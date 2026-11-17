@@ -30,6 +30,21 @@ const SIGNATURE_BYTES: usize = 64;
 /// dated ahead of its own clock.
 const MAX_BLOCK_TIMESTAMP_STEP_MS: u64 = 365 * 24 * 60 * 60 * 1000;
 
+/// Maximum charged byte footprint the retained chain of one Garden may occupy.
+///
+/// Every validator holds the finalized commits, their electorates and the
+/// transaction index in memory so joining validators can replay from genesis.
+/// Charging every block at the widest shape its genesis permits gives every
+/// validator an identical deterministic chain ceiling.
+const MAX_RETAINED_CHAIN_BYTES: u64 = 512 * 1024 * 1024;
+/// Worst-case retained charge for one transaction and its index entry.
+const TX_CHARGE_BYTES: u64 = 512;
+/// Worst-case retained charge for one commit vote and electorate entry.
+const VOTE_CHARGE_BYTES: u64 = 160;
+/// Maximum orphan anti-replay nonces retained per validator seat for departed
+/// or turned-away keys whose validator record was removed.
+const MAX_ORPHAN_NONCES_PER_SEAT: usize = 4;
+
 /// Domain tag for the Garden state root.
 const TAG_GARDEN_STATE: &[u8] = b"BDLM_GARDEN_STATE_V1";
 /// Domain tag for the Garden content root.
@@ -60,6 +75,10 @@ pub struct GardenState {
     pub last_timestamp_ms: u64,
     pub validators: BTreeMap<GardenKey, GardenValidator>,
     pub nonces: BTreeMap<GardenKey, u64>,
+    /// Deterministic FIFO of keys whose validator record was removed (by seat
+    /// recycling or `Admit { accept: false }`) while their nonce is retained
+    /// against immediate replay, bounded proportionally to `max_validators`.
+    orphan_nonces: std::collections::VecDeque<GardenKey>,
     /// The publications, by content id and author. The same content may be
     /// published by several validators; each has its own record, so nobody
     /// takes the publication of somebody else by naming its content first.
@@ -110,6 +129,7 @@ impl GardenState {
             last_timestamp_ms: genesis.created_unix_ms,
             validators,
             nonces: BTreeMap::new(),
+            orphan_nonces: std::collections::VecDeque::new(),
             objects: BTreeMap::new(),
             published: BTreeMap::new(),
             genesis,
@@ -209,9 +229,31 @@ impl GardenState {
         match self.vacant_seat() {
             Some(key) => {
                 self.validators.remove(&key);
+                self.record_orphan_nonce(key);
                 Ok(())
             }
             None => Err(format!("garden is full: at most {most} validators")),
+        }
+    }
+
+    /// Retain `key`'s nonce in a bounded FIFO so immediate replay of its old
+    /// `Join` is refused while unbounded key churn cannot grow `nonces`.
+    fn record_orphan_nonce(&mut self, key: GardenKey) {
+        if !self.nonces.contains_key(&key) {
+            return;
+        }
+        self.orphan_nonces.retain(|k| *k != key);
+        self.orphan_nonces.push_back(key);
+        let cap = (self.genesis.limits.max_validators as usize)
+            .saturating_mul(MAX_ORPHAN_NONCES_PER_SEAT)
+            .clamp(4, 4_096);
+        while self.orphan_nonces.len() > cap {
+            let Some(oldest) = self.orphan_nonces.pop_front() else {
+                break;
+            };
+            if !self.validators.contains_key(&oldest) {
+                self.nonces.remove(&oldest);
+            }
         }
     }
 
@@ -231,9 +273,10 @@ impl GardenState {
             }
             return Ok(());
         }
-        // The nonce of the key stays, so the request it signed cannot be
-        // replayed; it may ask again with a new one.
+        // Keep recent rejected keys' nonces so the request cannot be replayed
+        // immediately, while bounding the orphan FIFO against infinite churn.
         self.validators.remove(target);
+        self.record_orphan_nonce(*target);
         Ok(())
     }
 
@@ -271,7 +314,9 @@ impl GardenState {
     /// The validators whose votes finalize a block with these transactions.
     ///
     /// It is the active set before the block, without the validators the
-    /// block suspends, and with the host when the block carries its return.
+    /// block suspends or whose own signed `Leave` departs in it (other than
+    /// the host, which still signs its freezing departure), and with the host
+    /// when the block carries its return.
     pub fn electorate(&self, txs: &[SignedGardenTx]) -> Vec<GardenKey> {
         let mut set: BTreeSet<GardenKey> = self.active().into_iter().collect();
         for signed in txs {
@@ -279,10 +324,21 @@ impl GardenState {
                 GardenTxKind::Suspend { target } => {
                     set.remove(target);
                 }
-                GardenTxKind::Resume { .. }
-                    if signed.tx.sender == self.host() && self.status == DomainStatus::Frozen =>
+                GardenTxKind::Leave
+                    if signed.tx.sender != self.host()
+                        && set.contains(&signed.tx.sender)
+                        && signed.verify(self.chain_id()).is_ok() =>
                 {
-                    set.insert(self.host());
+                    set.remove(&signed.tx.sender);
+                }
+                GardenTxKind::Resume { .. } => {
+                    if signed.tx.sender == self.host() && self.status == DomainStatus::Frozen {
+                        set.insert(self.host());
+                    } else if self.is_active(&signed.tx.sender)
+                        && signed.verify(self.chain_id()).is_ok()
+                    {
+                        set.insert(signed.tx.sender);
+                    }
                 }
                 _ => {}
             }
@@ -418,6 +474,15 @@ impl GardenState {
         }
         let height = self.height.saturating_add(1);
         for target in wanted.into_iter().take(reserved) {
+            // A report about a validator the chosen transactions already took
+            // out of the electorate is one no voter can use: the block carried
+            // that validator's departure or suspension itself. Writing one
+            // anyway made `apply_tx` refuse it and `assemble` drop it silently,
+            // so the proposer never learned the block it built was short of
+            // the reports it meant to carry.
+            if !next.is_active(&target) {
+                continue;
+            }
             let report = sign(GardenTx {
                 chain_id: self.chain_id(),
                 sender: *me,
@@ -734,6 +799,9 @@ impl GardenState {
             }
         }
         self.nonces.insert(sender, expected.saturating_add(1));
+        if self.validators.contains_key(&sender) {
+            self.orphan_nonces.retain(|k| *k != sender);
+        }
         Ok(())
     }
 
@@ -794,6 +862,16 @@ impl GardenState {
                 "block carries {} transactions, the limit is {}",
                 txs.len(),
                 limits.max_block_txs
+            ));
+        }
+        let charged = u64::from(limits.max_block_txs)
+            .saturating_mul(TX_CHARGE_BYTES)
+            .saturating_add(u64::from(limits.max_validators).saturating_mul(VOTE_CHARGE_BYTES))
+            .max(1);
+        let retained = self.height.saturating_add(1).saturating_mul(charged);
+        if retained > MAX_RETAINED_CHAIN_BYTES {
+            return Err(format!(
+                "block would take retained Garden chain past {MAX_RETAINED_CHAIN_BYTES} bytes"
             ));
         }
         let mut per_sender: BTreeMap<GardenKey, u32> = BTreeMap::new();
@@ -1021,6 +1099,82 @@ mod tests {
     use super::super::types::{invite_keypair, GardenLimits};
     use super::*;
     use crate::crypto::primitives::KeyPair;
+
+    #[test]
+    fn electorate_excludes_signed_non_host_leave_and_ignores_forged_leave() {
+        let mut net = Net::new();
+        let a = net.join("alice");
+        let leave_a = net.tx(&a, GardenTxKind::Leave);
+        // Valid non-host Leave excludes `alice` so the host alone can finalize
+        // alice's departure even after alice disconnects.
+        assert_eq!(
+            net.ledger.state.electorate(std::slice::from_ref(&leave_a)),
+            vec![net.host]
+        );
+
+        // A forged Leave naming `alice` is ignored by `electorate`, so quorum
+        // cannot be shrunk without `alice`'s own signature.
+        let mut forged = leave_a.clone();
+        if let Some(first) = forged.signature.first_mut() {
+            *first ^= 0xff;
+        }
+        let mut expected = vec![net.host, a];
+        expected.sort();
+        assert_eq!(net.ledger.state.electorate(&[forged]), expected);
+
+        // Host's own Leave keeps the host in the electorate so the freezing
+        // commit is still signed by the host.
+        let leave_host = net.tx(&net.host.clone(), GardenTxKind::Leave);
+        assert_eq!(net.ledger.state.electorate(&[leave_host]), expected);
+
+        // Committing `leave_a` signed only by `host` succeeds.
+        assert!(net.commit(vec![leave_a]).is_ok());
+        assert!(!net.ledger.state.is_active(&a));
+    }
+
+    #[test]
+    fn evicting_departed_validator_seats_bounds_orphan_nonces_under_key_churn() {
+        let mut net = Net::new();
+        net.ledger.state.genesis.limits.max_validators = 2;
+        let orphan_cap = (2 * MAX_ORPHAN_NONCES_PER_SEAT).clamp(4, 4_096);
+        let mut departed = Vec::new();
+        for i in 0..(orphan_cap + 6) {
+            let k = net.join(&format!("v{i}"));
+            assert!(net.commit(vec![net.tx(&k, GardenTxKind::Leave)]).is_ok());
+            departed.push(k);
+        }
+        let newest = net.join("latest");
+        assert!(net.ledger.state.is_active(&newest));
+        // The most recently recycled key still keeps its anti-replay nonce.
+        let recent = departed[departed.len() - 1];
+        assert_eq!(net.ledger.state.next_nonce(&recent), 2);
+        // Oldest churned keys are evicted so `nonces` never grows unbounded.
+        assert!(!net.ledger.state.nonces.contains_key(&departed[0]));
+        assert!(
+            net.ledger.state.nonces.len() <= net.ledger.state.validators.len() + orphan_cap,
+            "nonces={} exceeded bounded cap",
+            net.ledger.state.nonces.len()
+        );
+    }
+
+    #[test]
+    fn retained_chain_ceiling_refuses_blocks_past_byte_budget() {
+        let mut net = Net::new();
+        let limits = net.ledger.state.genesis.limits.clone();
+        let charged = u64::from(limits.max_block_txs)
+            .saturating_mul(TX_CHARGE_BYTES)
+            .saturating_add(u64::from(limits.max_validators).saturating_mul(VOTE_CHARGE_BYTES));
+        let max_height = MAX_RETAINED_CHAIN_BYTES / charged;
+        net.ledger.state.height = max_height;
+        let tx = net.publish(&net.host.clone(), 4);
+        let err = net
+            .commit(vec![tx])
+            .expect_err("block past retained chain byte ceiling must be refused");
+        assert!(
+            err.contains("retained Garden chain"),
+            "unexpected err: {err}"
+        );
+    }
 
     #[test]
     fn garden_host_is_the_first_validator_and_joins_need_the_invite() {
@@ -1714,6 +1868,62 @@ mod tests {
         assert!(refusal.contains("not of the last"), "{refusal}");
         net.commit(vec![back]).unwrap();
         assert!(net.ledger.state.is_active(&target));
+    }
+
+    /// A leader's block must not spend a report on a validator the pool
+    /// already took out of the electorate: the report would be refused and
+    /// dropped silently, so the proposer would never learn that the block it
+    /// built carries fewer reports than the validators it meant to release.
+    #[test]
+    fn garden_assemble_skips_an_absence_report_for_a_validator_the_block_departs() {
+        let mut net = Net::new();
+        let host = net.host;
+        let _a = net.join("a");
+        let _b = net.join("b");
+        let _c = net.join("c");
+        let leader = net.ledger.state.leader(0).unwrap();
+        // Two members that are neither the host nor the leader: one departs in
+        // the pool, the other is only absent.
+        let candidates: Vec<GardenKey> = net
+            .ledger
+            .state
+            .active()
+            .into_iter()
+            .filter(|key| *key != host && *key != leader)
+            .collect();
+        assert_eq!(candidates.len(), 2);
+        let (leaver, quiet) = (candidates[0], candidates[1]);
+
+        let leave = net.tx(&leaver, GardenTxKind::Leave);
+        let pool = [leave];
+        let (txs, _dead) =
+            net.ledger
+                .state
+                .assemble(pool.iter(), &leader, &[leaver, quiet], |tx| {
+                    Some(GardenTx::sign(tx, net.key(&leader)).unwrap())
+                });
+        let reported: Vec<GardenKey> = txs
+            .iter()
+            .filter_map(|signed| match &signed.tx.kind {
+                GardenTxKind::Suspend { target } => Some(*target),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !reported.contains(&leaver),
+            "the block reported a validator its own transactions departed"
+        );
+        assert!(
+            reported.contains(&quiet),
+            "the silent validator lost its report"
+        );
+        // What the leader built is a valid block, which is the point.
+        let block = net.block(txs).unwrap();
+        let votes = net.votes(&block, &net.ledger.state.electorate(&block.txs));
+        net.ledger.append(GardenCommit { block, votes }).unwrap();
+        assert!(!net.ledger.state.is_active(&leaver));
+        assert!(!net.ledger.state.is_active(&quiet));
+        assert!(net.ledger.state.is_active(&host));
     }
 
     /// The vote list of a commit comes from the wire. A block takes one vote

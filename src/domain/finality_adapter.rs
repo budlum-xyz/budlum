@@ -48,6 +48,103 @@ impl PoWHeader {
     }
 }
 
+/// A Bitcoin block header in consensus field order.
+///
+/// The wire image is exactly the 80 bytes Bitcoin hashes (version, previous
+/// block hash, merkle root, time, bits, nonce, little-endian fixed fields);
+/// `height` is carried alongside it because Budlum commitments bind a height
+/// and a header window must be checked for contiguity against that height.
+/// The hash is `SHA256d` of the wire image, compared against the compact
+/// `bits` target as Bitcoin compares it: the digest read little-endian as an
+/// integer must not exceed the target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BitcoinHeader {
+    pub version: i32,
+    /// The previous block hash in Bitcoin wire order (internal byte order).
+    pub prev_hash: Hash32,
+    pub merkle_root: Hash32,
+    pub timestamp: u32,
+    pub bits: u32,
+    pub nonce: u32,
+    pub height: u64,
+}
+
+impl BitcoinHeader {
+    /// The exact 80 bytes Bitcoin commits to with `SHA256d`.
+    fn wire_bytes(&self) -> [u8; 80] {
+        let mut out = [0u8; 80];
+        out[0..4].copy_from_slice(&self.version.to_le_bytes());
+        out[4..36].copy_from_slice(&self.prev_hash);
+        out[36..68].copy_from_slice(&self.merkle_root);
+        out[68..72].copy_from_slice(&self.timestamp.to_le_bytes());
+        out[72..76].copy_from_slice(&self.bits.to_le_bytes());
+        out[76..80].copy_from_slice(&self.nonce.to_le_bytes());
+        out
+    }
+
+    /// `SHA256d` of the wire image, in Bitcoin wire (internal) order.
+    #[must_use]
+    pub fn block_hash(&self) -> Hash32 {
+        use sha2::{Digest, Sha256};
+        let first = Sha256::digest(self.wire_bytes());
+        let second = Sha256::digest(first);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&second);
+        out
+    }
+}
+
+/// Decode a compact `bits` target and the chainwork one header of that
+/// difficulty is worth, both under Bitcoin's compact rules.
+///
+/// Returns the target as 32 big-endian bytes (so a byte-wise compare equals
+/// the integer compare) and `floor(2^(280 - 8*size) / mantissa)` as the work,
+/// saturating at `u128::MAX` for targets so hard the quotient cannot fit
+/// (`size <= 19`). Saturation is deterministic and cannot be reached by a
+/// header that did not meet its own verified target: `size <= 19` means the
+/// target is at most `2^152`, and producing such a hash is the hard part of
+/// proof-of-work itself. Refuses the cases Bitcoin refuses: the sign bit,
+/// a zero mantissa, a size below 3 (sub-byte targets this adapter does not
+/// carry) or above 32 (overflow past 256 bits).
+pub(crate) fn decode_compact_bits(bits: u32) -> Option<([u8; 32], u128)> {
+    let mantissa = bits & 0x00ff_ffff;
+    let size = bits >> 24;
+    if bits & 0x0080_0000 != 0 || mantissa == 0 || !(3..=32).contains(&size) {
+        return None;
+    }
+    let mut target = [0u8; 32];
+    let shift = size - 3;
+    if shift > 29 {
+        return None;
+    }
+    let mantissa_be = mantissa.to_be_bytes();
+    let start = (32 - shift - 3) as usize;
+    target[start..start + 3].copy_from_slice(&mantissa_be[1..4]);
+    let k = 280 - i32::try_from(size).ok()? * 8;
+    let work = if k >= 128 {
+        u128::MAX
+    } else {
+        (1u128 << k) / u128::from(mantissa)
+    };
+    Some((target, work.max(1)))
+}
+
+/// The number of leading zero bits a 32-byte big-endian target demands of a
+/// hash that does not exceed it: `256 - target.bit_length()`. Used to bound
+/// every header's difficulty inside the range the domain registered.
+pub(crate) fn target_leading_zero_bits(target: &[u8; 32]) -> u32 {
+    let mut leading = 0u32;
+    for byte in target {
+        if *byte == 0 {
+            leading += 8;
+        } else {
+            leading += byte.leading_zeros();
+            break;
+        }
+    }
+    leading
+}
+
 /// Calculate a header hash with the immutable hash scheme registered for the
 /// Source domain. Custom schemes require a domain plugin and are deliberately
 /// Rejected by this generic light client.
@@ -157,6 +254,13 @@ pub enum FinalityProof {
         cert: FinalityCert,
         validator_snapshot: ValidatorSetSnapshot,
         qc: crate::consensus::qc::QcBlob,
+    },
+    /// Bitcoin SPV finality: a window of Bitcoin headers, oldest first, whose
+    /// first header binds the commitment and whose successors supply the
+    /// confirmation work. Appended so earlier bincode variant indices stay
+    /// stable; only a domain registered as `bitcoin-spv-v1` ever judges it.
+    BitcoinSpv {
+        headers: Vec<BitcoinHeader>,
     },
 }
 
@@ -607,6 +711,162 @@ impl DomainFinalityAdapter for PoWHeaderChainFinalityAdapter {
         if cumulative_work < params.min_cumulative_work {
             return Ok(FinalityStatus::Rejected(format!(
                 "PoW header chain cumulative work {} is below registered minimum {}",
+                cumulative_work, params.min_cumulative_work
+            )));
+        }
+
+        Ok(FinalityStatus::Finalized)
+    }
+}
+
+/// Bounded Bitcoin SPV light client for `bitcoin-spv-v1` domains.
+///
+/// The trust model mirrors [`PoWHeaderChainFinalityAdapter`]: a window of
+/// headers whose first member binds the commitment (height, parent, merkle
+/// root, timestamp, block hash), whose successors link back through their
+/// `prev_hash`, and whose cumulative chainwork clears the floor the domain
+/// registered. What differs is Bitcoin's own consensus data: `SHA256d` of the
+/// 80-byte wire image, compact `bits` targets compared the way Bitcoin
+/// compares them, and chainwork accumulated as `floor(2^(280-8*size)/mantissa)`
+/// rather than a leading-zero proxy. Everything fails closed: a malformed
+/// compact target, a window outside the registered bounds, a commitment that
+/// a Bitcoin header cannot speak for (a state or event root), or a chain
+/// below the work floor is refused, not ignored.
+#[derive(Debug, Clone, Default)]
+pub struct BitcoinSpvFinalityAdapter;
+
+impl DomainFinalityAdapter for BitcoinSpvFinalityAdapter {
+    fn adapter_name(&self) -> &'static str {
+        crate::domain::types::BITCOIN_SPV_ADAPTER
+    }
+
+    fn verify_finality(
+        &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        let FinalityProof::BitcoinSpv { headers } = proof else {
+            return Err(FinalityError("Expected BitcoinSpv finality proof".into()));
+        };
+        if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+            return Ok(rejected);
+        }
+        if commitment.state_root != [0u8; 32] || commitment.event_root != [0u8; 32] {
+            return Ok(FinalityStatus::Rejected(
+                "A Bitcoin SPV header binds no state root or event root; the commitment claims one"
+                    .into(),
+            ));
+        }
+        let params = domain
+            .pow_parameters
+            .as_ref()
+            .ok_or_else(|| FinalityError("Bitcoin SPV domain has no pow_parameters".into()))?;
+        params
+            .validate(domain.min_confirmations)
+            .map_err(FinalityError)?;
+
+        if headers.is_empty() {
+            return Ok(FinalityStatus::Rejected(
+                "Bitcoin header window is empty".into(),
+            ));
+        }
+        if headers.len() > params.max_headers as usize {
+            return Ok(FinalityStatus::Rejected(format!(
+                "Bitcoin header window has {} headers, maximum is {}",
+                headers.len(),
+                params.max_headers
+            )));
+        }
+
+        let target_header = &headers[0];
+        if target_header.height != commitment.domain_height
+            || target_header.prev_hash != commitment.parent_domain_block_hash
+            || target_header.merkle_root != commitment.tx_root
+            || u128::from(target_header.timestamp) * 1000 != commitment.timestamp_ms
+        {
+            return Ok(FinalityStatus::Rejected(
+                "Bitcoin target header does not bind the commitment height, parent, merkle root, or timestamp"
+                    .into(),
+            ));
+        }
+
+        let mut previous_hash: Option<Hash32> = None;
+        let mut previous_height = 0u64;
+        let mut previous_timestamp = 0u32;
+        let mut cumulative_work = 0u128;
+
+        for (index, header) in headers.iter().enumerate() {
+            let Some((target, work)) = decode_compact_bits(header.bits) else {
+                return Ok(FinalityStatus::Rejected(format!(
+                    "Bitcoin header {} carries malformed compact bits {:#010x}",
+                    header.height, header.bits
+                )));
+            };
+            let required_leading = target_leading_zero_bits(&target);
+            if !(params.min_difficulty_bits..=params.max_difficulty_bits)
+                .contains(&required_leading)
+            {
+                return Ok(FinalityStatus::Rejected(format!(
+                    "Bitcoin header {} difficulty {} is outside registered range {}..={}",
+                    header.height,
+                    required_leading,
+                    params.min_difficulty_bits,
+                    params.max_difficulty_bits
+                )));
+            }
+
+            if let Some(parent_hash) = previous_hash {
+                if header.height != previous_height.saturating_add(1) {
+                    return Ok(FinalityStatus::Rejected(
+                        "Bitcoin header heights are not contiguous".into(),
+                    ));
+                }
+                if header.prev_hash != parent_hash {
+                    return Ok(FinalityStatus::Rejected(
+                        "Bitcoin header parent link mismatch".into(),
+                    ));
+                }
+                if header.timestamp < previous_timestamp {
+                    return Ok(FinalityStatus::Rejected(
+                        "Bitcoin header timestamps move backwards".into(),
+                    ));
+                }
+            }
+
+            let mut hash = header.block_hash();
+            // Bitcoin compares the digest little-endian as an integer; the
+            // reversed bytes compare big-endian, which is a byte-wise compare.
+            hash.reverse();
+            if hash.as_slice() > target.as_slice() {
+                return Ok(FinalityStatus::Rejected(format!(
+                    "Bitcoin header {} does not meet its compact target",
+                    header.height
+                )));
+            }
+            if index == 0 && header.block_hash() != commitment.domain_block_hash {
+                return Ok(FinalityStatus::Rejected(
+                    "Bitcoin target header hash does not match commitment block hash".into(),
+                ));
+            }
+
+            cumulative_work = cumulative_work.saturating_add(work);
+            // Wire order, which is what the next header's `prev_hash` carries.
+            previous_hash = Some(header.block_hash());
+            previous_height = header.height;
+            previous_timestamp = header.timestamp;
+        }
+
+        let observed_depth = headers.len() as u64;
+        if observed_depth < domain.min_confirmations {
+            return Ok(FinalityStatus::Pending {
+                required_depth: domain.min_confirmations,
+                observed_depth,
+            });
+        }
+        if cumulative_work < params.min_cumulative_work {
+            return Ok(FinalityStatus::Rejected(format!(
+                "Bitcoin chainwork {} is below registered minimum {}",
                 cumulative_work, params.min_cumulative_work
             )));
         }
@@ -1938,6 +2198,370 @@ mod tests {
             producer: None,
             state_updates: std::collections::BTreeMap::new(),
         }
+    }
+
+    // --- Bitcoin SPV adapter (bitcoin-spv-v1) --------------------------------
+
+    /// Regtest-style compact target: size 32, mantissa `0x7fffff`. The target
+    /// is `0x7fffff << 232`, so a valid hash needs one leading zero bit and
+    /// each header is worth `2^24 / 0x7fffff = 2` units of chainwork. Mining
+    /// averages two nonces and is deterministic from the fixture fields.
+    const BITCOIN_TEST_BITS: u32 = 0x207f_ffff;
+
+    fn bitcoin_target() -> [u8; 32] {
+        decode_compact_bits(BITCOIN_TEST_BITS)
+            .expect("regtest bits decode")
+            .0
+    }
+
+    fn bitcoin_work() -> u128 {
+        decode_compact_bits(BITCOIN_TEST_BITS)
+            .expect("regtest bits decode")
+            .1
+    }
+
+    fn mine_bitcoin_header(prev_hash: Hash32, height: u64, timestamp: u32) -> BitcoinHeader {
+        let mut header = BitcoinHeader {
+            version: 1,
+            prev_hash,
+            merkle_root: [7u8; 32],
+            timestamp,
+            bits: BITCOIN_TEST_BITS,
+            nonce: 0,
+            height,
+        };
+        let target = bitcoin_target();
+        loop {
+            let mut hash = header.block_hash();
+            hash.reverse();
+            if hash.as_slice() <= target.as_slice() {
+                return header;
+            }
+            header.nonce = header.nonce.wrapping_add(1);
+        }
+    }
+
+    /// A header that deliberately misses its own target (exists for the
+    /// negative case; about half of nonces qualify).
+    fn mine_header_missing_target(prev_hash: Hash32, height: u64, timestamp: u32) -> BitcoinHeader {
+        let mut header = BitcoinHeader {
+            version: 1,
+            prev_hash,
+            merkle_root: [7u8; 32],
+            timestamp,
+            bits: BITCOIN_TEST_BITS,
+            nonce: 0,
+            height,
+        };
+        let target = bitcoin_target();
+        loop {
+            let mut hash = header.block_hash();
+            hash.reverse();
+            if hash.as_slice() > target.as_slice() {
+                return header;
+            }
+            header.nonce = header.nonce.wrapping_add(1);
+        }
+    }
+
+    fn bitcoin_domain(min_confirmations: u64) -> ConsensusDomain {
+        crate::domain::plugin::default_domain(
+            9,
+            ConsensusKind::PoW,
+            45262,
+            crate::domain::types::BITCOIN_SPV_ADAPTER,
+            min_confirmations,
+        )
+    }
+
+    /// The commitment a window of Bitcoin headers must bind: the target
+    /// header's hash, parent, merkle root and timestamp, and nothing a
+    /// Bitcoin header cannot speak for (state and event roots stay zero).
+    fn bitcoin_commitment(headers: &[BitcoinHeader]) -> DomainCommitment {
+        let target = &headers[0];
+        let mut commitment = commitment(ConsensusKind::PoW);
+        commitment.domain_id = 9;
+        commitment.domain_height = target.height;
+        commitment.domain_block_hash = target.block_hash();
+        commitment.parent_domain_block_hash = target.prev_hash;
+        commitment.state_root = [0u8; 32];
+        commitment.event_root = [0u8; 32];
+        commitment.tx_root = target.merkle_root;
+        commitment.timestamp_ms = u128::from(target.timestamp) * 1000;
+        commitment
+    }
+
+    fn linked_window(len: usize) -> Vec<BitcoinHeader> {
+        let mut headers = Vec::with_capacity(len);
+        let mut prev = [1u8; 32];
+        for offset in 0..len {
+            let header = mine_bitcoin_header(
+                prev,
+                10 + offset as u64,
+                1_700_000_000u32 + u32::try_from(offset).expect("window offset fits u32"),
+            );
+            prev = header.block_hash();
+            headers.push(header);
+        }
+        headers
+    }
+
+    #[test]
+    fn bitcoin_spv_finalizes_a_linked_window_at_the_commitment() {
+        let domain = bitcoin_domain(2);
+        let headers = linked_window(2);
+        let commitment = bitcoin_commitment(&headers);
+        let adapter = BitcoinSpvFinalityAdapter;
+
+        let status = adapter
+            .verify_finality(
+                &domain,
+                &commitment,
+                &FinalityProof::BitcoinSpv {
+                    headers: headers.clone(),
+                },
+            )
+            .expect("window verifies");
+        assert!(
+            matches!(status, FinalityStatus::Finalized),
+            "expected Finalized, got {status:?}"
+        );
+        // Two regtest headers are worth 2 units each; the default floor is 4.
+        assert!(bitcoin_work() * 2 >= domain.pow_parameters.as_ref().unwrap().min_cumulative_work);
+    }
+
+    #[test]
+    fn bitcoin_spv_rejects_a_broken_parent_link() {
+        let domain = bitcoin_domain(2);
+        let mut headers = linked_window(2);
+        headers[1].prev_hash = [9u8; 32];
+        // Re-mine so the header still meets its own target: the refusal is
+        // the link, not the proof-of-work.
+        let retargeted = mine_bitcoin_header(
+            headers[1].prev_hash,
+            headers[1].height,
+            headers[1].timestamp,
+        );
+        headers[1] = retargeted;
+        let commitment = bitcoin_commitment(&headers);
+        let adapter = BitcoinSpvFinalityAdapter;
+
+        let status = adapter
+            .verify_finality(&domain, &commitment, &FinalityProof::BitcoinSpv { headers })
+            .expect("refusal is a status, not an error");
+        assert!(
+            matches!(status, FinalityStatus::Rejected(_)),
+            "expected Rejected, got {status:?}"
+        );
+    }
+
+    #[test]
+    fn bitcoin_spv_rejects_a_header_below_its_target() {
+        let domain = bitcoin_domain(2);
+        let mut headers = linked_window(2);
+        headers[1] = mine_header_missing_target(
+            headers[0].block_hash(),
+            headers[1].height,
+            headers[1].timestamp,
+        );
+        let commitment = bitcoin_commitment(&headers);
+        let adapter = BitcoinSpvFinalityAdapter;
+
+        let status = adapter
+            .verify_finality(&domain, &commitment, &FinalityProof::BitcoinSpv { headers })
+            .expect("refusal is a status, not an error");
+        assert!(
+            matches!(status, FinalityStatus::Rejected(_)),
+            "expected Rejected, got {status:?}"
+        );
+    }
+
+    #[test]
+    fn bitcoin_spv_binds_the_commitment_and_refuses_a_state_root() {
+        let domain = bitcoin_domain(2);
+        let headers = linked_window(2);
+        let adapter = BitcoinSpvFinalityAdapter;
+
+        // Wrong block hash.
+        let mut commitment = bitcoin_commitment(&headers);
+        commitment.domain_block_hash = [0xAA; 32];
+        let status = adapter
+            .verify_finality(
+                &domain,
+                &commitment,
+                &FinalityProof::BitcoinSpv {
+                    headers: headers.clone(),
+                },
+            )
+            .expect("refusal is a status, not an error");
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+
+        // Wrong height.
+        let mut commitment = bitcoin_commitment(&headers);
+        commitment.domain_height += 1;
+        let status = adapter
+            .verify_finality(
+                &domain,
+                &commitment,
+                &FinalityProof::BitcoinSpv {
+                    headers: headers.clone(),
+                },
+            )
+            .expect("refusal is a status, not an error");
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+
+        // A Bitcoin header cannot speak for a state root.
+        let mut commitment = bitcoin_commitment(&headers);
+        commitment.state_root = [2u8; 32];
+        let status = adapter
+            .verify_finality(&domain, &commitment, &FinalityProof::BitcoinSpv { headers })
+            .expect("refusal is a status, not an error");
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+    }
+
+    #[test]
+    fn bitcoin_spv_refuses_malformed_compact_bits_and_foreign_proofs() {
+        let domain = bitcoin_domain(2);
+        let mut headers = linked_window(2);
+        let commitment = bitcoin_commitment(&headers);
+        let adapter = BitcoinSpvFinalityAdapter;
+
+        // Sign bit set (Bitcoin treats it as negative / invalid).
+        headers[0].bits = 0x1d80_ffff;
+        let status = adapter
+            .verify_finality(
+                &domain,
+                &commitment,
+                &FinalityProof::BitcoinSpv {
+                    headers: headers.clone(),
+                },
+            )
+            .expect("refusal is a status, not an error");
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+        headers[0].bits = BITCOIN_TEST_BITS;
+
+        // A proof built for the other PoW adapter is refused outright.
+        let foreign = adapter.verify_finality(
+            &domain,
+            &commitment,
+            &FinalityProof::PoWHeaderChain { headers: vec![] },
+        );
+        assert!(foreign.is_err());
+
+        // And the bounded leading-zero adapter refuses a Bitcoin window.
+        let bounded = PoWHeaderChainFinalityAdapter.verify_finality(
+            &domain,
+            &commitment,
+            &FinalityProof::BitcoinSpv { headers },
+        );
+        assert!(bounded.is_err());
+    }
+
+    #[test]
+    fn bitcoin_spv_bounds_depth_window_and_work_floor() {
+        let adapter = BitcoinSpvFinalityAdapter;
+
+        // Empty window.
+        let domain = bitcoin_domain(1);
+        let commitment = DomainCommitment {
+            domain_id: 9,
+            ..bitcoin_commitment(&linked_window(1))
+        };
+        let status = adapter
+            .verify_finality(
+                &domain,
+                &commitment,
+                &FinalityProof::BitcoinSpv { headers: vec![] },
+            )
+            .expect("refusal is a status, not an error");
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+
+        // One header with two required confirmations: pending, not final.
+        let domain = bitcoin_domain(2);
+        let headers = linked_window(1);
+        let commitment = bitcoin_commitment(&headers);
+        let status = adapter
+            .verify_finality(
+                &domain,
+                &commitment,
+                &FinalityProof::BitcoinSpv {
+                    headers: headers.clone(),
+                },
+            )
+            .expect("refusal is a status, not an error");
+        assert!(
+            matches!(
+                status,
+                FinalityStatus::Pending {
+                    required_depth: 2,
+                    observed_depth: 1
+                }
+            ),
+            "expected Pending, got {status:?}"
+        );
+
+        // Window above the registered ceiling.
+        let mut domain = bitcoin_domain(1);
+        domain.pow_parameters = Some(crate::domain::types::PoWDomainParameters {
+            min_difficulty_bits: 1,
+            max_difficulty_bits: 120,
+            min_cumulative_work: 2,
+            max_headers: 2,
+        });
+        let headers = linked_window(3);
+        let commitment = bitcoin_commitment(&headers);
+        let status = adapter
+            .verify_finality(&domain, &commitment, &FinalityProof::BitcoinSpv { headers })
+            .expect("refusal is a status, not an error");
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+
+        // Chainwork below the registered floor.
+        let mut domain = bitcoin_domain(1);
+        domain.pow_parameters = Some(crate::domain::types::PoWDomainParameters {
+            min_difficulty_bits: 1,
+            max_difficulty_bits: 120,
+            min_cumulative_work: 100,
+            max_headers: 4096,
+        });
+        let headers = linked_window(1);
+        let commitment = bitcoin_commitment(&headers);
+        let status = adapter
+            .verify_finality(&domain, &commitment, &FinalityProof::BitcoinSpv { headers })
+            .expect("refusal is a status, not an error");
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+    }
+
+    #[test]
+    fn bitcoin_spv_registration_accepts_pow_domains_and_refuses_the_wrong_shape() {
+        use crate::domain::registry::ConsensusDomainRegistry;
+        use crate::domain::types::POW_HEADER_CHAIN_ADAPTER;
+
+        // A PoW domain under the Bitcoin adapter with parameters registers.
+        let mut registry = ConsensusDomainRegistry::new();
+        assert!(registry.register(bitcoin_domain(2)).is_ok());
+
+        // A non-PoW kind under the Bitcoin adapter is refused.
+        let mut domain = bitcoin_domain(2);
+        domain.kind = ConsensusKind::PoA;
+        let mut registry = ConsensusDomainRegistry::new();
+        assert!(registry.register(domain).is_err());
+
+        // Without pow_parameters it is refused, as the bounded adapter is.
+        let mut domain = bitcoin_domain(2);
+        domain.pow_parameters = None;
+        let mut registry = ConsensusDomainRegistry::new();
+        assert!(registry.register(domain).is_err());
+
+        // And a PoW domain with parameters under a third, unknown name is
+        // refused: pow_parameters only exist for the two header adapters.
+        let mut domain = bitcoin_domain(2);
+        domain.finality_adapter = "pow".into();
+        let mut registry = ConsensusDomainRegistry::new();
+        assert!(registry.register(domain).is_err());
+        let mut domain = bitcoin_domain(2);
+        domain.finality_adapter = POW_HEADER_CHAIN_ADAPTER.into();
+        let mut registry = ConsensusDomainRegistry::new();
+        assert!(registry.register(domain).is_ok());
     }
 
     #[test]
