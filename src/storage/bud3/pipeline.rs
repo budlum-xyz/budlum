@@ -310,12 +310,19 @@ where
     let _ = usize::try_from(seg_count).map_err(|_| PipelineError::TooLarge)?;
     let mut decoders: std::collections::BTreeMap<u64, SegmentDecoder> =
         std::collections::BTreeMap::new();
-    let mut meter = Meter::new(
-        record.object_len.saturating_mul(4).saturating_add(1 << 20),
-        u64::from(record.symbols_per_segment).saturating_mul(seg_count),
-    );
+    let mut seen_esis: std::collections::BTreeSet<(u64, u32)> = std::collections::BTreeSet::new();
+    let step_budget = u64::from(
+        record
+            .symbols_per_segment
+            .saturating_add(super::fountain::MAX_EXTRA_SYMBOLS),
+    )
+    .saturating_mul(seg_count);
+    let byte_budget = step_budget
+        .saturating_mul(u64::from(record.profile.symbol_size))
+        .max(record.object_len.saturating_mul(4).saturating_add(1 << 20));
+    let mut meter = Meter::new(byte_budget, step_budget);
     for s in symbols {
-        if s.segment >= seg_count {
+        if s.segment >= seg_count || !seen_esis.insert((s.segment, s.esi)) {
             continue;
         }
         if let std::collections::btree_map::Entry::Vacant(e) = decoders.entry(s.segment) {
@@ -670,11 +677,21 @@ where
         let len = seg.len(index).ok_or(PipelineError::TooLarge)?;
         decoders.push(SegmentDecoder::new(index, len, &record.profile)?);
     }
-    let mut meter = Meter::new(
-        record.object_len.saturating_mul(4).saturating_add(1 << 20),
-        u64::from(record.symbols_per_segment).saturating_mul(seg.count()),
-    );
+    let mut seen_esis: std::collections::BTreeSet<(u64, u32)> = std::collections::BTreeSet::new();
+    let step_budget = u64::from(
+        record
+            .symbols_per_segment
+            .saturating_add(super::fountain::MAX_EXTRA_SYMBOLS),
+    )
+    .saturating_mul(seg.count());
+    let byte_budget = step_budget
+        .saturating_mul(u64::from(record.profile.symbol_size))
+        .max(record.object_len.saturating_mul(4).saturating_add(1 << 20));
+    let mut meter = Meter::new(byte_budget, step_budget);
     for s in symbols {
+        if !seen_esis.insert((s.segment, s.esi)) {
+            continue;
+        }
         let Some(dec) = usize::try_from(s.segment)
             .ok()
             .and_then(|i| decoders.get_mut(i))
@@ -802,6 +819,68 @@ mod tests {
     fn empty_content_round_trips() {
         let up = prepare_public_upload(b"", &SMALL, &Bud3Limits::default(), 4).unwrap();
         assert_eq!(view_public(&up.record, up.segments.concat()).unwrap(), b"");
+    }
+
+    #[test]
+    fn view_public_and_sealed_survive_duplicates_and_post_repair_esis_across_segments() {
+        use super::super::content_id::ContentKey;
+        use super::super::seal::SEAL_SALT_LEN;
+
+        let data: Vec<u8> = (0u64..92)
+            .flat_map(|i| crate::core::hash::hash_fields_bytes(&[b"SEG_DUP", &i.to_le_bytes()]))
+            .collect();
+        let pub_up = prepare_public_upload(&data, &SMALL, &Bud3Limits::default(), 20).unwrap();
+        assert!(pub_up.segments.len() >= 2);
+        // Flood segment 0 with 3x duplicates, keep `k - 2` initial symbols for segment 1,
+        // and append higher repair ESIs beyond initial `symbols_per_segment` (post-RecordRepair).
+        let mut syms = Vec::new();
+        for _ in 0..3 {
+            syms.extend(pub_up.segments[0].iter().cloned());
+        }
+        let seg_layout = Segmentation::new(pub_up.record.object_len, &SMALL).unwrap();
+        let seg1_len = seg_layout.len(1).unwrap();
+        let seg1_start = usize::try_from(seg_layout.offset(1).unwrap()).unwrap();
+        let pub_obj =
+            Object::public_coded(pub_up.record.codec, bud_codec::select(&data).payload, &data)
+                .unwrap()
+                .encode();
+        let enc1 = SegmentEncoder::new(
+            1,
+            &pub_obj[seg1_start..seg1_start + usize::try_from(seg1_len).unwrap()],
+            &SMALL,
+        )
+        .unwrap();
+        assert!(enc1.k() >= 4);
+        let repair1 = enc1.repair_symbols(20 - enc1.k(), 6).unwrap();
+        syms.extend(
+            pub_up.segments[1][..usize::try_from(enc1.k() - 2).unwrap()]
+                .iter()
+                .cloned(),
+        );
+        syms.extend(repair1);
+        assert_eq!(view_public(&pub_up.record, syms).unwrap(), data);
+
+        // Sealed multi-segment payload must likewise survive duplicates across segments.
+        let key = ContentKey([0x92u8; 32]);
+        let sealed_up = prepare_sealed_upload(
+            &data,
+            &key,
+            [0x13u8; SEAL_SALT_LEN],
+            &SMALL,
+            &Bud3Limits::default(),
+            20,
+        )
+        .unwrap();
+        assert!(sealed_up.segments.len() >= 2);
+        let mut sealed_syms = Vec::new();
+        for _ in 0..3 {
+            sealed_syms.extend(sealed_up.segments[0].iter().cloned());
+        }
+        sealed_syms.extend(sealed_up.segments[1].iter().cloned());
+        assert_eq!(
+            view_sealed(&sealed_up.record, &key, sealed_syms).unwrap(),
+            data
+        );
     }
     use super::super::volume::{Visibility, VolumeError};
 
