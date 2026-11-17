@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// M5: the anti-sybil minimum app registration fee, consistent with the BNS
-/// `base_cost`. On `BudlumxyzRegisterApp` transactions the executor REQUIRES
+/// `base_cost`. On hub app-registration transactions the executor REQUIRES
 /// this amount through `tx.amount` and deducts exactly this much, symmetrically
 /// with the H1 "exact cost" pattern.
 pub const BUDLUMXYZ_REGISTER_MIN_FEE: u64 = 100;
@@ -38,6 +38,12 @@ pub const MAX_APP_NAME_BYTES: usize = 64;
 /// Convenience: pub so an app registration caller can refuse past
 /// the same bound the registry validates in this module.
 pub const MAX_APP_URL_BYTES: usize = 256;
+/// Hard ceiling on total registered hub apps so consensus state and snapshot
+/// encoding stay deterministically bounded.
+const MAX_HUB_APPS: usize = 65_536;
+/// Per-developer registration cap so one funded sender cannot flood the hub
+/// directory or bury unrelated developers behind list-response truncation.
+const MAX_HUB_APPS_PER_DEVELOPER: usize = 64;
 
 fn is_valid_app_url(url: &str) -> bool {
     // The whole string is judged, never a prefix, and the default is refusal. Looking for a
@@ -67,6 +73,11 @@ fn is_valid_app_url(url: &str) -> bool {
     scheme.eq_ignore_ascii_case("https")
         || scheme.eq_ignore_ascii_case("bud")
         || scheme.eq_ignore_ascii_case("ipfs")
+}
+
+#[cfg(test)]
+fn new_test_hub() -> BudlumxyzRegistry {
+    Default::default()
 }
 
 impl BudlumxyzRegistry {
@@ -106,10 +117,18 @@ impl BudlumxyzRegistry {
         // on, so the id now resolves to somebody else's listing.
         //
         // `next_app_id` only increments, so this cannot happen within one
-        // run. `BudlumxyzRegistry` is restored wholesale from
+        // run. The hub registry is restored wholesale from
         // `StateSnapshotV2`, where `apps` and `next_app_id` are separate
         // fields, and a snapshot whose counter sits below its highest live id
         // produces exactly this.
+        let developer_count = self
+            .apps
+            .values()
+            .filter(|app| app.developer == developer)
+            .count();
+        if self.apps.len() >= MAX_HUB_APPS || developer_count >= MAX_HUB_APPS_PER_DEVELOPER {
+            return Err(BudlumxyzError::InvalidData);
+        }
         if self.apps.contains_key(&id) {
             return Err(BudlumxyzError::DuplicateAppId);
         }
@@ -811,7 +830,7 @@ mod tests {
 
     #[test]
     fn authorized_governors_serialize_in_canonical_order() {
-        let empty = BudlumxyzRegistry::new();
+        let empty = new_test_hub();
         let mut a = empty.clone();
         a.authorized_governors.insert(Address::from([9u8; 32]));
         a.authorized_governors.insert(Address::from([1u8; 32]));
@@ -826,5 +845,44 @@ mod tests {
             serde_json::to_vec(&a).expect("serialize a"),
             serde_json::to_vec(&b).expect("serialize b")
         );
+    }
+
+    #[test]
+    fn register_app_caps_listings_per_developer_without_blocking_others() {
+        let mut reg = new_test_hub();
+        let spammer = Address::from([0xAAu8; 32]);
+        let honest = Address::from([0xBBu8; 32]);
+        for idx in 0..MAX_HUB_APPS_PER_DEVELOPER {
+            reg.register_app(
+                format!("App {idx}"),
+                spammer,
+                AppCategory::DeFi,
+                format!("https://app-{idx}.example"),
+                None,
+                1,
+            )
+            .expect("within per-developer cap");
+        }
+        assert!(reg
+            .register_app(
+                "Overflow".to_string(),
+                spammer,
+                AppCategory::DeFi,
+                "https://overflow.example".to_string(),
+                None,
+                1,
+            )
+            .is_err());
+        let ok_id = reg
+            .register_app(
+                "Honest App".to_string(),
+                honest,
+                AppCategory::Infrastructure,
+                "https://honest.example".to_string(),
+                None,
+                1,
+            )
+            .expect("independent developer still admitted");
+        assert_eq!(reg.apps[&ok_id].developer, honest);
     }
 }

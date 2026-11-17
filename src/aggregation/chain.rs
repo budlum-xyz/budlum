@@ -553,6 +553,9 @@ pub fn check_block_with_accounts(
     accounts: &AccountState,
     block: &Block,
 ) -> Result<(), String> {
+    if block.header.height == 0 {
+        return check_block(params, registry, block);
+    }
     check_block_with_backend(
         params,
         registry,

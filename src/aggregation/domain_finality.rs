@@ -1,5 +1,10 @@
 //! Phase 4 domain state-transition claims and [`ClaimedDomainFinalityAdapter`].
 //!
+//! WIRING: unwired - Phase 4 domain-transition prover and adapter surface;
+//! external rollup provers produce `ObjectKind::StarkProof` envelopes for
+//! `agg/object`, and settlement nodes wire `ClaimedDomainFinalityAdapter` into
+//! their domain registry once a block's `MasterProof` passes `StarkBackend::verify`.
+//!
 //! Each domain's state-transition STARK proof enters the aggregation layer as
 //! an `ObjectKind::StarkProof` envelope and collapses into:
 //!
@@ -16,10 +21,6 @@
 //! reads finality directly from the verified `Claim::Prog` without re-verifying
 //! the underlying domain transition STARK.
 //!
-//! WIRING: external rollup provers call `compile_domain_transition` and
-//! `prove_domain_transition` to produce `ObjectKind::StarkProof` envelopes for
-//! `agg/object`; settlement nodes wire `ClaimedDomainFinalityAdapter` into
-//! their domain registry once a block's `MasterProof` passes `StarkBackend::verify`.
 
 use std::collections::{BTreeMap, BTreeSet};
 

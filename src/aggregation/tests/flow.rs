@@ -423,7 +423,9 @@ fn an_object_waits_two_ticks_for_its_transaction() {
 #[test]
 fn a_tick_proves_the_pool_deletes_the_payloads_and_does_not_prove_twice() {
     let mut txs = Txs::default();
-    let mut aggregator = Aggregator::new(backend(), ctx(0xA1), params());
+    let prover_ctx = ctx(0xA1);
+    let expected_aggregator = prover_ctx.aggregator;
+    let mut aggregator = Aggregator::new(backend(), prover_ctx, params());
     let signers: Vec<Signer> = (1..=5).map(Signer::new).collect();
     let mut envelopes = Vec::new();
     for (signer, n) in signers.iter().zip(0u16..) {
@@ -439,7 +441,7 @@ fn a_tick_proves_the_pool_deletes_the_payloads_and_does_not_prove_twice() {
     let frame = &outcome.publish[0];
     assert_eq!(frame.claims.len(), 5);
     assert_eq!(frame.shape, vec![SHAPE_TICK]);
-    assert_eq!(frame.segments[0].aggregator, Address::from([0xA1; 32]));
+    assert_eq!(frame.segments[0].aggregator, expected_aggregator);
     assert_eq!(backend().verify(frame, DOMAIN), Ok(()));
     // Claims are sorted by digest.
     let digests: Vec<Hash32> = frame.claims.iter().map(|c| c.digest(DOMAIN)).collect();

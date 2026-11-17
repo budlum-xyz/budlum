@@ -25,6 +25,7 @@
 //! verifier, the native backend and the digests of the claim layer.
 
 pub mod agg_merge;
+pub mod agg_merge_proof;
 pub mod agg_tick;
 pub mod asm;
 pub mod bytes;
