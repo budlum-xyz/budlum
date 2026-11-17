@@ -972,7 +972,7 @@ mod tests {
         );
 
         let mut bad_codec = up.record;
-        bad_codec.codec = up.record.codec.wrapping_add(1);
+        bad_codec.codec = bad_codec.codec.wrapping_add(1);
         assert_eq!(
             view_public_optical(&bad_codec, &seconds),
             Err(PipelineError::ContentMismatch)
