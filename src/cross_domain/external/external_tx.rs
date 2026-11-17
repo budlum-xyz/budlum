@@ -269,6 +269,9 @@ fn register(
     ctx: &ExternalDomainTxContext,
     request: &RegistrationRequest,
 ) -> Result<(), ExternalDomainTxError> {
+    if is_testnet(ctx.chain_id) && matches!(request.spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
     if request.poster != ctx.sender {
         return Err(ExternalDomainTxError::PosterIsNotSender);
     }
@@ -306,6 +309,9 @@ fn submit_evidence(
     let Some(entry) = intake.entries.get(&key) else {
         return Err(ExternalDomainTxError::UnknownDomain);
     };
+    if is_testnet(ctx.chain_id) && matches!(entry.spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
     let bls = bls_for(&entry.spec, ctx);
     let before = intake.clone();
     match intake.submit_evidence(evidence, bls) {
