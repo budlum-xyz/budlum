@@ -7200,8 +7200,28 @@ impl Blockchain {
             }
             self.state.bridge_root = self.state.bridge_state.root();
         }
-        // The archive follows the headers the new branch's state commits.
-        Self::reconcile_global_header_archive(&mut self.global_headers, &self.state);
+        // The archive follows the headers the new branch's state commits, and
+        // durable storage must replace any superseded or orphaned global
+        // headers so later reorgs and restarts read a contiguous hash chain.
+        let reconciled_headers =
+            Self::reconcile_global_header_archive(&mut self.global_headers, &self.state);
+        if let Some(ref store) = self.storage {
+            use crate::persistence::traits::BlockchainStorage as _;
+            let prune_from = reconciled_headers
+                .first()
+                .map_or(self.global_headers.len() as u64, |h| h.global_height);
+            if let Err(e) = store.prune_global_headers_from(prune_from) {
+                warn!("Failed to prune superseded global headers from {prune_from}: {e}");
+            }
+            for header in &reconciled_headers {
+                if let Err(e) = store.save_global_header(header) {
+                    warn!(
+                        "Failed to persist reconciled global header {}: {e}",
+                        header.global_height
+                    );
+                }
+            }
+        }
 
         // Keep the sets of epochs the fork did not touch and add the sets the
         // new fork went through, so past-epoch certificates and fault proofs
