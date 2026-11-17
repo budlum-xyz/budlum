@@ -327,29 +327,28 @@ pub fn pay_epoch(
         })
         .map(|(address, v)| (*address, v.stake))
         .collect();
-    let payouts = reward_for_epoch(*schedule, closed_epoch, state.get_balance(&pool), &eligible);
+    let pool_balance = state.get_balance(&pool);
+    let payouts = reward_for_epoch(*schedule, closed_epoch, pool_balance, &eligible);
     let mut paid = 0u64;
-    for (address, amount) in payouts {
+    for (address, raw_amount) in payouts {
+        let remaining_pool = pool_balance.saturating_sub(paid);
+        let amount = raw_amount.min(remaining_pool);
         if amount == 0 {
             continue;
         }
         let delegated = state.registry.delegated_stake(&address);
+        let total_stake = state.validators.get(&address).map_or(0, |v| v.stake);
+        let effective_delegated = delegated.min(total_stake);
         // The rate in force for the epoch being paid: a reprice during that
         // epoch prices the next one, not the rewards that already accrued.
         let commission_ppm = state
             .registry
-            .validator_commission_ppm_at(&address, closed_epoch);
-        let delegated_reward = if delegated == 0 {
+            .validator_commission_ppm_at(&address, closed_epoch)
+            .min(1_000_000);
+        let delegated_reward = if effective_delegated == 0 || total_stake == 0 {
             0
         } else {
-            (u128::from(amount) * u128::from(delegated)
-                / u128::from(
-                    state
-                        .validators
-                        .get(&address)
-                        .map_or(amount, |v| v.stake)
-                        .max(1),
-                )) as u64
+            (u128::from(amount) * u128::from(effective_delegated) / u128::from(total_stake)) as u64
         };
         let commission =
             (u128::from(delegated_reward) * u128::from(commission_ppm) / 1_000_000u128) as u64;
@@ -731,5 +730,38 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(storage_share_for(9, &late, remaining), 0);
+    }
+
+    #[test]
+    fn pay_epoch_clamps_delegated_share_when_validator_stake_shrunk() {
+        let validator = addr(1);
+        let delegator = addr(2);
+        let pool = reward_pool_account();
+        let mut state = crate::core::account::AccountState::new();
+        state.add_validator(validator, 1_000);
+        state.set_validator_commission(&validator, 100_000).unwrap();
+        state.add_balance(&delegator, 5_000);
+        state
+            .delegate_to_validator(&delegator, &validator, 5_000)
+            .unwrap();
+        state.add_balance(&pool, 1_000);
+        // Simulate a partial stake reduction leaving validator.stake < delegated.
+        state.validators.get_mut(&validator).unwrap().stake = 500;
+
+        let schedule = RewardPoolSchedule {
+            validation_reward_pool: 1_000,
+            validation_pool_epochs: 2,
+            treasury_pool: 0,
+            reward_pool_start_epoch: 0,
+        };
+        // Epoch 1 pays a budget of 500 and a consensus share of 200. The
+        // validator's own stake is 500 while its delegators still hold 5,000,
+        // so an uncapped split would hand the delegators 2,000 and mint 1,800
+        // atoms that the pool never held.
+        let paid = pay_epoch(&mut state, &schedule, 1);
+        assert_eq!(paid, 200);
+        assert_eq!(state.get_balance(&validator), 20);
+        assert_eq!(state.registry.claimable_reward(delegator, validator), 180);
+        assert_eq!(state.get_balance(&pool), 800);
     }
 }

@@ -211,8 +211,12 @@ mod tests {
         // The compensating control predates scoring and must not be dropped
         // now that scoring exists - they cover different things: PeerManager
         // bans on protocol violations, scoring degrades on mesh behaviour.
+        // The gossip entry point asks through `check_rate_limit_from`, which
+        // is the relay-aware wrapper over `check_rate_limit`: the second hop of
+        // a relayed message is not the author and must not be charged as one,
+        // while its first hop still is.
         assert!(
-            NODE_RS.contains("peer_manager_lock().check_rate_limit(&peer_id)"),
+            NODE_RS.contains("check_rate_limit_from(&peer_id, gossip_authored)"),
             "PeerManager rate limiting must stay alongside peer scoring, \
              called on the inbound message path"
         );

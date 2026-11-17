@@ -749,10 +749,11 @@ impl KeyPair {
         // the write side agree on what a key file may look like.
         super::key_file::require_owner_only(path.as_ref())
             .map_err(|e| CryptoError::Io(e.to_string()))?;
-        let mut file =
+        let file =
             std::fs::File::open(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?;
-        let mut bytes = Zeroizing::new(Vec::new());
-        file.read_to_end(&mut bytes)
+        let mut bytes = Zeroizing::new(Vec::with_capacity(SECRET_KEY_LENGTH + 1));
+        file.take((SECRET_KEY_LENGTH + 1) as u64)
+            .read_to_end(&mut bytes)
             .map_err(|e| CryptoError::Io(e.to_string()))?;
         Self::from_bytes(&bytes)
     }
@@ -1789,5 +1790,17 @@ mod pq_identity_tests {
                 String::from_utf8_lossy(entry)
             );
         }
+    }
+
+    #[test]
+    fn keypair_load_rejects_oversized_file_without_unbounded_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("oversized.key");
+        let big = vec![0xA5u8; 4096];
+        super::write_key_file(&path, &big).expect("write owner-only key file");
+        assert!(matches!(
+            crate::crypto::primitives::KeyPair::load(&path),
+            Err(crate::crypto::primitives::CryptoError::InvalidKey(_))
+        ));
     }
 }
