@@ -143,12 +143,24 @@ impl IdentitySocialSummary {
     }
 }
 
+/// The trusted anchor a per-name BNS proof is checked against: the
+/// `bns_root` and epoch of a finalized header the caller already trusts.
+///
+/// `BnsRegistry::root()` does not commit to the liveness epoch inside
+/// `BnsStateProof`, so checking a proof against a trusted root without pairing
+/// that root with the trusted header's epoch lets an answering node invent an
+/// older `proof.epoch` and keep an expired `.bud` record `Verified`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BnsAnchor {
+    pub root: [u8; 32],
+    pub epoch: u64,
+}
+
 /// Optional Merkle state-proof and reverse-resolution context for identity verification.
 #[derive(Debug, Clone, Default)]
 pub struct IdentityProofContext {
     pub bns_proof: Option<BnsStateProof>,
-    pub expected_bns_root: Option<[u8; 32]>,
-    pub current_epoch: u64,
+    pub expected_bns_anchor: Option<BnsAnchor>,
     pub reverse_primary_name: Option<String>,
 }
 
@@ -508,8 +520,8 @@ pub fn build_identity_profile_verified(
                 status: EvidenceStatus::Unavailable,
                 source: "BNS registry".into(),
                 root: proof_ctx
-                    .and_then(|ctx| ctx.expected_bns_root.as_ref())
-                    .map(hex32),
+                    .and_then(|ctx| ctx.expected_bns_anchor)
+                    .map(|anchor| hex32(&anchor.root)),
                 warning: Some("Name not found".into()),
             }],
             primary_name: None,
@@ -518,8 +530,8 @@ pub fn build_identity_profile_verified(
             records: BTreeMap::new(),
             subdomains_count: 0,
             bns_state_root: proof_ctx
-                .and_then(|ctx| ctx.expected_bns_root.as_ref())
-                .map(hex32),
+                .and_then(|ctx| ctx.expected_bns_anchor)
+                .map(|anchor| hex32(&anchor.root)),
             social: IdentitySocialSummary::default(),
             bns_proof: proof_ctx.and_then(|ctx| ctx.bns_proof.clone()),
             observed_height: None,
@@ -724,8 +736,8 @@ fn evaluate_bns_evidence(
 ) -> (EvidenceStatus, Option<String>, Option<String>) {
     if resolved.is_expired {
         let root = proof_ctx
-            .and_then(|ctx| ctx.expected_bns_root.as_ref())
-            .map(hex32);
+            .and_then(|ctx| ctx.expected_bns_anchor)
+            .map(|anchor| hex32(&anchor.root));
         let msg = if resolved.status == NameStatus::Grace {
             "BNS record is in owner rescue grace period; active resolution is suspended"
         } else {
@@ -743,14 +755,14 @@ fn evaluate_bns_evidence(
             ),
         );
     };
-    let Some(expected_root) = ctx.expected_bns_root else {
+    let Some(anchor) = ctx.expected_bns_anchor else {
         return (
             EvidenceStatus::Unverified,
             None,
             Some("No trusted BNS root anchor was supplied, so the name record is unproven".into()),
         );
     };
-    let root_hex = Some(hex32(&expected_root));
+    let root_hex = Some(hex32(&anchor.root));
     let Some(ref proof) = ctx.bns_proof else {
         return (
             EvidenceStatus::Unverified,
@@ -758,8 +770,7 @@ fn evaluate_bns_evidence(
             Some("Missing per-name BNS Merkle state proof for expected bns_root".into()),
         );
     };
-    let Ok(Some(leaf)) = BnsRegistry::verify_state_proof(proof, &expected_root, ctx.current_epoch)
-    else {
+    let Ok(Some(leaf)) = BnsRegistry::verify_state_proof(proof, &anchor.root, anchor.epoch) else {
         return (
             EvidenceStatus::Unverified,
             root_hex,
@@ -1109,8 +1120,10 @@ mod tests {
 
         let ctx = IdentityProofContext {
             bns_proof: Some(proof.clone()),
-            expected_bns_root: Some(bns_root),
-            current_epoch: 20,
+            expected_bns_anchor: Some(BnsAnchor {
+                root: bns_root,
+                epoch: 20,
+            }),
             reverse_primary_name: reverse,
         };
         let profile = build_identity_profile_verified(
@@ -1161,8 +1174,10 @@ mod tests {
         // Tampered bns_root downgrades BNS + BUD3 evidence to Unverified!
         let bad_ctx = IdentityProofContext {
             bns_proof: Some(proof),
-            expected_bns_root: Some([0xEE; 32]),
-            current_epoch: 20,
+            expected_bns_anchor: Some(BnsAnchor {
+                root: [0xEE; 32],
+                epoch: 20,
+            }),
             reverse_primary_name: Some("ayaz.bud".into()),
         };
         let bad_profile = build_identity_profile_verified(
@@ -1238,8 +1253,10 @@ mod tests {
         lied.address = Some(addr(0x44));
         let ctx = IdentityProofContext {
             bns_proof: Some(honest.clone()),
-            expected_bns_root: Some(bns_root),
-            current_epoch: 20,
+            expected_bns_anchor: Some(BnsAnchor {
+                root: bns_root,
+                epoch: 20,
+            }),
             reverse_primary_name: Some("ayaz.bud".into()),
         };
         let profile = build_identity_profile_verified(
@@ -1268,8 +1285,10 @@ mod tests {
         stripped.entry.as_mut().unwrap().extras = None;
         let ctx = IdentityProofContext {
             bns_proof: Some(stripped),
-            expected_bns_root: Some(bns_root),
-            current_epoch: 20,
+            expected_bns_anchor: Some(BnsAnchor {
+                root: bns_root,
+                epoch: 20,
+            }),
             reverse_primary_name: Some("ayaz.bud".into()),
         };
         let bare = build_identity_profile_verified(
@@ -1318,8 +1337,10 @@ mod tests {
         let status = |resolved: BnsResolved| {
             let ctx = IdentityProofContext {
                 bns_proof: Some(honest.clone()),
-                expected_bns_root: Some(bns_root),
-                current_epoch: 20,
+                expected_bns_anchor: Some(BnsAnchor {
+                    root: bns_root,
+                    epoch: 20,
+                }),
                 reverse_primary_name: Some("shop.bud".into()),
             };
             let profile = build_identity_profile_verified(
@@ -1432,8 +1453,7 @@ mod tests {
         // Proof returned without an independently supplied trusted root stays Unverified.
         let self_reported_ctx = IdentityProofContext {
             bns_proof: Some(proof.clone()),
-            expected_bns_root: None,
-            current_epoch: 20,
+            expected_bns_anchor: None,
             reverse_primary_name: None,
         };
         let unanchored = build_identity_profile_verified(
@@ -1460,8 +1480,10 @@ mod tests {
         // Independently anchored proof verifies BNS and matching manifest; the unrooted count card stays Pending.
         let anchored_ctx = IdentityProofContext {
             bns_proof: Some(proof),
-            expected_bns_root: Some(bns_root),
-            current_epoch: 20,
+            expected_bns_anchor: Some(BnsAnchor {
+                root: bns_root,
+                epoch: 20,
+            }),
             reverse_primary_name: None,
         };
         let verified = build_identity_profile_verified(
@@ -1532,5 +1554,50 @@ mod tests {
             warning: None,
         };
         assert!(bogus_card.validate().is_err());
+    }
+
+    /// An expired `.bud` record cannot be passed off as `Verified` by stuffing
+    /// an earlier `proof.epoch` into `BnsStateProof`: `IdentityProofContext`
+    /// pairs `root` and `epoch` inside `BnsAnchor` from the caller's trusted
+    /// header, so the anchor epoch rejects the lapsed entry even when the proof
+    /// validates cryptographically against the root.
+    #[test]
+    fn expired_record_with_spoofed_proof_epoch_is_rejected_by_bns_anchor() {
+        let owner = addr(0x51);
+        let mut reg = BnsRegistry::new();
+        // Registered at epoch 10 for 10 epochs -> expires at epoch 20.
+        reg.register("lapsed.bud".to_string(), owner, 10, 10)
+            .unwrap();
+        let active_resolved = reg.resolve_full("lapsed.bud", 15).unwrap();
+        assert!(!active_resolved.is_expired);
+
+        // Node lies about liveness and supplies a proof stamped at epoch 15,
+        // while the caller's trusted finalized header is already at epoch 25.
+        let mut spoofed_proof = reg.prove_name("lapsed.bud", 15);
+        spoofed_proof.epoch = 15;
+        let bns_root = reg.root();
+        let ctx = IdentityProofContext {
+            bns_proof: Some(spoofed_proof),
+            expected_bns_anchor: Some(BnsAnchor {
+                root: bns_root,
+                epoch: 25,
+            }),
+            reverse_primary_name: None,
+        };
+        let profile = build_identity_profile_verified(
+            "lapsed.bud".into(),
+            Some(active_resolved),
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&ctx),
+        );
+        let bns_card = profile
+            .evidence
+            .iter()
+            .find(|c| c.subject == "bns")
+            .unwrap();
+        assert_eq!(bns_card.status, EvidenceStatus::Unverified);
     }
 }

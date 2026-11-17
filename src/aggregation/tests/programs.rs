@@ -929,7 +929,7 @@ fn published(tick_pi: &Hash32) -> Vec<(u64, u64)> {
 
 /// The tick of the native backend over `objects`: the public input of its
 /// one segment, and the objects in the order of its claims.
-fn native_tick(domain: u32, aggregator: Address, objects: &[Object]) -> (Hash32, Vec<Object>) {
+fn native_tick(domain: u32, seed: [u8; 32], objects: &[Object]) -> (Hash32, Vec<Object>) {
     let registry = SchemeStatusRegistry::genesis();
     let items: Vec<PoolItem> = objects
         .iter()
@@ -944,8 +944,9 @@ fn native_tick(domain: u32, aggregator: Address, objects: &[Object]) -> (Hash32,
         max_claims: 64,
         max_proof_bytes: 1 << 20,
     };
+    let ctx = TickCtx::from_seed(domain, zeroize::Zeroizing::new(seed)).expect("seed");
     let frame = NativeBackend::new(registry, limits, 1)
-        .prove_tick(&TickCtx { domain, aggregator }, &items)
+        .prove_tick(&ctx, &items)
         .expect("tick");
     assert_eq!(frame.segments.len(), 1);
     let ordered = frame
@@ -970,14 +971,15 @@ fn native_tick(domain: u32, aggregator: Address, objects: &[Object]) -> (Hash32,
 
 #[test]
 fn the_tick_program_publishes_the_tick_pi_of_the_native_backend() {
-    let aggregator = Address::from([0xA6; 32]);
+    let aggregator = crate::aggregation::frame::aggregator_address_from_seed(&[0xA6; 32])
+        .expect("valid aggregator seed");
     let built = agg_tick(&chain_rules(), 4).expect("assembles");
     let objects: Vec<Object> = (0..3u8)
         .map(|i| Object::signed(20 + i, [0x30 + i; 32]))
         .collect();
 
     for count in [1usize, 3] {
-        let (expected, ordered) = native_tick(DOMAIN, aggregator, &objects[..count]);
+        let (expected, ordered) = native_tick(DOMAIN, [0xA6; 32], &objects[..count]);
         let run = run_tick(&built, DOMAIN, &aggregator, count as u64, &ordered);
         assert_eq!(run.error, None, "{count} objects");
         assert_eq!(run.writes, published(&expected), "{count} objects");
@@ -989,13 +991,15 @@ fn the_tick_program_publishes_the_tick_pi_of_the_native_backend() {
     }
 
     // Another domain and another aggregator are other public inputs.
-    let (here, ordered) = native_tick(DOMAIN, aggregator, &objects[..1]);
-    let (elsewhere, _) = native_tick(DOMAIN + 1, aggregator, &objects[..1]);
+    let (here, ordered) = native_tick(DOMAIN, [0xA6; 32], &objects[..1]);
+    let (elsewhere, _) = native_tick(DOMAIN + 1, [0xA6; 32], &objects[..1]);
     let run = run_tick(&built, DOMAIN + 1, &aggregator, 1, &ordered);
     assert_eq!(run.writes, published(&elsewhere));
     assert_ne!(run.writes, published(&here));
-    let other = Address::from([0xA7; 32]);
-    let (theirs, _) = native_tick(DOMAIN, other, &objects[..1]);
+    let other_seed = [0xA7; 32];
+    let other = crate::aggregation::frame::aggregator_address_from_seed(&other_seed)
+        .expect("valid aggregator seed");
+    let (theirs, _) = native_tick(DOMAIN, other_seed, &objects[..1]);
     let run = run_tick(&built, DOMAIN, &other, 1, &ordered);
     assert_eq!(run.writes, published(&theirs));
     assert_ne!(run.writes, published(&here));
@@ -1051,10 +1055,11 @@ fn the_programs_read_nothing_they_were_not_given() {
     assert_eq!(dirty.error, None);
     assert_eq!(dirty.steps, clean.steps);
 
-    let aggregator = Address::from([0xA6; 32]);
+    let aggregator = crate::aggregation::frame::aggregator_address_from_seed(&[0xA6; 32])
+        .expect("valid aggregator seed");
     let tick = agg_tick(&chain_rules(), 2).expect("assembles");
     let objects = [Object::signed(5, [0x78; 32]), Object::signed(6, [0x79; 32])];
-    let (expected, ordered) = native_tick(DOMAIN, aggregator, &objects);
+    let (expected, ordered) = native_tick(DOMAIN, [0xA6; 32], &objects);
     let dirty = run_from(&tick.program, true, |memory| {
         write_bytes(memory, tick.domain, &DOMAIN.to_be_bytes());
         write_bytes(memory, tick.aggregator, aggregator.as_bytes());

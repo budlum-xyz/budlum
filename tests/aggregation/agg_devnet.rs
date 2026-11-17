@@ -22,6 +22,7 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use budlum_core::aggregation::frame::aggregator_address_from_seed;
 use budlum_core::aggregation::params::{AggMode, AggParams};
 use budlum_core::chain::genesis::GenesisConfig;
 use budlum_core::core::address::Address;
@@ -138,16 +139,22 @@ impl Drop for Node {
 }
 
 impl Node {
-    /// Start a devnet node on `genesis` that builds blocks and runs the
-    /// aggregator for `producer`.
+    /// Start a devnet node on `genesis` that builds blocks for `producer` and
+    /// runs the aggregator using `aggregator_seed`.
     ///
     /// # Errors
     ///
     /// When the process cannot be set up or started, or never answers.
-    fn start(genesis: &str, producer: Address) -> Result<Self, String> {
+    fn start(genesis: &str, producer: Address, aggregator_seed: &[u8; 32]) -> Result<Self, String> {
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
         let genesis_path = dir.path().join("genesis.json");
         std::fs::write(&genesis_path, genesis).map_err(|e| e.to_string())?;
+        let seed_path = dir.path().join("aggregator.seed");
+        budlum_core::crypto::key_file::write_atomic_owner_only(
+            &seed_path,
+            hex::encode(aggregator_seed).as_bytes(),
+        )
+        .map_err(|e| e.to_string())?;
         let [public_port, rpc_port, p2p_port, metrics_port] = free_ports()?;
         let log = std::fs::File::create(dir.path().join("node.log")).map_err(|e| e.to_string())?;
         let errors = log.try_clone().map_err(|e| e.to_string())?;
@@ -165,8 +172,9 @@ impl Node {
             .arg(format!("--rpc-operator-listener=127.0.0.1:{rpc_port}"))
             .arg(format!("--metrics-port={metrics_port}"))
             .arg(format!("--metrics-listener=127.0.0.1:{metrics_port}"))
-            .arg("--mdns-enabled=false");
-        command.arg(format!("--validator-address={}", producer.to_hex()));
+            .arg("--mdns-enabled=false")
+            .arg(format!("--validator-address={}", producer.to_hex()))
+            .arg(format!("--aggregator-key-file={}", seed_path.display()));
         let child = command
             .env("BUDLUM_RPC_AUTH_REQUIRED", "0")
             .current_dir(dir.path())
@@ -229,6 +237,8 @@ fn a_devnet_with_the_native_backend_builds_blocks_without_signature_bytes() {
         .map(|n| WalletKeyPair::from_seed(&[u8::try_from(n + 1).expect("small"); 32]))
         .collect();
     let producer = Address::from([0xB7; 32]);
+    let aggregator_seed = [0xA6; 32];
+    let aggregator = aggregator_address_from_seed(&aggregator_seed).expect("valid seed");
     let recipient = Address::from([0x44; 32]);
     let mut genesis = GenesisConfig::new(CHAIN);
     for wallet in &wallets {
@@ -240,7 +250,7 @@ fn a_devnet_with_the_native_backend_builds_blocks_without_signature_bytes() {
     });
     let genesis = serde_json::to_string(&genesis).expect("genesis json");
 
-    let node = Node::start(&genesis, producer).expect("the node starts");
+    let node = Node::start(&genesis, producer, &aggregator_seed).expect("the node starts");
     assert!(
         node.log().contains("Aggregator active"),
         "the node runs its aggregation side:\n{}",
@@ -310,8 +320,8 @@ fn a_devnet_with_the_native_backend_builds_blocks_without_signature_bytes() {
         {
             assert_eq!(
                 segment.get("aggregator").and_then(Value::as_str),
-                Some(producer.to_string().as_str()),
-                "the node proved for its producer address"
+                Some(aggregator.to_string().as_str()),
+                "the node proved for its attested aggregator address"
             );
         }
         for tx in &transactions {
@@ -330,8 +340,8 @@ fn a_devnet_with_the_native_backend_builds_blocks_without_signature_bytes() {
     assert!(frames >= 1);
 
     // What the claims cost and who was paid: every sender paid its amount
-    // and its fee, and the claim fees went to the aggregator and the
-    // producer, which are the same address here.
+    // and its fee, half the claim fees went to the aggregator, and the other
+    // half (plus unburned tx fees) went to the producer.
     let fees = u64::try_from(SENDERS).expect("small") * SIG_CLAIM_FEE;
     for wallet in &wallets {
         assert_eq!(
@@ -339,7 +349,8 @@ fn a_devnet_with_the_native_backend_builds_blocks_without_signature_bytes() {
             10_000_000 - AMOUNT - FEE
         );
     }
-    assert!(node.balance(&producer).expect("balance") >= fees);
+    assert_eq!(node.balance(&aggregator).expect("balance"), fees / 2);
+    assert!(node.balance(&producer).expect("balance") >= fees / 2);
     println!(
         "agg_devnet: {claimed} claimed transactions in {frames} block(s) with a frame, \
          chain height {height}"

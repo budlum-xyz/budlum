@@ -3,10 +3,11 @@
 //! the next block carries the frame and the transaction without a witness.
 
 use super::chain::{
-    aggregator, chain, genesis, on, producer, recipient, signed, wallet, AMOUNT, CHAIN, FEE,
-    SIG_CLAIM_FEE,
+    aggregator, aggregator_seed, chain, genesis, on, producer, recipient, signed, wallet, AMOUNT,
+    CHAIN, FEE, SIG_CLAIM_FEE,
 };
 use crate::aggregation::chain::{claim_signature, decode_gossip_frame};
+use crate::aggregation::frame::aggregator_address_from_seed;
 use crate::aggregation::node::ObjectRefusal;
 use crate::aggregation::object::ObjectError;
 use crate::aggregation::pool::Rejection;
@@ -15,14 +16,20 @@ use crate::core::address::Address;
 use crate::core::transaction::Transaction;
 use crate::crypto::primitives::WalletKeyPair;
 use crate::network::protocol::{NetworkMessage, MAX_AGG_OBJECT_BYTES};
+use zeroize::Zeroizing;
 
 /// A chain with the layer on, `funded` holding a balance, and the
-/// aggregation side running for `address`.
-fn node(funded: &[&WalletKeyPair], address: Address) -> Blockchain {
+/// aggregation side running with `seed`.
+fn node_with_seed(funded: &[&WalletKeyPair], seed: [u8; 32]) -> (Blockchain, Address) {
     let addresses: Vec<Address> = funded.iter().map(|wallet| wallet.address()).collect();
     let mut chain = chain(genesis(Some(on()), &addresses));
-    assert!(chain.enable_aggregator(address).is_some());
-    chain
+    assert!(chain.enable_aggregator(Zeroizing::new(seed)).is_some());
+    let addr = aggregator_address_from_seed(&seed).expect("valid seed");
+    (chain, addr)
+}
+
+fn node(funded: &[&WalletKeyPair], seed: [u8; 32]) -> Blockchain {
+    node_with_seed(funded, seed).0
 }
 
 /// A signed V5 transfer of `amount`.
@@ -44,7 +51,7 @@ fn transfer(wallet: &WalletKeyPair, nonce: u64, amount: u64) -> Transaction {
 fn the_aggregation_side_only_runs_where_the_layer_is_on() {
     let sender = wallet(1);
     let mut off = chain(genesis(None, &[sender.address()]));
-    assert_eq!(off.enable_aggregator(aggregator()), None);
+    assert_eq!(off.enable_aggregator(aggregator_seed()), None);
     // Without it the transaction takes the old road, signature and all.
     off.add_transaction(signed(&sender, 0, FEE)).expect("pool");
     assert_eq!(off.mempool.len(), 1);
@@ -52,13 +59,16 @@ fn the_aggregation_side_only_runs_where_the_layer_is_on() {
     assert!(off.receive_frame(&[1, 2, 3]).is_err());
 
     let mut live = chain(genesis(Some(on()), &[sender.address()]));
-    assert_eq!(live.enable_aggregator(aggregator()), Some(on().tick_ms));
+    assert_eq!(
+        live.enable_aggregator(aggregator_seed()),
+        Some(on().tick_ms)
+    );
 }
 
 #[test]
 fn a_signed_transaction_goes_through_the_pool_into_a_block() {
     let sender = wallet(1);
-    let mut left = node(&[&sender], aggregator());
+    let mut left = node(&[&sender], *aggregator_seed());
     let mut right = chain(genesis(Some(on()), &[sender.address()]));
     let tx = signed(&sender, 0, FEE);
 
@@ -93,6 +103,16 @@ fn a_signed_transaction_goes_through_the_pool_into_a_block() {
     assert_eq!(left.state.get_balance(&recipient()), AMOUNT);
     assert_eq!(left.state.get_nonce(&sender.address()), 1);
     assert_eq!(left.state.get_balance(&aggregator()), SIG_CLAIM_FEE / 2);
+    assert_eq!(
+        left.state.get_balance(&producer()),
+        SIG_CLAIM_FEE / 2 + (FEE - SIG_CLAIM_FEE)
+            - left.state.tokenomics.metabolic_burn(FEE - SIG_CLAIM_FEE)
+    );
+    // The sender paid the amount and the fee, no more.
+    assert_eq!(
+        left.state.get_balance(&sender.address()),
+        10_000_000 - AMOUNT - FEE
+    );
 
     // The frame is spent: a later tick has nothing to publish and the next
     // block carries no frame.
@@ -104,7 +124,7 @@ fn a_signed_transaction_goes_through_the_pool_into_a_block() {
 #[test]
 fn an_object_from_a_peer_is_taken_once_and_a_bad_one_blames_the_peer() {
     let sender = wallet(1);
-    let mut node = node(&[&sender], aggregator());
+    let mut node = node(&[&sender], *aggregator_seed());
     let tx = signed(&sender, 0, FEE);
     let (claimed, envelope) = claim_signature(&tx).expect("claimed");
     let bytes = envelope.encode();
@@ -167,9 +187,8 @@ fn an_object_from_a_peer_is_taken_once_and_a_bad_one_blames_the_peer() {
 #[test]
 fn a_producer_carries_the_frame_of_another_aggregator() {
     let sender = wallet(1);
-    let first = Address::from([0xA1; 32]);
-    let mut prover = node(&[&sender], first);
-    let mut builder = node(&[&sender], producer());
+    let (mut prover, first) = node_with_seed(&[&sender], [0xA1; 32]);
+    let mut builder = node(&[&sender], [0xB7; 32]);
     let tx = signed(&sender, 0, FEE);
     let (claimed, envelope) = claim_signature(&tx).expect("claimed");
 
@@ -188,8 +207,23 @@ fn a_producer_carries_the_frame_of_another_aggregator() {
     broken[last] ^= 0x01;
     assert!(builder.receive_frame(&broken).is_err());
     assert!(builder.receive_frame(&frames[0][..last]).is_err());
+
+    // A frame for a held claim whose segment attestation is forged is refused.
+    let mut bad_attestation = decode_gossip_frame(&frames[0]).expect("frame");
+    bad_attestation.segments[0].attestation.signature[0] ^= 0x01;
+    assert!(builder.receive_frame(&bad_attestation.encode()).is_err());
+
     assert_eq!(builder.receive_frame(&frames[0]), Ok(true));
     assert_eq!(builder.receive_frame(&frames[0]), Ok(false));
+
+    // A frame for claims `builder` does NOT hold in `AggNode` is ignored
+    // (`Ok(false)`) without failing or spending signature checks.
+    let mut orphan = node(&[&sender], [0xC1; 32]);
+    let other_tx = transfer(&sender, 1, 1);
+    orphan.add_transaction(other_tx).expect("admitted");
+    let orphan_frames = orphan.aggregation_tick();
+    assert_eq!(orphan_frames.len(), 1);
+    assert_eq!(builder.receive_frame(&orphan_frames[0]), Ok(false));
 
     let (block, _) = builder.produce_block(producer()).expect("block");
     let frame = block.claim_frame.as_ref().expect("frame");
@@ -213,7 +247,7 @@ fn a_producer_carries_the_frame_of_another_aggregator() {
 fn transactions_of_one_sender_wait_in_nonce_order_and_a_held_nonce_is_refused() {
     let sender = wallet(1);
     let other = wallet(2);
-    let mut node = node(&[&sender, &other], aggregator());
+    let mut node = node(&[&sender, &other], *aggregator_seed());
 
     node.add_transaction(transfer(&sender, 0, 5))
         .expect("first");
@@ -260,8 +294,8 @@ fn transactions_of_one_sender_wait_in_nonce_order_and_a_held_nonce_is_refused() 
 fn a_transaction_that_can_no_longer_run_is_dropped_and_the_chain_goes_on() {
     let sender = wallet(1);
     let other = wallet(2);
-    let mut node = node(&[&sender, &other], aggregator());
-    let mut rival = self::node(&[&sender, &other], Address::from([0xA2; 32]));
+    let mut node = node(&[&sender, &other], *aggregator_seed());
+    let mut rival = self::node(&[&sender, &other], [0xA2; 32]);
 
     // Two ticks, so the two transactions of the sender sit in two frames.
     node.add_transaction(transfer(&sender, 0, 5))
@@ -310,8 +344,8 @@ fn a_transaction_that_can_no_longer_run_is_dropped_and_the_chain_goes_on() {
 fn dropped_transaction_clears_stale_claim_and_allows_resubmission() {
     let sender = wallet(1);
     let funder = wallet(2);
-    let mut node = node(&[&sender, &funder], aggregator());
-    let mut rival = self::node(&[&sender, &funder], Address::from([0xA2; 32]));
+    let mut node = node(&[&sender, &funder], *aggregator_seed());
+    let mut rival = self::node(&[&sender, &funder], [0xA2; 32]);
 
     // Prove nonce 0 and nonce 1 on `node`.
     node.add_transaction(transfer(&sender, 0, 5))
@@ -370,7 +404,7 @@ fn dropped_transaction_clears_stale_claim_and_allows_resubmission() {
 #[test]
 fn objects_and_frames_cross_the_wire_and_the_message_layer_bounds_them() {
     let sender = wallet(1);
-    let mut node = node(&[&sender], aggregator());
+    let mut node = node(&[&sender], *aggregator_seed());
     let tx = signed(&sender, 0, FEE);
     let (claimed, envelope) = claim_signature(&tx).expect("claimed");
 
@@ -426,7 +460,7 @@ fn frames_stay_within_the_proof_limit_and_every_transaction_gets_its_block() {
     };
     let mut left = chain(genesis(Some(tight), &addresses));
     let mut right = chain(genesis(Some(tight), &addresses));
-    assert!(left.enable_aggregator(aggregator()).is_some());
+    assert!(left.enable_aggregator(aggregator_seed()).is_some());
     for sender in &senders {
         left.add_transaction(signed(sender, 0, FEE))
             .expect("admitted");
@@ -459,7 +493,7 @@ fn the_frame_counts_toward_the_block_size() {
     addresses.push(payer);
     let mut left = chain(genesis(Some(on()), &addresses));
     let mut right = chain(genesis(Some(on()), &addresses));
-    assert!(left.enable_aggregator(aggregator()).is_some());
+    assert!(left.enable_aggregator(aggregator_seed()).is_some());
     for sender in &senders {
         left.add_transaction(signed(sender, 0, FEE))
             .expect("admitted");

@@ -20,6 +20,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use zeroize::Zeroizing;
+
 use super::aggregator::{Aggregator, TickOutcome};
 use super::backend::{AggError, TickCtx};
 use super::chain::{account_claim, claim_domain, ChainBackend};
@@ -32,10 +34,16 @@ use crate::core::block::Block;
 use crate::core::transaction::Transaction;
 use crate::crypto::scheme::SchemeStatusRegistry;
 use crate::domain::types::{DomainId, Hash32};
+use crate::mempool::pool::charged_bytes;
 
-/// Claimed transactions a node holds at most. Each is a few hundred bytes;
-/// past this a new object is turned away until blocks drain the store.
+/// Claimed transactions a node holds at most. Past this (or
+/// [`MAX_PENDING_TRANSACTION_BYTES`]), a new object is turned away until
+/// blocks drain the store.
 const MAX_PENDING_TRANSACTIONS: usize = 65_536;
+/// Maximum resident bytes of claimed transactions held in `AggNode`, measured
+/// via `mempool::pool::charged_bytes`. Bounds memory even when transactions
+/// carry `MAX_TX_SIZE` (100 KiB) payloads.
+const MAX_PENDING_TRANSACTION_BYTES: usize = 256 * 1024 * 1024;
 
 /// Why an object and its transaction were not taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,32 +133,45 @@ pub struct AggNode {
     aggregator: Aggregator<ChainBackend>,
     /// Claimed transactions whose object was verified, by signing hash.
     transactions: BTreeMap<Hash32, Transaction>,
+    /// Total encoded protobuf bytes of `transactions`.
+    pending_bytes: usize,
+    /// Maximum `pending_bytes` allowed before pruning / refusing with `StoreFull`.
+    max_pending_bytes: usize,
     /// The same transactions by sender and nonce.
     by_sender: BTreeMap<Address, BTreeMap<u64, Hash32>>,
 }
 
 impl AggNode {
-    /// The aggregation side of a node on the chain `chain_id`, proving for
-    /// `aggregator`. `None` unless the layer is on and the chain has a claim
-    /// domain: under `Off` and `Shadow` no frame is published.
+    /// The aggregation side of a node on the chain `chain_id`, proving with
+    /// the keypair derived from `signer_seed`. `None` unless the layer is on,
+    /// the chain has a claim domain, and `signer_seed` derives a valid keypair.
     #[must_use]
     pub fn new(
         params: &AggParams,
         chain_id: u64,
-        aggregator: Address,
+        signer_seed: Zeroizing<[u8; 32]>,
         registry: &SchemeStatusRegistry,
     ) -> Option<Self> {
         if params.mode != AggMode::On {
             return None;
         }
         let domain = claim_domain(chain_id)?;
-        let ctx = TickCtx { domain, aggregator };
+        let ctx = TickCtx::from_seed(domain, signer_seed).ok()?;
         Some(Self {
             domain,
             aggregator: Aggregator::new(ChainBackend::new(params, registry), ctx, *params),
             transactions: BTreeMap::new(),
+            pending_bytes: 0,
+            max_pending_bytes: MAX_PENDING_TRANSACTION_BYTES,
             by_sender: BTreeMap::new(),
         })
+    }
+
+    /// Address derived from the active aggregator signing seed.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn aggregator_address(&self) -> Address {
+        self.aggregator.ctx().aggregator
     }
 
     /// Whether the node holds the claimed transaction with this signing
@@ -231,8 +252,16 @@ impl AggNode {
             // both claims could never go into a block.
             return Err(ObjectRefusal::NonceHeld);
         }
-        if self.transactions.len() >= MAX_PENDING_TRANSACTIONS {
-            return Err(ObjectRefusal::StoreFull);
+        let tx_bytes = charged_bytes(&tx);
+        if self.transactions.len() >= MAX_PENDING_TRANSACTIONS
+            || self.pending_bytes.saturating_add(tx_bytes) > self.max_pending_bytes
+        {
+            self.prune_orphans();
+            if self.transactions.len() >= MAX_PENDING_TRANSACTIONS
+                || self.pending_bytes.saturating_add(tx_bytes) > self.max_pending_bytes
+            {
+                return Err(ObjectRefusal::StoreFull);
+            }
         }
         let lookup = Lookup {
             held: &self.transactions,
@@ -244,7 +273,11 @@ impl AggNode {
                     .entry(tx.from)
                     .or_default()
                     .insert(tx.nonce, tx_hash);
+                self.pending_bytes = self.pending_bytes.saturating_add(tx_bytes);
                 self.transactions.insert(tx_hash, tx);
+                // Reap any transactions whose ready pool objects were just
+                // evicted to make room in `ObjectPool::admit`.
+                self.prune_orphans();
                 Ok(true)
             }
             // The transaction came with the object, so the pool never waits
@@ -257,13 +290,32 @@ impl AggNode {
         }
     }
 
-    /// A frame arrived on `agg/frame`. Returns whether it is new.
+    /// A frame arrived on `agg/frame`. Drops (ignores) frames whose claims
+    /// do not match transactions currently held by this node before running
+    /// expensive ML-DSA-87 verification; returns whether the frame is new.
     ///
     /// # Errors
     ///
-    /// [`AggError`] when the frame is not valid; it is dropped.
-    pub fn on_frame(&mut self, frame: ClaimFrame) -> Result<bool, AggError> {
-        self.aggregator.on_frame(frame)
+    /// [`AggError`] when a frame whose claims are held here fails
+    /// validation or proof/attestation verification.
+    pub fn on_frame(
+        &mut self,
+        frame: ClaimFrame,
+        registry: &SchemeStatusRegistry,
+    ) -> Result<bool, AggError> {
+        let usable: BTreeSet<Hash32> = self
+            .transactions
+            .values()
+            .filter_map(|tx| tx.auth_claim)
+            .collect();
+        if !frame
+            .claims
+            .iter()
+            .all(|claim| usable.contains(&claim.digest(self.domain)))
+        {
+            return Ok(false);
+        }
+        self.aggregator.on_frame(frame, registry)
     }
 
     /// One tick of the aggregator: the frames to publish on `agg/frame`.
@@ -272,7 +324,9 @@ impl AggNode {
             held: &self.transactions,
             incoming: None,
         };
-        self.aggregator.on_tick(&lookup, registry)
+        let outcome = self.aggregator.on_tick(&lookup, registry);
+        self.prune_orphans();
+        outcome
     }
 
     /// The frame of the next block and the transactions that use its
@@ -306,6 +360,7 @@ impl AggNode {
     /// cannot linger or poison later merges.
     pub fn drop_transaction(&mut self, tx_hash: &Hash32) {
         if let Some(tx) = self.transactions.remove(tx_hash) {
+            self.pending_bytes = self.pending_bytes.saturating_sub(charged_bytes(&tx));
             if let Some(pending) = self.by_sender.get_mut(&tx.from) {
                 pending.remove(&tx.nonce);
                 if pending.is_empty() {
@@ -318,11 +373,31 @@ impl AggNode {
         }
     }
 
+    /// Remove any held transaction whose claim is neither tracked by the
+    /// object pool (ready or proven) nor covered by any retained claim frame.
+    fn prune_orphans(&mut self) {
+        let orphans: Vec<Hash32> = self
+            .transactions
+            .iter()
+            .filter_map(|(hash, tx)| {
+                let orphaned = tx.auth_claim.is_none_or(|digest| {
+                    !self.aggregator.pool().tracks_claim(&digest)
+                        && !self.aggregator.tracks_claim(&digest)
+                });
+                orphaned.then_some(*hash)
+            })
+            .collect();
+        for hash in orphans {
+            self.drop_transaction(&hash);
+        }
+    }
+
     /// Forget a frame that cannot go into a block as it is: over the block
     /// rules, or too large for a block next to its transactions. Smaller
     /// frames over the same claims are chosen from then on.
     pub fn drop_frame(&mut self, frame: &ClaimFrame) {
         self.aggregator.forget_frame(frame);
+        self.prune_orphans();
     }
 
     /// A block was committed. The frame it carried is done: its claims
@@ -342,5 +417,124 @@ impl AggNode {
         for hash in &gone {
             self.drop_transaction(hash);
         }
+        self.prune_orphans();
+    }
+}
+
+#[cfg(all(test, feature = "wallet-ml-dsa"))]
+mod tests {
+    use super::*;
+    use crate::aggregation::chain::claim_signature;
+
+    fn sample_node(params: AggParams) -> AggNode {
+        AggNode::new(
+            &params,
+            45_262,
+            Zeroizing::new([0xA6; 32]),
+            &SchemeStatusRegistry::genesis(),
+        )
+        .expect("aggregation enabled")
+    }
+
+    #[test]
+    fn pending_byte_limit_enforces_store_full_and_orphan_pruning_reclaims_space() {
+        let registry = SchemeStatusRegistry::genesis();
+        let params = AggParams {
+            mode: AggMode::On,
+            ..AggParams::default()
+        };
+        let mut node = sample_node(params);
+        let recipient = Address::from([0x44; 32]);
+        let sender_a = crate::crypto::primitives::WalletKeyPair::from_seed(&[1u8; 32]);
+        let sender_b = crate::crypto::primitives::WalletKeyPair::from_seed(&[2u8; 32]);
+
+        let mut tx_a = Transaction::new_with_fee(
+            sender_a.address(),
+            recipient,
+            10,
+            100_000,
+            0,
+            vec![0xAB; 2048],
+        );
+        tx_a.chain_id = 45_262;
+        tx_a.sign_v5(&sender_a);
+        let (claimed_a, env_a) = claim_signature(&tx_a).expect("v5 claim");
+        let bytes_a = charged_bytes(&claimed_a);
+
+        let mut tx_b = Transaction::new_with_fee(
+            sender_b.address(),
+            recipient,
+            10,
+            100_000,
+            0,
+            vec![0xCD; 2048],
+        );
+        tx_b.chain_id = 45_262;
+        tx_b.sign_v5(&sender_b);
+        let (claimed_b, env_b) = claim_signature(&tx_b).expect("v5 claim");
+
+        node.max_pending_bytes = bytes_a + 10;
+        assert_eq!(
+            node.aggregator_address(),
+            crate::aggregation::frame::aggregator_address_from_seed(&[0xA6; 32])
+                .expect("valid seed")
+        );
+        assert_eq!(
+            node.admit(env_a.clone(), claimed_a.clone(), &registry),
+            Ok(true)
+        );
+        assert_eq!(node.pending_bytes, bytes_a);
+        assert_eq!(
+            node.admit(env_b.clone(), claimed_b.clone(), &registry),
+            Err(ObjectRefusal::StoreFull)
+        );
+
+        // Removing the object from the pool leaves `claimed_a` as an orphan;
+        // `prune_orphans` reclaims its bytes so `claimed_b` can enter.
+        if let Some(digest_a) = claimed_a.auth_claim {
+            node.aggregator.forget_claim(&digest_a);
+        }
+        assert_eq!(node.admit(env_b, claimed_b.clone(), &registry), Ok(true));
+        assert!(!node.holds(&claimed_a.signing_hash()));
+        assert!(node.holds(&claimed_b.signing_hash()));
+        assert_eq!(node.pending_bytes, charged_bytes(&claimed_b));
+    }
+
+    #[test]
+    fn pool_eviction_during_admit_prunes_orphaned_transaction() {
+        let registry = SchemeStatusRegistry::genesis();
+        let params = AggParams {
+            mode: AggMode::On,
+            pool_max_bytes: 8_000, // holds one 7.2 KB envelope at a time
+            ..AggParams::default()
+        };
+        let mut node = sample_node(params);
+        let recipient = Address::from([0x44; 32]);
+        let sender_low = crate::crypto::primitives::WalletKeyPair::from_seed(&[3u8; 32]);
+        let sender_high = crate::crypto::primitives::WalletKeyPair::from_seed(&[4u8; 32]);
+
+        let mut tx_low =
+            Transaction::new_with_fee(sender_low.address(), recipient, 10, 10_000, 0, vec![]);
+        tx_low.chain_id = 45_262;
+        tx_low.sign_v5(&sender_low);
+        let (claimed_low, env_low) = claim_signature(&tx_low).expect("v5 claim");
+
+        let mut tx_high =
+            Transaction::new_with_fee(sender_high.address(), recipient, 10, 50_000, 0, vec![]);
+        tx_high.chain_id = 45_262;
+        tx_high.sign_v5(&sender_high);
+        let (claimed_high, env_high) = claim_signature(&tx_high).expect("v5 claim");
+
+        assert_eq!(
+            node.admit(env_low, claimed_low.clone(), &registry),
+            Ok(true)
+        );
+        assert_eq!(
+            node.admit(env_high, claimed_high.clone(), &registry),
+            Ok(true)
+        );
+        assert!(!node.holds(&claimed_low.signing_hash()));
+        assert!(node.holds(&claimed_high.signing_hash()));
+        assert_eq!(node.pending_bytes, charged_bytes(&claimed_high));
     }
 }

@@ -26,7 +26,7 @@ use std::time::Instant;
 use bud_proof::plonky3_prover::MAX_PROVER_WITNESS_ROWS;
 use bud_vm::Vm;
 use budlum_core::aggregation::claim::Claim;
-use budlum_core::aggregation::frame::{tick_pi, Segment};
+use budlum_core::aggregation::frame::tick_pi_of;
 use budlum_core::aggregation::merkle::claims_root;
 use budlum_core::aggregation::programs::agg_tick::agg_tick;
 use budlum_core::aggregation::programs::asm::Program;
@@ -178,14 +178,7 @@ fn native_tick_pi(aggregator: Address, objects: &[Object]) -> [u8; 32] {
     let Ok(count) = u32::try_from(objects.len()) else {
         fail("too many claims");
     };
-    tick_pi(
-        DOMAIN,
-        &Segment {
-            claims_root: root,
-            count,
-            aggregator,
-        },
-    )
+    tick_pi_of(DOMAIN, &root, count, &aggregator)
 }
 
 fn published(tick_pi: &[u8; 32]) -> Vec<(u64, u64)> {
