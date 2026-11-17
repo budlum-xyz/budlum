@@ -607,8 +607,15 @@ impl Mempool {
             if !self.evict_until_bytes_fit(&tx, projected - self.config.max_pool_bytes) {
                 return Err(MempoolError::PoolBytesFull);
             }
-        } else if count_full && !self.evict_lowest_fee(&tx) {
-            return Err(MempoolError::PoolFull);
+        } else if count_full {
+            let evicted = if duty.is_some() {
+                self.evict_cheapest_non_duty(&tx)
+            } else {
+                self.evict_lowest_fee(&tx)
+            };
+            if !evicted {
+                return Err(MempoolError::PoolFull);
+            }
         }
 
         if let Some(existing_hash) = existing_hash {
@@ -970,9 +977,12 @@ impl Mempool {
             let victim = hashes
                 .iter()
                 .filter(|h| {
-                    self.transactions
-                        .get(*h)
-                        .is_some_and(|entry| entry.tx.from != new_tx.from)
+                    self.transactions.get(*h).is_some_and(|entry| {
+                        // A duty batch is free, so it can never be outbid: a
+                        // paying admission takes its slot from another paying
+                        // entry instead of starving custody duties.
+                        entry.duty.is_none() && entry.tx.from != new_tx.from
+                    })
                 })
                 .min()
                 .cloned();
@@ -982,6 +992,34 @@ impl Mempool {
             }
         }
         false
+    }
+
+    /// Evict the cheapest entry that is not a duty batch, for an incoming duty
+    /// batch at the count ceiling.
+    ///
+    /// A duty batch cannot outbid anything, so the fee-ordered rule gives it no
+    /// way into a full pool: every validator's custody work is refused while
+    /// unauthenticated spam holds the slots. The duty lane's own byte and
+    /// per-validator caps bound how much of the pool duty work may hold, so
+    /// taking one slot back from a paying entry is safe.
+    fn evict_cheapest_non_duty(&mut self, new_tx: &Transaction) -> bool {
+        let victim = self
+            .by_fee
+            .iter()
+            .flat_map(|(_, hashes)| hashes.iter())
+            .filter_map(|hash| {
+                let entry = self.transactions.get(hash)?;
+                (entry.duty.is_none() && entry.tx.from != new_tx.from)
+                    .then(|| (entry.tx.fee, hash.clone()))
+            })
+            .min();
+        match victim {
+            Some((_, hash)) => {
+                self.remove_transaction(&hash);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Evict cheaper transactions until `needed` bytes have been freed.
@@ -1018,7 +1056,7 @@ impl Mempool {
                 let Some(entry) = self.transactions.get(hash) else {
                     continue;
                 };
-                if entry.tx.from == new_tx.from {
+                if entry.tx.from == new_tx.from || entry.duty.is_some() {
                     continue;
                 }
                 freed = freed.saturating_add(entry.charged);
@@ -2114,5 +2152,86 @@ mod tests {
         let honest_tx = make_ack(&honest, 0, [0xEE; 32]);
         pool.admit_at(honest_tx, 20 * window_ms)
             .expect("other validator must still be admitted into the duty lane");
+    }
+
+    /// A paying admission at the count ceiling used to evict the fee-0 bucket
+    /// first, which is exactly where a validator's custody work sits. Spam
+    /// could therefore push every duty batch out of the pool.
+    #[test]
+    fn a_paying_transaction_cannot_evict_a_validators_duty_batch() {
+        use crate::core::transaction::TransactionType;
+        use crate::crypto::primitives::KeyPair;
+
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 2,
+            min_fee: 1,
+            max_per_sender: 100,
+            ..Default::default()
+        });
+        let validator = KeyPair::generate().unwrap();
+        let validator_addr = Address::from(validator.public_key_bytes());
+        pool.sync_duty_validators([validator_addr]);
+
+        let mut duty = Transaction::new(validator_addr, Address::zero(), 0, Vec::new());
+        duty.fee = 0;
+        duty.tx_type = TransactionType::StorageV3(Box::new(
+            crate::storage::bud3::tx::StorageTxV3::CustodyAck { object: [7u8; 32] },
+        ));
+        duty.hash = duty.calculate_hash();
+        duty.sign(&validator);
+        pool.admit_at(duty.clone(), 1)
+            .expect("the duty batch takes a slot");
+
+        let paying = create_test_tx_from_seed(1, 0, 10);
+        pool.admit_at(paying.clone(), 2)
+            .expect("a second slot exists");
+        assert_eq!(pool.transactions.len(), 2);
+
+        // The pool is full. A paying transaction can only displace the paying
+        // entry, never the validator's duty batch.
+        let richer = create_test_tx_from_seed(2, 0, 1_000);
+        pool.admit_at(richer.clone(), 3)
+            .expect("the richer transaction is admitted");
+        assert!(
+            pool.transactions.contains_key(&duty.hash),
+            "a paying admission must not evict custody work"
+        );
+        assert!(!pool.transactions.contains_key(&paying.hash));
+        assert!(pool.transactions.contains_key(&richer.hash));
+    }
+
+    /// The other side of the same rule: at the count ceiling a duty batch takes
+    /// its slot from a paying entry, because the fee-ordered rule would
+    /// otherwise refuse it forever and custody duties would starve.
+    #[test]
+    fn a_duty_batch_takes_its_slot_from_a_paying_entry_at_the_count_ceiling() {
+        use crate::core::transaction::TransactionType;
+        use crate::crypto::primitives::KeyPair;
+
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 1,
+            min_fee: 1,
+            max_per_sender: 100,
+            ..Default::default()
+        });
+        let validator = KeyPair::generate().unwrap();
+        let validator_addr = Address::from(validator.public_key_bytes());
+        pool.sync_duty_validators([validator_addr]);
+
+        let paying = create_test_tx_from_seed(3, 0, 50);
+        pool.admit_at(paying.clone(), 1).expect("fills the pool");
+        assert_eq!(pool.transactions.len(), 1);
+
+        let mut duty = Transaction::new(validator_addr, Address::zero(), 0, Vec::new());
+        duty.fee = 0;
+        duty.tx_type = TransactionType::StorageV3(Box::new(
+            crate::storage::bud3::tx::StorageTxV3::CustodyAck { object: [9u8; 32] },
+        ));
+        duty.hash = duty.calculate_hash();
+        duty.sign(&validator);
+        pool.admit_at(duty.clone(), 2)
+            .expect("the duty batch takes the paying entry's slot");
+        assert!(pool.transactions.contains_key(&duty.hash));
+        assert!(!pool.transactions.contains_key(&paying.hash));
     }
 }
