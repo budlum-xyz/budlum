@@ -60,6 +60,63 @@ pub fn handoff_committee(validators: &[Vec<u8>], randomness: &[u8; 32]) -> Vec<u
     seats
 }
 
+/// Exact 192-bit unsigned product `a * b` as `(hi_128, lo_128)` for
+/// platform-independent stake-weighted priority comparison without floats.
+const fn mul_128_64(a: u128, b: u64) -> (u128, u128) {
+    let mask = u64::MAX as u128;
+    let a_lo = a & mask;
+    let a_hi = a >> 64;
+    let wb = b as u128;
+    let lo = a_lo * wb;
+    let mid = a_hi * wb + (lo >> 64);
+    let out_lo = (lo & mask) | ((mid & mask) << 64);
+    let out_hi = mid >> 64;
+    (out_hi, out_lo)
+}
+
+/// Stake-weighted committee seating over `outgoing` using exact 192-bit
+/// cross-multiplication `draw_a * stake_b` vs `draw_b * stake_a`.
+///
+/// Positive-stake members with higher stake produce proportionally smaller
+/// expected `draw / stake` ratios, so minimum-stake sybil accounts cannot
+/// capture the fixed [`COMMITTEE_SIZE`]-seat committee while large validator
+/// sets (`N > COMMITTEE_SIZE`) still verify cleanly once strictly more than two
+/// thirds of committee seats and committee stake sign.
+fn handoff_committee_weighted(members: &[HandoffMember], randomness: &[u8; 32]) -> Vec<usize> {
+    let positive: Vec<(usize, &HandoffMember)> = members
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.stake > 0)
+        .collect();
+    if positive.len() <= COMMITTEE_SIZE {
+        return positive.into_iter().map(|(i, _)| i).collect();
+    }
+    let mut candidates: Vec<(u128, u64, [u8; 32], usize)> = positive
+        .into_iter()
+        .map(|(index, member)| {
+            let r = rank(randomness, &member.address);
+            let mut top = [0u8; 16];
+            top.copy_from_slice(&r[..16]);
+            // Ensure strictly positive numerator so distinct stakes break ties fairly.
+            let draw = u128::from_be_bytes(top) | 1;
+            (draw, member.stake, r, index)
+        })
+        .collect();
+    candidates.sort_unstable_by(|a, b| {
+        mul_128_64(a.0, b.1)
+            .cmp(&mul_128_64(b.0, a.1))
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.cmp(&b.3))
+    });
+    let mut seats: Vec<usize> = candidates
+        .into_iter()
+        .take(COMMITTEE_SIZE)
+        .map(|(_, _, _, index)| index)
+        .collect();
+    seats.sort_unstable();
+    seats
+}
+
 const SET_TAG: &[u8] = b"BDLM_HANDOFF_SET_V1";
 const CERT_TAG: &[u8] = b"BDLM_HANDOFF_CERT_V1";
 
@@ -238,14 +295,15 @@ impl HandoffCertificate {
         outgoing: &[HandoffMember],
         epoch_randomness: [u8; 32],
     ) -> Result<(), HandoffError> {
-        if set_digest(self.chain_id, self.epoch, outgoing) != self.outgoing_set {
+        if !incoming_set_is_valid(outgoing)
+            || set_digest(self.chain_id, self.epoch, outgoing) != self.outgoing_set
+        {
             return Err(HandoffError::OutgoingSet);
         }
         if self.randomness != epoch_randomness {
             return Err(HandoffError::Randomness);
         }
-        let addresses: Vec<Vec<u8>> = outgoing.iter().map(|m| m.address.clone()).collect();
-        let committee = handoff_committee(&addresses, &epoch_randomness);
+        let committee = handoff_committee_weighted(outgoing, &epoch_randomness);
         if !self.signatures.windows(2).all(|w| w[0].index < w[1].index) {
             return Err(HandoffError::Order);
         }
@@ -261,17 +319,21 @@ impl HandoffCertificate {
                 committee: committee.len(),
             });
         }
-        // Seat count alone is a head count: registration is permissionless at
-        // the stake floor, so cheap addresses must not outweigh bonded stake.
-        // Require strictly more than two thirds of the outgoing set's committed
-        // stake as well as more than two thirds of the committee seats.
-        let total_stake: u128 = outgoing.iter().map(|m| u128::from(m.stake)).sum();
+        // Require strictly more than two thirds of the seated committee's
+        // bonded stake as well as more than two thirds of its seats; combined
+        // with stake-weighted committee selection this stops minimum-stake
+        // accounts from outweighing bonded stake without deadlocking networks
+        // with more than `COMMITTEE_SIZE` validators.
+        let committee_stake: u128 = committee
+            .iter()
+            .map(|&idx| u128::from(outgoing[idx].stake))
+            .sum();
         let signed_stake: u128 = self
             .signatures
             .iter()
             .map(|entry| u128::from(outgoing[entry.index as usize].stake))
             .sum();
-        if total_stake == 0 || signed_stake * 3 <= total_stake * 2 {
+        if committee_stake == 0 || signed_stake * 3 <= committee_stake * 2 {
             return Err(HandoffError::Quorum {
                 signed,
                 committee: committee.len(),
@@ -313,6 +375,9 @@ pub fn follow_handoffs<'a>(
     steps: &'a [(HandoffCertificate, Vec<HandoffMember>)],
     epoch_randomness: &dyn Fn(u64) -> [u8; 32],
 ) -> Result<(u64, &'a [HandoffMember]), HandoffError> {
+    if !incoming_set_is_valid(trusted) {
+        return Err(HandoffError::OutgoingSet);
+    }
     let mut epoch = start_epoch;
     let mut current = trusted;
     for (cert, incoming) in steps {
@@ -329,7 +394,10 @@ pub fn follow_handoffs<'a>(
             });
         }
         cert.verify_in(registry, current, epoch_randomness(cert.epoch))?;
-        epoch = epoch.saturating_add(1);
+        epoch = epoch.checked_add(1).ok_or(HandoffError::Epoch {
+            expected: u64::MAX,
+            got: cert.epoch,
+        })?;
         if !incoming_set_is_valid(incoming) {
             return Err(HandoffError::IncomingSet);
         }
@@ -562,6 +630,61 @@ mod tests {
         assert_eq!(
             follow_handoffs(&registry, 7, 4, &outgoing, &[(cert_dup, dup)], &|_| [3; 32]),
             Err(HandoffError::IncomingSet)
+        );
+    }
+
+    #[test]
+    fn large_validator_set_verifies_and_resists_minimum_stake_sybils() {
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        // Verify stake-weighted committee seating over > COMMITTEE_SIZE (512)
+        // validators: 60 heavily bonded validators (stake 10_000_000 each) plus
+        // 740 minimum-stake sybils (stake 1 each) = 800 total validators.
+        let mut mixed = Vec::with_capacity(800);
+        for i in 0u32..800 {
+            mixed.push(HandoffMember {
+                address: i.to_be_bytes().to_vec(),
+                pq_public_key: vec![1u8],
+                bls_public_key: Vec::new(),
+                pop_signature: Vec::new(),
+                stake: if i < 60 { 10_000_000 } else { 1 },
+            });
+        }
+        let seated = handoff_committee_weighted(&mixed, &[0xA5; 32]);
+        assert_eq!(seated.len(), COMMITTEE_SIZE);
+        let committee_stake: u128 = seated.iter().map(|&idx| u128::from(mixed[idx].stake)).sum();
+        let sybil_stake: u128 = seated
+            .iter()
+            .filter(|&&idx| idx >= 60)
+            .map(|&idx| u128::from(mixed[idx].stake))
+            .sum();
+        let bonded_seated = seated.iter().filter(|&&idx| idx < 60).count();
+        assert_eq!(
+            bonded_seated, 60,
+            "every heavily bonded validator is seated ahead of minimum-stake sybils"
+        );
+        assert!(
+            sybil_stake.saturating_mul(3) <= committee_stake.saturating_mul(2),
+            "740 minimum-stake sybils cannot reach 2/3 of committee stake"
+        );
+
+        // End-to-end signed verification with real PQ keys: 11 of 16 (> 2/3) pass,
+        // 10 of 16 (<= 2/3) are refused with exact InsufficientStake totals.
+        let keys: Vec<_> = (0..16)
+            .map(|_| crate::crypto::primitives::PqKeyPair::generate())
+            .collect();
+        let outgoing = members(&keys);
+        let incoming = outgoing.clone();
+        let committee = handoff_committee_weighted(&outgoing, &[3; 32]);
+        assert_eq!(committee.len(), 16);
+        let pass_cert = signed(&keys, &outgoing, &incoming, &committee[..11]);
+        assert_eq!(pass_cert.verify_in(&registry, &outgoing, [3; 32]), Ok(()));
+        let short_cert = signed(&keys, &outgoing, &incoming, &committee[..10]);
+        assert_eq!(
+            short_cert.verify_in(&registry, &outgoing, [3; 32]),
+            Err(HandoffError::Quorum {
+                signed: 10,
+                committee: 16,
+            })
         );
     }
 }
