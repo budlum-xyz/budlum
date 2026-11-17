@@ -296,7 +296,10 @@ where
                 }
             }
         }
-        buf.extend_from_slice(&chunk[..read]);
+        let Some(slice) = chunk.get(..read) else {
+            return Err(std::io::Error::other("short read chunk"));
+        };
+        buf.extend_from_slice(slice);
     }
     Ok(buf)
 }
