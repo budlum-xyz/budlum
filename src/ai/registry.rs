@@ -1230,7 +1230,9 @@ impl AiRegistry {
             return Err("Verifier stake must be > 0".into());
         }
         let current = self.verifier_stakes.get(verifier).copied().unwrap_or(0);
-        let new_stake = current.saturating_add(amount);
+        let new_stake = current
+            .checked_add(amount)
+            .ok_or_else(|| "Verifier stake overflow".to_string())?;
         self.verifier_stakes.insert(*verifier, new_stake);
         Ok(new_stake)
     }
@@ -1320,6 +1322,9 @@ impl AiRegistry {
         amount: u64,
         current_block: u64,
     ) -> Result<u64, String> {
+        if amount == 0 {
+            return Err("Withdrawal amount must be > 0".into());
+        }
         // Cannot withdraw if there are active equivocation events
         let has_pending = self
             .equivocation_events
@@ -1350,6 +1355,9 @@ impl AiRegistry {
             self.verifier_effort_ceilings.remove(verifier);
         } else {
             self.verifier_stakes.insert(*verifier, remaining);
+            if !self.is_verifier_authorized(verifier) {
+                self.verifier_effort_ceilings.remove(verifier);
+            }
         }
         Ok(amount)
     }
