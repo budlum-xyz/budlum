@@ -263,4 +263,18 @@ impl<B: AggBackend> Aggregator<B> {
         self.pool.forget_claims(&digests);
         self.frames.retain(|_, kept| kept.is_disjoint(frame));
     }
+
+    /// A pending transaction left the node before finality: abandon its claim
+    /// in the pool and drop any frame that carries it so zombie frames cannot
+    /// occupy the store or poison later merges.
+    pub(super) fn forget_claim(&mut self, digest: &Hash32) {
+        self.pool.abandon_claim(digest);
+        let domain = self.ctx.domain;
+        self.frames.retain(|_, frame| {
+            frame
+                .claims
+                .iter()
+                .all(|claim| claim.digest(domain) != *digest)
+        });
+    }
 }
