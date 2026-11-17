@@ -2284,7 +2284,7 @@ impl Storage {
         Ok(())
     }
 
-    /// Load up to `count` (`<= MAX_SYMBOLS_PER_REQUEST`) stored [`VerifiedSymbolItem`]s
+    /// Load up to `count` (`<= MAX_SYMBOLS_PER_REQUEST`) stored `VerifiedSymbolItem` records
     /// for `(holder, object, segment)` starting at `first_esi` in ascending ESI order.
     /// Callers must re-verify proofs against live consensus `Bud3Registry` state before serving.
     ///
