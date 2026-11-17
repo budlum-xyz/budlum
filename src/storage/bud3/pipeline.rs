@@ -347,7 +347,10 @@ where
     }
     let mut parse_meter = Meter::for_object(record.object_len);
     let parsed = Object::decode(&object, &mut parse_meter)?;
-    if parsed.header.codec != record.codec {
+    if parsed.header.codec != record.codec
+        || parsed.header.content_digest != record.content_id.digest
+        || parsed.header.content_len != record.content_id.len
+    {
         return Err(PipelineError::ContentMismatch);
     }
     let content = parsed
@@ -419,6 +422,22 @@ where
     check_volume_layout(&record.members, &bytes)?;
     if volume::root_of(&record.members) != record.root {
         return Err(PipelineError::Volume(VolumeError::RootMismatch));
+    }
+    if record.symbol_root != [0u8; 32] {
+        let enc = SegmentEncoder::new(0, &bytes, &record.profile)?;
+        let repair_count = record.symbols_per_segment.checked_sub(enc.k()).ok_or(
+            PipelineError::TooFewSymbols {
+                want: record.symbols_per_segment,
+                k: enc.k(),
+            },
+        )?;
+        let mut syms = enc.source_symbols();
+        syms.extend(enc.repair_symbols(0, repair_count)?);
+        let leaves: Vec<(u32, [u8; 32])> =
+            syms.iter().map(|s| (s.esi, symbol_leaf(&s.data))).collect();
+        if symbol_root(&leaves) != record.symbol_root {
+            return Err(PipelineError::CommitmentMismatch);
+        }
     }
     Ok(bytes)
 }
@@ -526,17 +545,34 @@ pub fn prepare_public_upload_two_path(
     Ok((up, verified.video_commitment))
 }
 
-/// Convenience: G5 optical view path verified against `record`.
+/// Convenience: G5 optical view path verified against the full on-chain
+/// [`ObjectRecord`] (`object_len`, `commitment`, `codec`, and `content_id`).
 ///
 /// # Errors
 ///
-/// Returns [`PipelineError`] if pixel QR decoding or content check fails.
+/// Returns [`PipelineError`] if pixel QR decoding, record commitment/codec
+/// binding, or `content_id` verification fails.
 pub fn view_public_optical(
     record: &ObjectRecord,
     seconds: &[super::qr::OpticalSecond],
 ) -> Result<Vec<u8>, PipelineError> {
     let mut meter = Meter::for_object(record.object_len.saturating_mul(8).saturating_add(1 << 20));
-    let content = super::two_path::decode_optical_path(seconds, &mut meter)?;
+    let obj = super::two_path::extract_object_from_optical_seconds(seconds, &mut meter)?;
+    let obj_bytes = obj.encode();
+    if u64::try_from(obj_bytes.len()) != Ok(record.object_len)
+        || commit_object(&obj_bytes, &record.profile) != Some(record.commitment)
+    {
+        return Err(PipelineError::CommitmentMismatch);
+    }
+    if obj.header.codec != record.codec
+        || obj.header.content_digest != record.content_id.digest
+        || obj.header.content_len != record.content_id.len
+    {
+        return Err(PipelineError::ContentMismatch);
+    }
+    let content = obj
+        .public_content()
+        .map_err(|_| PipelineError::ContentMismatch)?;
     if !record.content_id.matches_public(&content) {
         return Err(PipelineError::ContentMismatch);
     }
@@ -907,6 +943,58 @@ mod tests {
         assert_eq!(
             view_sealed(&up.record, &owner_key, up.segments.concat()).unwrap(),
             secret
+        );
+    }
+
+    #[test]
+    fn view_public_optical_rejects_spoofed_commitment_or_codec() {
+        let payload = b"canonical optical verification content".repeat(6);
+        let (up, _) =
+            prepare_public_upload_two_path(&payload, &SMALL, &Bud3Limits::default(), 16).unwrap();
+        let selected = bud_codec::select(&payload);
+        let obj = Object::public_coded(selected.codec, selected.payload, &payload).unwrap();
+        let seconds = super::super::qr::render_optical_seconds(&obj, &SMALL, 2).unwrap();
+
+        assert_eq!(view_public_optical(&up.record, &seconds).unwrap(), payload);
+
+        let mut bad_commit = up.record.clone();
+        bad_commit.commitment[0] ^= 0xFF;
+        assert_eq!(
+            view_public_optical(&bad_commit, &seconds),
+            Err(PipelineError::CommitmentMismatch)
+        );
+
+        let mut bad_len = up.record.clone();
+        bad_len.object_len = bad_len.object_len.saturating_add(1);
+        assert_eq!(
+            view_public_optical(&bad_len, &seconds),
+            Err(PipelineError::CommitmentMismatch)
+        );
+
+        let mut bad_codec = up.record;
+        bad_codec.codec = up.record.codec.wrapping_add(1);
+        assert_eq!(
+            view_public_optical(&bad_codec, &seconds),
+            Err(PipelineError::ContentMismatch)
+        );
+    }
+
+    #[test]
+    fn view_volume_bytes_rejects_tampered_symbol_root() {
+        let objects = vec![small_object(b"volume symbol root bind")];
+        let prepared = prepare_volume_upload(
+            &objects,
+            Visibility::Public,
+            &SMALL,
+            &Bud3Limits::default(),
+            4,
+        )
+        .unwrap();
+        let mut tampered = prepared.record;
+        tampered.symbol_root[0] ^= 0xAA;
+        assert_eq!(
+            view_volume_bytes(&tampered, prepared.symbols),
+            Err(PipelineError::CommitmentMismatch)
         );
     }
 }
