@@ -339,16 +339,113 @@ where
     }
 }
 
+/// Maximum simultaneous live TCP connections any single non-loopback client IP
+/// (or IPv6 `/64` prefix) may hold against one RPC listener. Keeps one slowloris
+/// or stalled-TLS source from starving the listener's global `max_connections`
+/// semaphore.
+const MAX_CONNECTIONS_PER_SOURCE: usize = 32;
+
+/// Maximum simultaneous JSON-RPC subscriptions on a single WebSocket
+/// connection so one client cannot exhaust the node-wide subscription feed pool.
+const MAX_SUBSCRIPTIONS_PER_CONNECTION: u32 = 16;
+
+/// Canonical rate-limit and connection-budget key for a client address.
+///
+/// IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) collapse to their underlying
+/// IPv4 address so dual-stack callers cannot claim a second bucket, and global
+/// IPv6 addresses collapse to their `/64` routing prefix so rotating host
+/// suffixes within one standard allocation share a single quota.
+fn rate_limit_bucket_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return IpAddr::V4(mapped);
+            }
+            if v6.is_loopback() || v6.is_unspecified() {
+                return IpAddr::V6(v6);
+            }
+            let seg = v6.segments();
+            IpAddr::V6(std::net::Ipv6Addr::new(
+                seg[0], seg[1], seg[2], seg[3], 0, 0, 0, 0,
+            ))
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ListenerConnectionLimiter {
+    total: Arc<tokio::sync::Semaphore>,
+    per_source: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    max_per_source: usize,
+}
+
+struct ListenerConnectionPermit {
+    _total: tokio::sync::OwnedSemaphorePermit,
+    source_bucket: Option<IpAddr>,
+    per_source: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+impl Drop for ListenerConnectionPermit {
+    fn drop(&mut self) {
+        if let Some(bucket) = self.source_bucket {
+            if let Ok(mut counts) = self.per_source.lock() {
+                if let Some(count) = counts.get_mut(&bucket) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        counts.remove(&bucket);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl ListenerConnectionLimiter {
+    fn new(max_total: usize, max_per_source: usize) -> Self {
+        Self {
+            total: Arc::new(tokio::sync::Semaphore::new(max_total)),
+            per_source: Arc::new(Mutex::new(HashMap::new())),
+            max_per_source: max_per_source.max(1),
+        }
+    }
+
+    fn try_acquire(&self, remote_ip: IpAddr) -> Option<ListenerConnectionPermit> {
+        let total = self.total.clone().try_acquire_owned().ok()?;
+        let normalized = rate_limit_bucket_key(remote_ip);
+        if normalized.is_loopback() {
+            return Some(ListenerConnectionPermit {
+                _total: total,
+                source_bucket: None,
+                per_source: self.per_source.clone(),
+            });
+        }
+        let mut counts = self.per_source.lock().ok()?;
+        let current = counts.get(&normalized).copied().unwrap_or(0);
+        if current >= self.max_per_source {
+            return None;
+        }
+        counts.insert(normalized, current.saturating_add(1));
+        drop(counts);
+        Some(ListenerConnectionPermit {
+            _total: total,
+            source_bucket: Some(normalized),
+            per_source: self.per_source.clone(),
+        })
+    }
+}
+
 /// Completes the TLS handshake inside the connection task, so one slow client
 /// cannot hold up the accept loop, then serves the connection like a plain one.
-async fn serve_tls_connection<S, B>(
+async fn serve_tls_connection<S, B, P>(
     acceptor: tokio_rustls::TlsAcceptor,
     socket: tokio::net::TcpStream,
     remote_addr: SocketAddr,
     service: S,
     stopped: impl std::future::Future<Output = ()>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: P,
 ) where
+    P: Send + 'static,
     S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
         + Clone
         + Send
@@ -376,12 +473,13 @@ async fn serve_tls_connection<S, B>(
 /// Serves a plain-HTTP connection while holding `_permit` for the connection's
 /// full lifetime so `max_connections` applies symmetrically to plain and TLS
 /// listeners.
-async fn serve_plain_connection<S, B>(
+async fn serve_plain_connection<S, B, P>(
     socket: tokio::net::TcpStream,
     service: S,
     stopped: impl std::future::Future<Output = ()>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: P,
 ) where
+    P: Send + 'static,
     S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
         + Clone
         + Send
@@ -444,7 +542,8 @@ impl AptosListener {
             .security
             .max_connections
             .unwrap_or(RPC_CONNECTION_LIMIT_CEILING) as usize;
-        let connections = Arc::new(tokio::sync::Semaphore::new(connection_limit));
+        let connections =
+            ListenerConnectionLimiter::new(connection_limit, MAX_CONNECTIONS_PER_SOURCE);
         let security = RpcSecurityLayer::new(self.security, self.metrics, RpcMode::Public);
         let tls = self.tls;
         let gateway = self.gateway;
@@ -464,9 +563,11 @@ impl AptosListener {
                         continue;
                     }
                 };
-                let permit = match connections.clone().acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(_) => break,
+                let Some(permit) = connections.try_acquire(remote_addr.ip()) else {
+                    tracing::debug!(
+                        "Aptos REST connection from {remote_addr} dropped: connection budget reached"
+                    );
+                    continue;
                 };
                 let gateway_for_service = gateway.clone();
                 let service =
@@ -538,6 +639,7 @@ impl SolanaListener {
         let config = ServerConfig::builder()
             .max_request_body_size(body_limit)
             .max_connections(connection_limit as u32)
+            .max_subscriptions_per_connection(MAX_SUBSCRIPTIONS_PER_CONNECTION)
             .set_batch_request_config(BatchRequestConfig::Limit(100))
             .build();
         let builder = ServerBuilder::default()
@@ -548,7 +650,8 @@ impl SolanaListener {
             .to_service_builder();
         let listener = tokio::net::TcpListener::bind(self.addr).await?;
         let local_addr = listener.local_addr()?;
-        let connections = Arc::new(tokio::sync::Semaphore::new(connection_limit));
+        let connections =
+            ListenerConnectionLimiter::new(connection_limit, MAX_CONNECTIONS_PER_SOURCE);
         let security = RpcSecurityLayer::new(self.security, self.metrics, RpcMode::Public);
         let (stop_handle, server_handle) = stop_channel();
         let methods = self.methods;
@@ -572,9 +675,11 @@ impl SolanaListener {
                     },
                     _ = stop_handle.clone().shutdown() => break,
                 };
-                let permit = match connections.clone().acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(_) => break,
+                let Some(permit) = connections.try_acquire(remote_addr.ip()) else {
+                    tracing::debug!(
+                        "Solana RPC connection from {remote_addr} dropped: connection budget reached"
+                    );
+                    continue;
                 };
                 let builder_for_service = builder.clone();
                 let methods_for_service = methods.clone();
@@ -744,7 +849,9 @@ impl RpcServer {
         // legitimate client pattern while keeping amplification bounded;
         // oversized batches are rejected wholesale instead of partially
         // executed (jsonrpsee drops the whole batch at `Limit`).
-        config = config.set_batch_request_config(BatchRequestConfig::Limit(100));
+        config = config
+            .max_subscriptions_per_connection(MAX_SUBSCRIPTIONS_PER_CONNECTION)
+            .set_batch_request_config(BatchRequestConfig::Limit(100));
         let builder = ServerBuilder::default()
             .set_rpc_middleware(jsonrpsee::core::middleware::RpcServiceBuilder::new().layer(
                 RpcCallRateLimitLayer::new(self.security.clone(), self.metrics.clone()),
@@ -832,7 +939,8 @@ impl RpcServer {
         } else {
             None
         };
-        let connection_permits = Arc::new(tokio::sync::Semaphore::new(connection_cap));
+        let connection_permits =
+            ListenerConnectionLimiter::new(connection_cap, MAX_CONNECTIONS_PER_SOURCE);
         let svc_builder = builder.to_service_builder();
         let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
         let (stop_handle, server_handle) = stop_channel();
@@ -857,9 +965,9 @@ impl RpcServer {
                     _ = stop_handle.clone().shutdown() => break,
                 };
 
-                let Ok(permit) = connection_permits.clone().try_acquire_owned() else {
+                let Some(permit) = connection_permits.try_acquire(remote_addr.ip()) else {
                     tracing::debug!(
-                        "RPC connection from {remote_addr} dropped: max_connections reached"
+                        "RPC connection from {remote_addr} dropped: connection budget reached"
                     );
                     continue;
                 };
@@ -1801,7 +1909,7 @@ fn is_per_ip_rate_limited(
     }
 
     let ip = match client_ip {
-        Some(ip) => ip,
+        Some(ip) => rate_limit_bucket_key(ip),
         None => return false,
     };
 
@@ -5977,6 +6085,7 @@ impl BudlumApiServer for RpcServer {
         let nfts = self.chain.nft_get_by_owner(addr).await;
         let list: Vec<_> = nfts
             .into_iter()
+            .take(MAX_LIST_RESPONSE_ITEMS)
             .map(|nft| {
                 serde_json::json!({
                     "id": nft.id,
@@ -10334,5 +10443,71 @@ mod view_claim_tests {
         assert!(verify_view_claim(&future, &content, &key, &owner, &packed, NOW).is_err());
         let edge = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max);
         assert!(verify_view_claim(&edge, &content, &key, &owner, &packed, NOW).is_ok());
+    }
+
+    #[test]
+    fn ipv6_slash64_and_v4_mapped_addresses_share_one_rate_bucket() {
+        use super::*;
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(2),
+            ..RpcSecurityConfig::default()
+        };
+        let rates = Arc::new(Mutex::new(HashMap::new()));
+        let host_a: IpAddr = "2001:db8:cafe:beef::1".parse().unwrap();
+        let host_b: IpAddr = "2001:db8:cafe:beef:dead:1234:5678:9abc".parse().unwrap();
+        let host_c: IpAddr = "2001:db8:cafe:beef::ffff".parse().unwrap();
+        let other_prefix: IpAddr = "2001:db8:cafe:feed::1".parse().unwrap();
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(host_a)));
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(host_b)));
+        assert!(
+            !is_per_ip_rate_limited(&config, &rates, Some(host_c)),
+            "rotating host suffixes within one IPv6 /64 must not mint fresh quota"
+        );
+        assert!(
+            is_per_ip_rate_limited(&config, &rates, Some(other_prefix)),
+            "a distinct IPv6 /64 keeps its own quota"
+        );
+
+        let v4: IpAddr = "198.51.100.42".parse().unwrap();
+        let v4_mapped: IpAddr = "::ffff:198.51.100.42".parse().unwrap();
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(v4)));
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(v4_mapped)));
+        assert!(
+            !is_per_ip_rate_limited(&config, &rates, Some(v4_mapped)),
+            "IPv4-mapped IPv6 must share the underlying IPv4 bucket"
+        );
+    }
+
+    #[test]
+    fn per_source_connection_limiter_isolates_prefix_flood_and_releases_on_drop() {
+        use super::*;
+        let limiter = ListenerConnectionLimiter::new(10, 2);
+        let a1: IpAddr = "2001:db8:1:2::10".parse().unwrap();
+        let a2: IpAddr = "2001:db8:1:2::20".parse().unwrap();
+        let a3: IpAddr = "2001:db8:1:2::30".parse().unwrap();
+        let honest: IpAddr = "203.0.113.9".parse().unwrap();
+
+        let p1 = limiter.try_acquire(a1).expect("first connection admitted");
+        let p2 = limiter
+            .try_acquire(a2)
+            .expect("second connection in /64 admitted");
+        assert!(
+            limiter.try_acquire(a3).is_none(),
+            "third simultaneous connection from the same /64 must be refused"
+        );
+        let honest_permit = limiter
+            .try_acquire(honest)
+            .expect("independent client still admitted while attacker is capped");
+        drop(p1);
+        let p3 = limiter
+            .try_acquire(a3)
+            .expect("dropping a connection releases one per-source slot");
+        drop(p2);
+        drop(p3);
+        drop(honest_permit);
+        assert!(
+            limiter.per_source.lock().unwrap().is_empty(),
+            "released sources must leave zero residual entries"
+        );
     }
 }
