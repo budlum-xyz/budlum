@@ -5,7 +5,7 @@ use crate::aggregation::claim::{Claim, ClaimError, Ext, GOLDILOCKS_MODULUS};
 use crate::aggregation::envelope::{Envelope, EnvelopeError, ObjectKind};
 use crate::aggregation::frame::{
     fold_shape, frame_hash, merge_pi, tick_pi, AggProgram, ClaimFrame, FrameError, FrameLimits,
-    Segment, SHAPE_MERGE, SHAPE_TICK,
+    Segment, SegmentAttestation, SHAPE_MERGE, SHAPE_TICK,
 };
 use crate::aggregation::hash::{
     auth_ok, TAG_AGG_MERGE, TAG_AGG_TICK, TAG_CLAIM, TAG_CLAIM_ROOT, TAG_FRAME, TAG_OBJECT,
@@ -13,17 +13,19 @@ use crate::aggregation::hash::{
 use crate::aggregation::merkle::{claims_root, MerkleError};
 use crate::aggregation::params::{AggMode, AggParams};
 use crate::core::address::Address;
+use crate::crypto::primitives::{ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN};
 use crate::crypto::scheme::SchemeId;
 use crate::domain::types::Hash32;
 
 const DOMAIN: u32 = 7;
 
 /// Every tag of the aggregation layer.
-const TAGS: [&[u8]; 7] = [
+const TAGS: [&[u8]; 8] = [
     TAG_CLAIM,
     TAG_CLAIM_ROOT,
     TAG_AGG_TICK,
     TAG_AGG_MERGE,
+    b"BDLM_AGG_SEGMENT_AUTH_V1",
     TAG_OBJECT,
     TAG_FRAME,
     b"BDLM_AUTH_OK_V1",
@@ -73,13 +75,7 @@ fn limits() -> FrameLimits {
 }
 
 fn tick_frame(n: u8, salt: u8) -> ClaimFrame {
-    ClaimFrame::tick(
-        DOMAIN,
-        Address::from([salt; 32]),
-        claims(n, salt),
-        vec![salt; 16],
-    )
-    .expect("tick frame")
+    ClaimFrame::tick(DOMAIN, &[salt; 32], claims(n, salt), vec![salt; 16]).expect("tick frame")
 }
 
 // ---- tags -----------------------------------------------------------------
@@ -280,6 +276,10 @@ fn seg(root: Hash32, count: u32, aggregator: u8) -> Segment {
         claims_root: root,
         count,
         aggregator: Address::from([aggregator; 32]),
+        attestation: SegmentAttestation {
+            public_key: Box::new([0u8; ML_DSA_87_PUBLIC_KEY_LEN]),
+            signature: Box::new([0u8; ML_DSA_87_SIGNATURE_LEN]),
+        },
     }
 }
 
@@ -297,16 +297,16 @@ fn two_segments() -> [Segment; 2] {
 
 #[test]
 fn public_inputs_match_the_independent_vectors() {
-    let [s1, s2] = two_segments();
+    let segs = two_segments();
     let t1 = hex32("a7ff39884777190f3ba67a61fb4b1f703eeca2649658e329508d1994267d7860");
     let t2 = hex32("c1446ce3444562a789928221ee22234c74c40f494fc58ea4cee83cb294666067");
     let m = hex32("acd3591da554c4cb1340df13a1ecfde900b37da688bb064eef5ff024e593e0b2");
-    assert_eq!(tick_pi(DOMAIN, &s1), t1);
-    assert_eq!(tick_pi(DOMAIN, &s2), t2);
+    assert_eq!(tick_pi(DOMAIN, &segs[0]), t1);
+    assert_eq!(tick_pi(DOMAIN, &segs[1]), t2);
     assert_eq!(merge_pi(&t1, &t2), m);
     assert_eq!(
-        frame_hash(&m, b"proof-bytes"),
-        hex32("039387d4fe76c5dab255900bdc5919b7c83e451d30b94b9629e5fc80f1244c73")
+        frame_hash(&m, &segs, b"proof-bytes"),
+        hex32("622f232493130b4e65244d3d2f92d408a067dc4b23c5aa555fbdc07b1265346b")
     );
 }
 
@@ -429,13 +429,13 @@ fn combine_refuses_frames_that_share_a_claim() {
 #[test]
 fn a_tick_frame_needs_claims_and_refuses_a_repeat() {
     assert_eq!(
-        ClaimFrame::tick(DOMAIN, Address::from([1; 32]), vec![], vec![]),
+        ClaimFrame::tick(DOMAIN, &[1; 32], vec![], vec![]),
         Err(FrameError::EmptySegment)
     );
     let mut twice = claims(2, 1);
     twice.push(twice[0].clone());
     assert_eq!(
-        ClaimFrame::tick(DOMAIN, Address::from([1; 32]), twice, vec![]),
+        ClaimFrame::tick(DOMAIN, &[1; 32], twice, vec![]),
         Err(FrameError::DuplicateClaim)
     );
 }
@@ -592,16 +592,22 @@ fn every_mutation_of_aggregator_shape_order_domain_and_limits_is_caught() {
 }
 
 #[test]
-fn the_frame_hash_binds_the_public_input_and_the_proof() {
+fn the_frame_hash_binds_the_public_input_attestations_and_the_proof() {
     let frame = tick_frame(2, 0x10);
     let pi = frame
         .check_structure(DOMAIN, &limits())
         .expect("valid")
         .master_pi;
-    assert_eq!(frame.hash(DOMAIN), Ok(frame_hash(&pi, &frame.proof)));
+    assert_eq!(
+        frame.hash(DOMAIN),
+        Ok(frame_hash(&pi, &frame.segments, &frame.proof))
+    );
     let mut other = frame.clone();
     other.proof.push(0);
     assert_ne!(other.hash(DOMAIN), frame.hash(DOMAIN));
+    let mut tampered = frame.clone();
+    tampered.segments[0].attestation.signature[0] ^= 1;
+    assert_ne!(tampered.hash(DOMAIN), frame.hash(DOMAIN));
 }
 
 #[test]

@@ -16,6 +16,7 @@ mod aggregation_network_tests {
 
     use tokio::time::sleep;
 
+    use crate::aggregation::frame::aggregator_address_from_seed;
     use crate::aggregation::params::{AggMode, AggParams};
     use crate::chain::blockchain::Blockchain;
     use crate::chain::chain_actor::{ChainActor, ChainHandle};
@@ -57,9 +58,10 @@ mod aggregation_network_tests {
     }
 
     impl Peer {
-        /// A node of the chain `genesis` that runs its aggregation side for
-        /// `address` and dials `bootstrap`.
-        async fn start(genesis: GenesisConfig, address: Address, bootstrap: Vec<String>) -> Self {
+        /// A node of the chain `genesis` that runs its aggregation side with
+        /// `seed` (deriving `address`) and dials `bootstrap`.
+        async fn start(genesis: GenesisConfig, seed: [u8; 32], bootstrap: Vec<String>) -> Self {
+            let address = aggregator_address_from_seed(&seed).expect("valid seed");
             let blockchain = Blockchain::new_with_genesis(
                 Arc::new(PoWEngine::new(0)),
                 None,
@@ -72,7 +74,10 @@ mod aggregation_network_tests {
                 actor.run().await;
             });
             assert!(
-                chain.enable_aggregator(address).await.is_some(),
+                chain
+                    .enable_aggregator(zeroize::Zeroizing::new(seed))
+                    .await
+                    .is_some(),
                 "the layer is on"
             );
             let mut node = Node::new(chain.clone()).expect("node");
@@ -126,11 +131,11 @@ mod aggregation_network_tests {
             ..AggParams::default()
         });
 
-        let producer = Peer::start(genesis.clone(), Address::from([0xB7; 32]), Vec::new()).await;
+        let producer = Peer::start(genesis.clone(), [0xB7; 32], Vec::new()).await;
         let mut aggregators = Vec::new();
         for n in 0..AGGREGATORS {
-            let address = Address::from([0xA0 + u8::try_from(n).expect("small"); 32]);
-            let peer = Peer::start(genesis.clone(), address, vec![producer.multiaddr()]).await;
+            let seed = [0xA0 + u8::try_from(n).expect("small"); 32];
+            let peer = Peer::start(genesis.clone(), seed, vec![producer.multiaddr()]).await;
             aggregators.push(peer);
         }
         // Handshakes and the gossip meshes of the two topics.

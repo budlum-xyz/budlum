@@ -355,7 +355,7 @@ mod poa_compliance_gate {
         assert!(!bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &addr(0x42)));
+            .is_frozen(ComplianceDomainKind::PoA, 7, &addr(0x42)));
     }
 
     /// An unauthorized caller cannot freeze.
@@ -370,7 +370,7 @@ mod poa_compliance_gate {
         assert!(!bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &addr(0x43)));
+            .is_frozen(ComplianceDomainKind::PoA, 8, &addr(0x43)));
     }
 
     /// The reason digest cannot be zero: a freeze without evidence cannot be audited.
@@ -385,7 +385,7 @@ mod poa_compliance_gate {
         assert!(!bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &addr(0x44)));
+            .is_frozen(ComplianceDomainKind::PoA, 9, &addr(0x44)));
     }
 
     /// No freeze for an unknown domain.
@@ -482,7 +482,7 @@ mod poa_compliance_gate {
         assert!(bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &target));
+            .is_frozen(ComplianceDomainKind::PoA, 10, &target));
         assert!(
             !bc.state.poa_compliance.audit_events().is_empty(),
             "the freeze must enter the audit trail"
@@ -506,7 +506,7 @@ mod poa_compliance_gate {
         assert!(!bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &target));
+            .is_frozen(ComplianceDomainKind::PoA, 12, &target));
 
         // The governance queue lands through the same verified path.
         bc.state.pending_poa_freezes.push(PendingPoaCompliance {
@@ -519,7 +519,7 @@ mod poa_compliance_gate {
         assert!(bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &target));
+            .is_frozen(ComplianceDomainKind::PoA, 12, &target));
     }
 
     #[test]
@@ -550,15 +550,91 @@ mod poa_compliance_gate {
         assert!(live
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &target));
+            .is_frozen(ComplianceDomainKind::PoA, 12, &target));
         assert!(follower
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &target));
+            .is_frozen(ComplianceDomainKind::PoA, 12, &target));
         assert_eq!(
             live.state.calculate_state_root(),
             follower.state.calculate_state_root()
         );
         assert_eq!(block.state_root, follower.state.calculate_state_root());
+    }
+
+    #[test]
+    fn a_poa_freeze_in_one_domain_does_not_freeze_another_domain_or_block_its_audit() {
+        use crate::domain::sovereign::{
+            AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,
+            SovereignDomainTemplate,
+        };
+
+        let mut bc = chain();
+        bc.register_consensus_domain(poa_domain(21))
+            .expect("domain 21");
+        bc.register_consensus_domain(poa_domain(22))
+            .expect("domain 22");
+
+        let op21 = bc
+            .state
+            .settlement
+            .domains
+            .get(21)
+            .unwrap()
+            .operator
+            .unwrap();
+        let op22 = bc
+            .state
+            .settlement
+            .domains
+            .get(22)
+            .unwrap()
+            .operator
+            .unwrap();
+
+        let compliance = ComplianceEvidence {
+            policy_hash: [3u8; 32],
+            authority_set_hash: [4u8; 32],
+            jurisdiction_hash: [5u8; 32],
+            audit_commitment: [6u8; 32],
+        };
+        let t22 = SovereignDomainTemplate::new(
+            22,
+            SovereignDomainClass::EnterprisePoa,
+            ConsensusKind::PoA,
+            op22,
+            true,
+            compliance,
+            DomainLifecycleState::Active,
+        );
+        let bundle22 = AuditExportBundle {
+            template_id: t22.template_id,
+            from_height: 0,
+            to_height: 5,
+            global_header_root: [6u8; 32],
+            commitment_root: [7u8; 32],
+            compliance_root: t22.compliance.root(),
+        };
+        bc.register_sovereign_template(t22).unwrap();
+
+        // Domain 21's admin freezes domain 22's operator address in domain 21.
+        bc.freeze_poa_account(21, op21, op22, [8u8; 32]).unwrap();
+        assert!(bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, 21, &op22));
+        assert!(!bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, 22, &op22));
+        // Domain 22's operator is NOT frozen in domain 22, so its audit passes.
+        bc.validate_sovereign_audit_export(&bundle22).unwrap();
+
+        // An unfreeze in domain 22 does not erase domain 21's freeze.
+        bc.unfreeze_poa_account(22, op22, op22, [9u8; 32]).unwrap();
+        assert!(bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, 21, &op22));
     }
 }

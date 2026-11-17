@@ -44,6 +44,65 @@ fn load_signing_key(path: &str) -> Option<KeyPair> {
     }
 }
 
+/// Read a 32-byte FIPS 204 ML-DSA-87 seed from an owner-only (0600), non-symlink
+/// regular file (max 128 bytes) holding 64 hex characters (optional `0x` prefix).
+fn read_aggregator_seed(path: &str) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+    use std::io::Read;
+    let lmeta = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot stat aggregator key file {path}: {e}"))?;
+    if lmeta.file_type().is_symlink() || !lmeta.is_file() {
+        return Err(format!(
+            "aggregator key file {path} must be a non-symlink regular file"
+        ));
+    }
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("cannot open aggregator key file {path}: {e}"))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("cannot stat open aggregator key file {path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("aggregator key file {path} must be a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if (meta.dev(), meta.ino()) != (lmeta.dev(), lmeta.ino()) {
+            return Err(format!(
+                "aggregator key file {path} changed concurrently during open"
+            ));
+        }
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "aggregator key file {path} has overly permissive permissions (must be 0600)"
+            ));
+        }
+    }
+    if meta.len() > 128 {
+        return Err(format!(
+            "aggregator key file {path} is too large ({} bytes, max 128)",
+            meta.len()
+        ));
+    }
+    let mut raw = zeroize::Zeroizing::new(String::new());
+    file.read_to_string(&mut raw)
+        .map_err(|e| format!("cannot read aggregator key file {path}: {e}"))?;
+    let trimmed = raw.trim();
+    let hex_str = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    let decoded = zeroize::Zeroizing::new(
+        hex::decode(hex_str)
+            .map_err(|e| format!("aggregator key file {path} is not valid hex: {e}"))?,
+    );
+    if decoded.len() != 32 {
+        return Err(format!(
+            "aggregator key file {path} must decode to 32 bytes, got {}",
+            decoded.len()
+        ));
+    }
+    let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+    seed.copy_from_slice(&decoded);
+    Ok(seed)
+}
+
 /// Claims `path` for a new secret key file. It fails when the path already exists, so key
 /// generation never overwrites an operator key. The file is created with mode 0600.
 fn claim_new_key_file(path: &str) -> std::io::Result<()> {
@@ -2061,11 +2120,21 @@ async fn main() {
     // difficulty=0). Broadcast goes over the gossipsub "blocks" channel, and
     // peers run the same deterministic commit path.
     // The aggregation side of the node. It runs when the genesis turned the
-    // layer on and the node has an address to prove for: the producer
-    // address, which is also where the aggregator share of the claim fees
-    // goes. A node without one neither proves nor carries objects.
-    if let Some(aggregator) = cli_producer_address {
-        if let Some(tick_ms) = chain.enable_aggregator(aggregator).await {
+    // layer on and the operator supplied an owner-only `--aggregator-key-file`
+    // seed so every tick segment carries a cryptographic ownership attestation
+    // for the derived aggregator address. No zeroed or fallback seed is ever
+    // synthesized here.
+    if let Some(ref agg_key_path) = config.aggregator_key_file {
+        let seed = read_aggregator_seed(agg_key_path).unwrap_or_else(|e| {
+            eprintln!("CRITICAL: {e}");
+            std::process::exit(1);
+        });
+        let aggregator = budlum_core::aggregation::frame::aggregator_address_from_seed(&seed)
+            .unwrap_or_else(|e| {
+                eprintln!("CRITICAL: invalid aggregator seed: {e}");
+                std::process::exit(1);
+            });
+        if let Some(tick_ms) = chain.enable_aggregator(seed).await {
             client.enable_aggregation().await;
             let chain_a = chain.clone();
             let client_a = client.clone();

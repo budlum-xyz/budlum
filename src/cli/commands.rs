@@ -106,6 +106,12 @@ pub struct NodeConfig {
     #[arg(long)]
     pub validator_key_file: Option<String>,
 
+    /// Path to an owner-only (0600) file holding the 64-hex-character (32-byte)
+    /// FIPS 204 ML-DSA-87 seed used to attest claim-aggregation segments.
+    /// Disallowed on mainnet.
+    #[arg(long)]
+    pub aggregator_key_file: Option<String>,
+
     #[arg(long)]
     pub gen_key: Option<String>,
 
@@ -380,6 +386,7 @@ impl Default for NodeConfig {
             dial: None,
             chain_id: None,
             validator_key_file: None,
+            aggregator_key_file: None,
             gen_key: None,
             rpc_host: "127.0.0.1".to_string(),
             rpc_port: 8545,
@@ -637,6 +644,7 @@ pub struct ValidatorSection {
     pub key_file: Option<String>, // backwards-compatibility
     pub backend: Option<String>,  // backwards-compatibility
     pub address: Option<String>,  // backwards-compatibility
+    pub aggregator_key_file: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, Default, Clone)]
@@ -1027,6 +1035,9 @@ impl NodeConfig {
             if self.validator_address.is_none() {
                 self.validator_address = validator.address;
             }
+            if self.aggregator_key_file.is_none() {
+                self.aggregator_key_file = validator.aggregator_key_file;
+            }
         }
 
         if let Some(features) = fc.features {
@@ -1283,6 +1294,16 @@ impl NodeConfig {
             {
                 eprintln!(
                     "CRITICAL SECURITY FAILURE: mainnet refuses a signing key on disk (validator_key_file); use the PKCS#11 signer backend"
+                );
+                std::process::exit(1);
+            }
+            if self
+                .aggregator_key_file
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+            {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: mainnet refuses an aggregation seed file on disk (aggregator_key_file); use an HSM-backed signer"
                 );
                 std::process::exit(1);
             }
