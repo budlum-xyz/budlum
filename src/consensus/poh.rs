@@ -1,9 +1,12 @@
 //! Proof of History (PoH) consensus engine.
 //!
 //! PoH orders events via a sequential domain-separated SHA-256 hash chain.
-//! Each tick hashes `BDLM_POH_TICK_V1 || prev_hash || step_index`. Verification
-//! replays forward from the nearest bounded checkpoint up to a hard step cap
-//! (`MAX_POH_VERIFY_STEPS`) to prevent CPU exhaustion.
+//! Each tick hashes `BDLM_POH_TICK_V1 || prev_hash || step_index`. Proposals
+//! bind their `(start_count, steps, end_hash)` witness into the block's
+//! hash-covered `vrf_proof` and `vrf_output` fields without mutating canonical
+//! state; `validate_block` fails closed unless the witness verifies against a
+//! canonical checkpoint, and `record_block` commits the verified transition
+//! once (idempotently).
 
 use crate::consensus::split_resolver::{resolve_split_tie, SplitCandidate, SplitDecision};
 use crate::consensus::{ConsensusEngine, ConsensusError};
@@ -16,6 +19,8 @@ use std::sync::RwLock;
 /// Maximum hash iterations allowed in a single PoH verification call.
 const MAX_POH_VERIFY_STEPS: u64 = 16_384;
 const MAX_POH_CHECKPOINTS: usize = 4_096;
+const POH_WITNESS_MAGIC: &[u8; 8] = b"BDLMPOH1";
+const POH_WITNESS_LEN: usize = 8 + 8 + 8;
 
 /// PoH configuration.
 #[derive(Debug, Clone)]
@@ -58,6 +63,48 @@ fn poh_step(prev_hash: &[u8; 32], step_index: u64) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
+}
+
+fn encode_poh_witness(start_count: u64, steps: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(POH_WITNESS_LEN);
+    out.extend_from_slice(POH_WITNESS_MAGIC);
+    out.extend_from_slice(&start_count.to_le_bytes());
+    out.extend_from_slice(&steps.to_le_bytes());
+    out
+}
+
+fn decode_poh_witness(block: &Block) -> Result<(u64, u64, [u8; 32]), ConsensusError> {
+    if block.vrf_proof.len() != POH_WITNESS_LEN || block.vrf_output.len() != 32 {
+        return Err(ConsensusError(
+            "PoH block missing commitment-bound PoH witness".into(),
+        ));
+    }
+    let Some(magic) = block.vrf_proof.get(0..8) else {
+        return Err(ConsensusError("PoH witness header truncated".into()));
+    };
+    if magic != POH_WITNESS_MAGIC {
+        return Err(ConsensusError("PoH witness magic mismatch".into()));
+    }
+    let start_bytes: [u8; 8] = block
+        .vrf_proof
+        .get(8..16)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| ConsensusError("PoH witness start_count truncated".into()))?;
+    let step_bytes: [u8; 8] = block
+        .vrf_proof
+        .get(16..24)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| ConsensusError("PoH witness steps truncated".into()))?;
+    let end_hash: [u8; 32] = block
+        .vrf_output
+        .as_slice()
+        .try_into()
+        .map_err(|_| ConsensusError("PoH witness end_hash must be 32 bytes".into()))?;
+    Ok((
+        u64::from_le_bytes(start_bytes),
+        u64::from_le_bytes(step_bytes),
+        end_hash,
+    ))
 }
 
 /// Verify a bounded forward PoH hash sequence from `start_hash` at `start_count`.
@@ -103,6 +150,38 @@ impl PohEngine {
         }
     }
 
+    fn checkpoint_at(ledger: &PohLedger, target_count: u64) -> Option<[u8; 32]> {
+        if target_count > ledger.state.hash_count {
+            return None;
+        }
+        if let Some(&cached) = ledger.checkpoints.get(&target_count) {
+            return Some(cached);
+        }
+        let (&anchor_count, &anchor_hash) =
+            ledger.checkpoints.range(..=target_count).next_back()?;
+        let steps = target_count.saturating_sub(anchor_count);
+        if steps > MAX_POH_VERIFY_STEPS {
+            return None;
+        }
+        let mut current = anchor_hash;
+        for offset in 0..steps {
+            current = poh_step(&current, anchor_count + offset);
+        }
+        Some(current)
+    }
+
+    fn prune_checkpoints(checkpoints: &mut BTreeMap<u64, [u8; 32]>) {
+        while checkpoints.len() > MAX_POH_CHECKPOINTS {
+            // Keep genesis checkpoint 0 when possible; evict oldest non-zero checkpoint.
+            let evict_key = checkpoints.keys().copied().find(|&k| k != 0);
+            if let Some(key) = evict_key {
+                checkpoints.remove(&key);
+            } else {
+                break;
+            }
+        }
+    }
+
     /// Advance the PoH clock by one tick.
     ///
     /// # Errors
@@ -122,15 +201,7 @@ impl PohEngine {
         ledger.state.current_hash = next_hash;
         ledger.state.hash_count = next_count;
         ledger.checkpoints.insert(next_count, next_hash);
-        while ledger.checkpoints.len() > MAX_POH_CHECKPOINTS {
-            // Keep genesis checkpoint 0 when possible; evict oldest non-zero checkpoint.
-            let evict_key = ledger.checkpoints.keys().copied().find(|&k| k != 0);
-            if let Some(key) = evict_key {
-                ledger.checkpoints.remove(&key);
-            } else {
-                break;
-            }
-        }
+        Self::prune_checkpoints(&mut ledger.checkpoints);
         Ok(next_hash)
     }
 
@@ -140,19 +211,33 @@ impl PohEngine {
         let Ok(ledger) = self.ledger.read() else {
             return false;
         };
-        if expected_count > ledger.state.hash_count {
-            return false;
+        Self::checkpoint_at(&ledger, expected_count).is_some_and(|expected| expected == *hash)
+    }
+
+    fn verify_block_witness_against_ledger(
+        &self,
+        ledger: &PohLedger,
+        block: &Block,
+    ) -> Result<(u64, u64, [u8; 32]), ConsensusError> {
+        let (start_count, steps, end_hash) = decode_poh_witness(block)?;
+        let required_steps = self.config.hashes_per_slot.max(1);
+        if steps < required_steps || steps > MAX_POH_VERIFY_STEPS {
+            return Err(ConsensusError(format!(
+                "PoH witness step count {steps} outside permitted range [{required_steps}, {MAX_POH_VERIFY_STEPS}]"
+            )));
         }
-        if let Some(cached) = ledger.checkpoints.get(&expected_count) {
-            return cached == hash;
-        }
-        let Some((&anchor_count, &anchor_hash)) =
-            ledger.checkpoints.range(..=expected_count).next_back()
-        else {
-            return false;
+        let Some(anchor_hash) = Self::checkpoint_at(ledger, start_count) else {
+            return Err(ConsensusError(format!(
+                "PoH witness start_count {start_count} cannot be anchored in canonical history (head={})",
+                ledger.state.hash_count
+            )));
         };
-        let steps = expected_count.saturating_sub(anchor_count);
-        verify_poh_sequence(&anchor_hash, anchor_count, steps, hash)
+        if !verify_poh_sequence(&anchor_hash, start_count, steps, &end_hash) {
+            return Err(ConsensusError(
+                "PoH block witness hash chain verification failed".into(),
+            ));
+        }
+        Ok((start_count, steps, end_hash))
     }
 
     #[cfg(test)]
@@ -177,7 +262,30 @@ impl ConsensusEngine for PohEngine {
         block: &mut Block,
         _state: &AccountState,
     ) -> Result<(), ConsensusError> {
-        let _poh_hash = self.tick()?;
+        let steps = self.config.hashes_per_slot.max(1);
+        if steps > MAX_POH_VERIFY_STEPS {
+            return Err(ConsensusError(
+                "PoH hashes_per_slot exceeds verification ceiling".into(),
+            ));
+        }
+        // Snapshot canonical PoH head without mutating it; canonical state
+        // advances once on commit in `record_block`.
+        let (start_hash, start_count) = {
+            let ledger = self
+                .ledger
+                .read()
+                .map_err(|_| ConsensusError("PoH state lock poisoned".into()))?;
+            (ledger.state.current_hash, ledger.state.hash_count)
+        };
+        start_count
+            .checked_add(steps)
+            .ok_or_else(|| ConsensusError("PoH hash counter overflow".into()))?;
+        let mut end_hash = start_hash;
+        for offset in 0..steps {
+            end_hash = poh_step(&end_hash, start_count + offset);
+        }
+        block.vrf_output = end_hash.to_vec();
+        block.vrf_proof = encode_poh_witness(start_count, steps);
         block.hash = block.calculate_hash();
         Ok(())
     }
@@ -206,27 +314,59 @@ impl ConsensusEngine for PohEngine {
             }
         }
 
-        // Verify the engine's current head remains self-consistent against its checkpoints.
-        let (head_hash, head_count) = {
-            let ledger = self
-                .ledger
-                .read()
-                .map_err(|_| ConsensusError("PoH state lock poisoned".into()))?;
-            (ledger.state.current_hash, ledger.state.hash_count)
-        };
-        if !self.verify_hash(&head_hash, head_count) {
-            return Err(ConsensusError("PoH head hash verification failed".into()));
-        }
+        let ledger = self
+            .ledger
+            .read()
+            .map_err(|_| ConsensusError("PoH state lock poisoned".into()))?;
+        let _ = self.verify_block_witness_against_ledger(&ledger, block)?;
 
         Ok(())
     }
 
     fn record_block(
         &self,
-        _block: &Block,
-        _storage: Option<&crate::storage::db::Storage>,
+        block: &Block,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
-        let _ = self.tick()?;
+        let mut ledger = self
+            .ledger
+            .write()
+            .map_err(|_| ConsensusError("PoH state lock poisoned".into()))?;
+        let (start_count, steps, end_hash) =
+            self.verify_block_witness_against_ledger(&ledger, block)?;
+        let end_count = start_count
+            .checked_add(steps)
+            .ok_or_else(|| ConsensusError("PoH hash counter overflow".into()))?;
+
+        // Idempotent commit: re-recording an already-committed PoH transition
+        // verifies consistency and does not double-advance canonical state.
+        if end_count <= ledger.state.hash_count {
+            let Some(existing) = Self::checkpoint_at(&ledger, end_count) else {
+                return Err(ConsensusError(
+                    "PoH canonical history missing committed checkpoint".into(),
+                ));
+            };
+            if existing != end_hash {
+                return Err(ConsensusError(
+                    "PoH witness conflicts with committed canonical checkpoint".into(),
+                ));
+            }
+            return Ok(());
+        }
+
+        let Some(anchor_hash) = Self::checkpoint_at(&ledger, start_count) else {
+            return Err(ConsensusError(
+                "PoH witness anchor unavailable during commit".into(),
+            ));
+        };
+        let mut current = anchor_hash;
+        for offset in 0..steps {
+            current = poh_step(&current, start_count + offset);
+            ledger.checkpoints.insert(start_count + offset + 1, current);
+        }
+        ledger.state.current_hash = end_hash;
+        ledger.state.hash_count = end_count;
+        Self::prune_checkpoints(&mut ledger.checkpoints);
         Ok(())
     }
 
@@ -312,10 +452,64 @@ mod tests {
             .is_ok());
 
         let mut b2 = make_block(2, &b1.hash);
+        engine
+            .prepare_block(&mut b2, &AccountState::new())
+            .expect("prepare b2");
         b2.timestamp = b1.timestamp.saturating_sub(1);
         b2.hash = b2.calculate_hash();
         assert!(engine
             .validate_block(&b2, &[b1], &AccountState::new())
             .is_err());
+    }
+
+    #[test]
+    fn poh_rejects_block_without_witness_or_forged_witness() {
+        let engine = PohEngine::new(PohConfig::default());
+        let zero = "0".repeat(64);
+        // Hash-only block without PoH witness must fail closed.
+        let bare = make_block(1, &zero);
+        assert!(engine
+            .validate_block(&bare, &[], &AccountState::new())
+            .is_err());
+
+        // Block with forged PoH end hash must fail closed.
+        let mut forged = make_block(1, &zero);
+        engine
+            .prepare_block(&mut forged, &AccountState::new())
+            .expect("prepare");
+        forged.vrf_output = vec![0xAA; 32];
+        forged.hash = forged.calculate_hash();
+        assert!(engine
+            .validate_block(&forged, &[], &AccountState::new())
+            .is_err());
+    }
+
+    #[test]
+    fn poh_prepare_does_not_mutate_canonical_state_and_record_is_idempotent() {
+        let producer = PohEngine::new(PohConfig::default());
+        let verifier = PohEngine::new(PohConfig::default());
+        let zero = "0".repeat(64);
+        let mut b1 = make_block(1, &zero);
+
+        // Preparing (or discarding) a proposal must not advance canonical state.
+        producer
+            .prepare_block(&mut b1, &AccountState::new())
+            .expect("prepare b1");
+        assert_eq!(producer.state().hash_count, 0);
+
+        // Producer and independent verifier agree on exact canonical hash_count.
+        assert!(verifier
+            .validate_block(&b1, &[], &AccountState::new())
+            .is_ok());
+        producer.record_block(&b1, None).expect("producer record");
+        verifier.record_block(&b1, None).expect("verifier record");
+        assert_eq!(producer.state().hash_count, producer.config.hashes_per_slot);
+        assert_eq!(producer.state(), verifier.state());
+
+        // Re-recording the same block is idempotent and does not advance twice.
+        producer
+            .record_block(&b1, None)
+            .expect("idempotent re-record");
+        assert_eq!(producer.state().hash_count, producer.config.hashes_per_slot);
     }
 }
