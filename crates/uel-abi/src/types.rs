@@ -51,6 +51,43 @@ impl EeId {
     pub const RV32: Self = Self(0x0C);
 }
 
+/// Mainnet chain id.
+pub const BUDLUM_MAINNET_CHAIN_ID: u64 = 45_260;
+/// Public-testnet chain id.
+pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
+/// Development-network chain id.
+pub const BUDLUM_DEVNET_CHAIN_ID: u64 = 45_262;
+
+/// Whether a pointer target is admitted by the built-in network launch policy.
+///
+/// EVM and WASM pointers are launch features on the two known public networks.
+/// SVM, Move, and later catalog targets remain devnet-only until a protocol
+/// release commits their activation. Unknown chain ids fail closed.
+#[must_use]
+pub const fn pointer_target_enabled_by_default(chain_id: u64, target: EeId) -> bool {
+    match chain_id {
+        BUDLUM_DEVNET_CHAIN_ID => matches!(
+            target,
+            EeId::EVM
+                | EeId::WASM
+                | EeId::SVM
+                | EeId::MOVE
+                | EeId::MOVE_SUI
+                | EeId::CAIRO
+                | EeId::NEAR_WASM
+                | EeId::POLKAVM
+                | EeId::TVM
+                | EeId::UTXO
+                | EeId::PLUTUS
+                | EeId::RV32
+        ),
+        BUDLUM_MAINNET_CHAIN_ID | BUDLUM_TESTNET_CHAIN_ID => {
+            matches!(target, EeId::EVM | EeId::WASM)
+        }
+        _ => false,
+    }
+}
+
 /// A state namespace the coordinator keeps for a worker, such as `uel/alias`.
 /// Lowercase ASCII letters, digits and `_ - . /`, 1 to 64 bytes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -389,11 +426,20 @@ mod tests {
     #[test]
     fn svm_and_move_pointers_are_closed_on_testnet() {
         for target in [EeId::SVM, EeId::MOVE] {
-            assert!(!pointer_target_enabled_by_default(45_261, target));
-            assert!(pointer_target_enabled_by_default(45_262, target));
+            assert!(!pointer_target_enabled_by_default(
+                BUDLUM_TESTNET_CHAIN_ID,
+                target
+            ));
+            assert!(pointer_target_enabled_by_default(
+                BUDLUM_DEVNET_CHAIN_ID,
+                target
+            ));
         }
         for target in [EeId::EVM, EeId::WASM] {
-            assert!(pointer_target_enabled_by_default(45_261, target));
+            assert!(pointer_target_enabled_by_default(
+                BUDLUM_TESTNET_CHAIN_ID,
+                target
+            ));
         }
         assert!(!pointer_target_enabled_by_default(99_999, EeId::EVM));
     }
