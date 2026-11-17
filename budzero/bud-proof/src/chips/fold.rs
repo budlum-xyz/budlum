@@ -33,7 +33,7 @@
 //! frame proof, handling `FoldAirError` on invalid statements or proofs.
 
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
-use p3_field::PrimeCharacteristicRing;
+use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::Goldilocks;
 use p3_matrix::dense::RowMajorMatrix;
 
@@ -518,6 +518,57 @@ pub fn verify_agg_fold(
     let public_values = build_fold_public_values(steps, pub_stmt);
     verify_chip(&AggFoldAir, &proof.proof, &public_values)
         .map_err(|e| FoldAirError::VerifyFailed(format!("{e:?}")))
+}
+
+/// Returns the canonical `AggFoldAir` public values as `u64` Goldilocks limbs
+/// plus its [`crate::bud_stark::PcsOpeningShape`] for `degree_bits`.
+///
+/// # Errors
+///
+/// Returns [`FoldAirError`] if `steps`/`pub_stmt` fail statement validation or
+/// `degree_bits` is out of bounds.
+pub fn agg_fold_pcs_metadata(
+    steps: &[AggFoldStep],
+    pub_stmt: &AggFoldPublic,
+    degree_bits: usize,
+) -> Result<(Vec<u64>, crate::bud_stark::PcsOpeningShape), FoldAirError> {
+    validate_statement(steps, pub_stmt)?;
+    let pvs: Vec<u64> = build_fold_public_values(steps, pub_stmt)
+        .into_iter()
+        .map(|f| f.as_canonical_u64())
+        .collect();
+    let shape = crate::plonky3_prover::air_pcs_shape(&AggFoldAir, degree_bits, false, 0)
+        .map_err(FoldAirError::VerifyFailed)?;
+    Ok((pvs, shape))
+}
+
+/// Stage 2 (`verify_algebra`) for `AggFoldAir`: re-derives `zeta` and evaluates
+/// all fold constraints without running FRI.
+///
+/// # Errors
+///
+/// Returns an error string if `public_values` have the wrong length or are
+/// non-canonical, or if `verify_algebra` fails.
+pub fn verify_agg_fold_algebra(
+    commitments: &crate::plonky3_prover::ChipCommitments,
+    opened_values: &crate::plonky3_prover::ChipOpenedValues,
+    degree_bits: usize,
+    public_values: &[u64],
+) -> Result<([u64; 3], crate::bud_stark::PcsOpeningShape), String> {
+    if public_values.len() != FOLD_NUM_PUBLIC_VALUES
+        || public_values.iter().any(|&v| v >= Goldilocks::ORDER_U64)
+    {
+        return Err("invalid AggFoldAir public values".into());
+    }
+    let pvs: Vec<Goldilocks> = public_values.iter().copied().map(Goldilocks::new).collect();
+    let stmt = crate::bud_stark::AlgebraStatement {
+        commitments,
+        opened_values,
+        degree_bits,
+        public_values: &pvs,
+        preprocessed_vk: None,
+    };
+    crate::plonky3_prover::verify_chip_algebra(&AggFoldAir, &stmt)
 }
 
 #[cfg(test)]

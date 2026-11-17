@@ -33,6 +33,7 @@ pub mod hidden_multisig;
 pub mod keccak;
 pub mod mldsa;
 pub mod object;
+pub mod pcs_claim;
 pub mod prog_claim;
 pub mod verify_sig;
 

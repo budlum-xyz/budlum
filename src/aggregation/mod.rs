@@ -22,6 +22,7 @@
 //! program computes.
 
 pub mod aggregator;
+pub mod air_registry;
 pub mod backend;
 pub mod block;
 pub mod chain;

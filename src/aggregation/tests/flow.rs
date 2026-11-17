@@ -262,9 +262,7 @@ fn size_domain_kind_and_duplicates_are_refused() {
     pcs.scheme = SchemeId(0);
     assert_eq!(
         pool.admit(pcs, &txs, &registry()),
-        Err(Rejection::Object(ObjectError::KindNotEnabled(
-            ObjectKind::PcsOpening
-        )))
+        Err(Rejection::Object(ObjectError::Invalid))
     );
 
     assert!(pool.admit(good.clone(), &txs, &registry()).is_ok());
@@ -439,7 +437,7 @@ fn a_tick_proves_the_pool_deletes_the_payloads_and_does_not_prove_twice() {
     let frame = &outcome.publish[0];
     assert_eq!(frame.claims.len(), 5);
     assert_eq!(frame.shape, vec![SHAPE_TICK]);
-    assert_eq!(frame.segments[0].aggregator, Address::from([0xA1; 32]));
+    assert_eq!(frame.segments[0].aggregator, ctx(0xA1).aggregator);
     assert_eq!(backend().verify(frame, DOMAIN), Ok(()));
     // Claims are sorted by digest.
     let digests: Vec<Hash32> = frame.claims.iter().map(|c| c.digest(DOMAIN)).collect();
