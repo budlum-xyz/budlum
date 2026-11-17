@@ -495,6 +495,8 @@ impl UniversalDomainCatalog {
     }
 
     /// Looks up a domain by its CAIP-2 reference.
+    ///
+    /// Convenience: exposed for CAIP-2 ecosystem lookup callers.
     #[must_use]
     pub fn get_by_caip2(&self, caip2: &str) -> Option<&UniversalDomainRecord> {
         let id = self.by_caip2.get(caip2)?;
@@ -508,6 +510,8 @@ impl UniversalDomainCatalog {
     }
 
     /// Lists all registered domains that advertise `capability`.
+    ///
+    /// Convenience: exposed for capability-filtered domain queries.
     #[must_use]
     pub fn with_capability(&self, capability: DomainCapability) -> Vec<&UniversalDomainRecord> {
         self.domains
