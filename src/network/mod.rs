@@ -9,6 +9,7 @@ pub mod peer_manager;
 pub mod privacy;
 pub mod proto_conversions;
 pub mod protocol;
+pub mod sentry;
 pub mod sync_codec;
 pub mod witness_protocol;
 
