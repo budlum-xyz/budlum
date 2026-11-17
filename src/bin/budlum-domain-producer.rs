@@ -89,6 +89,33 @@ fn quantity(value: &Value, field: &str) -> Result<u64, String> {
     )
 }
 
+const MAX_RPC_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+async fn read_json_bounded(mut response: reqwest::Response, method: &str) -> Result<Value, String> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_RPC_RESPONSE_BYTES as u64)
+    {
+        return Err(format!(
+            "{method}: response exceeds {MAX_RPC_RESPONSE_BYTES}-byte limit"
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("{method}: failed reading response body: {e}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_RPC_RESPONSE_BYTES {
+            return Err(format!(
+                "{method}: response exceeds {MAX_RPC_RESPONSE_BYTES}-byte limit"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|e| format!("{method}: response was not JSON: {e}"))
+}
+
 async fn rpc_call(
     client: &reqwest::Client,
     url: &str,
@@ -101,15 +128,13 @@ async fn rpc_call(
         "method": method,
         "params": params,
     });
-    let answer: Value = client
+    let response = client
         .post(url)
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("{method}: request failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("{method}: response was not JSON: {e}"))?;
+        .map_err(|e| format!("{method}: request failed: {e}"))?;
+    let answer = read_json_bounded(response, method).await?;
     if let Some(error) = answer.get("error") {
         return Err(format!("{method}: {error}"));
     }
@@ -283,9 +308,14 @@ fn load_payload(cli: &Cli) -> Result<budlum_core::domain::VerifiedDomainCommitme
 /// The install is idempotent and keeps an existing default, and doing it here
 /// rather than only in `main` covers every entry point - including a test that
 /// calls `run` directly, which is the path a `main`-only install leaves open.
-fn http_client() -> reqwest::Client {
+fn http_client() -> Result<reqwest::Client, String> {
     budlum_core::crypto::tls::install_default_provider();
-    reqwest::Client::new()
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("HTTP client: {e}"))
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
@@ -303,7 +333,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         .as_ref()
         .ok_or_else(|| "--key-file is required to submit".to_string())?;
     let key = budlum_core::wallet::open_key_file(key_file, cli.password_file.as_deref())?;
-    let client = http_client();
+    let client = http_client()?;
     let requested_chain_id = cli.signing_chain_id.ok_or_else(|| {
         "--signing-chain-id is required to submit a domain commitment".to_string()
     })?;
