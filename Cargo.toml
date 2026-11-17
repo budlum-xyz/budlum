@@ -29,6 +29,11 @@ bpqs-research = ["dep:budlum-bpqs"]
 # required-features entry with no matching feature, and this is the declaration
 # that silences the warning without making the bench part of any normal build.
 __bench_domain_throughput_disabled = []
+# The reference aggregation backend (proof bytes = the objects) and its
+# structural verifier. Compiled only for tests and devnet; the production
+# profile never enables it, and `aggregation::tests::
+# the_reference_backend_is_gated_out_of_the_production_profile` is the gate.
+native-agg-backend = []
 
 [dependencies]
 sha2 = "0.11"

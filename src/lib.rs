@@ -11,6 +11,7 @@
 /// it therefore requires the `wallet-ml-dsa` feature.
 #[cfg(feature = "wallet-ml-dsa")]
 pub mod account_abstraction;
+pub mod aggregation;
 pub mod ai;
 pub mod ai_inference;
 pub mod bns;
