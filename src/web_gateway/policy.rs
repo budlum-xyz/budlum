@@ -58,7 +58,14 @@ fn is_forbidden_header(name: &str) -> bool {
 #[must_use]
 fn csp_is_at_least_as_strict(candidate: &str, baseline: &str) -> bool {
     let parse = |policy: &str| -> Option<BTreeMap<String, Vec<String>>> {
-        if policy.chars().any(char::is_control) {
+        // Restrict to RFC 9110 visible ASCII header-field bytes and a single
+        // policy (no commas). Non-ASCII bytes cause `HeaderValue::from_str` to
+        // fail on emission, which would drop the CSP header if accepted here.
+        if !policy
+            .bytes()
+            .all(|b| b == b'\t' || (0x20..=0x7E).contains(&b))
+            || policy.contains(',')
+        {
             return None;
         }
         let mut parsed = BTreeMap::new();
@@ -241,6 +248,9 @@ impl RateLimiter {
         let window = now_secs / self.window_secs;
         if self.swept_window != Some(window) {
             self.sweep(window);
+        }
+        if self.per_window == 0 {
+            return LimitDecision::Refused;
         }
         if let Some((_, used)) = self.counts.get_mut(key) {
             return if *used >= self.per_window {
@@ -528,5 +538,31 @@ mod tests {
         assert!(!list.is_blocked("ayaz.bud"));
         assert!(!BlockList::default().is_blocked("phish.bud"));
         assert_eq!(BLOCKED_STATUS, 451);
+    }
+
+    #[test]
+    fn non_ascii_and_comma_site_csp_fall_back_to_baseline_and_zero_rate_refuses() {
+        // Non-ASCII bytes in an allowed narrowing directive would fail HTTP
+        // HeaderValue encoding and strip CSP if accepted; commas split policies.
+        for bad in [
+            "default-src 'self'; frame-ancestors 'none'; base-uri \u{00e9}",
+            "default-src 'self'; frame-ancestors 'none'; sandbox \u{200b}",
+            "default-src 'self'; frame-ancestors 'none'; base-uri 'self', default-src *",
+        ] {
+            assert!(
+                !csp_is_at_least_as_strict(bad, DEFAULT_CSP),
+                "malformed CSP must be refused: {bad:?}"
+            );
+            let headers = content_headers_with_csp("text/html", IMMUTABLE_CACHE, Some(bad));
+            let csp = headers
+                .iter()
+                .find(|(name, _)| name == "content-security-policy")
+                .expect("baseline CSP must remain present");
+            assert_eq!(csp.1, DEFAULT_CSP);
+        }
+
+        let mut zero = RateLimiter::new(0, 60);
+        assert_eq!(zero.check("client-a", 0), LimitDecision::Refused);
+        assert_eq!(zero.tracked_keys(), 0);
     }
 }

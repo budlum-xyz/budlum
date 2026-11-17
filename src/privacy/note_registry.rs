@@ -266,7 +266,7 @@ impl L1NoteRegistry {
                 return Err("duplicate nullifier in transfer".into());
             }
         }
-        // Pre-check outputs unique + not already live
+        // Pre-check outputs unique + not already live, spent, or colliding with nullifiers
         let mut seen_out = BTreeSet::new();
         for c in output_commitments {
             if !seen_out.insert(*c) {
@@ -275,7 +275,10 @@ impl L1NoteRegistry {
             if self.live_commitments.contains(c) {
                 return Err("output commitment already live".into());
             }
-            if self.spent_nullifiers.contains(c) {
+            if self.spent_commitments.contains(c) {
+                return Err("output commitment already spent".into());
+            }
+            if self.spent_nullifiers.contains(c) || seen_nullifiers.contains(c) {
                 return Err("output commitment collides with a spent nullifier".into());
             }
         }
@@ -841,5 +844,40 @@ mod h3_tests {
         );
         // Another owner can still deposit unaffected.
         r.insert_note_for_owner(overflow, bob).unwrap();
+    }
+
+    #[test]
+    fn transfer_cannot_resurrect_spent_commitment_or_collide_with_transfer_nullifier() {
+        let mut r = L1NoteRegistry::new();
+        let c1 = budlum_note_packing::hash_from_field(101);
+        let c2 = budlum_note_packing::hash_from_field(102);
+        let p1 = budlum_note_packing::hash_from_field(201);
+        let p2 = budlum_note_packing::hash_from_field(202);
+        let n1 = L1NoteRegistry::derive_nullifier(&c1, &p1);
+        let n2 = L1NoteRegistry::derive_nullifier(&c2, &p2);
+
+        r.insert_note(c1).unwrap();
+        r.apply_transfer_with_proofs(&[c1], &[n1], &[c2], &[p1])
+            .unwrap();
+        assert!(r.is_commitment_spent(&c1));
+        assert!(!r.contains_commitment(&c1));
+
+        // Emitting already-spent c1 as an output must be refused so live and
+        // spent commitment sets stay disjoint and unspendable zombie notes
+        // cannot be created.
+        let err = r
+            .apply_transfer_with_proofs(&[c2], &[n2], &[c1], &[p2])
+            .unwrap_err();
+        assert!(err.contains("already spent"), "unexpected error: {err}");
+        assert!(!r.contains_commitment(&c1));
+        assert!(r.contains_commitment(&c2));
+
+        // Emitting a commitment equal to this transfer's own nullifier must
+        // also be refused.
+        let err = r
+            .apply_transfer_with_proofs(&[c2], &[n2], &[n2], &[p2])
+            .unwrap_err();
+        assert!(err.contains("nullifier"), "unexpected error: {err}");
+        assert!(r.contains_commitment(&c2));
     }
 }

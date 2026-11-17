@@ -234,15 +234,17 @@ impl BnsRegistry {
     ///
     /// Every insert goes through here so the index cannot drift from `names`.
     /// The previous expiry row for the name is removed first: a renewal or a
-    /// transfer rewrites `expires_at`, and two rows for one name would let the
-    /// reclaim path delete a name that is still live.
+    /// re-registration rewrites `expires_at`, and two rows for one name would
+    /// leave a stale row that breaks `max_names` enforcement and causes live
+    /// nodes to diverge from snapshot-rebuilt nodes.
     fn insert_record(&mut self, name: String, record: NameRecord) {
         self.name_tree.touch(&name);
-        self.expired_by_grace_end
-            .remove(&(grace_end_of(&record), name.clone()));
-        self.expired_by_grace_end
-            .insert((grace_end_of(&record), name.clone()));
-        self.names.insert(name, record);
+        let new_grace_end = grace_end_of(&record);
+        if let Some(old) = self.names.insert(name.clone(), record) {
+            self.expired_by_grace_end
+                .remove(&(grace_end_of(&old), name.clone()));
+        }
+        self.expired_by_grace_end.insert((new_grace_end, name));
     }
 
     /// The name table, read-only. Writes go through the registry so the
@@ -625,10 +627,9 @@ impl BnsRegistry {
                 return Err(BnsError::NameTaken);
             };
             let key = expired_key.clone();
-            // The index row was selected because its grace end is past, so
-            // `reclaim_expired` refuses only when the record changed under it;
-            // that cannot happen between the two reads in this function.
-            let _ = self.reclaim_expired(&key, current_epoch);
+            // Fail closed if the indexed row is not actually past grace so
+            // `self.names.len()` can never exceed `self.max_names`.
+            self.reclaim_expired(&key, current_epoch)?;
         }
         self.insert_record(name, record);
         Ok(())
@@ -1959,5 +1960,41 @@ mod tests {
         assert_eq!(four_char, reg.base_cost * 10 * 10);
         assert_eq!(long_char, reg.base_cost * 10);
         assert_eq!(three_char, long_char * 100);
+    }
+
+    #[test]
+    fn reregistration_replaces_old_expiry_row_and_enforces_max_names() {
+        let mut live = BnsRegistry::new();
+        live.max_names = 2;
+        let alice = Address::from([0x11; 32]);
+        let bob = Address::from([0x22; 32]);
+
+        // Register alice.bud at epoch 0 (expires 10, grace ends 10 + GRACE_PERIOD)
+        // and bob.bud at epoch 0 (expires 500).
+        live.register("alice.bud".into(), alice, 0, 10).unwrap();
+        live.register("bob.bud".into(), bob, 0, 500).unwrap();
+
+        // Same-owner re-registration during grace (epoch 12, duration 500) must
+        // replace the old expiry index row rather than leaving a stale entry.
+        live.register("alice.bud".into(), alice, 12, 500).unwrap();
+        assert_eq!(live.expired_by_grace_end.len(), live.names.len());
+
+        // Snapshot-restored node has a freshly rebuilt index.
+        let mut rebuilt = live.clone();
+        rebuilt.rebuild_expiry_index();
+        assert_eq!(live.expired_by_grace_end, rebuilt.expired_by_grace_end);
+
+        // Past the old grace end, both alice.bud and bob.bud are still live, so
+        // a third registration must be refused on both live and rebuilt nodes.
+        let past_old_grace = 10 + BnsRegistry::GRACE_PERIOD + 1;
+        assert_eq!(
+            live.register("carol.bud".into(), alice, past_old_grace, 10),
+            Err(BnsError::NameTaken)
+        );
+        assert_eq!(
+            rebuilt.register("carol.bud".into(), alice, past_old_grace, 10),
+            Err(BnsError::NameTaken)
+        );
+        assert_eq!(live.names.len(), live.max_names);
     }
 }
