@@ -4,6 +4,7 @@
 //! Run with: `cargo bench --bench agg_phase3_stark`
 
 use std::time::Instant;
+use zeroize::Zeroizing;
 
 use budlum_core::aggregation::backend::{AggBackend, TickCtx};
 use budlum_core::aggregation::frame::{merge_pi, ClaimFrame, FrameLimits};
@@ -114,14 +115,10 @@ fn main() -> Result<(), String> {
         let mut frames = Vec::with_capacity(ticks);
         for t in 0..ticks {
             let slice = &pool_1024[t * per_tick..(t + 1) * per_tick];
+            let ctx = TickCtx::from_seed(DOMAIN, Zeroizing::new([0xA0 + t as u8; 32]))
+                .map_err(|e| format!("ctx: {e:?}"))?;
             let frame = backend
-                .prove_tick(
-                    &TickCtx {
-                        domain: DOMAIN,
-                        aggregator: Address::from([0xA0 + t as u8; 32]),
-                    },
-                    slice,
-                )
+                .prove_tick(&ctx, slice)
                 .map_err(|e| format!("prove_tick: {e:?}"))?;
             frames.push(frame);
         }

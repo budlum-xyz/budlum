@@ -25,8 +25,8 @@ use bud_proof::plonky3_prover::ChipProof;
 use super::backend::{AggBackend, AggError, TickCtx};
 use super::claim::Claim;
 use super::frame::{
-    merge_pi, tick_pi, AggProgram, ClaimFrame, FrameError, FrameLimits, Segment, SHAPE_MERGE,
-    SHAPE_TICK,
+    aggregator_address_from_seed, merge_pi, tick_pi, verify_segment_attestations, AggProgram,
+    ClaimFrame, FrameError, FrameLimits, Segment, SHAPE_MERGE, SHAPE_TICK,
 };
 use super::hash::{h, TAG_AGG_MERGE, TAG_AGG_TICK};
 use super::object::derive_claim;
@@ -307,6 +307,11 @@ fn build_fold_statement(
 
 impl AggBackend for StarkBackend {
     fn prove_tick(&self, ctx: &TickCtx, items: &[PoolItem]) -> Result<ClaimFrame, AggError> {
+        let derived = aggregator_address_from_seed(&ctx.signer_seed)
+            .map_err(|_| AggError::InvalidSegmentAttestation(0))?;
+        if derived != ctx.aggregator {
+            return Err(AggError::InvalidSegmentAttestation(0));
+        }
         let mut keyed = Vec::with_capacity(items.len());
         for item in items {
             if item.envelope.domain != ctx.domain {
@@ -315,8 +320,8 @@ impl AggBackend for StarkBackend {
             if item.envelope.payload.is_empty() {
                 return Err(AggError::PayloadPruned);
             }
-            let derived = derive_claim(&self.registry, &item.envelope)?;
-            if derived != item.claim {
+            let derived_claim = derive_claim(&self.registry, &item.envelope)?;
+            if derived_claim != item.claim {
                 return Err(AggError::ProofMismatch);
             }
             keyed.push((item.claim.digest(ctx.domain), item.claim.clone()));
@@ -327,7 +332,7 @@ impl AggBackend for StarkBackend {
             return Err(AggError::Frame(FrameError::TooManyClaims(claims.len())));
         }
 
-        let provisional = ClaimFrame::tick(ctx.domain, ctx.aggregator, claims, Vec::new())?;
+        let provisional = ClaimFrame::tick(ctx.domain, &ctx.signer_seed, claims, Vec::new())?;
         let (steps, pub_stmt) = build_fold_statement(
             self.parameter_set,
             ctx.domain,
@@ -408,6 +413,7 @@ impl AggBackend for StarkBackend {
 
     fn verify(&self, frame: &ClaimFrame, domain: DomainId) -> Result<(), AggError> {
         let facts = frame.check_structure(domain, &self.limits)?;
+        verify_segment_attestations(&self.registry, domain, &frame.segments)?;
         let decoded = decode_stark_proof(&frame.proof)?;
 
         if decoded.parameter_set != self.parameter_set {
