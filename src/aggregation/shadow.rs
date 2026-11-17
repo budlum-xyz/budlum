@@ -63,6 +63,10 @@ impl ShadowAuditor {
     /// Returns `Ok(true)` if every transaction in `block` matched between
     /// native signature verification and aggregation claim derivation, or
     /// `Ok(false)` if any mismatch was recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `block.chain_id` does not fit a `DomainId`.
     pub fn audit_block(&mut self, block: &Block) -> Result<bool, String> {
         if self.params.mode != AggMode::Shadow {
             return Ok(true);
