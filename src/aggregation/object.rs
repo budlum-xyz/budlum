@@ -3,6 +3,7 @@
 use super::claim::Claim;
 use super::envelope::{Envelope, ObjectKind};
 use super::params::AggParams;
+use super::programs::prog_claim::{verify_vm_proof, StarkProofObject};
 use super::schemes::agg_scheme;
 use crate::crypto::scheme::{SchemeId, SchemeStatusRegistry};
 
@@ -82,8 +83,13 @@ pub fn derive_claim(
                 msg_hash: envelope.tx_hash,
             })
         }
-        kind @ (ObjectKind::StarkProof | ObjectKind::PcsOpening) => {
-            Err(ObjectError::KindNotEnabled(kind))
+        ObjectKind::StarkProof => {
+            if envelope.scheme != SchemeId(0) {
+                return Err(ObjectError::Invalid);
+            }
+            let obj = StarkProofObject::decode(&envelope.payload)?;
+            verify_vm_proof(envelope.domain, &obj)
         }
+        kind @ ObjectKind::PcsOpening => Err(ObjectError::KindNotEnabled(kind)),
     }
 }

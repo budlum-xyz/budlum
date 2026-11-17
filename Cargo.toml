@@ -337,6 +337,14 @@ path = "benches/agg_phase3_stark.rs"
 harness = false
 required-features = ["wallet-ml-dsa"]
 
+# Phase 4 benchmark: hidden m-of-n multisig Claim::Prog, domain state-transition
+# Claim::Prog, and ClaimedDomainFinalityAdapter MasterProof finality.
+[[bench]]
+name = "agg_phase4_prog"
+path = "benches/agg_phase4_prog.rs"
+harness = false
+required-features = ["wallet-ml-dsa"]
+
 # Domain throughput/latency benchmarks (criterion.rs)
 [[bench]]
 name = "domain_throughput"

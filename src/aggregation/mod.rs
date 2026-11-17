@@ -26,6 +26,7 @@ pub mod backend;
 pub mod block;
 pub mod chain;
 pub mod claim;
+pub mod domain_finality;
 pub mod envelope;
 pub mod fees;
 pub mod frame;

@@ -72,10 +72,6 @@ where
 
 /// `AUTH_OK = H("BDLM_AUTH_OK_V1")`: the output hash an authorization program
 /// writes when it accepts.
-///
-/// WIRING: the account rule of program accounts compares the output hash of
-/// a `Claim::Prog` with this value. Program accounts arrive with the program
-/// claims of Phase 4.
 #[must_use]
 pub fn auth_ok() -> Hash32 {
     h(&[TAG_AUTH_OK])
