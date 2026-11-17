@@ -89,8 +89,9 @@ impl MemorySymbolNetwork {
 
 /// Symbol source of a node that holds no symbols and has no symbol transport.
 ///
-/// Every read comes back empty, so a view through it fails with a
-/// missing-symbols error and never returns unverified bytes.
+/// Convenience: exposed for empty-network test callers and fixture views. Every
+/// read comes back empty, so a view through it fails with a missing-symbols
+/// error and never returns unverified bytes.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoSymbolsHeld;
 

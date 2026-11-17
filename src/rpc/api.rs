@@ -1385,6 +1385,55 @@ pub trait BudlumApi {
         validator: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// B.U.D. 3.0 G8 paid fallback decode of a public object (`content_hex`).
+    /// Requires a verified on-chain `PaidViewReceipt` and unconditionally refuses sealed objects.
+    #[method(name = "bud_storageGetContent")]
+    async fn storage_get_content(
+        &self,
+        payer: String,
+        object: String,
+        receipt_id: String,
+        fee_paid_atoms: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// B.U.D. 3.0 verified symbol range (`VerifiedSymbolItem` with Merkle custody proofs)
+    /// held locally for `(holder, object, segment, first_esi..+count)`.
+    #[method(name = "bud_storageGetSymbols")]
+    async fn storage_get_symbols(
+        &self,
+        holder: String,
+        object: String,
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// B.U.D. 3.0 placement shares, confirmation state, and physical-byte endowment telemetry.
+    #[method(name = "bud_storageGetPlacement")]
+    async fn storage_get_placement(
+        &self,
+        commitment: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Resolve a SocialFi u64 NFT id or 32-byte `NftId` hex to its bound B.U.D. 3.0
+    /// object metadata and symbol roots, or null when unbound.
+    #[method(name = "bud_storageGetNftObject")]
+    async fn storage_get_nft_object(
+        &self,
+        nft_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Operator-only local admission of Merkle-verified B.U.D. 3.0 custody symbols.
+    /// Every item is verified against consensus `Bud3Registry` roots before persistence.
+    #[method(name = "bud_storageStoreVerifiedSymbols")]
+    async fn storage_store_verified_symbols(
+        &self,
+        holder: String,
+        object: String,
+        segment: u64,
+        items: Vec<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Validators that offer a relay.
     #[method(name = "bud_listRelays")]
     async fn list_relays(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
