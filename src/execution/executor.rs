@@ -3897,6 +3897,34 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
+            TransactionType::VerifyStark(_) => {
+                // Phase 5 split-STARK verification carries zero transfer amount;
+                // `Claim::Poly` provenance and Stage 2 (`verify_algebra`) are
+                // enforced against `AirRegistry` during block aggregation checks.
+                if tx.amount != 0 {
+                    return Err(BudlumError::validation(
+                        "verify_stark_amount_nonzero",
+                        "a VerifyStark transaction carries no amount",
+                    ));
+                }
+                if tx.claim_refs.is_empty() {
+                    return Err(BudlumError::validation(
+                        "verify_stark_missing_claim_refs",
+                        "a VerifyStark transaction must reference its Claim::Poly digest",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < total_cost {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance",
+                        format!("the fee exceeds the spendable balance: need {total_cost}"),
+                    ));
+                }
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
             TransactionType::StorageV3(storage_tx) => {
                 // StorageTx v3 carries zero explicit transfer amount; RegisterObject
                 // (when not deduplicated) and RenewObject additionally collect the

@@ -30,6 +30,12 @@ pub const TAG_FRAME: &[u8] = b"BDLM_FRAME_V1";
 const TAG_AGG_SEGMENT_AUTH: &[u8] = b"BDLM_AGG_SEGMENT_AUTH_V1";
 /// Tag of the output a successful authorization program writes.
 const TAG_AUTH_OK: &[u8] = b"BDLM_AUTH_OK_V1";
+/// Tag of a canonical PCS polynomial-bundle commitment (`Claim::Poly.poly_hash`).
+pub const TAG_PCS_POLY: &[u8] = b"BDLM_PCS_POLY_V1";
+/// Tag of a canonical PCS opened-values digest (`Claim::Poly.value`).
+pub const TAG_PCS_EVAL: &[u8] = b"BDLM_PCS_EVAL_V1";
+/// Tag of a canonical `AirRegistry` AIR identifier (`AirId`).
+pub const TAG_AIR_ID: &[u8] = b"BDLM_AIR_ID_V1";
 
 /// `H` over the concatenation of `parts`.
 #[must_use]

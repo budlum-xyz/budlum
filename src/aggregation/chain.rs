@@ -19,8 +19,11 @@
 //! `check_block_with_backend`, and `settlement_of` expose the chain-side doors
 //! for wallets, program-account provers, benchmarks, and integration callers.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::air_registry::AirRegistry;
 use super::backend::{AggBackend, AggError, TickCtx};
 use super::block::{check_block_claims, claim_payers, TxClaims};
 use super::claim::Claim;
@@ -34,7 +37,7 @@ use super::programs::prog_claim::StarkProofObject;
 use crate::core::account::AccountState;
 use crate::core::block::Block;
 use crate::core::chain_config::Network;
-use crate::core::transaction::{Transaction, SIGNATURE_VERSION_V5};
+use crate::core::transaction::{Transaction, TransactionType, SIGNATURE_VERSION_V5};
 use crate::crypto::scheme::{SchemeId, SchemeStatusRegistry};
 use crate::domain::types::{DomainId, Hash32};
 
@@ -237,6 +240,9 @@ pub fn claim_program_auth(
     let mut claimed = tx.clone();
     claimed.signature = None;
     claimed.signer_public_key = Vec::new();
+    claimed.authorization = None;
+    claimed.signature_version = crate::core::transaction::SIGNATURE_VERSION_V5;
+    claimed.hash = claimed.calculate_hash();
     claimed.auth_claim = Some(claim.digest(domain));
     Some((claimed, envelope))
 }
@@ -496,17 +502,24 @@ pub fn check_pool_transaction(params: &AggParams, tx: &Transaction) -> Result<()
     Ok(())
 }
 
-/// Check the claims of a block against a specific [`AggBackend`] and optional
-/// [`AccountState`] (resolving `Account.auth_program_hash` for program
-/// accounts in block rule 6).
+/// Check the claims of a block against a specific [`AggBackend`], optional
+/// [`AccountState`] (resolving `Account.auth_program_hash` in block rule 6),
+/// and an [`AirRegistry`] for Phase 5 `VerifyStark` Stage 2 (`verify_algebra`)
+/// verification.
+///
+/// For every `TransactionType::VerifyStark` transaction in `block`, the chain
+/// re-derives `zeta` locally from commitments and public values, runs
+/// `verify_algebra`, and checks that the resulting `Claim::Poly` digest is
+/// both referenced by `tx.claim_refs` and proven in `block.claim_frame`.
 ///
 /// # Errors
 ///
-/// A message naming the rule the block breaks.
-pub fn check_block_with_backend<B: AggBackend>(
+/// A message naming the rule or `VerifyStark` check the block breaks.
+pub fn check_block_with_backend_and_airs<B: AggBackend>(
     params: &AggParams,
     registry: &SchemeStatusRegistry,
     accounts: Option<&AccountState>,
+    air_registry: &AirRegistry,
     block: &Block,
     backend: &B,
 ) -> Result<(), String> {
@@ -537,8 +550,50 @@ pub fn check_block_with_backend<B: AggBackend>(
         registry,
         backend,
     )
-    .map(|_| ())
-    .map_err(|e| format!("aggregation: {e}"))
+    .map_err(|e| format!("aggregation: {e}"))?;
+
+    let has_verify_stark = block
+        .transactions
+        .iter()
+        .any(|tx| matches!(tx.tx_type, TransactionType::VerifyStark(_)));
+    if !has_verify_stark {
+        return Ok(());
+    }
+    if params.mode != AggMode::On {
+        return Err("aggregation: VerifyStark requires aggregation mode On".into());
+    }
+    let proven_claims: BTreeSet<Hash32> = block
+        .claim_frame
+        .as_ref()
+        .map(|frame| frame.claims.iter().map(|c| c.digest(domain)).collect())
+        .unwrap_or_default();
+    for tx in &block.transactions {
+        if let TransactionType::VerifyStark(stmt) = &tx.tx_type {
+            air_registry
+                .verify_stark_tx(domain, stmt, &tx.claim_refs, &proven_claims)
+                .map_err(|e| format!("aggregation: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Check the claims of a block against a specific [`AggBackend`] and optional
+/// [`AccountState`] (resolving `Account.auth_program_hash` for program
+/// accounts in block rule 6), using [`AirRegistry::with_builtins`] for
+/// `VerifyStark` transactions.
+///
+/// # Errors
+///
+/// A message naming the rule the block breaks.
+pub fn check_block_with_backend<B: AggBackend>(
+    params: &AggParams,
+    registry: &SchemeStatusRegistry,
+    accounts: Option<&AccountState>,
+    block: &Block,
+    backend: &B,
+) -> Result<(), String> {
+    let air_registry = AirRegistry::with_builtins();
+    check_block_with_backend_and_airs(params, registry, accounts, &air_registry, block, backend)
 }
 
 /// Check the claims of a block using `accounts` to resolve program accounts

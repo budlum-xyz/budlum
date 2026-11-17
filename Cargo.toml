@@ -345,6 +345,12 @@ path = "benches/agg_phase4_prog.rs"
 harness = false
 required-features = ["wallet-ml-dsa"]
 
+[[bench]]
+name = "agg_phase5_pcs"
+path = "benches/agg_phase5_pcs.rs"
+harness = false
+required-features = ["wallet-ml-dsa"]
+
 # Domain throughput/latency benchmarks (criterion.rs)
 [[bench]]
 name = "domain_throughput"
