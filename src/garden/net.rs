@@ -1764,7 +1764,7 @@ mod tests {
     fn garden_codec_clone_isolates_per_connection_large_and_response_shares() {
         let base = GardenCodec::default();
         let conn_a = base.clone();
-        let conn_b = base.clone();
+        let conn_b = base;
 
         let per_conn_req =
             u32::try_from(MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES).unwrap();
@@ -1806,7 +1806,6 @@ mod tests {
         assert!(conn_a.conn_response_frames.try_acquire().is_err());
         assert!(conn_b
             .conn_response_frames
-            .clone()
             .try_acquire_many_owned(per_conn_resp)
             .is_ok());
     }

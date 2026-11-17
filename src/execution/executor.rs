@@ -6629,7 +6629,7 @@ mod tests {
         let chain_id = network.chain_id().value();
         let net_floor = network.min_stake();
         let gov_floor = net_floor + 500;
-        let mut params = state.registry.params().clone();
+        let mut params = *state.registry.params();
         params.min_stake = gov_floor;
         state.registry.set_params(params);
 
