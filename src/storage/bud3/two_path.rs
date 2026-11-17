@@ -116,7 +116,8 @@ pub fn extract_object_from_frames(
             .push(frame);
     }
 
-    let seg_count = u64::try_from(by_segment.len()).map_err(|_| TwoPathError::Decode)?;
+    let seg_count = u64::try_from(by_segment.len())
+        .map_err(|_| TwoPathError::Frame(FrameWireError::BadGeometry))?;
     let mut object_bytes = Vec::new();
     for expected_seg in 0..seg_count {
         let geom_map = by_segment
@@ -440,14 +441,14 @@ mod tests {
 
     #[test]
     fn extract_object_from_frames_survives_poisoned_leading_frame_geometry() {
-        use super::super::frame::{Bud3Frame, FrameKind};
+        use super::super::fountain::SymbolKind;
+        use super::super::frame::Bud3Frame;
 
         let content = b"majority honest frames defeat one leading rogue frame".repeat(12);
         let obj = Object::raw_public(&content);
         let honest_frames = frames_for_object_bytes(&obj.encode(), &FAST_PROFILE, 3).unwrap();
         let rogue = Bud3Frame {
-            profile_id: honest_frames[0].profile_id,
-            kind: FrameKind::Source,
+            kind: SymbolKind::Source,
             segment: 0,
             segment_len: honest_frames[0].segment_len.saturating_add(19),
             esi: 0,
