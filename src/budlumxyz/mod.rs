@@ -38,6 +38,12 @@ pub const MAX_APP_NAME_BYTES: usize = 64;
 /// Convenience: pub so an app registration caller can refuse past
 /// the same bound the registry validates in this module.
 pub const MAX_APP_URL_BYTES: usize = 256;
+/// Hard ceiling on total registered hub apps so consensus state and snapshot
+/// encoding stay deterministically bounded.
+pub const MAX_HUB_APPS: usize = 65_536;
+/// Per-developer registration cap so one funded sender cannot flood the hub
+/// directory or bury unrelated developers behind list-response truncation.
+pub const MAX_HUB_APPS_PER_DEVELOPER: usize = 64;
 
 fn is_valid_app_url(url: &str) -> bool {
     // The whole string is judged, never a prefix, and the default is refusal. Looking for a
@@ -110,6 +116,17 @@ impl BudlumxyzRegistry {
         // `StateSnapshotV2`, where `apps` and `next_app_id` are separate
         // fields, and a snapshot whose counter sits below its highest live id
         // produces exactly this.
+        if self.apps.len() >= MAX_HUB_APPS {
+            return Err(BudlumxyzError::InvalidData);
+        }
+        let developer_count = self
+            .apps
+            .values()
+            .filter(|app| app.developer == developer)
+            .count();
+        if developer_count >= MAX_HUB_APPS_PER_DEVELOPER {
+            return Err(BudlumxyzError::InvalidData);
+        }
         if self.apps.contains_key(&id) {
             return Err(BudlumxyzError::DuplicateAppId);
         }
@@ -826,5 +843,45 @@ mod tests {
             serde_json::to_vec(&a).expect("serialize a"),
             serde_json::to_vec(&b).expect("serialize b")
         );
+    }
+
+    #[test]
+    fn register_app_caps_listings_per_developer_without_blocking_others() {
+        let mut reg = BudlumxyzRegistry::new();
+        let spammer = Address::from([0xAAu8; 32]);
+        let honest = Address::from([0xBBu8; 32]);
+        for idx in 0..MAX_HUB_APPS_PER_DEVELOPER {
+            reg.register_app(
+                format!("App {idx}"),
+                spammer,
+                AppCategory::DeFi,
+                format!("https://app-{idx}.example"),
+                None,
+                1,
+            )
+            .expect("within per-developer cap");
+        }
+        assert!(matches!(
+            reg.register_app(
+                "Overflow".to_string(),
+                spammer,
+                AppCategory::DeFi,
+                "https://overflow.example".to_string(),
+                None,
+                1,
+            ),
+            Err(BudlumxyzError::InvalidData)
+        ));
+        let ok_id = reg
+            .register_app(
+                "Honest App".to_string(),
+                honest,
+                AppCategory::Infrastructure,
+                "https://honest.example".to_string(),
+                None,
+                1,
+            )
+            .expect("independent developer still admitted");
+        assert_eq!(reg.apps[&ok_id].developer, honest);
     }
 }
