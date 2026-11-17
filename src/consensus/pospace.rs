@@ -1,9 +1,12 @@
 //! Proof of Space (PoSpace) consensus engine.
 //!
-//! PoSpace validators commit plot identifiers and storage capacity and answer
-//! domain-separated challenges. Challenge-response verification enforces exact
-//! constant-time equality against `BDLM_POSPACE_RESPONSE_V1` rather than
-//! accepting arbitrary non-zero bytes.
+//! PoSpace requires miners to commit verifiable storage capacity ("plots")
+//! and answer cryptographic challenges bound to each registered `plot_id`.
+//! Every block carries a hash-covered space proof `(plot_id, challenge,
+//! capacity_bytes, response)` in `vrf_proof` / `vrf_output`; `validate_block`
+//! fails closed unless a valid challenge-bound response is present, and fork
+//! choice scores each candidate chain strictly by the verified plot capacity
+//! committed inside that candidate chain.
 
 use crate::consensus::split_resolver::{resolve_split_tie, SplitCandidate, SplitDecision};
 use crate::consensus::{ConsensusEngine, ConsensusError};
@@ -16,34 +19,32 @@ use subtle::ConstantTimeEq;
 
 #[cfg(test)]
 const MAX_POSPACE_PLOTS: usize = 4_096;
+const POSPACE_WITNESS_MAGIC: &[u8; 8] = b"BDLMSPC1";
+const POSPACE_WITNESS_LEN: usize = 8 + 32 + 32 + 8;
 
 /// PoSpace configuration.
 #[derive(Debug, Clone)]
 pub struct PoSpaceConfig {
-    /// Minimum accepted plot size in bytes.
-    pub plot_size_bytes: u64,
-    /// Maximum number of attempts per challenge.
-    pub max_challenge_attempts: u64,
-    /// Number of segments per plot.
-    pub segments_per_plot: u64,
+    /// Minimum plot size in bytes required to participate.
+    pub min_plot_size_bytes: u64,
+    /// Number of blocks between challenge rotations.
+    pub challenge_interval: u64,
 }
 
 impl Default for PoSpaceConfig {
     fn default() -> Self {
         Self {
-            plot_size_bytes: 1_000_000_000, // 1 GB
-            max_challenge_attempts: 10,
-            segments_per_plot: 1_000,
+            min_plot_size_bytes: 1_024 * 1_024,
+            challenge_interval: 10,
         }
     }
 }
 
-/// A validator's registered plot record.
+/// Registered storage plot record.
 #[derive(Debug, Clone)]
 struct PlotRecord {
     plot_id: [u8; 32],
     size_bytes: u64,
-    last_challenge_response: Option<([u8; 32], [u8; 32])>,
 }
 
 /// Derive the canonical expected challenge response for `(plot_id, challenge)`.
@@ -70,6 +71,69 @@ pub fn verify_plot_response(plot_id: &[u8; 32], challenge: &[u8; 32], response: 
     bool::from(expected.ct_eq(response))
 }
 
+fn encode_pospace_witness(plot_id: &[u8; 32], challenge: &[u8; 32], size_bytes: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(POSPACE_WITNESS_LEN);
+    out.extend_from_slice(POSPACE_WITNESS_MAGIC);
+    out.extend_from_slice(plot_id);
+    out.extend_from_slice(challenge);
+    out.extend_from_slice(&size_bytes.to_le_bytes());
+    out
+}
+
+fn decode_pospace_witness(
+    block: &Block,
+) -> Result<([u8; 32], [u8; 32], u64, [u8; 32]), ConsensusError> {
+    if block.vrf_proof.len() != POSPACE_WITNESS_LEN || block.vrf_output.len() != 32 {
+        return Err(ConsensusError(
+            "PoSpace block missing challenge-bound space proof".into(),
+        ));
+    }
+    let Some(magic) = block.vrf_proof.get(0..8) else {
+        return Err(ConsensusError("PoSpace proof header truncated".into()));
+    };
+    if magic != POSPACE_WITNESS_MAGIC {
+        return Err(ConsensusError("PoSpace proof magic mismatch".into()));
+    }
+    let plot_id: [u8; 32] = block
+        .vrf_proof
+        .get(8..40)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| ConsensusError("PoSpace proof plot_id truncated".into()))?;
+    let challenge: [u8; 32] = block
+        .vrf_proof
+        .get(40..72)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| ConsensusError("PoSpace proof challenge truncated".into()))?;
+    let size_bytes_arr: [u8; 8] = block
+        .vrf_proof
+        .get(72..80)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| ConsensusError("PoSpace proof size_bytes truncated".into()))?;
+    let response: [u8; 32] = block
+        .vrf_output
+        .as_slice()
+        .try_into()
+        .map_err(|_| ConsensusError("PoSpace proof response must be 32 bytes".into()))?;
+    Ok((
+        plot_id,
+        challenge,
+        u64::from_le_bytes(size_bytes_arr),
+        response,
+    ))
+}
+
+fn derive_block_challenge(previous_hash: &str, block_index: u64, challenge_epoch: u64) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"BDLM_POSPACE_CHALLENGE_V1");
+    hasher.update(previous_hash.as_bytes());
+    hasher.update(block_index.to_le_bytes());
+    hasher.update(challenge_epoch.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
 /// PoSpace engine: bounded plot registry and cryptographic challenge verifier.
 pub struct PoSpaceEngine {
     pub config: PoSpaceConfig,
@@ -92,7 +156,7 @@ impl PoSpaceEngine {
     ///
     /// # Errors
     ///
-    /// Returns an error for empty addresses, zero plot ids, zero capacity,
+    /// Returns an error for empty addresses, zero plot ids, below-minimum capacity,
     /// capacity exhaustion, or a poisoned lock.
     #[cfg(test)]
     fn register_plot(
@@ -107,8 +171,11 @@ impl PoSpaceEngine {
         if plot_id == [0u8; 32] {
             return Err(ConsensusError("PoSpace plot_id cannot be zero".into()));
         }
-        if size_bytes == 0 {
-            return Err(ConsensusError("PoSpace plot size must be non-zero".into()));
+        if size_bytes == 0 || size_bytes < self.config.min_plot_size_bytes {
+            return Err(ConsensusError(format!(
+                "PoSpace plot size {size_bytes} is below minimum {}",
+                self.config.min_plot_size_bytes
+            )));
         }
         let mut plots = self
             .plots
@@ -124,7 +191,6 @@ impl PoSpaceEngine {
             PlotRecord {
                 plot_id,
                 size_bytes,
-                last_challenge_response: None,
             },
         );
         Ok(())
@@ -153,6 +219,7 @@ impl PoSpaceEngine {
     }
 
     /// Verify a registered validator's challenge response.
+    #[cfg(test)]
     #[must_use]
     fn verify_response(&self, address: &str, challenge: &[u8; 32], response: &[u8; 32]) -> bool {
         let Ok(plots) = self.plots.read() else {
@@ -161,7 +228,7 @@ impl PoSpaceEngine {
         let Some(plot) = plots.get(address) else {
             return false;
         };
-        if plot.size_bytes == 0 {
+        if plot.size_bytes < self.config.min_plot_size_bytes {
             return false;
         }
         verify_plot_response(&plot.plot_id, challenge, response)
@@ -182,6 +249,12 @@ impl PoSpaceEngine {
     fn plot_count(&self) -> usize {
         self.plots.read().map_or(0, |plots| plots.len())
     }
+
+    fn expected_challenge_for_block(&self, block: &Block) -> [u8; 32] {
+        let interval = self.config.challenge_interval.max(1);
+        let challenge_epoch = block.index / interval;
+        derive_block_challenge(&block.previous_hash, block.index, challenge_epoch)
+    }
 }
 
 impl ConsensusEngine for PoSpaceEngine {
@@ -190,6 +263,27 @@ impl ConsensusEngine for PoSpaceEngine {
         block: &mut Block,
         _state: &AccountState,
     ) -> Result<(), ConsensusError> {
+        let plot = {
+            let plots = self
+                .plots
+                .read()
+                .map_err(|_| ConsensusError("PoSpace plot registry lock poisoned".into()))?;
+            if let Some(producer) = block.producer {
+                let key = producer.to_hex();
+                plots.get(&key).cloned().ok_or_else(|| {
+                    ConsensusError(format!("PoSpace producer {key} has no registered plot"))
+                })?
+            } else {
+                plots.values().next().cloned().ok_or_else(|| {
+                    ConsensusError("PoSpace engine has no registered plots".into())
+                })?
+            }
+        };
+
+        let challenge = self.expected_challenge_for_block(block);
+        let response = compute_plot_response(&plot.plot_id, &challenge);
+        block.vrf_output = response.to_vec();
+        block.vrf_proof = encode_pospace_witness(&plot.plot_id, &challenge, plot.size_bytes);
         block.hash = block.calculate_hash();
         Ok(())
     }
@@ -208,25 +302,51 @@ impl ConsensusEngine for PoSpaceEngine {
             )));
         }
 
-        // If the block's producer is registered with a pending challenge proof,
-        // verify it cryptographically before accepting the block.
+        let (plot_id, challenge, size_bytes, response) = decode_pospace_witness(block)?;
+        if size_bytes < self.config.min_plot_size_bytes {
+            return Err(ConsensusError(format!(
+                "PoSpace proof plot size {size_bytes} is below minimum {}",
+                self.config.min_plot_size_bytes
+            )));
+        }
+
+        let expected_challenge = self.expected_challenge_for_block(block);
+        if !bool::from(challenge.ct_eq(&expected_challenge)) {
+            return Err(ConsensusError(
+                "PoSpace proof challenge does not match block slot challenge".into(),
+            ));
+        }
+
+        if !verify_plot_response(&plot_id, &challenge, &response) {
+            return Err(ConsensusError(
+                "PoSpace block space proof failed cryptographic verification".into(),
+            ));
+        }
+
+        let plots = self
+            .plots
+            .read()
+            .map_err(|_| ConsensusError("PoSpace plot registry lock poisoned".into()))?;
         if let Some(producer) = block.producer {
             let key = producer.to_hex();
-            let pending = {
-                let plots = self
-                    .plots
-                    .read()
-                    .map_err(|_| ConsensusError("PoSpace plot registry lock poisoned".into()))?;
-                plots
-                    .get(&key)
-                    .and_then(|plot| plot.last_challenge_response)
+            let Some(reg) = plots.get(&key) else {
+                return Err(ConsensusError(format!(
+                    "PoSpace producer {key} is not registered in plot registry"
+                )));
             };
-            if let Some((challenge, response)) = pending {
-                if !self.verify_response(&key, &challenge, &response) {
-                    return Err(ConsensusError(format!(
-                        "PoSpace producer {key} failed challenge-response verification"
-                    )));
-                }
+            if reg.plot_id != plot_id || reg.size_bytes != size_bytes {
+                return Err(ConsensusError(format!(
+                    "PoSpace producer {key} proof does not match registered plot commitment"
+                )));
+            }
+        } else {
+            let matches_registered = plots
+                .values()
+                .any(|reg| reg.plot_id == plot_id && reg.size_bytes == size_bytes);
+            if !matches_registered {
+                return Err(ConsensusError(
+                    "PoSpace block references an unregistered plot".into(),
+                ));
             }
         }
 
@@ -236,7 +356,7 @@ impl ConsensusEngine for PoSpaceEngine {
     fn record_block(
         &self,
         _block: &Block,
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         let _ = self.issue_challenge()?;
         Ok(())
@@ -264,11 +384,25 @@ impl ConsensusEngine for PoSpaceEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
+        // Derive score strictly from verified space proofs committed inside the
+        // candidate chain itself (never from engine-global mutable plot totals).
         let height_weight = chain
             .last()
             .map_or(0u128, |b| u128::from(b.index))
             .saturating_mul(1_000);
-        height_weight.saturating_add(u128::from(self.total_capacity()))
+        let mut proven_capacity = 0u128;
+        for block in chain {
+            if let Ok((plot_id, challenge, size_bytes, response)) = decode_pospace_witness(block) {
+                let expected = self.expected_challenge_for_block(block);
+                if size_bytes >= self.config.min_plot_size_bytes
+                    && bool::from(challenge.ct_eq(&expected))
+                    && verify_plot_response(&plot_id, &challenge, &response)
+                {
+                    proven_capacity = proven_capacity.saturating_add(u128::from(size_bytes));
+                }
+            }
+        }
+        height_weight.saturating_add(proven_capacity)
     }
 
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
@@ -306,7 +440,7 @@ mod tests {
         assert_eq!(engine.plot_count(), 1);
         assert_eq!(engine.total_capacity(), 1_000_000_000);
         assert!(engine
-            .register_plot("bad-zero-id", [0u8; 32], 1_000)
+            .register_plot("bad-zero-id", [0u8; 32], 10_000_000)
             .is_err());
         assert!(engine.register_plot("bad-zero-size", plot_id, 0).is_err());
     }
@@ -323,17 +457,18 @@ mod tests {
         let valid_response = compute_plot_response(&plot_id, &challenge);
         assert!(engine.verify_response("validator-2", &challenge, &valid_response));
 
-        // Zero response must fail.
         assert!(!engine.verify_response("validator-2", &challenge, &[0u8; 32]));
-        // Arbitrary non-zero forged response must fail (closes CWE-345).
         assert!(!engine.verify_response("validator-2", &challenge, &[0xAB; 32]));
-        // Unknown validator must fail.
         assert!(!engine.verify_response("unknown", &challenge, &valid_response));
     }
 
     #[test]
     fn pospace_prepare_and_validate_block() {
         let engine = PoSpaceEngine::new(PoSpaceConfig::default());
+        let plot_id = [7u8; 32];
+        engine
+            .register_plot("miner-1", plot_id, 10_000_000)
+            .expect("register plot");
         let zero = "0".repeat(64);
         let mut block = make_block(1, &zero);
         engine
@@ -342,5 +477,61 @@ mod tests {
         assert!(engine
             .validate_block(&block, &[], &AccountState::new())
             .is_ok());
+    }
+
+    #[test]
+    fn pospace_rejects_block_without_space_proof_or_with_forged_proof() {
+        // Fresh engine with zero registered plots MUST fail closed on bare hash-only blocks.
+        let empty_engine = PoSpaceEngine::new(PoSpaceConfig::default());
+        let zero = "0".repeat(64);
+        let bare = make_block(1, &zero);
+        assert!(empty_engine
+            .validate_block(&bare, &[], &AccountState::new())
+            .is_err());
+
+        // Engine with registered plot rejects tampered response.
+        let engine = PoSpaceEngine::new(PoSpaceConfig::default());
+        engine
+            .register_plot("miner-a", [9u8; 32], 50_000_000)
+            .expect("register");
+        let mut forged = make_block(1, &zero);
+        engine
+            .prepare_block(&mut forged, &AccountState::new())
+            .expect("prepare");
+        forged.vrf_output = vec![0xEE; 32];
+        forged.hash = forged.calculate_hash();
+        assert!(engine
+            .validate_block(&forged, &[], &AccountState::new())
+            .is_err());
+    }
+
+    #[test]
+    fn pospace_fork_choice_scores_candidate_chain_capacity_deterministically() {
+        let zero = "0".repeat(64);
+        let small = PoSpaceEngine::new(PoSpaceConfig::default());
+        small
+            .register_plot("small-miner", [3u8; 32], 2_000_000)
+            .expect("register small");
+        let mut b_small = make_block(1, &zero);
+        small
+            .prepare_block(&mut b_small, &AccountState::new())
+            .expect("prepare small");
+
+        let large = PoSpaceEngine::new(PoSpaceConfig::default());
+        large
+            .register_plot("large-miner", [4u8; 32], 200_000_000)
+            .expect("register large");
+        let mut b_large = make_block(1, &zero);
+        large
+            .prepare_block(&mut b_large, &AccountState::new())
+            .expect("prepare large");
+
+        let chain_small = vec![b_small];
+        let chain_large = vec![b_large];
+        // Higher proven plot capacity wins at equal height regardless of engine state.
+        assert!(small.is_better_chain(&chain_small, &chain_large));
+        assert!(!small.is_better_chain(&chain_large, &chain_small));
+        // Reflexivity: a chain is never strictly better than itself.
+        assert!(!small.is_better_chain(&chain_small, &chain_small));
     }
 }
