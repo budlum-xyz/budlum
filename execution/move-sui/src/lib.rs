@@ -794,6 +794,16 @@ mod tests {
     fn move_sui_is_closed_on_testnet() {
         let mut closed_worker = MoveSuiWorker::new();
         assert!(!closed_worker.is_active(&launch_ctx()));
+        for chain_id in [45_260, 99_999] {
+            assert!(!closed_worker.is_active(&BlockContext {
+                chain_id,
+                ..launch_ctx()
+            }));
+        }
+        assert!(closed_worker.is_active(&BlockContext {
+            chain_id: 45_262,
+            ..launch_ctx()
+        }));
         let activated_worker = MoveSuiWorker::with_activation_height(Some(100));
         assert!(!activated_worker.is_active(&BlockContext {
             height: 99,
