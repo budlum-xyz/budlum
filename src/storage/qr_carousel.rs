@@ -88,7 +88,7 @@ pub enum CarouselError {
     BadBlockLen,
     /// Derived or declared `k` is zero or above [`MAX_K`].
     BadK(u16),
-    /// k does not equal ceil(total_len / block_len).
+    /// k does not equal ceil(`total_len` / `block_len`).
     InvalidGeometry,
     /// Drop buffer shorter than the header, or body cut off.
     Truncated,

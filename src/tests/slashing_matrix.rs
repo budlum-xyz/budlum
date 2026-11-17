@@ -1,8 +1,7 @@
 //! Slashing test matrix.
 //!
-//! Separate test scenarios: double-sign, downtime and liveness, and an invalid
-//! attestation. On top of the verifier registry, for each slashing condition
-//! Positive (slash fires) and negative (an honest validator is not slashed).
+//! Separate test scenarios: double-sign, non-slashing downtime evidence and
+//! invalid attestation spam. Absence is suspension-only under invariant V-4.
 
 #[cfg(test)]
 mod tests {
@@ -81,10 +80,10 @@ mod tests {
         );
     }
 
-    // ─── Liveness / Downtime Slashing ───
+    // ─── Liveness / downtime: suspension, never slashing ───
 
     #[test]
-    fn liveness_fault_processed() {
+    fn liveness_evidence_is_processed_without_slashing() {
         let mut reg = setup_registry();
         let val = addr(0x44);
 
@@ -103,8 +102,10 @@ mod tests {
             Some(addr(0x01)),
         );
 
-        let result = reg.slash_from_report(&report);
-        assert!(result.is_ok(), "liveness fault must be processed");
+        assert_eq!(reg.slash_from_report(&report).unwrap(), None);
+        assert_eq!(reg.get(&val, roles::VALIDATOR).unwrap().stake, 10_000);
+        assert!(reg.is_active(&val, roles::VALIDATOR));
+        assert!(reg.slashing_history().is_empty());
     }
 
     // ─── Invalid Signature Spam ───

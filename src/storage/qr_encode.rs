@@ -552,8 +552,8 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
         }
         for i in 0..side {
             let row = if upward { side - 1 - i } else { i };
-            for dx in 0..2 {
-                let c = (col - dx as isize) as usize;
+            for dx in 0..2isize {
+                let c = (col - dx) as usize;
                 if reserved.get(row).and_then(|r| r.get(c)).is_some_and(|v| *v) {
                     continue;
                 }

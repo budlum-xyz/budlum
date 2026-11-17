@@ -127,6 +127,11 @@ impl StateSnapshot {
         // Plain data type; a failure here is a deterministic bug.
         serde_json::to_vec(self).unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec())
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         // The disk-read path enforces MAX_SNAPSHOT_BYTES; a snapshot handed
         // to this entry point directly (remote sync, tests, imports) must
@@ -237,6 +242,11 @@ impl PruningManager {
             .unwrap_or(0)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn quarantine_snapshots_above_height(&self, max_height: u64) -> Result<usize, String> {
         use std::fs;
         use std::path::Path;
@@ -281,6 +291,11 @@ impl PruningManager {
         Ok(quarantined)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn save_snapshot(&self, snapshot: &StateSnapshot) -> Result<(), String> {
         use std::fs;
         use std::path::Path;
@@ -300,6 +315,11 @@ impl PruningManager {
         );
         Ok(())
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn load_latest_snapshot(&self) -> Result<Option<StateSnapshot>, String> {
         use std::fs;
         use std::path::Path;
@@ -382,18 +402,35 @@ impl PruningManager {
         Ok(None)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn save_snapshot_v2(&self, snapshot: &StateSnapshotV2) -> Result<(), String> {
-        use std::fs;
+        use std::fs::{self, File};
+        use std::io::Write as _;
         use std::path::Path;
         let dir = Path::new(&self.snapshot_dir);
         if !dir.exists() {
             fs::create_dir_all(dir).map_err(|e| format!("Failed to create snapshot dir: {e}"))?;
         }
         let filename = format!("snapshot_{}.json", snapshot.height);
+        let tmp_filename = format!(".snapshot_{}.json.tmp", snapshot.height);
         let path = dir.join(filename);
+        let tmp_path = dir.join(tmp_filename);
         let data = serde_json::to_string_pretty(snapshot)
             .map_err(|e| format!("Failed to serialize snapshot v2: {e}"))?;
-        fs::write(&path, data).map_err(|e| format!("Failed to write snapshot v2: {e}"))?;
+        let mut tmp_file =
+            File::create(&tmp_path).map_err(|e| format!("Failed to create snapshot tmp: {e}"))?;
+        tmp_file
+            .write_all(data.as_bytes())
+            .map_err(|e| format!("Failed to write snapshot v2: {e}"))?;
+        tmp_file
+            .sync_all()
+            .map_err(|e| format!("Failed to sync snapshot v2: {e}"))?;
+        drop(tmp_file);
+        fs::rename(&tmp_path, &path).map_err(|e| format!("Failed to commit snapshot v2: {e}"))?;
         println!(
             "Snapshot V2 saved: {} ({} accounts)",
             path.display(),
@@ -402,6 +439,11 @@ impl PruningManager {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn load_latest_snapshot_v2(&self) -> Result<Option<StateSnapshotV2>, String> {
         use std::fs;
         use std::path::Path;
@@ -509,13 +551,13 @@ fn get_snapshot_height(path: &std::path::Path) -> Option<u64> {
 }
 
 /// Oldest `StateSnapshotV2` schema that this binary will accept during the
-/// Staged ConsensusStateV2 migration window. Older snapshots must be restored
+/// Staged `ConsensusStateV2` migration window. Older snapshots must be restored
 /// With an intermediate release first; silently accepting them would risk
 /// Losing registry/tokenomics metadata that was not present yet.
 pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Current durable snapshot schema emitted by this binary. This is the
-/// ConsensusStateV2 migration target.
+/// `ConsensusStateV2` migration target.
 ///
 /// Schema 5 adds the identity registry root field. Unlike the `poa_onboarding`
 /// entry, which shipped at schema 4 without a bump (absent -> empty default ->
@@ -528,7 +570,7 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// screen a folder list that is not the chain's - so the field enters the
 /// digest under a `>= 6` gate and pre-vault pinned digests stay byte-exact.
 ///
-/// Schema 7 digests the PoA admission records and the compliance ledger
+/// Schema 7 digests the `PoA` admission records and the compliance ledger
 /// Both decide writes: a node that dropped an
 /// admission set or a freeze would serve a chain that is not the chain's,
 /// and the field shipped outside the digest was exactly the forgery surface
@@ -536,15 +578,25 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// byte-exact: at 6 and below the two fields cannot affect the digest.
 ///
 /// Schema 10 carries and digests the settlement registries (testnet
-///): state that moved from `Blockchain` into the account
+/// State that moved from `Blockchain` into the account
 /// state when its writes became transaction doors. A node that dropped a
 /// registration would serve a chain that is not the chain's; at 9 and below
 /// the field cannot affect the digest.
 ///
-/// Schema 11 carries and digests the scheme and suite statuses of the chain
-///. A status decides whether a signature family still
+/// Schema 11 carries and digests the scheme and suite statuses of the chain.
+/// A status decides whether a signature family still
 /// verifies, so a node that dropped a `Disabled` mark would accept signatures
 /// the chain refuses; at 10 and below the field cannot affect the digest.
+///
+/// Schema 13 carries and digests the validator directory: the class,
+/// operator key, quota and mobile bond of every registered validator. It is
+/// folded into the state root, so a restore that dropped it would restore a
+/// root that no peer computes. At 12 and below the field cannot affect the
+/// digest and a snapshot without it restores an empty directory.
+///
+/// Schema 14 digests the B.U.D. 3.0 registry. The field existed in schema 13
+/// without digest binding; nonempty legacy copies must be refused, not migrated
+/// by resealing unauthenticated storage and custody records.
 ///
 /// Schema 12 carries and digests the reward-pool flag (testnet item 8). It
 /// decides whether the epoch transition pays from the pre-funded pool, which
@@ -554,13 +606,13 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// and a snapshot without it restores the network profile's answer - what the
 /// chain did before the flag existed.
 ///
-/// Schema 13 adds the per-application Graft claim freshness watermarks. Their
-/// zero/`None` defaults are omitted from bincode commitments, so a schema-12
+/// Schema 15 adds the per-application claim freshness watermarks. Their
+/// zero/`None` defaults are omitted from bincode commitments, so an older
 /// snapshot remains byte-exact and migrates without rewriting its state root.
 /// Once a claim writes either watermark, the snapshot must identify itself as
-/// schema 13: an older binary must skip it as future state rather than ignore
+/// schema 15: an older binary must skip it as future state rather than ignore
 /// the fields and restore replayable ownership claims.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 13;
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -663,7 +715,7 @@ pub struct StateSnapshotV2 {
     pub note_registry: Option<crate::privacy::L1NoteRegistry>,
     #[serde(default)]
     pub bridge_state: Option<crate::cross_domain::BridgeState>,
-    /// PoA admission records: admins, approvals and the KYC horizons.
+    /// `PoA` admission records: admins, approvals and the KYC horizons.
     ///
     /// `#[serde(default)]` so older snapshots load; a chain with no
     /// permissioned domains restores an empty registry, which is the correct
@@ -673,7 +725,7 @@ pub struct StateSnapshotV2 {
     /// was derived from.
     #[serde(default)]
     pub poa_onboarding: Option<crate::registry::poa_onboarding::PoAOnboarding>,
-    /// The PoA compliance ledger (screening, freeze,
+    /// The `PoA` compliance ledger (screening, freeze,
     /// travel-rule) alongside the admission records, both digested from
     /// schema 7.
     #[serde(default)]
@@ -704,6 +756,14 @@ pub struct StateSnapshotV2 {
     /// profile's answer, which is what a chain that predates the flag did.
     #[serde(default)]
     pub reward_pool_enabled: Option<bool>,
+    /// The validator directory (schema-13 bump). `None` reads as empty, which
+    /// is what a chain that predates the validator door had.
+    #[serde(default)]
+    pub validator_directory: Option<crate::validators::ValidatorDirectory>,
+    /// The B.U.D. 3.0 registry. `None` reads as empty, which is what a chain
+    /// that predates the B.U.D. 3.0 door had.
+    #[serde(default)]
+    pub bud3_registry: Option<crate::storage::bud3::registry::Bud3Registry>,
     /// Proof tasks and unpaid receipts.
     ///
     /// `#[serde(default)]` like its neighbours: a snapshot taken before this
@@ -739,28 +799,28 @@ pub struct StateSnapshotV2 {
     // RFC_GAP1 section 7: Ed25519 single signature + trust list + AllowUnsigned transition.
     // `#[serde(default)]` -> legacy schema-3 snapshots (no field) load as None.
     /// Ed25519 public key of the party signing the snapshot (from the trust list). None =
-    /// AllowUnsigned (devnet / legacy-import transition window).
+    /// `AllowUnsigned` (devnet / legacy-import transition window).
     #[serde(default)]
     pub manifest_signer: Option<[u8; 32]>,
     /// `sign(calculate_digest)` Ed25519 signature (64 bytes). None = AllowUnsigned.
     #[serde(default)]
     pub manifest_signature: Option<Vec<u8>>,
-    /// Trust policy: AllowUnsigned (devnet/transition) | RequireSigned (production).
-    /// Default AllowUnsigned -> backward compatible (legacy snapshots load).
+    /// Trust policy: `AllowUnsigned` (devnet/transition) | `RequireSigned` (production).
+    /// Default `AllowUnsigned` -> backward compatible (legacy snapshots load).
     #[serde(default)]
     pub trust_policy: SnapshotTrustPolicy,
 
     pub snapshot_hash: String,
 }
 
-/// C4 trust policy (RFC_GAP1 section 7.1: C-hybrid Task-1 trust model).
+/// C4 trust policy (`RFC_GAP1` section 7.1: C-hybrid Task-1 trust model).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SnapshotTrustPolicy {
     /// Signature optional: OK if the digest matches (devnet / legacy-import window).
-    /// Compile warning in a mainnet build (RequireSigned in production).
+    /// Compile warning in a mainnet build (`RequireSigned` in production).
     #[default]
     AllowUnsigned,
-    /// Signature REQUIRED: manifest_signer in the trust list + Ed25519 verify must pass.
+    /// Signature REQUIRED: `manifest_signer` in the trust list + Ed25519 verify must pass.
     /// Unsigned/corrupt snapshot -> `verify_authentic` Err -> loader quarantine.
     RequireSigned,
 }
@@ -944,6 +1004,8 @@ impl StateSnapshotV2 {
             settlement: Some(account_state.settlement.clone()),
             scheme_registry: Some(SchemeRegistrySnapshot::of(&account_state.scheme_registry)),
             reward_pool_enabled: Some(account_state.reward_pool_enabled),
+            validator_directory: Some(account_state.validator_directory.clone()),
+            bud3_registry: Some(account_state.bud3_registry.clone()),
             proof_market: Some(account_state.proof_market.clone()),
             identity: Some(account_state.identity.clone()),
             vault: Some(account_state.vault.clone()),
@@ -971,10 +1033,10 @@ impl StateSnapshotV2 {
         snapshot
     }
 
-    /// (P2 schema-4) raw digest. Branches on schema_version:
+    /// (P2 schema-4) raw digest. Branches on `schema_version`:
     /// - `< 4`: legacy digest (backward compatible - verifies old on-disk snapshots).
     /// - `>= 4`: extended digest (`budlum.snapshot.v4` prefix + 15
-    ///   previously unhashed fields). Closes the forgery surface (RFC_GAP1, "remaining gaps").
+    ///   previously unhashed fields). Closes the forgery surface (`RFC_GAP1`, "remaining gaps").
     pub fn calculate_digest(&self) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
@@ -1150,8 +1212,8 @@ impl StateSnapshotV2 {
         if self.schema_version >= 6 {
             hash_opt_serializable(&mut hasher, &self.vault);
         }
-        // --- The PoA admission + compliance pair (schema-7 bump, /
-        //). Same gate logic as identity and vault: at 6 and
+        // --- The PoA admission + compliance pair (schema-7 bump, /.
+        // Same gate logic as identity and vault: at 6 and
         //     below these fields cannot affect the digest, at 7 and above a
         //     node that dropped an admission set or a freeze produces a
         //     different hash instead of a quietly-valid snapshot. ---
@@ -1180,6 +1242,16 @@ impl StateSnapshotV2 {
         if self.schema_version >= 12 {
             hash_opt_serializable(&mut hasher, &self.reward_pool_enabled);
         }
+        // Schema 13: the validator directory, gated the same way.
+        if self.schema_version >= 13 {
+            hash_opt_serializable(&mut hasher, &self.validator_directory);
+        }
+        // Schema 14: bind all B.U.D. 3.0 custody, grant, quota and object state.
+        // Schema 13 carried this field but did not hash it; its nonempty copies
+        // are rejected by `verify` rather than silently resealed on migration.
+        if self.schema_version >= 14 {
+            hash_opt_serializable(&mut hasher, &self.bud3_registry);
+        }
 
         hasher.finalize().into()
     }
@@ -1200,20 +1272,37 @@ impl StateSnapshotV2 {
         hex::encode(self.calculate_digest())
     }
 
-    /// Fields introduced by a schema must not be smuggled into an older
-    /// version whose readers are allowed to ignore them. Schema-12 Graft rows
-    /// legitimately restore zero/`None`; any written watermark requires the
-    /// schema-13 gate that makes older binaries skip the snapshot.
-    fn fields_match_schema(&self) -> bool {
-        if self.schema_version < 13 {
-            let carries_graft_watermark = self.settlement.as_ref().is_some_and(|settlement| {
-                settlement
-                    .graft
-                    .apps
-                    .values()
-                    .any(|app| app.claim_expiry != 0 || app.anchored_claim_cursor.is_some())
+    fn bud3_payload_is_bound(&self) -> bool {
+        // Schema 13's B.U.D. field was not in its digest: even an honestly
+        // sealed legacy snapshot cannot prove a nonempty registry's contents.
+        // Compare the entire struct, not `is_empty`, which is an operational
+        // predicate and does not cover every serialized index.
+        if self.schema_version < 14 {
+            return self.bud3_registry.as_ref().is_none_or(|registry| {
+                registry == &crate::storage::bud3::registry::Bud3Registry::default()
             });
-            if carries_graft_watermark {
+        }
+        // New snapshots must carry the registry, even when empty. Otherwise a
+        // missing field could be silently defaulted into an apparently valid
+        // fresh state by a caller that recomputes an unsigned digest.
+        self.bud3_registry.is_some()
+    }
+
+    /// Fields introduced by a schema must not be smuggled into an older
+    /// version whose readers are allowed to ignore them. Older rows
+    /// legitimately restore zero/`None`; any written watermark requires the
+    /// schema-15 gate that makes older binaries skip the snapshot.
+    fn fields_match_schema(&self) -> bool {
+        if self.schema_version < 15 {
+            let carries_app_binding_watermark =
+                self.settlement.as_ref().is_some_and(|settlement| {
+                    settlement
+                        .app_binding
+                        .apps
+                        .values()
+                        .any(|app| app.claim_expiry != 0 || app.anchored_claim_cursor.is_some())
+                });
+            if carries_app_binding_watermark {
                 return false;
             }
         }
@@ -1221,10 +1310,12 @@ impl StateSnapshotV2 {
     }
 
     pub fn verify(&self) -> bool {
-        self.fields_match_schema() && self.snapshot_hash == self.calculate_hash()
+        self.bud3_payload_is_bound()
+            && self.fields_match_schema()
+            && self.snapshot_hash == self.calculate_hash()
     }
 
-    /// C4: manifest authenticity verification (RFC_GAP1 section 7.1, Task-1).
+    /// C4: manifest authenticity verification (`RFC_GAP1` section 7.1, Task-1).
     ///
     /// - `AllowUnsigned` -> OK if `verify` (digest) passes (missing signer/sig accepted).
     /// - `RequireSigned` -> `manifest_signer` set + a valid `manifest_signature`
@@ -1232,6 +1323,10 @@ impl StateSnapshotV2 {
     ///
     /// `trust_list` = None accepts any signer, for tests and devnet; in production
     /// The loader supplies the trust list from config (genesis bundle + CLI override, section 7.2).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_authentic(
         &self,
         trust_list: Option<&[[u8; 32]]>,
@@ -1291,6 +1386,10 @@ impl StateSnapshotV2 {
     /// Surfaces a serialization error to the caller instead of silently writing
     /// An empty/corrupt snapshot. This is the exact failure class that hid the
     /// Registry tuple-key bug.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn try_to_bytes(&self) -> Result<Vec<u8>, String> {
         serde_json::to_vec(self).map_err(|e| format!("Failed to serialize snapshot V2: {e}"))
     }
@@ -1307,7 +1406,16 @@ impl StateSnapshotV2 {
     /// As a *skeleton*: supported schema-2 snapshots deserialize through
     /// `#[serde(default)]` fields and are rewritten as schema 3 by
     /// `from_state`; unsupported versions fail closed instead of being guessed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn migration_report(&self) -> Result<StateSnapshotV2MigrationReport, String> {
+        if !self.bud3_payload_is_bound() {
+            return Err(String::from(
+                "B.U.D. 3.0 registry missing from schema 14 or nonempty without a schema 14 digest",
+            ));
+        }
         if self.schema_version < MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION {
             return Err(format!(
                 "Unsupported legacy snapshot schema_version {} (minimum supported is {}; staged migration hook rejected)",
@@ -1343,6 +1451,11 @@ impl StateSnapshotV2 {
         })
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         // Same ceiling as the V1 entry point and the bounded disk reader:
         // no snapshot is parsed before its size is checked, whoever hands
@@ -1356,20 +1469,21 @@ impl StateSnapshotV2 {
         let mut snapshot: StateSnapshotV2 = serde_json::from_slice(data)
             .map_err(|e| format!("Failed to parse snapshot V2: {e}"))?;
         snapshot.migration_report()?;
+        if !snapshot.verify() {
+            return Err(format!(
+                "snapshot schema {} does not match its own digest",
+                snapshot.schema_version
+            ));
+        }
         // C6 legacy import (RFC_GAP1 section 7.3, AllowUnsigned transition window):
         // Schema<4 snapshots arrived with the old digest; the new code recomputes
         // the schema-4 snapshot_hash + AllowUnsigned (devnet transition).
         // A RequireSigned production loader expects a signature (sign_manifest).
         if snapshot.schema_version < CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION {
-            // The old blob must match the digest of ITS OWN schema before it
-            // is rewritten; the rewrite recomputes the hash, so an edited
-            // legacy file would otherwise always pass.
-            if !snapshot.verify() {
-                return Err(format!(
-                    "legacy snapshot schema {} does not match its own digest",
-                    snapshot.schema_version
-                ));
-            }
+            // Older schemas never authenticated a B.U.D. registry. `verify()`
+            // above refuses nonempty copies; only a provably empty historical
+            // registry may be materialized into the required schema-14 field.
+            snapshot.bud3_registry.get_or_insert_with(Default::default);
             snapshot.schema_version = CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION;
             snapshot.snapshot_hash = snapshot.calculate_hash();
         }
@@ -1651,19 +1765,19 @@ mod tests {
     }
 
     #[test]
-    fn graft_watermarks_require_snapshot_schema_thirteen() {
+    fn app_binding_watermarks_require_snapshot_schema_fifteen() {
         let mut account_state = AccountState::new();
-        let id = crate::settlement::graft::graft_id(7, b"legacy-app");
-        account_state.settlement.graft.apps.insert(
+        let id = crate::settlement::app_binding::app_binding_id(7, b"legacy-app");
+        account_state.settlement.app_binding.apps.insert(
             id,
-            crate::settlement::graft::GraftApp {
-                graft_id: id,
+            crate::settlement::app_binding::AppBindingApp {
+                app_binding_id: id,
                 owner: Address::zero(),
                 domain_key: 7,
                 origin_app: b"legacy-app".to_vec(),
                 manifest_hash: [3u8; 32],
-                mirror_account: crate::settlement::graft::mirror_account(id),
-                status: crate::settlement::graft::GraftStatus::Active,
+                mirror_account: crate::settlement::app_binding::mirror_account(id),
+                status: crate::settlement::app_binding::AppBindingStatus::Active,
                 registered_at_block: 1,
                 claim_expiry: 0,
                 anchored_claim_cursor: None,
@@ -1681,18 +1795,18 @@ mod tests {
                 finality_certificates: vec![],
             },
         );
-        snapshot.schema_version = 12;
+        snapshot.schema_version = 14;
         snapshot.reseal_after_manual_edit();
         assert!(
             snapshot.verify(),
-            "default watermarks preserve a schema-12 snapshot commitment"
+            "default watermarks preserve a schema-14 snapshot commitment"
         );
 
         snapshot
             .settlement
             .as_mut()
             .unwrap()
-            .graft
+            .app_binding
             .apps
             .get_mut(&id)
             .unwrap()
@@ -1700,9 +1814,9 @@ mod tests {
         snapshot.reseal_after_manual_edit();
         assert!(
             !snapshot.verify(),
-            "a written watermark must not hide behind schema 12"
+            "a written watermark must not hide behind schema 14"
         );
-        snapshot.schema_version = 13;
+        snapshot.schema_version = 15;
         snapshot.reseal_after_manual_edit();
         assert!(snapshot.verify());
 
@@ -1712,7 +1826,7 @@ mod tests {
                 .settlement
                 .as_ref()
                 .unwrap()
-                .graft
+                .app_binding
                 .apps
                 .get(&id)
                 .unwrap()
@@ -2194,6 +2308,60 @@ mod tests {
         assert!(snapshot.verify_authentic(None).is_ok());
     }
 
+    #[test]
+    fn bud3_schema14_digest_binds_registry_and_refuses_legacy_unbound_state() {
+        let mut snapshot = StateSnapshotV2::from_state(&AccountState::new(), legacy_params(1));
+        assert_eq!(
+            snapshot.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
+        assert!(snapshot.verify());
+        let old_hash = snapshot.snapshot_hash.clone();
+        snapshot
+            .bud3_registry
+            .as_mut()
+            .expect("schema-14 snapshots carry B.U.D. registry")
+            .set_validator_quota([7; 32], 1_024);
+        assert_ne!(old_hash, snapshot.calculate_hash());
+        assert!(!snapshot.verify(), "undigested quota edits must not verify");
+        assert!(StateSnapshotV2::from_bytes(&snapshot.to_bytes()).is_err());
+
+        snapshot.reseal_after_manual_edit();
+        assert!(snapshot.verify(), "schema-14 digest binds the new value");
+        let mut legacy = snapshot.clone();
+        legacy.schema_version = 13;
+        legacy.reseal_after_manual_edit();
+        assert!(
+            !legacy.verify(),
+            "schema-13 cannot authenticate its B.U.D. payload"
+        );
+        assert!(legacy.migration_report().is_err());
+        assert!(StateSnapshotV2::from_bytes(&legacy.to_bytes()).is_err());
+
+        let mut missing = snapshot;
+        missing.bud3_registry = None;
+        missing.reseal_after_manual_edit();
+        assert!(
+            !missing.verify(),
+            "schema-14 cannot silently default a missing registry"
+        );
+    }
+
+    #[test]
+    fn empty_schema13_bud3_snapshot_remains_migratable() {
+        let mut legacy = StateSnapshotV2::from_state(&AccountState::new(), legacy_params(1));
+        legacy.schema_version = 13;
+        legacy.reseal_after_manual_edit();
+        assert!(legacy.verify());
+        let migrated = StateSnapshotV2::from_bytes(&legacy.to_bytes())
+            .expect("historical empty registry carries no unauthenticated B.U.D. data");
+        assert_eq!(
+            migrated.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
+        assert!(migrated.verify());
+    }
+
     /// `RequireSigned` with no trust list to compare against means "signed by
     /// Anyone who can sign": a key generated a second ago clears it. A
     /// Signature proves the manifest was signed, never that the signer is one
@@ -2632,6 +2800,10 @@ mod tests {
     /// Only the keys of the schema-12 change.
     const SCHEMA12_KEYS: &[&str] = &["reward_pool_enabled"];
 
+    /// Only the keys of the schema-13 change.
+    const SCHEMA13_KEYS: &[&str] = &["validator_directory"];
+    const SCHEMA14_KEYS: &[&str] = &["bud3_registry"];
+
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
     /// the seal is recomputed because the version changed.
@@ -2712,6 +2884,7 @@ mod tests {
             agg_sig_bls: vec![1, 2, 3],
             bitmap: vec![0u8],
             set_hash: "set".into(),
+            seat_table_version: 0,
         }
     }
 
@@ -2788,6 +2961,10 @@ mod tests {
             "scheme_registry",
             // the reward-pool flag (schema-12 bump: default-filled AND digested)
             "reward_pool_enabled",
+            // validator directory (schema-13 bump: default-filled AND digested)
+            "validator_directory",
+            // B.U.D. 3.0 registry (schema-14 digest; carried unbound in 13)
+            "bud3_registry",
             // identity registry (schema-5 bump: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 bump: same discipline)
@@ -2830,6 +3007,8 @@ mod tests {
                 SCHEMA10_KEYS,
                 SCHEMA11_KEYS,
                 SCHEMA12_KEYS,
+                SCHEMA13_KEYS,
+                SCHEMA14_KEYS,
             ]
             .concat(),
             2,
@@ -2847,6 +3026,8 @@ mod tests {
             SCHEMA10_KEYS,
             SCHEMA11_KEYS,
             SCHEMA12_KEYS,
+            SCHEMA13_KEYS,
+            SCHEMA14_KEYS,
         ]
         .concat()
         {
@@ -2962,6 +3143,8 @@ mod tests {
                 SCHEMA10_KEYS,
                 SCHEMA11_KEYS,
                 SCHEMA12_KEYS,
+                SCHEMA13_KEYS,
+                SCHEMA14_KEYS,
             ]
             .concat(),
             3,
@@ -2977,6 +3160,8 @@ mod tests {
             SCHEMA10_KEYS,
             SCHEMA11_KEYS,
             SCHEMA12_KEYS,
+            SCHEMA13_KEYS,
+            SCHEMA14_KEYS,
         ]
         .concat()
         {
@@ -3068,6 +3253,8 @@ mod tests {
                 SCHEMA10_KEYS,
                 SCHEMA11_KEYS,
                 SCHEMA12_KEYS,
+                SCHEMA13_KEYS,
+                SCHEMA14_KEYS,
             ]
             .concat(),
             4,
@@ -3082,6 +3269,8 @@ mod tests {
             SCHEMA10_KEYS,
             SCHEMA11_KEYS,
             SCHEMA12_KEYS,
+            SCHEMA13_KEYS,
+            SCHEMA14_KEYS,
         ]
         .concat()
         {

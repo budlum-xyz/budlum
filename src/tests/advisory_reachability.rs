@@ -170,6 +170,49 @@ mod tests {
         }
     }
 
+    /// The version floors above are `all` checks, and `all` over nothing is
+    /// true. So the crates they are about must be in the graphs they are
+    /// checked in: a floor on a crate that is not there says nothing, and
+    /// would go on saying nothing if the crate came back under another name
+    /// or the lockfile parser stopped finding it.
+    #[test]
+    fn patched_network_crates_are_in_the_graphs_their_floors_are_checked_in() {
+        for (name, crate_name) in [
+            ("Cargo.lock", "libp2p"),
+            ("Cargo.lock", "quinn-udp"),
+            ("Cargo.lock", "libp2p-gossipsub"),
+            ("budzero/Cargo.lock", "libp2p"),
+            ("budzero/Cargo.lock", "quinn-udp"),
+            ("fuzz/Cargo.lock", "libp2p"),
+            ("fuzz/Cargo.lock", "quinn-udp"),
+            ("fuzz/Cargo.lock", "libp2p-gossipsub"),
+        ] {
+            let lock = LOCKFILES
+                .iter()
+                .find(|(lock_name, _)| *lock_name == name)
+                .map_or_else(
+                    || panic!("{name} is not one of the lockfiles under test"),
+                    |(_, lock)| *lock,
+                );
+            assert!(
+                !locked_versions_in(lock, crate_name).is_empty(),
+                "{name}: {crate_name} is not in the graph, so its version floor checks nothing"
+            );
+        }
+        // No lockfile under test builds a git source: the floors read versions,
+        // and a version says what was built only for a registry package.
+        for (name, lock) in LOCKFILES {
+            assert!(
+                !lock.contains("source = \"git+"),
+                "{name} builds a git source; its version field does not say what was built"
+            );
+            assert!(
+                lock.contains("source = \"registry+"),
+                "{name} names no registry source; the lockfile under test is empty"
+            );
+        }
+    }
+
     /// No `[patch.crates-io]` may remain. It is what broke cargo-semver-checks,
     /// and all dependencies must resolve cleanly from crates.io.
     #[test]

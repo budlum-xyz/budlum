@@ -117,7 +117,7 @@ fn d4_relayer_gate_enforces_active_registration() {
 }
 
 /// Supply-chain attester gate: the primitive `verify_domain_commitment_finality`
-/// Calls to authorize PoA authorities.
+/// Calls to authorize `PoA` authorities.
 #[test]
 fn d4_attester_gate_enforces_active_registration() {
     let mut reg = PermissionlessRegistry::new();
@@ -166,7 +166,7 @@ fn d4_cross_role_slash_jails_all_four_domains() {
     assert!(matches!(validator.status, MemberStatus::Slashed));
 }
 
-/// AI_OPERATOR (RoleId 8) is preserved across merge, its RoleId is
+/// `AI_OPERATOR` (`RoleId` 8) is preserved across merge, its `RoleId` is
 /// Pinned and its registration path is intact.
 #[test]
 fn d4_ai_operator_preserved() {

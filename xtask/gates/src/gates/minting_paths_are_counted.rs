@@ -74,13 +74,23 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/execution/executor.rs",
-        3,
-        "bridge unlock inside a RelayerResult (the owner's burned share is \
-         returned; the relayer's cut was already minted on target arrival) and \
-         the two fee-split recipients of a transaction fee that was already \
-         paid - the application share to the recipient and the protocol share \
-         to the producer. The bridge mint inside a RelayerResult is not on \
-         this list: it creates supply and goes through `try_mint_balance`.",
+        6,
+        "two in `pay_claim_fees`: the aggregator share and the producer share \
+         of the claim fees of a block. `ClaimSettlement` charges each claim \
+         fee to the transaction that pays for the claim, and \
+         `finalize_block_with_claims` takes exactly that amount out of the \
+         fee the sender already paid before the burn and the fee split see \
+         it, so the two credits equal what was withheld and create no \
+         supply; a sender who cannot cover its claims is not executed and \
+         is charged nothing. One in `pay_agreeing_verifiers` (the requester's escrowed AI request \
+         fee `max_fee`, already debited when the request opened, split across \
+         the agreeing verifiers without creating supply), one bridge unlock \
+         inside a RelayerResult (the owner's burned share is returned; the \
+         relayer's cut was already minted on target arrival), and the two \
+         fee-split recipients of a transaction fee that was already paid - the \
+         application share to the recipient and the protocol share to the \
+         producer. The bridge mint inside a RelayerResult is not on this list: \
+         it creates supply and goes through `try_mint_balance`.",
     ),
     (
         "src/settlement/domains.rs",
@@ -93,7 +103,7 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          Every line moves recorded value back to the party that paid it in.",
     ),
     (
-        "src/settlement/graft.rs",
+        "src/settlement/app_binding.rs",
         1,
         "one in `credit`: the intent payment moves the user's own escrowed \
          funds to the solver on fulfilment - the amount the intent locked, \
@@ -127,10 +137,12 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          refund of a slashed deal returns the unserved part of that same \
          prepaid fee to the payer the ledger took it from; the missed-challenge \
          settlement returns the opener bond that `open_challenge` debited from \
-         the challenger; and the storage deal expiry sweep returns the operator \
-         bond that `open_deal` debited when the deal's term ends unrenewed. \
-         Each line puts back money this ledger already took, so none of them \
-         creates supply.",
+         the triggering challenger and also refunds the opener bond of every \
+         sibling open challenge resolved when the parent deal is slashed; and \
+         the storage deal expiry sweep returns the operator bond that \
+         `open_deal` debited when the deal's term ends unrenewed. Each line \
+         puts back money this ledger already took, so none of them creates \
+         supply.",
     ),
     (
         "src/cross_domain/bridge_tx.rs",
@@ -147,7 +159,9 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
         "the challenge settlement returns the opener's bond to the opener: the \
          amount `answer_challenge`'s debit side took out of the opener's \
          escrow when the challenge was opened, so the refund cannot exceed \
-         what was taken.",
+         what was taken; and `SlashDeal` refunds the opener bonds of any open \
+         challenges on the slashed deal that are resolved alongside the slash, \
+         returning only the exact escrowed bond each `open_challenge` debited.",
     ),
     (
         "src/tokenomics/reward_pool.rs",

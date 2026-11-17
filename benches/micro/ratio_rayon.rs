@@ -89,26 +89,36 @@ where
     }
 }
 
+/// A `usize` as `f64`, exact for every value a `u64` holds: the two 32-bit
+/// halves convert without loss and the sum is rounded once. The old code
+/// clamped the size to `u32::MAX` (about 4.3 GB), which would have reported a
+/// larger input's throughput as if it were 4.3 GB.
+#[must_use]
+fn usize_to_f64(n: usize) -> f64 {
+    let wide = u64::try_from(n).unwrap_or(u64::MAX);
+    let high = u32::try_from(wide >> 32).unwrap_or(u32::MAX);
+    let low = u32::try_from(wide & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+    f64::from(high) * 4_294_967_296.0 + f64::from(low)
+}
+
 /// MB/s from an input size and an elapsed time, guarded against a zero.
 #[must_use]
 fn mb_per_second(bytes: usize, spent: Duration) -> f64 {
-    let wide: u32 = u32::try_from(bytes).unwrap_or(u32::MAX);
     let secs = spent.as_secs_f64();
     if secs <= 0.0 {
         return f64::MAX;
     }
-    (f64::from(wide) / 1e6) / secs
+    (usize_to_f64(bytes) / 1e6) / secs
 }
 
 /// Serial duration over pool duration, guarded against a zero.
 #[must_use]
 fn speedup(serial: Duration, pool: Duration) -> f64 {
-    let a = u32::try_from(serial.as_micros()).unwrap_or(u32::MAX);
-    let b = u32::try_from(pool.as_micros()).unwrap_or(u32::MAX);
-    if b == 0 {
+    let pool_secs = pool.as_secs_f64();
+    if pool_secs <= 0.0 {
         return f64::MAX;
     }
-    f64::from(a) / f64::from(b)
+    serial.as_secs_f64() / pool_secs
 }
 
 fn main() {

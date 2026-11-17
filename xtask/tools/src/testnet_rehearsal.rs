@@ -13,7 +13,7 @@
 //! `budlum-indexer` processes on loopback using pre-built binaries in
 //! `target/release` (or `--bin-dir`), assembles a fresh testnet ceremony on
 //! chain `45261` wired as a 3-regular chordal ring, and runs the same live
-//! Graft, domain, delegation, BNS, faucet, and finality scenarios plus
+//! `AppBinding`, domain, delegation, BNS, faucet, and finality scenarios plus
 //! public/operator RPC split and multi-VM/storage checks.
 //!
 //! Each scenario's verdict and measurements go to the report file (default
@@ -141,6 +141,53 @@ fn is_eight_seat_repo(root: &Path) -> bool {
     root.join("ops/testnet-local-validator.py").is_file()
 }
 
+/// Four paired-seat launchers also represent eight validator identities, even
+/// though Compose has no separate `validator8` service.
+fn is_eight_seat_compose(compose: &str) -> bool {
+    compose.contains("\n  validator8:\n")
+        || count_text(
+            compose,
+            "entrypoint: [\"python3\", \"/home/budlum/testnet-local-validator.py\"]",
+        ) >= 4
+}
+
+/// Check the actual [rpc] key, not a substring of `operator_auth_required` or
+/// a comment. This dependency-free preflight only needs literal bools/integers.
+fn require_rpc_setting(profile: &str, key: &str, expected: &str) -> Result<(), String> {
+    let mut in_rpc = false;
+    let mut found = None;
+    for raw_line in profile.lines() {
+        let line = raw_line
+            .split_once('#')
+            .map_or(raw_line, |(before, _)| before)
+            .trim();
+        if line.starts_with('[') {
+            in_rpc = line == "[rpc]";
+            continue;
+        }
+        if !in_rpc {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.trim() != key {
+            continue;
+        }
+        if found.replace(value.trim()).is_some() {
+            return Err(format!("testnet profile has duplicate [rpc] {key}"));
+        }
+    }
+    if found == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "testnet profile [rpc] {key}: expected {expected}, got {}",
+            found.unwrap_or("<missing>")
+        ))
+    }
+}
+
 fn preflight(root: &Path) -> Result<Vec<String>, String> {
     let mut checks = Vec::new();
     let genesis = required_file(root, "config/testnet-genesis.json", &mut checks)?;
@@ -151,16 +198,16 @@ fn preflight(root: &Path) -> Result<Vec<String>, String> {
     let compose = required_file(root, COMPOSE_FILE, &mut checks)?;
     let profile = required_file(root, "config/testnet.toml", &mut checks)?;
     require_text(&profile, "chain_id = 45261", "testnet profile")?;
-    require_text(
+    require_rpc_setting(
         &profile,
-        &format!("rate_limit_per_minute = {TESTNET_RPC_RATE_LIMIT_PER_MINUTE}"),
-        "testnet profile",
+        "rate_limit_per_minute",
+        &TESTNET_RPC_RATE_LIMIT_PER_MINUTE.to_string(),
     )?;
-    if compose.contains("\n  validator8:\n") {
-        require_text(&profile, "auth_required = false", "testnet profile")?;
-        require_text(&profile, "operator_auth_required = true", "testnet profile")?;
+    if is_eight_seat_compose(&compose) {
+        require_rpc_setting(&profile, "auth_required", "false")?;
+        require_rpc_setting(&profile, "operator_auth_required", "true")?;
     } else {
-        require_text(&profile, "auth_required = true", "testnet profile")?;
+        require_rpc_setting(&profile, "auth_required", "true")?;
     }
     for service in [
         "validator1:",
@@ -431,50 +478,60 @@ impl LocalStack {
         }
     }
 
+    fn init_validator_seat(
+        &mut self,
+        root: &Path,
+        operators_dir: &Path,
+        seat: usize,
+    ) -> Result<(), String> {
+        let key_file = self.ceremony_dir.join(format!("validator{seat}.key"));
+        let rec_file = operators_dir.join(format!("validator{seat}.json"));
+        let moniker = format!("validator{seat}");
+        self.run_bin(
+            root,
+            "bud",
+            &[
+                "validator",
+                "init",
+                "--chain-id",
+                "45261",
+                "--moniker",
+                &moniker,
+                "--key-file",
+                &key_file.to_string_lossy(),
+                "--record-out",
+                &rec_file.to_string_lossy(),
+            ],
+        )?;
+        let id_file = self.ceremony_dir.join(format!("validator{seat}.p2p"));
+        let port = LOCAL_P2P_BASE
+            .checked_add(u16::try_from(seat).map_err(|_| "seat index overflow")?)
+            .ok_or("port overflow")?;
+        let id_out = self.run_bin(
+            root,
+            "bud",
+            &[
+                "node",
+                "identity",
+                "--identity-file",
+                &id_file.to_string_lossy(),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+            ],
+        )?;
+        let boot = line_value(&id_out, "bootnode (config [p2p] bootnodes): ")
+            .map(|raw| raw.trim_matches('"').to_string())
+            .ok_or_else(|| format!("node identity printed no bootnode for validator{seat}"))?;
+        self.bootnodes.push(boot);
+        Ok(())
+    }
+
     fn assemble_ceremony(&mut self, root: &Path) -> Result<(), String> {
         let operators_dir = self.ceremony_dir.join("operators");
         for seat in 1..=self.seats {
-            let key_file = self.ceremony_dir.join(format!("validator{seat}.key"));
-            let rec_file = operators_dir.join(format!("validator{seat}.json"));
-            let moniker = format!("validator{seat}");
-            self.run_bin(
-                root,
-                "bud",
-                &[
-                    "validator",
-                    "init",
-                    "--chain-id",
-                    "45261",
-                    "--moniker",
-                    &moniker,
-                    "--key-file",
-                    &key_file.to_string_lossy(),
-                    "--record-out",
-                    &rec_file.to_string_lossy(),
-                ],
-            )?;
-            let id_file = self.ceremony_dir.join(format!("validator{seat}.p2p"));
-            let port = LOCAL_P2P_BASE
-                .checked_add(u16::try_from(seat).map_err(|_| "seat index overflow")?)
-                .ok_or("port overflow")?;
-            let id_out = self.run_bin(
-                root,
-                "bud",
-                &[
-                    "node",
-                    "identity",
-                    "--identity-file",
-                    &id_file.to_string_lossy(),
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    &port.to_string(),
-                ],
-            )?;
-            let boot = line_value(&id_out, "bootnode (config [p2p] bootnodes): ")
-                .map(|raw| raw.trim_matches('"').to_string())
-                .ok_or_else(|| format!("node identity printed no bootnode for validator{seat}"))?;
-            self.bootnodes.push(boot);
+            self.init_validator_seat(root, &operators_dir, seat)?;
         }
 
         let faucet_seed = self.ceremony_dir.join("faucet.seed");
@@ -485,6 +542,28 @@ impl LocalStack {
         )?;
         let faucet_addr = line_value(&faucet_out, "faucet address: 0x")
             .ok_or("budlum-faucet keygen printed no address")?;
+        // The rehearsal wallets are ceremony output for the reason
+        // `Backend::wallet_path` gives: alice is a `.bud` primary seller, and
+        // that list is a genesis field.
+        let alice_key = self.ceremony_dir.join("alice.key");
+        let alice_out = self.run_bin(
+            root,
+            "bud",
+            &[
+                "wallet",
+                "create",
+                "--key-file",
+                &alice_key.to_string_lossy(),
+            ],
+        )?;
+        let alice_addr = line_value(&alice_out, "address: 0x")
+            .ok_or("bud wallet create printed no address for alice")?;
+        let bob_key = self.ceremony_dir.join("bob.key");
+        self.run_bin(
+            root,
+            "bud",
+            &["wallet", "create", "--key-file", &bob_key.to_string_lossy()],
+        )?;
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
@@ -511,6 +590,8 @@ impl LocalStack {
                 "5353535353535353535353535353535353535353535353535353535353535353",
                 "--burn-reserve",
                 "5454545454545454545454545454545454545454545454545454545454545454",
+                "--bns-primary-seller",
+                &alice_addr,
                 "--out",
                 &genesis_out.to_string_lossy(),
             ],
@@ -767,11 +848,18 @@ enum Backend<'a> {
 }
 
 impl Backend<'_> {
+    /// Where the rehearsal's `alice` / `bob` key file lives.
+    ///
+    /// The ceremony creates these, not the scenario: a `.bud` name is created
+    /// by an authorized primary seller opening a `Primary` offer, and the
+    /// seller list is public genesis input that is hashed, so the address has
+    /// to exist before `bud genesis assemble` runs. A key created later could
+    /// never be a seller of the chain it signs for.
     fn wallet_path(&self, name: &str) -> String {
         match self {
-            Self::Compose { .. } => format!("/tmp/rehearsal-{name}.key"),
+            Self::Compose { .. } => format!("/home/budlum/ceremony/{name}.key"),
             Self::Local { stack, .. } => stack
-                .work_dir
+                .ceremony_dir
                 .join(format!("{name}.key"))
                 .display()
                 .to_string(),
@@ -960,8 +1048,19 @@ pub fn line_value(output: &str, prefix: &str) -> Option<String> {
         .map(|rest| rest.trim().to_string())
 }
 
-/// The address `bud wallet create` printed, without its `0x`.
+/// The address a rehearsal key file holds, without its `0x`.
+///
+/// The ceremony creates `alice` and `bob` before the genesis is assembled, so
+/// the normal path is the read-only `wallet address`. `wallet create` runs
+/// only when the file is absent (a rehearsal against a stack whose ceremony
+/// predates this rule), because creating over an existing key would replace
+/// the address the genesis named.
 fn wallet(backend: &Backend<'_>, file: &str) -> Result<String, String> {
+    if let Ok(output) = backend.bud(&["wallet", "address", "--key-file", file]) {
+        if let Some(address) = line_value(&output, "0x") {
+            return Ok(address);
+        }
+    }
     let output = backend.bud(&["wallet", "create", "--key-file", file])?;
     line_value(&output, "address: 0x").ok_or_else(|| "wallet create printed no address".into())
 }
@@ -1162,42 +1261,95 @@ fn scenario_delegation(backend: &Backend<'_>, wallets: &Wallets) -> Result<Strin
 }
 
 fn scenario_bns(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, String> {
-    let name = "rehearsal.bud";
+    const NAME: &str = "rehearsal.bud";
+    const PRICE_ATOMS: &str = "1000";
+    const DURATION: &str = "1000";
+    // The offer has to outlive the whole scenario; the epoch ladder here is
+    // linear in blocks, so a four-digit epoch is a few minutes of chain time.
+    const EXPIRES_AT_EPOCH: &str = "1000000";
+    // There is no direct registration door: the BNS directive removed
+    // `BnsRegister`, so a name exists only after a `Primary` offer from an
+    // authorized seller is settled by a buyer. The ceremony names alice as the
+    // seller, so this is the same two transactions a user makes.
     backend.bud(&[
         "bns",
-        "register",
+        "create-offer",
         "--key-file",
         &wallets.alice_file,
         "--name",
-        name,
+        NAME,
+        "--price-atoms",
+        PRICE_ATOMS,
         "--duration",
-        "1000",
+        DURATION,
+        "--kind",
+        "Primary",
+        "--expires-at-epoch",
+        EXPIRES_AT_EPOCH,
+    ])?;
+    let offer_id = wait_for(60, || {
+        call("bud_bnsListOffers", "[]").as_ref().and_then(|offers| {
+            offers.as_array().and_then(|rows| {
+                rows.iter()
+                    .find(|row| row.get("name").and_then(crate::json::Value::as_str) == Some(NAME))
+                    .and_then(|row| row.get("id"))
+                    .and_then(crate::json::Value::as_u64)
+            })
+        })
+    })
+    .ok_or("the Primary offer did not appear within 120 s")?;
+    backend.bud(&[
+        "bns",
+        "buy",
+        "--key-file",
+        &wallets.bob_file,
+        "--offer-id",
+        &offer_id.to_string(),
     ])?;
     let owner = wait_for(60, || {
-        call("bud_bnsResolve", &format!("[\"{name}\"]"))
+        call("bud_bnsResolve", &format!("[\"{NAME}\"]"))
             .as_ref()
             .and_then(crate::json::Value::as_str)
             .map(str::to_string)
     })
     .ok_or("the name did not resolve within 120 s")?;
-    if owner.trim_start_matches("0x") != wallets.alice {
-        return Err(format!("{name} resolves to {owner}, not to its registrant"));
+    if owner.trim_start_matches("0x") != wallets.bob {
+        return Err(format!(
+            "{NAME} resolves to {owner}, not to the buyer who settled the offer"
+        ));
     }
-    Ok(format!("{name} -> {owner}"))
+    Ok(format!("{NAME} -> {owner} (offer {offer_id} settled)"))
 }
 
-fn scenario_graft(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, String> {
+fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, String> {
     const DOMAIN: &str = "4242";
     const ORIGIN: &str = "00000000000000000000000000000000000000aa";
+    // AppBinding deliberately refuses an arbitrary PoW domain as a trust
+    // anchor: its operator chooses the difficulty floor and could self-mine a
+    // root that authorizes a claim. The old rehearsal registered exactly that
+    // unsafe shape, so the Register transaction was correctly refused in block
+    // execution and both native and Compose jobs waited 120 s for a row that
+    // could never exist. Register an explicit PoA authority set instead. The
+    // same three ceremony validators that already secure this rehearsal are
+    // committed into the domain's validator_set_hash by the CLI.
+    let authority1 = backend.validator_address(1)?;
+    let authority2 = backend.validator_address(2)?;
+    let authority3 = backend.validator_address(3)?;
     backend.bud(&[
         "domain",
-        "register-pow",
+        "register-poa",
         "--key-file",
         &wallets.alice_file,
         "--id",
         DOMAIN,
         "--chain-id",
         "4242",
+        "--authority",
+        &authority1,
+        "--authority",
+        &authority2,
+        "--authority",
+        &authority3,
     ])?;
     wait_for(60, || {
         call("bud_getDomainInfo", &format!("[{DOMAIN}]"))
@@ -1206,25 +1358,31 @@ fn scenario_graft(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, St
             .filter(|registered| **registered == crate::json::Value::Bool(true))
             .map(|_| ())
     })
-    .ok_or("the PoW domain did not register within 120 s")?;
-    let ids = backend.bud(&["graft", "id", "--domain", DOMAIN, "--origin-app", ORIGIN])?;
-    let graft_id = line_value(&ids, "graft id: ").ok_or("graft id printed nothing")?;
-    let mirror = line_value(&ids, "mirror account: 0x").ok_or("graft id printed no mirror")?;
-    let app_binding_closed = match backend {
-        Backend::Compose { eight_seat, .. } => *eight_seat,
-        Backend::Local { stack, .. } => stack.eight_seat,
-    };
-    let signer_file = if app_binding_closed {
-        &wallets.bob_file
-    } else {
-        &wallets.alice_file
-    };
+    .ok_or("the PoA domain did not register within 120 s")?;
+    let ids = backend.bud(&[
+        "app-binding",
+        "id",
+        "--domain",
+        DOMAIN,
+        "--origin-app",
+        ORIGIN,
+    ])?;
+    let app_binding_id =
+        line_value(&ids, "app_binding id: ").ok_or("app_binding id printed nothing")?;
+    let mirror =
+        line_value(&ids, "mirror account: 0x").ok_or("app_binding id printed no mirror")?;
+    let query_params = format!("[\"{app_binding_id}\"]");
     let before_tip = tip();
-    let reg_attempt = backend.bud(&[
-        "graft",
+    // Remote app binding (`app_binding`) is closed on public testnet (45261)
+    // and mainnet (45260); only devnet (45262) keeps the door open. Verify the
+    // live fail-closed boundary (G-7): registration must either be refused at
+    // submission or dropped in execution without creating a binding row or
+    // crediting the mirror account.
+    let register_result = backend.bud(&[
+        "app-binding",
         "register",
         "--key-file",
-        signer_file,
+        &wallets.alice_file,
         "--domain",
         DOMAIN,
         "--origin-app",
@@ -1232,43 +1390,33 @@ fn scenario_graft(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, St
         "--manifest",
         "1111111111111111111111111111111111111111111111111111111111111111",
     ]);
-    let query_params = format!("[\"{graft_id}\"]");
-    let lookup_registered = || {
-        call("bud_getGraftApplication", &query_params)
-            .filter(|value| *value != crate::json::Value::Null)
+    let refusal_stage = if let Err(err) = register_result {
+        format!("refused at submission ({err})")
+    } else {
+        wait_for(30, || {
+            let now = tip();
+            (now >= before_tip.saturating_add(2)).then_some(now)
+        })
+        .ok_or("chain did not advance 2 blocks after AppBinding closed-feature probe")?;
+        String::from("refused in execution")
     };
-    if app_binding_closed {
-        if reg_attempt.is_ok() {
-            let _ = wait_for(15, || (tip() >= before_tip + 2).then_some(()));
-        }
-        if lookup_registered().is_some() {
-            return Err("app_binding registered on testnet despite containment".into());
-        }
-        return Ok(format!(
-            "domain {DOMAIN} registered; app_binding (mirror 0x{mirror}) contained on chain 45261"
+    let registered = call("bud_getAppBindingApplication", &query_params);
+    if registered
+        .as_ref()
+        .is_some_and(|v| *v != crate::json::Value::Null)
+    {
+        return Err(format!(
+            "AppBinding {app_binding_id} unexpectedly registered on closed testnet {CHAIN_ID}"
         ));
     }
-    reg_attempt?;
-    wait_for(60, lookup_registered).ok_or("the Graft application did not register within 120 s")?;
-    backend.bud(&[
-        "graft",
-        "pay",
-        "--key-file",
-        &wallets.alice_file,
-        "--graft-id",
-        &graft_id,
-        "--amount",
-        "5000",
-        "--origin-recipient",
-        "01",
-    ])?;
-    let held = wait_for(60, || {
-        let amount = balance(&mirror);
-        (amount >= 5000).then_some(amount)
-    })
-    .ok_or("the Graft payment did not reach the mirror within 120 s")?;
+    let held = balance(&mirror);
+    if held != 0 {
+        return Err(format!(
+            "AppBinding mirror 0x{mirror} unexpectedly holds {held} on closed testnet {CHAIN_ID}"
+        ));
+    }
     Ok(format!(
-        "application {graft_id}: mirror 0x{mirror} holds {held}"
+        "PoA domain {DOMAIN} registered; AppBinding {app_binding_id} stayed closed ({refusal_stage})"
     ))
 }
 
@@ -1570,8 +1718,8 @@ fn run_scenarios(backend: &mut Backend<'_>) -> Vec<Verdict> {
     ) && push("7. delegation", scenario_delegation(backend, &wallets))
         && push("8. BNS name", scenario_bns(backend, &wallets))
         && push(
-            "9. Graft register and pay",
-            scenario_graft(backend, &wallets),
+            "9. AppBinding register and pay",
+            scenario_app_binding(backend, &wallets),
         )
         && push("10. load", scenario_load(backend, &wallets))
         && push("11. validator loss and rejoin", scenario_chaos(backend));
@@ -1717,10 +1865,32 @@ mod tests {
     #[test]
     fn native_rpc_budget_matches_the_bounded_testnet_profile() {
         let profile = include_str!("../../../config/testnet.toml");
-        let needle = format!("rate_limit_per_minute = {TESTNET_RPC_RATE_LIMIT_PER_MINUTE}");
-        assert!(require_text(profile, &needle, "testnet profile").is_ok());
-        let drifted = profile.replace(&needle, "rate_limit_per_minute = 120");
-        assert!(require_text(&drifted, &needle, "testnet profile").is_err());
+        let expected = TESTNET_RPC_RATE_LIMIT_PER_MINUTE.to_string();
+        assert!(require_rpc_setting(profile, "rate_limit_per_minute", &expected).is_ok());
+        let drifted = profile.replace("rate_limit_per_minute = 600", "rate_limit_per_minute = 120");
+        assert!(require_rpc_setting(&drifted, "rate_limit_per_minute", &expected).is_err());
+    }
+
+    #[test]
+    fn paired_seats_require_exact_public_and_operator_rpc_policy() {
+        let compose = include_str!("../../../ops/testnet-local.yml");
+        assert!(is_eight_seat_compose(compose), "four paired-seat launchers");
+        assert!(!compose.contains("\n  validator8:\n"));
+        assert!(!is_eight_seat_compose("\n  validator4:\n"));
+
+        let profile = include_str!("../../../config/testnet.toml");
+        assert!(require_rpc_setting(profile, "auth_required", "false").is_ok());
+        assert!(require_rpc_setting(profile, "operator_auth_required", "true").is_ok());
+        let no_public_auth_key = profile.replacen("auth_required = false\n", "", 1);
+        assert!(require_rpc_setting(&no_public_auth_key, "auth_required", "true").is_err());
+        let closed_public_auth = profile.replace("auth_required = false", "auth_required = true");
+        assert!(require_rpc_setting(&closed_public_auth, "auth_required", "false").is_err());
+        assert!(require_rpc_setting(
+            "[rpc]\n# auth_required = false\noperator_auth_required = true\n",
+            "auth_required",
+            "true"
+        )
+        .is_err());
     }
 
     #[test]
@@ -1740,7 +1910,13 @@ mod tests {
             .split_once("\n  validator2:\n")
             .expect("validator2 service")
             .0;
-        assert!(bootnode.contains("bash -c 'exec 3<>/dev/tcp/127.0.0.1/5001'"));
+        assert!(bootnode.contains("bash -c 'exec 3<>/dev/tcp/127.0.0.1/5001"));
+        if is_eight_seat_compose(compose) {
+            assert!(
+                bootnode.contains("&& exec 4<>/dev/tcp/127.0.0.1/5002'"),
+                "the second validator seat must listen before other containers dial it"
+            );
+        }
         for (service, next) in [
             ("validator2", "validator3"),
             ("validator3", "validator4"),
@@ -1960,5 +2136,71 @@ mod tests {
         let text = report_text(&verdicts);
         assert!(text.contains("| 1. chain is live | pass | tip 1 -> 2 |"));
         assert!(text.contains("| 2. four PoS producers | FAIL | only 3 \\| producers |"));
+    }
+
+    #[test]
+    fn compose_rehearsal_gives_each_p2p_service_a_distinct_slash24_and_healthcheck() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("xtask/tools lives two levels below repo root");
+        let compose =
+            fs::read_to_string(root.join(COMPOSE_FILE)).expect("read ops/testnet-local.yml");
+
+        let mut subnets = BTreeSet::new();
+        for service in [
+            "validator1",
+            "validator2",
+            "validator3",
+            "validator4",
+            "rpc",
+        ] {
+            let header = format!("  {service}:\n");
+            let start = compose
+                .find(&header)
+                .unwrap_or_else(|| panic!("missing service {service} in {COMPOSE_FILE}"));
+            let rest = &compose[start + header.len()..];
+            let end = rest
+                .lines()
+                .scan(0usize, |offset, line| {
+                    let pos = *offset;
+                    *offset += line.len() + 1;
+                    Some((pos, line))
+                })
+                .find(|(_, line)| {
+                    (!line.starts_with(' ') && !line.is_empty() && !line.starts_with('#'))
+                        || (line.starts_with("  ")
+                            && !line.starts_with("   ")
+                            && line.trim_end().ends_with(':'))
+                })
+                .map_or(rest.len(), |(pos, _)| pos);
+            let block = &rest[..end];
+
+            let ip = block
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("ipv4_address:"))
+                .map_or_else(
+                    || panic!("{service} must pin a static ipv4_address"),
+                    str::trim,
+                );
+            let octets: Vec<&str> = ip.split('.').collect();
+            assert_eq!(octets.len(), 4, "{service} invalid IPv4 address: {ip}");
+            let slash24 = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
+            assert!(
+                subnets.insert(slash24.clone()),
+                "{service} shares /24 subnet {slash24} with another P2P container, \
+                 which collides with Network::Testnet max_peers_per_subnet = 4"
+            );
+
+            if service.starts_with("validator") {
+                assert!(
+                    block.contains("/dev/tcp/127.0.0.1/5001")
+                        && block.contains("/dev/tcp/127.0.0.1/5002"),
+                    "{service} must probe both seat P2P sockets in its healthcheck"
+                );
+            }
+        }
+        assert_eq!(subnets.len(), 5);
+        assert!(compose.contains("subnet: 172.28.0.0/16"));
     }
 }

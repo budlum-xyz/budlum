@@ -2,17 +2,62 @@
 //!
 //! Provides deterministic model registry specifications, bounded execution reference
 //! Payloads, attestation request/result primitives, and consensus agreement outcomes.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Maximum allowed byte size for `input_ref` or `output_ref` payloads (`64 KiB`).
-/// Prevents state/mempool/snapshot DoS vectors via oversize inference references.
+/// Prevents state/mempool/snapshot `DoS` vectors via oversize inference references.
 pub const MAX_INFERENCE_REF_BYTES: usize = 65_536;
 
-/// Highest whitelisted execution class id (1 = FixedPointMlpV1, 0 = none).
+/// Highest whitelisted execution class id (1 = `FixedPointMlpV1`, 0 = none).
 const MAX_EXECUTION_CLASS: u8 = 1;
+
+/// Basis of the fixed-point reputation scores: one unit of trust is
+/// `10_000` permyriad (basis points).  / .
+///
+/// The scores used to exist only as `f64`, and the registry sorted on them.
+/// A float is not a safe ordering key: the last bit depends on how the node
+/// was built, and `partial_cmp` turns a `NaN` into `Equal`, which silently
+/// reorders a ranking. The integer score is now the ordering key and the
+/// value that crosses the actor/RPC boundary; the `f64` stays as a display
+/// column derived from the same counters.
+pub const TRUST_SCORE_BASIS_POINTS: u64 = 10_000;
+
+/// Equivocation penalty per event, in permyriad of the score.
+/// Mirrors the `0.1` and `0.15` factors the display scores use.
+const VERIFIER_EQUIVOCATION_PENALTY_PERMYRIAD: u64 = 1_000;
+const AGENT_EQUIVOCATION_PENALTY_PERMYRIAD: u64 = 1_500;
+
+/// Trust weights: 40% payment reliability, 60% inference quality.
+const PAYMENT_WEIGHT_PERMYRIAD: u64 = 4_000;
+const INFERENCE_WEIGHT_PERMYRIAD: u64 = 6_000;
+
+/// `numerator / denominator` in permyriad, truncated toward zero.
+///
+/// Widens to `u128` before multiplying: the counters are `u64` and reach
+/// `u64::MAX` in a long-lived registry, so `counter * 10_000` overflows in
+/// `u64` ('s arithmetic leg). A ratio above one saturates at the basis
+/// instead of wrapping, which keeps the score total over every counter pair.
+fn permyriad_of_ratio(numerator: u64, denominator: u64) -> u64 {
+    if denominator == 0 {
+        return 0;
+    }
+    let scaled =
+        u128::from(numerator) * u128::from(TRUST_SCORE_BASIS_POINTS) / u128::from(denominator);
+    let capped = scaled.min(u128::from(TRUST_SCORE_BASIS_POINTS));
+    u64::try_from(capped).unwrap_or(TRUST_SCORE_BASIS_POINTS)
+}
+
+/// Applies a permyriad factor to a permyriad score, truncating toward zero.
+fn permyriad_scale(value: u64, factor_permyriad: u64) -> u64 {
+    let scaled =
+        u128::from(value) * u128::from(factor_permyriad) / u128::from(TRUST_SCORE_BASIS_POINTS);
+    let capped = scaled.min(u128::from(TRUST_SCORE_BASIS_POINTS));
+    u64::try_from(capped).unwrap_or(TRUST_SCORE_BASIS_POINTS)
+}
 
 /// Most verifiers a model may require for one request. A larger quorum could
 /// never be met and would keep every request pending until its deadline.
@@ -95,6 +140,11 @@ impl TryFrom<Vec<u8>> for BoundedBytes {
 }
 
 impl BoundedBytes {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn try_new(bytes: Vec<u8>) -> Result<Self, String> {
         if bytes.len() > MAX_INFERENCE_REF_BYTES {
             return Err(format!(
@@ -147,10 +197,10 @@ pub struct AiModelSpec {
     /// Default false = attestation-only (mainnet v1 compatible).
     #[serde(default)]
     pub require_execution_proof: bool,
-    /// BudZKVM guest program hash when execution class is registered.
+    /// `BudZKVM` guest program hash when execution class is registered.
     #[serde(default)]
     pub execution_program_hash: Option<[u8; 32]>,
-    /// Whitelisted execution class id (1 = FixedPointMlpV1). 0 = none.
+    /// Whitelisted execution class id (1 = `FixedPointMlpV1`). 0 = none.
     #[serde(default)]
     pub execution_class: u8,
     /// Digest of the model's weights and biases, as produced by
@@ -206,6 +256,11 @@ pub struct AiModelSpec {
 }
 
 impl AiModelSpec {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.min_verifier_count == 0 {
             return Err("min_verifier_count must be >= 1".into());
@@ -450,7 +505,7 @@ impl AiInferenceRequest {
     }
 }
 
-/// AI inference result submitted by an active bonded AI inference layer operator (RoleId 8).
+/// AI inference result submitted by an active bonded AI inference layer operator (`RoleId` 8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiInferenceResult {
     pub request_id: AiRequestId,
@@ -577,7 +632,7 @@ pub struct AiVerifierStakeInfo {
 /// research and integration task."
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiExecutionProof {
-    /// The model that produced this inference. The ZKVM program_hash must
+    /// The model that produced this inference. The ZKVM `program_hash` must
     /// Match this model's registered `model_hash` - this is the cryptographic
     /// Binding between the proof and the model.
     pub model_id: AiModelId,
@@ -590,7 +645,7 @@ pub struct AiExecutionProof {
     /// The ZKVM program hash - keccak256 of the model's bytecode.
     /// This binds the proof to a specific model implementation.
     pub program_hash: [u8; 32],
-    /// The STARK proof envelope bytes produced by BudZKVM.
+    /// The STARK proof envelope bytes produced by `BudZKVM`.
     /// Contains the actual mathematical proof that can be verified.
     pub proof_bytes: Vec<u8>,
     /// Number of execution steps in the ZKVM trace.
@@ -752,7 +807,7 @@ impl AiExecutionProof {
     }
 }
 
-/// Verifier Quality of Service (QoS) reputation.
+/// Verifier Quality of Service (`QoS`) reputation.
 ///
 /// In the Agentic Economy paradigm, verifier stake is not just a slashing
 /// Deposit - it's also a service quality guarantee. Agents selecting verifiers
@@ -772,14 +827,14 @@ pub struct AiVerifierQos {
     /// Number of equivocation events (slashing events).
     pub equivocation_count: u64,
     /// Average response time in blocks (request submission to result submission).
-    /// Computed as sum_of_response_blocks / total_results_submitted.
+    /// Computed as `sum_of_response_blocks` / `total_results_submitted`.
     pub avg_response_blocks: u64,
     /// Last block at which this verifier submitted a result.
     pub last_active_block: u64,
 }
 
 impl AiVerifierQos {
-    /// Create a new QoS record with zero metrics.
+    /// Create a new `QoS` record with zero metrics.
     pub fn new(verifier: Address) -> Self {
         Self {
             verifier,
@@ -818,10 +873,34 @@ impl AiVerifierQos {
         self.equivocation_count = self.equivocation_count.saturating_add(1);
     }
 
+    /// The reliability score in permyriad (`0..=10_000`), integer only.
+    ///
+    /// This is the ordering key `AiRegistry::verifiers_by_reliability` sorts
+    /// on and the value a caller should carry across a process boundary
+    /// ( / ). Same factors as [`Self::reliability_score`]:
+    /// finalization rate, times one minus a saturating equivocation penalty.
+    /// Every step truncates toward zero and widens before it multiplies, so
+    /// the result is identical on every node and total over `u64` counters.
+    #[must_use]
+    pub fn reliability_score_permyriad(&self) -> u64 {
+        if self.total_results_submitted == 0 {
+            return 0;
+        }
+        let finalization_rate =
+            permyriad_of_ratio(self.successful_finalizations, self.total_results_submitted);
+        let penalty = self
+            .equivocation_count
+            .saturating_mul(VERIFIER_EQUIVOCATION_PENALTY_PERMYRIAD)
+            .min(TRUST_SCORE_BASIS_POINTS);
+        permyriad_scale(finalization_rate, TRUST_SCORE_BASIS_POINTS - penalty)
+    }
+
     /// Calculate a reliability score (0.0 - 1.0).
     ///
     /// Display only (Z8): uses f64. It must never feed consensus, verifier
-    /// selection or fees. The state root hashes the integer counters only.
+    /// selection or fees - the ranking sorts on
+    /// [`Self::reliability_score_permyriad`]. The state root hashes the
+    /// integer counters only.
     /// Higher is better. Factors in:
     /// - Finalization rate (successful / total)
     /// - Equivocation penalty
@@ -870,7 +949,9 @@ impl AiInferenceOutcome {
         hasher.update(b"BDLM_AI_OUTCOME_LEAF_V1");
         hasher.update(self.request_id.0);
         hasher.update(self.output_commitment);
+        hasher.update((self.output_ref.len() as u64).to_le_bytes());
         hasher.update(self.output_ref.as_slice());
+        hasher.update((self.agreeing_verifiers.len() as u64).to_le_bytes());
         for verifier in &self.agreeing_verifiers {
             hasher.update(verifier.as_bytes());
         }
@@ -893,7 +974,7 @@ impl AiInferenceOutcome {
 /// or with humans." This type enables:
 ///
 /// 1. **Inference-linked payments** - agent pays for inference results
-///    (request_id binds the payment to a specific AI inference outcome)
+///    (`request_id` binds the payment to a specific AI inference outcome)
 /// 2. **Autonomous agent payments** - agent-to-agent value transfer without
 ///    Human intervention (the foundation of Agentic Economy)
 /// 3. **Escrow-gated** - payments can be escrowed until a condition is met
@@ -903,7 +984,7 @@ impl AiInferenceOutcome {
 /// Amount, sender loses amount + fee) or it fails (no state change).
 ///
 /// Future: ZKVM verification gate - payment only releases if an
-/// AiExecutionProof is attached and verified (trustless settlement).
+/// `AiExecutionProof` is attached and verified (trustless settlement).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiAgentPayment {
     /// Unique payment identifier.
@@ -918,7 +999,7 @@ pub struct AiAgentPayment {
     /// If set, payment is escrowed until the outcome is finalized.
     pub request_id: Option<AiRequestId>,
     /// Optional: Require execution proof for payment release.
-    /// If true, the recipient must attach an AiExecutionProof before
+    /// If true, the recipient must attach an `AiExecutionProof` before
     /// The escrowed payment is released - this is the "trustless" path.
     pub require_proof: bool,
     /// Block when this payment was submitted.
@@ -1036,11 +1117,55 @@ impl AiAgentReputation {
         self.active_block_span = current_block.saturating_sub(self.first_active_block);
     }
 
+    /// The trust score in permyriad (`0..=10_000`), integer only.
+    ///
+    /// The ordering key behind `AiRegistry::agents_by_trust_score*` and the
+    /// value the actor/RPC boundary carries ( / ). Weights and
+    /// penalties match [`Self::trust_score`]: 40% payment reliability, 60%
+    /// inference quality, a saturating equivocation penalty, and a neutral
+    /// full score for a dimension with no data. An agent with neither
+    /// agent with neither payments nor results scores zero, as the display score
+    /// does.
+    #[must_use]
+    pub fn trust_score_permyriad(&self) -> u64 {
+        let total_payments = self
+            .payments_completed
+            .saturating_add(self.payments_defaulted);
+        if total_payments == 0 && self.results_submitted == 0 {
+            return 0;
+        }
+
+        let payment_reliability = if total_payments > 0 {
+            permyriad_of_ratio(self.payments_completed, total_payments)
+        } else {
+            TRUST_SCORE_BASIS_POINTS
+        };
+
+        let inference_quality = if self.results_submitted > 0 {
+            let finalization_rate =
+                permyriad_of_ratio(self.results_finalized, self.results_submitted);
+            let penalty = self
+                .equivocations
+                .saturating_mul(AGENT_EQUIVOCATION_PENALTY_PERMYRIAD)
+                .min(TRUST_SCORE_BASIS_POINTS);
+            permyriad_scale(finalization_rate, TRUST_SCORE_BASIS_POINTS - penalty)
+        } else {
+            TRUST_SCORE_BASIS_POINTS
+        };
+
+        let weighted = u128::from(payment_reliability) * u128::from(PAYMENT_WEIGHT_PERMYRIAD)
+            + u128::from(inference_quality) * u128::from(INFERENCE_WEIGHT_PERMYRIAD);
+        u64::try_from(weighted / u128::from(TRUST_SCORE_BASIS_POINTS))
+            .unwrap_or(TRUST_SCORE_BASIS_POINTS)
+    }
+
     /// Calculate the agent's trust score (0.0 - 1.0).
     ///
     /// Display only (Z8): uses f64. It must never feed consensus, verifier
-    /// selection or fees. The state root hashes the integer counters only.
-    /// Factors in payment reliability, inference quality, and equivocation rate.
+    /// selection or fees - the ranking sorts on
+    /// [`Self::trust_score_permyriad`]. The state root hashes the integer
+    /// counters only. Factors in payment reliability, inference quality, and
+    /// equivocation rate.
     pub fn trust_score(&self) -> f64 {
         let total_payments = self
             .payments_completed
@@ -1100,7 +1225,7 @@ pub enum AiPaymentEscrowStatus {
 }
 
 /// Immutable settlement receipt kept after a payment leaves the live escrow map.
-/// Prevents payment_id reuse and preserves audit/root inclusion.
+/// Prevents `payment_id` reuse and preserves audit/root inclusion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiAgentPaymentSettlement {
     pub payment_id: [u8; 32],
@@ -1332,7 +1457,7 @@ mod tests {
         let mut s = valid_spec();
         s.execution_dims = Some(vec![2, 1]);
         let with_dims = s.calculate_leaf();
-        assert_ne!(base, with_dims, "P31-F02: dims must change the leaf");
+        assert_ne!(base, with_dims, "dimensions must change the leaf");
         s.execution_dims = Some(vec![2, 2]);
         assert_ne!(
             with_dims,
@@ -1341,11 +1466,7 @@ mod tests {
         );
         let mut m = valid_spec();
         m.modalities = crate::ai_inference::perception::ModalitySet::none();
-        assert_ne!(
-            base,
-            m.calculate_leaf(),
-            "P31-F02: modalities must change the leaf"
-        );
+        assert_ne!(base, m.calculate_leaf(), "modalities must change the leaf");
     }
 
     #[test]
@@ -1492,5 +1613,96 @@ mod tests {
         let mut b = AiAgentReputation::new(addr(1));
         b.record_request(11);
         assert_ne!(a.calculate_leaf(), b.calculate_leaf());
+    }
+}
+
+#[cfg(test)]
+mod permyriad_tests {
+    //!  / : the integer scores are exact, bounded and total.
+    use super::{AiAgentReputation, AiVerifierQos, TRUST_SCORE_BASIS_POINTS};
+    use crate::core::address::Address;
+
+    fn addr(byte: u8) -> Address {
+        Address::from([byte; 32])
+    }
+
+    #[test]
+    fn reliability_permyriad_is_exact_and_bounded() {
+        let mut qos = AiVerifierQos::new(addr(1));
+        assert_eq!(qos.reliability_score_permyriad(), 0, "no data scores zero");
+        qos.total_results_submitted = 3;
+        qos.successful_finalizations = 1;
+        // 1/3 = 3333.33.. bp, truncated toward zero, never rounded up.
+        assert_eq!(qos.reliability_score_permyriad(), 3_333);
+        qos.equivocation_count = 1;
+        // 3333 * 9000 / 10000 = 2999.7 -> 2999
+        assert_eq!(qos.reliability_score_permyriad(), 2_999);
+        qos.equivocation_count = 10;
+        assert_eq!(qos.reliability_score_permyriad(), 0, "penalty saturates");
+        qos.equivocation_count = u64::MAX;
+        assert_eq!(qos.reliability_score_permyriad(), 0, "no overflow");
+    }
+
+    #[test]
+    fn trust_permyriad_weights_are_forty_sixty() {
+        let mut rep = AiAgentReputation::new(addr(1));
+        assert_eq!(rep.trust_score_permyriad(), 0, "no data scores zero");
+        rep.payments_completed = 1;
+        // Payments only: 1.0 * 0.4 + neutral 1.0 * 0.6 = 1.0
+        assert_eq!(rep.trust_score_permyriad(), TRUST_SCORE_BASIS_POINTS);
+        rep.results_submitted = 2;
+        rep.results_finalized = 1;
+        rep.equivocations = 1;
+        // payment 10000; inference (5000 * 8500 / 10000) = 4250
+        // trust = (10000*4000 + 4250*6000)/10000 = 6550
+        assert_eq!(rep.trust_score_permyriad(), 6_550);
+        rep.payments_defaulted = 1;
+        // payment 5000 -> (5000*4000 + 4250*6000)/10000 = 4550
+        assert_eq!(rep.trust_score_permyriad(), 4_550);
+    }
+
+    /// G-2: the same counters give the same score on every node, and the
+    /// score never leaves `0..=10_000`.
+    #[test]
+    fn permyriad_scores_are_total_over_extreme_counters() {
+        for counter in [0u64, 1, 2, 7, u64::MAX / 2, u64::MAX] {
+            let mut qos = AiVerifierQos::new(addr(1));
+            qos.total_results_submitted = counter;
+            qos.successful_finalizations = counter;
+            qos.equivocation_count = counter;
+            assert!(qos.reliability_score_permyriad() <= TRUST_SCORE_BASIS_POINTS);
+
+            let mut rep = AiAgentReputation::new(addr(1));
+            rep.payments_completed = counter;
+            rep.payments_defaulted = counter;
+            rep.results_submitted = counter;
+            rep.results_finalized = counter;
+            rep.equivocations = counter;
+            assert!(rep.trust_score_permyriad() <= TRUST_SCORE_BASIS_POINTS);
+        }
+    }
+}
+
+#[cfg(test)]
+mod permyriad_clamp_tests {
+    //! A counter pair that claims more finalizations than submissions is a
+    //! malformed row, not a score above one: the ratio caps at the basis.
+    use super::{AiAgentReputation, AiVerifierQos, TRUST_SCORE_BASIS_POINTS};
+    use crate::core::address::Address;
+
+    #[test]
+    fn a_ratio_above_one_caps_at_the_basis() {
+        let mut qos = AiVerifierQos::new(Address::from([1u8; 32]));
+        qos.total_results_submitted = 1;
+        qos.successful_finalizations = 20_000;
+        assert_eq!(qos.reliability_score_permyriad(), TRUST_SCORE_BASIS_POINTS);
+
+        // The agent leg reaches the same cap through `results_finalized`:
+        // a row that claims more finalizations than submissions must not
+        // produce a trust score above one unit.
+        let mut rep = AiAgentReputation::new(Address::from([1u8; 32]));
+        rep.results_submitted = 1;
+        rep.results_finalized = 20_000;
+        assert_eq!(rep.trust_score_permyriad(), TRUST_SCORE_BASIS_POINTS);
     }
 }

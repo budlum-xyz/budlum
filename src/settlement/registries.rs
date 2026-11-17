@@ -17,6 +17,7 @@ use crate::core::hash::hash_fields_bytes;
 use crate::cross_domain::external::IntakeState;
 use crate::cross_domain::UniversalRelayer;
 use crate::domain::{ConsensusDomainRegistry, DomainCommitmentRegistry, SovereignDomainRegistry};
+use crate::object_layer::ObjectLayerRegistry;
 use crate::prover::ProofClaimRegistry;
 use crate::security::quantum_canary::CanaryBook;
 use crate::settlement::global_block::GlobalHeaderWindow;
@@ -47,10 +48,10 @@ pub struct SettlementRegistries {
     /// Written only by `SettlementTx::RelayerIntent`.
     #[serde(default)]
     pub relayer_policy: crate::relayer::RelayerPolicyRegistry,
-    /// Graft applications, mirror payments, externally proven claims, and
-    /// solver-intent bindings. Every write enters through `SettlementTx::Graft`.
+    /// AppBinding applications, mirror payments, externally proven claims, and
+    /// solver-intent bindings. Every write enters through `SettlementTx::AppBinding`.
     #[serde(default)]
-    pub graft: crate::settlement::graft::GraftRegistry,
+    pub app_binding: crate::settlement::app_binding::AppBindingRegistry,
     /// The finality checkpoint headers: built by the transition of
     /// every checkpoint block from the state at its end.
     pub global_headers: GlobalHeaderWindow,
@@ -66,6 +67,11 @@ pub struct SettlementRegistries {
     /// absent from the serialization and from the root.
     #[serde(default, skip_serializing_if = "CanaryBook::is_empty")]
     pub quantum: CanaryBook,
+    /// The Universal Object Layer. Written only by
+    /// `ObjectLayerTx`; closed on the testnet until its activation height.
+    /// Empty: absent from the serialization and from the root.
+    #[serde(default, skip_serializing_if = "ObjectLayerRegistry::is_empty")]
+    pub object_layer: ObjectLayerRegistry,
 }
 
 impl SettlementRegistries {
@@ -88,10 +94,11 @@ impl SettlementRegistries {
             && self.proof_claims.is_empty()
             && self.relayer.is_empty()
             && self.relayer_policy.is_empty()
-            && self.graft.is_empty()
+            && self.app_binding.is_empty()
             && self.global_headers.is_empty()
             && self.shared_security.is_empty()
             && self.quantum.is_empty()
+            && self.object_layer.is_empty()
     }
 
     /// True when the external intake holds any record. The block clock does
@@ -138,7 +145,7 @@ impl SettlementRegistries {
         let proof_claims = self.proof_claims.root();
         let relayer = self.relayer.state_root();
         let relayer_policy = self.relayer_policy.root();
-        let graft = self.graft.root();
+        let app_binding = self.app_binding.root();
         let headers = self.global_headers.root();
         let mut fields: Vec<&[u8]> = vec![
             b"BDLM_SETTLEMENT_REGISTRIES_V1",
@@ -150,7 +157,7 @@ impl SettlementRegistries {
             &proof_claims,
             &relayer,
             &relayer_policy,
-            &graft,
+            &app_binding,
             &headers,
         ];
         // Mikoriza joins only once it holds something, like the canary book.
@@ -164,6 +171,13 @@ impl SettlementRegistries {
         let quantum = self.quantum.state_root();
         if !self.quantum.is_empty() {
             fields.push(&quantum);
+        }
+        // The object layer joins only once it holds a record, so a chain that
+        // never chartered a domain keeps its pinned roots.
+        let object_layer = self.object_layer.root();
+        if !self.object_layer.is_empty() {
+            fields.push(b"BDLM_OBJECT_LAYER_V1");
+            fields.push(&object_layer);
         }
         hash_fields_bytes(&fields)
     }
@@ -194,13 +208,41 @@ mod tests {
     }
 
     #[test]
-    fn a_graft_registration_changes_the_settlement_root() {
+    fn object_layer_empty_registry_keeps_state_root() {
+        let plain = SettlementRegistries::new();
+        let mut with_params = SettlementRegistries::new();
+        // Genesis parameters alone are not a record.
+        with_params.object_layer.params.min_class_bond = 7;
+        assert!(with_params.is_empty());
+        assert_eq!(plain.root(), with_params.root());
+        // And an empty registry stays out of the serialization.
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("object_layer"));
+    }
+
+    #[test]
+    fn an_object_layer_record_changes_the_settlement_root() {
+        use crate::object_layer::ObjectLayerRegistry;
+        let mut registries = SettlementRegistries::new();
+        let before = registries.root();
+        registries.object_layer = ObjectLayerRegistry::default();
+        registries.object_layer.departure_seq = 0;
+        registries
+            .object_layer
+            .home_nonces
+            .insert(crate::object_layer::HomeIdentity([1; 32]), 1);
+        assert!(!registries.is_empty());
+        assert_ne!(before, registries.root());
+    }
+
+    #[test]
+    fn a_app_binding_registration_changes_the_settlement_root() {
         let mut registries = SettlementRegistries::new();
         let before = registries.root();
         registries
-            .graft
+            .app_binding
             .register(7, b"app".to_vec(), [2u8; 32], 1)
-            .expect("the test Graft row is valid");
+            .expect("the test AppBinding row is valid");
         assert_ne!(before, registries.root());
     }
 }

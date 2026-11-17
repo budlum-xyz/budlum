@@ -51,6 +51,9 @@ pub fn encode_external_evidence(
     Ok(FinalityProof::Raw(payload))
 }
 
+/// Maximum byte budget for an encoded external-evidence carrier.
+const MAX_EXTERNAL_EVIDENCE_BYTES: usize = 2 * 1024 * 1024;
+
 /// Decodes the local carrier. It does not validate the evidence: only the
 /// bound adapter may interpret its payload or decide whether it is final.
 ///
@@ -65,7 +68,10 @@ pub fn decode_external_evidence(
             "external-domain finality requires a raw evidence envelope".to_string(),
         ));
     };
-    bincode::deserialize(payload)
+    // The carrier is peer-supplied: bound both its bytes and every advertised
+    // collection count before a Serde visitor can reserve attacker-declared
+    // capacity. The shared decoder preserves the fixint wire encoding.
+    crate::network::bounded_bincode::decode_bounded_bincode(payload, MAX_EXTERNAL_EVIDENCE_BYTES)
         .map_err(|error| FinalityError(format!("external evidence carrier is malformed: {error}")))
 }
 
@@ -123,6 +129,18 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
         proof: &FinalityProof,
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityStatus, FinalityError> {
+        if domain.id != commitment.domain_id {
+            return Ok(FinalityStatus::Rejected(format!(
+                "commitment domain {} does not match local domain {}",
+                commitment.domain_id, domain.id
+            )));
+        }
+        if !domain.is_active() {
+            return Ok(FinalityStatus::Rejected(format!(
+                "domain {} is not active",
+                domain.id
+            )));
+        }
         if domain.finality_adapter != EXTERNAL_DOMAIN_FINALITY_ADAPTER {
             return Ok(FinalityStatus::Rejected(format!(
                 "domain {} is not bound to the external-domain finality adapter",
@@ -162,6 +180,15 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
         if attestation.adapter != self.adapter_id || evidence.adapter != self.adapter_id {
             return Ok(FinalityStatus::Rejected(
                 "the evidence and attestation do not name the bridge's adapter".to_string(),
+            ));
+        }
+        let evidence_domain = crate::cross_domain::external::spec::DomainKey::from_parts(
+            &evidence.adapter,
+            &evidence.network,
+        );
+        if attestation.domain != evidence_domain {
+            return Ok(FinalityStatus::Rejected(
+                "the attestation belongs to a different external network".to_string(),
             ));
         }
         if attestation.evidence_digest != evidence.digest() {
@@ -261,6 +288,7 @@ mod tests {
     struct FixtureAdapter {
         descriptor: AdapterDescriptor,
         evidence: RawConsensusEvidence,
+        wrong_domain: bool,
     }
 
     impl ExternalFinalityAdapter for FixtureAdapter {
@@ -286,7 +314,11 @@ mod tests {
                 adapter: self.descriptor.id,
                 domain: crate::cross_domain::external::spec::DomainKey::from_parts(
                     &self.descriptor.id,
-                    &evidence.network,
+                    if self.wrong_domain {
+                        "another-network"
+                    } else {
+                        &evidence.network
+                    },
                 ),
                 height: evidence.declared_height,
                 state_root: evidence.declared_root,
@@ -382,6 +414,7 @@ mod tests {
             FixtureAdapter {
                 descriptor,
                 evidence,
+                wrong_domain: false,
             },
             domain,
             commitment,
@@ -394,6 +427,20 @@ mod tests {
         let proof = encode_external_evidence(&adapter.evidence).expect("encode");
         let decoded = decode_external_evidence(&proof).expect("decode");
         assert_eq!(decoded, adapter.evidence);
+    }
+
+    #[test]
+    fn evidence_from_one_network_cannot_finalize_another_network() {
+        let (mut adapter, domain, mut commitment) = fixture();
+        let proof = encode_external_evidence(&adapter.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        adapter.wrong_domain = true;
+        let bridge =
+            ExternalDomainFinalityBridge::new(Box::new(adapter), VerificationPolicy::proven(100));
+        assert!(matches!(
+            bridge.verify_finality(&domain, &commitment, &proof).unwrap(),
+            FinalityStatus::Rejected(message) if message.contains("different external network")
+        ));
     }
 
     #[test]
@@ -462,5 +509,27 @@ mod tests {
             matches!(status, FinalityStatus::Rejected(_)),
             "an unslashable set passed a slashable-only policy"
         );
+    }
+
+    #[test]
+    fn inactive_or_mismatched_domain_is_rejected_at_bridge() {
+        let (adapter, mut domain, mut commitment) = fixture();
+        let proof = encode_external_evidence(&adapter.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let bridge =
+            ExternalDomainFinalityBridge::new(Box::new(adapter), VerificationPolicy::proven(100));
+
+        domain.status = DomainStatus::Frozen;
+        let frozen_status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(matches!(frozen_status, FinalityStatus::Rejected(_)));
+
+        domain.status = DomainStatus::Active;
+        commitment.domain_id = domain.id.saturating_add(1);
+        let wrong_id = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(matches!(wrong_id, FinalityStatus::Rejected(_)));
     }
 }

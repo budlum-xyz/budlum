@@ -1,8 +1,8 @@
 //! (2026-07-21 - from the task list item "CI hardening")
 //! **The genesis reproducibility probe (CI expansion, item 1).**
 //!
-//! Background: the job in `.github/workflows/determinism.yml`
-//! `Genesis Reproducibility (Madde 1)` job'u `genesis_hash_deterministic`
+//! Background: the `Genesis Reproducibility (Item 1)` job in
+//! `.github/workflows/determinism.yml` (`genesis_hash_deterministic`)
 //! compares the `GENESIS_HASH=<hex>` line of a test with that name across two
 //! clean builds. Until the hardening, the job was comparing an empty hash with
 //! an empty hash - a vacuous pass - because no test with that name EXISTED in
@@ -49,8 +49,7 @@ fn probe_chain(chain_id: u64) -> Vec<String> {
 
     // The static twin of the fail-closed boot check: the state_root inside the
     // block and a fresh build_state root have to stay identical (a divergence is
-    // CRITICAL at boot
-    // Mismatch riski demektir).
+    // CRITICAL at boot and means a deterministic state-root mismatch).
     assert_eq!(
         block.state_root, rebuilt_root,
         "genesis state_root({chain_id}) != build_state() root - the boot check breaks"
@@ -111,7 +110,7 @@ mod tests {
     /// in-process nondeterminism; CI checks equality across builds.
     #[test]
     fn genesis_hash_deterministic() {
-        // Mainnet=45260 (asal hedef), Testnet=45261, Devnet=45262, fallback=9999.
+        // Mainnet=45260 (primary target), Testnet=45261, Devnet=45262, fallback=9999.
         let chain_ids = [45260u64, 45261, 45262, 9999];
         let mut observations = Vec::new();
         for &chain_id in &chain_ids {

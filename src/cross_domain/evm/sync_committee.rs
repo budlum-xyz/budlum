@@ -1,5 +1,5 @@
 //! WIRING: unwired - verify_execution_block_finality is reached in this tree only through the adapter modules that declare themselves unwired; the relayer path wires it.
-//! F10.3 Ethereum PoS sync committee light client, Altair-and-later finality.
+//! F10.3 Ethereum `PoS` sync committee light client, Altair-and-later finality.
 //!
 //! **BLS variant.** This module follows the Altair *structure* - 512 keys,
 //! sync periods, two-thirds threshold, fork-domain signing root - with
@@ -11,7 +11,7 @@
 //! `SyncCommitteeState` or sync aggregate verifies here. The module
 //! previously ran an internal minimal-signature-size variant (G2 keys,
 //! G1 signatures) that no Ethereum aggregate could satisfy; the groups
-//! were swapped under the approved work package ARGE-SYNC-ETH-INTEROP
+//! were swapped under the sync-committee interop change
 //! (workspace AR-GE queue, P1, approved 2026-09-07).
 //!
 //! **Serialization note.** `SyncCommitteeState` key material is now 48
@@ -22,7 +22,7 @@
 //! verified here as a BLS12-381 aggregate over the caller-supplied state.
 //! That state is NOT yet authenticated to a finalized beacon state
 //! The rotation refuses without the
-//! finality branch, and this module makes no PoS finality claim beyond what
+//! finality branch, and this module makes no `PoS` finality claim beyond what
 //! the supplied state and aggregate prove.
 //!
 //! # The model, Ethereum Altair `BeaconSyncCommittee`
@@ -89,11 +89,19 @@ pub enum SyncCommitteeError {
     /// Period rotation without the branch that proves `next_sync_committee`
     /// to the finalized state.
     RotationBranchRequired,
+    /// The finality branch does not place the finalized header's root at
+    /// `finalized_checkpoint.root` inside the attested header's state
+    /// The committee signed a head, not a finalized block.
+    NotFinalized,
 }
 
 impl std::fmt::Display for SyncCommitteeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SyncCommitteeError::NotFinalized => write!(
+                f,
+                "sync: the finality branch does not prove the header finalized"
+            ),
             SyncCommitteeError::InvalidPubkey => write!(f, "sync: invalid pubkey"),
             SyncCommitteeError::InvalidSignature => write!(f, "sync: invalid signature"),
             SyncCommitteeError::InsufficientParticipation {
@@ -300,6 +308,66 @@ pub struct BeaconChainParams {
     pub fork_version: [u8; 4],
     /// `genesis_validators_root` of the beacon chain.
     pub genesis_validators_root: [u8; 32],
+    /// Generalized index of `BeaconState.finalized_checkpoint.root` in the
+    /// fork's state: [`FINALIZED_ROOT_GINDEX_DENEB`] (105) before Electra,
+    /// [`FINALIZED_ROOT_GINDEX_ELECTRA`] (169) from Electra on.
+    pub finalized_root_gindex: u64,
+}
+
+/// `FINALIZED_ROOT_GINDEX` from Altair to Deneb: state field 20
+/// (`finalized_checkpoint`, of a 32-leaf state), then `root` (field 1 of
+/// the two-field checkpoint): `52 * 2 + 1 = 105`, six levels.
+pub const FINALIZED_ROOT_GINDEX_DENEB: u64 = 105;
+
+/// `FINALIZED_ROOT_GINDEX_ELECTRA`: the Electra state has more than 32
+/// fields, so the state tree is one level deeper: `84 * 2 + 1 = 169`.
+pub const FINALIZED_ROOT_GINDEX_ELECTRA: u64 = 169;
+
+/// `NEXT_SYNC_COMMITTEE_GINDEX_DENEB`: `next_sync_committee` is BeaconState
+/// field index 23 in a 32-leaf container (`32 + 23 = 55`).
+pub const NEXT_SYNC_COMMITTEE_GINDEX_DENEB: u64 = 55;
+
+/// `NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA`: Electra BeaconState container depth
+/// is 6 (`64 + 23 = 87`).
+pub const NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA: u64 = 87;
+
+/// The proof that the header a deposit is about is final.
+///
+/// A sync committee signs a recent *attested* header, which is the chain's
+/// head, not a finalized block. Finality is a fact inside the attested
+/// header's state: `finalized_checkpoint.root`. The Altair light-client
+/// update carries a Merkle branch from that root up to the attested
+/// header's `state_root`; this is that branch. Counting two thirds of the
+/// committee on the head and calling the head final was the defect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalityUpdate {
+    /// The header the committee signed. Its `execution_block_hash_branch`
+    /// is not read.
+    pub attested: BeaconBinding,
+    /// Siblings from `hash_tree_root(finalized header)` up to
+    /// `attested.state_root`, leaf's sibling first.
+    pub finality_branch: Vec<[u8; 32]>,
+}
+
+/// Walk an SSZ Merkle branch for generalized index `gindex`.
+pub(crate) fn walk_branch(leaf: [u8; 32], branch: &[[u8; 32]], gindex: u64) -> Option<[u8; 32]> {
+    if gindex < 2 {
+        return None;
+    }
+    let depth = gindex.ilog2() as usize;
+    if branch.len() != depth {
+        return None;
+    }
+    let index = gindex - (1u64 << depth);
+    let mut node = leaf;
+    for (level, sibling) in branch.iter().enumerate() {
+        node = if (index >> level) & 1 == 1 {
+            sha256_pair(sibling, &node)
+        } else {
+            sha256_pair(&node, sibling)
+        };
+    }
+    Some(node)
 }
 
 /// What ties a sync-committee signature to one execution block.
@@ -331,22 +399,60 @@ pub struct BeaconBinding {
     pub execution_block_hash_branch: Vec<[u8; 32]>,
 }
 
-fn sha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn sha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(left);
     hasher.update(right);
     hasher.finalize().into()
 }
 
-fn u64_chunk(value: u64) -> [u8; 32] {
+pub(crate) fn u64_chunk(value: u64) -> [u8; 32] {
     let mut chunk = [0u8; 32];
     chunk[..8].copy_from_slice(&value.to_le_bytes());
     chunk
 }
 
+/// SSZ `hash_tree_root` of a `BeaconBlockHeader`: five fields padded to eight.
+pub(crate) fn beacon_header_hash_tree_root(
+    slot: u64,
+    proposer_index: u64,
+    parent_root: [u8; 32],
+    state_root: [u8; 32],
+    body_root: [u8; 32],
+) -> [u8; 32] {
+    merkleize_chunks(&[
+        u64_chunk(slot),
+        u64_chunk(proposer_index),
+        parent_root,
+        state_root,
+        body_root,
+    ])
+}
+
+/// SSZ `hash_tree_root` of a 48-byte BLS pubkey (padded to 64 bytes -> 2 chunks).
+fn pubkey_hash_tree_root(pubkey: &[u8; BLS_PUBKEY_LEN]) -> [u8; 32] {
+    let mut c0 = [0u8; 32];
+    let mut c1 = [0u8; 32];
+    c0.copy_from_slice(&pubkey[..32]);
+    c1[..16].copy_from_slice(&pubkey[32..48]);
+    sha256_pair(&c0, &c1)
+}
+
+/// SSZ `hash_tree_root(SyncCommittee)` for Altair-and-later committees.
+#[must_use]
+pub fn sync_committee_hash_tree_root(
+    pubkeys: &[[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    aggregate_pubkey: &[u8; BLS_PUBKEY_LEN],
+) -> [u8; 32] {
+    let pk_roots: Vec<[u8; 32]> = pubkeys.iter().map(pubkey_hash_tree_root).collect();
+    let pubkeys_root = merkleize_chunks(&pk_roots);
+    let agg_root = pubkey_hash_tree_root(aggregate_pubkey);
+    sha256_pair(&pubkeys_root, &agg_root)
+}
+
 /// SSZ `hash_tree_root` of a fixed list of 32-byte chunks, padded with zero
 /// chunks to the next power of two.
-fn merkleize_chunks(chunks: &[[u8; 32]]) -> [u8; 32] {
+pub(crate) fn merkleize_chunks(chunks: &[[u8; 32]]) -> [u8; 32] {
     let mut width = 1usize;
     while width < chunks.len() {
         width *= 2;
@@ -425,6 +531,12 @@ impl BeaconBinding {
 
 /// Verify that a sync-committee aggregate finalizes one execution block.
 ///
+/// `binding` is the finalized header and the branch placing the execution
+/// block in its body. `finality` is the header the committee signed and the
+/// branch proving `binding` is that header's finalized checkpoint. The
+/// committee's signature is checked over `finality.attested`, never over
+/// `binding` itself.
+///
 /// This is the entry point a deposit proof uses; `verify_sync_aggregate`
 /// alone checks a signature over whatever bytes it is handed, and a caller
 /// that hands it the relayer's bytes has verified that the relayer can sign
@@ -433,24 +545,42 @@ impl BeaconBinding {
 /// parameters, and before any curve arithmetic the binding must place
 /// `execution_block_hash` inside the header's body and the header's slot
 /// inside the committee state's period.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_execution_block_finality(
     state: &SyncCommitteeState,
     aggregate: &SyncAggregate,
     binding: &BeaconBinding,
+    finality: &FinalityUpdate,
     params: &BeaconChainParams,
     execution_block_hash: &[u8; 32],
 ) -> Result<(), SyncCommitteeError> {
     if !binding.commits_to_execution_block(execution_block_hash) {
         return Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody);
     }
-    let slot_period = binding.period();
+    // The finalized header is the attested header's finalized checkpoint.
+    let proven_state_root = walk_branch(
+        binding.beacon_header_root(),
+        &finality.finality_branch,
+        params.finalized_root_gindex,
+    );
+    if proven_state_root != Some(finality.attested.state_root)
+        || binding.slot > finality.attested.slot
+    {
+        return Err(SyncCommitteeError::NotFinalized);
+    }
+    // The committee in force is the one at the attested header's
+    // signature slot.
+    let slot_period = finality.attested.period();
     if slot_period != state.current_period {
         return Err(SyncCommitteeError::PeriodMismatch {
             slot_period,
             state_period: state.current_period,
         });
     }
-    let signing_root = binding.signing_root(params);
+    let signing_root = finality.attested.signing_root(params);
     verify_sync_aggregate(state, aggregate, &signing_root)
 }
 
@@ -464,9 +594,54 @@ pub fn verify_execution_block_finality(
 /// committee: always possible". The branch format (decision A) lands with
 /// the committee work; until then no rotation runs. `state` is taken so the
 /// signature does not pretend rotation is possible without evidence.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn rotate_period(state: &mut SyncCommitteeState) -> Result<(), SyncCommitteeError> {
     let _never_rotates_without_the_branch = state.current_period;
     Err(SyncCommitteeError::RotationBranchRequired)
+}
+
+/// WIRING: exposed for external EVM light-client integrations that supply the
+/// finalized BeaconState branch and next committee.
+///
+/// Rotate the sync committee using a finalized BeaconState SSZ branch proving
+/// the incoming `next_sync_committee` against `finalized_state_root`.
+///
+/// # Errors
+///
+/// Returns an error when the period does not advance sequentially, the
+/// generalized index is unsupported, or the SSZ Merkle branch does not reconstruct
+/// `finalized_state_root`.
+pub fn rotate_period_with_branch(
+    state: &mut SyncCommitteeState,
+    new_period: u64,
+    finalized_state_root: &[u8; 32],
+    new_next_committee: [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    new_next_aggregate_pubkey: &[u8; BLS_PUBKEY_LEN],
+    next_sync_committee_branch: &[[u8; 32]],
+    gindex: u64,
+) -> Result<(), SyncCommitteeError> {
+    if new_period != state.current_period.saturating_add(1) {
+        return Err(SyncCommitteeError::PeriodMismatch {
+            slot_period: new_period,
+            state_period: state.current_period,
+        });
+    }
+    if gindex != NEXT_SYNC_COMMITTEE_GINDEX_DENEB && gindex != NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA {
+        return Err(SyncCommitteeError::RotationBranchRequired);
+    }
+    let leaf = sync_committee_hash_tree_root(&new_next_committee, new_next_aggregate_pubkey);
+    let proven_root = walk_branch(leaf, next_sync_committee_branch, gindex)
+        .ok_or(SyncCommitteeError::RotationBranchRequired)?;
+    if &proven_root != finalized_state_root {
+        return Err(SyncCommitteeError::NotFinalized);
+    }
+    state.current_sync_committee = state.next_sync_committee;
+    state.next_sync_committee = new_next_committee;
+    state.current_period = new_period;
+    Ok(())
 }
 
 /// Test-only builders shared with `verify.rs`.
@@ -498,6 +673,30 @@ pub(crate) mod fixtures {
             state_root: [0xA1; 32],
             body_root: node,
             execution_block_hash_branch: branch,
+        }
+    }
+
+    /// An attested header `distance` slots after `finalized`, whose state
+    /// commits to `finalized` as its finalized checkpoint at `gindex`.
+    pub(crate) fn finality_for(
+        finalized: &BeaconBinding,
+        gindex: u64,
+        distance: u64,
+    ) -> super::FinalityUpdate {
+        let depth = gindex.ilog2() as usize;
+        let branch: Vec<[u8; 32]> = (0..depth).map(|i| [0xF0 + i as u8; 32]).collect();
+        let state_root = super::walk_branch(finalized.beacon_header_root(), &branch, gindex)
+            .expect("the branch has the gindex's depth");
+        super::FinalityUpdate {
+            attested: BeaconBinding {
+                slot: finalized.slot + distance,
+                proposer_index: 2,
+                parent_root: [0xB0; 32],
+                state_root,
+                body_root: [0xB2; 32],
+                execution_block_hash_branch: Vec::new(),
+            },
+            finality_branch: branch,
         }
     }
 
@@ -747,6 +946,7 @@ mod tests {
             genesis_validators_root: hex_32(
                 "4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95",
             ),
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_DENEB,
         };
         assert_eq!(
             binding.signing_root(&mainnet_deneb),
@@ -774,28 +974,22 @@ mod tests {
         let params = BeaconChainParams {
             fork_version: [0x04, 0, 0, 0],
             genesis_validators_root: [0x42; 32],
+            finalized_root_gindex:
+                crate::cross_domain::evm::sync_committee::FINALIZED_ROOT_GINDEX_DENEB,
         };
         let execution_block = [0xE1; 32];
         let (state, secrets) = signing_committee(PARTICIPATION_THRESHOLD);
 
+        let gindex = params.finalized_root_gindex;
         let bound = binding_committing_to(execution_block, 5);
-        let agg = aggregate_over(&secrets, &bound.signing_root(&params));
-        verify_execution_block_finality(&state, &agg, &bound, &params, &execution_block)
-            .expect("a genuine attestation over the block finalizes it");
+        let finality = finality_for(&bound, gindex, 64);
+        let agg = aggregate_over(&secrets, &finality.attested.signing_root(&params));
+        verify_execution_block_finality(&state, &agg, &bound, &finality, &params, &execution_block)
+            .expect("a genuine attestation over a header finalizing the block finalizes it");
 
         // The very same aggregate does not finalize another execution block.
         assert_eq!(
-            verify_execution_block_finality(&state, &agg, &bound, &params, &[0xE2; 32]),
-            Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody)
-        );
-
-        // A header for another block, signed by the same committee, is a
-        // valid signature over a different message: the branch refuses it
-        // before the pairing would.
-        let other = binding_committing_to([0xE2; 32], 5);
-        let other_agg = aggregate_over(&secrets, &other.signing_root(&params));
-        assert_eq!(
-            verify_execution_block_finality(&state, &other_agg, &other, &params, &execution_block),
+            verify_execution_block_finality(&state, &agg, &bound, &finality, &params, &[0xE2; 32]),
             Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody)
         );
 
@@ -806,7 +1000,14 @@ mod tests {
             ..params
         };
         assert_eq!(
-            verify_execution_block_finality(&state, &agg, &bound, &other_fork, &execution_block),
+            verify_execution_block_finality(
+                &state,
+                &agg,
+                &bound,
+                &finality,
+                &other_fork,
+                &execution_block
+            ),
             Err(SyncCommitteeError::SignatureVerificationFailed)
         );
 
@@ -815,7 +1016,14 @@ mod tests {
         let mut later = state.clone();
         later.current_period = 9;
         assert_eq!(
-            verify_execution_block_finality(&later, &agg, &bound, &params, &execution_block),
+            verify_execution_block_finality(
+                &later,
+                &agg,
+                &bound,
+                &finality,
+                &params,
+                &execution_block
+            ),
             Err(SyncCommitteeError::PeriodMismatch {
                 slot_period: 0,
                 state_period: 9,
@@ -823,7 +1031,99 @@ mod tests {
         );
     }
 
-    use super::fixtures::binding_committing_to;
+    /// Two thirds of the committee signing a header makes that
+    /// header the attested head, not a finalized block. A genuine aggregate
+    /// over the very header the deposit names, with no finality branch to
+    /// an attested state, is refused.
+    #[test]
+    fn a_signed_head_is_not_finality() {
+        let params = BeaconChainParams {
+            fork_version: [0x04, 0, 0, 0],
+            genesis_validators_root: [0x42; 32],
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_DENEB,
+        };
+        let execution_block = [0xE1; 32];
+        let (state, secrets) = signing_committee(PARTICIPATION_THRESHOLD);
+        let bound = binding_committing_to(execution_block, 5);
+
+        // The old shape: the committee signs the deposit's own header.
+        let head_only = FinalityUpdate {
+            attested: bound.clone(),
+            finality_branch: Vec::new(),
+        };
+        let agg = aggregate_over(&secrets, &bound.signing_root(&params));
+        assert_eq!(
+            verify_execution_block_finality(
+                &state,
+                &agg,
+                &bound,
+                &head_only,
+                &params,
+                &execution_block
+            ),
+            Err(SyncCommitteeError::NotFinalized)
+        );
+
+        // A branch with one sibling tampered does not reach the attested
+        // state root.
+        let mut tampered = finality_for(&bound, params.finalized_root_gindex, 64);
+        let agg = aggregate_over(&secrets, &tampered.attested.signing_root(&params));
+        tampered.finality_branch[3][0] ^= 1;
+        assert_eq!(
+            verify_execution_block_finality(
+                &state,
+                &agg,
+                &bound,
+                &tampered,
+                &params,
+                &execution_block
+            ),
+            Err(SyncCommitteeError::NotFinalized)
+        );
+
+        // A branch built for the Electra index does not pass under Deneb.
+        let electra = finality_for(&bound, FINALIZED_ROOT_GINDEX_ELECTRA, 64);
+        let agg = aggregate_over(&secrets, &electra.attested.signing_root(&params));
+        assert_eq!(
+            verify_execution_block_finality(
+                &state,
+                &agg,
+                &bound,
+                &electra,
+                &params,
+                &execution_block
+            ),
+            Err(SyncCommitteeError::NotFinalized)
+        );
+
+        // A "finalized" header later than the attested one is refused.
+        let mut backwards = finality_for(&bound, params.finalized_root_gindex, 0);
+        backwards.attested.slot = bound.slot - 1;
+        let agg = aggregate_over(&secrets, &backwards.attested.signing_root(&params));
+        assert_eq!(
+            verify_execution_block_finality(
+                &state,
+                &agg,
+                &bound,
+                &backwards,
+                &params,
+                &execution_block
+            ),
+            Err(SyncCommitteeError::NotFinalized)
+        );
+    }
+
+    #[test]
+    fn finalized_root_gindices_match_the_spec_depths() {
+        assert_eq!(FINALIZED_ROOT_GINDEX_DENEB.ilog2(), 6);
+        assert_eq!(FINALIZED_ROOT_GINDEX_ELECTRA.ilog2(), 7);
+        // Both name field index 41 at their depth: the root of
+        // finalized_checkpoint.
+        assert_eq!(FINALIZED_ROOT_GINDEX_DENEB - 64, 41);
+        assert_eq!(FINALIZED_ROOT_GINDEX_ELECTRA - 128, 41);
+    }
+
+    use super::fixtures::{binding_committing_to, finality_for};
 
     #[test]
     fn garbage_aggregate_does_not_panic() {
@@ -1426,6 +1726,7 @@ mod tests {
             genesis_validators_root: hex_32(
                 "4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95",
             ),
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_DENEB,
         };
         (binding, params)
     }

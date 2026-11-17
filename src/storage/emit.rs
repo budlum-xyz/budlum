@@ -22,9 +22,10 @@
 //!
 //! It does not authorise anything. Both entry points take their bytes from the
 //! caller and publish no handle into stored content, so there is no viewer here
-//! to grant: the grant and Pollen checks belong to whichever path reads content
+//! to grant: the grant and Data Market checks belong to whichever path reads content
 //! out of a registry, and adding a second copy of that registry here would give
 //! the answer twice and let the two disagree.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::generated::{

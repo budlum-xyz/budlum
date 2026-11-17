@@ -196,7 +196,9 @@ impl BudlumClient {
     #[must_use]
     pub fn new(url: String) -> Self {
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { url, client }
@@ -293,7 +295,9 @@ impl EthClient {
     #[must_use]
     pub fn new(url: String, bridge_address: String) -> Self {
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -1023,7 +1027,7 @@ fn block_by_number_params(height: u64) -> serde_json::Value {
 }
 
 /// How a block payload renders a bridge burn transaction (`{:?}` of
-/// `TransactionType::Bridge(BridgeTx::BurnWithEvent(..))`,).
+/// `TransactionType::Bridge(BridgeTx::BurnWithEvent(..))`).
 const BURN_TX_TYPE_PREFIX: &str = "Bridge(BurnWithEvent(";
 
 /// Burn transaction hashes in a block payload.

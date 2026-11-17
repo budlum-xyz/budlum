@@ -202,7 +202,6 @@ dependencies = [
  "curve25519-dalek-derive",
  "digest",
  "fiat-crypto",
- "rand_core 0.10.1",
  "rustc_version",
  "subtle",
  "zeroize",
@@ -257,9 +256,7 @@ checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
- "rand_core 0.10.1",
  "sha2",
- "signature",
  "subtle",
  "zeroize",
 ]

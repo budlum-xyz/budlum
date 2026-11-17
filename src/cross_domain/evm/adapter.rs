@@ -1,5 +1,5 @@
 //! WIRING: unwired - verify_deposit_observed is reached only from the adapter fixture tests in this tree; the live relayer observation runs the adapter's verify_observation instead.
-//! F10.4 EvmChainAdapter - the ChainAdapter impl for the EVM leg. NOT a
+//! F10.4 `EvmChainAdapter` - the `ChainAdapter` impl for the EVM leg. NOT a
 //! fully live path: the off-chain half is a stub that
 //! refuses at broadcast, so the Ethereum-to-Budlum leg has no live end-to-end
 //! route. The on-chain verification below is real and deterministic; what it
@@ -7,7 +7,7 @@
 //!
 //! Two sides:
 //!
-//! - On-chain (verify_receipt_proof): deterministic in Budlum consensus.
+//! - On-chain (`verify_receipt_proof`): deterministic in Budlum consensus.
 //!   It uses F10.1 (MPT) + F10.2 (receipt/header/verify). The sync committee
 //!   (F10.3) runs only if `EvmDepositProof.sync_attestation` is populated;
 //!   this line said "uses" for a long time while no path called it.
@@ -19,14 +19,14 @@
 //!
 //! Security invariant: `verify_receipt_proof` NEVER connects to the network.
 //!
-//! ## The cryptographic binding between receipt and tx_hash
+//! ## The cryptographic binding between receipt and `tx_hash`
 //!
 //! `proof.leaf` must now be derived with the formula
 //! `hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address)`. An attacker
-//! cannot copy the same Merkle proof and present it with a different tx_hash:
+//! cannot copy the same Merkle proof and present it with a different `tx_hash`:
 //! the leaf is recomputed and a mismatch ends in `ProofVerificationFailed`. The
 //! same binding also prevents cross-bridge proof reuse (the leaf is bound to
-//! bridge_address).
+//! `bridge_address`).
 //!
 //! Security boundary: the wire format changed - the off-chain relayer tool
 //! must produce the leaf with the same formula. `verify_deposit` does MPT +
@@ -56,7 +56,7 @@ const MAX_DEPOSIT_PACKAGE_BYTES: u64 = 1024 * 1024;
 /// set with the chain config during the ceremony. A placeholder here (CI test).
 pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 
-/// EvmChainAdapter - the ChainAdapter for Ethereum.
+/// `EvmChainAdapter` - the `ChainAdapter` for Ethereum.
 ///
 /// `verify_receipt_proof` is deterministic in Budlum consensus. The off-chain
 /// methods (`generate_receipt_proof`/`submit_transaction`/
@@ -187,7 +187,7 @@ impl ChainAdapter for EvmChainAdapter {
 
     /// Off-chain (the relayer binary): produce a receipt + MPT proof from Ethereum RPC.
     ///
-    /// This impl is an offline-test stub (the StubAdapter pattern) and
+    /// This impl is an offline-test stub (the `StubAdapter` pattern) and
     /// REFUSES - there is no live Ethereum RPC route.
     /// A production RPC client does not exist in this tree.
     async fn generate_receipt_proof(
@@ -229,7 +229,7 @@ impl ChainAdapter for EvmChainAdapter {
     /// 1) `proof.verify(external_state_root)` - Merkle self-consistency.
     /// 2) `proof.leaf == derive_receipt_leaf(tx_hash, bridge_address)` -
     ///    The cryptographic leaf binding. An attacker cannot present the same
-    ///    proof with a different tx_hash; a cross-bridge proof is rejected too.
+    ///    proof with a different `tx_hash`; a cross-bridge proof is rejected too.
     ///
     /// Refuse registration for an adapter that cannot bind a receipt.
     ///
@@ -499,7 +499,7 @@ fn deposit_schemes(attested: bool) -> Vec<ObservedScheme> {
 /// Derives the receipt proof leaf from `tx_hash + bridge_address`.
 /// Domain-tagged (collision-resistant, length-prefixed) SHA-256.
 /// An attacker cannot copy a proof valid for another tx and present it with a
-/// different tx_hash: the leaf is recomputed independently and a mismatch ends
+/// different `tx_hash`: the leaf is recomputed independently and a mismatch ends
 /// in `ProofVerificationFailed`. The same binding also prevents cross-bridge
 /// proof reuse.
 fn derive_receipt_leaf(tx_hash: &str, bridge_address: &[u8]) -> Hash32 {

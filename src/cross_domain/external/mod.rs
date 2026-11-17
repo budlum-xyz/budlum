@@ -84,6 +84,7 @@ pub mod evm_hybrid;
 pub mod external_tx;
 pub mod intake;
 pub mod intake_quorum;
+pub mod phase_a_dual;
 pub mod profile;
 pub mod prover;
 pub mod quorum;
@@ -182,6 +183,10 @@ mod tests {
                 return Err("public key is not a valid curve point".to_string());
             }
             Ok(())
+        }
+
+        fn sync_committee_closed(&self) -> bool {
+            false
         }
     }
 
@@ -939,6 +944,7 @@ mod tests {
         // full participation
         payload[280..344].copy_from_slice(&[0xff; 64]);
         payload[344..376].copy_from_slice(&[0xcc; 32]);
+        payload[552..560].copy_from_slice(&105u64.to_le_bytes());
 
         let update = parse_update(&payload).expect("a well-formed payload parses");
         assert_eq!(update.finalized_root, [0xaa; 32]);
@@ -1217,16 +1223,15 @@ mod tests {
         attested_slot: u64,
         period: u64,
     ) -> RawConsensusEvidence {
-        let mut payload = vec![0u8; layout_len()];
-        payload[0..32].copy_from_slice(&[0xaa; 32]);
-        payload[32..40].copy_from_slice(&finalized_slot.to_le_bytes());
-        payload[40..48].copy_from_slice(&attested_slot.to_le_bytes());
-        payload[48..56].copy_from_slice(&period.to_le_bytes());
-        payload[56..88].copy_from_slice(&[0xbb; 32]);
-        payload[88..184].copy_from_slice(&[0x11; 96]);
-        payload[184..280].copy_from_slice(&[0x22; 96]);
-        payload[280..344].copy_from_slice(&[0xff; 64]);
-        payload[344..376].copy_from_slice(&[0xcc; 32]);
+        let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+            finalized_slot,
+            attested_slot,
+            period,
+            &test_committee(),
+            &[0x22; 96],
+            &[0xff; 64],
+            [0xcc; 32],
+        );
 
         let descriptor = adapter.descriptor();
         RawConsensusEvidence {

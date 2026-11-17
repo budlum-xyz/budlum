@@ -44,16 +44,16 @@ pub enum PipelineError {
 impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PipelineError::Bridge(e) => write!(f, "bridge error: {e}"),
-            PipelineError::Relayer(e) => write!(f, "relayer error: {e}"),
-            PipelineError::MessageRegistry(e) => write!(f, "message registry: {e}"),
-            PipelineError::UnexpectedMessageKind { expected, got } => {
+            Self::Bridge(e) => write!(f, "bridge error: {e}"),
+            Self::Relayer(e) => write!(f, "relayer error: {e}"),
+            Self::MessageRegistry(e) => write!(f, "message registry: {e}"),
+            Self::UnexpectedMessageKind { expected, got } => {
                 write!(f, "expected message kind {expected}, got {got}")
             }
-            PipelineError::NoEventTree(domain) => {
+            Self::NoEventTree(domain) => {
                 write!(f, "no event tree for domain {domain}")
             }
-            PipelineError::MissingCorrelationId => {
+            Self::MissingCorrelationId => {
                 write!(f, "correlated message is missing its correlation id")
             }
         }
@@ -64,13 +64,13 @@ impl std::error::Error for PipelineError {}
 
 impl From<BridgeError> for PipelineError {
     fn from(e: BridgeError) -> Self {
-        PipelineError::Bridge(e)
+        Self::Bridge(e)
     }
 }
 
 impl From<RelayerError> for PipelineError {
     fn from(e: RelayerError) -> Self {
-        PipelineError::Relayer(e)
+        Self::Relayer(e)
     }
 }
 
@@ -130,6 +130,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
     }
 
     /// Register an asset on a domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_asset(
         &mut self,
         asset_id: crate::cross_domain::bridge::AssetId,
@@ -154,6 +158,11 @@ impl<'a> BridgeRelayerPipeline<'a> {
         clippy::too_many_arguments,
         reason = ": the pipeline's lock mirrors BridgeState::lock's parameter set one-for-one"
     )]
+    /// PARTIAL: allowed - rolls back the newly inserted message row and bridge lock if relay enqueueing fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn lock(
         &mut self,
         source_domain: DomainId,
@@ -186,23 +195,27 @@ impl<'a> BridgeRelayerPipeline<'a> {
         )?;
 
         // Register the cross-domain message
-        let message = match event.message.clone() {
-            Some(message) => message,
-            None => {
-                self.bridge.unwind_lock(&transfer.message_id, source_domain);
-                return Err(PipelineError::Relayer(RelayerError::Other(
-                    "lock event missing message".into(),
-                )));
-            }
+        let Some(message) = event.message.clone() else {
+            self.bridge.unwind_lock(&transfer.message_id, source_domain);
+            return Err(PipelineError::Relayer(RelayerError::Other(
+                "lock event missing message".into(),
+            )));
         };
         if let Err(e) = self.messages.insert(message.clone()) {
             self.bridge.unwind_lock(&message.message_id, source_domain);
             return Err(PipelineError::MessageRegistry(e));
         }
 
-        // Enqueue relay
-        self.relayer
-            .enqueue_relay(event.clone(), &message, source_height)?;
+        // Enqueue relay; if the queue refuses, unwind both the message
+        // registry row and the bridge lock so no half-applied transfer lingers.
+        if let Err(e) = self
+            .relayer
+            .enqueue_relay(event.clone(), &message, source_height)
+        {
+            self.messages.remove(&message.message_id);
+            self.bridge.unwind_lock(&transfer.message_id, source_domain);
+            return Err(PipelineError::Relayer(e));
+        }
 
         // Add to event tree
         self.get_or_create_tree(source_domain).push(event.clone());
@@ -217,6 +230,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
     ///
     /// On success, returns the verified cross-domain message for bridge
     /// Processing (mint or unlock).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn relay(
         &mut self,
         message_id: MessageId,
@@ -246,6 +263,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
     // ─── Stage 3: Mint (target domain) ────
 
     /// After relay verification, mint the asset on the target domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn mint(
         &mut self,
         message: &CrossDomainMessage,
@@ -257,6 +278,16 @@ impl<'a> BridgeRelayerPipeline<'a> {
                 got: message.kind.name(),
             });
         }
+        if self
+            .relayer
+            .ledger
+            .get_record(&message.message_id)
+            .is_none()
+        {
+            return Err(PipelineError::Relayer(RelayerError::Other(
+                "bridge mint requires a verified relay proof".into(),
+            )));
+        }
         self.bridge.mint(message, current_height)?;
         Ok(())
     }
@@ -265,6 +296,11 @@ impl<'a> BridgeRelayerPipeline<'a> {
 
     /// Burn the asset on the target domain to send it back.
     /// Returns the event for relay back to the source domain.
+    /// PARTIAL: allowed - rolls back the newly inserted message row and bridge burn if relay enqueueing fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn burn(
         &mut self,
         message_id: MessageId,
@@ -304,9 +340,19 @@ impl<'a> BridgeRelayerPipeline<'a> {
                 return Err(PipelineError::MessageRegistry(e));
             }
 
-            // Enqueue relay back to source
-            self.relayer
-                .enqueue_relay(event.clone(), message, domain_height)?;
+            // Enqueue relay back to source; unwind burn + message on refusal.
+            if let Err(e) = self
+                .relayer
+                .enqueue_relay(event.clone(), message, domain_height)
+            {
+                self.messages.remove(&message.message_id);
+                self.bridge.unwind_burn(
+                    &message_id,
+                    crate::cross_domain::bridge::BridgeStatus::Minted { domain },
+                    previous_expiry,
+                );
+                return Err(PipelineError::Relayer(e));
+            }
         }
 
         // Add to event tree
@@ -319,6 +365,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
 
     /// After relay verification of a burn, unlock the asset on the source domain.
     /// `current_height` is the block the unlock settles in.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn unlock(
         &mut self,
         message: &CrossDomainMessage,
@@ -330,6 +380,16 @@ impl<'a> BridgeRelayerPipeline<'a> {
                 expected: "BridgeBurn",
                 got: message.kind.name(),
             });
+        }
+        if self
+            .relayer
+            .ledger
+            .get_record(&message.message_id)
+            .is_none()
+        {
+            return Err(PipelineError::Relayer(RelayerError::Other(
+                "bridge unlock requires a verified relay proof".into(),
+            )));
         }
         // A burn message carries its own id, but the bridge transfer is keyed
         // By the original lock message id. Resolve the transfer through the
@@ -365,7 +425,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
         self.relayer
     }
 
-    /// Sweep expired bridge locks (DoS prevention).
+    /// Sweep expired bridge locks (`DoS` prevention).
     /// Returns (owner, amount) for balance refund.
     pub fn sweep_expired_locks(
         &mut self,
@@ -763,5 +823,33 @@ mod tests {
         let root1 = p.bridge_state().root();
         let root2 = p.bridge_state().root();
         assert_eq!(root1, root2);
+    }
+
+    #[test]
+    fn pipeline_mint_and_unlock_refuse_unrelayed_messages() {
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
+        let a = asset(53);
+        p.register_asset(a, 1).unwrap();
+
+        let lock_event = p
+            .lock(1, 2, 100, a, owner(), recipient(), 500, 1000)
+            .unwrap();
+        let lock_msg = lock_event.message.clone().unwrap();
+        // Minting before `relay` proves the event is refused.
+        assert!(p.mint(&lock_msg, 0).is_err());
+
+        let lock_proof = p.event_proof(1, 0).unwrap();
+        let relayed_lock = p
+            .relay(lock_msg.message_id, relayer_addr(), &lock_proof, 1, 150)
+            .unwrap();
+        p.mint(&relayed_lock, 0).unwrap();
+
+        let burn_event = p
+            .burn(lock_msg.message_id, 2, 200, 1000, [7u8; 20])
+            .unwrap();
+        let burn_msg = burn_event.message.clone().unwrap();
+        // Unlocking before `relay` proves the burn event is refused.
+        assert!(p.unlock(&burn_msg, 2, 250).is_err());
     }
 }

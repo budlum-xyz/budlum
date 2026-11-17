@@ -34,7 +34,7 @@ fn publish_reached_the_mesh(error: &gossipsub::PublishError) -> bool {
 }
 
 /// Maximum seconds a sync cycle may remain in
-/// "syncing" state (sync_state == 1) before it is considered orphaned
+/// "syncing" state (`sync_state` == 1) before it is considered orphaned
 /// And automatically reset. Prevents nodes from reporting stale
 /// "syncing" status indefinitely when a peer disconnects mid-sync or
 /// When gossipsub publish fails without a corresponding reset.
@@ -47,14 +47,73 @@ const SYNC_TIMEOUT_SECS: u64 = 15;
 /// round itself, a peer that keeps answering index-contiguous, hash-chained
 /// chunks - data the fork-recovery path stages without validating it against
 /// consensus - holds the node's only sync round for `chunks x SYNC_TIMEOUT_SECS`
-/// and never accrues an unanswered-sync strike, so the four-strike ban can never
-/// engage and no other peer can be asked. Four stall windows is enough for an
+/// and never accrues an unanswered-sync strike, so it is never set aside as a
+/// sync source and no other peer can be asked. Four stall windows is enough for an
 /// honest but slow peer to finish a round; past it the round is closed and the
 /// peer is charged, which is what makes the strike path reachable.
 const MAX_SYNC_ROUND_SECS: u64 = SYNC_TIMEOUT_SECS.saturating_mul(4);
+/// How long a peer that stalled or failed one sync round is deprioritized
+/// behind other peers. Without an expiry (and without skipping peers that
+/// already returned empty headers at our tip), a single transient stall on
+/// the only peer ahead of us exiled it permanently while the fallback
+/// re-polled a peer at our same height forever.
+const STALLED_SYNC_PEER_COOLDOWN: Duration = Duration::from_secs(30);
 /// Concurrent request/response streams per connection. The libp2p default is
 /// 100; with a 1 MiB request ceiling that pins 100 MiB or more per peer.
 const MAX_SYNC_CONCURRENT_STREAMS: usize = 16;
+
+/// Pick the target peer for a header sync round.
+///
+/// `eligible_best` is already filtered to connected, handshaked, non-banned
+/// peers ordered by score, and `preferred` is already checked for eligibility.
+/// `stalled` is a peer within `STALLED_SYNC_PEER_COOLDOWN`; `empty_at_tip` is
+/// a peer that already returned no new headers for our current tip hash.
+fn select_sync_peer(
+    preferred: Option<PeerId>,
+    eligible_best: &[PeerId],
+    stalled: Option<PeerId>,
+    empty_at_tip: Option<PeerId>,
+) -> Option<PeerId> {
+    let fresh = |p: &PeerId| Some(*p) != stalled && Some(*p) != empty_at_tip;
+    let not_empty = |p: &PeerId| Some(*p) != empty_at_tip;
+
+    preferred
+        .filter(fresh)
+        .or_else(|| eligible_best.iter().copied().find(fresh))
+        .or_else(|| preferred.filter(not_empty))
+        .or_else(|| eligible_best.iter().copied().find(not_empty))
+        .or(preferred)
+        .or_else(|| eligible_best.first().copied())
+}
+
+/// [`select_sync_peer`], with the peers set aside as sync sources asked last.
+///
+/// A peer that left a run of sync requests unanswered rests
+/// (`PeerManager::is_sync_resting`): it is passed over while any other
+/// eligible peer is there, whatever its score and even when it is the peer
+/// that asked for the round. When every eligible peer rests, the choice is
+/// made among all of them as if none did: with all of them looking slow the
+/// slow one is this node, and it still has to sync from someone.
+fn select_sync_peer_resting_last(
+    preferred: Option<PeerId>,
+    eligible_best: &[PeerId],
+    stalled: Option<PeerId>,
+    empty_at_tip: Option<PeerId>,
+    resting: impl Fn(&PeerId) -> bool,
+) -> Option<PeerId> {
+    let rested_best: Vec<PeerId> = eligible_best
+        .iter()
+        .copied()
+        .filter(|p| !resting(p))
+        .collect();
+    select_sync_peer(
+        preferred.filter(|p| !resting(p)),
+        &rested_best,
+        stalled,
+        empty_at_tip,
+    )
+    .or_else(|| select_sync_peer(preferred, eligible_best, stalled, empty_at_tip))
+}
 const MAX_PENDING_BITSWAP_FETCH_WAITERS: usize = 128;
 /// QC blobs assembled at once, across all peers.
 const MAX_QC_ASSEMBLIES: usize = 8;
@@ -389,6 +448,14 @@ fn refusal_is_benign_fork_or_lag(error: &str) -> bool {
     .any(|refusal| error.contains(refusal))
 }
 
+/// The gossip topics of the aggregation layer: objects on their way to the
+/// aggregators and the frames the aggregators publish. A node joins them
+/// when it runs the aggregation side of its chain.
+const AGGREGATION_TOPICS: [&str; 2] = [
+    crate::network::protocol::TOPIC_AGG_OBJECT,
+    crate::network::protocol::TOPIC_AGG_FRAME,
+];
+
 fn budlum_topic_score_params() -> gossipsub::TopicScoreParams {
     // Keep P1/P2/P4 active while disabling P3/P3b delivery-deficit penalties:
     // sparse low-rate testnet meshes otherwise fall below the 20 msg/s default
@@ -408,18 +475,39 @@ fn log_prefix(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
-/// Extract IPv4 /24 key from a multiaddr (first 3 octets), if present.
+/// The subnet bucket a remote multiaddr is counted in.
 ///
-/// Loopback addresses (`127.0.0.0/8`) return `None` so local multi-validator
-/// rehearsals on a single host do not trip the public `/24` eclipse ceiling.
-pub fn ipv4_slash24(addr: &Multiaddr) -> Option<[u8; 3]> {
+/// The eclipse bound used to key on an IPv4 `/24` and nothing else, so an IPv6
+/// peer - or the same peer reached through a dual-stack listener as
+/// `::ffff:a.b.c.d` - came back as `None`, and `None` was admitted without a
+/// bound. One host could take the whole peer table while the `/24` limit
+/// reported itself as enforced, and the profile value was measured on the one
+/// family an attacker would not use. The bucket now covers both
+/// families; see [`crate::network::peer_manager::SubnetKey`].
+///
+/// exposed for: the admission tests in `peer_manager.rs`, which must count a
+/// peer in the same bucket the dial path computes here.
+pub(crate) fn subnet_bucket(addr: &Multiaddr) -> Option<crate::network::peer_manager::SubnetKey> {
+    use libp2p::multiaddr::Protocol;
     for proto in addr.iter() {
-        if let libp2p::multiaddr::Protocol::Ip4(ip) = proto {
-            if ip.is_loopback() {
-                return None;
+        match proto {
+            Protocol::Ip4(ip) => {
+                if ip.is_loopback() {
+                    return None;
+                }
+                return Some(crate::network::peer_manager::SubnetKey::from_ip(
+                    std::net::IpAddr::V4(ip),
+                ));
             }
-            let [a, b, c, _] = ip.octets();
-            return Some([a, b, c]);
+            Protocol::Ip6(ip) => {
+                if ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()) {
+                    return None;
+                }
+                return Some(crate::network::peer_manager::SubnetKey::from_ip(
+                    std::net::IpAddr::V6(ip),
+                ));
+            }
+            _ => {}
         }
     }
     None
@@ -451,6 +539,91 @@ fn tx_refusal_is_pool_race(
     ) || err.starts_with("Invalid transaction: Invalid nonce:")
 }
 
+/// Whether an address a peer advertised may enter the routing table.
+///
+/// `Identify` hands the node whatever listen addresses a peer claims, and every
+/// one of them used to go straight into Kademlia. On a public network a peer
+/// can therefore advertise `127.0.0.1`, `10.0.0.0/8` or `fe80::/10` and fill
+/// the routing table with addresses that mean nothing outside the process that
+/// sent them: every later dial goes nowhere and the node stops finding peers it
+/// could reach (Kademlia poisoning).
+///
+/// `private_ok` is the node's own answer to "is this a private network". On
+/// devnet the peers *are* on loopback, and a private address is the only
+/// address there is, so the rule has to be a profile decision rather than a
+/// global one.
+fn advertised_address_is_allowed(addr: &Multiaddr, private_ok: bool) -> bool {
+    use libp2p::multiaddr::Protocol;
+    if private_ok {
+        return true;
+    }
+    for proto in addr.iter() {
+        let ip = match proto {
+            Protocol::Ip4(ip) => std::net::IpAddr::V4(ip),
+            Protocol::Ip6(ip) => std::net::IpAddr::V6(ip),
+            // Identify advertisements are unauthenticated. A public-profile
+            // node must not turn an arbitrary DNS name into a routing-table
+            // entry whose private resolution is discovered only while dialling.
+            Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_) => {
+                return false;
+            }
+            _ => continue,
+        };
+        if !is_globally_routable(ip) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether this profile treats a private advertisement as a poisoning attempt.
+///
+/// Devnet is the one network where the peers really are on loopback; every
+/// other profile either faces the open internet or is a rehearsal of it, and
+/// there a private address in the routing table is an address nobody can dial.
+fn profile_rejects_private_advertisements(network: crate::core::chain_config::Network) -> bool {
+    !matches!(network, crate::core::chain_config::Network::Devnet)
+}
+
+/// Whether an IP address can be dialled from anywhere on the internet.
+///
+/// The IPv4-mapped IPv6 form is judged as the IPv4 address it carries: a
+/// `::ffff:10.0.0.1` advertisement is a private address, not a routable v6 one.
+fn is_globally_routable(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                || o[0] == 0
+                // 100.64.0.0/10: carrier-grade NAT. `is_private` says no
+                // because it is not RFC 1918, but nothing outside the carrier
+                // can dial it either.
+                || (o[0] == 100 && (64..128).contains(&o[1])))
+        }
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_globally_routable(std::net::IpAddr::V4(v4)),
+            None => {
+                let o = v6.octets();
+                !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    // fc00::/7: unique local.
+                    || (o[0] & 0xfe) == 0xfc
+                    // fe80::/10: unicast link local.
+                    || (o[0] == 0xfe && (o[1] & 0xc0) == 0x80)
+                    // 2001:db8::/32: documentation, never a public peer.
+                    || (o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x0d && o[3] == 0xb8))
+            }
+        },
+    }
+}
+
 #[derive(NetworkBehaviour)]
 pub struct BudlumBehaviour {
     ping: ping::Behaviour,
@@ -465,7 +638,7 @@ pub struct BudlumBehaviour {
     /// pruned them, checked against the block's `witness_root`.
     witness: request_response::Behaviour<crate::network::witness_protocol::WitnessCodec>,
     /// Connection budget: without it a peer can open unbounded connections
-    /// and exhaust memory (libp2p resource-management DoS, RUSTSEC-2022-0084).
+    /// and exhaust memory (libp2p resource-management `DoS`, RUSTSEC-2022-0084).
     /// The incoming cap plus the per-peer cap also blunt eclipse attempts: an
     /// attacker cannot fill the routing table with connections from one
     /// identity, and inbound connections are capped below the total so a node
@@ -474,9 +647,11 @@ pub struct BudlumBehaviour {
 }
 use crate::chain::chain_actor::ChainHandle;
 use crate::chain::finality::{Precommit, Prevote};
+use crate::chain::state_recovery::tick::{
+    Checkpoint, CheckpointView, StateRecoveryTick, TickOutcome,
+};
 use crate::network::gossip_dedup::{DedupResult, GossipDedup};
 use crate::network::peer_manager::PeerManager;
-use crate::network::regen_health_tick::{Checkpoint, CheckpointView, RegenHealthTick, TickOutcome};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 #[allow(clippy::large_enum_variant)]
@@ -488,9 +663,13 @@ pub enum NodeCommand {
     /// command; a `GetHeaders` must not travel over gossip.
     RequestSync,
     BroadcastTx(crate::core::transaction::Transaction),
+    /// The chain runs the aggregation layer and this node its aggregator:
+    /// join `agg/object` and `agg/frame`, and send a signed quantum-safe
+    /// transaction as an object from here on.
+    EnableAggregation,
     ListPeers,
     /// Hard Pruning - physical deletion of B.U.D. content.
-    /// Triggered ONLY by local Executor after verified NftBurn (SECURITY_AUDIT_HACKER.md).
+    /// Triggered ONLY by local Executor after verified `NftBurn` (`SECURITY_AUDIT_HACKER`.md).
     /// Payload is 32-byte ContentId (mirrors budlum_core::storage::content_id::ContentId and bud_node::store::ContentId).
     StoragePrune {
         cid: [u8; 32],
@@ -537,6 +716,10 @@ impl NodeClient {
     pub async fn broadcast_tx(&self, tx: crate::core::transaction::Transaction) {
         let _ = self.sender.send(NodeCommand::BroadcastTx(tx)).await;
     }
+    /// Join the two aggregation topics; see [`NodeCommand::EnableAggregation`].
+    pub async fn enable_aggregation(&self) {
+        let _ = self.sender.send(NodeCommand::EnableAggregation).await;
+    }
     pub fn broadcast_tx_sync(&self, tx: crate::core::transaction::Transaction) {
         let _ = self.sender.try_send(NodeCommand::BroadcastTx(tx));
     }
@@ -578,6 +761,11 @@ impl NodeClient {
         let _ = self.sender.send(NodeCommand::StoragePrune { cid }).await;
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn fetch_local_content(&self, cid: [u8; 32]) -> Result<Vec<u8>, String> {
         const LOCAL_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
         let (tx, rx) = oneshot::channel();
@@ -591,6 +779,11 @@ impl NodeClient {
             .map_err(|e| format!("failed to receive local content response: {e}"))?
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn fetch_remote_content(&self, cid: [u8; 32]) -> Result<Vec<u8>, String> {
         const REMOTE_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
         let (tx, rx) = oneshot::channel();
@@ -607,6 +800,10 @@ impl NodeClient {
     /// Bans a peer by id through the node loop (`bud_adminBanPeer`). The
     /// public RPC listener never reaches this; the operator listener calls
     /// it after its own mode check.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn admin_ban_peer(&self, peer_id: PeerId) -> Result<(), String> {
         const ADMIN_BAN_TIMEOUT: Duration = Duration::from_secs(5);
         let (tx, rx) = oneshot::channel();
@@ -624,6 +821,10 @@ impl NodeClient {
     }
 
     /// Lifts a ban by peer id (`bud_adminUnbanPeer`); operator listener only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn admin_unban_peer(&self, peer_id: PeerId) -> Result<(), String> {
         const ADMIN_UNBAN_TIMEOUT: Duration = Duration::from_secs(5);
         let (tx, rx) = oneshot::channel();
@@ -642,6 +843,10 @@ impl NodeClient {
 
     /// Lists currently banned peer ids (`bud_adminListBannedPeers`);
     /// operator listener only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn admin_list_banned_peers(&self) -> Result<Vec<String>, String> {
         const ADMIN_LIST_TIMEOUT: Duration = Duration::from_secs(5);
         let (tx, rx) = oneshot::channel();
@@ -691,31 +896,29 @@ pub const MAX_PEERS: usize = 50;
 pub const DHT_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Writes the identity key file. On unix the file is created with mode 0600,
-/// so it is never readable by other users, not even briefly.
+/// so it is never readable by other users, not even briefly, and the write is
+/// atomic: a crash mid-write cannot leave a truncated identity that the next
+/// boot would then replace with a fresh peer id.
 fn write_identity_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(bytes)
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, bytes)
-    }
+    crate::crypto::key_file::write_atomic_owner_only(path, bytes)
 }
 
 pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
     if let Some(p) = path {
         let file_path = std::path::Path::new(p);
         if file_path.exists() {
-            match std::fs::read(file_path) {
+            // the identity file is a key file, so the reader holds the
+            // same rule as the writer. A wide one is refused loudly and a fresh
+            // identity is generated rather than read, because reading it would
+            // be using a secret that anyone on the host can already copy.
+            let narrow = crate::crypto::key_file::require_owner_only(file_path);
+            if let Err(e) = &narrow {
+                warn!("Identity file {p} is not owner-only, not using it: {e}");
+            }
+            let read = narrow
+                .map_err(|e| e.to_string())
+                .and_then(|()| std::fs::read(file_path).map_err(|e| e.to_string()));
+            match read {
                 Ok(bytes) => {
                     if let Ok(keypair) = identity::Keypair::from_protobuf_encoding(&bytes) {
                         info!("Loaded persistent P2P identity from {p}");
@@ -736,12 +939,6 @@ pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
                     warn!("Failed to save identity key to {p}: {e}");
                 } else {
                     info!("Saved new P2P identity key to {p}");
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ =
-                        std::fs::set_permissions(file_path, std::fs::Permissions::from_mode(0o600));
                 }
             }
             Err(e) => warn!("Failed to encode identity key: {e}"),
@@ -826,6 +1023,50 @@ struct SyncRangeCursor {
     fork_recovery: bool,
     chunks_remaining: u32,
     staged_suffix: Vec<crate::core::block::Block>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboundSyncKind {
+    ActiveSync,
+    CertFetch,
+    QcFetch,
+    Handshake,
+}
+
+impl OutboundSyncKind {
+    /// Only an active chain-sync round or an explicit finality cert/QC fetch
+    /// that stalls on an open connection (`Timeout`), lacks `/sync` support
+    /// (`UnsupportedProtocols`), or fails at transport I/O during an active
+    /// sync round (`Io`) accrues unanswered-sync strikes. Handshakes share
+    /// `/sync`, and transient `ConnectionClosed` or `DialFailure` errors
+    /// during `/24` subnet-cap admission churn, simultaneous dial deduplication,
+    /// or peer restarts must not ban an honest validator.
+    const fn counts_as_sync_strike(self) -> bool {
+        !matches!(self, Self::Handshake)
+    }
+
+    const fn counts_as_sync_strike_for_error(
+        self,
+        error: &request_response::OutboundFailure,
+    ) -> bool {
+        if !self.counts_as_sync_strike() {
+            return false;
+        }
+        match self {
+            Self::Handshake => false,
+            Self::ActiveSync => matches!(
+                error,
+                request_response::OutboundFailure::Timeout
+                    | request_response::OutboundFailure::UnsupportedProtocols
+                    | request_response::OutboundFailure::Io(_)
+            ),
+            Self::CertFetch | Self::QcFetch => matches!(
+                error,
+                request_response::OutboundFailure::Timeout
+                    | request_response::OutboundFailure::UnsupportedProtocols
+            ),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -918,8 +1159,13 @@ pub struct Node {
     pub dns_seeds: Vec<String>,
     pub dns_seed_port: u16,
     pub peer_count: Arc<AtomicUsize>,
+    /// When each live connection was admitted. A peer that connects and never
+    /// completes the application handshake holds an inbound slot until the
+    /// sweep passes this deadline, so this is what lets the node tell a
+    /// squatter from a peer that is still handshaking.
+    peer_connected_at: HashMap<PeerId, std::time::Instant>,
     pub sync_state: Arc<AtomicUsize>,
-    /// Timestamp when sync_state was set to 1.
+    /// Timestamp when `sync_state` was set to 1.
     pub sync_started_at: Arc<AtomicU64>,
     /// Timestamp when the current sync *round* was opened.
     ///
@@ -931,9 +1177,14 @@ pub struct Node {
     active_sync_request: Option<request_response::OutboundRequestId>,
     /// Peer currently serving the active single-flight sync round.
     active_sync_peer: Option<PeerId>,
-    /// Peer whose most recent sync round stalled or failed unanswered, so the
-    /// next round prefers a different connected peer when one exists.
-    last_stalled_sync_peer: Option<PeerId>,
+    /// Tip hash carried in the active header sync locator so an empty response
+    /// can suppress re-polling the same peer at the same tip.
+    active_sync_locator_tip: Option<String>,
+    /// Peer whose most recent sync round stalled or failed unanswered, with
+    /// the instant it stalled so the cooldown expires instead of exiling it.
+    last_stalled_sync_peer: Option<(PeerId, std::time::Instant)>,
+    /// Most recent peer that returned no new headers for our current tip hash.
+    last_empty_sync_peer: Option<(PeerId, String)>,
     /// Multi-chunk range-sync cursor for the active sync round.
     sync_range_cursor: Option<SyncRangeCursor>,
     /// Spacing between the locator re-walks a fork signal triggers. Without it
@@ -983,7 +1234,18 @@ pub struct Node {
     pub identity_path: Option<std::path::PathBuf>,
     pub banned_peer_db: Option<std::path::PathBuf>,
     pub mdns_enabled: bool,
+    /// Whether a private address a peer advertises may enter the routing table.
+    ///
+    /// Defaults to `true`: a node that never applied a network profile is a
+    /// test or an embedded node whose peers are on loopback, and refusing them
+    /// would buy no security. [`Self::apply_network_security`] closes it for
+    /// the public networks, where a private advertisement is a poisoning
+    /// attempt rather than a description of where the peer is.
+    pub accept_private_peer_addresses: bool,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    /// Whether this node runs the aggregation side of its chain; set by
+    /// `NodeCommand::EnableAggregation`.
+    aggregation: bool,
     pub storage_node: Option<Arc<bud_node::BudBitswap>>,
     /// What this node is allowed to delete, and whether it may delete at all.
     ///
@@ -1001,7 +1263,7 @@ pub struct Node {
     /// `None` keeps the previous behaviour for nodes that never set a policy,
     /// which is every test and ephemeral devnet node. A node that stores
     /// content in production should set one.
-    pub pruning_policy: Option<crate::storage::PruningPolicy>,
+    pub pruning_policy: Option<crate::persistence::PruningPolicy>,
     pub shard_manager: Option<Arc<bud_node::ShardManager>>,
     pub mobile_mode: bool,
     /// What this device says it can spend on being a peer.
@@ -1026,16 +1288,16 @@ pub struct Node {
     /// leaving the node stuck at whatever its flattest battery earned it. It
     /// is a ceiling and never a floor: a profile can only ask for fewer.
     mobile_peer_ceiling: usize,
-    /// The reversion ledger the regeneration health tick assesses and moves.
+    /// The reversion ledger the state recovery tick assesses and moves.
     ///
     /// Node-local and in memory: the ledger records what this node verified
     /// about its own view against the finality certificates, and it starts
     /// again from the live checkpoint on restart.
-    regen_health: RegenHealthTick,
+    recovery_tick: StateRecoveryTick,
     /// Transactions a reversion gave up, offered again after re-growth
     ///, and the height the stash starts above.
-    regen_mempool: crate::domain::RegenMempool,
-    regen_stash_from: Option<u64>,
+    recovery_mempool: crate::chain::state_recovery::RecoveryMempool,
+    recovery_stash_from: Option<u64>,
     /// Witness requests in flight, with the root the answer must hash to.
     witness_requests: HashMap<
         request_response::OutboundRequestId,
@@ -1237,6 +1499,31 @@ impl Node {
         error.contains("no validator set recorded for epoch")
     }
 
+    /// A certificate whose seat table this node cannot derive yet.
+    ///
+    /// The seat table of a checkpoint follows from the participation records
+    /// of the chain up to that checkpoint. A node whose own chain does not
+    /// reach the checkpoint derives an older table, and an honest
+    /// certificate then fails with a seat table version mismatch. The
+    /// certificate is checked before the block it names is looked up, so
+    /// this error comes first and used to be charged as bad behaviour: a
+    /// validator that fell behind banned, for an hour, the peers that
+    /// answered its own certificate requests (testnet rehearsal, validator
+    /// loss and rejoin).
+    ///
+    /// With `tip` below the checkpoint the mismatch says where this node is,
+    /// not what the peer did. Such a certificate is neither credited nor
+    /// charged and opens no sync round: it is not authenticated, and block
+    /// announcements and handshakes are what a node syncs on. With the
+    /// checkpoint block in hand the same mismatch stays an offence.
+    fn finality_cert_names_a_seat_table_we_lack(
+        error: &str,
+        tip: u64,
+        checkpoint_height: u64,
+    ) -> bool {
+        error.contains("names seat table version") && tip < checkpoint_height
+    }
+
     fn request_finality_cert(&mut self, peer: PeerId, checkpoint_height: u64) {
         if checkpoint_height == 0
             || self.cert_fetches.len() >= 8
@@ -1310,6 +1597,7 @@ impl Node {
                 bitmap: cert.bitmap,
                 set_hash: cert.set_hash,
                 scheme_id: crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
+                seat_table_version: cert.seat_table_version,
             },
             None => NetworkMessage::FinalityCertResponse {
                 found: false,
@@ -1320,6 +1608,7 @@ impl Node {
                 bitmap: Vec::new(),
                 set_hash: String::new(),
                 scheme_id: String::new(),
+                seat_table_version: 0,
             },
         }
     }
@@ -1330,6 +1619,13 @@ impl Node {
         expected_height: u64,
         response: &[u8],
     ) {
+        if response.is_empty() {
+            // A rate-limited or not-yet-handshaked responder closes the `/sync`
+            // request channel with an empty payload; treat it as an unanswered
+            // poll rather than a malformed certificate so load bursts do not
+            // trigger mutual `report_bad_behavior` bans.
+            return;
+        }
         match NetworkMessage::from_bytes_validated(response) {
             Ok(NetworkMessage::FinalityCertResponse { found: false, .. }) => {
                 let chain_id = self.chain.get_chain_id().await;
@@ -1354,6 +1650,7 @@ impl Node {
                 bitmap,
                 set_hash,
                 scheme_id,
+                seat_table_version,
             }) => {
                 let cert_chain_id = self.chain.get_chain_id().await;
                 if checkpoint_height < expected_height
@@ -1380,10 +1677,11 @@ impl Node {
                     agg_sig_bls,
                     bitmap,
                     set_hash,
+                    seat_table_version,
                 };
                 match self.chain.handle_finality_cert(cert).await {
                     Ok(()) => {
-                        self.peer_manager_lock().report_good_behavior(&peer);
+                        self.peer_manager_lock().report_sync_success(&peer);
                         let interval =
                             crate::core::chain_config::finality_checkpoint_interval_for_chain_id(
                                 cert_chain_id,
@@ -1408,6 +1706,17 @@ impl Node {
                     Err(e) if Self::finality_cert_missing_validator_set(&e) => {
                         warn!(
                             "Synced FinalityCert from {peer} names a validator epoch this node no longer retains; ignoring without sync credit"
+                        );
+                    }
+                    Err(e)
+                        if Self::finality_cert_names_a_seat_table_we_lack(
+                            &e,
+                            self.chain.get_height().await,
+                            checkpoint_height,
+                        ) =>
+                    {
+                        warn!(
+                            "Synced FinalityCert from {peer} names a seat table this node cannot derive yet (height={checkpoint_height}); ignoring without sync credit"
                         );
                     }
                     Err(e) => {
@@ -1451,6 +1760,18 @@ impl Node {
         };
         all_peers.sort_by_key(|p| p.to_bytes());
         sync_peers.sort_by_key(|p| p.to_bytes());
+        if all_peers.is_empty()
+            && !self.bootstrap_peers.is_empty()
+            && self.stale_tip_ticks >= 3
+            && self.stale_tip_ticks.is_multiple_of(3)
+        {
+            for addr in self.bootstrap_peers.clone() {
+                if let Err(e) = self.bootstrap(&addr) {
+                    tracing::debug!("Starvation bootstrap retry failed for {addr}: {e}");
+                }
+            }
+            return;
+        }
         if !all_peers.is_empty() {
             let peer = all_peers[self.sync_poll_cursor % all_peers.len()];
             self.sync_poll_cursor = self.sync_poll_cursor.wrapping_add(1);
@@ -1728,7 +2049,7 @@ impl Node {
 
     /// Open a sync round: ask one peer for headers over `/sync`.
     ///
-    /// Sync requests go over the peer-bound request_response protocol and
+    /// Sync requests go over the peer-bound `request_response` protocol and
     /// nowhere else. The gossip arms for `GetHeaders` and `GetBlocksRange`
     /// only log and drop (a reply published to the topic would reach the
     /// whole mesh, not the asker), so a request published to the topic is
@@ -1755,27 +2076,37 @@ impl Node {
         if self.sync_state.load(Ordering::SeqCst) == 1 {
             return false;
         }
+        let stalled = match self.last_stalled_sync_peer {
+            Some((peer, at)) if at.elapsed() < STALLED_SYNC_PEER_COOLDOWN => Some(peer),
+            Some(_) => {
+                self.last_stalled_sync_peer = None;
+                None
+            }
+            None => None,
+        };
+        let tip_hash = locator.first().cloned();
+        let empty_at_tip = tip_hash.as_deref().and_then(|tip| {
+            self.last_empty_sync_peer
+                .as_ref()
+                .and_then(|(peer, seen_tip)| (seen_tip == tip).then_some(*peer))
+        });
         let target = {
             let pm = self.peer_manager_lock();
+            let connected = pm.connected_peers();
             let eligible = |p: &PeerId| pm.is_handshaked(p) && !pm.is_banned(p);
-            let stalled = self.last_stalled_sync_peer;
-            match preferred.filter(|p| eligible(p) && Some(*p) != stalled) {
-                Some(p) => Some(p),
-                None => {
-                    let best = pm.get_best_peers(MAX_PEERS);
-                    best.iter()
-                        .copied()
-                        .find(|p| {
-                            pm.connected_peers().contains(p) && eligible(p) && Some(*p) != stalled
-                        })
-                        .or_else(|| {
-                            preferred.filter(eligible).or_else(|| {
-                                best.into_iter()
-                                    .find(|p| pm.connected_peers().contains(p) && eligible(p))
-                            })
-                        })
-                }
-            }
+            let preferred_eligible = preferred.filter(eligible);
+            let eligible_best: Vec<PeerId> = pm
+                .get_best_peers(MAX_PEERS)
+                .into_iter()
+                .filter(|p| connected.contains(p) && eligible(p))
+                .collect();
+            select_sync_peer_resting_last(
+                preferred_eligible,
+                &eligible_best,
+                stalled,
+                empty_at_tip,
+                |p| pm.is_sync_resting(p),
+            )
         };
         let Some(peer) = target else {
             info!("No handshaked peer available to sync from; waiting for one");
@@ -1793,21 +2124,22 @@ impl Node {
         }
         let sync = &mut self.swarm.behaviour_mut().sync;
         self.active_sync_peer = Some(peer);
+        self.active_sync_locator_tip = tip_hash;
         self.active_sync_request = Some(sync.send_request(&peer, req.to_bytes()));
         info!("Requesting headers from {peer} over /sync (limit {limit})");
         true
     }
 
-    /// One regeneration health tick against the finalized checkpoints.
+    /// One state recovery tick against the finalized checkpoints.
     ///
     /// The canonical commitment of each stage comes from the post-quantum
     /// source (Root Seal, verified anchor, finality checkpoint with its QC);
-    /// the held one is this node's own. [`RegenHealthTick::observe`] decides
+    /// the held one is this node's own. [`StateRecoveryTick::observe`] decides
     /// and moves the reversion ledger. This method gathers the view and acts on the
     /// outcome: repair and revert open a sync round, alarms are logged as
     /// errors with their stable kind label.
-    async fn regen_health_tick(&mut self) {
-        use crate::domain::regeneration_stage::Stage;
+    async fn state_recovery_tick(&mut self) {
+        use crate::chain::state_recovery::stage::Stage;
         let live = self.chain.get_finalized_height().await;
         let (polyp, previous) = self.chain.pq_sealed_heights(live).await;
         // Every stage is read through the post-quantum canonical source: a
@@ -1817,8 +2149,8 @@ impl Node {
         wanted.extend(previous.map(|height| (Stage::Ephyra, height)));
         wanted.extend(polyp.map(|height| (Stage::Polyp, height)));
         let held = (
-            self.regen_health.held_stage(),
-            self.regen_health.held_height(),
+            self.recovery_tick.held_stage(),
+            self.recovery_tick.held_height(),
         );
         if !wanted.contains(&held) {
             wanted.push(held);
@@ -1840,7 +2172,7 @@ impl Node {
             polyp,
             checkpoints,
         };
-        let outcome = self.regen_health.observe(&view);
+        let outcome = self.recovery_tick.observe(&view);
         match &outcome {
             TickOutcome::Idle | TickOutcome::Healthy => {}
             TickOutcome::Repair {
@@ -1852,7 +2184,7 @@ impl Node {
                 repair_cost,
                 regrowth_cost,
                 height = live,
-                "Regeneration health: view diverges from the finality certificate, repair by sync"
+                "State recovery: view diverges from the finality certificate, repair by sync"
             ),
             TickOutcome::Reverted(reversion) => warn!(
                 from = ?reversion.from,
@@ -1860,19 +2192,19 @@ impl Node {
                 stress = ?reversion.stress,
                 height_after = reversion.height_after,
                 event = reversion.event_number,
-                "Regeneration health: reversion ledger reverted, re-growing by sync"
+                "State recovery: reversion ledger reverted, re-growing by sync"
             ),
             TickOutcome::RevertRefused(error) => tracing::error!(
                 %error,
                 height = live,
-                "Regeneration health: the ledger refused the reversion verdict"
+                "State recovery: the ledger refused the reversion verdict"
             ),
             TickOutcome::Alarm { reason, stress } => tracing::error!(
                 kind = reason.kind(),
                 ?reason,
                 ?stress,
                 height = live,
-                "Regeneration health alarm: self-recovery is impossible or unsafe"
+                "State recovery alarm: self-recovery is impossible or unsafe"
             ),
         }
         match &outcome {
@@ -1880,7 +2212,7 @@ impl Node {
                 self.stash_reverted_transactions(reversion.height_after, live)
                     .await;
             }
-            TickOutcome::Healthy if self.regen_health.held_stage() == Stage::Medusa => {
+            TickOutcome::Healthy if self.recovery_tick.held_stage() == Stage::Medusa => {
                 self.rebroadcast_stashed_transactions(live).await;
             }
             _ => {}
@@ -1888,7 +2220,7 @@ impl Node {
         if outcome.opens_sync() {
             let locator = self.chain.get_locator().await;
             if !self.request_headers_from_peer(None, locator, 500) {
-                info!("Regeneration health: no sync round opened, one is open or no peer fits");
+                info!("State recovery: no sync round opened, one is open or no peer fits");
             }
         }
     }
@@ -1925,19 +2257,19 @@ impl Node {
             let Some(block) = self.chain.get_block(height).await else {
                 continue;
             };
-            kept += self.regen_mempool.stash(
+            kept += self.recovery_mempool.stash(
                 &block.transactions,
                 height,
                 &crate::mempool::pool::charged_bytes,
             );
         }
-        self.regen_stash_from = Some(
-            self.regen_stash_from
+        self.recovery_stash_from = Some(
+            self.recovery_stash_from
                 .map_or(target, |held| held.min(target)),
         );
         info!(
             kept,
-            target, live, "Regeneration: stashed the transactions of the reverted heights"
+            target, live, "State recovery: stashed the transactions of the reverted heights"
         );
     }
 
@@ -1945,11 +2277,11 @@ impl Node {
     /// transactions the canonical chain did not include to the mempool and the
     /// network again. The mempool door validates them like any other.
     async fn rebroadcast_stashed_transactions(&mut self, live: u64) {
-        let Some(from) = self.regen_stash_from else {
+        let Some(from) = self.recovery_stash_from else {
             return;
         };
-        if self.regen_mempool.is_empty() {
-            self.regen_stash_from = None;
+        if self.recovery_mempool.is_empty() {
+            self.recovery_stash_from = None;
             return;
         }
         let mut confirmed = std::collections::HashSet::new();
@@ -1960,9 +2292,9 @@ impl Node {
             }
         }
         let txs = self
-            .regen_mempool
+            .recovery_mempool
             .take_unconfirmed(live, &|hash| confirmed.contains(hash));
-        self.regen_stash_from = None;
+        self.recovery_stash_from = None;
         let mut accepted = 0;
         for tx in txs {
             if self.chain.add_transaction(tx.clone()).await.is_ok() {
@@ -1981,7 +2313,7 @@ impl Node {
         }
         info!(
             accepted,
-            "Regeneration: re-offered the stashed transactions after re-growth"
+            "State recovery: re-offered the stashed transactions after re-growth"
         );
     }
 
@@ -1991,6 +2323,7 @@ impl Node {
         self.sync_round_started_at.store(0, Ordering::SeqCst);
         self.active_sync_request = None;
         self.active_sync_peer = None;
+        self.active_sync_locator_tip = None;
         self.sync_range_cursor = None;
     }
 
@@ -2009,7 +2342,7 @@ impl Node {
     /// `false` once the round is older than [`MAX_SYNC_ROUND_SECS`]: the refresh
     /// is then skipped, the stall sweep closes the round on its own clock and
     /// charges `report_unanswered_request`, which is the only path that accrues
-    /// the four strikes a pinned peer is banned on.
+    /// the strikes a pinning peer is set aside as a sync source on.
     fn sync_round_may_refresh(&self, now_secs: u64) -> bool {
         let round_start = self.sync_round_started_at.load(Ordering::SeqCst);
         round_start == 0 || now_secs.saturating_sub(round_start) < MAX_SYNC_ROUND_SECS
@@ -2030,7 +2363,8 @@ impl Node {
                         SYNC_TIMEOUT_SECS,
                     );
                     if let Some(stalled_peer) = self.active_sync_peer {
-                        self.last_stalled_sync_peer = Some(stalled_peer);
+                        self.last_stalled_sync_peer =
+                            Some((stalled_peer, std::time::Instant::now()));
                         let mut pm = self.peer_manager_lock();
                         pm.report_unanswered_request(&stalled_peer);
                         pm.report_slow_sync(&stalled_peer);
@@ -2363,11 +2697,21 @@ impl Node {
             && block.hash == block.calculate_hash()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn new(chain: ChainHandle) -> Result<Self, Box<dyn Error>> {
         let local_key = identity::Keypair::generate_ed25519();
         Self::with_key(chain, local_key, true, None, None)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn with_key(
         chain: ChainHandle,
         local_key: identity::Keypair,
@@ -2504,6 +2848,13 @@ impl Node {
                 budlum_topic_score_params(),
             );
         }
+        // The two topics of the aggregation layer, scored like the others.
+        for topic in AGGREGATION_TOPICS {
+            score_params.topics.insert(
+                gossipsub::IdentTopic::new(topic).hash(),
+                budlum_topic_score_params(),
+            );
+        }
         let score_thresholds = gossipsub::PeerScoreThresholds::default();
         gossipsub
             .with_peer_score(score_params, score_thresholds)
@@ -2583,12 +2934,15 @@ impl Node {
                 let req_cfg = request_response::Config::default()
                     .with_request_timeout(Duration::from_secs(30))
                     .with_max_concurrent_streams(MAX_SYNC_CONCURRENT_STREAMS);
+                let sync_cfg = req_cfg
+                    .clone()
+                    .with_request_timeout(Duration::from_secs(SYNC_TIMEOUT_SECS));
                 let sync = request_response::Behaviour::new(
                     [(
                         StreamProtocol::new("/budlum/sync/1.0.0"),
                         request_response::ProtocolSupport::Full,
                     )],
-                    req_cfg.clone(),
+                    sync_cfg,
                 );
                 let bitswap = request_response::Behaviour::new(
                     [(
@@ -2661,12 +3015,15 @@ impl Node {
             dns_seeds: Vec::new(),
             dns_seed_port: 0,
             peer_count,
+            peer_connected_at: HashMap::new(),
             sync_state,
             sync_started_at,
             sync_round_started_at,
             active_sync_request: None,
             active_sync_peer: None,
+            active_sync_locator_tip: None,
             last_stalled_sync_peer: None,
+            last_empty_sync_peer: None,
             sync_range_cursor: None,
             fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate::new(),
             deferred_votes: crate::network::deferred_votes::DeferredVotes::new(),
@@ -2688,16 +3045,18 @@ impl Node {
             identity_path: None,
             banned_peer_db: None,
             mdns_enabled,
+            accept_private_peer_addresses: true,
             metrics: None,
+            aggregation: false,
             storage_node,
             pruning_policy: None,
             shard_manager,
             mobile_mode,
             mobile_profile: None,
             mobile_peer_ceiling: MAX_PEERS,
-            regen_health: RegenHealthTick::default(),
-            regen_mempool: crate::domain::RegenMempool::new(),
-            regen_stash_from: None,
+            recovery_tick: StateRecoveryTick::default(),
+            recovery_mempool: crate::chain::state_recovery::RecoveryMempool::new(),
+            recovery_stash_from: None,
             witness_requests: HashMap::new(),
             reorg_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reorg_last_completed_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2788,11 +3147,16 @@ impl Node {
     /// an archive node. `PruningPolicy::validate` should be called on the
     /// policy before it reaches here; this only stores it.
     #[must_use]
-    pub const fn with_pruning_policy(mut self, policy: crate::storage::PruningPolicy) -> Self {
+    pub const fn with_pruning_policy(mut self, policy: crate::persistence::PruningPolicy) -> Self {
         self.pruning_policy = Some(policy);
         self
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn new_with_bootstrap(
         chain: ChainHandle,
         bootstrap_peers: Vec<String>,
@@ -2824,6 +3188,14 @@ impl Node {
                 format!("./data/{network:?}/vote-history.json").to_lowercase(),
             ));
         }
+        // Kademlia poisoning: `Identify` accepts whatever a peer
+        // says its listen addresses are, and the routing table used to take
+        // all of it. On a public network that lets one peer fill the table
+        // with `127.0.0.1` and `10.0.0.0/8` entries, after which every dial
+        // goes nowhere. The public profiles therefore accept only globally
+        // routable advertisements; devnet, where loopback *is* the topology,
+        // keeps them.
+        self.accept_private_peer_addresses = !profile_rejects_private_advertisements(network);
     }
 
     pub fn with_identity(mut self, path: Option<String>) -> Self {
@@ -2877,6 +3249,11 @@ impl Node {
             sync_state: self.sync_state.clone(),
         }
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn listen(&mut self, port: u16) -> Result<(), Box<dyn Error>> {
         let addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
         self.swarm.listen_on(addr)?;
@@ -2888,12 +3265,22 @@ impl Node {
         info!("Listening on port {port}");
         Ok(())
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn dial(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
         let remote: Multiaddr = addr.parse()?;
         self.swarm.dial(remote)?;
         info!("Dialing {addr}");
         Ok(())
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn bootstrap(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
         let multiaddr: Multiaddr = addr.parse()?;
         let peer_id = match multiaddr
@@ -2903,17 +3290,21 @@ impl Node {
             Some(libp2p::multiaddr::Protocol::P2p(peer_id)) => peer_id,
             _ => return Err("Bootstrap address must contain /p2p/<ID>".into()),
         };
+        if self.peer_manager_lock().is_banned(&peer_id) {
+            return Ok(());
+        }
         info!("Bootstrapping via {addr}");
         self.swarm
             .behaviour_mut()
             .kad
             .add_address(&peer_id, multiaddr.clone());
-        if !self.swarm.is_connected(&peer_id) && peer_id != self.peer_id {
+        if !self.swarm.is_connected(&peer_id) {
             let _ = self.swarm.dial(multiaddr);
         }
-        let _ = self.swarm.behaviour_mut().kad.bootstrap();
+        self.swarm.behaviour_mut().kad.bootstrap()?;
         Ok(())
     }
+
     /// Restore the vote high-water marks written by a previous run.
     ///
     /// Both marks exist to stop this node signing twice at one checkpoint
@@ -3169,6 +3560,37 @@ impl Node {
         loop {
             tokio::select! {
                 _ = gc_interval.tick() => {
+                    // A peer completes the transport handshake long before it
+                    // sends the application `Handshake`, and until it does the
+                    // connection still holds one of the inbound slots the
+                    // connection limits enforce. Refusing the newcomer is not
+                    // enough: nothing reclaims that slot, so the GC beat is
+                    // what disconnects a connection that never handshaked.
+                    {
+                        const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(30);
+                        let expired = {
+                            let pm = self.peer_manager.lock().unwrap_or_else(|poisoned| {
+                                tracing::error!(
+                                    "PeerManager lock was poisoned by an earlier panic; \
+                                     continuing with the recovered state"
+                                );
+                                poisoned.into_inner()
+                            });
+                            drain_expired_unhandshaked_peers(
+                                &mut self.peer_connected_at,
+                                &pm,
+                                std::time::Instant::now(),
+                                HANDSHAKE_DEADLINE,
+                            )
+                        };
+                        for peer in expired {
+                            warn!(
+                                "Peer {peer} held a connection past its handshake or idle \
+                                 deadline; disconnecting to free the slot"
+                            );
+                            let _ = self.swarm.disconnect_peer_id(peer);
+                        }
+                    }
                     let removed = self.chain.cleanup_mempool().await;
                     if removed > 0 {
                         info!("Cleaned up {removed} expired transactions from mempool");
@@ -3217,7 +3639,7 @@ impl Node {
                 _ = finality_health_interval.tick() => {
                     // Every node checks its own view, validator or not,
                     // so the health tick runs on a beat of its own.
-                    self.regen_health_tick().await;
+                    self.state_recovery_tick().await;
                 }
                 _ = finality_interval.tick() => {
                     // Resolve validator address lazily
@@ -3243,10 +3665,14 @@ impl Node {
                     // once - the same bytes are a duplicate to gossipsub - so
                     // a dropped vote is a vote the author cannot re-send, and
                     // the round it belonged to is short a validator forever.
+                    self.deferred_votes
+                        .prune_through(self.chain.get_finalized_height().await);
                     if agg_state.active {
-                        let due = self
-                            .deferred_votes
-                            .take_for(agg_state.epoch, agg_state.checkpoint_height);
+                        let due = self.deferred_votes.take_for_round(
+                            agg_state.epoch,
+                            agg_state.checkpoint_height,
+                            &agg_state.checkpoint_hash,
+                        );
                         if !due.is_empty() {
                             info!(
                                 "Finality: replaying {} vote(s) held for checkpoint height {} (epoch {})",
@@ -3278,6 +3704,11 @@ impl Node {
                             };
                             match self.chain.handle_prevote(vote).await {
                                 Ok(()) => {
+                                    // The initial gossip delivery reported
+                                    // `Ignore` while the round was not open yet,
+                                    // so gossipsub did not forward it to 2-hop
+                                    // peers. Relay once cryptographic admission
+                                    // succeeds.
                                     let topic = gossipsub::IdentTopic::new("blocks");
                                     let _ = self
                                         .swarm
@@ -3318,6 +3749,7 @@ impl Node {
                                             scheme_id:
                                                 crate::chain::finality::BLS_SCHEME_RFC9380_V1
                                                     .to_string(),
+                                            seat_table_version: cert.seat_table_version,
                                         }
                                         .to_bytes(),
                                     );
@@ -3332,6 +3764,9 @@ impl Node {
                                 }
                                 Err(e) => {
                                     if e.contains("Cannot precommit before prevote quorum") {
+                                        // Keep the precommit queued until prevote
+                                        // quorum arrives on this node rather than
+                                        // discarding its only delivery.
                                         self.deferred_votes.push(
                                             vote.epoch,
                                             vote.checkpoint_height,
@@ -3456,6 +3891,7 @@ impl Node {
                                                 scheme_id:
                                                     crate::chain::finality::BLS_SCHEME_RFC9380_V1
                                                         .to_string(),
+                                                seat_table_version: cert.seat_table_version,
                                             }
                                             .to_bytes(),
                                         );
@@ -3718,10 +4154,38 @@ impl Node {
                                 }
                             }
                             NodeCommand::BroadcastTx(tx) => {
-                                let msg = NetworkMessage::Transaction(tx);
-                                let topic = gossipsub::IdentTopic::new("transactions");
+                                // With the aggregation side running, a signed
+                                // quantum-safe transaction travels as an object:
+                                // the envelope with its signature, and the
+                                // transaction without it.
+                                let object = self
+                                    .aggregation
+                                    .then(|| crate::aggregation::chain::claim_signature(&tx))
+                                    .flatten();
+                                let (topic, msg) = match object {
+                                    Some((transaction, envelope)) => (
+                                        crate::network::protocol::TOPIC_AGG_OBJECT,
+                                        NetworkMessage::AggObject {
+                                            envelope: envelope.encode(),
+                                            transaction,
+                                        },
+                                    ),
+                                    None => ("transactions", NetworkMessage::Transaction(tx)),
+                                };
+                                let topic = gossipsub::IdentTopic::new(topic);
                                 if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, msg.to_bytes()) {
                                     warn!("Failed to gossip transaction: {e}");
+                                }
+                            }
+                            NodeCommand::EnableAggregation => {
+                                self.aggregation = true;
+                                for topic in AGGREGATION_TOPICS {
+                                    let topic = gossipsub::IdentTopic::new(topic);
+                                    if let Err(e) = self.swarm.behaviour_mut().gossipsub.subscribe(&topic) {
+                                        warn!("Failed to subscribe to {topic}: {e}");
+                                    } else {
+                                        info!("Subscribed to topic: {topic}");
+                                    }
                                 }
                             }
                             NodeCommand::StoragePrune { cid } => {
@@ -3746,7 +4210,7 @@ impl Node {
                                 let policy_permits = self
                                     .pruning_policy
                                     .as_ref()
-                                    .is_none_or(crate::storage::PruningPolicy::should_prune_historical_state);
+                                    .is_none_or(crate::persistence::PruningPolicy::should_prune_historical_state);
                                 if !policy_permits {
                                     if let Some(ref policy) = self.pruning_policy {
                                         info!(
@@ -3891,8 +4355,7 @@ impl Node {
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                             let remote = endpoint.get_remote_address();
-                            let subnet: Option<crate::network::peer_manager::SubnetKey> =
-                                crate::network::peer_manager::peer_subnet_key(remote);
+                            let subnet = subnet_bucket(remote);
                             // Security review (HIGH): a banned peer
                             // could reconnect and carry on issuing
                             // /sync requests, because the handshaked
@@ -3915,23 +4378,20 @@ impl Node {
                             // node. The rest of this file recovers the
                             // guard and keeps enforcing; these four
                             // sites were the ones that did not.
-                            let already_connected =
-                                self.peer_manager_lock().is_connected(&peer_id);
-                            let admit = already_connected
+                            let admit = self.peer_manager_lock().is_connected(&peer_id)
                                 || self.peer_manager_lock().can_admit_subnet(subnet);
                             if !admit {
                                 warn!(
-                                    "Eclipse bound: rejecting {} from {:?} (/24 limit)",
+                                    "Eclipse bound: rejecting {} from {:?} (per-subnet limit)",
                                     peer_id, subnet
                                 );
                                 let _ = self.swarm.disconnect_peer_id(peer_id);
                                 continue;
                             }
                             // H5.2 outbound diversity: an extra /24 limit for outbound connections.
-                            if !already_connected && endpoint.is_dialer() {
-                                let ob_admit = self
-                                    .peer_manager_lock()
-                                    .can_admit_outbound_subnet(subnet);
+                            if endpoint.is_dialer() {
+                                let ob_admit = self.peer_manager_lock().is_connected(&peer_id)
+                                    || self.peer_manager_lock().can_admit_outbound_subnet(subnet);
                                 if !ob_admit {
                                     warn!(
                                         "Outbound diversity: rejecting outbound {} from {:?}",
@@ -3992,6 +4452,10 @@ impl Node {
                                 }
                                 continue;
                             }
+                            if newly_connected {
+                                self.peer_connected_at
+                                    .insert(peer_id, std::time::Instant::now());
+                            }
                             if let Some(ref m) = self.metrics {
                                 m.p2p_peers_connected.set(count as i64);
                                 let mean_quality = self
@@ -4009,13 +4473,17 @@ impl Node {
                             // became handshaked, and every later block from the
                             // producer was dropped as "before completing
                             // handshake". A follower could not follow at all.
-                            let handshake = Self::handshake_message(&self.chain, false).await;
-                            let chain_len = self.chain.get_height().await + 1;
-                            info!("Connected to {peer_id}, Chain length: {chain_len}, sending Handshake over /sync");
-                            let sync = &mut self.swarm.behaviour_mut().sync;
-                            let _ = sync.send_request(&peer_id, handshake.to_bytes());
+                            let needs_handshake =
+                                newly_connected || !self.peer_manager_lock().is_handshaked(&peer_id);
+                            if needs_handshake {
+                                let handshake = Self::handshake_message(&self.chain, false).await;
+                                let chain_len = self.chain.get_height().await + 1;
+                                info!("Connected to {peer_id}, Chain length: {chain_len}, sending Handshake over /sync");
+                                let sync = &mut self.swarm.behaviour_mut().sync;
+                                let _ = sync.send_request(&peer_id, handshake.to_bytes());
+                            }
 
-                            if self.chain.get_height().await == 0 {
+                            if newly_connected && self.chain.get_height().await == 0 {
                                 if let Some(last_block) = self.chain.get_block(0).await {
                                     let locator = vec![last_block.hash];
                                     info!("New connection, requesting headers...");
@@ -4041,6 +4509,7 @@ impl Node {
                             // cid from `bitswap_requests` so unrelated peer churn never
                             // drains in-flight fetches (CWE-404).
                             if num_established == 0 {
+                                self.peer_connected_at.remove(&peer_id);
                                 self.cert_fetches.retain(|_, (p, _)| *p != peer_id);
                                 let retired_ids: Vec<_> = self
                                     .bitswap_request_peers
@@ -4187,7 +4656,12 @@ impl Node {
                                 }
                             }
 
-                            if !self.peer_manager_lock().check_rate_limit(&peer_id) {
+                            let gossip_authored =
+                                handshake_origin_matches_peer(peer_id, message.source);
+                            if !self
+                                .peer_manager_lock()
+                                .check_rate_limit_from(&peer_id, gossip_authored)
+                            {
                                 warn!("Rate limit exceeded or lock error for peer {peer_id}");
                                 self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                 continue;
@@ -4208,9 +4682,9 @@ impl Node {
                                 });
                                 match dedup.check_and_record(&message.data, &peer_id) {
                                     DedupResult::New => None,
-                                    DedupResult::Duplicate => {
-                                        Some(dedup.peer_should_be_banned(&peer_id))
-                                    }
+                                    DedupResult::Duplicate => Some(
+                                        dedup.peer_should_be_banned_from(&peer_id, gossip_authored),
+                                    ),
                                 }
                             };
                             if let Some(should_ban) = duplicate_action {
@@ -4239,6 +4713,23 @@ impl Node {
                             }
 
                             info!("Received from {peer_id}: id={id}");
+                            let is_handshaked = self.peer_manager_lock().is_handshaked(&peer_id);
+                            if !is_handshaked
+                                && !NetworkMessage::wire_is_handshake(&message.data)
+                            {
+                                warn!(
+                                    "Peer {} sent {} bytes before completing handshake, dropping.",
+                                    peer_id,
+                                    message.data.len()
+                                );
+                                self.gossip_dedup
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .forget(&message.data);
+                                self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                continue;
+                            }
+
                             match NetworkMessage::from_bytes_validated(&message.data) {
                                 Ok(msg) => {
                                     let is_handshake_msg = matches!(
@@ -4246,10 +4737,12 @@ impl Node {
                                         NetworkMessage::Handshake { .. } | NetworkMessage::HandshakeAck { .. }
                                     );
 
-                                    let is_handshaked = self.peer_manager_lock().is_handshaked(&peer_id);
-
                                     if !is_handshake_msg && !is_handshaked {
-                                        warn!("Peer {} sent {:?} before completing handshake, dropping.", peer_id, msg);
+                                        warn!(
+                                            "Peer {} sent non-handshake payload ({} bytes) before completing handshake, dropping.",
+                                            peer_id,
+                                            message.data.len()
+                                        );
                                         // Dropped for the sender's state, not for the
                                         // content: an honest copy must stay new, and a
                                         // frame racing ahead of `/sync` HandshakeAck must
@@ -4417,9 +4910,7 @@ impl Node {
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
                                             continue;
                                         }
-                                        if tx.hash.len() != 64
-                                            || !tx.hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                                        {
+                                        if !crate::network::protocol::is_canonical_hash(&tx.hash) {
                                             warn!(
                                                 "Rejected transaction with non-canonical hash from {} (len={})",
                                                 peer_id,
@@ -4473,6 +4964,95 @@ impl Node {
                                         }
                                     }
 
+                                    NetworkMessage::AggObject { envelope, transaction } => {
+                                        if !self.aggregation {
+                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                            continue;
+                                        }
+                                        if let Err(e) = NetworkMessage::validate_tx_size(&transaction) {
+                                            warn!("Received oversized object transaction from {}: {:?}", peer_id, e);
+                                            {
+                                                let mut pm = self.peer_manager_lock();
+                                                pm.report_oversized_message(&peer_id);
+                                            }
+                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                            continue;
+                                        }
+                                        match self.chain.submit_agg_object(envelope, transaction).await {
+                                            Ok(_) => {
+                                                let mut pm = self.peer_manager_lock();
+                                                pm.report_good_behavior(&peer_id);
+                                            }
+                                            Err(refusal) => {
+                                                // The penalty of the network layer
+                                                // goes to the peer that sent an
+                                                // object it could have checked.
+                                                let blame = refusal.blames_peer();
+                                                warn!(peer = %peer_id, blame, "Object refused: {refusal}");
+                                                if blame {
+                                                    let mut pm = self.peer_manager_lock();
+                                                    pm.report_invalid_tx(&peer_id);
+                                                }
+                                                self.report_gossip(
+                                                    &id,
+                                                    &peer_id,
+                                                    if blame {
+                                                        gossipsub::MessageAcceptance::Reject
+                                                    } else {
+                                                        gossipsub::MessageAcceptance::Ignore
+                                                    },
+                                                );
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    NetworkMessage::AggFrame(frame) => {
+                                        if !self.aggregation {
+                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                            continue;
+                                        }
+                                        // A frame carries one object verification per claim on
+                                        // the chain actor, so charge the peer proportional to its
+                                        // claim count before dispatching to `self.chain`.
+                                        let objects = frame
+                                            .get(..4)
+                                            .and_then(|count| <[u8; 4]>::try_from(count).ok())
+                                            .map_or(usize::MAX, |count| {
+                                                usize::try_from(u32::from_be_bytes(count))
+                                                    .unwrap_or(usize::MAX)
+                                            });
+                                        let within_budget = {
+                                            let mut pm = self.peer_manager_lock();
+                                            pm.charge_agg_frame_from(&peer_id, gossip_authored, objects)
+                                        };
+                                        if !within_budget {
+                                            warn!(peer = %peer_id, objects, "AggFrame over peer proof budget");
+                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                            continue;
+                                        }
+                                        match self.chain.submit_agg_frame(frame).await {
+                                            Ok(true) => {
+                                                let mut pm = self.peer_manager_lock();
+                                                pm.report_good_behavior(&peer_id);
+                                            }
+                                            Ok(false) => {
+                                                self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                continue;
+                                            }
+                                            Err(e) => {
+                                                // A frame is self-contained: one
+                                                // that does not verify was never
+                                                // valid for anyone.
+                                                warn!(peer = %peer_id, "Frame refused: {e}");
+                                                {
+                                                    let mut pm = self.peer_manager_lock();
+                                                    pm.report_invalid_block(&peer_id);
+                                                }
+                                                self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                continue;
+                                            }
+                                        }
+                                    }
                                     NetworkMessage::SlashingEvidence(evidence) => {
                                         match self.chain.submit_slashing_evidence(evidence.clone()).await {
                                             Ok(_) => {
@@ -4901,6 +5481,14 @@ impl Node {
                                                             crate::network::deferred_votes::DeferredVote::Prevote(prevote),
                                                         );
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
                                                     } else {
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
@@ -4932,11 +5520,36 @@ impl Node {
                                                         );
                                                         continue;
                                                     }
-                                                    self.report_gossip(
-                                                        &id,
-                                                        &peer_id,
-                                                        gossipsub::MessageAcceptance::Ignore,
-                                                    );
+                                                    if e.contains("checkpoint hash mismatch") {
+                                                        // Hold authenticated votes for a competing
+                                                        // branch at this height so a subsequent
+                                                        // reorg replays them instead of losing the
+                                                        // author's single gossip delivery.
+                                                        self.deferred_votes.push(
+                                                            prevote.epoch,
+                                                            prevote.checkpoint_height,
+                                                            crate::network::deferred_votes::DeferredVote::Prevote(prevote),
+                                                        );
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Accept,
+                                                        );
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
+                                                    } else {
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Ignore,
+                                                        );
+                                                    }
                                                     self.trigger_fork_sync(peer_id).await;
                                                     continue;
                                                 }
@@ -5006,6 +5619,7 @@ impl Node {
                                                         scheme_id:
                                                             crate::chain::finality::BLS_SCHEME_RFC9380_V1
                                                                 .to_string(),
+                                                        seat_table_version: cert.seat_table_version,
                                                     }
                                                     .to_bytes(),
                                                 );
@@ -5056,6 +5670,14 @@ impl Node {
                                                             crate::network::deferred_votes::DeferredVote::Precommit(precommit),
                                                         );
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
                                                     } else {
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
@@ -5087,11 +5709,32 @@ impl Node {
                                                         );
                                                         continue;
                                                     }
-                                                    self.report_gossip(
-                                                        &id,
-                                                        &peer_id,
-                                                        gossipsub::MessageAcceptance::Ignore,
-                                                    );
+                                                    if e.contains("checkpoint hash mismatch") {
+                                                        self.deferred_votes.push(
+                                                            precommit.epoch,
+                                                            precommit.checkpoint_height,
+                                                            crate::network::deferred_votes::DeferredVote::Precommit(precommit),
+                                                        );
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Accept,
+                                                        );
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
+                                                    } else {
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Ignore,
+                                                        );
+                                                    }
                                                     self.trigger_fork_sync(peer_id).await;
                                                     continue;
                                                 }
@@ -5110,6 +5753,7 @@ impl Node {
                                         bitmap,
                                         set_hash,
                                         scheme_id,
+                                        seat_table_version,
                                     } => {
                                         let authored = handshake_origin_matches_peer(peer_id, message.source);
                                         let rate_limit_ok = {
@@ -5152,6 +5796,7 @@ impl Node {
                                             agg_sig_bls,
                                             bitmap,
                                             set_hash,
+                                            seat_table_version,
                                         };
 
                                         // A certificate at or below our
@@ -5217,6 +5862,15 @@ impl Node {
                                                         self.trigger_fork_sync(peer_id).await;
                                                     }
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                } else if Self::finality_cert_names_a_seat_table_we_lack(
+                                                    &e,
+                                                    self.chain.get_height().await,
+                                                    checkpoint_height,
+                                                ) {
+                                                    warn!(
+                                                        "FinalityCert from {peer_id} names a seat table this node cannot derive yet (height={checkpoint_height}); ignoring"
+                                                    );
+                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                 } else {
                                                     self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
@@ -5275,7 +5929,11 @@ impl Node {
                                             continue;
                                         }
 
-                                        match serde_json::from_slice::<crate::consensus::qc::QcFaultProof>(&proof_data) {
+                                        match crate::network::proto_conversions::decode_bounded_json::<
+                                            crate::consensus::qc::QcFaultProof,
+                                        >(
+                                            &proof_data, "qc fault proof"
+                                        ) {
                                             Ok(proof) => {
                                                 match self.chain.handle_qc_fault_proof(proof).await {
                                                     Ok(_) => {
@@ -5393,9 +6051,21 @@ impl Node {
                             }
                         }
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Identify(identify::Event::Received { info, .. })) => {
-                            info!("Received identity from {:?}", info.public_key.to_peer_id());
+                            let identified = info.public_key.to_peer_id();
+                            info!("Received identity from {identified:?}");
                             for addr in info.listen_addrs {
-                                self.swarm.behaviour_mut().kad.add_address(&info.public_key.to_peer_id(), addr);
+                                // Kademlia poisoning: an advertisement
+                                // is taken on the advertiser's word, so a
+                                // private address is only believable on a
+                                // private network.
+                                if !advertised_address_is_allowed(
+                                    &addr,
+                                    self.accept_private_peer_addresses,
+                                ) {
+                                    warn!("Refusing private address {addr} from {identified}");
+                                    continue;
+                                }
+                                self.swarm.behaviour_mut().kad.add_address(&identified, addr);
                             }
                         }
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Kad(KademliaEvent::RoutingUpdated { peer, .. })) => {
@@ -5423,7 +6093,11 @@ impl Node {
                                             };
                                             if !pre_allowed {
                                                 warn!("Rejected sync request from banned/rate-limited peer {peer}");
-                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
+                                                let _ = self
+                                                    .swarm
+                                                    .behaviour_mut()
+                                                    .sync
+                                                    .send_response(channel, Vec::new());
                                                 continue;
                                             }
                                             let parsed = NetworkMessage::from_bytes_validated(&request);
@@ -5436,12 +6110,15 @@ impl Node {
                                                 || self.peer_manager_lock().is_handshaked(&peer);
                                             if !handshaked {
                                                 warn!("Rejected sync request from unhandshaked peer {peer}");
-                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
+                                                let _ = self
+                                                    .swarm
+                                                    .behaviour_mut()
+                                                    .sync
+                                                    .send_response(channel, Vec::new());
                                                 continue;
                                             }
                                             if is_handshake {
                                                 let Some((what, fields)) = parsed.ok().and_then(Self::handshake_fields) else {
-                                                    let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                     continue;
                                                 };
                                                 let ack = what == "HandshakeAck";
@@ -5556,9 +6233,9 @@ impl Node {
                                                             || (admission == QcServeAdmission::Start
                                                                 && !self.peer_manager_lock().check_blob_rate_limit_from(&peer, false));
                                                         if busy {
-                                                            if let Ok(answer) = qc_chunk_response(epoch, checkpoint_height, chunk_index, None) {
-                                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, answer.to_bytes());
-                                                            }
+                                                            let bytes = qc_chunk_response(epoch, checkpoint_height, chunk_index, None)
+                                                                .map_or_else(|_| Vec::new(), |answer| answer.to_bytes());
+                                                            let _ = self.swarm.behaviour_mut().sync.send_response(channel, bytes);
                                                             continue;
                                                         }
                                                         let blob = self.chain.get_qc_blob(checkpoint_height).await;
@@ -5662,12 +6339,22 @@ impl Node {
                                                             continue;
                                                         }
                                                         if headers.is_empty() {
+                                                            // The peer has nothing past our locator: we
+                                                            // are level with it. Nothing to fetch, so the
+                                                            // round closes now rather than at the timeout.
+                                                            // Said out loud: an empty answer from a peer
+                                                            // that just announced a higher block is a
+                                                            // locator disagreement, and it is the one way
+                                                            // a follower can re-ask forever.
                                                             let our_height = self.chain.get_height().await;
                                                             info!(
                                                                 peer = %peer,
                                                                 our_height,
                                                                 "peer returned no headers past our locator"
                                                             );
+                                                            if let Some(tip) = self.active_sync_locator_tip.clone() {
+                                                                self.last_empty_sync_peer = Some((peer, tip));
+                                                            }
                                                             self.clear_sync_round();
                                                         } else {
                                                             let our_height = self.chain.get_height().await;
@@ -5698,6 +6385,9 @@ impl Node {
                                                                         our_height,
                                                                         "peer returned no unheld headers past our locator"
                                                                     );
+                                                                    if let Some(tip) = self.active_sync_locator_tip.clone() {
+                                                                        self.last_empty_sync_peer = Some((peer, tip));
+                                                                    }
                                                                     self.clear_sync_round();
                                                                 }
                                                                 SyncHeaderPlan::AboveNext { first } => {
@@ -6107,7 +6797,11 @@ impl Node {
                                                             }
                                                         } else {
                                                             if joined > 0 {
-                                                                if self.last_stalled_sync_peer == Some(peer) {
+                                                                self.last_empty_sync_peer = None;
+                                                                if self
+                                                                    .last_stalled_sync_peer
+                                                                    .is_some_and(|(p, _)| p == peer)
+                                                                {
                                                                     self.last_stalled_sync_peer = None;
                                                                 }
                                                                 self.fork_rewalk.record_progress();
@@ -6130,34 +6824,45 @@ impl Node {
                                                     }
                                                 }
                                             } else if self.active_sync_request == Some(request_id) {
+                                                warn!(
+                                                    peer = %peer,
+                                                    "sync response refused or empty; closing sync round"
+                                                );
                                                 self.clear_sync_round();
                                             }
                                         }
                                     }
                                 }
                                 request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
-                                    self.cert_fetches.remove(&request_id);
-                                    if let Some(fetch) = self.qc_fetches.remove(&request_id) {
+                                    let was_cert_fetch = self.cert_fetches.remove(&request_id).is_some();
+                                    let removed_qc = self.qc_fetches.remove(&request_id);
+                                    let was_qc_fetch = removed_qc.is_some();
+                                    if let Some(fetch) = removed_qc {
                                         self.qc_assemblies.remove(&(fetch.peer, fetch.epoch, fetch.height));
                                         self.retry_qc_fetch(&fetch);
                                         self.drain_qc_fetches();
                                     }
+                                    let was_active_sync = self.active_sync_request == Some(request_id);
+                                    let kind = if was_active_sync {
+                                        OutboundSyncKind::ActiveSync
+                                    } else if was_cert_fetch {
+                                        OutboundSyncKind::CertFetch
+                                    } else if was_qc_fetch {
+                                        OutboundSyncKind::QcFetch
+                                    } else {
+                                        OutboundSyncKind::Handshake
+                                    };
                                     warn!("Outbound sync failure to {}: {:?}", peer, error);
-                                    {
-                                        // A request this node chose to send
-                                        // that came back unanswered costs the
-                                        // peer its place in the sync order,
-                                        // not an hour of silence: the devnet
-                                        // lost its own validators to that ban
-                                        // and then could not finalize.
+                                    if kind.counts_as_sync_strike_for_error(&error) {
                                         let mut pm = self.peer_manager_lock();
                                         pm.report_unanswered_request(&peer);
                                     }
                                     // Handshake requests share `/sync` with chain sync.
                                     // Only the request that owns the active round may
                                     // close it; an unrelated failure must leave it alone.
-                                    if self.active_sync_request == Some(request_id) {
-                                        self.last_stalled_sync_peer = Some(peer);
+                                    if was_active_sync {
+                                        self.last_stalled_sync_peer =
+                                            Some((peer, std::time::Instant::now()));
                                         self.clear_sync_round();
                                     }
                                 }
@@ -7211,6 +7916,23 @@ mod sync_handler_order_tests {
         );
     }
 
+    #[test]
+    fn unjoined_next_height_block_and_connection_guards_are_wired() {
+        let prod = production();
+        assert!(
+            prod.contains("if unjoined && self.sync_state.load(Ordering::SeqCst) == 0"),
+            "an unjoined height+1 block on a taller fork must open a /sync round"
+        );
+        assert!(
+            prod.contains("if num_established > 0 {"),
+            "closing a redundant connection must not disconnect a peer that still has live connections"
+        );
+        assert!(
+            prod.contains("\"sync response refused or empty; closing sync round\""),
+            "an empty or refused /sync response must close the active sync round"
+        );
+    }
+
     /// One peer must not be able to hold the node's single-flight sync round
     /// open by answering every chunk.
     ///
@@ -7218,9 +7940,9 @@ mod sync_handler_order_tests {
     /// contiguous and hash chained, but never validated against consensus - and
     /// used to refresh the stall deadline on each answer, so a peer that keeps
     /// replying keeps the round alive, never accrues an unanswered-sync strike,
-    /// and the four-strike ban cannot engage. The round now has its own ceiling:
+    /// and the peer is never set aside as a sync source. The round now has its own ceiling:
     /// past it the refresh is skipped, the stall sweep closes the round and
-    /// charges the peer, which is the only path that reaches a ban.
+    /// charges the peer, which is the only path that sets it aside.
     #[test]
     fn a_sync_round_cannot_be_extended_past_its_ceiling_by_peer_answers() {
         assert_eq!(
@@ -7311,8 +8033,107 @@ mod gossip_author_tests {
 }
 
 #[cfg(test)]
+mod subnet_policy_tests {
+    use super::*;
+    use crate::network::peer_manager::SubnetKey;
+
+    fn addr(s: &str) -> Multiaddr {
+        s.parse().expect("test multiaddrs are valid")
+    }
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> std::net::IpAddr {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
+    }
+
+    /// The eclipse bucket ignores the address family: the mapped form is the
+    /// IPv4 address it carries, not a second budget.
+    ///
+    /// Canary: keep the old IPv4-only extractor and the mapped assertion is
+    /// `None` against `Some` on the same host.
+    #[test]
+    fn ipv4_mapped_address_is_not_a_new_subnet() {
+        let plain = subnet_bucket(&addr("/ip4/203.0.113.7/tcp/4001"));
+        let mapped = subnet_bucket(&addr("/ip6/::ffff:203.0.113.7/tcp/4001"));
+        assert_eq!(plain, Some(SubnetKey::from_ip(v4(203, 0, 113, 7))));
+        assert_eq!(
+            mapped, plain,
+            "::ffff:203.0.113.7 must land in the 203.0.113.0/24 bucket"
+        );
+    }
+
+    /// Two addresses inside one IPv6 `/64` are one subscriber and one bucket.
+    #[test]
+    fn ipv6_peers_in_one_slash64_share_a_bucket() {
+        let first = subnet_bucket(&addr("/ip6/2001:db8:1:2::1/tcp/4001"));
+        let second = subnet_bucket(&addr("/ip6/2001:db8:1:2:ffff::2/tcp/4001"));
+        let other = subnet_bucket(&addr("/ip6/2001:db8:1:3::1/tcp/4001"));
+        assert_eq!(first, second, "one /64 is one bucket");
+        assert_ne!(first, other, "a different /64 is a different bucket");
+        assert!(first.is_some(), "an IPv6 peer must be bucketed at all");
+    }
+
+    /// Kademlia poisoning: an advertisement is the advertiser's word, so on a
+    /// public network only a globally routable address may enter the table.
+    #[test]
+    fn kademlia_refuses_private_addresses_on_public_network() {
+        for advertised in [
+            "/ip4/127.0.0.1/tcp/4001",
+            "/ip4/10.1.2.3/tcp/4001",
+            "/ip4/172.16.9.9/tcp/4001",
+            "/ip4/192.168.0.7/tcp/4001",
+            "/ip4/169.254.10.10/tcp/4001",
+            "/ip4/100.64.0.1/tcp/4001",
+            "/ip4/0.0.0.0/tcp/4001",
+            "/ip6/::1/tcp/4001",
+            "/ip6/fd00::1/tcp/4001",
+            "/ip6/fe80::1/tcp/4001",
+            "/ip6/2001:db8::1/tcp/4001",
+            "/ip6/::ffff:10.1.2.3/tcp/4001",
+            "/dns4/localhost/tcp/4001",
+            "/dns4/seed.example/tcp/4001",
+        ] {
+            assert!(
+                !advertised_address_is_allowed(&addr(advertised), false),
+                "{advertised} must be refused on a public network"
+            );
+            assert!(
+                advertised_address_is_allowed(&addr(advertised), true),
+                "{advertised} must stay usable on devnet"
+            );
+        }
+        for advertised in [
+            "/ip4/8.8.8.8/tcp/4001",
+            "/ip6/2606:4700:4700::1111/tcp/4001",
+        ] {
+            assert!(
+                advertised_address_is_allowed(&addr(advertised), false),
+                "{advertised} is dialable and must be accepted"
+            );
+        }
+    }
+
+    /// The public profiles close private advertisements; devnet keeps them,
+    /// because on devnet every peer is on loopback.
+    #[test]
+    fn public_profiles_close_private_advertisements() {
+        use crate::core::chain_config::Network;
+        assert!(profile_rejects_private_advertisements(Network::Mainnet));
+        assert!(profile_rejects_private_advertisements(Network::Testnet));
+        assert!(
+            !profile_rejects_private_advertisements(Network::Devnet),
+            "devnet peers are on loopback: private is the topology"
+        );
+        // The same decision `apply_network_security` installs on the node.
+        assert!(!advertised_address_is_allowed(
+            &addr("/ip4/127.0.0.1/tcp/4001"),
+            !profile_rejects_private_advertisements(Network::Testnet)
+        ));
+    }
+}
+
+#[cfg(test)]
 mod finality_publish_tests {
-    use super::{ipv4_slash24, publish_reached_the_mesh, tx_refusal_is_pool_race};
+    use super::{publish_reached_the_mesh, subnet_bucket, tx_refusal_is_pool_race};
     use libp2p::gossipsub::PublishError;
     use libp2p::Multiaddr;
 
@@ -7413,13 +8234,12 @@ mod finality_publish_tests {
                 crate::core::block::BlockHeader::from_block(&blk)
             })
             .collect();
-        let max_batch = u64::try_from(crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS).unwrap();
 
         assert_eq!(
             super::plan_sync_headers(&headers, 7, 18),
             super::SyncHeaderPlan::Fetch {
                 from: 8,
-                final_to: 19u64.saturating_add(max_batch).min(48),
+                final_to: 28,
                 fork_recovery: true,
                 max_chunks: 12,
             }
@@ -7428,7 +8248,7 @@ mod finality_publish_tests {
             super::plan_sync_headers(&headers, 7, 7),
             super::SyncHeaderPlan::Fetch {
                 from: 8,
-                final_to: 8u64.saturating_add(max_batch.saturating_mul(4)).min(48),
+                final_to: 44,
                 fork_recovery: false,
                 max_chunks: 4,
             }
@@ -7444,6 +8264,163 @@ mod finality_publish_tests {
         assert_eq!(
             super::plan_sync_headers(&headers, headers.len(), 47),
             super::SyncHeaderPlan::NothingNew
+        );
+    }
+
+    #[test]
+    fn outbound_handshake_failure_does_not_accrue_sync_strikes() {
+        use libp2p::request_response::OutboundFailure;
+        assert!(!super::OutboundSyncKind::Handshake.counts_as_sync_strike());
+        assert!(super::OutboundSyncKind::ActiveSync.counts_as_sync_strike());
+        assert!(super::OutboundSyncKind::CertFetch.counts_as_sync_strike());
+        assert!(super::OutboundSyncKind::QcFetch.counts_as_sync_strike());
+
+        assert!(!super::OutboundSyncKind::Handshake
+            .counts_as_sync_strike_for_error(&OutboundFailure::Timeout));
+        assert!(
+            !super::OutboundSyncKind::Handshake.counts_as_sync_strike_for_error(
+                &OutboundFailure::Io(std::io::Error::other("reset")),
+            )
+        );
+        assert!(
+            super::OutboundSyncKind::ActiveSync.counts_as_sync_strike_for_error(
+                &OutboundFailure::Io(std::io::Error::other("reset")),
+            )
+        );
+        for kind in [
+            super::OutboundSyncKind::CertFetch,
+            super::OutboundSyncKind::QcFetch,
+        ] {
+            assert!(!kind.counts_as_sync_strike_for_error(&OutboundFailure::Io(
+                std::io::Error::other("reset")
+            )));
+        }
+        for kind in [
+            super::OutboundSyncKind::ActiveSync,
+            super::OutboundSyncKind::CertFetch,
+            super::OutboundSyncKind::QcFetch,
+        ] {
+            assert!(kind.counts_as_sync_strike_for_error(&OutboundFailure::Timeout));
+            assert!(kind.counts_as_sync_strike_for_error(&OutboundFailure::UnsupportedProtocols));
+            assert!(!kind.counts_as_sync_strike_for_error(&OutboundFailure::ConnectionClosed));
+            assert!(!kind.counts_as_sync_strike_for_error(&OutboundFailure::DialFailure));
+        }
+    }
+
+    #[test]
+    fn select_sync_peer_breaks_stalled_and_empty_fallback_deadlock() {
+        let ahead = super::PeerId::random();
+        let sibling = super::PeerId::random();
+        let other = super::PeerId::random();
+
+        // While the ahead peer is in stall cooldown and the sibling has not
+        // yet answered empty at this tip, rotation tries the sibling first.
+        assert_eq!(
+            super::select_sync_peer(Some(ahead), &[sibling, ahead], Some(ahead), None),
+            Some(sibling),
+        );
+
+        // Once the sibling answers empty at this tip, refusing the ahead peer
+        // forever would deadlock sync at the sibling's stale height; the
+        // selector must fall back to the ahead peer instead of re-polling the
+        // empty sibling (with or without a preferred peer).
+        assert_eq!(
+            super::select_sync_peer(Some(ahead), &[sibling, ahead], Some(ahead), Some(sibling)),
+            Some(ahead),
+        );
+        assert_eq!(
+            super::select_sync_peer(None, &[sibling, ahead], Some(ahead), Some(sibling)),
+            Some(ahead),
+        );
+
+        // When a third fresh peer exists, it still takes precedence over both
+        // the stalled peer and the empty peer.
+        assert_eq!(
+            super::select_sync_peer(
+                Some(ahead),
+                &[sibling, other, ahead],
+                Some(ahead),
+                Some(sibling),
+            ),
+            Some(other),
+        );
+
+        // After the stall cooldown expires, the ahead peer is selected directly.
+        assert_eq!(
+            super::select_sync_peer(Some(ahead), &[sibling, ahead], None, Some(sibling)),
+            Some(ahead),
+        );
+    }
+
+    #[test]
+    fn a_seat_table_this_node_cannot_derive_is_not_charged_to_the_peer() {
+        let lag = "Certificate names seat table version 15, the verifier holds 0";
+        // Behind the checkpoint: the mismatch is this node's own lag.
+        assert!(super::Node::finality_cert_names_a_seat_table_we_lack(
+            lag, 30, 35
+        ));
+        // With the checkpoint block in hand it is an offence, as before.
+        assert!(!super::Node::finality_cert_names_a_seat_table_we_lack(
+            lag, 35, 35
+        ));
+        assert!(!super::Node::finality_cert_names_a_seat_table_we_lack(
+            lag, 40, 35
+        ));
+        // No other refusal is excused by being behind.
+        for other in [
+            "Invalid aggregated BLS signature",
+            "Validator set hash mismatch",
+            "Height 33 is not a valid checkpoint height",
+        ] {
+            assert!(!super::Node::finality_cert_names_a_seat_table_we_lack(
+                other, 30, 35
+            ));
+        }
+        // The text is the one the chain produces.
+        let source = include_str!("../chain/finality.rs");
+        assert!(source.contains("Certificate names seat table version {}, the verifier holds {}"));
+        // Both doors of a certificate take the excuse before the charge.
+        let prod = production_source();
+        assert_eq!(
+            prod.matches("Self::finality_cert_names_a_seat_table_we_lack(")
+                .count(),
+            2,
+            "the gossip arm and the sync response both classify the refusal"
+        );
+    }
+
+    #[test]
+    fn a_resting_sync_peer_is_asked_only_when_nobody_else_is_left() {
+        let best = super::PeerId::random();
+        let other = super::PeerId::random();
+        let third = super::PeerId::random();
+        let order = [best, other, third];
+        let pick = |preferred, resting: &[super::PeerId]| {
+            super::select_sync_peer_resting_last(preferred, &order, None, None, |p| {
+                resting.contains(p)
+            })
+        };
+        // Nobody rests: the plain choice.
+        assert_eq!(pick(None, &[]), Some(best));
+        assert_eq!(pick(Some(third), &[]), Some(third));
+        // The best scored peer rests: the next one is asked, also when the
+        // resting peer is the one that asked for the round.
+        assert_eq!(pick(None, &[best]), Some(other));
+        assert_eq!(pick(Some(best), &[best]), Some(other));
+        assert_eq!(pick(Some(third), &[best, other]), Some(third));
+        // Everybody rests: the node still asks, as if nobody did.
+        assert_eq!(pick(None, &order), Some(best));
+        assert_eq!(pick(Some(third), &order), Some(third));
+        // The stalled peer and the peer that had nothing new keep their
+        // place in the order among the rested ones.
+        assert_eq!(
+            super::select_sync_peer_resting_last(None, &order, Some(other), None, |p| *p == best),
+            Some(third)
+        );
+        // Nobody eligible, nobody asked.
+        assert_eq!(
+            super::select_sync_peer_resting_last(None, &[], None, None, |_| false),
+            None
         );
     }
 
@@ -7505,9 +8482,11 @@ mod finality_publish_tests {
     #[test]
     fn loopback_subnet_exemption_and_signed_tx_pool_race_classification() {
         let lo: Multiaddr = "/ip4/127.0.0.1/tcp/25001".parse().unwrap();
+        let lo6: Multiaddr = "/ip6/::1/tcp/25001".parse().unwrap();
         let pub_addr: Multiaddr = "/ip4/203.0.113.7/tcp/5001".parse().unwrap();
-        assert_eq!(ipv4_slash24(&lo), None);
-        assert_eq!(ipv4_slash24(&pub_addr), Some([203, 0, 113]));
+        assert_eq!(subnet_bucket(&lo), None);
+        assert_eq!(subnet_bucket(&lo6), None);
+        assert!(subnet_bucket(&pub_addr).is_some());
 
         let signer = crate::crypto::primitives::KeyPair::generate().unwrap();
         let sender = crate::core::address::Address::from(signer.public_key_bytes());
@@ -7599,5 +8578,151 @@ mod finality_publish_tests {
         assert!(!super::refusal_is_benign_fork_or_lag(
             "Invalid PQ attestation in precommit: forged"
         ));
+    }
+
+    #[test]
+    fn unhandshaked_peer_is_reclaimed_after_deadline_while_handshaked_survives() {
+        use super::{Duration, HashMap, PeerId, PeerManager};
+
+        let mut pm = PeerManager::new();
+        let squatter = PeerId::random();
+        let honest = PeerId::random();
+        let quiet = PeerId::random();
+        let fresh = PeerId::random();
+        let gone = PeerId::random();
+
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(squatter, None));
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(honest, None));
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(quiet, None));
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(fresh, None));
+        pm.set_handshaked(&honest, true);
+        pm.set_handshaked(&quiet, true);
+        // `honest` produced an accepted message after its handshake; `quiet`
+        // produced nothing, so its record carries no recent activity.
+        pm.report_good_behavior(&honest);
+
+        let now = std::time::Instant::now();
+        let deadline = Duration::from_secs(30);
+        let mut connected_at = HashMap::new();
+        connected_at.insert(squatter, now - Duration::from_secs(31));
+        connected_at.insert(honest, now - Duration::from_secs(3_600));
+        connected_at.insert(quiet, now - Duration::from_secs(3_600));
+        connected_at.insert(fresh, now - Duration::from_secs(5));
+        connected_at.insert(gone, now - Duration::from_secs(60));
+
+        let expired =
+            super::drain_expired_unhandshaked_peers(&mut connected_at, &pm, now, deadline);
+        assert_eq!(expired.len(), 2);
+        assert!(expired.contains(&squatter));
+        assert!(
+            expired.contains(&quiet),
+            "a handshaked peer silent past the idle window must give its slot back"
+        );
+        assert!(!connected_at.contains_key(&squatter));
+        assert!(!connected_at.contains_key(&quiet));
+        assert!(
+            connected_at.contains_key(&honest),
+            "a handshaked peer with recent accepted traffic keeps its slot"
+        );
+        assert!(!connected_at.contains_key(&gone));
+        assert!(
+            connected_at.contains_key(&fresh),
+            "a fresh unhandshaked peer must stay tracked until its deadline passes"
+        );
+    }
+}
+
+/// Identify connected peers that have held a connection for longer than the
+/// schedule allows: `deadline` for a peer that has not completed the
+/// application `Handshake`, and a longer idle window for one that has, because
+/// the handshake itself is unauthenticated and costs the sender nothing.
+/// Entries for peers that already disconnected are dropped.
+fn drain_expired_unhandshaked_peers(
+    connected_at: &mut HashMap<PeerId, std::time::Instant>,
+    pm: &PeerManager,
+    now: std::time::Instant,
+    deadline: Duration,
+) -> Vec<PeerId> {
+    // A `Handshake` is the chain id, a version pair and a scheme name, all of
+    // them public constants: nothing in it is signed, staked or bound to the
+    // peer's role, so the flag it sets cannot be what earns a slot for the life
+    // of a connection. A handshaked peer is therefore still reaped once it has
+    // been silent for `HANDSHAKED_IDLE_DEADLINE`, measured from the last
+    // activity its score record shows rather than from the moment it connected.
+    const HANDSHAKED_IDLE_DEADLINE: Duration = Duration::from_secs(600);
+    let mut expired = Vec::new();
+    let mut spent = Vec::new();
+    for (peer, admitted) in connected_at.iter() {
+        if !pm.is_connected(peer) {
+            spent.push(*peer);
+            continue;
+        }
+        let last_activity = pm
+            .get_peer_info(peer)
+            .and_then(|score| score.last_seen)
+            .map_or(*admitted, |seen| seen.max(*admitted));
+        let limit = if pm.is_handshaked(peer) {
+            HANDSHAKED_IDLE_DEADLINE
+        } else {
+            deadline
+        };
+        if now.duration_since(last_activity) >= limit {
+            expired.push(*peer);
+        }
+    }
+    for peer in spent {
+        connected_at.remove(&peer);
+    }
+    for peer in &expired {
+        connected_at.remove(peer);
+    }
+    expired
+}
+
+#[cfg(test)]
+mod identity_file_tests {
+    use super::*;
+
+    /// the same identity is loaded twice, so the file the writer made
+    /// is a file the reader accepts.
+    #[test]
+    fn a_written_identity_is_loaded_back_as_the_same_peer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("identity.key");
+        let first = load_or_generate_identity_key(Some(path.to_str().expect("utf8")));
+        assert!(path.exists(), "the first call must write the identity file");
+        let again = load_or_generate_identity_key(Some(path.to_str().expect("utf8")));
+        assert_eq!(
+            first.public().to_peer_id(),
+            again.public().to_peer_id(),
+            "a restart must keep the peer id"
+        );
+    }
+
+    /// an identity file that group or others can read is not used.
+    /// The node starts on a fresh identity instead and says why, which is the
+    /// only safe answer: a wide file may already be copied.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_identity_file_is_not_used() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("identity.key");
+        let original = load_or_generate_identity_key(Some(path.to_str().expect("utf8")));
+        let original_peer = original.public().to_peer_id();
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod wide");
+        let replaced = load_or_generate_identity_key(Some(path.to_str().expect("utf8")));
+        assert_ne!(
+            replaced.public().to_peer_id(),
+            original_peer,
+            "a wide identity file must not be trusted as this node's identity"
+        );
+        // The replacement is written narrow, so the next boot reads it.
+        crate::crypto::key_file::require_owner_only(&path)
+            .expect("the file left behind is owner-only");
+        let next = load_or_generate_identity_key(Some(path.to_str().expect("utf8")));
+        assert_eq!(next.public().to_peer_id(), replaced.public().to_peer_id());
     }
 }

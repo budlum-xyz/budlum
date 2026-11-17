@@ -368,6 +368,10 @@ impl QcBlob {
     /// for the `n` validators of its snapshot. The bound grows with
     /// the validator set instead of stopping the set at a fixed byte count
     /// (the old 1 MiB cap refused a set of about 310 members).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_size(&self, validators: usize) -> Result<(), String> {
         let encoded = self.encoded_len();
         let max = qc_blob_max_bytes(validators);
@@ -386,6 +390,10 @@ impl QcBlob {
 
     /// Verify under the scheme statuses of a fresh genesis. A chain calls
     /// [`Self::verify_against_snapshot_in`] with its state registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_against_snapshot(
         &self,
         snapshot: &ValidatorSetSnapshot,
@@ -400,6 +408,11 @@ impl QcBlob {
         )
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_against_snapshot_in(
         &self,
         registry: &crate::crypto::scheme::SchemeStatusRegistry,
@@ -536,8 +549,8 @@ impl QcBlob {
 
         // (security audit) return the unique-verified
         // Signer set so callers can enforce a quorum against the
-        // Post-deduplication count. The previous design only
-        // Returned ``; callers that wanted to count unique
+        // Post-deduplication count. The previous design did not
+        // return the signer set; callers that wanted to count unique
         // Signers (e.g. `import_qc_blob`'s BLS-quorum check) had to
         // Re-walk the entries themselves, which was both wasteful
         // And easy to get wrong (counting duplicates). Returning
@@ -710,6 +723,18 @@ impl QcFaultProof {
             siblings.push(digest);
         }
 
+        let expected_root = hex::decode(merkle_root)
+            .map_err(|_| "Merkle proof invalid: expected root is not hex".to_string())?;
+        if expected_root.len() != 32 {
+            return Err(format!(
+                "Merkle proof invalid: expected 32-byte root, got {} bytes",
+                expected_root.len()
+            ));
+        }
+        if expected_root.iter().all(|b| *b == 0) {
+            return Err("Merkle proof invalid: zero root admits no leaf".to_string());
+        }
+
         // An index with bits above its path is refused,
         // not silently narrowed - one proof must verify under exactly one
         // index.
@@ -721,8 +746,8 @@ impl QcFaultProof {
             merkle_tree::promote_sha3,
         )
         .ok_or_else(|| "Merkle proof invalid: index has bits above the proof path".to_string())?;
-        let computed_root = hex::encode(computed);
-        if computed_root != merkle_root {
+        if computed.as_slice() != expected_root.as_slice() {
+            let computed_root = hex::encode(computed);
             return Err(format!(
                 "Merkle proof invalid: computed {computed_root} != expected {merkle_root}"
             ));
@@ -752,11 +777,25 @@ impl QcFaultProof {
                 if pq_signature.is_empty() {
                     return Err("Empty Dilithium signature".into());
                 }
+                if pq_signature.len() > QC_WIRE_MAX_SIGNATURE {
+                    return Err("Dilithium signature exceeds maximum wire size".into());
+                }
                 if merkle_proof.is_empty() && *leaf_index != 0 {
                     return Err("Empty merkle proof".into());
                 }
                 if merkle_proof.len() > MAX_MERKLE_PROOF_ELEMENTS {
                     return Err("Merkle proof is longer than any tree path".into());
+                }
+                if merkle_proof.iter().any(|el| el.len() != 32) {
+                    return Err("Merkle proof element must be 32 bytes".into());
+                }
+                let index_above_path = usize::try_from(*leaf_index)
+                    .ok()
+                    .and_then(|idx| idx.checked_shr(merkle_proof.len() as u32))
+                    .unwrap_or(1)
+                    != 0;
+                if index_above_path {
+                    return Err("Leaf index has bits above the merkle proof path".into());
                 }
             }
             QcProofKind::ZkInvalidAttestationV1 {
@@ -874,33 +913,22 @@ impl QcFaultProof {
                         .into(),
                 )
             }
-            QcProofKind::ZkInvalidAttestationV1 { public_inputs, .. } => {
+            QcProofKind::ZkInvalidAttestationV1 {
+                proof_bytes,
+                public_inputs,
+            } => {
                 if public_inputs.merkle_root != blob.merkle_root {
                     return Err("ZK QC public input merkle root mismatch".into());
                 }
-                // ZK QC fault proof verifier
-                // Is not yet implemented. This is a deliberate fail-closed guard:
-                // ZK domain finality attestations CANNOT be invalidated via fault
-                // Proofs until a proper ZK verifier is integrated. That verifier
-                // is a BudZero STARK proof of the fault; no
-                // pairing-based SNARK (Groth16, KZG-based PLONK, anything over
-                // BN254) sits on a Budlum verification path, and the
-                // `no_pairing_snark_in_verification_path` gate holds the line.
-                // This prevents forged ZK attestations
-                // From being finalized without verification, at the cost of also
-                // Preventing legitimate fault challenges.
-                //
-                // Tracking: Implement ZK verifier in consensus::zk_verifier module,
-                // Then replace this stub with actual proof verification.
-                // Security impact: ZK domain QC blobs are accepted (BLS quorum
-                // Verified) but cannot be challenged. For mainnet, consider
-                // Disabling ZK domain QC import until verifier is ready.
-                Err(
-                    "ZK QC fault proof verifier not implemented - ZK domain attestations \
-                     cannot be challenged until ZK verifier integration. This is fail-closed: \
-                     no invalid ZK attestation can be finalized via this path."
-                        .into(),
-                )
+                // Fail-closed. ZK domain attestations cannot be invalidated
+                // via fault proofs until a BudZero STARK verifier is
+                // integrated. No pairing based SNARK sits on a Budlum
+                // verification path.
+                crate::consensus::zk_verifier::verify_zk_qc_fault_proof(
+                    proof_bytes,
+                    &public_inputs.merkle_root,
+                )?;
+                Err("ZK QC fault proof verifier not implemented".into())
             }
         }
     }
@@ -1925,5 +1953,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn qc_fault_proof_rejects_short_siblings_zero_root_and_high_index() {
+        let short_sibling = QcFaultProof::new_invalid_dilithium(
+            1,
+            100,
+            "ab".repeat(32),
+            0,
+            "00".repeat(32),
+            InvalidDilithiumEvidence {
+                pq_signature: vec![0x11; 64],
+                merkle_proof: vec![vec![0xAA]],
+                leaf_index: 0,
+            },
+        );
+        assert!(
+            short_sibling.validate().is_err(),
+            "1-byte Merkle sibling must be refused at validate()"
+        );
+
+        let high_index = QcFaultProof::new_invalid_dilithium(
+            1,
+            100,
+            "ab".repeat(32),
+            0,
+            "00".repeat(32),
+            InvalidDilithiumEvidence {
+                pq_signature: vec![0x11; 64],
+                merkle_proof: vec![vec![0x22; 32]],
+                leaf_index: 2,
+            },
+        );
+        assert!(
+            high_index.validate().is_err(),
+            "leaf_index=2 with 1-step proof must be refused at validate()"
+        );
+
+        let valid_shape = QcFaultProof::new_invalid_dilithium(
+            1,
+            100,
+            "ab".repeat(32),
+            0,
+            "00".repeat(32),
+            InvalidDilithiumEvidence {
+                pq_signature: vec![0x11; 64],
+                merkle_proof: vec![],
+                leaf_index: 0,
+            },
+        );
+        assert!(
+            valid_shape.verify_inclusion(&"00".repeat(32)).is_err(),
+            "all-zero QC root must refuse inclusion proofs"
+        );
     }
 }

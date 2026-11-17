@@ -9,9 +9,10 @@
 //! What the index holds (history the node does not keep in a queryable
 //! form): blocks by height and hash, transactions by hash, every address's
 //! transactions, and each block producer's record (blocks produced, first and
-//! last height). Current-state reads (domains, global headers, BNS names,
-//! B.U.D. manifests) are answered from the node, so they are never stale
-//! copies. The contract is `docs/explorer-api.openapi.yaml`.
+//! last height). Current-state reads (domains, global headers and BNS names)
+//! are answered from the node, so they are never stale copies. The legacy
+//! manifest route is retired until the explorer moves to B.U.D. 3.0 objects.
+//! The contract is `docs/explorer-api.openapi.yaml`.
 //!
 //! # Usage
 //!
@@ -211,17 +212,38 @@ impl Node {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        const MAX_INDEXER_RPC_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
         let body =
             serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
-        let value: serde_json::Value = self
+        let mut response = self
             .http
             .post(&self.url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("{method}: node unreachable: {e}"))?
-            .json()
+            .map_err(|e| format!("{method}: node unreachable: {e}"))?;
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_INDEXER_RPC_RESPONSE_BYTES as u64)
+        {
+            return Err(format!(
+                "{method}: node response exceeds {MAX_INDEXER_RPC_RESPONSE_BYTES}-byte limit"
+            ));
+        }
+        let mut raw = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
+            .map_err(|e| format!("{method}: failed reading node response: {e}"))?
+        {
+            if raw.len().saturating_add(chunk.len()) > MAX_INDEXER_RPC_RESPONSE_BYTES {
+                return Err(format!(
+                    "{method}: node response exceeds {MAX_INDEXER_RPC_RESPONSE_BYTES}-byte limit"
+                ));
+            }
+            raw.extend_from_slice(&chunk);
+        }
+        let value: serde_json::Value = serde_json::from_slice(&raw)
             .map_err(|e| format!("{method}: answer is not JSON: {e}"))?;
         if let Some(error) = value.get("error") {
             return Err(format!("{method}: {error}"));
@@ -542,7 +564,6 @@ fn node_backed(parts: &[&str]) -> bool {
             | ["v1", "external-domains"]
             | ["v1", "global-headers", _]
             | ["v1", "bns", _]
-            | ["v1", "manifests", _]
     )
 }
 
@@ -624,9 +645,12 @@ async fn route(
         ["v1", "bns", name] => {
             from_node(node, "bud_bnsResolveFull", serde_json::json!([name])).await
         }
-        ["v1", "manifests", id] => {
-            from_node(node, "bud_storageGetManifest", serde_json::json!([id])).await
-        }
+        ["v1", "manifests", _] => json_response(
+            StatusCode::GONE,
+            &serde_json::json!({
+                "error": "legacy manifests are retired; no B.U.D. 3.0 explorer object route is exposed yet"
+            }),
+        ),
         _ => json_response(
             StatusCode::NOT_FOUND,
             &serde_json::json!({"error": "unknown path; see docs/explorer-api.openapi.yaml"}),
@@ -687,7 +711,9 @@ async fn serve(cli: Cli) -> Result<(), String> {
         rates: Mutex::new(ClientRates::default()),
     });
     let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("HTTP client: {e}"))?;
     let node = Arc::new(Node {
@@ -826,7 +852,6 @@ mod tests {
             vec!["v1", "external-domains"],
             vec!["v1", "global-headers", "12"],
             vec!["v1", "bns", "alice"],
-            vec!["v1", "manifests", "abc"],
         ] {
             assert!(node_backed(&parts), "{parts:?} answers from the node");
         }
@@ -837,8 +862,9 @@ mod tests {
             vec!["v1", "txs", "abc"],
             vec!["v1", "addresses", "aa", "txs"],
             vec!["v1", "producers"],
+            vec!["v1", "manifests", "abc"],
         ] {
-            assert!(!node_backed(&parts), "{parts:?} answers from the index");
+            assert!(!node_backed(&parts), "{parts:?} must not call the node");
         }
     }
 

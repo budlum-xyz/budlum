@@ -50,14 +50,14 @@ fn apply(state: &mut AccountState, tx: Transaction) -> Result<(), String> {
 }
 
 #[test]
-fn a_manifest_registers_in_block_and_moves_the_state_root() {
+fn legacy_manifest_registration_is_refused_without_fee_nonce_or_root_change() {
     let alice = addr(1);
     let mut state = AccountState::new();
     state.add_balance(&alice, 1_000);
     let before = state.calculate_state_root();
     let m = manifest_owned_by(alice);
 
-    apply(
+    let err = apply(
         &mut state,
         storage_tx(
             alice,
@@ -68,19 +68,17 @@ fn a_manifest_registers_in_block_and_moves_the_state_root() {
             0,
         ),
     )
-    .expect("the owner registers its manifest");
+    .unwrap_err();
 
-    assert_eq!(
-        state.storage_registry.get_manifest(&m.manifest_id),
-        Some(&m)
-    );
-    assert_eq!(state.get_balance(&alice), 999, "the fee is charged");
-    assert_eq!(state.get_nonce(&alice), 1, "the nonce advances");
-    assert_ne!(
-        state.calculate_state_root(),
-        before,
-        "a registry write that does not reach the root would let nodes disagree silently"
-    );
+    assert!(err.contains("storage_tx_failed"), "{err}");
+    assert!(err.contains("B.U.D. 3.0"), "{err}");
+    assert!(state
+        .storage_registry
+        .get_manifest(&m.manifest_id)
+        .is_none());
+    assert_eq!(state.get_balance(&alice), 1_000, "a refusal charges no fee");
+    assert_eq!(state.get_nonce(&alice), 0, "a refusal spends no nonce");
+    assert_eq!(state.calculate_state_root(), before);
 }
 
 #[test]
@@ -258,28 +256,18 @@ fn a_self_host_policy_declaration_moves_the_state_root_and_charges_the_fee() {
     let mut state = AccountState::new();
     state.add_balance(&alice, 1_000);
     let m = manifest_owned_by(alice);
-    apply(
-        &mut state,
-        storage_tx(
-            alice,
-            0,
-            StorageTx::RegisterManifest {
-                manifest: m.clone(),
-            },
-            0,
-        ),
-    )
-    .expect("register");
+    // Fixture setup for the policy door; legacy registration itself is closed.
+    state.storage_registry.register_manifest(&m);
     let before = state.calculate_state_root();
 
-    apply(&mut state, declare_policy_tx(alice, &m, 1)).expect("the owner declares");
+    apply(&mut state, declare_policy_tx(alice, &m, 0)).expect("the owner declares");
 
     assert!(state
         .storage_registry
         .self_host_policies
         .contains_key(&(m.manifest_id, m.shards[0].shard_id)));
-    assert_eq!(state.get_balance(&alice), 998);
-    assert_eq!(state.get_nonce(&alice), 2);
+    assert_eq!(state.get_balance(&alice), 999);
+    assert_eq!(state.get_nonce(&alice), 1);
     assert_ne!(state.calculate_state_root(), before);
 }
 
@@ -484,7 +472,7 @@ fn a_generated_registration_is_refused_and_charges_nothing() {
     .unwrap_err();
 
     assert!(err.contains("storage_tx_failed"), "{err}");
-    assert!(err.contains("not priced"), "{err}");
+    assert!(err.contains("B.U.D. 3.0"), "{err}");
     assert!(state
         .storage_registry
         .get_manifest(&m.manifest_id)
@@ -658,13 +646,15 @@ mod open_deal {
         let (_, m, op) = world();
         let body = unsigned_body(&m, &op);
         let first_shard = &b"open a deal in block payload"[..8];
+        let manifest_json = serde_json::to_vec(&m).expect("manifest json");
+        let body_json = serde_json::to_vec(&body).expect("deal json");
         assert_eq!(
             operator_open_deal_consent_digest(
                 DEFAULT_CHAIN_ID,
                 &payer(),
                 0,
-                &body,
-                &m,
+                &body_json,
+                &manifest_json,
                 first_shard,
             )
             .expect("the measured shard agrees"),
@@ -677,8 +667,8 @@ mod open_deal {
             DEFAULT_CHAIN_ID,
             &payer(),
             0,
-            &relabelled,
-            &m,
+            &serde_json::to_vec(&relabelled).expect("deal json"),
+            &manifest_json,
             first_shard,
         )
         .expect_err("a signer must not attest a size its bytes do not satisfy");

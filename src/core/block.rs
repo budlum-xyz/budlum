@@ -63,6 +63,21 @@ pub struct BlockHeader {
     /// devnet and testnet blocks built before; mainnet requires it.
     #[serde(default)]
     pub witness_root: Option<[u8; 32]>,
+    /// The seat participation record this checkpoint block carries (section
+    /// 7.5.1): the seats whose precommits for the previous checkpoint the
+    /// proposer collected. `None` on a block that is not a checkpoint. Folded
+    /// into the block hash when present, because the next seat table is
+    /// derived from it.
+    #[serde(default)]
+    pub seat_participation: Option<crate::validators::committee::SeatParticipation>,
+    /// The hash of the claim frame of the block (aggregation layer, block
+    /// rule 10). `None` on a block that carries no frame. Folded into the
+    /// block hash when present, so the frame of a block cannot be swapped
+    /// for another. On the genesis block the slot carries the commitment of
+    /// the aggregation parameters instead: a chain with other rules is
+    /// another chain.
+    #[serde(default)]
+    pub frame_hash: Option<[u8; 32]>,
 }
 
 /// Stand-in bytes hashed when slashing evidence cannot be serialized.
@@ -94,6 +109,8 @@ struct BlockPreimage<'a> {
     storage_root: Option<crate::domain::types::Hash32>,
     shards_root: Option<&'a [u8; 32]>,
     witness_root: Option<&'a [u8; 32]>,
+    seat_participation: Option<&'a crate::validators::committee::SeatParticipation>,
+    frame_hash: Option<&'a [u8; 32]>,
 }
 
 fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
@@ -141,6 +158,18 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
         .map(|r| bincode::serialize(r).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec()));
 
     let storage_root_bytes = presence_tagged(p.storage_root);
+    // The seat participation record is consensus data: the next seat table is
+    // derived from it, so the block hash seals it. Encoded here beside the
+    // other buffers so the borrow outlives `fields`.
+    let participation_bytes = p.seat_participation.map(|record| {
+        let seats = record.seats.as_bytes();
+        let mut bytes = Vec::with_capacity(16 + seats.len());
+        bytes.extend_from_slice(&record.checkpoint.to_le_bytes());
+        let seat_len = u64::try_from(seats.len()).unwrap_or(u64::MAX);
+        bytes.extend_from_slice(&seat_len.to_le_bytes());
+        bytes.extend_from_slice(seats);
+        bytes
+    });
     let mut fields: Vec<&[u8]> = vec![
         b"BDLM_BLOCK_V4",
         &index_bytes,
@@ -171,6 +200,18 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
         fields.push(b"BDLM_WITNESS_ROOT_V1");
         fields.push(witness_root.as_slice());
     }
+    // Tagged and folded only when present, so a block that carries no record
+    // hashes exactly as it did before the field existed.
+    if let Some(bytes) = &participation_bytes {
+        fields.push(b"BDLM_SEAT_PARTICIPATION_V1");
+        fields.push(bytes.as_slice());
+    }
+    // Tagged and folded only when present, like the two above: a block
+    // without a claim frame hashes exactly as it did before.
+    if let Some(frame_hash) = &p.frame_hash {
+        fields.push(b"BDLM_BLOCK_FRAME_HASH_V1");
+        fields.push(frame_hash.as_slice());
+    }
     hash_fields_bytes(&fields)
 }
 
@@ -197,6 +238,8 @@ impl BlockHeader {
             storage_root: block.storage_root,
             shards_root: block.shards_root,
             witness_root: block.witness_root,
+            seat_participation: block.seat_participation.clone(),
+            frame_hash: block.frame_hash,
         }
     }
 
@@ -224,6 +267,8 @@ impl BlockHeader {
             storage_root: self.storage_root,
             shards_root: self.shards_root.as_ref(),
             witness_root: self.witness_root.as_ref(),
+            seat_participation: self.seat_participation.as_ref(),
+            frame_hash: self.frame_hash.as_ref(),
         })
     }
 
@@ -297,6 +342,26 @@ pub struct Block {
     /// devnet and testnet blocks built before; mainnet requires it.
     #[serde(default)]
     pub witness_root: Option<[u8; 32]>,
+    /// The seat participation record this checkpoint block carries (section
+    /// 7.5.1): the seats whose precommits for the previous checkpoint the
+    /// proposer collected. `None` on a block that is not a checkpoint. Folded
+    /// into the block hash when present, because the next seat table is
+    /// derived from it.
+    #[serde(default)]
+    pub seat_participation: Option<crate::validators::committee::SeatParticipation>,
+    /// The hash of the claim frame of the block (aggregation layer, block
+    /// rule 10). `None` on a block that carries no frame. Folded into the
+    /// block hash when present, so the frame of a block cannot be swapped
+    /// for another. On the genesis block the slot carries the commitment of
+    /// the aggregation parameters instead: a chain with other rules is
+    /// another chain.
+    #[serde(default)]
+    pub frame_hash: Option<[u8; 32]>,
+    /// The claim frame of the block: the claims its transactions use, and
+    /// one proof that every object behind them was verified. Part of the
+    /// body; the header commits to it through `frame_hash`.
+    #[serde(default)]
+    pub claim_frame: Option<crate::aggregation::frame::ClaimFrame>,
 }
 
 impl Block {
@@ -338,6 +403,9 @@ impl Block {
             storage_root: None,
             shards_root: None,
             witness_root: None,
+            seat_participation: None,
+            frame_hash: None,
+            claim_frame: None,
         };
         block.tx_root = block.calculate_tx_root();
         block.hash = block.calculate_hash();
@@ -521,6 +589,8 @@ impl Block {
             storage_root: self.storage_root,
             shards_root: self.shards_root.as_ref(),
             witness_root: self.witness_root.as_ref(),
+            seat_participation: self.seat_participation.as_ref(),
+            frame_hash: self.frame_hash.as_ref(),
         })
     }
     pub fn sign(&mut self, keypair: &KeyPair) {
@@ -621,6 +691,11 @@ impl Block {
             .map(|public| public.pq)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn sign_with_signer(&mut self, signer: &dyn ConsensusSigner) -> Result<(), String> {
         // A backend that holds the validator's ML-DSA-65 key signs the
         // composite form, the only one mainnet admits. Off mainnet a
@@ -766,7 +841,7 @@ impl Block {
             }
         }
     }
-    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    #[cfg(test)]
     pub fn verify_signature_with_pubkey(&self, expected_pubkey: &Address) -> bool {
         self.verify_signature_with_pubkey_in(
             &crate::crypto::scheme::SchemeStatusRegistry::genesis(),

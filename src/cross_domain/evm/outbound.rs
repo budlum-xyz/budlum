@@ -1,6 +1,5 @@
 //! The one EVM log shape a contract uses to speak to Budlum, and its
-//! translation into a cross-domain message (,,
-//!).
+//! translation into a cross-domain message.
 //!
 //! `contracts/lib/BudlumOutbound.sol` declares
 //!
@@ -9,11 +8,11 @@
 //!                      bytes32 indexed correlationId, bytes32 payloadHash)
 //! ```
 //!
-//! and `GraftExecutor`, `BudlumGraftClaimer` and `BudlumRegistrar` emit it.
+//! and `AppBindingExecutor`, `BudlumAppBindingClaimer` and `BudlumRegistrar` emit it.
 //! A domain reporter puts the message built here into the domain's event
 //! tree; Budlum accepts it only once that tree's root reaches the external
 //! root it anchored for the domain. The emitter becomes the message sender,
-//! right-aligned in a 32-byte word (`settlement::graft::origin_emitter`), so
+//! right-aligned in a 32-byte word (`settlement::app_binding::origin_emitter`), so
 //! a contract can only ever speak as itself.
 
 use crate::core::address::Address;
@@ -128,7 +127,7 @@ pub fn message_from_log(
         source_height: position.source_height,
         event_index: position.event_index,
         nonce: position.nonce,
-        sender: crate::settlement::graft::origin_emitter(&emitter),
+        sender: crate::settlement::app_binding::origin_emitter(&emitter),
         recipient: Address::from(log.topics[1]),
         payload_hash,
         kind: MessageKind::Custom(kind),
@@ -183,7 +182,7 @@ mod tests {
             message_from_log(&log(b"budlum/mikoriza/allocation/v1"), position()).expect("decodes");
         assert_eq!(
             message.sender,
-            crate::settlement::graft::origin_emitter(&[0xEE; 20])
+            crate::settlement::app_binding::origin_emitter(&[0xEE; 20])
         );
         assert_eq!(message.recipient, Address::from([0x02; 32]));
         assert_eq!(message.correlation_id, Some([0x03; 32]));

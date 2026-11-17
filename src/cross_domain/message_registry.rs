@@ -53,6 +53,11 @@ impl CrossDomainMessageRegistry {
         before - self.messages.len()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn insert(&mut self, message: CrossDomainMessage) -> Result<(), String> {
         if !message.verify_id() {
             return Err("Invalid message id".into());
@@ -77,6 +82,10 @@ impl CrossDomainMessageRegistry {
 
     pub fn get(&self, message_id: &MessageId) -> Option<&CrossDomainMessage> {
         self.messages.get(message_id)
+    }
+
+    pub(crate) fn remove(&mut self, message_id: &MessageId) -> Option<CrossDomainMessage> {
+        self.messages.remove(message_id)
     }
 
     pub fn len(&self) -> usize {

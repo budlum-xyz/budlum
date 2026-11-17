@@ -82,7 +82,7 @@ mod tests {
             .expect("self-signed certificate");
         Identity {
             chain: vec![generated.cert.der().clone()],
-            key: PrivatePkcs8KeyDer::from(generated.key_pair.serialize_der()),
+            key: PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der()),
         }
     }
 

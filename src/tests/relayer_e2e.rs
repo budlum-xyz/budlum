@@ -12,7 +12,7 @@ use crate::cross_domain::event_tree::{DomainEvent, DomainEventKind, DomainEventT
 use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams, MessageKind};
 use crate::cross_domain::AssetId;
 use crate::domain::types::{DomainId, Hash32};
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use std::sync::Arc;
 use tempfile::tempdir;
 

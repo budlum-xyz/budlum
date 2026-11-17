@@ -269,7 +269,11 @@ fn validate_canonical_blinding(label: &str, blinding: u64) -> Result<(), WalletE
 
 fn reduce_nonzero_goldilocks(raw: u64) -> u64 {
     let reduced = raw % budlum_note_packing::GOLDILOCKS_P;
-    if reduced == 0 { 1 } else { reduced }
+    if reduced == 0 {
+        1
+    } else {
+        reduced
+    }
 }
 
 /// Derive a field-element spend secret from wallet seed + note commitment.

@@ -20,10 +20,15 @@ use std::collections::BTreeMap;
 pub struct AssetId(#[serde(with = "asset_id_serde")] pub [u8; 32]);
 
 impl AssetId {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_hex(s: &str) -> Result<Self, String> {
         let s = s.strip_prefix("0x").unwrap_or(s);
         if s == "0" {
-            return Ok(AssetId([0u8; 32]));
+            return Ok(Self([0u8; 32]));
         }
         let bytes = hex::decode(s).map_err(|e| e.to_string())?;
         if bytes.len() != 32 {
@@ -34,15 +39,18 @@ impl AssetId {
         }
         let mut id = [0u8; 32];
         id.copy_from_slice(&bytes);
-        Ok(AssetId(id))
+        Ok(Self(id))
     }
+    #[must_use]
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
-    pub fn zero() -> Self {
-        AssetId([0u8; 32])
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self([0u8; 32])
     }
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
@@ -109,7 +117,7 @@ impl std::fmt::Debug for AssetId {
 
 impl From<[u8; 32]> for AssetId {
     fn from(bytes: [u8; 32]) -> Self {
-        AssetId(bytes)
+        Self(bytes)
     }
 }
 
@@ -172,7 +180,7 @@ pub struct BridgeTransfer {
     /// (security audit) height at which this lock expires.
     /// `BridgeState::sweep_expired_locks(current_height)` returns
     /// `Locked` transfers to `Active` once `current_height >= expiry_height`,
-    /// Preventing permanent DoS via a forgotten/abandoned lock.
+    /// Preventing permanent `DoS` via a forgotten/abandoned lock.
     #[serde(default)]
     pub expiry_height: u64,
     /// The Ethereum destination declared AT the burn
@@ -225,12 +233,12 @@ pub struct BridgeState {
     asset_locations: BTreeMap<AssetId, BridgeStatus>,
     #[serde(with = "crate::core::map_keys")]
     transfers: BTreeMap<MessageId, BridgeTransfer>,
-    /// Expiry queue: expiry_height -> [message_id]
-    /// Fix O(N) sweep DoS by indexing by height.
+    /// Expiry queue: `expiry_height` -> `[message_id]`
+    /// Fix O(N) sweep `DoS` by indexing by height.
     expiry_queue: BTreeMap<u64, Vec<MessageId>>,
     pub replay: ReplayNonceStore,
     /// Settled queue: the height a transfer reached a terminal status
-    /// (`Unlocked`, or `Active` again after its lock expired) -> [message_id].
+    /// (`Unlocked`, or `Active` again after its lock expired) -> `[message_id]`.
     /// `sweep_expired_locks` drops those rows `SETTLED_RETENTION_BLOCKS`
     /// later. Without it `transfers` only ever grew: every row stayed for
     /// the life of the chain, and with it the per-block cost of `root()`,
@@ -540,6 +548,10 @@ impl BridgeState {
     /// carries a different root. The mark itself never needs pruning: one
     /// row per direction and sender bounds the store by the number of
     /// distinct bridging senders, not by traffic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn mint(
         &mut self,
         message: &CrossDomainMessage,
@@ -640,6 +652,11 @@ impl BridgeState {
         total
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn burn(
         &mut self,
         message_id: MessageId,
@@ -650,6 +667,11 @@ impl BridgeState {
             .map(|_| ())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn burn_with_event(
         &mut self,
         message_id: MessageId,
@@ -757,6 +779,10 @@ impl BridgeState {
     /// `settled_height` is the block this unlock lands in; the row becomes
     /// history at that height and is dropped by the sweep
     /// `SETTLED_RETENTION_BLOCKS` later.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn unlock(
         &mut self,
         message_id: MessageId,
@@ -915,6 +941,10 @@ impl BridgeState {
     /// Record positive evidence that an off-chain release claim was built for
     /// a burned transfer, refusing claims past the burn's expiry height so
     /// off-chain release and local expiry refund are mutually exclusive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_claim_issued(
         &mut self,
         message_id: &MessageId,
@@ -941,7 +971,7 @@ impl BridgeState {
     /// (security audit §3) sweep all `Locked` transfers whose
     /// `expiry_height` is below `current_height`, returning their
     /// `asset_id` back to `Active` so a forgotten/abandoned lock can
-    /// Never permanently DoS the bridge. Returns the (asset_id, amount)
+    /// Never permanently `DoS` the bridge. Returns the (`asset_id`, amount)
     /// List of released locks for the caller's audit log.
     ///
     /// Idempotent: transfers already past `expiry_height` stay `Active`
@@ -949,7 +979,7 @@ impl BridgeState {
     /// Undo the last `lock` of `message_id`: removes the
     /// row and restores the asset's location. The replay nonce is left
     /// advanced on purpose - a skipped nonce is harmless, an un-consumed one
-    /// would allow an id collision. Replaces "clone the whole BridgeState
+    /// would allow an id collision. Replaces "clone the whole `BridgeState`
     /// and restore it" as the rollback of a refused registration.
     pub fn unwind_lock(&mut self, message_id: &MessageId, source_domain: DomainId) {
         if let Some(transfer) = self.transfers.remove(message_id) {
@@ -962,6 +992,9 @@ impl BridgeState {
             if transfer.expiry_height > 0 {
                 if let Some(bucket) = self.expiry_queue.get_mut(&transfer.expiry_height) {
                     bucket.retain(|id| id != message_id);
+                    if bucket.is_empty() {
+                        self.expiry_queue.remove(&transfer.expiry_height);
+                    }
                 }
             }
         }
@@ -1015,6 +1048,10 @@ impl BridgeState {
     /// Fee-aware sweep used by consensus block execution: expired `Locked` rows
     /// refund gross `t.amount` to `t.owner`, while expired `Burned` rows revert
     /// to `Minted` and refund the exact net-of-fee burned units to `t.recipient`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn sweep_expired_locks_with_fee(
         &mut self,
         current_height: u64,
@@ -1544,10 +1581,10 @@ pub fn apply_burn_to_state(
     )
     .map_err(|e| e.to_string())?;
     let amount = held.get();
-    let burner_balance = state.get_balance(&burner);
+    let burner_balance = state.spendable_balance(&burner);
     if burner_balance < amount {
         return Err(format!(
-            "Insufficient balance for bridge burn: burner has {burner_balance}, needed {amount}"
+            "Insufficient spendable balance for bridge burn: burner has {burner_balance}, needed {amount}"
         ));
     }
     // The message is registered BEFORE the row flips, so a refused
@@ -2096,5 +2133,20 @@ mod bridge_fee_split {
             bridge.transfer(&id).unwrap().status,
             BridgeStatus::Burned { domain: 2 }
         );
+    }
+
+    #[test]
+    fn unwind_lock_removes_empty_expiry_bucket() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"unwind-lock-bucket-cleanup"]));
+        let owner = Address::from([3u8; 32]);
+        let recipient = Address::from([4u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, _) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 99)
+            .unwrap();
+        assert!(bridge.expiry_queue.contains_key(&99));
+        bridge.unwind_lock(&transfer.message_id, 1);
+        assert!(!bridge.expiry_queue.contains_key(&99));
     }
 }
