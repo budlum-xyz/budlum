@@ -20,7 +20,15 @@ def seat_bootnodes(seat: str, fallback_bootstrap: str) -> list[str]:
         return [fallback_bootstrap]
     if not 0 <= idx < 8:
         return [fallback_bootstrap]
-    peers = (((idx + 1) % 8) + 1, ((idx + 7) % 8) + 1, ((idx + 4) % 8) + 1)
+    # Include a step-2 chord alongside the ring neighbours and the co-located
+    # sibling ((idx + 4) % 8) + 1 so every seat has a direct peer in each of
+    # the other three validator containers even when one container is stopped.
+    peers = (
+        ((idx + 1) % 8) + 1,
+        ((idx + 7) % 8) + 1,
+        ((idx + 2) % 8) + 1,
+        ((idx + 4) % 8) + 1,
+    )
     addrs: list[str] = []
     for n in peers:
         p = CEREMONY_DIR / f"validator{n}.bootnode"
