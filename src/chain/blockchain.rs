@@ -4483,7 +4483,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_create_offer_shape".to_string());
                 }
-                match bincode::deserialize::<crate::bns::CreateNameOffer>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<
+                    crate::bns::CreateNameOffer,
+                >(&tx.data, crate::network::protocol::MAX_TX_SIZE)
+                {
                     Ok(req) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&req.name) {
                             reasons.push("invalid_bns_offer_name".to_string());
@@ -4533,7 +4536,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_cancel_offer_shape".to_string());
                 }
-                match bincode::deserialize::<u64>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<u64>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok(offer_id) => match self.state.marketplace.get_name_offer(offer_id) {
                         None => reasons.push("bns_offer_not_found".to_string()),
                         Some(offer) if !offer.active => {
@@ -4551,7 +4557,10 @@ impl Blockchain {
                 if tx.amount == 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_buy_name_shape".to_string());
                 }
-                match bincode::deserialize::<u64>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<u64>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok(offer_id) => match self.state.marketplace.get_name_offer(offer_id) {
                         None => reasons.push("bns_offer_not_found".to_string()),
                         Some(offer) => {
@@ -4567,7 +4576,10 @@ impl Blockchain {
                 }
             }
             crate::core::transaction::TransactionType::BnsRenew => {
-                match bincode::deserialize::<(String, u64)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(String, u64)>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok((name, duration)) => {
                         if tx.amount != self.state.bns_registry.calculate_cost(&name, duration) {
                             reasons.push("invalid_bns_renewal_payment".to_string());
@@ -4583,7 +4595,10 @@ impl Blockchain {
                 }
             }
             crate::core::transaction::TransactionType::BnsTransfer => {
-                match bincode::deserialize::<(String, Address)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(String, Address)>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok((_name, new_owner)) if new_owner != Address::zero() => {
                         if new_owner != tx.from
                             && self
@@ -4606,7 +4621,12 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_set_address_shape".to_string());
                 }
-                match bincode::deserialize::<(String, Option<Address>, Option<u32>)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
+                    String,
+                    Option<Address>,
+                    Option<u32>,
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
+                {
                     Ok((name, target, _domain_id)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&name) {
                             reasons.push("invalid_bns_name".to_string());
@@ -4622,7 +4642,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_set_primary_shape".to_string());
                 }
-                match bincode::deserialize::<Option<String>>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<Option<String>>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok(Some(name)) if !crate::bns::BnsRegistry::is_valid_name(&name) => {
                         reasons.push("invalid_bns_name".to_string());
                     }
@@ -4634,10 +4657,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_set_records_shape".to_string());
                 }
-                match bincode::deserialize::<(
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
                     String,
                     std::collections::BTreeMap<String, Option<String>>,
-                )>(&tx.data)
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                 {
                     Ok((name, updates)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&name) {
@@ -4664,7 +4687,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_remove_subdomain_shape".to_string());
                 }
-                match bincode::deserialize::<(String, String)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(String, String)>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok((parent, sub_label)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&parent)
                             || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
@@ -4679,11 +4705,11 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_set_subdomain_content_shape".to_string());
                 }
-                match bincode::deserialize::<(
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
                     String,
                     String,
                     Option<crate::storage::bud3::content_ref::ContentRef>,
-                )>(&tx.data)
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                 {
                     Ok((parent, sub_label, content)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&parent)
@@ -4710,10 +4736,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_content_shape".to_string());
                 }
-                match bincode::deserialize::<(
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
                     String,
                     Option<crate::storage::bud3::content_ref::ContentRef>,
-                )>(&tx.data)
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                 {
                     Ok((name, cref)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&name) {
@@ -4738,7 +4764,12 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_register_subdomain_shape".to_string());
                 }
-                match bincode::deserialize::<(String, String, Address)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
+                    String,
+                    String,
+                    Address,
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
+                {
                     Ok((parent, sub_label, sub_owner)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&parent)
                             || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
@@ -4754,7 +4785,12 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_set_storage_shape".to_string());
                 }
-                match bincode::deserialize::<(String, [u8; 32], u32)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
+                    String,
+                    [u8; 32],
+                    u32,
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
+                {
                     Ok((name, _, _)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&name) {
                             reasons.push("invalid_bns_name".to_string());
@@ -5588,7 +5624,10 @@ impl Blockchain {
         let mut cids = Vec::new();
         for tx in &block.transactions {
             if let crate::core::transaction::TransactionType::NftBurn = tx.tx_type {
-                if let Ok(nft_id) = bincode::deserialize::<u64>(&tx.data) {
+                if let Ok(nft_id) = crate::network::bounded_bincode::decode_bounded_bincode::<u64>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     if let Some(nft) = state.nft_registry.get_nft(nft_id) {
                         // Burning a token is not proof of owning the content
                         // it names: `NftMint` accepts an arbitrary content id.

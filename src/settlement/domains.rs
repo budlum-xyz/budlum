@@ -1725,10 +1725,12 @@ fn execute_object_layer_tx(
             if !domain.is_active() || !domain_has_bound_authority(domain) {
                 return false;
             }
-            let Ok((sequence, merkle_proof)) = bincode::deserialize::<(
-                u64,
-                crate::cross_domain::event_tree::MerkleProof,
-            )>(&proof.inclusion) else {
+            let Ok((sequence, merkle_proof)) =
+                crate::network::bounded_bincode::decode_bounded_bincode::<(
+                    u64,
+                    crate::cross_domain::event_tree::MerkleProof,
+                )>(&proof.inclusion, 4 * 1024)
+            else {
                 return false;
             };
             let Some(commitment) = self
@@ -5324,5 +5326,20 @@ mod tests {
             direct_err.contains("reserved Garden domain id"),
             "{direct_err}"
         );
+    }
+
+    #[test]
+    fn forged_length_prefix_home_event_proof_is_rejected_without_allocating() {
+        // `sequence: u64` + `MerkleProof.siblings: Vec<[u8; 32]>` with a forged
+        // count claiming billions of sibling hashes inside a 24-byte buffer.
+        let mut forged = Vec::with_capacity(24);
+        forged.extend_from_slice(&1u64.to_le_bytes());
+        forged.extend_from_slice(&0x0000_FFFF_FFFF_FFFFu64.to_le_bytes());
+        forged.extend_from_slice(&[0u8; 8]);
+        assert!(crate::network::bounded_bincode::decode_bounded_bincode::<(
+            u64,
+            crate::cross_domain::event_tree::MerkleProof,
+        )>(&forged, 4 * 1024)
+        .is_err());
     }
 }
