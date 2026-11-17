@@ -478,50 +478,60 @@ impl LocalStack {
         }
     }
 
+    fn init_validator_seat(
+        &mut self,
+        root: &Path,
+        operators_dir: &Path,
+        seat: usize,
+    ) -> Result<(), String> {
+        let key_file = self.ceremony_dir.join(format!("validator{seat}.key"));
+        let rec_file = operators_dir.join(format!("validator{seat}.json"));
+        let moniker = format!("validator{seat}");
+        self.run_bin(
+            root,
+            "bud",
+            &[
+                "validator",
+                "init",
+                "--chain-id",
+                "45261",
+                "--moniker",
+                &moniker,
+                "--key-file",
+                &key_file.to_string_lossy(),
+                "--record-out",
+                &rec_file.to_string_lossy(),
+            ],
+        )?;
+        let id_file = self.ceremony_dir.join(format!("validator{seat}.p2p"));
+        let port = LOCAL_P2P_BASE
+            .checked_add(u16::try_from(seat).map_err(|_| "seat index overflow")?)
+            .ok_or("port overflow")?;
+        let id_out = self.run_bin(
+            root,
+            "bud",
+            &[
+                "node",
+                "identity",
+                "--identity-file",
+                &id_file.to_string_lossy(),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+            ],
+        )?;
+        let boot = line_value(&id_out, "bootnode (config [p2p] bootnodes): ")
+            .map(|raw| raw.trim_matches('"').to_string())
+            .ok_or_else(|| format!("node identity printed no bootnode for validator{seat}"))?;
+        self.bootnodes.push(boot);
+        Ok(())
+    }
+
     fn assemble_ceremony(&mut self, root: &Path) -> Result<(), String> {
         let operators_dir = self.ceremony_dir.join("operators");
         for seat in 1..=self.seats {
-            let key_file = self.ceremony_dir.join(format!("validator{seat}.key"));
-            let rec_file = operators_dir.join(format!("validator{seat}.json"));
-            let moniker = format!("validator{seat}");
-            self.run_bin(
-                root,
-                "bud",
-                &[
-                    "validator",
-                    "init",
-                    "--chain-id",
-                    "45261",
-                    "--moniker",
-                    &moniker,
-                    "--key-file",
-                    &key_file.to_string_lossy(),
-                    "--record-out",
-                    &rec_file.to_string_lossy(),
-                ],
-            )?;
-            let id_file = self.ceremony_dir.join(format!("validator{seat}.p2p"));
-            let port = LOCAL_P2P_BASE
-                .checked_add(u16::try_from(seat).map_err(|_| "seat index overflow")?)
-                .ok_or("port overflow")?;
-            let id_out = self.run_bin(
-                root,
-                "bud",
-                &[
-                    "node",
-                    "identity",
-                    "--identity-file",
-                    &id_file.to_string_lossy(),
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    &port.to_string(),
-                ],
-            )?;
-            let boot = line_value(&id_out, "bootnode (config [p2p] bootnodes): ")
-                .map(|raw| raw.trim_matches('"').to_string())
-                .ok_or_else(|| format!("node identity printed no bootnode for validator{seat}"))?;
-            self.bootnodes.push(boot);
+            self.init_validator_seat(root, &operators_dir, seat)?;
         }
 
         let faucet_seed = self.ceremony_dir.join("faucet.seed");
