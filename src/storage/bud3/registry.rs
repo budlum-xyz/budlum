@@ -37,10 +37,7 @@ use super::grants::{GrantBud3Error, GrantRow};
 use super::meter::Meter;
 use super::pipeline::ObjectRecord;
 use super::placement::{Class, Share};
-use super::repair::{
-    repair_attestation_digest, RepairClaim, RepairWitness, MAX_REPAIR_WITNESS_SYMBOLS,
-    MIN_REPAIR_ATTESTATIONS,
-};
+use super::repair::{RepairWitness, MAX_REPAIR_WITNESS_SYMBOLS};
 use super::segment::Segmentation;
 use super::view::{PaidViewReceipt, MIN_PAID_VIEW_FEE_ATOMS, PAID_VIEW_RETENTION_EPOCHS};
 use crate::core::hash::hash_fields_bytes;
@@ -1976,8 +1973,11 @@ impl Bud3Registry {
         )
     }
 
-    /// Verify and record a segment repair using either Merkle-proven live symbols
-    /// or `MIN_REPAIR_ATTESTATIONS` independent active Full validator signatures.
+    /// Verify and record a segment repair from Merkle-proven live symbols.
+    ///
+    /// The legacy validator-attestation witness stays decodable for wire
+    /// compatibility, but is refused until it carries a seat- or stake-weighted
+    /// quorum certificate. A fixed signature count is not finality.
     ///
     /// Convenience: called by `super::tx::apply_with_validators_and_nft_owner` with the
     /// consensus active Full validator key directory and by direct registry callers.
@@ -1994,7 +1994,7 @@ impl Bud3Registry {
         repair: SegmentRepair<'_>,
         repairer: Option<&Address>,
         validator_keys: &BTreeMap<Address, Vec<u8>>,
-        (chain_id, epoch): (u64, u64),
+        (_chain_id, epoch): (u64, u64),
     ) -> Result<(), RegistryError> {
         let SegmentRepair {
             segment,
@@ -2206,64 +2206,10 @@ impl Bud3Registry {
                     ));
                 }
             }
-            RepairWitness::ValidatorAttestations(atts) => {
-                if atts.len() < MIN_REPAIR_ATTESTATIONS {
-                    return Err(RegistryError::BadRepair(
-                        "insufficient Full validator repair attestations",
-                    ));
-                }
-                let orig_root = *obj
-                    .record
-                    .symbol_roots
-                    .get(seg_idx)
-                    .ok_or(RegistryError::BadRepair("missing original segment root"))?;
-                let digest = repair_attestation_digest(
-                    chain_id,
-                    &RepairClaim {
-                        object: key,
-                        segment,
-                        first_esi: first,
-                        count,
-                        new_root: &new_root,
-                        original_segment_root: &orig_root,
-                    },
-                );
-                let new_holders: BTreeSet<Address> = sorted.iter().map(|s| s.validator).collect();
-                let lost_holders: BTreeSet<Address> = obj
-                    .shares
-                    .iter()
-                    .filter(|s| s.segment == segment && s.lost)
-                    .map(|s| s.share.validator)
-                    .collect();
-                let mut distinct = BTreeSet::new();
-                for att in atts {
-                    if repairer == Some(&att.validator)
-                        || new_holders.contains(&att.validator)
-                        || lost_holders.contains(&att.validator)
-                    {
-                        return Err(RegistryError::BadRepair(
-                            "conflicted repair attester refused",
-                        ));
-                    }
-                    if !distinct.insert(att.validator) {
-                        return Err(RegistryError::BadRepair("duplicate repair attester"));
-                    }
-                    let pk = validator_keys
-                        .get(&att.validator)
-                        .ok_or(RegistryError::BadRepair(
-                            "repair attester has no active consensus Full key",
-                        ))?;
-                    crate::crypto::pq::verify(
-                        crate::crypto::scheme::SchemeId::ML_DSA_65,
-                        pk,
-                        &digest,
-                        crate::crypto::ctx::STORAGE_V2,
-                        &att.signature,
-                    )
-                    .map_err(|_| {
-                        RegistryError::BadRepair("invalid repair attestation signature")
-                    })?;
-                }
+            RepairWitness::ValidatorAttestations(_) => {
+                return Err(RegistryError::BadRepair(
+                    "validator repair attestations require a seat- or stake-weighted quorum certificate",
+                ));
             }
         }
         // Drop any expired unacknowledged repair shares on this segment only

@@ -864,7 +864,7 @@ impl Executor {
                     .checked_sub(tx.amount)
                     .ok_or_else(|| BudlumError::validation("stake_underflow", "stake underflow"))?;
 
-                let min_stake = state.registry.params().min_stake.max(1);
+                let min_stake = state.full_validator_stake_floor(tx.chain_id);
                 if let Some(validator) = state.get_validator_mut(&tx.from) {
                     validator.stake = new_stake;
                     if validator.stake < min_stake {
