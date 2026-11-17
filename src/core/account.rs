@@ -7162,6 +7162,36 @@ mod tests {
         assert_eq!(state.registry.params().unbonding_epochs, old_u);
     }
 
+    /// `full_validator_stake_floor` is the larger of two contracts: the
+    /// governance parameter (a *registration* floor, 1,000 atoms by default)
+    /// and the network profile's bond (10^9 atoms on testnet). The test suite
+    /// already pins the direction where the network floor is the stricter one;
+    /// this pins the other, where governance has raised its floor above the
+    /// network's and the parameter has to bind. A helper that returned either
+    /// side alone would pass the first test and fail this one.
+    #[test]
+    fn full_validator_stake_floor_is_the_max_of_the_two_contracts() {
+        let mut state = AccountState::new();
+        let network = crate::core::chain_config::Network::Testnet;
+        let chain = network.chain_id().0;
+        let network_floor = network.min_stake_full();
+        let registry_floor = state.registry.params().min_stake.max(1);
+        assert!(
+            registry_floor < network_floor,
+            "the default registry floor sits above the network floor; this test would prove nothing"
+        );
+        assert_eq!(state.full_validator_stake_floor(chain), network_floor);
+
+        let mut params = *state.registry.params();
+        params.min_stake = network_floor.saturating_add(1);
+        state.registry.set_params(params);
+        assert_eq!(
+            state.full_validator_stake_floor(chain),
+            network_floor.saturating_add(1),
+            "a governance raise above the network floor must bind"
+        );
+    }
+
     #[test]
     fn governance_cannot_enable_block_emission() {
         use crate::core::governance::{Proposal, ProposalType};
