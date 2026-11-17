@@ -410,8 +410,8 @@ impl Bud3SymbolStore {
         {
             return Err(SymbolProtocolError::InvalidSymbolCount);
         }
-        let entry = registry
-            .object(object)
+        let (live_key, entry) = registry
+            .resolve_live_object(object)
             .ok_or(SymbolProtocolError::BadMerkleProof)?;
         let mut seen = BTreeSet::new();
         for item in items {
@@ -420,7 +420,7 @@ impl Bud3SymbolStore {
             }
             verify_item_against_entry(entry, holder, segment, item)?;
         }
-        let slot = self.slots.entry((*holder, *object, segment)).or_default();
+        let slot = self.slots.entry((*holder, live_key, segment)).or_default();
         for item in items {
             if slot.insert(item.symbol.esi, item.clone()).is_none() {
                 self.total_items = self.total_items.saturating_add(1);
@@ -454,10 +454,10 @@ impl Bud3SymbolStore {
         if count == 0 {
             return SymbolRangeResponse { items: Vec::new() };
         }
-        let Some(entry) = registry.object(object) else {
+        let Some((live_key, entry)) = registry.resolve_live_object(object) else {
             return SymbolRangeResponse { items: Vec::new() };
         };
-        let Some(slot) = self.slots.get(&(*holder, *object, segment)) else {
+        let Some(slot) = self.slots.get(&(*holder, live_key, segment)) else {
             return SymbolRangeResponse { items: Vec::new() };
         };
         let capped = count.min(MAX_SYMBOLS_PER_REQUEST);
@@ -749,6 +749,147 @@ mod tests {
         assert_eq!(
             verify_symbol_range_response(0, root, syms.len() as u64, profile.symbol_size, &dup_esi),
             Err(SymbolProtocolError::BadMerkleProof)
+        );
+    }
+
+    #[test]
+    fn bud3_symbol_store_resolves_finalized_replacement_commitment() {
+        use super::super::custody::{symbol_leaf, symbol_root};
+        use super::super::pipeline::{prepare_public_upload, ObjectRecord};
+        use super::super::placement::{Class, Share};
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let old_up = prepare_public_upload(
+            b"symbol store replacement payload",
+            &profile,
+            &Bud3Limits::default(),
+            12,
+        )
+        .unwrap();
+        let old_key = old_up.record.commitment;
+        let validators = [[10u8; 32], [11u8; 32], [12u8; 32]];
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: validators[0],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[1],
+                    class: Class::Full,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[2],
+                    class: Class::Full,
+                    first_esi: 8,
+                    symbols: 4,
+                },
+            ),
+        ];
+        let mut reg = Bud3Registry::default();
+        reg.register_object([1; 32], old_up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        for v in &validators {
+            reg.ack(&old_key, v).unwrap();
+        }
+
+        let new_up = prepare_public_upload(
+            b"symbol store replacement payload\0",
+            &profile,
+            &Bud3Limits::default(),
+            12,
+        )
+        .unwrap();
+        let leaves: Vec<(u32, [u8; 32])> = new_up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let new_rec = ObjectRecord {
+            content_id: old_up.record.content_id,
+            object_len: new_up.record.object_len,
+            commitment: [0xCA; 32],
+            profile,
+            codec: 0,
+            symbols_per_segment: new_up.record.symbols_per_segment,
+            symbol_roots: vec![symbol_root(&leaves)],
+        };
+        let vkeys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                (
+                    [v; 32],
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation([v; 32], &[v; 32], &old_key, &new_rec, &shares).unwrap()
+            })
+            .collect();
+        let new_key = reg
+            .replace_object(
+                (validators[0], 10_000),
+                &old_key,
+                new_rec,
+                shares,
+                &atts,
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 2, &vkeys),
+            )
+            .unwrap();
+        for v in &validators {
+            reg.ack(&new_key, v).unwrap();
+        }
+
+        let resp = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: new_key,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves,
+            &new_up.segments[0][0..4],
+        )
+        .unwrap();
+        let mut store = Bud3SymbolStore::default();
+        store
+            .insert_verified(&reg, &validators[0], &old_key, 0, &resp.items)
+            .expect("insert_verified must resolve finalized replacement redirects");
+        assert_eq!(
+            store
+                .verified_range(&reg, &validators[0], &old_key, 0, 0, 4)
+                .items
+                .len(),
+            4
+        );
+        assert_eq!(
+            store
+                .verified_range(&reg, &validators[0], &new_key, 0, 0, 4)
+                .items
+                .len(),
+            4
         );
     }
 }

@@ -2264,3 +2264,109 @@ fn bind_nft_through_executor_requires_minted_nft_ownership() {
     .expect("verified NFT owner binds cleanly");
     assert_eq!(state.bud3_registry.refcount(&key), 1);
 }
+
+#[test]
+fn register_object_scoped_claimant_dedup_waives_duplicate_storage_fee() {
+    use crate::storage::bud3::content_id::ContentKey;
+    use crate::storage::bud3::pipeline::prepare_sealed_upload;
+    use crate::storage::bud3::seal::SEAL_SALT_LEN;
+
+    let squatter = Address::from([0xF1; 32]);
+    let alice = Address::from([0xF2; 32]);
+    let val_a = [0xF3; 32];
+    let val_b = [0xF4; 32];
+    let mut state = AccountState::new();
+    state.add_balance(&squatter, 50_000);
+    state.add_balance(&alice, 50_000);
+    state.add_validator(Address::from(val_a), 50_000);
+    state.add_validator(Address::from(val_b), 50_000);
+
+    let up = prepare_sealed_upload(
+        b"scoped claimant dedup payload for exact pre_storage_fee accounting",
+        &ContentKey([0xA7; 32]),
+        [0x13; SEAL_SALT_LEN],
+        &P,
+        &Bud3Limits::default(),
+        6,
+    )
+    .unwrap();
+    let raw_key = up.record.commitment;
+    let shares = vec![
+        (
+            0,
+            Share {
+                validator: val_a,
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 3,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: val_b,
+                class: Class::Full,
+                first_esi: 3,
+                symbols: 3,
+            },
+        ),
+    ];
+
+    // Squatter places an unconfirmed entry at `raw_key`.
+    apply(
+        &mut state,
+        &storage_tx(
+            squatter,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record.clone(),
+                shares: shares.clone(),
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .unwrap();
+
+    // Legitimate claimant `alice` is admitted under her claimant-scoped key.
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record.clone(),
+                shares: shares.clone(),
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .unwrap();
+    let scoped =
+        crate::storage::bud3::registry::Bud3Registry::claimant_scoped_key(&raw_key, &alice.0);
+    assert!(state.bud3_registry.object(&scoped).is_some());
+
+    // Drain `alice` to a single tx fee (`1`) so any non-zero `pre_storage_fee` fails.
+    let alice_bal = state.get_balance(&alice);
+    state.sub_balance(&alice, alice_bal - 1).unwrap();
+    let alice_nonce = state.get_account(&alice).map_or(0, |a| a.nonce);
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            alice_nonce,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record,
+                shares,
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .expect("deduplicating already-registered claimant-scoped object must waive storage fee");
+    assert_eq!(state.get_balance(&alice), 0);
+}

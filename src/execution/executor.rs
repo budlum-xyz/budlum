@@ -3941,32 +3941,42 @@ impl Executor {
                             && bud_codec::is_open(record.codec)
                             && crate::storage::bud3::bof1::codec_is_open_on_testnet(record.codec);
                         let sender_bytes = *tx.from.as_bytes();
+                        let share_confirmed = |e: &crate::storage::bud3::registry::ObjectEntry| {
+                            e.record.content_id.kind == ContentIdKind::Public
+                                && e.custody_confirmed
+                                && e.record.content_id == record.content_id
+                                && !e.shares.is_empty()
+                                && e.shares
+                                    .iter()
+                                    .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+                        };
                         let will_dedup = state
                             .bud3_registry
                             .object(&record.commitment)
                             .is_some_and(|e| {
-                                (e.owner == sender_bytes
-                                    && e.record.content_id.kind != ContentIdKind::Public)
-                                    || (e.record.content_id.kind == ContentIdKind::Public
-                                        && e.custody_confirmed
-                                        && e.record.content_id == record.content_id
-                                        && !e.shares.is_empty()
-                                        && e.shares.iter().all(|s| {
-                                            s.status == ShareStatus::Confirmed && !s.lost
-                                        }))
+                                share_confirmed(e)
+                                    || (e.owner == sender_bytes
+                                        && e.record.content_id.kind != ContentIdKind::Public)
+                                    || (e.owner != sender_bytes && {
+                                        let scoped = crate::storage::bud3::registry::Bud3Registry::claimant_scoped_key(
+                                            &record.commitment,
+                                            &sender_bytes,
+                                        );
+                                        !state.bud3_registry.is_tombstoned(&scoped)
+                                            && state.bud3_registry.replacement(&scoped).is_none()
+                                            && state.bud3_registry.object(&scoped).is_some_and(|own| {
+                                                share_confirmed(own)
+                                                    || own.record.content_id.kind
+                                                        != ContentIdKind::Public
+                                            })
+                                    })
                             })
                             || (record.content_id.kind == ContentIdKind::Public
                                 && state
                                     .bud3_registry
                                     .public_object(&record.content_id.digest)
                                     .and_then(|k| state.bud3_registry.object(&k))
-                                    .is_some_and(|e| {
-                                        e.record.content_id == record.content_id
-                                            && !e.shares.is_empty()
-                                            && e.shares.iter().all(|s| {
-                                                s.status == ShareStatus::Confirmed && !s.lost
-                                            })
-                                    }));
+                                    .is_some_and(share_confirmed));
                         if !codec_ok || will_dedup || *lifetime_epochs == 0 {
                             0
                         } else {
