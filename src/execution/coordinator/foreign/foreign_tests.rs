@@ -607,7 +607,7 @@ fn uol_k1_home_key_stipend_all_four_chains_alert_and_pq_ceiling() {
     use ed25519_dalek::{Signer as _, SigningKey as EdSigningKey};
     use k256::ecdsa::Signature as SecpSig;
 
-    let chain_id = Network::Testnet.chain_id().value();
+    let chain_id = Network::Devnet.chain_id().value();
     let domain = 77u32;
     let sol_domain = 78u32;
     let apt_domain = 79u32;
