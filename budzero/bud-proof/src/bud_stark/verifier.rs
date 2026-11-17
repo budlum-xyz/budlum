@@ -376,20 +376,13 @@ where
         }
     }
 
-    // Whether the LogUp aux trace must exist is decided by the program shape
-    // (the AIR has preprocessed program columns), never by the proof. A proof
-    // that drops its aux commitment would otherwise skip every LogUp guarded
-    // constraint, including the Program CTL that binds executed instructions
-    // to the committed program.
-    if preprocessed_width > 0 && commitments.aux_trace.is_none() {
-        return Err(VerificationError::InvalidProofShape);
-    }
-
     let has_aux_trace = commitments.aux_trace.is_some();
-    // The proof must not choose to run without the aux trace. An AIR
-    // whose constraints depend on it (BudAir: register, memory and program
-    // LogUps) is checked in full or not at all. Only a proof that already
-    // lacks the aux commitment pays for the extra symbolic evaluation.
+    // Whether the LogUp aux trace must exist is decided strictly by the AIR's
+    // symbolic constraints (e.g. BudAir's register, memory, and program CTL
+    // LogUps), never by the proof. A proof that omits `aux_trace` for an AIR
+    // with aux-guarded constraints is rejected immediately, while chip AIRs
+    // that commit preprocessed boundary schedules without a permutation trace
+    // (such as BoundKeccakAir and NttButterflyAir) verify cleanly.
     if !has_aux_trace {
         let base_layout = AirLayout {
             preprocessed_width,

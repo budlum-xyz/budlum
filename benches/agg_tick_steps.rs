@@ -31,6 +31,9 @@ use budlum_core::aggregation::merkle::claims_root;
 use budlum_core::aggregation::programs::agg_tick::agg_tick;
 use budlum_core::aggregation::programs::asm::Program;
 use budlum_core::aggregation::programs::chain_rules;
+use budlum_core::aggregation::programs::chip_offload::{
+    prove_tick_chips, verify_tick_chips, OffloadAccounting,
+};
 use budlum_core::aggregation::programs::object::OBJECT_CELLS;
 use budlum_core::aggregation::programs::verify_sig::verify_sig;
 use budlum_core::core::address::Address;
@@ -300,5 +303,78 @@ fn main() {
     println!(
         "row limit of one proof: {MAX_PROVER_WITNESS_ROWS} rows, three rows a step: {steps_per_proof} steps"
     );
+
+    // Chip-offloaded tick measurements (BoundKeccakAir + NttButterflyAir).
+    let keccak_vm_steps: u64 = one
+        .profile
+        .iter()
+        .filter(|(name, _)| {
+            name.contains("keccak") || name.contains("hash") || name.contains("xof")
+        })
+        .map(|(_, s)| *s)
+        .sum();
+    let ntt_vm_steps: u64 = one
+        .profile
+        .iter()
+        .filter(|(name, _)| name.contains("ntt"))
+        .map(|(_, s)| *s)
+        .sum();
+    let accounting = OffloadAccounting::compute(one.steps, keccak_vm_steps, ntt_vm_steps, 329, 8);
+    println!();
+    println!(
+        "AGGREGATION PHASE 2 CHIP OFFLOAD: residual_vm_steps={} (from {} -> {:.1}x VM reduction)",
+        accounting.residual_vm_steps,
+        accounting.total_vm_steps,
+        accounting.total_vm_steps as f64 / accounting.residual_vm_steps.max(1) as f64
+    );
+    println!(
+        "{:<9}{:>10}{:>12}{:>12}{:>12}",
+        "claims", "perms", "prove ms", "verify ms", "proof B"
+    );
+    for count in [16usize, 64, 256] {
+        let claims: Vec<Claim> = (0..count)
+            .map(|i| {
+                let mut signer = [0u8; 32];
+                signer[..8].copy_from_slice(&(i as u64 + 1).to_le_bytes());
+                let mut msg_hash = [0x42u8; 32];
+                msg_hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                Claim::Sig {
+                    scheme: SchemeId::ML_DSA_87,
+                    signer: Address::from(signer),
+                    msg_hash,
+                }
+            })
+            .collect();
+        let digests: Vec<[u8; 32]> = claims.iter().map(|c| c.digest(DOMAIN)).collect();
+        let Ok(root) = claims_root(&digests) else {
+            fail("claims_root failed");
+        };
+        let expected_pi = tick_pi(
+            DOMAIN,
+            &Segment {
+                claims_root: root,
+                count: count as u32,
+                aggregator,
+            },
+        );
+        let started = Instant::now();
+        let Ok(chip_proof) = prove_tick_chips(DOMAIN, &aggregator, &claims, &[]) else {
+            fail("chip tick proving failed");
+        };
+        let prove_ms = started.elapsed().as_secs_f64() * 1e3;
+        let proof_bytes = chip_proof.keccak_outputs.len() * 25 * 8
+            + postcard::to_allocvec(&chip_proof.keccak_proof.proof).map_or(0, |b| b.len());
+        let started = Instant::now();
+        if verify_tick_chips(DOMAIN, &aggregator, &claims, &expected_pi, &[], &chip_proof).is_err()
+        {
+            fail("chip tick verification failed");
+        }
+        let verify_ms = started.elapsed().as_secs_f64() * 1e3;
+        let perms = chip_proof.keccak_outputs.len();
+        println!("{count:<9}{perms:>10}{prove_ms:>12.1}{verify_ms:>12.1}{proof_bytes:>12}");
+        println!(
+            "agg_tick_steps: chip_tick claims={count} perms={perms} prove_ms={prove_ms:.1} verify_ms={verify_ms:.1} proof_bytes={proof_bytes}"
+        );
+    }
     println!("agg_tick_steps: done");
 }

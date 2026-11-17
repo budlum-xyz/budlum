@@ -21,7 +21,10 @@
 //! work, and the refusal is lifted with the binding.
 //! WIRING: unwired - the AIR-shape helpers here are the proof-side surface a later caller wires up; no production module calls them yet (the prover paths consume the concrete columns directly until that wiring lands).
 
-use crate::keccak_chip::{prove_keccak_f, verify_keccak_f, KeccakChipError};
+use crate::keccak_chip::{
+    prove_bound_keccak_f, prove_keccak_f, verify_bound_keccak_f, verify_keccak_f, BoundKeccakProof,
+    KeccakChipError,
+};
 use bud_proof::plonky3_prover::ChipProof;
 
 /// The Keccak-256 rate in bytes.
@@ -66,10 +69,9 @@ pub fn encode_batch(statements: &[PulStatement]) -> Vec<u8> {
     out
 }
 
-/// The Keccak-f input state of every absorption of the sponge over `bytes`.
+/// Pads `bytes` with Keccak `pad10*1` into 136-byte (17-lane) rate blocks.
 #[must_use]
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
-pub fn absorb_states(bytes: &[u8]) -> Vec<[u64; 25]> {
+pub fn pad_rate_blocks(bytes: &[u8]) -> Vec<[u64; 17]> {
     let mut padded = bytes.to_vec();
     padded.push(0x01);
     while !padded.len().is_multiple_of(RATE_BYTES) {
@@ -78,13 +80,29 @@ pub fn absorb_states(bytes: &[u8]) -> Vec<[u64; 25]> {
     if let Some(last) = padded.last_mut() {
         *last |= 0x80;
     }
-    let mut state = [0u64; 25];
-    let mut inputs = Vec::with_capacity(padded.len() / RATE_BYTES);
+    let mut blocks = Vec::with_capacity(padded.len() / RATE_BYTES);
     for block in padded.chunks(RATE_BYTES) {
+        let mut lanes = [0u64; 17];
         for (i, lane) in block.chunks(8).enumerate() {
             let mut word = [0u8; 8];
             word.copy_from_slice(lane);
-            state[i] ^= u64::from_le_bytes(word);
+            lanes[i] = u64::from_le_bytes(word);
+        }
+        blocks.push(lanes);
+    }
+    blocks
+}
+
+/// The Keccak-f input state of every absorption of the sponge over `bytes`.
+#[must_use]
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
+pub fn absorb_states(bytes: &[u8]) -> Vec<[u64; 25]> {
+    let blocks = pad_rate_blocks(bytes);
+    let mut state = [0u64; 25];
+    let mut inputs = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        for (dst, src) in state.iter_mut().zip(block.iter()) {
+            *dst ^= *src;
         }
         inputs.push(state);
         let mut next = state;
@@ -200,6 +218,75 @@ pub fn verify_batch(proof: &PulBatchProof) -> Result<(), KeccakChipError> {
     Err(KeccakChipError::UnboundProof)
 }
 
+/// A cryptographically bound batch proof: the statements, each sponge
+/// permutation's output state, and the [`BoundKeccakProof`] certifying that
+/// every absorbed state maps to its output under `Keccak-f[1600]`.
+#[derive(Clone)]
+pub struct BoundPulBatchProof {
+    pub statements: Vec<PulStatement>,
+    pub outputs: Vec<[u64; 25]>,
+    pub keccak: BoundKeccakProof,
+}
+
+/// Proves the Keccak-256 sponge over a statement batch with every absorbed
+/// state and permutation output bound inside `BoundKeccakAir`.
+///
+/// # Errors
+///
+/// Refuses an empty batch or a chip-proving failure.
+pub fn prove_bound_batch(
+    statements: Vec<PulStatement>,
+) -> Result<BoundPulBatchProof, KeccakChipError> {
+    if statements.is_empty() {
+        return Err(KeccakChipError::Empty);
+    }
+    let inputs = absorb_states(&encode_batch(&statements));
+    let (keccak, outputs) = prove_bound_keccak_f(&inputs)?;
+    Ok(BoundPulBatchProof {
+        statements,
+        outputs,
+        keccak,
+    })
+}
+
+/// Verifies a [`BoundPulBatchProof`] without running `Keccak-f[1600]` in the
+/// verifier: reconstructs each absorption input solely by XORing the padded
+/// statement rate blocks into the prior proven output state, then verifies the
+/// bound Keccak STARK and returns the 32-byte Keccak-256 digest of the batch.
+///
+/// # Errors
+///
+/// Refuses empty batches, mismatched output counts, replayed proofs for other
+/// statements, tampered intermediate states, or invalid STARK proofs.
+pub fn verify_bound_batch(proof: &BoundPulBatchProof) -> Result<[u8; 32], KeccakChipError> {
+    if proof.statements.is_empty() {
+        return Err(KeccakChipError::Empty);
+    }
+    let blocks = pad_rate_blocks(&encode_batch(&proof.statements));
+    if proof.outputs.len() != blocks.len() {
+        return Err(KeccakChipError::ShapeMismatch);
+    }
+    let mut inputs = Vec::with_capacity(blocks.len());
+    for (idx, block) in blocks.iter().enumerate() {
+        let mut state = if idx == 0 {
+            [0u64; 25]
+        } else {
+            proof.outputs[idx - 1]
+        };
+        for (dst, src) in state.iter_mut().zip(block.iter()) {
+            *dst ^= *src;
+        }
+        inputs.push(state);
+    }
+    verify_bound_keccak_f(&inputs, &proof.outputs, &proof.keccak)?;
+    let last = proof.outputs.last().ok_or(KeccakChipError::Empty)?;
+    let mut digest = [0u8; 32];
+    for (i, word) in last.iter().take(4).enumerate() {
+        digest[i * 8..(i + 1) * 8].copy_from_slice(&word.to_le_bytes());
+    }
+    Ok(digest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +345,60 @@ mod tests {
             verify_batch(&honest_again),
             Err(KeccakChipError::UnboundProof),
             "the honest batch is refused too: the refusal is not a statement check"
+        );
+    }
+
+    fn keccak256_reference(bytes: &[u8]) -> [u8; 32] {
+        use tiny_keccak::{Hasher, Keccak};
+        let mut h = Keccak::v256();
+        h.update(bytes);
+        let mut out = [0u8; 32];
+        h.finalize(&mut out);
+        out
+    }
+
+    #[test]
+    fn bound_batch_proves_and_verifies_multi_block_sponge() {
+        let statements = vec![statement(1), statement(2), statement(3)];
+        let expected = keccak256_reference(&encode_batch(&statements));
+        let proof = prove_bound_batch(statements).expect("bound batch proves");
+        assert!(
+            proof.outputs.len() >= 2,
+            "3 statements must span multiple 136-byte sponge blocks"
+        );
+        let verified_digest = verify_bound_batch(&proof).expect("bound batch verifies");
+        assert_eq!(verified_digest, expected);
+    }
+
+    #[test]
+    fn bound_batch_rejects_replayed_statements_and_tampered_sponge_states() {
+        let honest = prove_bound_batch(vec![statement(1), statement(2)]).expect("proves");
+
+        // Replaying the same chip proof beside a different statement list must fail.
+        let replayed = BoundPulBatchProof {
+            statements: vec![statement(9), statement(2)],
+            outputs: honest.outputs.clone(),
+            keccak: honest.keccak.clone(),
+        };
+        assert!(verify_bound_batch(&replayed).is_err());
+
+        // Tampering an intermediate sponge output lane must fail.
+        let mut bad_mid = honest.clone();
+        bad_mid.outputs[0][17] ^= 1;
+        assert!(verify_bound_batch(&bad_mid).is_err());
+
+        // Tampering the final digest lane must fail.
+        let mut bad_final = honest.clone();
+        let last_idx = bad_final.outputs.len() - 1;
+        bad_final.outputs[last_idx][0] ^= 1;
+        assert!(verify_bound_batch(&bad_final).is_err());
+
+        // Truncating outputs must fail with ShapeMismatch.
+        let mut truncated = honest;
+        truncated.outputs.pop();
+        assert_eq!(
+            verify_bound_batch(&truncated),
+            Err(KeccakChipError::ShapeMismatch)
         );
     }
 }
