@@ -1769,6 +1769,34 @@ fn execute_object_layer_tx(
             ));
         }
     }
+    if let crate::object_layer::ObjectLayerTx::RegisterClass(reg) = tx {
+        let dom = state
+            .settlement
+            .domains
+            .get(reg.home_domain)
+            .ok_or_else(|| {
+                SettlementTxError::Refused("object_layer_class_domain_missing".into())
+            })?;
+        if !dom.is_active() {
+            return Err(SettlementTxError::Refused(
+                "object_layer_class_domain_inactive".into(),
+            ));
+        }
+        // Registering a class chooses its `registrant` (the sole account
+        // authorized to call `RefreshClass` and freeze it on an authority
+        // mismatch) and pins the class's initial slice/rule forever, so only
+        // the home domain's operator may register classes for its domain.
+        if dom.operator != Some(ctx.sender) {
+            return Err(SettlementTxError::Refused(
+                "object_layer_class_requires_domain_operator".into(),
+            ));
+        }
+        if !domain_has_bound_authority(dom) {
+            return Err(SettlementTxError::Refused(
+                "object_layer_class_domain_authority_unbound".into(),
+            ));
+        }
+    }
     let domain_registry = state.settlement.domains.clone();
     let commitment_registry = state.settlement.commitments.clone();
     let finality = IntakeFinality {
@@ -5181,6 +5209,7 @@ mod tests {
                 silence_window: 100,
                 data_policy: DataPolicy::Public,
                 status: CharterStatus::Active,
+                operator: None,
             },
             proof: CodeProof {
                 endpoint_code_hash: [0x33; 32],
@@ -5284,6 +5313,47 @@ mod tests {
         .expect_err("prover-operated storage domain must never satisfy creator's task");
         assert!(
             format!("{err:?}").contains("authorized storage domain"),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn object_layer_register_class_requires_bound_domain_operator() {
+        use crate::object_layer::registry::ClassRegistration;
+        let mut state = AccountState::new();
+        let op = Address([0x51; 32]);
+        let squatter = Address([0x52; 32]);
+        let mut dom = default_domain(91, ConsensusKind::PoA, 45262, "poa-authority-quorum", 1);
+        dom.operator = Some(op);
+        dom.validator_set_hash = [0xAA; 32];
+        state.add_balance(&op, dom.operator_bond + FEE);
+        state.add_balance(&squatter, 10_000_000);
+        register_domain(&mut state, dom).unwrap();
+
+        let reg = ClassRegistration {
+            home_domain: 91,
+            kind: crate::object_layer::AssetKind::Fungible,
+            contract: vec![0x11; 20],
+            rule: crate::object_layer::ClassRule::Template {
+                id: crate::object_layer::TemplateId::FungibleV1,
+                params: crate::object_layer::rule::TemplateParams::default(),
+            },
+            slice: crate::object_layer::rule::ClassSlice::default(),
+            slice_source: crate::object_layer::family::SliceSource::AccountAndStorageProof,
+            samples: Vec::new(),
+            bond: 1_000_000,
+            state_proof: None,
+        };
+        let err = execute_settlement_tx(
+            &mut state,
+            &ctx(squatter),
+            &SettlementTx::ObjectLayer(Box::new(
+                crate::object_layer::ObjectLayerTx::RegisterClass(reg),
+            )),
+        )
+        .expect_err("non-operator must not register object class on another operator's domain");
+        assert!(
+            format!("{err:?}").contains("object_layer_class_requires_domain_operator"),
             "got: {err:?}"
         );
     }

@@ -837,6 +837,8 @@ pub trait BudlumApi {
     async fn bns_list_offers(
         &self,
         kind: Option<String>,
+        offset: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a signed `BnsCreateOffer` marketplace listing transaction.
@@ -952,11 +954,13 @@ pub trait BudlumApi {
     #[method(name = "bud_socialGetPost")]
     async fn social_get_post(&self, id: u64) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Get all posts by a user.
+    /// Get posts by a user (paginated, capped at 1000 per page).
     #[method(name = "bud_socialGetProfile")]
     async fn social_get_profile(
         &self,
         address: String,
+        offset: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// B.U.D. `SocialFi`: Get global social feed.
@@ -1032,7 +1036,11 @@ pub trait BudlumApi {
 
     /// List all active data offers.
     #[method(name = "bud_marketGetOffers")]
-    async fn market_get_offers(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn market_get_offers(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a data offer transaction.
     #[method(name = "bud_marketPrepareOffer")]
@@ -1053,19 +1061,35 @@ pub trait BudlumApi {
 
     /// List Data Market `DataAsset` records visible in chain state.
     #[method(name = "bud_dataMarketGetDataAssets")]
-    async fn pollen_get_data_assets(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn pollen_get_data_assets(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// List Data Market `AccessGrant` records visible in chain state.
     #[method(name = "bud_dataMarketGetAccessGrants")]
-    async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn pollen_get_access_grants(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// List Data Market `SaleAuthorization` records visible in chain state.
     #[method(name = "bud_dataMarketGetSaleAuthorizations")]
-    async fn pollen_get_sale_authorizations(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn pollen_get_sale_authorizations(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// List Data Market purchase receipts visible in chain state.
     #[method(name = "bud_dataMarketGetPurchaseReceipts")]
-    async fn pollen_get_purchase_receipts(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn pollen_get_purchase_receipts(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Build canonical `AiInferenceRequest`.`input_ref` for grant-gated data reads.
     #[method(name = "bud_dataMarketBuildAiInputRef")]
@@ -1104,15 +1128,23 @@ pub trait BudlumApi {
         buyer_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    // --- B.U.D. budlumxyz ---
+    // --- B.U.D. Hub ---
 
-    /// List all registered dApps.
+    /// List registered dApps (paginated).
     #[method(name = "bud_hubGetApps")]
-    async fn budlumxyz_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn budlumxyz_get_apps(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// List the AppBinding applications (apps on other chains usable with BUD).
     #[method(name = "bud_hubGetAppBindingApps")]
-    async fn budlumxyz_get_app_binding_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn budlumxyz_get_app_binding_apps(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a dApp registration transaction.
     #[method(name = "bud_hubPrepareRegister")]
@@ -1405,7 +1437,11 @@ pub trait BudlumApi {
 
     /// Slashing history (audit trail).
     #[method(name = "bud_getSlashingHistory")]
-    async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn get_slashing_history(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// AI inference layer readiness: chain-derived bonded operator count plus explicit
     /// Fail-closed flags for scheduler, worker, proof, and settlement wiring.

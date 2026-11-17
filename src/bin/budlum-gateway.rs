@@ -2183,7 +2183,7 @@ mod tests {
 
         for idx in 0..(MAX_MANIFEST_CACHE_ENTRIES + 5) {
             let mut digest = [0u8; 32];
-            digest[..8].copy_from_slice(&(idx as u64).to_le_bytes());
+            digest[..8].copy_from_slice(&((idx + 1) as u64).to_le_bytes());
             let cref = ContentRef::new(
                 ContentId {
                     kind: ContentIdKind::Public,
