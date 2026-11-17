@@ -899,15 +899,53 @@ fn host_bridge_refuses_cross_ee_namespace_write_and_static_write() {
 }
 
 #[test]
-fn expansion_ee_all_twelve_environments_execute_on_testnet() {
+fn expansion_ee_all_twelve_environments_execute_on_devnet() {
     let (sender_seed, sender) = test_uel_signer(0x77);
     let proposer = Address::from([0x78; 32]);
     let mut state = funded_state(&[sender, proposer]);
     let mut coord = ExecutionCoordinator::new();
-    let ctx = BlockContext {
+    let testnet_ctx = BlockContext {
         height: 55,
         timestamp_ms: 1_700_000_055_000,
         chain_id: crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
+    };
+    let mut testnet_state = state.clone();
+    let testnet_before = testnet_state.execution_state.execution_root();
+    let refused = testnet_state
+        .execute_uel_block(
+            &mut coord,
+            testnet_ctx,
+            proposer,
+            &[UelTx {
+                tx_hash: [0xBF; 32],
+                sender,
+                nonce: 0,
+                ee: EeId::MOVE_SUI,
+                action: UelAction::Deploy {
+                    code: b"expansion-contract-0x05".to_vec(),
+                    salt: [0u8; 32],
+                },
+                value_attos: 0,
+                gas_limit_bgu: 200_000,
+                max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                max_priority_fee_per_bgu_attos: 100,
+                auth: UelTxAuth::default(),
+            }
+            .signed(testnet_ctx.chain_id, &sender_seed)],
+        )
+        .expect("testnet refusal receipt");
+    assert_eq!(refused[0].status, UelReceiptStatus::Revert);
+    assert_eq!(
+        testnet_state.execution_state.execution_root(),
+        testnet_before
+    );
+
+    let ctx = BlockContext {
+        height: 55,
+        timestamp_ms: 1_700_000_055_000,
+        chain_id: crate::core::chain_config::Network::Devnet
             .chain_id()
             .value(),
     };

@@ -1174,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn live_flag_admitted_on_testnet() {
+    fn live_flag_refused_on_testnet() {
         let mut obj = Object::raw_public(b"segment");
         obj.header.flags = Flags::from_byte(Flags::LIVE).unwrap();
         assert_eq!(
@@ -1182,6 +1182,6 @@ mod tests {
             Err(Bof1Error::Truncated("prev_object"))
         );
         obj.header.prev_object = Some([4u8; 32]);
-        assert_eq!(obj.validate_testnet(), Ok(()));
+        assert_eq!(obj.validate_testnet(), Err(Bof1Error::LiveNotOpen));
     }
 }
