@@ -1871,9 +1871,19 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_stays_closed() {
         inclusion_path: path,
         predicate_proof: None,
     };
-    remote_view
+    let testnet_refused = remote_view
         .verify_for_chain(&checkpoint, &acct_state.state_root_body(), testnet_chain)
-        .expect("the remote state view is enabled on testnet");
+        .expect_err("the remote state view stays closed on testnet");
+    assert!(
+        testnet_refused.to_string().contains("app binding disabled"),
+        "got {testnet_refused}"
+    );
+    let devnet_chain = crate::core::chain_config::Network::Devnet
+        .chain_id()
+        .value();
+    remote_view
+        .verify_for_chain(&checkpoint, &acct_state.state_root_body(), devnet_chain)
+        .expect("the remote state view is enabled on devnet");
     let mainnet_chain = crate::core::chain_config::Network::Mainnet
         .chain_id()
         .value();

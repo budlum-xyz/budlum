@@ -1799,7 +1799,7 @@ mod tests {
             inclusion_path: path,
             predicate_proof: None,
         };
-        // The door is open on devnet and testnet, and remains closed on mainnet.
+        // The door is open on devnet and remains closed on testnet and mainnet.
         let closed_chain = crate::core::chain_config::Network::Mainnet
             .chain_id()
             .value();
@@ -1811,9 +1811,11 @@ mod tests {
         let testnet_chain = crate::core::chain_config::Network::Testnet
             .chain_id()
             .value();
-        assert!(view
-            .verify_for_chain(&checkpoint, &body, testnet_chain)
-            .is_ok());
+        assert!(matches!(
+            view.verify_for_chain(&checkpoint, &body, testnet_chain),
+            Err(LightClientError::VerificationFailed(reason))
+                if reason.contains("app binding disabled")
+        ));
         let open_chain = crate::core::chain_config::Network::Devnet
             .chain_id()
             .value();
