@@ -910,8 +910,23 @@ fn apply_headers(response: &mut Response<BoxBody>, headers: Vec<(String, String)
         let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
             continue;
         };
-        let Ok(value) = HeaderValue::from_str(&value) else {
-            continue;
+        let is_csp = name == hyper::header::CONTENT_SECURITY_POLICY;
+        let value = if is_csp
+            && !value
+                .bytes()
+                .all(|b| b == b'\t' || (0x20..=0x7E).contains(&b))
+        {
+            // Defense-in-depth: never omit CSP or emit non-ASCII/control bytes
+            // if a caller passes an unencodable policy string; emit the baseline floor.
+            HeaderValue::from_static("default-src 'self'; frame-ancestors 'none'")
+        } else {
+            match HeaderValue::from_str(&value) {
+                Ok(v) => v,
+                Err(_) if is_csp => {
+                    HeaderValue::from_static("default-src 'self'; frame-ancestors 'none'")
+                }
+                Err(_) => continue,
+            }
         };
         response.headers_mut().append(name, value);
     }
@@ -2045,5 +2060,28 @@ mod tests {
             .expect_err("second miss in same window must be rate-limited");
         assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn apply_headers_never_drops_content_security_policy() {
+        for bad_csp in [
+            "default-src 'self'; frame-ancestors 'none'; base-uri \u{00e9}",
+            "default-src 'self'; frame-ancestors 'none'\r\nx-injected: 1",
+            "default-src 'self'; frame-ancestors 'none'; img-src \u{007f}",
+        ] {
+            let mut response = Response::new(BoxBody::from(Bytes::new()));
+            apply_headers(
+                &mut response,
+                vec![("content-security-policy".to_string(), bad_csp.to_string())],
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(hyper::header::CONTENT_SECURITY_POLICY)
+                    .and_then(|v| v.to_str().ok()),
+                Some("default-src 'self'; frame-ancestors 'none'"),
+                "malformed CSP must fall back to strict baseline: {bad_csp:?}"
+            );
+        }
     }
 }
