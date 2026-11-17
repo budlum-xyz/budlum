@@ -204,6 +204,12 @@ impl ObjectPool {
         self.waiting.len()
     }
 
+    /// Whether this pool currently tracks `digest` as either ready or proven.
+    #[must_use]
+    pub fn tracks_claim(&self, digest: &Hash32) -> bool {
+        self.claims.contains_key(digest)
+    }
+
     fn remember(&mut self, object_id: Hash32) {
         if self.seen.insert(object_id) {
             self.seen_order.push_back(object_id);

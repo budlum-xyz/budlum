@@ -1584,24 +1584,24 @@ impl Blockchain {
         // only kept records: freezing could be called but being frozen changed
         // nothing - "frozen" was a note, not a decision.
         //
-        // The operator is read from the REGISTERED TEMPLATE, not from the bundle.
-        // An identity coming from inside the bundle would let a frozen operator
-        // write someone else's name and pass the gate.
-        let operator = self
+        // The domain and operator are read from the REGISTERED TEMPLATE, not from
+        // the bundle. Reading either from the bundle would let a frozen operator
+        // spoof an unfrozen domain or operator name and pass the gate.
+        let (domain_id, operator) = self
             .state
             .settlement
             .sovereign
-            .template_operator(bundle.template_id)
+            .template_domain_and_operator(bundle.template_id)
             .ok_or_else(|| {
                 "AuditExportBundle names a template that is not registered".to_string()
             })?;
-        if self
-            .state
-            .poa_compliance
-            .is_frozen(crate::registry::ComplianceDomainKind::PoA, &operator)
-        {
+        if self.state.poa_compliance.is_frozen(
+            crate::registry::ComplianceDomainKind::PoA,
+            domain_id,
+            &operator,
+        ) {
             return Err(format!(
-                "operator {} is frozen; audit export refused",
+                "operator {} is frozen in domain {domain_id}; audit export refused",
                 operator.to_hex()
             ));
         }
@@ -1696,11 +1696,16 @@ impl Blockchain {
         let result = if unfreeze {
             self.state
                 .poa_compliance
-                .unfreeze(kind, admin, address, reason_hash, height)
+                .unfreeze(kind, domain_id, admin, address, reason_hash, height)
         } else {
-            self.state
-                .poa_compliance
-                .freeze_suspicious(kind, admin, address, reason_hash, height)
+            self.state.poa_compliance.freeze_suspicious(
+                kind,
+                domain_id,
+                admin,
+                address,
+                reason_hash,
+                height,
+            )
         };
         result.map_err(|e| format!("{e:?}"))
     }
@@ -4577,20 +4582,20 @@ impl Blockchain {
         })
     }
 
-    /// Run the aggregation side of this node, proving for `aggregator`:
-    /// from here on a signed quantum-safe transaction handed to
-    /// `add_transaction` goes to the object pool instead of being refused,
-    /// and the block producer carries the frames the pool yields.
+    /// Run the aggregation side of this node using `signer_seed` (a 32-byte
+    /// FIPS 204 ML-DSA-87 seed): from here on a signed quantum-safe transaction
+    /// handed to `add_transaction` goes to the object pool instead of being
+    /// refused, and the block producer carries the frames the pool yields.
     ///
     /// Returns the tick interval in milliseconds when the node runs it, and
     /// `None` otherwise: only a chain whose genesis turned the layer on has
     /// an aggregation side.
-    pub fn enable_aggregator(&mut self, aggregator: Address) -> Option<u64> {
+    pub fn enable_aggregator(&mut self, signer_seed: zeroize::Zeroizing<[u8; 32]>) -> Option<u64> {
         let params = self.aggregation_params();
         self.agg_node = crate::aggregation::node::AggNode::new(
             &params,
             self.chain_id,
-            aggregator,
+            signer_seed,
             &self.state.scheme_registry,
         );
         self.agg_node.as_ref().map(|_| params.tick_ms)
@@ -4677,7 +4682,8 @@ impl Blockchain {
             return Err("this node runs no aggregator".into());
         };
         let frame = crate::aggregation::chain::decode_gossip_frame(frame)?;
-        node.on_frame(frame).map_err(|e| e.to_string())
+        node.on_frame(frame, &self.state.scheme_registry)
+            .map_err(|e| e.to_string())
     }
 
     /// One tick of the aggregator of this node: the encoded frames to

@@ -1035,11 +1035,12 @@ enum OutboundSyncKind {
 
 impl OutboundSyncKind {
     /// Only an active chain-sync round or an explicit finality cert/QC fetch
-    /// that stalls on an open connection (`Timeout`) or lacks `/sync` support
-    /// (`UnsupportedProtocols`) accrues unanswered-sync strikes. Handshakes
-    /// share `/sync`, and transient `ConnectionClosed`, `DialFailure`, or `Io`
-    /// errors during `/24` subnet-cap admission churn, simultaneous dial
-    /// deduplication, or peer restarts must not ban an honest validator.
+    /// that stalls on an open connection (`Timeout`), lacks `/sync` support
+    /// (`UnsupportedProtocols`), or fails at transport I/O during an active
+    /// sync round (`Io`) accrues unanswered-sync strikes. Handshakes share
+    /// `/sync`, and transient `ConnectionClosed` or `DialFailure` errors
+    /// during `/24` subnet-cap admission churn, simultaneous dial deduplication,
+    /// or peer restarts must not ban an honest validator.
     const fn counts_as_sync_strike(self) -> bool {
         !matches!(self, Self::Handshake)
     }
@@ -1048,12 +1049,20 @@ impl OutboundSyncKind {
         self,
         error: &request_response::OutboundFailure,
     ) -> bool {
-        self.counts_as_sync_strike()
-            && matches!(
+        match self {
+            Self::Handshake => false,
+            Self::ActiveSync => matches!(
                 error,
                 request_response::OutboundFailure::Timeout
                     | request_response::OutboundFailure::UnsupportedProtocols
-            )
+                    | request_response::OutboundFailure::Io(_)
+            ),
+            Self::CertFetch | Self::QcFetch => matches!(
+                error,
+                request_response::OutboundFailure::Timeout
+                    | request_response::OutboundFailure::UnsupportedProtocols
+            ),
+        }
     }
 }
 
@@ -3573,9 +3582,8 @@ impl Node {
                         };
                         for peer in expired {
                             warn!(
-                                "Peer {peer} held a connection past {:?} without handshaking; \
-                                 disconnecting to free the slot",
-                                HANDSHAKE_DEADLINE
+                                "Peer {peer} held a connection past its handshake or idle \
+                                 deadline; disconnecting to free the slot"
                             );
                             let _ = self.swarm.disconnect_peer_id(peer);
                         }
@@ -4702,6 +4710,23 @@ impl Node {
                             }
 
                             info!("Received from {peer_id}: id={id}");
+                            let is_handshaked = self.peer_manager_lock().is_handshaked(&peer_id);
+                            if !is_handshaked
+                                && !NetworkMessage::wire_is_handshake(&message.data)
+                            {
+                                warn!(
+                                    "Peer {} sent {} bytes before completing handshake, dropping.",
+                                    peer_id,
+                                    message.data.len()
+                                );
+                                self.gossip_dedup
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .forget(&message.data);
+                                self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                continue;
+                            }
+
                             match NetworkMessage::from_bytes_validated(&message.data) {
                                 Ok(msg) => {
                                     let is_handshake_msg = matches!(
@@ -4709,10 +4734,12 @@ impl Node {
                                         NetworkMessage::Handshake { .. } | NetworkMessage::HandshakeAck { .. }
                                     );
 
-                                    let is_handshaked = self.peer_manager_lock().is_handshaked(&peer_id);
-
                                     if !is_handshake_msg && !is_handshaked {
-                                        warn!("Peer {} sent {:?} before completing handshake, dropping.", peer_id, msg);
+                                        warn!(
+                                            "Peer {} sent non-handshake payload ({} bytes) before completing handshake, dropping.",
+                                            peer_id,
+                                            message.data.len()
+                                        );
                                         // Dropped for the sender's state, not for the
                                         // content: an honest copy must stay new, and a
                                         // frame racing ahead of `/sync` HandshakeAck must
@@ -4981,10 +5008,33 @@ impl Node {
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                             continue;
                                         }
+                                        // A frame carries one object verification per claim on
+                                        // the chain actor, so charge the peer proportional to its
+                                        // claim count before dispatching to `self.chain`.
+                                        let objects = frame
+                                            .get(..4)
+                                            .and_then(|count| <[u8; 4]>::try_from(count).ok())
+                                            .map_or(usize::MAX, |count| {
+                                                usize::try_from(u32::from_be_bytes(count))
+                                                    .unwrap_or(usize::MAX)
+                                            });
+                                        let within_budget = {
+                                            let mut pm = self.peer_manager_lock();
+                                            pm.charge_agg_frame_from(&peer_id, gossip_authored, objects)
+                                        };
+                                        if !within_budget {
+                                            warn!(peer = %peer_id, objects, "AggFrame over peer proof budget");
+                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                            continue;
+                                        }
                                         match self.chain.submit_agg_frame(frame).await {
-                                            Ok(_) => {
+                                            Ok(true) => {
                                                 let mut pm = self.peer_manager_lock();
                                                 pm.report_good_behavior(&peer_id);
+                                            }
+                                            Ok(false) => {
+                                                self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                continue;
                                             }
                                             Err(e) => {
                                                 // A frame is self-contained: one
@@ -8224,6 +8274,24 @@ mod finality_publish_tests {
 
         assert!(!super::OutboundSyncKind::Handshake
             .counts_as_sync_strike_for_error(&OutboundFailure::Timeout));
+        assert!(
+            !super::OutboundSyncKind::Handshake.counts_as_sync_strike_for_error(
+                &OutboundFailure::Io(std::io::Error::other("reset")),
+            )
+        );
+        assert!(
+            super::OutboundSyncKind::ActiveSync.counts_as_sync_strike_for_error(
+                &OutboundFailure::Io(std::io::Error::other("reset")),
+            )
+        );
+        for kind in [
+            super::OutboundSyncKind::CertFetch,
+            super::OutboundSyncKind::QcFetch,
+        ] {
+            assert!(!kind.counts_as_sync_strike_for_error(&OutboundFailure::Io(
+                std::io::Error::other("reset")
+            )));
+        }
         for kind in [
             super::OutboundSyncKind::ActiveSync,
             super::OutboundSyncKind::CertFetch,
@@ -8516,27 +8584,43 @@ mod finality_publish_tests {
         let mut pm = PeerManager::new();
         let squatter = PeerId::random();
         let honest = PeerId::random();
+        let quiet = PeerId::random();
         let fresh = PeerId::random();
         let gone = PeerId::random();
 
         assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(squatter, None));
         assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(honest, None));
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(quiet, None));
         assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(fresh, None));
         pm.set_handshaked(&honest, true);
+        pm.set_handshaked(&quiet, true);
+        // `honest` produced an accepted message after its handshake; `quiet`
+        // produced nothing, so its record carries no recent activity.
+        pm.report_good_behavior(&honest);
 
         let now = std::time::Instant::now();
         let deadline = Duration::from_secs(30);
         let mut connected_at = HashMap::new();
         connected_at.insert(squatter, now - Duration::from_secs(31));
-        connected_at.insert(honest, now - Duration::from_secs(60));
+        connected_at.insert(honest, now - Duration::from_secs(3_600));
+        connected_at.insert(quiet, now - Duration::from_secs(3_600));
         connected_at.insert(fresh, now - Duration::from_secs(5));
         connected_at.insert(gone, now - Duration::from_secs(60));
 
         let expired =
             super::drain_expired_unhandshaked_peers(&mut connected_at, &pm, now, deadline);
-        assert_eq!(expired, vec![squatter]);
+        assert_eq!(expired.len(), 2);
+        assert!(expired.contains(&squatter));
+        assert!(
+            expired.contains(&quiet),
+            "a handshaked peer silent past the idle window must give its slot back"
+        );
         assert!(!connected_at.contains_key(&squatter));
-        assert!(!connected_at.contains_key(&honest));
+        assert!(!connected_at.contains_key(&quiet));
+        assert!(
+            connected_at.contains_key(&honest),
+            "a handshaked peer with recent accepted traffic keeps its slot"
+        );
         assert!(!connected_at.contains_key(&gone));
         assert!(
             connected_at.contains_key(&fresh),
@@ -8545,21 +8629,41 @@ mod finality_publish_tests {
     }
 }
 
-/// Identify connected peers that have exceeded `deadline` without completing
-/// the application `Handshake`, while pruning entries for peers that already
-/// disconnected or completed the handshake.
+/// Identify connected peers that have held a connection for longer than the
+/// schedule allows: `deadline` for a peer that has not completed the
+/// application `Handshake`, and a longer idle window for one that has, because
+/// the handshake itself is unauthenticated and costs the sender nothing.
+/// Entries for peers that already disconnected are dropped.
 fn drain_expired_unhandshaked_peers(
     connected_at: &mut HashMap<PeerId, std::time::Instant>,
     pm: &PeerManager,
     now: std::time::Instant,
     deadline: Duration,
 ) -> Vec<PeerId> {
+    // A `Handshake` is the chain id, a version pair and a scheme name, all of
+    // them public constants: nothing in it is signed, staked or bound to the
+    // peer's role, so the flag it sets cannot be what earns a slot for the life
+    // of a connection. A handshaked peer is therefore still reaped once it has
+    // been silent for `HANDSHAKED_IDLE_DEADLINE`, measured from the last
+    // activity its score record shows rather than from the moment it connected.
+    const HANDSHAKED_IDLE_DEADLINE: Duration = Duration::from_secs(600);
     let mut expired = Vec::new();
     let mut spent = Vec::new();
     for (peer, admitted) in connected_at.iter() {
-        if !pm.is_connected(peer) || pm.is_handshaked(peer) {
+        if !pm.is_connected(peer) {
             spent.push(*peer);
-        } else if now.duration_since(*admitted) >= deadline {
+            continue;
+        }
+        let last_activity = pm
+            .get_peer_info(peer)
+            .and_then(|score| score.last_seen)
+            .map_or(*admitted, |seen| seen.max(*admitted));
+        let limit = if pm.is_handshaked(peer) {
+            HANDSHAKED_IDLE_DEADLINE
+        } else {
+            deadline
+        };
+        if now.duration_since(last_activity) >= limit {
             expired.push(*peer);
         }
     }

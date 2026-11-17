@@ -14,7 +14,9 @@
 
 use super::backend::{AggBackend, AggError, TickCtx};
 use super::envelope::Envelope;
-use super::frame::{ClaimFrame, FrameLimits};
+use super::frame::{
+    aggregator_address_from_seed, verify_segment_attestations, ClaimFrame, FrameLimits,
+};
 use super::object::derive_claim;
 use super::pool::PoolItem;
 use crate::crypto::scheme::SchemeStatusRegistry;
@@ -109,6 +111,11 @@ impl NativeBackend {
 
 impl AggBackend for NativeBackend {
     fn prove_tick(&self, ctx: &TickCtx, items: &[PoolItem]) -> Result<ClaimFrame, AggError> {
+        let derived = aggregator_address_from_seed(&ctx.signer_seed)
+            .map_err(|_| AggError::InvalidSegmentAttestation(0))?;
+        if derived != ctx.aggregator {
+            return Err(AggError::InvalidSegmentAttestation(0));
+        }
         let mut keyed = Vec::with_capacity(items.len());
         for item in items {
             if item.envelope.domain != ctx.domain {
@@ -128,7 +135,7 @@ impl AggBackend for NativeBackend {
         let claims = keyed.iter().map(|(_, item)| item.claim.clone()).collect();
         let frame = ClaimFrame::tick(
             ctx.domain,
-            ctx.aggregator,
+            &ctx.signer_seed,
             claims,
             self.encode_proof(&objects),
         )?;
@@ -145,6 +152,7 @@ impl AggBackend for NativeBackend {
 
     fn verify(&self, frame: &ClaimFrame, domain: DomainId) -> Result<(), AggError> {
         frame.check_structure(domain, &self.limits)?;
+        verify_segment_attestations(&self.registry, domain, &frame.segments)?;
         let objects = self.decode_proof(&frame.proof)?;
         if objects.len() != frame.claims.len() {
             return Err(AggError::ProofMismatch);
