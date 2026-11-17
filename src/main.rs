@@ -1710,6 +1710,7 @@ async fn main() {
     let profile_peer_cap = node.max_peers;
     let effective_max_peers = config.effective_max_peers();
     node.max_peers = effective_max_peers;
+    node.sync_connection_caps();
     if let Some(requested) = config.max_peers {
         if requested > profile_peer_cap {
             tracing::warn!(
@@ -1726,7 +1727,46 @@ async fn main() {
         }
     }
 
-    if !sentry_policy.is_discovery_disabled() {
+    let mut combined_validator_peers = config.validator_peers.clone();
+    for pp in &config.private_peers {
+        if !combined_validator_peers.contains(pp) {
+            combined_validator_peers.push(pp.clone());
+        }
+    }
+    let sentry_shield = budlum_core::network::sentry::SentryShieldConfig::from_role_and_peers(
+        &config.role,
+        &config.sentry_peers,
+        &combined_validator_peers,
+        Some(&node.peer_id),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("CRITICAL SECURITY ERROR: invalid sentry shield topology: {e}");
+        std::process::exit(1);
+    });
+    node.configure_sentry_shield(sentry_shield)
+        .unwrap_or_else(|e| {
+            eprintln!("CRITICAL SECURITY ERROR: failed to configure sentry shield: {e}");
+            std::process::exit(1);
+        });
+
+    if node.sentry_shield().is_validator_shielded() || sentry_policy.is_discovery_disabled() {
+        tracing::info!(
+            sentry_count = config.sentry_peers.len(),
+            "Validator sentry shield enabled: public bootnodes, DNS seeds, mDNS, and Kademlia DHT server mode disabled; speaking only with configured sentry peers"
+        );
+    } else {
+        if config.role == "validator" && network != budlum_core::core::chain_config::Network::Devnet
+        {
+            tracing::warn!(
+                "Validator is starting on a public network without --sentry-peers / [p2p] sentry_peers; configure sentry shield nodes to hide validator P2P endpoints from direct public exposure"
+            );
+        }
+        if node.sentry_shield().is_sentry_protecting_validators() {
+            tracing::info!(
+                protected_validators = combined_validator_peers.len(),
+                "Sentry shield node active: protecting upstream validator identities and withholding their listen addresses from Kademlia"
+            );
+        }
         for addr in &bootstraps {
             if let Err(e) = node.bootstrap(addr) {
                 eprintln!("Failed to bootstrap from {addr}: {e}");
@@ -1753,6 +1793,7 @@ async fn main() {
             std::process::exit(1);
         }
     }
+    node.maintain_sentry_shield_links();
     if let Some(ref addr) = config.dial {
         if let Err(e) = node.dial(addr) {
             eprintln!("Error: could not dial {addr}: {e}");
