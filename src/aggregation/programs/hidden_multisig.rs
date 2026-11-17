@@ -32,7 +32,7 @@ use super::agg_merge::program_hash_of;
 use super::asm::{Asm, Program, R};
 use super::prog_claim::{
     emit_swrite_const_digest, emit_swrite_digest_cells, prove_vm_program, write_cell,
-    write_digest_cells, ProgClaimError, StarkProofObject, DIGEST_LIMBS,
+    write_digest_cells, ProgClaimError, StarkProofObject, DIGEST_LIMBS, DIGEST_LIMBS_U32,
 };
 use crate::aggregation::claim::GOLDILOCKS_MODULUS;
 use crate::aggregation::hash::auth_ok;
@@ -355,7 +355,7 @@ pub fn compile_hidden_multisig(
     a.region("publish_claim_io");
     emit_swrite_digest_cells(&mut a, cells.msg_limbs, 0);
     let auth_ok_digest = auth_ok();
-    emit_swrite_const_digest(&mut a, &auth_ok_digest, DIGEST_LIMBS as u32);
+    emit_swrite_const_digest(&mut a, &auth_ok_digest, DIGEST_LIMBS_U32);
     a.halt();
 
     let program = a.finish()?;
@@ -369,8 +369,9 @@ pub fn compile_hidden_multisig(
     })
 }
 
-/// Proves a hidden m-of-n multisig authorization over `msg_hash` using the
-/// supplied member signature witnesses, producing a real 128-bit `BudAir`
+/// Proves a hidden m-of-n multisig authorization over `msg_hash`.
+///
+/// Uses the supplied member signature witnesses to produce a 128-bit `BudAir`
 /// [`StarkProofObject`] whose derived claim is
 /// `Claim::Prog { program_hash, input_hash: msg_hash, output_hash: AUTH_OK }`.
 ///
@@ -396,7 +397,10 @@ pub fn prove_hidden_multisig_with_witnesses(
             "witnesses length must match compiled threshold m",
         ));
     }
-    let mem_bytes = ((compiled.program.memory_cells as usize) + 16) * 8;
+    let mem_bytes = usize::try_from(compiled.program.memory_cells)
+        .unwrap_or(0)
+        .saturating_add(16)
+        .saturating_mul(8);
     let mut vm = Vm::new(mem_bytes.max(4096));
     write_digest_cells(&mut vm, compiled.cells.msg_limbs, &msg_hash);
     write_cell(&mut vm, compiled.cells.policy_salt, policy_salt);

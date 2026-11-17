@@ -33,7 +33,7 @@ use super::programs::agg_merge::program_hash_of;
 use super::programs::asm::{Asm, Program, R};
 use super::programs::prog_claim::{
     emit_swrite_digest_cells, prove_vm_program, write_cell, write_digest_cells, ProgClaimError,
-    StarkProofObject, DIGEST_LIMBS,
+    StarkProofObject, DIGEST_LIMBS, DIGEST_LIMBS_U32,
 };
 use crate::crypto::facts::{AssumptionClass, ObservedScheme};
 use crate::domain::finality_adapter::{
@@ -213,7 +213,7 @@ pub fn compile_domain_transition(
     // 3. Publish (input_hash, output_hash) to SWrite[0..16].
     a.region("publish_transition_io");
     emit_swrite_digest_cells(&mut a, cells.input_hash, 0);
-    emit_swrite_digest_cells(&mut a, cells.output_hash, DIGEST_LIMBS as u32);
+    emit_swrite_digest_cells(&mut a, cells.output_hash, DIGEST_LIMBS_U32);
     a.halt();
 
     let program = a.finish()?;
@@ -243,9 +243,14 @@ pub fn prove_domain_transition(
     batch_digest: &Hash32,
     claim_domain: DomainId,
 ) -> Result<StarkProofObject, ProgClaimError> {
-    if compiled.domain_id != domain.id || compiled.domain_chain_id != domain.domain_chain_id {
+    if compiled.domain_id != domain.id {
         return Err(ProgClaimError::InvalidInput(
-            "domain does not match compiled DomainTransitionProgram",
+            "domain id does not match compiled DomainTransitionProgram",
+        ));
+    }
+    if compiled.domain_chain_id != domain.domain_chain_id {
+        return Err(ProgClaimError::InvalidInput(
+            "domain chain id does not match compiled DomainTransitionProgram",
         ));
     }
     let input_hash = domain_transition_input_hash(domain, prev_height, prev_state_root);
@@ -258,7 +263,10 @@ pub fn prove_domain_transition(
         commitment.domain_height,
     );
 
-    let mem_bytes = ((compiled.program.memory_cells as usize) + 16) * 8;
+    let mem_bytes = usize::try_from(compiled.program.memory_cells)
+        .unwrap_or(0)
+        .saturating_add(16)
+        .saturating_mul(8);
     let mut vm = Vm::new(mem_bytes.max(4096));
     write_cell(&mut vm, compiled.cells.prev_height, prev_height);
     write_cell(&mut vm, compiled.cells.new_height, commitment.domain_height);
