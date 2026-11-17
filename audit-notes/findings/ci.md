@@ -14,3 +14,7 @@ Run id leri rapor bolum 1 ve bolum 2 B-0010.
 - **Neye yol açar:** İncelenen PR'ların gerçek durumu bilinmez; yazar yeşil sanır.
 - **Nasıl düzeltilir:** Strix'in kendi reposunda yaptığı gibi (commit 0601550: "fold CI into one workflow with job timeouts and path-gate the binary and workflow lint"): (1) `paths:` filtresiyle yalnız dokunulan alanın kapıları, (2) ağır işler (fuzz, Miri, kani, docker) `schedule` + `workflow_dispatch`'e, (3) PR'da zorunlu tek bir "gate summary" job'u.
 - **Durum:** açık. Bu turda değiştirilmedi (workflow dosyası değişikliği ayrı PR ve ayrı kanıt ister).
+
+## Tur 2
+
+B-0012 … B-0018 için `findings/round2.md`. Kuyruk ölçümü, superseded iptaller ve depodaki fan-out çözüm deseni orada.

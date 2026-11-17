@@ -115,3 +115,23 @@ Biçim: `BUDLUM_DENETIM_DIREKTIFI` §5 (kimlik, konum, önem, ne yanlış, neden
 - Token hiçbir commit'e, yoruma, loga veya rapora yazılmadı; `.netrc` dışında hiçbir yerde tutulmadı.
 - Geçmiş yeniden yazılmadı, force-push yapılmadı, başka dalın commit'i değiştirilmedi.
 - `main`'e doğrudan commit yok; tek push `aggregation-phase1` dalına.
+
+## 6. Tur 2 (2026-11-17, ikinci oturum)
+
+Tur 1'in açık uçlarını kapatmak yerine tablo değişti: `budlum-stack@a579d3a7` üzerinde **zaten bir `src/aggregation/` uygulaması** bulundu (faz 0–2, BudZKVM programları ve ölçümlerle). Yani tur 2'nin işi yeni kod yazmak değil, gemiye binecek kodu denetlemek ve oradaki gerçek hatayı düzeltmek oldu.
+
+### Yapılanlar
+
+1. **B-0003 doğrulandı ve düzeltmesi açıldı.** `executor.rs:867` aktiflik tabanını governance parametresinden (testnette 1.000 atom) okuyor; aynı `Unstake` işleminin `:917`'si ve kayıt kolları ağ tabanını (`bud(1_000)` = 10^9 atom) kullanıyor. **PR #190** (base `budlum-stack`, `0ec399cb`, 1 dosya +57/−1) tek ifadeyi kardeşleriyle aynı yere getiriyor ve önce kırılan testiyle birlikte geliyor.
+2. **PR #188 kapatıldı.** Stack'teki uygulamanın geri kopyasıydı; gerekçe yorumu bırakıldı. `main`'e ikinci bir `src/aggregation/` indirmek `#126 → #164 → #183` zinciriyle çakışacaktı. Dal (`aggregation-phase1`) ve 73 testlik `budlum-aggproof` koşum takımı bağımsız oracle olarak duruyor.
+3. **Stack claim ağacı doğrulandı (B-0017):** tek düğüm tanıtılıyor, çoğaltılmıyor; yaprak/düğüm ayrımı var — CVE-2012-2459 şekli dışlanmış.
+4. **B-0004 yeniden triyaj edildi (B-0014):** chain_id bağı inmiş; kalan "kök türetilmiyor" tespiti bug değil, oran olarak ifade edilmemiş bir quorum güveni. Karar sahibin.
+5. **CI kök nedeni ayrıştırıldı (B-0012):** platform engeli yok (in_progress>0); sorun 33 workflow'un fan-out'u. Kuyruk ölçüldü: 83 `queued`, 2 `in_progress`, 300 koşu içinde yalnız **2** superseded koşu vardı — iptal edildi. Kuyruk israf değil, hacim. Depoda çözüm deseni var (`f7312e2a`, `86bf7628`).
+6. **İki taban sorunu belgelendi (B-0016, B-0018):** governance `min_stake` ile ağ tabanı arasındaki yetki sorusu ve `map_or(1, ...)` fail-open davranışı; ikisi de kör refactor yerine karar olarak yazıldı.
+
+### Bu turda hüküm verilemeyenler (dürüst liste)
+
+- **PR #190'ın test hükmü yok**: crate bu ortamda derlenmiyor (B-0002); statik kanıt `rustfmt --check` (dosya temiz ayrıştırılıyor) ve kardeş kollarla birebir aynı ifade. Fail-first koşusu CI'nın.
+- **CI kuyruğu**: #190 için 14 koşu `queued`; ~90 güncel-SHA koşusunun arkasında. Hüküm bu turda alınamaz; "CI yeşil" denmiyor.
+- **PR #187 (faz 2 çipler)**: okunmadı; sıradaki tur.
+- Benchmarks/fuzz/Miri/kani/determinism: yine çalıştırılmadı.
