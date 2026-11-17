@@ -26,6 +26,8 @@ const MAX_PROVE_FAILURES: u8 = 2;
 /// Object ids the pool remembers, so an object it has judged is not judged
 /// again. The oldest id is forgotten first.
 const SEEN_CAPACITY: usize = 262_144;
+/// Proven claim digests the pool remembers before evicting the oldest entry.
+const PROVEN_CLAIMS_CAPACITY: usize = SEEN_CAPACITY;
 
 /// A heavy object with the claim it stands for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +131,16 @@ struct Waiting {
     ticks_left: u8,
 }
 
+/// State of a claim digest tracked by the pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimEntry {
+    /// Object is currently in `ready` waiting to be proven.
+    Ready(Hash32),
+    /// Object was proven; kept until finalized, abandoned, or evicted at
+    /// `PROVEN_CLAIMS_CAPACITY`.
+    Proven(Hash32),
+}
+
 /// The object pool of one domain.
 #[derive(Debug)]
 pub struct ObjectPool {
@@ -136,9 +148,11 @@ pub struct ObjectPool {
     domain: DomainId,
     ready: BTreeMap<Hash32, Ready>,
     waiting: BTreeMap<Hash32, Waiting>,
-    /// Claim digest to the object that stands for it, for ready objects, and
-    /// to nothing for claims that are proven.
-    claims: BTreeMap<Hash32, Option<Hash32>>,
+    /// Claim digest to the object that stands for it (ready or proven).
+    claims: BTreeMap<Hash32, ClaimEntry>,
+    /// Insertion order of proven claim digests so `claims` stays bounded even
+    /// when proven claims leave without finalizing.
+    proven_order: VecDeque<Hash32>,
     seen: BTreeSet<Hash32>,
     seen_order: VecDeque<Hash32>,
     sender_counts: BTreeMap<Address, usize>,
@@ -164,6 +178,7 @@ impl ObjectPool {
             ready: BTreeMap::new(),
             waiting: BTreeMap::new(),
             claims: BTreeMap::new(),
+            proven_order: VecDeque::new(),
             seen: BTreeSet::new(),
             seen_order: VecDeque::new(),
             sender_counts: BTreeMap::new(),
@@ -296,7 +311,7 @@ impl ObjectPool {
         self.evict(&victims);
         self.bytes = self.bytes.saturating_add(bytes);
         self.remember(object_id);
-        self.claims.insert(digest, Some(object_id));
+        self.claims.insert(digest, ClaimEntry::Ready(object_id));
         self.sender_counts.insert(tx.from, used.saturating_add(1));
         self.ready.insert(
             object_id,
@@ -429,7 +444,16 @@ impl ObjectPool {
             let object_id = item.envelope.object_id();
             if let Some(ready) = self.ready.remove(&object_id) {
                 self.bytes = self.bytes.saturating_sub(ready.bytes);
-                self.claims.insert(ready.digest, None);
+                self.claims
+                    .insert(ready.digest, ClaimEntry::Proven(object_id));
+                self.proven_order.push_back(ready.digest);
+                if self.proven_order.len() > PROVEN_CLAIMS_CAPACITY {
+                    if let Some(oldest) = self.proven_order.pop_front() {
+                        if matches!(self.claims.get(&oldest), Some(ClaimEntry::Proven(_))) {
+                            self.claims.remove(&oldest);
+                        }
+                    }
+                }
             }
         }
     }
@@ -453,8 +477,30 @@ impl ObjectPool {
     /// frame was abandoned.
     pub fn forget_claims(&mut self, digests: &[Hash32]) {
         for digest in digests {
-            if self.claims.get(digest) == Some(&None) {
+            if matches!(self.claims.get(digest), Some(ClaimEntry::Proven(_))) {
                 self.claims.remove(digest);
+            }
+        }
+    }
+
+    /// Abandon a claim whose transaction left the node before finality.
+    ///
+    /// Drops any ready object still waiting to be proven and clears both the
+    /// claim entry and the object id from `seen`, so dead claims cannot
+    /// accumulate and a temporarily underfunded transaction can be
+    /// resubmitted once funded.
+    pub(super) fn abandon_claim(&mut self, digest: &Hash32) {
+        if let Some(entry) = self.claims.remove(digest) {
+            match entry {
+                ClaimEntry::Ready(object_id) => {
+                    if let Some(ready) = self.ready.remove(&object_id) {
+                        self.bytes = self.bytes.saturating_sub(ready.bytes);
+                    }
+                    self.seen.remove(&object_id);
+                }
+                ClaimEntry::Proven(object_id) => {
+                    self.seen.remove(&object_id);
+                }
             }
         }
     }
