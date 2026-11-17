@@ -39,10 +39,20 @@ const MAX_UNADMITTED_REQUESTS_PER_PEER: u8 = 12;
 const MAX_HELLOS_PER_PEER_PER_SEC: usize = 8;
 /// Largest number of bytes buffered in frames above
 /// `MAX_UNADMITTED_REQUEST_BYTES` across all streams of one Garden swarm.
-const MAX_LARGE_FRAME_BYTES_IN_FLIGHT: usize = 4 * MAX_REQUEST_BYTES;
+/// Exceeds both `max_established_per_peer` (2) and the unadmitted inbound cap
+/// (4), so neither a single peer nor every unadmitted slot combined can exhaust
+/// the pool and starve admitted validators.
+const MAX_LARGE_FRAME_BYTES_IN_FLIGHT: usize = 8 * MAX_REQUEST_BYTES;
+/// Per-connection share of buffered large-request bytes so one connection
+/// (and, under `max_established_per_peer = 2`, one peer) can never drain the
+/// swarm-wide pool and block other validators' `Gossip` or `PutObject` frames.
+const MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT: usize = MAX_REQUEST_BYTES;
 /// Granularity in which a large request or response frame is charged to the
 /// swarm-wide in-flight byte budget.
 const LARGE_FRAME_UNIT_BYTES: usize = 64 * 1024;
+/// Maximum idle gap between chunks of an in-flight request or response frame
+/// before the stream is aborted and its byte permits are returned.
+const FRAME_CHUNK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum time a TCP connection may spend in Noise + Yamux setup before the
 /// transport closes it and returns its pending inbound slot.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -52,7 +62,9 @@ pub const MAX_RESPONSE_BYTES: usize = 18 * 1024 * 1024;
 /// Largest number of response bytes buffered concurrently across all streams
 /// of one Garden swarm, charged at `LARGE_FRAME_UNIT_BYTES` granularity for
 /// bytes actually received.
-const MAX_RESPONSE_FRAME_BYTES_IN_FLIGHT: usize = 4 * MAX_RESPONSE_BYTES;
+const MAX_RESPONSE_FRAME_BYTES_IN_FLIGHT: usize = 8 * MAX_RESPONSE_BYTES;
+/// Per-connection share of buffered response bytes.
+const MAX_CONN_RESPONSE_FRAME_BYTES_IN_FLIGHT: usize = MAX_RESPONSE_BYTES;
 /// Concurrent streams per connection.
 const MAX_CONCURRENT_STREAMS: usize = 16;
 /// Most connections a Garden swarm keeps.
@@ -227,12 +239,36 @@ pub fn member_dial_address(address: &str, key: &GardenKey) -> Result<Multiaddr, 
     Ok(parsed)
 }
 
-/// The codec: one bounded frame per request and per response, with
-/// swarm-wide byte-granular budgets for buffered request and response frames.
-#[derive(Debug, Clone)]
+/// The codec: one bounded frame per request and per response, with both a
+/// per-connection share and a swarm-wide byte-granular budget for buffered
+/// request and response frames.
+///
+/// `libp2p::request_response` clones the codec once per established connection,
+/// so [`Clone::clone`] shares the swarm semaphores while minting a fresh
+/// per-connection semaphore pair. Each connection acquires its own share before
+/// touching the swarm pool, ensuring a stalled peer holds at most its own share
+/// and never starves other peers' `Gossip` or `PutObject` streams.
+#[derive(Debug)]
 struct GardenCodec {
     large_frames: Arc<Semaphore>,
+    conn_large_frames: Arc<Semaphore>,
     response_frames: Arc<Semaphore>,
+    conn_response_frames: Arc<Semaphore>,
+}
+
+impl Clone for GardenCodec {
+    fn clone(&self) -> Self {
+        Self {
+            large_frames: Arc::clone(&self.large_frames),
+            conn_large_frames: Arc::new(Semaphore::new(
+                MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
+            )),
+            response_frames: Arc::clone(&self.response_frames),
+            conn_response_frames: Arc::new(Semaphore::new(
+                MAX_CONN_RESPONSE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
+            )),
+        }
+    }
 }
 
 impl Default for GardenCodec {
@@ -241,21 +277,28 @@ impl Default for GardenCodec {
             large_frames: Arc::new(Semaphore::new(
                 MAX_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
             )),
+            conn_large_frames: Arc::new(Semaphore::new(
+                MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
+            )),
             response_frames: Arc::new(Semaphore::new(
                 MAX_RESPONSE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
+            )),
+            conn_response_frames: Arc::new(Semaphore::new(
+                MAX_CONN_RESPONSE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
             )),
         }
     }
 }
 
 /// Read up to `limit` total bytes (including any already-read `prefix`),
-/// charging `budget` in `LARGE_FRAME_UNIT_BYTES` increments strictly for
-/// bytes actually received so a stalled peer holds zero budget.
+/// charging `conn_budget` first and `swarm_budget` second in
+/// `LARGE_FRAME_UNIT_BYTES` increments strictly for bytes actually received.
 async fn read_bounded_budgeted<T>(
     io: &mut T,
     prefix: &[u8],
     limit: usize,
-    budget: Option<&Arc<Semaphore>>,
+    conn_budget: Option<&Arc<Semaphore>>,
+    swarm_budget: Option<&Arc<Semaphore>>,
     budget_err: &'static str,
 ) -> std::io::Result<Vec<u8>>
 where
@@ -265,10 +308,23 @@ where
     let mut buf = Vec::with_capacity(prefix.len());
     buf.extend_from_slice(prefix);
     let mut chunk = vec![0u8; LARGE_FRAME_UNIT_BYTES];
-    let mut charged = Vec::new();
+    let mut conn_charged = Vec::new();
+    let mut swarm_charged = Vec::new();
     let mut charged_units = 0usize;
+    let in_tokio = tokio::runtime::Handle::try_current().is_ok();
     loop {
-        let read = io.read(&mut chunk).await?;
+        let read = if in_tokio {
+            tokio::time::timeout(FRAME_CHUNK_TIMEOUT, io.read(&mut chunk))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "garden frame chunk read timed out",
+                    )
+                })??
+        } else {
+            io.read(&mut chunk).await?
+        };
         if read == 0 {
             break;
         }
@@ -279,21 +335,35 @@ where
                 format!("garden frame exceeds {limit} bytes"),
             ));
         }
-        if let Some(budget) = budget {
+        if conn_budget.is_some() || swarm_budget.is_some() {
             let needed_units = new_payload_len.div_ceil(LARGE_FRAME_UNIT_BYTES);
             let delta = needed_units.saturating_sub(charged_units);
             if delta > 0 {
                 let delta_u32 = u32::try_from(delta)
                     .map_err(|_| std::io::Error::other("garden frame budget overflow"))?;
-                match budget.clone().try_acquire_many_owned(delta_u32) {
-                    Ok(permit) => {
-                        charged.push(permit);
-                        charged_units = needed_units;
-                    }
-                    Err(_) => {
-                        return Err(std::io::Error::other(budget_err));
-                    }
+                let conn_permit = match conn_budget {
+                    Some(sem) => Some(
+                        sem.clone()
+                            .try_acquire_many_owned(delta_u32)
+                            .map_err(|_| std::io::Error::other(budget_err))?,
+                    ),
+                    None => None,
+                };
+                let swarm_permit = match swarm_budget {
+                    Some(sem) => Some(
+                        sem.clone()
+                            .try_acquire_many_owned(delta_u32)
+                            .map_err(|_| std::io::Error::other(budget_err))?,
+                    ),
+                    None => None,
+                };
+                if let Some(permit) = conn_permit {
+                    conn_charged.push(permit);
                 }
+                if let Some(permit) = swarm_permit {
+                    swarm_charged.push(permit);
+                }
+                charged_units = needed_units;
             }
         }
         let Some(slice) = chunk.get(..read) else {
@@ -309,7 +379,7 @@ async fn read_bounded<T>(io: &mut T, limit: usize) -> std::io::Result<Vec<u8>>
 where
     T: AsyncRead + Unpin + Send,
 {
-    read_bounded_budgeted(io, &[], limit, None, "").await
+    read_bounded_budgeted(io, &[], limit, None, None, "").await
 }
 
 impl request_response::Codec for GardenCodec {
@@ -326,7 +396,18 @@ impl request_response::Codec for GardenCodec {
         // AdmissionStatus) never allocate up to MAX_REQUEST_BYTES before
         // reaching the swarm.
         let mut tag = [0u8; 4];
-        io.read_exact(&mut tag).await?;
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::time::timeout(FRAME_CHUNK_TIMEOUT, io.read_exact(&mut tag))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "garden request tag read timed out",
+                    )
+                })??;
+        } else {
+            io.read_exact(&mut tag).await?;
+        }
         let variant = u32::from_le_bytes(tag);
         let limit = match variant {
             0 => MAX_UNADMITTED_REQUEST_BYTES, // Hello
@@ -340,11 +421,20 @@ impl request_response::Codec for GardenCodec {
                 ));
             }
         };
-        // Charge the swarm budget strictly for bytes actually received on large
-        // frames, so a peer that sends only a variant tag and stalls holds zero
-        // permits and cannot starve admitted validators' gossip or deposits.
-        let budget = (limit > MAX_UNADMITTED_REQUEST_BYTES).then_some(&self.large_frames);
-        read_bounded_budgeted(io, &tag, limit, budget, "garden large frame budget is full").await
+        // Charge the connection's own share first, then the swarm budget,
+        // strictly for bytes actually received on large frames.
+        let is_large = limit > MAX_UNADMITTED_REQUEST_BYTES;
+        let conn_budget = is_large.then_some(&self.conn_large_frames);
+        let swarm_budget = is_large.then_some(&self.large_frames);
+        read_bounded_budgeted(
+            io,
+            &tag,
+            limit,
+            conn_budget,
+            swarm_budget,
+            "garden large frame budget is full",
+        )
+        .await
     }
 
     async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T) -> std::io::Result<Vec<u8>>
@@ -355,6 +445,7 @@ impl request_response::Codec for GardenCodec {
             io,
             &[],
             MAX_RESPONSE_BYTES,
+            Some(&self.conn_response_frames),
             Some(&self.response_frames),
             "garden response frame budget is full",
         )
@@ -394,12 +485,32 @@ impl request_response::Codec for GardenCodec {
 /// the pool and locks out every other validator.
 const MAX_PENDING_INCOMING_PER_SOURCE: usize = 2;
 
-/// Source prefix of a pending inbound handshake, grouped by IPv4 `/24` or
-/// IPv6 `/64` so one host rotating addresses inside its prefix shares a cap.
+/// Source prefix of a pending or unjoined inbound peer, grouped by IPv4 `/24`
+/// or IPv6 `/64` so one host rotating addresses inside its prefix shares a cap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum SourceKey {
+pub enum SourceKey {
     V4([u8; 3]),
     V6([u8; 8]),
+}
+
+impl SourceKey {
+    /// True for loopback prefixes (`127.0.0.0/8` and `::1`), where in-process
+    /// integration suites run multiple distinct nodes on one host.
+    pub const fn is_loopback(self) -> bool {
+        match self {
+            Self::V4(octets) => octets[0] == 127,
+            Self::V6(octets) => {
+                octets[0] == 0
+                    && octets[1] == 0
+                    && octets[2] == 0
+                    && octets[3] == 0
+                    && octets[4] == 0
+                    && octets[5] == 0
+                    && octets[6] == 0
+                    && octets[7] == 0
+            }
+        }
+    }
 }
 
 fn source_key(address: &Multiaddr) -> Option<SourceKey> {
@@ -409,6 +520,10 @@ fn source_key(address: &Multiaddr) -> Option<SourceKey> {
             Some(SourceKey::V4([octets[0], octets[1], octets[2]]))
         }
         libp2p::multiaddr::Protocol::Ip6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                let octets = mapped.octets();
+                return Some(SourceKey::V4([octets[0], octets[1], octets[2]]));
+            }
             let octets = ip.octets();
             Some(SourceKey::V6([
                 octets[0], octets[1], octets[2], octets[3], octets[4], octets[5], octets[6],
@@ -575,6 +690,8 @@ pub enum NetEvent {
 pub struct GardenNet {
     pub commands: mpsc::Sender<NetCommand>,
     pub events: mpsc::Receiver<NetEvent>,
+    /// Source prefix observed for each currently connected peer.
+    pub peer_sources: Arc<std::sync::Mutex<BTreeMap<PeerId, SourceKey>>>,
     /// The address the swarm is bound to.
     pub listen: Multiaddr,
 }
@@ -668,7 +785,10 @@ async fn start_with(
 
     let (command_tx, mut command_rx) = mpsc::channel::<NetCommand>(1024);
     let (event_tx, event_rx) = mpsc::channel::<NetEvent>(1024);
-    let max_unadmitted_in = (max_connections as usize / 6).max(4);
+    let peer_sources: Arc<std::sync::Mutex<BTreeMap<PeerId, SourceKey>>> =
+        Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+    let peer_sources_task = Arc::clone(&peer_sources);
+    let max_unadmitted_in = (max_connections as usize / 6).clamp(1, 4);
     tokio::spawn(async move {
         let mut tags = BTreeMap::new();
         let mut admitted: HashSet<PeerId> = HashSet::new();
@@ -799,6 +919,11 @@ async fn start_with(
                 event = swarm.select_next_some(), if backlog.len() < EVENT_BACKLOG => {
                     let out = match event {
                         SwarmEvent::ConnectionEstablished { peer_id, endpoint, num_established, .. } => {
+                            if let Some(src) = source_key(endpoint.get_remote_address()) {
+                                if let Ok(mut map) = peer_sources_task.lock() {
+                                    map.entry(peer_id).or_insert(src);
+                                }
+                            }
                             if endpoint.is_listener() && !admitted.contains(&peer_id) {
                                 unadmitted_in.retain(|p| *p != peer_id);
                                 unadmitted_in.push_back(peer_id);
@@ -812,6 +937,9 @@ async fn start_with(
                             (num_established.get() == 1).then_some(NetEvent::Connected(peer_id))
                         }
                         SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
+                            if let Ok(mut map) = peer_sources_task.lock() {
+                                map.remove(&peer_id);
+                            }
                             admitted.remove(&peer_id);
                             unadmitted_in.retain(|p| *p != peer_id);
                             unadmitted_attempts.remove(&peer_id);
@@ -847,6 +975,9 @@ async fn start_with(
                                         if let Ok(bytes) = bincode::serialize(&refusal) {
                                             let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
                                         }
+                                        unadmitted_in.retain(|p| *p != peer);
+                                        unadmitted_attempts.remove(&peer);
+                                        let _ = swarm.disconnect_peer_id(peer);
                                         None
                                     } else {
                                         if hello_window_start.elapsed() >= Duration::from_secs(1) {
@@ -956,6 +1087,7 @@ async fn start_with(
     Ok(GardenNet {
         commands: command_tx,
         events: event_rx,
+        peer_sources,
         listen: bound,
     })
 }
@@ -1591,5 +1723,71 @@ mod tests {
         assert!(limiter
             .handle_pending_inbound_connection(id3, &local, &same_net_c)
             .is_ok());
+    }
+
+    #[test]
+    fn garden_codec_clone_isolates_per_connection_large_and_response_shares() {
+        let base = GardenCodec::default();
+        let conn_a = base.clone();
+        let conn_b = base.clone();
+
+        let per_conn_req =
+            u32::try_from(MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES).unwrap();
+        // Connection A consumes its entire per-connection large-request share.
+        let held_conn_a = conn_a
+            .conn_large_frames
+            .clone()
+            .try_acquire_many_owned(per_conn_req)
+            .expect("connection A acquires its full large-frame share");
+        let held_swarm_a = conn_a
+            .large_frames
+            .clone()
+            .try_acquire_many_owned(per_conn_req)
+            .expect("swarm grants connection A's share");
+        // Connection A cannot take one more unit on a second concurrent stream.
+        assert!(conn_a.conn_large_frames.try_acquire().is_err());
+        // Connection B still gets its own full large-request share and swarm budget.
+        let held_conn_b = conn_b
+            .conn_large_frames
+            .clone()
+            .try_acquire_many_owned(per_conn_req)
+            .expect("connection B retains its own large-frame share");
+        let held_swarm_b = conn_b
+            .large_frames
+            .clone()
+            .try_acquire_many_owned(per_conn_req)
+            .expect("swarm still has room for connection B");
+        drop((held_conn_a, held_swarm_a, held_conn_b, held_swarm_b));
+
+        // Same isolation holds for response frame budgets.
+        let per_conn_resp =
+            u32::try_from(MAX_CONN_RESPONSE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES)
+                .unwrap();
+        let _resp_a = conn_a
+            .conn_response_frames
+            .clone()
+            .try_acquire_many_owned(per_conn_resp)
+            .unwrap();
+        assert!(conn_a.conn_response_frames.try_acquire().is_err());
+        assert!(conn_b
+            .conn_response_frames
+            .clone()
+            .try_acquire_many_owned(per_conn_resp)
+            .is_ok());
+    }
+
+    #[test]
+    fn source_key_groups_public_prefixes_and_detects_loopback() {
+        let pub_a: Multiaddr = "/ip4/198.51.100.10/tcp/4001".parse().unwrap();
+        let pub_b: Multiaddr = "/ip4/198.51.100.250/tcp/4002".parse().unwrap();
+        let mapped: Multiaddr = "/ip6/::ffff:198.51.100.77/tcp/4003".parse().unwrap();
+        let loop4: Multiaddr = "/ip4/127.0.0.1/tcp/4001".parse().unwrap();
+        let loop6: Multiaddr = "/ip6/::1/tcp/4001".parse().unwrap();
+        let k_a = source_key(&pub_a).unwrap();
+        assert_eq!(k_a, source_key(&pub_b).unwrap());
+        assert_eq!(k_a, source_key(&mapped).unwrap());
+        assert!(!k_a.is_loopback());
+        assert!(source_key(&loop4).unwrap().is_loopback());
+        assert!(source_key(&loop6).unwrap().is_loopback());
     }
 }
