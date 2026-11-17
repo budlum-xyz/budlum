@@ -66,6 +66,7 @@ const MODULE_PREFIXES: &[(&str, &str)] = &[
     ("budlum:socialfi", "src/socialfi/"),
     ("budlum:storage", "src/storage/"),
     ("budlum:tokenomics", "src/tokenomics/"),
+    ("budlum:unification", "src/unification/"),
     ("budlum:validators", "src/validators/"),
     ("budlum:wallet", "src/wallet/"),
     ("budlum:web_gateway", "src/web_gateway/"),
