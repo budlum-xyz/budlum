@@ -51,6 +51,7 @@ pub mod sharding;
 pub mod socialfi;
 pub mod storage;
 pub mod tokenomics;
+pub mod unification;
 pub mod validators;
 pub mod web_gateway;
 // The V5 command-line wallet; its keys are ML-DSA-87.

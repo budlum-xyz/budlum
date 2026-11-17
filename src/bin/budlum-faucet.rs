@@ -451,9 +451,30 @@ impl Node {
                 budlum_core::rpc::client_auth::API_KEY_FILE_ENV
             ));
         }
-        let value: serde_json::Value = response
-            .json()
+        const MAX_NODE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_NODE_RESPONSE_BYTES as u64)
+        {
+            return Err(format!(
+                "{method}: node response exceeds {MAX_NODE_RESPONSE_BYTES}-byte limit"
+            ));
+        }
+        let mut response = response;
+        let mut raw = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
+            .map_err(|e| format!("{method}: failed reading node response: {e}"))?
+        {
+            if raw.len().saturating_add(chunk.len()) > MAX_NODE_RESPONSE_BYTES {
+                return Err(format!(
+                    "{method}: node response exceeds {MAX_NODE_RESPONSE_BYTES}-byte limit"
+                ));
+            }
+            raw.extend_from_slice(&chunk);
+        }
+        let value: serde_json::Value = serde_json::from_slice(&raw)
             .map_err(|e| format!("{method}: answer is not JSON: {e}"))?;
         if let Some(error) = value.get("error") {
             return Err(format!("{method}: {error}"));
@@ -913,7 +934,9 @@ async fn serve(
     drop(seed);
     let address = key.address();
     let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("HTTP client: {e}"))?;
     let api_key = budlum_core::rpc::client_auth::api_key_from_env()

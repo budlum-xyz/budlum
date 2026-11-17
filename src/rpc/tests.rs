@@ -3332,4 +3332,140 @@ mod rpc_tests {
         assert!(joiner.garden_leave().await.is_ok());
         assert!(joiner.garden_return().await.is_ok());
     }
+
+    #[tokio::test]
+    async fn universal_unification_rpc_methods_answer_and_refuse_malformed_inputs() {
+        use crate::unification::{
+            CanonicalValue, DomainTokenBalance, LiquidityQuote, NormalizedMachineOutput,
+            OutputBinding, OutputCompositionPlan, OutputSelector, PaymentRail, StorageNetworkKind,
+            StorageReplica, UnifiedContentRecord, UniversalPaymentIntent, VerificationStrength,
+        };
+        use std::collections::BTreeMap;
+
+        let (server, _) = setup().await;
+
+        // 1. bud_getUniversalDomains (0-arg answer)
+        let domains = server.get_universal_domains().await.unwrap();
+        assert!(domains["count"].as_u64().unwrap_or(0) >= 19);
+        assert!(domains["catalog_root"].as_str().unwrap().starts_with("0x"));
+
+        // 2. bud_quoteUniversalPayment (refusal + answer)
+        assert!(server
+            .quote_universal_payment(serde_json::json!({"bad": true}))
+            .await
+            .is_err());
+        let pay_req = serde_json::json!({
+            "intent": UniversalPaymentIntent {
+                payer_id: [0x11; 32],
+                merchant_id: [0x22; 32],
+                nonce: 1,
+                target_domain: 3,
+                target_asset_id: [0xAA; 32],
+                target_amount: 100,
+                max_slippage_bps: 100,
+                deadline_unix_secs: 2_000,
+                invoice_hash: [0x33; 32],
+                rail: PaymentRail::OnChain,
+            },
+            "balances": [DomainTokenBalance {
+                domain_id: 1,
+                asset_id: [0xBB; 32],
+                symbol: String::from("BUD"),
+                available_amount: 120,
+            }],
+            "quotes": [LiquidityQuote {
+                quote_id: [0x44; 32],
+                source_domain: 1,
+                source_asset_id: [0xBB; 32],
+                target_domain: 3,
+                target_asset_id: [0xAA; 32],
+                rate_scaled: 1_000_000_000_000_000_000,
+                max_target_liquidity: 500,
+                fee_bps: 10,
+                valid_until_unix_secs: 2_500,
+            }],
+            "now_unix_secs": 1_500,
+        });
+        let quote_res = server.quote_universal_payment(pay_req).await.unwrap();
+        assert_eq!(quote_res["target_amount_delivered"].as_u64(), Some(100));
+
+        // 3. bud_composeExecutionOutputs (refusal + answer)
+        assert!(server
+            .compose_execution_outputs(
+                serde_json::json!({"plan_id": "", "steps": [], "bindings": []})
+            )
+            .await
+            .is_err());
+        let evm = NormalizedMachineOutput::from_evm(
+            "evm_step",
+            3,
+            true,
+            50_000,
+            vec![1, 2],
+            &[],
+            [(String::from("amount"), CanonicalValue::U64(42))]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        let wasm = NormalizedMachineOutput::from_wasm(
+            "wasm_step",
+            5,
+            true,
+            25_000,
+            vec![3],
+            Vec::new(),
+            [(String::from("received"), CanonicalValue::U64(42))]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        let plan = OutputCompositionPlan {
+            plan_id: String::from("rpc-compose"),
+            steps: vec![evm, wasm],
+            bindings: vec![OutputBinding {
+                from_step: String::from("evm_step"),
+                selector: OutputSelector::TypedField {
+                    key: String::from("amount"),
+                },
+                to_step: String::from("wasm_step"),
+                target_input: String::from("received"),
+                enforce_match: true,
+            }],
+        };
+        let composed = server
+            .compose_execution_outputs(serde_json::to_value(plan).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(composed["total_gas_bgu"].as_u64(), Some(75_000));
+
+        // 4. bud_resolveUnifiedStorage (refusal + answer)
+        assert!(server
+            .resolve_unified_storage(serde_json::json!({"uri": "http://bad", "objects": []}))
+            .await
+            .is_err());
+        let mut obj = UnifiedContentRecord::from_bytes(b"hello web3", "text/plain");
+        let digest = obj.sha3_256_digest;
+        obj.replicas.push(StorageReplica {
+            network: StorageNetworkKind::Ipfs,
+            domain_id: StorageNetworkKind::Ipfs.default_domain_id(),
+            native_locator: String::from(
+                "bafybeihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+            ),
+            verification: VerificationStrength::CryptographicHash,
+            available: true,
+            latency_ms: 20,
+        });
+        let mut bns = BTreeMap::new();
+        bns.insert(String::from("site.bud"), digest);
+        let storage_res = server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [obj],
+                "bns_bindings": bns,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(storage_res["primary"]["network"].as_str(), Some("ipfs"));
+    }
 }

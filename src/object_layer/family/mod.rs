@@ -316,7 +316,9 @@ pub trait FamilyProfile: Sync {
         let [raw] = proof.contract_account_proof.as_slice() else {
             return Err(Refusal::UnprovenEvent);
         };
-        let merkle: MerkleProof = bincode::deserialize(raw).map_err(|_| Refusal::UnprovenEvent)?;
+        let merkle: MerkleProof =
+            crate::network::bounded_bincode::decode_bounded_bincode(raw, 4 * 1024)
+                .map_err(|_| Refusal::UnprovenEvent)?;
         let mut slice_bytes = Vec::new();
         for (key, value) in slice {
             let key_bytes = key.as_bytes();
@@ -362,7 +364,8 @@ pub trait FamilyProfile: Sync {
             return Err(CharterRefusal::ProofDisagrees);
         };
         let merkle: MerkleProof =
-            bincode::deserialize(raw).map_err(|_| CharterRefusal::ProofDisagrees)?;
+            crate::network::bounded_bincode::decode_bounded_bincode(raw, 4 * 1024)
+                .map_err(|_| CharterRefusal::ProofDisagrees)?;
         let expected_leaf = hash_fields_bytes(&[
             b"BDLM_UOL_HOME_CODE_V1",
             chain_reference.as_bytes(),
@@ -510,5 +513,35 @@ mod tests {
         assert_eq!(contract, &[9; 20]);
         assert!(split_class_ref(&[]).is_err());
         assert!(split_class_ref(&[7, 1]).is_err());
+    }
+
+    #[test]
+    fn oversized_or_forged_length_merkle_proof_is_rejected_without_allocating() {
+        let profile = profile_for(HomeVmFamily::Svm);
+        // Oversized (> 4 KiB) proof rejected immediately.
+        let oversized = vec![0u8; 4 * 1024 + 1];
+        assert!(matches!(
+            profile.verify_home_code_entry(
+                "solana:devnet",
+                &[1; 32],
+                [2; 32],
+                [3; 32],
+                &[oversized]
+            ),
+            Err(CharterRefusal::ProofDisagrees)
+        ));
+        // Forged bincode Vec length (u64::MAX) inside a tiny buffer rejected safely.
+        let mut crafted = vec![0u8; 48];
+        crafted[40..48].copy_from_slice(&u64::MAX.to_le_bytes());
+        let slice = ClassSlice::new();
+        let proof = HomeSliceProof {
+            state_root: [0u8; 32],
+            contract_account_proof: vec![crafted],
+            storage_proofs: Vec::new(),
+        };
+        assert!(matches!(
+            profile.verify_home_slice_proof("solana:devnet", &[1; 32], &slice, &proof),
+            Err(Refusal::UnprovenEvent)
+        ));
     }
 }

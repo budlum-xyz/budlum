@@ -1458,6 +1458,32 @@ pub trait BudlumApi {
     #[method(name = "bud_getAsset")]
     async fn get_asset(&self, asset_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Return the canonical universal blockchain domain catalog and its Merkle root.
+    #[method(name = "bud_getUniversalDomains")]
+    async fn get_universal_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Compute a dry-run atomic multi-token split-tender payment quote across domains.
+    #[method(name = "bud_quoteUniversalPayment")]
+    async fn quote_universal_payment(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Compose normalized multi-VM, multi-language execution outputs into one Merkle-verifiable bundle.
+    #[method(name = "bud_composeExecutionOutputs")]
+    async fn compose_execution_outputs(
+        &self,
+        plan: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Resolve a universal Web3 / decentralized storage URI (`bud://`, `ipfs://`, `ar://`, `bns://`, ...)
+    /// across multi-network replicas ordered by cryptographic verification strength.
+    #[method(name = "bud_resolveUnifiedStorage")]
+    async fn resolve_unified_storage(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// WebSocket subscriptions: `kind` is
     /// `newHeads`, `finalizedHeads` or `logs`; `logs` takes an optional
     /// address and yields the transactions that send to or from it.
