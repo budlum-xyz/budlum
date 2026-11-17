@@ -301,8 +301,9 @@ impl AggNode {
         Some((frame, transactions))
     }
 
-    /// Forget a transaction that can no longer run. A frame that carries
-    /// its claim is not chosen for a block again.
+    /// Forget a transaction that can no longer run. Its claim leaves the
+    /// object pool and any frame that carries it is dropped so stale frames
+    /// cannot linger or poison later merges.
     pub fn drop_transaction(&mut self, tx_hash: &Hash32) {
         if let Some(tx) = self.transactions.remove(tx_hash) {
             if let Some(pending) = self.by_sender.get_mut(&tx.from) {
@@ -310,6 +311,9 @@ impl AggNode {
                 if pending.is_empty() {
                     self.by_sender.remove(&tx.from);
                 }
+            }
+            if let Some(digest) = tx.auth_claim {
+                self.aggregator.forget_claim(&digest);
             }
         }
     }
