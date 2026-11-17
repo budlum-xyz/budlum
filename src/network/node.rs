@@ -115,6 +115,24 @@ fn select_sync_peer_resting_last(
     .or_else(|| select_sync_peer(preferred, eligible_best, stalled, empty_at_tip))
 }
 const MAX_PENDING_BITSWAP_FETCH_WAITERS: usize = 128;
+/// Maximum concurrent outbound B.U.D. 3.0 P2P symbol/custody requests tracked in memory.
+const MAX_INFLIGHT_BUD3_REQUESTS: usize = 256;
+
+struct PendingBud3SymbolRequest {
+    peer_id: PeerId,
+    request: crate::network::bud3_protocol::Bud3SymbolsRequest,
+    symbol_size: u16,
+    roots: Vec<crate::storage::bud3::registry::SymbolRoot>,
+    sender: oneshot::Sender<
+        Result<Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>, String>,
+    >,
+}
+
+struct PendingBud3CustodyRequest {
+    peer_id: PeerId,
+    request: crate::network::bud3_protocol::Bud3CustodyRequest,
+    sender: oneshot::Sender<Result<usize, String>>,
+}
 /// QC blobs assembled at once, across all peers.
 const MAX_QC_ASSEMBLIES: usize = 8;
 /// A slow or malicious peer cannot occupy every outbound fetch slot.
@@ -1455,27 +1473,9 @@ pub struct Node {
         ),
     >,
     /// B.U.D. 3.0 symbol fetch requests in flight on `/budlum/bud3/symbols/1`.
-    bud3_symbol_requests: HashMap<
-        request_response::OutboundRequestId,
-        (
-            PeerId,
-            crate::network::bud3_protocol::Bud3SymbolsRequest,
-            u16,
-            Vec<crate::storage::bud3::registry::SymbolRoot>,
-            oneshot::Sender<
-                Result<Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>, String>,
-            >,
-        ),
-    >,
+    bud3_symbol_requests: HashMap<request_response::OutboundRequestId, PendingBud3SymbolRequest>,
     /// B.U.D. 3.0 custody push requests in flight on `/budlum/bud3/custody/1`.
-    bud3_custody_requests: HashMap<
-        request_response::OutboundRequestId,
-        (
-            PeerId,
-            crate::network::bud3_protocol::Bud3CustodyRequest,
-            oneshot::Sender<Result<usize, String>>,
-        ),
-    >,
+    bud3_custody_requests: HashMap<request_response::OutboundRequestId, PendingBud3CustodyRequest>,
     /// Per-peer rate and custody stream limits for B.U.D. 3.0 protocols.
     bud3_peer_limiter: crate::storage::bud3::symbol_protocol::SymbolPeerLimiter,
     /// Single-flight guard ensuring peer-supplied fork batches can keep at
@@ -4809,9 +4809,17 @@ impl Node {
                                 roots,
                                 response,
                             } => {
+                                self.bud3_symbol_requests
+                                    .retain(|_, pending| !pending.sender.is_closed());
                                 if self.peer_manager_lock().is_banned(&peer_id) {
                                     let _ = response.send(Err(format!(
                                         "refused B.U.D. 3.0 symbol fetch to banned peer {peer_id}"
+                                    )));
+                                } else if self.bud3_symbol_requests.len()
+                                    >= MAX_INFLIGHT_BUD3_REQUESTS
+                                {
+                                    let _ = response.send(Err(String::from(
+                                        "B.U.D. 3.0 outbound symbol request limit reached",
                                     )));
                                 } else {
                                     let req_id = self
@@ -4821,7 +4829,13 @@ impl Node {
                                         .send_request(&peer_id, request.clone());
                                     self.bud3_symbol_requests.insert(
                                         req_id,
-                                        (peer_id, request, symbol_size, roots, response),
+                                        PendingBud3SymbolRequest {
+                                            peer_id,
+                                            request,
+                                            symbol_size,
+                                            roots,
+                                            sender: response,
+                                        },
                                     );
                                 }
                             }
@@ -4830,9 +4844,17 @@ impl Node {
                                 request,
                                 response,
                             } => {
+                                self.bud3_custody_requests
+                                    .retain(|_, pending| !pending.sender.is_closed());
                                 if self.peer_manager_lock().is_banned(&peer_id) {
                                     let _ = response.send(Err(format!(
                                         "refused B.U.D. 3.0 custody push to banned peer {peer_id}"
+                                    )));
+                                } else if self.bud3_custody_requests.len()
+                                    >= MAX_INFLIGHT_BUD3_REQUESTS
+                                {
+                                    let _ = response.send(Err(String::from(
+                                        "B.U.D. 3.0 outbound custody request limit reached",
                                     )));
                                 } else {
                                     let req_id = self
@@ -4840,8 +4862,14 @@ impl Node {
                                         .behaviour_mut()
                                         .bud3_custody
                                         .send_request(&peer_id, request.clone());
-                                    self.bud3_custody_requests
-                                        .insert(req_id, (peer_id, request, response));
+                                    self.bud3_custody_requests.insert(
+                                        req_id,
+                                        PendingBud3CustodyRequest {
+                                            peer_id,
+                                            request,
+                                            sender: response,
+                                        },
+                                    );
                                 }
                             }
                             NodeCommand::FetchRemoteContent { cid, response } => {
@@ -7760,7 +7788,7 @@ impl Node {
                                         warn!("Rejected B.U.D. 3.0 symbol request from banned/unhandshaked/rate-limited peer {peer}");
                                         continue;
                                     }
-                                    let peer_key = crate::core::hash::hash_bytes(&peer.to_bytes());
+                                    let peer_key = crate::core::hash::calculate_hash_bytes(&peer.to_bytes());
                                     let now_sec = SystemTime::now()
                                         .duration_since(UNIX_EPOCH)
                                         .unwrap_or_default()
@@ -7834,8 +7862,13 @@ impl Node {
                                         },
                                     ..
                                 } => {
-                                    let Some((asked, req, symbol_size, roots, sender)) =
-                                        self.bud3_symbol_requests.remove(&request_id)
+                                    let Some(PendingBud3SymbolRequest {
+                                        peer_id: asked,
+                                        request: req,
+                                        symbol_size,
+                                        roots,
+                                        sender,
+                                    }) = self.bud3_symbol_requests.remove(&request_id)
                                     else {
                                         warn!("Unsolicited B.U.D. 3.0 symbol response from {peer}");
                                         self.peer_manager_lock().report_bad_behavior(&peer);
@@ -7873,7 +7906,7 @@ impl Node {
                                     error,
                                     ..
                                 } => {
-                                    if let Some((_, _, _, _, sender)) =
+                                    if let Some(PendingBud3SymbolRequest { sender, .. }) =
                                         self.bud3_symbol_requests.remove(&request_id)
                                     {
                                         let _ = sender.send(Err(format!(
@@ -7908,7 +7941,7 @@ impl Node {
                                         warn!("Rejected B.U.D. 3.0 custody push from banned/unhandshaked/rate-limited peer {peer}");
                                         continue;
                                     }
-                                    let peer_key = crate::core::hash::hash_bytes(&peer.to_bytes());
+                                    let peer_key = crate::core::hash::calculate_hash_bytes(&peer.to_bytes());
                                     if let Err(err) =
                                         self.bud3_peer_limiter.open_custody_stream(&peer_key)
                                     {
@@ -7974,8 +8007,11 @@ impl Node {
                                         },
                                     ..
                                 } => {
-                                    let Some((asked, req, sender)) =
-                                        self.bud3_custody_requests.remove(&request_id)
+                                    let Some(PendingBud3CustodyRequest {
+                                        peer_id: asked,
+                                        request: req,
+                                        sender,
+                                    }) = self.bud3_custody_requests.remove(&request_id)
                                     else {
                                         warn!("Unsolicited B.U.D. 3.0 custody response from {peer}");
                                         self.peer_manager_lock().report_bad_behavior(&peer);
@@ -8011,7 +8047,7 @@ impl Node {
                                     error,
                                     ..
                                 } => {
-                                    if let Some((_, _, sender)) =
+                                    if let Some(PendingBud3CustodyRequest { sender, .. }) =
                                         self.bud3_custody_requests.remove(&request_id)
                                     {
                                         let _ = sender.send(Err(format!(

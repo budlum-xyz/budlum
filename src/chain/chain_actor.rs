@@ -3573,7 +3573,11 @@ impl ChainActor {
                     let _ = reply.send(res);
                 }
                 ChainCommand::ValidatorPeerId(owner, reply) => {
-                    let record = self.blockchain.state.validator_directory.get(&owner);
+                    let record = self
+                        .blockchain
+                        .state
+                        .validator_directory
+                        .get(&Address(owner));
                     let _ = reply.send(record.map(|r| r.peer_id));
                 }
                 ChainCommand::GetValidatorDirectory(query, tx) => {

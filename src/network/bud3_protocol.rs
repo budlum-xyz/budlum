@@ -135,7 +135,9 @@ pub fn verify_bud3_symbols_response(
             req.range.count
         ));
     }
-    let end_esi = req.range.first_esi.saturating_add(req.range.count);
+    let Some(end_esi) = req.range.first_esi.checked_add(req.range.count) else {
+        return Err(String::from("B.U.D. 3.0 symbol request ESI range overflow"));
+    };
     let mut seen_esis = BTreeSet::new();
     for item in &range_resp.items {
         if item.symbol.segment != req.range.segment
@@ -265,10 +267,13 @@ impl request_response::Codec for Bud3SymbolsCodec {
     {
         let bytes = read_bounded_bytes(io, MAX_BUD3_SYMBOL_REQUEST_BYTES).await?;
         let req: Bud3SymbolsRequest = decode_bounded_frame(&bytes, MAX_BUD3_SYMBOL_REQUEST_BYTES)?;
-        if req.range.count == 0 || req.range.count > MAX_SYMBOLS_PER_REQUEST {
+        if req.range.count == 0
+            || req.range.count > MAX_SYMBOLS_PER_REQUEST
+            || req.range.first_esi.checked_add(req.range.count).is_none()
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "invalid B.U.D. 3.0 symbol request count",
+                "invalid B.U.D. 3.0 symbol request count or ESI range",
             ));
         }
         Ok(req)
@@ -411,7 +416,9 @@ mod tests {
         build_symbol_range_response, CUSTODY_PROTOCOL_ID, SYMBOLS_PROTOCOL_ID,
     };
 
-    fn sample_symbols() -> (Vec<Symbol>, Vec<(u32, [u8; 32])>, SymbolRoot) {
+    type SampleSymbols = (Vec<Symbol>, Vec<(u32, [u8; 32])>, SymbolRoot);
+
+    fn sample_symbols() -> SampleSymbols {
         let syms: Vec<Symbol> = (0..4u32)
             .map(|esi| Symbol {
                 segment: 0,
@@ -631,5 +638,34 @@ mod tests {
             .read_request(&cproto, &mut Cursor::new(wire))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn bud3_symbols_rejects_overflowing_esi_range() {
+        let (_, _, root) = sample_symbols();
+        let req = Bud3SymbolsRequest {
+            holder: [7; 32],
+            range: SymbolRangeRequest {
+                object: [8; 32],
+                segment: 0,
+                first_esi: u32::MAX,
+                count: 2,
+            },
+        };
+        let mut codec = Bud3SymbolsCodec;
+        let proto = StreamProtocol::new(SYMBOLS_PROTOCOL_ID);
+        let mut wire = Vec::new();
+        codec
+            .write_request(&proto, &mut wire, req.clone())
+            .await
+            .unwrap();
+        assert!(codec
+            .read_request(&proto, &mut Cursor::new(wire))
+            .await
+            .is_err());
+        let empty = Bud3SymbolsResponse::Symbols(SymbolRangeResponse { items: Vec::new() });
+        assert!(verify_bud3_symbols_response(&req, &empty, 128, &[root])
+            .unwrap_err()
+            .contains("overflow"));
     }
 }
