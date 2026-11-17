@@ -2366,43 +2366,42 @@ mod tests {
                 let admitted = before.check_tx(&tx);
                 let outcome = net.commit(vec![tx.clone()]);
                 let after = &net.ledger.state;
-                match &outcome {
-                    Ok(()) => {
-                        prop_assert_eq!(after.height, before.height + 1);
-                        prop_assert_eq!(
-                            after.next_nonce(&tx.tx.sender),
-                            before.next_nonce(&tx.tx.sender) + 1
-                        );
-                        prop_assert!(
-                            is_report || admitted.is_ok(),
-                            "a block took what the transaction check refuses: {:?}",
-                            admitted
-                        );
-                        // A record leaves the table in two ways only: the
-                        // host turned a waiting key away, or a newcomer took
-                        // the seat of a key that left and published nothing.
-                        for (key, gone) in &before.validators {
-                            if after.validators.contains_key(key) {
-                                continue;
-                            }
-                            let turned_away = gone.status == GardenValidatorStatus::Waiting
-                                && matches!(
-                                    &tx.tx.kind,
-                                    GardenTxKind::Admit { target, accept: false } if target == key
-                                );
-                            let seat_taken = gone.status == GardenValidatorStatus::Left
-                                && !before.published.contains_key(key)
-                                && before.seats() == before.genesis.limits.max_validators as usize;
-                            prop_assert!(
-                                turned_away || seat_taken,
-                                "a record was removed that still held something: {:?}",
-                                gone
-                            );
-                            prop_assert_eq!(after.next_nonce(key), before.next_nonce(key));
+                if outcome.is_ok() {
+                    prop_assert_eq!(after.height, before.height + 1);
+                    prop_assert_eq!(
+                        after.next_nonce(&tx.tx.sender),
+                        before.next_nonce(&tx.tx.sender) + 1
+                    );
+                    prop_assert!(
+                        is_report || admitted.is_ok(),
+                        "a block took what the transaction check refuses: {:?}",
+                        admitted
+                    );
+                    // A record leaves the table in two ways only: the
+                    // host turned a waiting key away, or a newcomer took
+                    // the seat of a key that left and published nothing.
+                    for (key, gone) in &before.validators {
+                        if after.validators.contains_key(key) {
+                            continue;
                         }
-                        last = Some(tx);
+                        let turned_away = gone.status == GardenValidatorStatus::Waiting
+                            && matches!(
+                                &tx.tx.kind,
+                                GardenTxKind::Admit { target, accept: false } if target == key
+                            );
+                        let seat_taken = gone.status == GardenValidatorStatus::Left
+                            && !before.published.contains_key(key)
+                            && before.seats() == before.genesis.limits.max_validators as usize;
+                        prop_assert!(
+                            turned_away || seat_taken,
+                            "a record was removed that still held something: {:?}",
+                            gone
+                        );
+                        prop_assert_eq!(after.next_nonce(key), before.next_nonce(key));
                     }
-                    Err(_) => prop_assert_eq!(after, &before, "a refusal changed the state"),
+                    last = Some(tx);
+                } else {
+                    prop_assert_eq!(after, &before, "a refusal changed the state");
                 }
                 if let Err(broken) = hold(after) {
                     return Err(TestCaseError::fail(broken));
