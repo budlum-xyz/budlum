@@ -2004,11 +2004,12 @@ impl HostApi for EvmStackHost<'_> {
             return self.root.checkpoint_begin();
         };
         let id = self.next_checkpoint_id;
-        self.next_checkpoint_id = self
+        let next_id = self
             .next_checkpoint_id
             .checked_add(1)
             .ok_or_else(|| HostError::Invalid(String::from("checkpoint id overflow")))?;
         let root_cp_id = Some(self.root.checkpoint_begin()?);
+        self.next_checkpoint_id = next_id;
         self.checkpoints.push(EvmHostCheckpoint {
             id,
             overlay_idx: self.overlays.len() - 1,
