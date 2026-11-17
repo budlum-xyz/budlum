@@ -119,15 +119,15 @@ pub fn checked_content_ref(
         content_ref.nft_id,
     )
     .map_err(BnsBud3Error::InvalidContentRef)?;
-    let obj = bud3
-        .object(&checked.object_commitment)
+    let (live_key, obj) = bud3
+        .resolve_live_object(&checked.object_commitment)
         .ok_or(BnsBud3Error::UnknownObject)?;
     if obj.record.content_id != checked.content_id {
         return Err(BnsBud3Error::ContentIdMismatch);
     }
     match checked.nft_id {
         // An NFT the reference names has to be one bound to this object.
-        Some(nft) if !obj.references.contains(&nft) => {
+        Some(nft) if !bud3.nft_matches_object(&nft, &live_key) => {
             return Err(BnsBud3Error::SealedRequiresNftGrant);
         }
         None if checked.content_id.kind == ContentIdKind::Sealed => {
@@ -571,6 +571,145 @@ mod tests {
                 },
             ),
             Err(BnsBud3Error::Gateway(ViewBud3Error::UnpaidFallbackView))
+        );
+    }
+
+    #[test]
+    fn checked_content_ref_follows_finalized_replacement_with_nft() {
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+        use crate::storage::bud3::bof1::Object;
+        use crate::storage::bud3::custody::{symbol_leaf, symbol_root};
+        use crate::storage::bud3::fountain::SegmentEncoder;
+        use crate::storage::bud3::pipeline::ObjectRecord;
+        use crate::storage::bud3::replace::sign_replace_attestation;
+        use crate::storage::bud3::segment::commit_object;
+        use crate::storage::bud3::view::MemorySymbolNetwork;
+        use std::collections::BTreeMap;
+
+        let owner = [0x61; 32];
+        let body = b"bns bound content survives finalized object replacement ".repeat(4);
+        let up = prepare_public_upload(&body, &fixtures::P, &Bud3Limits::default(), 12).unwrap();
+        let old_key = up.record.commitment;
+        let mut bud3 = Bud3Registry::default();
+        let validators = [[10u8; 32], [11u8; 32], [12u8; 32]];
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: validators[0],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[1],
+                    class: Class::Full,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[2],
+                    class: Class::Full,
+                    first_esi: 8,
+                    symbols: 4,
+                },
+            ),
+        ];
+        bud3.register_object(owner, up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        let nft = [0xB7; 32];
+        bud3.bind_nft(nft, owner, Some(owner), &old_key).unwrap();
+        for v in &validators {
+            bud3.ack(&old_key, v).unwrap();
+        }
+
+        let raw_obj = Object::raw_public(&body);
+        let raw_bytes = raw_obj.encode();
+        let new_commit = commit_object(&raw_bytes, &fixtures::P).unwrap();
+        let enc_raw = SegmentEncoder::new(0, &raw_bytes, &fixtures::P).unwrap();
+        let k_raw = enc_raw.k();
+        let mut syms_new = enc_raw.source_symbols();
+        syms_new.extend(enc_raw.repair_symbols(0, 12 - k_raw).unwrap());
+        let new_leaves: Vec<(u32, [u8; 32])> = syms_new
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let new_rec = ObjectRecord {
+            content_id: up.record.content_id,
+            object_len: u64::try_from(raw_bytes.len()).unwrap(),
+            commitment: new_commit,
+            profile: fixtures::P,
+            codec: 0,
+            symbols_per_segment: 12,
+            symbol_roots: vec![symbol_root(&new_leaves)],
+        };
+        let vkeys: BTreeMap<[u8; 32], Vec<u8>> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                (
+                    [v; 32],
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation([v; 32], &[v; 32], &old_key, &new_rec, &shares).unwrap()
+            })
+            .collect();
+        let new_key = bud3
+            .replace_object(
+                (validators[0], 10_000),
+                &old_key,
+                new_rec,
+                shares,
+                &atts,
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 2, &vkeys),
+            )
+            .unwrap();
+        for v in &validators {
+            bud3.ack(&new_key, v).unwrap();
+        }
+        assert!(bud3.object(&old_key).is_none());
+
+        let cref = ContentRef::new(up.record.content_id, old_key, Some(nft)).unwrap();
+        let validated = checked_content_ref(&bud3, cref).unwrap();
+        assert_eq!(validated.object_commitment, old_key);
+
+        let mut bns = BnsRegistry::new();
+        bns.register("replaced".to_string(), Address(owner), 1)
+            .unwrap();
+        Bud3BnsResolver::set_bud3_content(
+            &mut bns,
+            &bud3,
+            ("replaced.bud", &Address(owner)),
+            Some(validated),
+            2,
+        )
+        .unwrap();
+        let mut net = MemorySymbolNetwork::default();
+        net.store_holder_share(validators[0], new_key, 0, syms_new[0..4].to_vec());
+        net.store_holder_share(validators[1], new_key, 0, syms_new[4..8].to_vec());
+        net.store_holder_share(validators[2], new_key, 0, syms_new[8..12].to_vec());
+        assert_eq!(
+            Bud3BnsResolver::resolve_via_bud3_view(
+                &bns,
+                &bud3,
+                &net,
+                "replaced.bud",
+                3,
+                &BnsViewAccess::default(),
+            )
+            .unwrap(),
+            body
         );
     }
 }

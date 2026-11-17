@@ -458,6 +458,9 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
     if record.symbol_roots.len() as u64 != seg.count() {
         return Err(RegistryError::BadRecord("one symbol root per segment"));
     }
+    if record.symbol_roots.iter().any(|r| *r == [0u8; 32]) {
+        return Err(RegistryError::BadRecord("zero symbol root"));
+    }
     for index in 0..seg.count() {
         let k = seg
             .source_symbols(index)
@@ -615,7 +618,8 @@ impl Bud3Registry {
         if public {
             if let Some(existing) = self.public_index.get(&record.content_id.digest) {
                 if self.objects.get(existing).is_some_and(|entry| {
-                    entry.record.content_id == record.content_id
+                    entry.custody_confirmed
+                        && entry.record.content_id == record.content_id
                         && !entry.shares.is_empty()
                         && entry
                             .shares
@@ -648,9 +652,12 @@ impl Bud3Registry {
                 }
                 return Ok(Registered::Deduplicated(raw_key));
             }
-            let scoped = hash_fields_bytes(&[b"BDLM_BUD3_CLAIMANT_KEY_V1", &raw_key, &owner]);
+            let scoped = Self::claimant_scoped_key(&raw_key, &owner);
             if self.tombstones.contains_key(&scoped) {
                 return Err(RegistryError::Tombstoned);
+            }
+            if self.replacements.contains_key(&scoped) {
+                return Err(RegistryError::BadRecord("commitment was already replaced"));
             }
             if let Some(own_entry) = self.objects.get(&scoped) {
                 if own_entry.record.content_id.kind == ContentIdKind::Public {
@@ -668,6 +675,8 @@ impl Bud3Registry {
                 return Ok(Registered::Deduplicated(scoped));
             }
             scoped
+        } else if self.replacements.contains_key(&raw_key) {
+            return Err(RegistryError::BadRecord("commitment was already replaced"));
         } else {
             raw_key
         };
@@ -709,6 +718,70 @@ impl Bud3Registry {
     #[must_use]
     pub fn replacement(&self, old: &ObjectKey) -> Option<&Replacement> {
         self.replacements.get(old)
+    }
+
+    /// Deterministic owner-scoped object key used when deduplicating/isolating
+    /// a claimant registration under a contested raw commitment.
+    #[must_use]
+    pub(crate) fn claimant_scoped_key(raw_key: &ObjectKey, owner: &Address) -> ObjectKey {
+        hash_fields_bytes(&[b"BDLM_BUD3_CLAIMANT_KEY_V1", raw_key, owner])
+    }
+
+    fn pending_replacement_sources(&self, key: &ObjectKey) -> Vec<ObjectKey> {
+        let mut out = vec![*key];
+        let mut cur = *key;
+        let mut seen = BTreeSet::from([*key]);
+        for _ in 0..16 {
+            let Some((old, _)) = self
+                .replacements
+                .iter()
+                .find(|(_, r)| !r.finalized && r.new == cur)
+            else {
+                break;
+            };
+            if !seen.insert(*old) {
+                break;
+            }
+            out.push(*old);
+            cur = *old;
+        }
+        out
+    }
+
+    fn pending_replacement_leaf(&self, key: &ObjectKey) -> ObjectKey {
+        let mut cur = *key;
+        let mut seen = BTreeSet::from([*key]);
+        for _ in 0..16 {
+            let Some(rep) = self.replacements.get(&cur) else {
+                break;
+            };
+            if rep.finalized || !seen.insert(rep.new) {
+                break;
+            }
+            cur = rep.new;
+        }
+        cur
+    }
+
+    /// Return an unfinalized predecessor object whose shares remain confirmed
+    /// while `key` is awaiting custody confirmation.
+    #[must_use]
+    pub(crate) fn pending_confirmed_fallback(&self, key: &ObjectKey) -> Option<ObjectKey> {
+        if self
+            .objects
+            .get(key)
+            .is_none_or(|entry| entry.custody_confirmed)
+        {
+            return None;
+        }
+        self.replacements
+            .iter()
+            .find(|(old, r)| {
+                !r.finalized
+                    && r.new == *key
+                    && self.objects.get(*old).is_some_and(|o| o.custody_confirmed)
+            })
+            .map(|(old, _)| *old)
     }
 
     /// Resolve `key` to its live [`ObjectEntry`], following finalized Section 6.14
@@ -1040,7 +1113,10 @@ impl Bud3Registry {
             .get(&key)
             .ok_or(RegistryError::UnknownObject)?
             .owner;
-        let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
+        let has_deps = self
+            .pending_replacement_sources(&key)
+            .into_iter()
+            .any(|k| self.base_deps.get(&k).is_some_and(|d| !d.is_empty()));
         let nft_count = self.objects.get(&key).map_or(0, |o| o.references.len());
         if nft_count <= 1 && has_deps {
             return Err(RegistryError::HasDependents);
@@ -1093,24 +1169,38 @@ impl Bud3Registry {
             return Err(RegistryError::UnknownObject);
         }
         if from != to && obj.owner == *from {
+            let lineage = self.pending_replacement_sources(&key);
             for (base, deps) in &self.base_deps {
-                if deps.contains(&key)
-                    && self
+                if lineage.iter().any(|k| deps.contains(k)) {
+                    let base_live = self.pending_replacement_leaf(base);
+                    let conflict = self
                         .objects
                         .get(base)
                         .is_some_and(|base_obj| base_obj.owner != *to)
-                {
-                    return Err(RegistryError::CrossOwnerDependency);
+                        || self
+                            .objects
+                            .get(&base_live)
+                            .is_some_and(|base_obj| base_obj.owner != *to);
+                    if conflict {
+                        return Err(RegistryError::CrossOwnerDependency);
+                    }
                 }
             }
-            if let Some(deps) = self.base_deps.get(&key) {
-                for dep in deps {
-                    if self
-                        .objects
-                        .get(dep)
-                        .is_some_and(|dep_obj| dep_obj.owner != *to)
-                    {
-                        return Err(RegistryError::CrossOwnerDependency);
+            for base_k in &lineage {
+                if let Some(deps) = self.base_deps.get(base_k) {
+                    for dep in deps {
+                        let dep_live = self.pending_replacement_leaf(dep);
+                        let conflict = self
+                            .objects
+                            .get(dep)
+                            .is_some_and(|dep_obj| dep_obj.owner != *to)
+                            || self
+                                .objects
+                                .get(&dep_live)
+                                .is_some_and(|dep_obj| dep_obj.owner != *to);
+                        if conflict {
+                            return Err(RegistryError::CrossOwnerDependency);
+                        }
                     }
                 }
             }
@@ -1176,7 +1266,10 @@ impl Bud3Registry {
             return Err(RegistryError::NotAuthorized);
         }
         let obj = self.objects.get(&key).ok_or(RegistryError::UnknownObject)?;
-        let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
+        let has_deps = self
+            .pending_replacement_sources(&key)
+            .into_iter()
+            .any(|k| self.base_deps.get(&k).is_some_and(|d| !d.is_empty()));
         if obj.references.len() <= 1 && has_deps {
             return Err(RegistryError::HasDependents);
         }
@@ -1249,19 +1342,33 @@ impl Bud3Registry {
 
     /// Convenience: detach `dependent` from `base` after standalone rehydration.
     pub fn detach_dependency(&mut self, dependent: &ObjectKey, base: &ObjectKey, epoch: u64) {
-        let mut remove_entry = false;
-        if let Some(set) = self.base_deps.get_mut(base) {
-            set.remove(dependent);
-            remove_entry = set.is_empty();
-        }
-        if remove_entry {
-            self.base_deps.remove(base);
-            if self
-                .objects
-                .get(base)
-                .is_some_and(|o| o.references.is_empty())
-            {
-                self.delete(base, epoch);
+        let dep_keys = self.pending_replacement_sources(dependent);
+        let base_keys = self.pending_replacement_sources(base);
+        for base_k in base_keys {
+            let mut remove_entry = false;
+            if let Some(set) = self.base_deps.get_mut(&base_k) {
+                for dep_k in &dep_keys {
+                    set.remove(dep_k);
+                }
+                remove_entry = set.is_empty();
+            }
+            if remove_entry {
+                self.base_deps.remove(&base_k);
+                let live_k = self.pending_replacement_leaf(&base_k);
+                let has_refs = self
+                    .objects
+                    .get(&base_k)
+                    .is_some_and(|o| !o.references.is_empty())
+                    || self
+                        .objects
+                        .get(&live_k)
+                        .is_some_and(|o| !o.references.is_empty());
+                if !has_refs
+                    && self.objects.contains_key(&base_k)
+                    && self.replacements.get(&base_k).is_none_or(|r| r.finalized)
+                {
+                    self.delete(&base_k, epoch);
+                }
             }
         }
     }
@@ -2622,6 +2729,7 @@ impl Bud3Registry {
                             "count": r.count,
                         })).collect::<Vec<_>>(),
                         "references": o.references.len(),
+                        "custody_confirmed": o.custody_confirmed,
                         "expires_at_epoch": o.expires_at,
                         "repairs_due": self.repairs_due(key),
                         "endowment": {
@@ -2636,6 +2744,9 @@ impl Bud3Registry {
                             .replacement(key)
                             .filter(|r| !r.finalized)
                             .map(|r| hex::encode(r.new)),
+                        "pending_fallback_commitment": self
+                            .pending_confirmed_fallback(key)
+                            .map(hex::encode),
                     })
                 } else if let Some(r) = self.replacements.get(key) {
                     serde_json::json!({
@@ -4603,5 +4714,279 @@ mod tests {
         assert!(r.resolve_live_object(&k1).is_none());
         assert!(r.replacement(&k1).is_none());
         assert!(r.replacement(&k2).is_none());
+    }
+
+    #[test]
+    fn pending_replacement_enforces_base_dependencies_across_burn_transfer_and_detach() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(1);
+        let outsider = addr(99);
+        let (base_up, base_shares) = upload(b"pending replacement base dependency object");
+        let base_old = base_up.record.commitment;
+        r.register_object(owner, base_up.record.clone(), base_shares.clone(), 0, 50)
+            .unwrap();
+        let base_nft = [0xD1; 32];
+        r.bind_nft(base_nft, owner, Some(owner), &base_old).unwrap();
+        for (_, sh) in &base_shares {
+            r.ack(&base_old, &sh.validator).unwrap();
+        }
+
+        let (dep_up, dep_shares) = upload(b"dependent child object referencing base");
+        let dep_key = dep_up.record.commitment;
+        r.register_object(owner, dep_up.record, dep_shares.clone(), 0, 50)
+            .unwrap();
+        r.register_dependency(dep_key, base_old).unwrap();
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut base_new_rec = base_up.record;
+        base_new_rec.codec = if base_new_rec.codec == 0 { 1 } else { 0 };
+        base_new_rec.object_len = base_new_rec.object_len.saturating_add(2);
+        base_new_rec.commitment = [0xD2; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &base_old, &base_new_rec, &base_shares)
+                    .unwrap()
+            })
+            .collect();
+        let base_new = r
+            .replace_object(
+                (addr(10), 10_000),
+                &base_old,
+                base_new_rec,
+                base_shares.clone(),
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+
+        // While replacement is pending, `base_nft` already points at `base_new`
+        // while `base_deps` still keys off `base_old`: burn, release, cross-owner
+        // transfer, and pending-old deletion via detach must all uphold dependency safety.
+        assert_eq!(
+            r.can_release_verified_nft_reference(&base_nft, &owner),
+            Err(RegistryError::HasDependents)
+        );
+        assert_eq!(
+            r.burn_reference(&base_nft, &owner, 2),
+            Err(RegistryError::HasDependents)
+        );
+        assert_eq!(
+            r.can_transfer_nft_reference(&base_nft, &owner, &outsider),
+            Err(RegistryError::CrossOwnerDependency)
+        );
+        r.detach_dependency(&dep_key, &base_old, 2);
+        assert!(
+            r.object(&base_old).is_some(),
+            "pending predecessor must remain intact until new custody confirms"
+        );
+        assert!(r.resolve_live_object(&base_new).is_some());
+
+        for (_, sh) in &base_shares {
+            r.ack(&base_new, &sh.validator).unwrap();
+        }
+        assert!(r.burn_reference(&base_nft, &owner, 3).unwrap());
+    }
+
+    #[test]
+    fn pending_replacement_dependent_blocks_cross_owner_transfer() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(2);
+        let outsider = addr(88);
+        let (base_up, base_shares) = upload(b"immutable base object owned by alice");
+        let base_key = base_up.record.commitment;
+        r.register_object(owner, base_up.record, base_shares.clone(), 0, 50)
+            .unwrap();
+        for (_, sh) in &base_shares {
+            r.ack(&base_key, &sh.validator).unwrap();
+        }
+
+        let (dep_up, dep_shares) = upload(b"dependent object slated for replacement");
+        let dep_old = dep_up.record.commitment;
+        r.register_object(owner, dep_up.record.clone(), dep_shares.clone(), 0, 50)
+            .unwrap();
+        let dep_nft = [0xD3; 32];
+        r.bind_nft(dep_nft, owner, Some(owner), &dep_old).unwrap();
+        for (_, sh) in &dep_shares {
+            r.ack(&dep_old, &sh.validator).unwrap();
+        }
+        r.register_dependency(dep_old, base_key).unwrap();
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut dep_new_rec = dep_up.record;
+        dep_new_rec.codec = if dep_new_rec.codec == 0 { 1 } else { 0 };
+        dep_new_rec.object_len = dep_new_rec.object_len.saturating_add(3);
+        dep_new_rec.commitment = [0xD4; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &dep_old, &dep_new_rec, &dep_shares)
+                    .unwrap()
+            })
+            .collect();
+        let _dep_new = r
+            .replace_object(
+                (addr(10), 10_000),
+                &dep_old,
+                dep_new_rec,
+                dep_shares,
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            r.can_transfer_nft_reference(&dep_nft, &owner, &outsider),
+            Err(RegistryError::CrossOwnerDependency)
+        );
+    }
+
+    #[test]
+    fn finalized_replacement_rejects_reregistration_under_superseded_commitment() {
+        use super::super::keys::derive_object_content_key;
+        use super::super::pipeline::prepare_sealed_upload;
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(3);
+        let ck = derive_object_content_key(&[0x55; 32], 1);
+        let up = prepare_sealed_upload(
+            b"sealed object replaced and finalized",
+            &ck,
+            [0x19; 24],
+            &P,
+            &Bud3Limits::default(),
+            20,
+        )
+        .unwrap();
+        let old_key = up.record.commitment;
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: addr(10),
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(11),
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(12),
+                    class: Class::Full,
+                    first_esi: 12,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(13),
+                    class: Class::Mobile,
+                    first_esi: 16,
+                    symbols: 4,
+                },
+            ),
+        ];
+        r.register_object(owner, up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        for (_, sh) in &shares {
+            r.ack(&old_key, &sh.validator).unwrap();
+        }
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut new_rec = up.record.clone();
+        new_rec.codec = if new_rec.codec == 0 { 1 } else { 0 };
+        new_rec.object_len = new_rec.object_len.saturating_add(4);
+        new_rec.commitment = [0xD5; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &old_key, &new_rec, &shares).unwrap()
+            })
+            .collect();
+        let new_key = r
+            .replace_object(
+                (addr(10), 10_000),
+                &old_key,
+                new_rec,
+                shares.clone(),
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for (_, sh) in &shares {
+            r.ack(&new_key, &sh.validator).unwrap();
+        }
+        assert!(r.object(&old_key).is_none());
+        assert_eq!(
+            r.resolve_live_object(&old_key).map(|(k, _)| k),
+            Some(new_key)
+        );
+
+        assert_eq!(
+            r.register_object(addr(77), up.record, shares, 2, 50),
+            Err(RegistryError::BadRecord("commitment was already replaced"))
+        );
+        assert_eq!(
+            r.resolve_live_object(&old_key).map(|(k, _)| k),
+            Some(new_key)
+        );
     }
 }

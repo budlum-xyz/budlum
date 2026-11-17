@@ -2335,6 +2335,55 @@ fn parse_hex32_field(hex_str: &str, field_name: &str) -> Result<[u8; 32], ErrorO
     Ok(arr)
 }
 
+fn parse_opt_hex32(hex_str: &str) -> Option<[u8; 32]> {
+    let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    let bytes = hex::decode(clean).ok()?;
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    Some(arr)
+}
+
+fn parse_placement_roots(
+    val: &serde_json::Value,
+) -> Vec<crate::storage::bud3::registry::SymbolRoot> {
+    let Some(items) = val["symbol_roots"].as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|r| {
+            Some(crate::storage::bud3::registry::SymbolRoot {
+                segment: r["segment"].as_u64()?,
+                root: parse_opt_hex32(r["root"].as_str()?)?,
+                first_esi: u32::try_from(r["first_esi"].as_u64()?).ok()?,
+                count: u32::try_from(r["count"].as_u64()?).ok()?,
+            })
+        })
+        .collect()
+}
+
+fn parse_placement_shares(val: &serde_json::Value) -> Vec<(u64, u8, u32, u32, [u8; 32])> {
+    let Some(items) = val["shares"].as_array() else {
+        return Vec::new();
+    };
+    let mut shares: Vec<(u64, u8, u32, u32, [u8; 32])> = items
+        .iter()
+        .filter(|s| !s["lost"].as_bool().unwrap_or(false))
+        .filter_map(|s| {
+            let segment = s["segment"].as_u64()?;
+            let rank = match s["class"].as_str()? {
+                "Full" => 0u8,
+                _ => 1u8,
+            };
+            let first_esi = u32::try_from(s["first_esi"].as_u64()?).ok()?;
+            let symbols = u32::try_from(s["symbols"].as_u64()?).ok()?;
+            let holder = parse_opt_hex32(s["validator"].as_str()?)?;
+            Some((segment, rank, first_esi, symbols, holder))
+        })
+        .collect();
+    shares.sort_unstable();
+    shares
+}
+
 /// Parses a signed grant authorisation: `{"ownerPublicKey": "0x…", "signature":
 /// "0x…"}`, the public key being the FIPS 204 ML-DSA-87 key of the account whose
 /// word the mutation is. The address the key derives to is the only identity the
@@ -2556,6 +2605,138 @@ fn view_grant_json(g: &crate::storage::ViewGrant) -> serde_json::Value {
 /// reporting to a sink only one of them has.
 fn fire_three_event(sink: &mut dyn ThreeEventHook, event: ThreeHookEvent) {
     emit_hook(sink, event);
+}
+
+impl RpcServer {
+    async fn hydrate_bud3_target_from_peers(&self, target_key: [u8; 32]) {
+        let Ok(placement) = self
+            .chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Placement(
+                target_key,
+            ))
+            .await
+        else {
+            return;
+        };
+        if placement["status"].as_str() != Some("live") {
+            return;
+        }
+        let Some(symbol_size) = placement["symbol_size"]
+            .as_u64()
+            .and_then(|v| u16::try_from(v).ok())
+        else {
+            return;
+        };
+        let all_roots = parse_placement_roots(&placement);
+        let shares = parse_placement_shares(&placement);
+        for (seg, _, first_esi, symbols, holder) in shares {
+            let Ok(Some(peer_bytes)) = self.chain.validator_peer_id(holder).await else {
+                continue;
+            };
+            let Ok(peer_id) = crate::network::bud3_protocol::ed25519_key_to_peer_id(&peer_bytes)
+            else {
+                continue;
+            };
+            if peer_id == self.node.peer_id {
+                continue;
+            }
+            let seg_roots: Vec<crate::storage::bud3::registry::SymbolRoot> = all_roots
+                .iter()
+                .filter(|r| r.segment == seg)
+                .copied()
+                .collect();
+            let mut cursor = first_esi;
+            let mut remaining = symbols;
+            while remaining > 0 {
+                let chunk =
+                    remaining.min(crate::storage::bud3::symbol_protocol::MAX_SYMBOLS_PER_REQUEST);
+                let local_complete = matches!(
+                    self.chain
+                        .bud3_get_symbols(holder, target_key, seg, cursor, chunk)
+                        .await,
+                    Ok(Ok(page)) if u32::try_from(page.items.len()).ok() == Some(chunk)
+                );
+                if !local_complete {
+                    if let Ok(items) = self
+                        .node
+                        .bud3_fetch_symbols(
+                            peer_id,
+                            crate::network::bud3_protocol::Bud3SymbolsRequest {
+                                holder,
+                                range: crate::storage::bud3::symbol_protocol::SymbolRangeRequest {
+                                    object: target_key,
+                                    segment: seg,
+                                    first_esi: cursor,
+                                    count: chunk,
+                                },
+                            },
+                            symbol_size,
+                            seg_roots.clone(),
+                        )
+                        .await
+                    {
+                        if !items.is_empty() {
+                            let _ = self
+                                .chain
+                                .bud3_store_verified_symbols(holder, target_key, seg, items)
+                                .await;
+                        }
+                    }
+                }
+                remaining -= chunk;
+                let Some(next) = cursor.checked_add(chunk) else {
+                    break;
+                };
+                cursor = next;
+            }
+        }
+    }
+
+    async fn hydrate_bud3_object_from_peers(&self, object: [u8; 32]) {
+        let mut cur = object;
+        let mut seen = std::collections::BTreeSet::from([cur]);
+        let mut live_info = serde_json::Value::Null;
+        for _ in 0..16 {
+            let Ok(info) = self
+                .chain
+                .bud3(crate::storage::bud3::registry::Bud3Query::Object(cur))
+                .await
+            else {
+                return;
+            };
+            if info["status"].as_str() == Some("replaced") {
+                let Some(next_key) = info["replaced_by"].as_str().and_then(parse_opt_hex32) else {
+                    break;
+                };
+                if !seen.insert(next_key) {
+                    break;
+                }
+                cur = next_key;
+                continue;
+            }
+            live_info = info;
+            break;
+        }
+        let mut targets = vec![cur];
+        if let Some(pending_next) = live_info["replaced_by"].as_str().and_then(parse_opt_hex32) {
+            if !targets.contains(&pending_next) {
+                targets.push(pending_next);
+            }
+        }
+        if live_info["custody_confirmed"].as_bool() == Some(false) {
+            if let Some(fb) = live_info["pending_fallback_commitment"]
+                .as_str()
+                .and_then(parse_opt_hex32)
+            {
+                if !targets.contains(&fb) {
+                    targets.push(fb);
+                }
+            }
+        }
+        for target_key in targets {
+            self.hydrate_bud3_target_from_peers(target_key).await;
+        }
+    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -5003,7 +5184,19 @@ impl BudlumApiServer for RpcServer {
         // The chain actor reads the record and runs it through the
         // B.U.D. 3.0 view. `bytes` is null when this node cannot rebuild the
         // object from the symbols it can reach; `view_error` says why.
-        Ok(match self.chain.bns_resolve_content(name.clone()).await {
+        let mut content_view = self.chain.bns_resolve_content(name.clone()).await;
+        if !needs_grant {
+            if let Some((ref content, Err(_))) = content_view {
+                if content.content_id.kind
+                    == crate::storage::bud3::content_id::ContentIdKind::Public
+                {
+                    self.hydrate_bud3_object_from_peers(content.object_commitment)
+                        .await;
+                    content_view = self.chain.bns_resolve_content(name.clone()).await;
+                }
+            }
+        }
+        Ok(match content_view {
             None => serde_json::Value::Null,
             Some((content, viewed)) => {
                 let (bytes, view_error) = match viewed {
@@ -8827,39 +9020,51 @@ impl BudlumApiServer for RpcServer {
             receipt_id,
             fee_paid_atoms,
         };
-        let bytes = self
+        let mut decode_res = self
             .chain
             .bud3_get_content(receipt)
             .await
-            .map_err(|_| bud3_actor_unavailable())?
-            .map_err(|e| match e {
-                crate::storage::bud3::view::ViewBud3Error::SealedFallbackForbidden => {
-                    ErrorObjectOwned::owned(
-                        -32602,
-                        "G8 paid fallback decode is forbidden for sealed objects",
-                        None::<()>,
-                    )
-                }
-                crate::storage::bud3::view::ViewBud3Error::UnpaidFallbackView => {
-                    ErrorObjectOwned::owned(
-                        -32602,
-                        "paid view receipt missing, expired, or insufficient",
-                        None::<()>,
-                    )
-                }
-                crate::storage::bud3::view::ViewBud3Error::UnknownObject => {
-                    ErrorObjectOwned::owned(
-                        -32602,
-                        "unknown or tombstoned B.U.D. 3.0 object",
-                        None::<()>,
-                    )
-                }
-                other => ErrorObjectOwned::owned(
-                    -32000,
-                    format!("B.U.D. 3.0 fallback decode failed: {other:?}"),
+            .map_err(|_| bud3_actor_unavailable())?;
+        if matches!(
+            decode_res,
+            Err(crate::storage::bud3::view::ViewBud3Error::InsufficientNetworkSymbols(_))
+                | Err(crate::storage::bud3::view::ViewBud3Error::Pipeline(
+                    crate::storage::bud3::pipeline::PipelineError::SegmentMissing(_)
+                ))
+        ) {
+            self.hydrate_bud3_object_from_peers(object).await;
+            decode_res = self
+                .chain
+                .bud3_get_content(receipt)
+                .await
+                .map_err(|_| bud3_actor_unavailable())?;
+        }
+        let bytes = decode_res.map_err(|e| match e {
+            crate::storage::bud3::view::ViewBud3Error::SealedFallbackForbidden => {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    "G8 paid fallback decode is forbidden for sealed objects",
                     None::<()>,
-                ),
-            })?;
+                )
+            }
+            crate::storage::bud3::view::ViewBud3Error::UnpaidFallbackView => {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    "paid view receipt missing, expired, or insufficient",
+                    None::<()>,
+                )
+            }
+            crate::storage::bud3::view::ViewBud3Error::UnknownObject => ErrorObjectOwned::owned(
+                -32602,
+                "unknown or tombstoned B.U.D. 3.0 object",
+                None::<()>,
+            ),
+            other => ErrorObjectOwned::owned(
+                -32000,
+                format!("B.U.D. 3.0 fallback decode failed: {other:?}"),
+                None::<()>,
+            ),
+        })?;
         reservation.commit()?;
         Ok(serde_json::json!({
             "object": hex::encode(object),
