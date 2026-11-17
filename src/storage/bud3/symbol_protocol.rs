@@ -11,10 +11,12 @@
 //! * Mobile validators serve symbols only on unmetered networks (Wi-Fi) by
 //!   default; operators may opt into a bounded daily cellular byte ceiling.
 
-use super::custody::{prove, sub_block_count, CustodyProof, ProofContext};
+use super::custody::{
+    prove, sub_block_count, symbol_leaf, verify_symbol_root_path, CustodyProof, ProofContext,
+};
 use super::fountain::Symbol;
 use super::registry::ObjectKey;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// libp2p protocol identifier for client symbol reads (Section 6.11.3).
 pub const SYMBOLS_PROTOCOL_ID: &str = "/budlum/bud3/symbols/1";
@@ -219,9 +221,16 @@ pub fn build_symbol_range_response(
 
 /// Verify every item in `resp` against the segment's on-chain `symbol_root`.
 ///
+/// Authenticates the full symbol payload (`symbol_leaf(&item.symbol.data)` via
+/// `verify_symbol_root_path`), exact `symbol_size` byte length, matching
+/// `(segment, esi)` metadata, bounded item count, duplicate-ESI rejection, and
+/// sub-block-0 custody proof consistency.
+///
 /// # Errors
 ///
-/// [`SymbolProtocolError::BadMerkleProof`] if any item fails sub-block 0 or root verification.
+/// [`SymbolProtocolError::InvalidSymbolCount`] if `resp.items` exceeds `MAX_SYMBOLS_PER_REQUEST`,
+/// or [`SymbolProtocolError::BadMerkleProof`] if any item fails size, metadata,
+/// sub-block 0, or full-symbol Merkle root verification.
 pub fn verify_symbol_range_response(
     segment: u64,
     symbol_root: [u8; 32],
@@ -229,12 +238,27 @@ pub fn verify_symbol_range_response(
     symbol_size: u16,
     resp: &SymbolRangeResponse,
 ) -> Result<(), SymbolProtocolError> {
+    if symbol_size == 0 {
+        return Err(SymbolProtocolError::BadMerkleProof);
+    }
+    if usize::try_from(MAX_SYMBOLS_PER_REQUEST).is_ok_and(|max| resp.items.len() > max) {
+        return Err(SymbolProtocolError::InvalidSymbolCount);
+    }
+    let expected_len = usize::from(symbol_size);
     let ctx = ProofContext {
         symbol_root,
         symbol_count,
-        sub_blocks: sub_block_count(usize::from(symbol_size)),
+        sub_blocks: sub_block_count(expected_len),
     };
+    let mut seen_esis = BTreeSet::new();
     for item in &resp.items {
+        if item.symbol.segment != segment
+            || item.symbol.esi != item.proof.esi
+            || item.symbol.data.len() != expected_len
+            || !seen_esis.insert(item.symbol.esi)
+        {
+            return Err(SymbolProtocolError::BadMerkleProof);
+        }
         let audit = super::custody::Audit {
             segment,
             position: item.proof.position,
@@ -243,7 +267,7 @@ pub fn verify_symbol_range_response(
         item.proof
             .verify(&audit, &ctx)
             .map_err(|_| SymbolProtocolError::BadMerkleProof)?;
-        let prefix_len = item.symbol.data.len().min(super::custody::SUB_BLOCK);
+        let prefix_len = expected_len.min(super::custody::SUB_BLOCK);
         let Some(sym_prefix) = item.symbol.data.get(..prefix_len) else {
             return Err(SymbolProtocolError::BadMerkleProof);
         };
@@ -251,6 +275,16 @@ pub fn verify_symbol_range_response(
             return Err(SymbolProtocolError::BadMerkleProof);
         };
         if sym_prefix != proof_prefix {
+            return Err(SymbolProtocolError::BadMerkleProof);
+        }
+        if !verify_symbol_root_path(
+            symbol_root,
+            symbol_count,
+            item.proof.position,
+            item.proof.esi,
+            symbol_leaf(&item.symbol.data),
+            &item.proof.root_path,
+        ) {
             return Err(SymbolProtocolError::BadMerkleProof);
         }
     }
@@ -321,5 +355,91 @@ mod tests {
         policy.daily_cellular_cap_bytes = 4_096;
         assert!(policy.admit_serve(LinkMetering::MeteredCellular, 2_048));
         assert!(!policy.admit_serve(LinkMetering::MeteredCellular, 3_000));
+    }
+
+    #[test]
+    fn verify_symbol_range_response_rejects_tampered_trailing_bytes_truncated_and_wrong_metadata() {
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let enc = SegmentEncoder::new(0, &[0x42; 512], &profile).unwrap();
+        let syms = enc.source_symbols();
+        let leaves: Vec<(u32, [u8; 32])> =
+            syms.iter().map(|s| (s.esi, symbol_leaf(&s.data))).collect();
+        let root = symbol_root(&leaves);
+        let req = SymbolRangeRequest {
+            object: [1; 32],
+            segment: 0,
+            first_esi: 0,
+            count: 4,
+        };
+        let valid_resp = build_symbol_range_response(&req, &leaves, &syms).unwrap();
+
+        // Tampering bytes beyond the 64-byte sub-block 0 prefix must be rejected.
+        let mut tampered_tail = valid_resp.clone();
+        tampered_tail.items[0].symbol.data[64] ^= 0xFF;
+        assert_eq!(
+            verify_symbol_range_response(
+                0,
+                root,
+                syms.len() as u64,
+                profile.symbol_size,
+                &tampered_tail
+            ),
+            Err(SymbolProtocolError::BadMerkleProof)
+        );
+
+        // Truncated or empty symbol payloads cannot bypass the prefix check.
+        let mut empty_data = valid_resp.clone();
+        empty_data.items[0].symbol.data.clear();
+        assert_eq!(
+            verify_symbol_range_response(
+                0,
+                root,
+                syms.len() as u64,
+                profile.symbol_size,
+                &empty_data
+            ),
+            Err(SymbolProtocolError::BadMerkleProof)
+        );
+
+        // Spoofed symbol.segment or symbol.esi with a valid proof must be refused.
+        let mut wrong_seg = valid_resp.clone();
+        wrong_seg.items[0].symbol.segment = 7;
+        assert_eq!(
+            verify_symbol_range_response(
+                0,
+                root,
+                syms.len() as u64,
+                profile.symbol_size,
+                &wrong_seg
+            ),
+            Err(SymbolProtocolError::BadMerkleProof)
+        );
+        let mut wrong_esi = valid_resp.clone();
+        wrong_esi.items[0].symbol.esi = 99;
+        assert_eq!(
+            verify_symbol_range_response(
+                0,
+                root,
+                syms.len() as u64,
+                profile.symbol_size,
+                &wrong_esi
+            ),
+            Err(SymbolProtocolError::BadMerkleProof)
+        );
+
+        // Duplicate ESIs inside one response must be refused.
+        let mut dup_esi = valid_resp;
+        let first_item = dup_esi.items[0].clone();
+        dup_esi.items.push(first_item);
+        assert_eq!(
+            verify_symbol_range_response(0, root, syms.len() as u64, profile.symbol_size, &dup_esi),
+            Err(SymbolProtocolError::BadMerkleProof)
+        );
     }
 }
