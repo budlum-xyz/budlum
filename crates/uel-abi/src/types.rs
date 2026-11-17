@@ -443,4 +443,18 @@ mod tests {
         }
         assert!(!pointer_target_enabled_by_default(99_999, EeId::EVM));
     }
+
+    #[test]
+    fn expansion_coordinator_is_closed_on_testnet() {
+        assert!(!expansion_environment_enabled_by_default(
+            BUDLUM_MAINNET_CHAIN_ID
+        ));
+        assert!(!expansion_environment_enabled_by_default(
+            BUDLUM_TESTNET_CHAIN_ID
+        ));
+        assert!(expansion_environment_enabled_by_default(
+            BUDLUM_DEVNET_CHAIN_ID
+        ));
+        assert!(!expansion_environment_enabled_by_default(99_999));
+    }
 }
