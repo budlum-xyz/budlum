@@ -876,7 +876,7 @@ impl Executor {
                 };
                 if let Some(validator) = state.get_validator_mut(&tx.from) {
                     validator.stake = new_stake;
-                    if validator.stake < full_floor {
+                    if validator.stake == 0 || validator.stake < unstake_floor {
                         validator.active = false;
                     }
                 }
@@ -6620,5 +6620,53 @@ mod tests {
             Some(floor - 1),
             "permissionless registry keeps the remaining slashable stake synced"
         );
+    }
+
+    #[test]
+    fn unstake_keeps_active_state_aligned_with_class_unstake_floor() {
+        let mut state = AccountState::new();
+        let network = crate::core::chain_config::Network::Testnet;
+        let chain_id = network.chain_id().value();
+        let net_floor = network.min_stake();
+        let gov_floor = net_floor + 500;
+        let mut params = state.registry.params().clone();
+        params.min_stake = gov_floor;
+        state.registry.set_params(params);
+
+        let full_seat = Address::from([0x78u8; 32]);
+        let non_full = Address::from([0x79u8; 32]);
+        state.add_balance(&full_seat, 1_000);
+        state.add_balance(&non_full, 1_000);
+        state.add_validator_with_floor(full_seat, gov_floor + 10, net_floor);
+        state.add_validator_with_floor(non_full, gov_floor + 10, net_floor);
+        if let Some(entry) = state.get_validator_mut(&full_seat) {
+            entry.filiz = Some(crate::consensus::filiz::FilizRegistration::default());
+            entry.active = true;
+        }
+        if let Some(entry) = state.get_validator_mut(&non_full) {
+            entry.active = true;
+        }
+
+        for addr in [full_seat, non_full] {
+            let unstake = Transaction::new_with_chain_id(
+                addr,
+                Address::zero(),
+                100,
+                10,
+                0,
+                Vec::new(),
+                chain_id,
+                TransactionType::Unstake,
+            );
+            Executor::apply_transaction_checked(&mut state, &unstake).expect("unstake succeeds");
+        }
+
+        // Full-seat validator uses full_floor (gov_floor), so dropping below gov_floor deactivates.
+        assert!(!state.get_validator(&full_seat).unwrap().active);
+        // Non-full validator uses network.min_stake() (net_floor) matching sync_validator_registration_with_floor.
+        assert!(state.get_validator(&non_full).unwrap().active);
+        assert!(state
+            .registry
+            .is_active(&non_full, crate::registry::roles::VALIDATOR));
     }
 }

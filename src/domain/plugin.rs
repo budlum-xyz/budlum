@@ -252,7 +252,7 @@ pub fn default_domain(
     // Pow_parameters (registry rejects "pow_parameters for incompatible
     // adapter"). The Bitcoin SPV adapter needs its own defaults: its
     // difficulty bounds count the leading zero bits of `SHA256d` under the
-    // compact target (mainnet-style windows start at32, regtest-style at1),
+    // compact target (mainnet-style windows start at 32, regtest-style at 1),
     // and its chainwork floor is Bitcoin work, not a leading-zero proxy.
     let adapter_str: String = finality_adapter.into();
     let pow_parameters = if adapter_str == crate::domain::types::POW_HEADER_CHAIN_ADAPTER {

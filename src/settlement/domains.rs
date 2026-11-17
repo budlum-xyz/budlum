@@ -929,6 +929,28 @@ impl CommitmentAttestation {
             },
         }
     }
+
+    /// What the finality adapter configured for `domain` actually attests.
+    ///
+    /// A `bitcoin-spv-v1` header commits only to its `prev_hash` (`parent`) and
+    /// `merkle_root` (`tx_root`); it has no state root or event root, so settlement
+    /// advances the domain's tip and tx-root window without demanding a non-zero
+    /// `state_root` or treating an `event_root` as proven.
+    #[must_use]
+    pub fn for_domain(domain: &ConsensusDomain) -> Self {
+        if domain.kind == ConsensusKind::PoW
+            && domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER
+        {
+            Self {
+                state_root: false,
+                tx_root: true,
+                event_root: false,
+                parent: true,
+            }
+        } else {
+            Self::for_kind(&domain.kind)
+        }
+    }
 }
 
 /// Freeze a domain for contradicting its committed history. A pending
@@ -1027,7 +1049,7 @@ pub fn accept_commitment(
         // next height with any parent it likes; storing that commitment would
         // make the honest one a same-height conflict and freeze the domain.
         // Refused before the store is touched.
-        if !CommitmentAttestation::for_kind(&commitment.consensus_kind).parent
+        if !CommitmentAttestation::for_domain(&domain).parent
             && domain.last_committed_hash != [0u8; 32]
             && commitment.parent_domain_block_hash != domain.last_committed_hash
         {
@@ -1056,13 +1078,17 @@ fn apply_pending_commitments(
 ) -> Result<CommitmentOutcome, String> {
     let mut advanced = false;
     loop {
-        let (last_height, last_hash) = {
+        let (last_height, last_hash, attest_parent) = {
             let domain = state
                 .settlement
                 .domains
                 .get(domain_id)
                 .ok_or_else(|| format!("Domain {domain_id} not found"))?;
-            (domain.last_committed_height, domain.last_committed_hash)
+            (
+                domain.last_committed_height,
+                domain.last_committed_hash,
+                CommitmentAttestation::for_domain(domain).parent,
+            )
         };
         let next_height = last_height.saturating_add(1);
         let Some(com) = state
@@ -1077,7 +1103,7 @@ fn apply_pending_commitments(
                 .settlement
                 .commitments
                 .remove(domain_id, next_height, com.sequence);
-            if CommitmentAttestation::for_kind(&com.consensus_kind).parent {
+            if attest_parent {
                 return Ok(freeze_domain(
                     state,
                     domain_id,
@@ -1175,16 +1201,21 @@ pub fn accept_verified_commitment(
     let domain_id = commitment.domain_id;
     let domain_height = commitment.domain_height;
     let state_root = commitment.state_root;
-    if !CommitmentAttestation::for_kind(&commitment.consensus_kind).state_root {
-        let outcome = accept_commitment(state, commitment)?;
-        return Ok(outcome);
-    }
-    let height_before = state
+    let (height_before, attests_state_root) = state
         .settlement
         .domains
         .get(domain_id)
-        .map(|domain| domain.last_committed_height)
+        .map(|domain| {
+            (
+                domain.last_committed_height,
+                CommitmentAttestation::for_domain(domain).state_root,
+            )
+        })
         .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+    if !attests_state_root {
+        let outcome = accept_commitment(state, commitment)?;
+        return Ok(outcome);
+    }
     // A zero state root anchors nothing; refused before anything
     // moves (fail-closed).
     if state_root == [0u8; 32] {
@@ -1772,7 +1803,7 @@ fn execute_object_layer_tx(
                     && commitment.validator_set_hash != domain.validator_set_hash)
                 || commitment.domain_block_hash != proof.home_block_hash
                 || commitment.event_root == [0u8; 32]
-                || !CommitmentAttestation::for_kind(&commitment.consensus_kind).event_root
+                || !CommitmentAttestation::for_domain(domain).event_root
             {
                 return false;
             }
@@ -1866,7 +1897,7 @@ fn execute_object_layer_tx(
                 c.domain_id == id
                     && c.state_root != [0u8; 32]
                     && c.consensus_kind == domain.kind
-                    && CommitmentAttestation::for_kind(&c.consensus_kind).state_root
+                    && CommitmentAttestation::for_domain(domain).state_root
                     && (domain.validator_set_hash == [0u8; 32]
                         || c.validator_set_hash == domain.validator_set_hash)
             })
