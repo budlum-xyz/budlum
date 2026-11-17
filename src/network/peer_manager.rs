@@ -257,6 +257,10 @@ pub struct PeerManager {
     /// Live peer set. Libp2p can emit multiple connection events for one peer;
     /// This set makes `peer_count` and per-subnet accounting idempotent.
     connected_peers: HashSet<PeerId>,
+    /// Operator-configured sentry/validator shield peers exempt from public
+    /// `/24` subnet caps, public `max_peers` eviction, multiplexed rate-limit
+    /// drops, and score banning.
+    protected_peers: HashSet<PeerId>,
     /// H5.2 outbound diversity: max outbound connections per subnet bucket.
     pub(crate) max_outbound_per_subnet: usize,
     /// Outbound connection count per subnet bucket.
@@ -285,6 +289,7 @@ impl PeerManager {
             subnet_counts: HashMap::new(),
             peer_subnets: HashMap::new(),
             connected_peers: HashSet::new(),
+            protected_peers: HashSet::new(),
             max_outbound_per_subnet: 0,
             outbound_subnet_counts: HashMap::new(),
             outbound_peer_subnets: HashMap::new(),
@@ -313,6 +318,24 @@ impl PeerManager {
 
     pub fn is_connected(&self, peer_id: &PeerId) -> bool {
         self.connected_peers.contains(peer_id)
+    }
+
+    /// Install the set of operator-configured sentry/validator shield peers.
+    /// Any prior persisted or transient ban on a shield peer is cleared immediately.
+    pub fn set_protected_peers<I: IntoIterator<Item = PeerId>>(&mut self, peers: I) {
+        self.protected_peers = peers.into_iter().collect();
+        let protected: Vec<PeerId> = self.protected_peers.iter().copied().collect();
+        for peer_id in protected {
+            self.unban_peer(&peer_id);
+        }
+    }
+
+    /// Count of live connected peers excluding reserved sentry-shield links.
+    pub fn public_connected_count(&self) -> usize {
+        self.connected_peers
+            .iter()
+            .filter(|peer| !self.protected_peers.contains(peer))
+            .count()
     }
 
     pub fn tracked_peer_count(&self) -> usize {
@@ -357,6 +380,9 @@ impl PeerManager {
         peer_id: PeerId,
         subnet: Option<K>,
     ) -> bool {
+        if self.protected_peers.contains(&peer_id) {
+            return true;
+        }
         let key = subnet.map(Into::into).unwrap_or(SubnetKey::UNADDRESSED);
         if !self.can_admit_outbound_subnet(Some(key)) {
             return false;
@@ -403,6 +429,9 @@ impl PeerManager {
     ) -> bool {
         if !self.connected_peers.insert(peer_id) {
             return false;
+        }
+        if self.protected_peers.contains(&peer_id) {
+            return true;
         }
         let key = subnet.map(Into::into).unwrap_or(SubnetKey::UNADDRESSED);
         *self.subnet_counts.entry(key).or_insert(0) += 1;
@@ -462,7 +491,11 @@ impl PeerManager {
     /// always found, so refusing only ever costs a new entry, never an
     /// accumulated penalty.
     fn get_or_create(&mut self, peer_id: &PeerId) -> Option<&mut PeerScore> {
-        if !self.peers.contains_key(peer_id) && self.peers.len() >= self.max_tracked_peers {
+        let shield_protected = self.protected_peers.contains(peer_id);
+        if !shield_protected
+            && !self.peers.contains_key(peer_id)
+            && self.peers.len() >= self.max_tracked_peers
+        {
             let recently_empty = self
                 .last_empty_prune
                 .is_some_and(|t| t.elapsed() < EMPTY_PRUNE_BACKOFF);
@@ -497,10 +530,13 @@ impl PeerManager {
     /// headroom instead.
     fn evict_stalest_penalty(&mut self) -> bool {
         let connected = &self.connected_peers;
+        let protected = &self.protected_peers;
         let victim = self
             .peers
             .iter()
-            .filter(|(id, s)| !s.is_banned() && !connected.contains(*id))
+            .filter(|(id, s)| {
+                !s.is_banned() && !connected.contains(*id) && !protected.contains(*id)
+            })
             .min_by_key(|(_, s)| s.last_seen)
             .map(|(id, _)| *id);
         match victim {
@@ -546,9 +582,11 @@ impl PeerManager {
         self.cleanup_expired_bans();
         let before = self.peers.len();
         let connected = &self.connected_peers;
+        let protected = &self.protected_peers;
         self.peers.retain(|id, s| {
             s.is_banned()
                 || connected.contains(id)
+                || protected.contains(id)
                 || (s.score < 0 && Self::negative_record_is_fresh(s))
         });
         before - self.peers.len()
@@ -581,6 +619,12 @@ impl PeerManager {
         peer_id: &PeerId,
         authored_by_peer: bool,
     ) -> bool {
+        if self.protected_peers.contains(peer_id) {
+            if let Some(score) = self.get_or_create(peer_id) {
+                score.last_seen = Some(Instant::now());
+            }
+            return true;
+        }
         let refill = self.msg_refill_rate;
         let Some(score) = self.get_or_create(peer_id) else {
             return false;
@@ -616,6 +660,12 @@ impl PeerManager {
         peer_id: &PeerId,
         authored_by_peer: bool,
     ) -> bool {
+        if self.protected_peers.contains(peer_id) {
+            if let Some(score) = self.get_or_create(peer_id) {
+                score.last_seen = Some(Instant::now());
+            }
+            return true;
+        }
         let Some(score) = self.get_or_create(peer_id) else {
             return false;
         };
@@ -651,6 +701,12 @@ impl PeerManager {
         peer_id: &PeerId,
         authored_by_peer: bool,
     ) -> bool {
+        if self.protected_peers.contains(peer_id) {
+            if let Some(score) = self.get_or_create(peer_id) {
+                score.last_seen = Some(Instant::now());
+            }
+            return true;
+        }
         let Some(score) = self.get_or_create(peer_id) else {
             return false;
         };
@@ -689,6 +745,12 @@ impl PeerManager {
         authored_by_peer: bool,
         objects: usize,
     ) -> bool {
+        if self.protected_peers.contains(peer_id) {
+            if let Some(score) = self.get_or_create(peer_id) {
+                score.last_seen = Some(Instant::now());
+            }
+            return true;
+        }
         let Some(score) = self.get_or_create(peer_id) else {
             return false;
         };
@@ -713,44 +775,52 @@ impl PeerManager {
         }
     }
     pub fn report_invalid_block(&mut self, peer_id: &PeerId) {
+        let protected = self.protected_peers.contains(peer_id);
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
         score.invalid_blocks += 1;
-        score.score = (score.score + INVALID_BLOCK_PENALTY).max(MIN_SCORE);
+        let floor = if protected { 0 } else { MIN_SCORE };
+        score.score = (score.score + INVALID_BLOCK_PENALTY).max(floor);
         score.last_seen = Some(Instant::now());
-        if score.score <= BAN_THRESHOLD {
+        if !protected && score.score <= BAN_THRESHOLD {
             self.ban_peer(peer_id);
         }
     }
     pub fn report_invalid_tx(&mut self, peer_id: &PeerId) {
+        let protected = self.protected_peers.contains(peer_id);
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
         score.invalid_txs += 1;
-        score.score = (score.score + INVALID_TX_PENALTY).max(MIN_SCORE);
+        let floor = if protected { 0 } else { MIN_SCORE };
+        score.score = (score.score + INVALID_TX_PENALTY).max(floor);
         score.last_seen = Some(Instant::now());
-        if score.score <= BAN_THRESHOLD {
+        if !protected && score.score <= BAN_THRESHOLD {
             self.ban_peer(peer_id);
         }
     }
     pub fn report_oversized_message(&mut self, peer_id: &PeerId) {
+        let protected = self.protected_peers.contains(peer_id);
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
-        score.score = (score.score + OVERSIZED_MESSAGE_PENALTY).max(MIN_SCORE);
+        let floor = if protected { 0 } else { MIN_SCORE };
+        score.score = (score.score + OVERSIZED_MESSAGE_PENALTY).max(floor);
         score.last_seen = Some(Instant::now());
-        if score.score <= BAN_THRESHOLD {
+        if !protected && score.score <= BAN_THRESHOLD {
             self.ban_peer(peer_id);
         }
     }
     pub fn report_bad_behavior(&mut self, peer_id: &PeerId) {
+        let protected = self.protected_peers.contains(peer_id);
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
-        score.score = (score.score - 10).max(MIN_SCORE);
+        let floor = if protected { 0 } else { MIN_SCORE };
+        score.score = (score.score - 10).max(floor);
         score.last_seen = Some(Instant::now());
-        if score.score <= BAN_THRESHOLD {
+        if !protected && score.score <= BAN_THRESHOLD {
             self.ban_peer(peer_id);
         }
     }
@@ -776,6 +846,10 @@ impl PeerManager {
         score.last_seen = Some(Instant::now());
     }
     pub fn ban_peer(&mut self, peer_id: &PeerId) {
+        if self.protected_peers.contains(peer_id) {
+            warn!("Refusing to ban protected sentry-shield peer {}", peer_id);
+            return;
+        }
         // A ban that cannot be recorded is the one refusal that must not pass
         // quietly. Every other caller of `get_or_create` is adjusting a score
         // that only matters while the peer is tracked; this one is the record
@@ -971,12 +1045,14 @@ impl PeerManager {
         score.last_seen = Some(Instant::now());
     }
     pub fn report_invalid_handshake(&mut self, peer_id: &PeerId) {
+        let protected = self.protected_peers.contains(peer_id);
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
-        score.score = (score.score + INVALID_HANDSHAKE_PENALTY).max(MIN_SCORE);
+        let floor = if protected { 0 } else { MIN_SCORE };
+        score.score = (score.score + INVALID_HANDSHAKE_PENALTY).max(floor);
         score.last_seen = Some(Instant::now());
-        if score.score <= BAN_THRESHOLD {
+        if !protected && score.score <= BAN_THRESHOLD {
             self.ban_peer(peer_id);
         }
     }
@@ -1024,6 +1100,9 @@ impl PeerManager {
             let Ok(pid) = ban.peer_id.parse::<PeerId>() else {
                 continue;
             };
+            if self.protected_peers.contains(&pid) {
+                continue;
+            }
             let remaining = Duration::from_secs(ban.expires_unix - now_unix);
             // The table ceiling applies to a reload too: a long ban file must not grow it.
             let Some(entry) = self.get_or_create(&pid) else {
@@ -2299,5 +2378,77 @@ mod tests {
         assert!(pm.charge_agg_frame(&flooder, 160));
         // A second immediate large frame exceeds the refilled budget and fails.
         assert!(!pm.charge_agg_frame(&flooder, 160));
+    }
+
+    #[test]
+    fn protected_sentry_shield_peers_resist_banning_subnet_caps_and_relay_floods() {
+        let mut pm = PeerManager::new();
+        pm.max_tracked_peers = 4;
+        pm.set_max_peers_per_subnet(2);
+
+        let sentry_a = test_peer_id();
+        let sentry_b = test_peer_id();
+        let sentry_c = test_peer_id();
+        let public_a = test_peer_id();
+        let public_b = test_peer_id();
+        let public_c = test_peer_id();
+        let subnet = [10u8, 42, 0];
+
+        // Even if a shield peer was banned prior to shield installation or in a
+        // persisted ban file, `set_protected_peers` and `reload_banned_peers`
+        // keep it unbanned.
+        pm.ban_peer(&sentry_a);
+        assert!(pm.is_banned(&sentry_a));
+        pm.set_protected_peers([sentry_a, sentry_b, sentry_c]);
+        assert!(!pm.is_banned(&sentry_a));
+
+        pm.reload_banned_peers(&[PersistedBan {
+            peer_id: sentry_a.to_base58(),
+            expires_unix: unix_now_secs() + 3600,
+        }]);
+        assert!(!pm.is_banned(&sentry_a));
+
+        // Relayed invalid transactions/blocks or direct ban attempts must never
+        // ban a configured sentry/validator shield peer or drive its score negative.
+        for _ in 0..20 {
+            pm.report_invalid_tx(&sentry_a);
+            pm.report_invalid_block(&sentry_a);
+            pm.report_oversized_message(&sentry_a);
+            pm.report_bad_behavior(&sentry_a);
+        }
+        pm.ban_peer(&sentry_a);
+        assert!(!pm.is_banned(&sentry_a));
+        assert!(pm.get_score(&sentry_a) >= 0);
+
+        // Multiplexed consensus traffic (100+ votes/messages/agg frames) over a
+        // sentry link must never be dropped by single-peer rate limits.
+        for _ in 0..250 {
+            assert!(pm.check_rate_limit_from(&sentry_a, false));
+            assert!(pm.check_vote_rate_limit_from(&sentry_a, false));
+            assert!(pm.check_blob_rate_limit_from(&sentry_a, false));
+            assert!(pm.charge_agg_frame_from(&sentry_a, false, 160));
+        }
+
+        // Three sentries in the same /24 subnet connect without consuming any
+        // of the 2 public /24 subnet slots or `public_connected_count`.
+        assert!(pm.note_connected(sentry_a, Some(subnet)));
+        assert!(pm.note_connected(sentry_b, Some(subnet)));
+        assert!(pm.note_connected(sentry_c, Some(subnet)));
+        assert_eq!(pm.public_connected_count(), 0);
+        assert_eq!(pm.subnet_connection_count(subnet), 0);
+
+        // Two public peers in that same /24 still fit, and the third public peer hits the /24 cap.
+        assert!(pm.can_admit_subnet(Some(subnet)));
+        assert!(pm.note_connected(public_a, Some(subnet)));
+        assert!(pm.can_admit_subnet(Some(subnet)));
+        assert!(pm.note_connected(public_b, Some(subnet)));
+        assert!(!pm.can_admit_subnet(Some(subnet)));
+        assert!(!pm.is_connected(&public_c));
+        assert_eq!(pm.public_connected_count(), 2);
+
+        // Even when the tracked score map is full, an unseen protected peer is
+        // still tracked and marked handshaked cleanly.
+        pm.set_handshaked(&sentry_c, true);
+        assert!(pm.is_handshaked(&sentry_c));
     }
 }

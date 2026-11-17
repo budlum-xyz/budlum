@@ -1473,7 +1473,6 @@ src/network/gossip_dedup.rs	fn	is_below_threshold
 src/network/gossip_dedup.rs	fn	peer_score
 src/network/gossip_dedup.rs	fn	peers_below_threshold
 src/network/gossip_dedup.rs	fn	record_invalid
-src/network/gossip_dedup.rs	fn	remove_peer
 src/network/gossip_dedup.rs	fn	total_duplicates
 src/network/gossip_dedup.rs	fn	total_processed
 src/network/gossip_dedup.rs	fn	window_utilization
