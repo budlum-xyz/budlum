@@ -1005,8 +1005,8 @@ impl Mempool {
     fn evict_cheapest_non_duty(&mut self, new_tx: &Transaction) -> bool {
         let victim = self
             .by_fee
-            .iter()
-            .flat_map(|(_, hashes)| hashes.iter())
+            .values()
+            .flat_map(|hashes| hashes.iter())
             .filter_map(|hash| {
                 let entry = self.transactions.get(hash)?;
                 (entry.duty.is_none() && entry.tx.from != new_tx.from)
