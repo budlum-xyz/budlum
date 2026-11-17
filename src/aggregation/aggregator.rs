@@ -62,11 +62,12 @@ impl<B: AggBackend> Aggregator<B> {
     /// address of `ctx`.
     #[must_use]
     pub const fn new(backend: B, ctx: TickCtx, params: AggParams) -> Self {
+        let domain = ctx.domain;
         Self {
             backend,
             ctx,
             params,
-            pool: ObjectPool::new(params, ctx.domain),
+            pool: ObjectPool::new(params, domain),
             frames: BTreeMap::new(),
             frame_bytes: 0,
             max_frames: MAX_FRAMES,
