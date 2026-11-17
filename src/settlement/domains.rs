@@ -44,10 +44,10 @@ use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::cross_domain::external::BlsVerifier;
 use crate::domain::{
-    hash_finality_proof, BftFinalityAdapter, ConsensusDomain, ConsensusKind, DomainCommitment,
-    DomainFinalityAdapter, DomainId, DomainStatus, FinalityProof, FinalityStatus, Hash32,
-    PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
-    AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
+    hash_finality_proof, BftFinalityAdapter, BitcoinSpvFinalityAdapter, ConsensusDomain,
+    ConsensusKind, DomainCommitment, DomainFinalityAdapter, DomainId, DomainStatus, FinalityProof,
+    FinalityStatus, Hash32, PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter,
+    ZkFinalityAdapter, AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
 };
 use crate::domain::{SovereignDomainTemplate, VerifiedDomainCommitment};
 use crate::prover::{
@@ -326,7 +326,10 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     }
 
     let adapter_valid = match &domain.kind {
-        ConsensusKind::PoW => domain.finality_adapter == POW_HEADER_CHAIN_ADAPTER,
+        ConsensusKind::PoW => {
+            domain.finality_adapter == POW_HEADER_CHAIN_ADAPTER
+                || domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER
+        }
         ConsensusKind::PoS => domain.finality_adapter == "pos-qc-finality",
         ConsensusKind::PoA => domain.finality_adapter == "poa-authority-quorum",
         ConsensusKind::Bft => domain.finality_adapter == "bft-quorum-commit",
@@ -603,9 +606,21 @@ pub fn verify_commitment_finality_observed(
 
     let status = match domain.kind {
         ConsensusKind::PoW => {
-            let adapter = PoWHeaderChainFinalityAdapter;
-            ensure_adapter_name(domain, adapter.adapter_name())?;
-            adapter.verify_finality(domain, commitment, proof)
+            if domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER {
+                // Bitcoin SPV domains are judged by Bitcoin's own consensus
+                // data (SHA256d, compact bits, chainwork); every other PoW
+                // domain keeps the bounded leading-zero header chain. Each
+                // adapter refuses a proof built for the other, and
+                // `ensure_adapter_name` refuses a domain registered under a
+                // third name.
+                let adapter = BitcoinSpvFinalityAdapter;
+                ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            } else {
+                let adapter = PoWHeaderChainFinalityAdapter;
+                ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            }
         }
         ConsensusKind::PoS => {
             let adapter = PoSFinalityAdapter;
