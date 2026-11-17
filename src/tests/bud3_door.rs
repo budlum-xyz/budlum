@@ -1644,10 +1644,6 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
     assert_ne!(old_key, new_key);
     assert_eq!(old_up.record.content_id, new_up.record.content_id);
 
-    let attestations: Vec<_> = [201u8, 202, 203]
-        .into_iter()
-        .map(|id| sign_replace_attestation([id; 32], &[id; 32], &old_key, &new_up.record).unwrap())
-        .collect();
     let half_new = new_up.record.symbols_per_segment / 2;
     let new_shares = vec![
         (
@@ -1669,6 +1665,13 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
             },
         ),
     ];
+    let attestations: Vec<_> = [201u8, 202, 203]
+        .into_iter()
+        .map(|id| {
+            sign_replace_attestation([id; 32], &[id; 32], &old_key, &new_up.record, &new_shares)
+                .unwrap()
+        })
+        .collect();
     let proposer_bal_before = state.get_balance(&proposer);
     let endowment_acct = crate::storage::bud3::fees::custody_endowment_account();
     let endowment_bal_before = state.get_balance(&endowment_acct);
