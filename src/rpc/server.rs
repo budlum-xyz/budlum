@@ -169,6 +169,11 @@ pub enum RpcMode {
     Operator,
 }
 
+/// Resolved client IP propagated from [`RpcSecurityService`] into jsonrpsee's
+/// RPC middleware pipeline (including every WebSocket message after upgrade).
+#[derive(Clone, Copy, Debug)]
+struct ResolvedClientIp(IpAddr);
+
 #[derive(Clone)]
 struct RpcSecurityLayer {
     config: Arc<RpcSecurityConfig>,
@@ -278,6 +283,9 @@ where
         // the authenticated caller's rate-limit budget.
         let authed = is_authorized(&self.config, &req);
         let client_ip = extract_client_ip(&self.config, &req);
+        if let Some(ip) = client_ip {
+            req.extensions_mut().insert(ResolvedClientIp(ip));
+        }
         let rate_bucket = if authed {
             &self.per_authed_ip_rates
         } else {
@@ -536,6 +544,9 @@ impl SolanaListener {
             .set_batch_request_config(BatchRequestConfig::Limit(100))
             .build();
         let builder = ServerBuilder::default()
+            .set_rpc_middleware(jsonrpsee::core::middleware::RpcServiceBuilder::new().layer(
+                RpcCallRateLimitLayer::new(self.security.clone(), self.metrics.clone()),
+            ))
             .set_config(config)
             .to_service_builder();
         let listener = tokio::net::TcpListener::bind(self.addr).await?;
@@ -756,7 +767,11 @@ impl RpcServer {
         // oversized batches are rejected wholesale instead of partially
         // executed (jsonrpsee drops the whole batch at `Limit`).
         config = config.set_batch_request_config(BatchRequestConfig::Limit(100));
-        let builder = ServerBuilder::default().set_config(config.build());
+        let builder = ServerBuilder::default()
+            .set_rpc_middleware(jsonrpsee::core::middleware::RpcServiceBuilder::new().layer(
+                RpcCallRateLimitLayer::new(self.security.clone(), self.metrics.clone()),
+            ))
+            .set_config(config.build());
 
         let mode_label = match self.mode {
             RpcMode::Public => "public",
@@ -1652,6 +1667,147 @@ pub(crate) fn to_json<T: serde::Serialize>(
             None::<()>,
         )
     })
+}
+
+/// Per-call admission for dispatched JSON-RPC calls across HTTP and WebSocket.
+///
+/// [`RpcSecurityLayer`] runs once per HTTP request, so a WebSocket connection
+/// is admitted only on the upgrade request. jsonrpsee then dispatches every
+/// WebSocket message straight through the RPC middleware pipeline, so charging
+/// the per-IP window here enforces `rate_limit_per_minute` on every call,
+/// notification, and call inside a batch over both HTTP and WebSocket.
+#[derive(Clone)]
+struct RpcCallRateLimitLayer {
+    config: Arc<RpcSecurityConfig>,
+    per_call_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
+}
+
+impl RpcCallRateLimitLayer {
+    fn new(config: RpcSecurityConfig, metrics: Option<Arc<crate::core::metrics::Metrics>>) -> Self {
+        Self {
+            config: Arc::new(config),
+            per_call_rates: Arc::new(Mutex::new(HashMap::new())),
+            metrics,
+        }
+    }
+}
+
+impl<S> Layer<S> for RpcCallRateLimitLayer {
+    type Service = RpcCallRateLimitService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        RpcCallRateLimitService {
+            inner,
+            config: self.config.clone(),
+            per_call_rates: self.per_call_rates.clone(),
+            metrics: self.metrics.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RpcCallRateLimitService<S> {
+    inner: S,
+    config: Arc<RpcSecurityConfig>,
+    per_call_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
+}
+
+impl<S> RpcCallRateLimitService<S> {
+    fn resolve_ip(extensions: &hyper::http::Extensions) -> Option<IpAddr> {
+        extensions
+            .get::<ResolvedClientIp>()
+            .map(|ip| ip.0)
+            .or_else(|| extensions.get::<SocketAddr>().map(SocketAddr::ip))
+    }
+
+    /// Charge `calls` slots of the per-IP window against the resolved client IP.
+    fn charge(&self, client_ip: Option<IpAddr>, calls: usize) -> bool {
+        let count = calls.max(1);
+        let admitted = (0..count)
+            .all(|_| is_per_ip_rate_limited(&self.config, &self.per_call_rates, client_ip));
+        if !admitted {
+            if let Some(ref m) = self.metrics {
+                m.rpc_rate_limited_total.inc();
+            }
+        }
+        admitted
+    }
+}
+
+fn call_rate_exceeded() -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(-32005, "Too many requests", None::<()>)
+}
+
+impl<S> jsonrpsee::core::middleware::RpcServiceT for RpcCallRateLimitService<S>
+where
+    S: jsonrpsee::core::middleware::RpcServiceT<
+            MethodResponse = jsonrpsee::core::server::MethodResponse,
+            BatchResponse = jsonrpsee::core::server::MethodResponse,
+            NotificationResponse = jsonrpsee::core::server::MethodResponse,
+        > + Send
+        + Sync
+        + Clone
+        + 'static,
+{
+    type MethodResponse = jsonrpsee::core::server::MethodResponse;
+    type NotificationResponse = jsonrpsee::core::server::MethodResponse;
+    type BatchResponse = jsonrpsee::core::server::MethodResponse;
+
+    fn call<'a>(
+        &self,
+        request: jsonrpsee::core::middleware::Request<'a>,
+    ) -> impl std::future::Future<Output = Self::MethodResponse> + Send + 'a {
+        let client_ip = Self::resolve_ip(request.extensions());
+        let admitted = self.charge(client_ip, 1);
+        let inner = self.inner.clone();
+        async move {
+            if !admitted {
+                return jsonrpsee::core::server::MethodResponse::error(
+                    request.id(),
+                    call_rate_exceeded(),
+                );
+            }
+            inner.call(request).await
+        }
+    }
+
+    fn batch<'a>(
+        &self,
+        mut batch: jsonrpsee::core::middleware::Batch<'a>,
+    ) -> impl std::future::Future<Output = Self::BatchResponse> + Send + 'a {
+        let client_ip = Self::resolve_ip(batch.extensions());
+        let admitted = self.charge(client_ip, batch.len());
+        let inner = self.inner.clone();
+        async move {
+            if !admitted {
+                return jsonrpsee::core::server::MethodResponse::error(
+                    jsonrpsee::types::Id::Null,
+                    call_rate_exceeded(),
+                );
+            }
+            inner.batch(batch).await
+        }
+    }
+
+    fn notification<'a>(
+        &self,
+        notification: jsonrpsee::core::middleware::Notification<'a>,
+    ) -> impl std::future::Future<Output = Self::NotificationResponse> + Send + 'a {
+        let client_ip = Self::resolve_ip(notification.extensions());
+        let admitted = self.charge(client_ip, 1);
+        let inner = self.inner.clone();
+        async move {
+            if !admitted {
+                return jsonrpsee::core::server::MethodResponse::error(
+                    jsonrpsee::types::Id::Null,
+                    call_rate_exceeded(),
+                );
+            }
+            inner.notification(notification).await
+        }
+    }
 }
 
 fn cap_list_response<T>(mut items: Vec<T>) -> Vec<T> {
@@ -9886,6 +10042,199 @@ mod client_identity_tests {
             !rates.contains_key(&quiet),
             "the quietest client is the one evicted"
         );
+    }
+
+    fn encode_ws_masked_text_frame(payload: &[u8]) -> Vec<u8> {
+        let mask = [0x37u8, 0xFA, 0x21, 0x3D];
+        let mut frame = Vec::with_capacity(payload.len() + 10);
+        frame.push(0x81); // FIN + Text opcode
+        if payload.len() < 126 {
+            frame.push(0x80 | (payload.len() as u8));
+        } else {
+            frame.push(0x80 | 126);
+            frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        }
+        frame.extend_from_slice(&mask);
+        for (idx, &byte) in payload.iter().enumerate() {
+            frame.push(byte ^ mask[idx & 3]);
+        }
+        frame
+    }
+
+    async fn read_ws_text_frame(stream: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let mut header = [0u8; 2];
+        stream.read_exact(&mut header).await.unwrap();
+        let len_code = header[1] & 0x7F;
+        let len = match len_code {
+            0..=125 => usize::from(len_code),
+            126 => {
+                let mut ext = [0u8; 2];
+                stream.read_exact(&mut ext).await.unwrap();
+                usize::from(u16::from_be_bytes(ext))
+            }
+            _ => {
+                let mut ext = [0u8; 8];
+                stream.read_exact(&mut ext).await.unwrap();
+                usize::try_from(u64::from_be_bytes(ext)).unwrap()
+            }
+        };
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).await.unwrap();
+        String::from_utf8(body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn websocket_json_rpc_messages_obey_per_ip_rate_limit_while_http_stays_intact() {
+        use jsonrpsee::server::{stop_channel, BatchRequestConfig, ServerBuilder, ServerConfig};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut methods = jsonrpsee::Methods::new();
+        methods
+            .verify_and_insert(
+                "ping",
+                jsonrpsee::MethodCallback::Sync(Arc::new(|id, _params, _max_len, _ext| {
+                    jsonrpsee::core::server::MethodResponse::response(
+                        id,
+                        jsonrpsee::ResponsePayload::success("pong"),
+                        4096,
+                    )
+                })),
+            )
+            .unwrap();
+
+        let security_cfg = RpcSecurityConfig {
+            auth_required: false,
+            api_key: None,
+            allowed_ips: Vec::new(),
+            trusted_proxies: vec!["127.0.0.1".into()],
+            rate_limit_per_minute: Some(2),
+            cors_origins: Vec::new(),
+            max_request_body_size: Some(1024 * 1024),
+            max_connections: Some(16),
+        };
+        let rpc_cfg = ServerConfig::builder()
+            .max_request_body_size(1024 * 1024)
+            .max_connections(16)
+            .set_batch_request_config(BatchRequestConfig::Limit(100))
+            .build();
+        let svc_builder = ServerBuilder::default()
+            .set_rpc_middleware(
+                jsonrpsee::core::middleware::RpcServiceBuilder::new()
+                    .layer(RpcCallRateLimitLayer::new(security_cfg.clone(), None)),
+            )
+            .set_config(rpc_cfg)
+            .to_service_builder();
+        let security = RpcSecurityLayer::new(security_cfg, None, RpcMode::Public);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop_handle, server_handle) = stop_channel();
+        let permits = Arc::new(tokio::sync::Semaphore::new(16));
+
+        let accept_task = tokio::spawn(async move {
+            let _keep_alive = server_handle;
+            loop {
+                let Ok((socket, remote_addr)) = listener.accept().await else {
+                    break;
+                };
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    continue;
+                };
+                let svc_builder = svc_builder.clone();
+                let methods = methods.clone();
+                let stop_for_svc = stop_handle.clone();
+                let svc = security
+                    .clone()
+                    .for_remote_addr(remote_addr)
+                    .layer(tower::service_fn(
+                        move |req: HttpRequest<hyper::body::Incoming>| {
+                            let mut inner = svc_builder
+                                .clone()
+                                .build(methods.clone(), stop_for_svc.clone());
+                            async move { inner.call(req).await }
+                        },
+                    ));
+                let shutdown = stop_handle.clone().shutdown();
+                tokio::spawn(serve_plain_connection(socket, svc, shutdown, permit));
+            }
+        });
+
+        // 1. Open ONE WebSocket connection and issue 3 calls on it (budget = 2).
+        let mut ws = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let upgrade = format!(
+            "GET / HTTP/1.1\r\n\
+             Host: {addr}\r\n\
+             X-Forwarded-For: 203.0.113.10\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n"
+        );
+        ws.write_all(upgrade.as_bytes()).await.unwrap();
+        let mut handshake_buf = vec![0u8; 512];
+        let n = ws.read(&mut handshake_buf).await.unwrap();
+        let handshake = String::from_utf8_lossy(&handshake_buf[..n]);
+        assert!(
+            handshake.starts_with("HTTP/1.1 101"),
+            "expected WebSocket 101 upgrade, got: {handshake}"
+        );
+
+        for id in [1u64, 2u64] {
+            let req = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"ping","params":[]}}"#);
+            ws.write_all(&encode_ws_masked_text_frame(req.as_bytes()))
+                .await
+                .unwrap();
+            let resp = read_ws_text_frame(&mut ws).await;
+            let parsed: serde_json::Value = serde_json::from_str(&resp).unwrap();
+            assert_eq!(parsed["result"], "pong", "call {id} must succeed: {resp}");
+        }
+
+        // Third call on the same WebSocket connection must be rejected with -32005.
+        let over_budget = r#"{"jsonrpc":"2.0","id":3,"method":"ping","params":[]}"#;
+        ws.write_all(&encode_ws_masked_text_frame(over_budget.as_bytes()))
+            .await
+            .unwrap();
+        let throttled = read_ws_text_frame(&mut ws).await;
+        let parsed: serde_json::Value = serde_json::from_str(&throttled).unwrap();
+        assert_eq!(
+            parsed["error"]["code"], -32005,
+            "third WebSocket call must be rate-limited with -32005, got: {throttled}"
+        );
+
+        // 2. Ordinary HTTP POST from a distinct proxied client IP succeeds for
+        // its full 2-request budget and receives HTTP 429 on the 3rd request.
+        for (id, expected_status, expected_body_fragment) in [
+            (10u64, "HTTP/1.1 200", "\"result\":\"pong\""),
+            (11u64, "HTTP/1.1 200", "\"result\":\"pong\""),
+            (12u64, "HTTP/1.1 429", "Too many requests"),
+        ] {
+            let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let body = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"ping","params":[]}}"#);
+            let req = format!(
+                "POST / HTTP/1.1\r\n\
+                 Host: {addr}\r\n\
+                 Content-Type: application/json\r\n\
+                 X-Forwarded-For: 203.0.113.42\r\n\
+                 Connection: close\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            tcp.write_all(req.as_bytes()).await.unwrap();
+            let mut resp = Vec::new();
+            tcp.read_to_end(&mut resp).await.unwrap();
+            let resp_text = String::from_utf8_lossy(&resp);
+            assert!(
+                resp_text.starts_with(expected_status),
+                "HTTP call {id} expected {expected_status}, got: {resp_text}"
+            );
+            assert!(
+                resp_text.contains(expected_body_fragment),
+                "HTTP call {id} expected body fragment {expected_body_fragment}, got: {resp_text}"
+            );
+        }
+
+        accept_task.abort();
     }
 }
 
