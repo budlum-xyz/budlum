@@ -27,6 +27,7 @@
 pub mod agg_tick;
 pub mod asm;
 pub mod bytes;
+pub mod chip_offload;
 pub mod keccak;
 pub mod mldsa;
 pub mod object;
