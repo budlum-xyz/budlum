@@ -1883,8 +1883,21 @@ impl AccountState {
     /// or unbonded owner in the free lane.
     #[must_use]
     pub fn duty_lane_signers(&self) -> std::collections::BTreeSet<Address> {
-        let floor = self.registry.params().min_stake;
-        let mobile_floor = (floor / 100).max(1);
+        self.duty_lane_signers_for_chain(crate::core::transaction::DEFAULT_CHAIN_ID)
+    }
+
+    /// Active validator addresses holding at least their class bond floor on
+    /// `chain_id` and eligible for the zero-fee validator duty lane.
+    #[must_use]
+    pub fn duty_lane_signers_for_chain(
+        &self,
+        chain_id: u64,
+    ) -> std::collections::BTreeSet<Address> {
+        let network = crate::core::chain_config::Network::from_chain_id(chain_id);
+        let floor = self.registry.params().min_stake.max(1);
+        let mobile_floor = network
+            .map_or_else(|| (floor / 100).max(1), |n| n.min_stake_mobile())
+            .max(1);
         let mut signers = std::collections::BTreeSet::new();
         for (address, validator) in &self.validators {
             if validator.active
@@ -1908,6 +1921,8 @@ impl AccountState {
             };
             if admitted {
                 signers.insert(record.owner);
+            } else {
+                signers.remove(&record.owner);
             }
         }
         signers
@@ -3755,13 +3770,21 @@ impl AccountState {
         }
 
         // ResumeValidator requests whose epoch has come lift the suspension
-        // (section 7.8.7); the validator re-enters the active set only if its
-        // stake still satisfies the minimum bond floor. Absence itself never
-        // slashed (V-4).
-        let min_stake = self.registry.params().min_stake;
+        // (section 7.8.7); the validator re-enters the active set only if it
+        // still carries at least the registry and network minimum stake floor.
+        // Absence itself never slashed (V-4).
+        let resume_floor = self
+            .registry
+            .params()
+            .min_stake
+            .max(
+                crate::core::chain_config::Network::from_chain_id(chain_id)
+                    .map_or(1, |n| n.min_stake_full()),
+            )
+            .max(1);
         for resumed in self.liveness.activate_due_resumes(self.epoch_index) {
             if let Some(v) = self.validators.get_mut(&resumed) {
-                if !v.slashed && !v.jailed && v.stake >= min_stake {
+                if !v.slashed && !v.jailed && v.stake >= resume_floor {
                     v.active = true;
                 }
             }

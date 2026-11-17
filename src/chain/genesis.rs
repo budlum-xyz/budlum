@@ -392,9 +392,13 @@ impl GenesisConfig {
 
                 // The default PoW floor (8 bits, about 1.5k hashes
                 // for six headers) lets anyone mine a "finalized" header
-                // chain for a bridge-enabled domain. On mainnet the floor is
-                // raised to a work level that is not self-mineable.
-                if domain.bridge_enabled && self.chain_id == Network::Mainnet.chain_id().value() {
+                // chain for a bridge-enabled domain. On mainnet and the public
+                // testnet the floor is raised to a work level that is not
+                // self-mineable.
+                if domain.bridge_enabled
+                    && (self.chain_id == Network::Mainnet.chain_id().value()
+                        || self.chain_id == Network::Testnet.chain_id().value())
+                {
                     if let Some(params) = domain.pow_parameters.as_mut() {
                         params.min_difficulty_bits = MAINNET_BRIDGE_POW_MIN_DIFFICULTY_BITS;
                         params.min_cumulative_work = u128::from(cfg.min_confirmations.max(1))

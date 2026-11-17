@@ -52,8 +52,12 @@ pub const FULL_MISSES_TO_LOSS: u64 = 2;
 pub const MOBILE_MISSES_TO_LOSS: u64 = 3;
 /// Maximum number of bound NFT references tracked on a single B.U.D. 3.0 object.
 pub const MAX_OBJECT_REFERENCES: usize = 4096;
+/// Maximum concurrent unpruned paid-view receipts across the entire registry.
+const MAX_PAID_VIEWS: usize = 65_536;
 /// Maximum concurrent unpruned paid-view receipts tracked for one object.
 const MAX_PAID_VIEWS_PER_OBJECT: usize = 1024;
+/// Maximum concurrent unpruned paid-view receipts one payer may hold per object.
+const MAX_PAID_VIEWS_PER_PAYER_OBJECT: usize = 8;
 
 /// The state-root tag. V2 commits every serialized field and exact index.
 pub const REGISTRY_TAG: &[u8] = b"BDLM_BUD3_REGISTRY_V2";
@@ -462,7 +466,11 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
         let mut distinct_validators = BTreeSet::new();
         for (s, sh) in shares {
             if *s == index {
-                distinct_validators.insert(sh.validator);
+                if !distinct_validators.insert(sh.validator) {
+                    return Err(RegistryError::BadPlacement(
+                        "duplicate validator in segment",
+                    ));
+                }
                 ranges.push((sh.first_esi, sh.symbols));
             }
         }
@@ -678,14 +686,38 @@ impl Bud3Registry {
         if self.tombstones.contains_key(&object) {
             return Err(RegistryError::Tombstoned);
         }
-        let object_receipts = self
-            .paid_views
-            .values()
-            .filter(|rec| rec.object == object)
-            .count();
+        // Reap expired or orphaned receipts before checking capacity so stale
+        // entries awaiting the next epoch boundary cannot crowd out new views.
+        let objects = &self.objects;
+        let tombstones = &self.tombstones;
+        self.paid_views.retain(|_, rec| {
+            rec.paid_at_epoch.saturating_add(PAID_VIEW_RETENTION_EPOCHS) >= epoch
+                && objects.contains_key(&rec.object)
+                && !tombstones.contains_key(&rec.object)
+        });
+        if self.paid_views.len() >= MAX_PAID_VIEWS {
+            return Err(RegistryError::InvalidPaidView(
+                "global paid view receipt limit reached",
+            ));
+        }
+        let mut object_receipts = 0usize;
+        let mut payer_object_receipts = 0usize;
+        for rec in self.paid_views.values() {
+            if rec.object == object {
+                object_receipts += 1;
+                if rec.payer == payer {
+                    payer_object_receipts += 1;
+                }
+            }
+        }
         if object_receipts >= MAX_PAID_VIEWS_PER_OBJECT {
             return Err(RegistryError::InvalidPaidView(
                 "paid view receipt limit reached for object",
+            ));
+        }
+        if payer_object_receipts >= MAX_PAID_VIEWS_PER_PAYER_OBJECT {
+            return Err(RegistryError::InvalidPaidView(
+                "paid view receipt limit reached for payer on object",
             ));
         }
         let obj = self
@@ -745,6 +777,7 @@ impl Bud3Registry {
                     .forfeited_pool_total
                     .saturating_add(obj.endowment.remaining_balance);
                 self.base_deps.remove(&old);
+                self.paid_views.retain(|_, rec| rec.object != old);
                 for nft in obj.references {
                     self.nfts.remove(&nft);
                 }
@@ -1670,6 +1703,15 @@ impl Bud3Registry {
     pub fn close_windows(&mut self, epoch: u64) -> usize {
         let mut missed = 0;
         for obj in self.objects.values_mut() {
+            let upload_roots = obj.record.symbol_roots.len();
+            // Retire unacknowledged repair shares once their 3-epoch acknowledgment
+            // window elapses so a silent recipient cannot freeze future repairs.
+            obj.shares.retain(|s| {
+                !(s.root >= upload_roots
+                    && s.status == ShareStatus::Pending
+                    && epoch.saturating_sub(s.assigned_epoch)
+                        >= super::custody::SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS)
+            });
             for s in &mut obj.shares {
                 if s.open_audit.is_some_and(|(_, last)| last < epoch) {
                     s.open_audit = None;
@@ -1875,15 +1917,14 @@ impl Bud3Registry {
                     .source_symbols(index)
                     .unwrap_or(u64::MAX)
                     .saturating_add(2);
-                // Unacknowledged repair shares have not yet been accepted by
-                // their holders, so they must not inflate coverage and mask a
-                // real redundancy loss on the segment.
+                // Exclude unacknowledged repair shares from coverage arithmetic so
+                // a phantom pending repair cannot mask a real custody loss.
                 let mut sizes: Vec<u64> = obj
                     .shares
                     .iter()
                     .filter(|s| {
                         s.segment == index
-                            && !(s.root >= upload_roots && s.status == ShareStatus::Pending)
+                            && (s.root < upload_roots || s.status == ShareStatus::Confirmed)
                     })
                     .map(|s| u64::from(s.share.symbols))
                     .collect();
@@ -1970,11 +2011,16 @@ impl Bud3Registry {
             .ok_or(RegistryError::UnknownObject)?;
         let upload_roots = obj.record.symbol_roots.len();
         // Refuse overlapping repairs while an earlier repair for this segment
-        // still has pending (unsettled) shares inside its acknowledgement
-        // window so repairers cannot stack unpaid symbols onto the object. A
-        // holder that never acknowledges cannot freeze repair forever: once
-        // the acknowledgement deadline has elapsed, those expired pending
-        // repair shares are retired so a fresh repair can replace the loss.
+        // still has pending shares inside their 3-epoch acknowledgment window.
+        // Once that deadline passes, a silent recipient no longer blocks a fresh
+        // repair and its expired pending share is pruned when the new repair lands.
+        let is_expired_pending_repair = |s: &ShareState| {
+            s.segment == segment
+                && s.root >= upload_roots
+                && s.status == ShareStatus::Pending
+                && epoch.saturating_sub(s.assigned_epoch)
+                    >= super::custody::SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS
+        };
         if obj.shares.iter().any(|s| {
             s.segment == segment
                 && s.root >= upload_roots
@@ -1987,14 +2033,6 @@ impl Bud3Registry {
                 "segment already has an unsettled repair",
             ));
         }
-        obj.shares.retain(|s| {
-            !(s.segment == segment
-                && s.root >= upload_roots
-                && s.status == ShareStatus::Pending
-                && !s.lost
-                && epoch.saturating_sub(s.assigned_epoch)
-                    >= super::custody::SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS)
-        });
         let seg_idx = usize::try_from(segment).map_err(|_| RegistryError::BadRepair("segment"))?;
         let seg_layout = Segmentation::new(obj.record.object_len, &obj.record.profile)
             .ok_or(RegistryError::BadRepair("invalid object profile"))?;
@@ -2018,7 +2056,7 @@ impl Bud3Registry {
         let existing_holders: BTreeSet<Address> = obj
             .shares
             .iter()
-            .filter(|s| s.segment == segment)
+            .filter(|s| s.segment == segment && !is_expired_pending_repair(s))
             .map(|s| s.share.validator)
             .collect();
         let mut seen_new_holders = BTreeSet::new();
@@ -2227,6 +2265,9 @@ impl Bud3Registry {
                 }
             }
         }
+        // Drop any expired unacknowledged repair shares on this segment only
+        // after every validation check above has passed.
+        obj.shares.retain(|s| !is_expired_pending_repair(s));
         obj.roots.push(SymbolRoot {
             segment,
             root: new_root,
@@ -2254,9 +2295,10 @@ impl Bud3Registry {
         Ok(())
     }
 
-    /// Retire repair shares whose acknowledgement window elapsed without
-    /// custody confirmation, so an unresponsive repair recipient cannot pin a
-    /// segment's repair state indefinitely. Returns how many shares were retired.
+    /// Retire pending repair shares that remained unacknowledged past
+    /// `SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS`. Combined with `settle_repairs`
+    /// requiring `confirmed_symbols == r.count`, a partially retired repair
+    /// never releases old lost shares while unblocking a fresh replacement repair.
     pub(crate) fn retire_unacknowledged_repairs(&mut self, epoch: u64) -> usize {
         let mut retired = 0;
         for obj in self.objects.values_mut() {
@@ -2286,13 +2328,18 @@ impl Bud3Registry {
                 .iter()
                 .enumerate()
                 .skip(upload_roots)
-                .filter(|(i, _)| {
-                    let mut has_any = false;
-                    let all_confirmed = obj.shares.iter().filter(|s| s.root == *i).all(|s| {
-                        has_any = true;
-                        s.status == ShareStatus::Confirmed
-                    });
-                    has_any && all_confirmed
+                .filter(|(i, r)| {
+                    r.count > 0 && {
+                        let confirmed_symbols: u64 = obj
+                            .shares
+                            .iter()
+                            .filter(|s| {
+                                s.root == *i && s.status == ShareStatus::Confirmed && !s.lost
+                            })
+                            .map(|s| u64::from(s.share.symbols))
+                            .sum();
+                        confirmed_symbols == u64::from(r.count)
+                    }
                 })
                 .map(|(_, r)| r.segment)
                 .collect();
@@ -3584,20 +3631,54 @@ mod tests {
             ),
         ];
         assert_eq!(
-            r.register_object(addr(1), up.record, duplicate_same_validator, 0, 10),
+            r.register_object(addr(1), up.record.clone(), duplicate_same_validator, 0, 10),
             Err(RegistryError::BadPlacement(
-                "each segment requires at least two distinct validators",
+                "duplicate validator in segment",
+            ))
+        );
+        // Even with two distinct validators, repeating either holder in the same segment is refused.
+        let third = syms / 3;
+        let repeated_with_peer = vec![
+            (
+                0,
+                Share {
+                    validator: addr(9),
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: third,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(10),
+                    class: Class::Full,
+                    first_esi: third,
+                    symbols: third,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(9),
+                    class: Class::Full,
+                    first_esi: third * 2,
+                    symbols: syms - third * 2,
+                },
+            ),
+        ];
+        assert_eq!(
+            r.register_object(addr(1), up.record, repeated_with_peer, 0, 10),
+            Err(RegistryError::BadPlacement(
+                "duplicate validator in segment",
             ))
         );
     }
 
     #[test]
-    fn unacknowledged_repair_share_expires_after_ack_deadline_and_allows_new_repair() {
-        use super::super::custody::{symbol_root, SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS};
-        use super::super::fountain::SegmentEncoder;
-
+    fn unacknowledged_repair_share_expires_after_deadline_and_unblocks_segment() {
         let mut r = Bud3Registry::default();
-        let content: Vec<u8> = (0..1500u32).map(|i| (i % 249) as u8).collect();
+        let content: Vec<u8> = (0u16..1500).map(|i| (i.wrapping_mul(31)) as u8).collect();
         let (up, shares) = upload(&content);
         let key = up.record.commitment;
         r.register_object(addr(1), up.record.clone(), shares, 0, 1000)
@@ -3611,86 +3692,133 @@ mod tests {
         let obj_bytes = super::super::bof1::Object::raw_public(&content).encode();
         let enc = SegmentEncoder::new(0, &obj_bytes, &P).unwrap();
         let k = enc.k();
-        let valid_witness = super::super::repair::RepairWitness::ProvenSymbols(
+        let witness = super::super::repair::RepairWitness::ProvenSymbols(
             super::super::repair::build_repair_proven_witness(0, &up.segments[0], &up.segments[0])
                 .unwrap(),
         );
 
-        let build_repair = |first_esi: u32, holder: u8| {
-            let fresh = enc.repair_symbols(first_esi - k, 5).unwrap();
-            let leaves: Vec<(u32, [u8; 32])> = fresh
+        let batch1 = enc.repair_symbols(20 - k, 5).unwrap();
+        let root1 = symbol_root(
+            &batch1
                 .iter()
                 .map(|x| (x.esi, symbol_leaf(&x.data)))
-                .collect();
-            let root = symbol_root(&leaves);
-            let share = Share {
-                validator: addr(holder),
-                class: Class::Full,
-                first_esi,
-                symbols: 5,
-            };
-            (share, fresh, root)
-        };
-
-        // First repair assigned to holder 20 at epoch 100; holder 20 never acknowledges.
-        let (share1, fresh1, root1) = build_repair(20, 20);
+                .collect::<Vec<_>>(),
+        );
+        // Repair placed on silent holder addr(20) at epoch 10.
         r.record_repair(
             &key,
             SegmentRepair {
                 segment: 0,
-                new_shares: vec![share1],
-                new_symbols: fresh1,
+                new_shares: vec![Share {
+                    validator: addr(20),
+                    class: Class::Full,
+                    first_esi: 20,
+                    symbols: 5,
+                }],
+                new_symbols: batch1,
                 new_root: root1,
-                witness: &valid_witness,
+                witness: &witness,
             },
-            100,
+            10,
         )
         .unwrap();
 
-        // Unacknowledged repair shares must not mask the segment's real loss.
+        // Phantom unacknowledged share never hides the loss from `repairs_due`.
         assert_eq!(r.repairs_due(&key), vec![0]);
 
-        // Inside the acknowledgement window, overlapping repair is still refused.
-        let (share2, fresh2, root2) = build_repair(25, 21);
+        let batch2 = enc.repair_symbols(25 - k, 5).unwrap();
+        let root2 = symbol_root(
+            &batch2
+                .iter()
+                .map(|x| (x.esi, symbol_leaf(&x.data)))
+                .collect::<Vec<_>>(),
+        );
+
+        // Inside the 3-epoch ack window (epoch 12), overlapping repair is still refused.
         assert_eq!(
             r.record_repair(
                 &key,
                 SegmentRepair {
                     segment: 0,
-                    new_shares: vec![share2],
-                    new_symbols: fresh2.clone(),
+                    new_shares: vec![Share {
+                        validator: addr(21),
+                        class: Class::Full,
+                        first_esi: 25,
+                        symbols: 5,
+                    }],
+                    new_symbols: batch2.clone(),
                     new_root: root2,
-                    witness: &valid_witness,
+                    witness: &witness,
                 },
-                100 + SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS - 1,
+                12,
             ),
             Err(RegistryError::BadRepair(
-                "segment already has an unsettled repair",
+                "segment already has an unsettled repair"
             ))
         );
 
-        // Once the ack deadline elapses, retiring unacknowledged repair shares
-        // clears the stale pending share without vacuously dropping lost shares.
-        let after_deadline = 100 + SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS;
-        assert_eq!(r.retire_unacknowledged_repairs(after_deadline), 1);
+        // Once the 3-epoch ack window elapses (epoch 13), `close_windows` retires the
+        // silent pending share, `settle_repairs` must NOT vacuously drop the lost share,
+        // and a replacement repair on responsive holder addr(21) succeeds cleanly.
+        r.close_windows(13);
         assert_eq!(r.settle_repairs(), 0);
         assert_eq!(r.repairs_due(&key), vec![0]);
 
-        // A fresh repair to holder 21 now succeeds and settles upon ack.
         r.record_repair(
             &key,
             SegmentRepair {
                 segment: 0,
-                new_shares: vec![share2],
-                new_symbols: fresh2,
+                new_shares: vec![Share {
+                    validator: addr(21),
+                    class: Class::Full,
+                    first_esi: 25,
+                    symbols: 5,
+                }],
+                new_symbols: batch2,
                 new_root: root2,
-                witness: &valid_witness,
+                witness: &witness,
             },
-            after_deadline,
+            13,
         )
         .unwrap();
-        r.ack(&key, &addr(21)).unwrap();
+        assert_eq!(r.ack(&key, &addr(21)).unwrap(), 1);
         assert_eq!(r.settle_repairs(), 1);
         assert!(r.repairs_due(&key).is_empty());
+    }
+
+    #[test]
+    fn paid_view_receipts_cap_per_payer_and_reap_stale_entries() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"payer cap and eager reaping");
+        let key = up.record.commitment;
+        let lifetime = PAID_VIEW_RETENTION_EPOCHS
+            .saturating_mul(2)
+            .saturating_add(20);
+        r.register_object(addr(1), up.record, shares, 1, lifetime)
+            .unwrap();
+
+        for i in 0..MAX_PAID_VIEWS_PER_PAYER_OBJECT {
+            let mut rid = [0xC0; 32];
+            rid[0] = i as u8;
+            r.record_paid_view(addr(7), key, rid, MIN_PAID_VIEW_FEE_ATOMS, 2)
+                .unwrap();
+        }
+        assert_eq!(
+            r.record_paid_view(addr(7), key, [0xEE; 32], MIN_PAID_VIEW_FEE_ATOMS, 2),
+            Err(RegistryError::InvalidPaidView(
+                "paid view receipt limit reached for payer on object"
+            ))
+        );
+        // Once past retention, `record_paid_view` eagerly reaps stale receipts even
+        // before `expire` runs.
+        r.record_paid_view(
+            addr(7),
+            key,
+            [0xEF; 32],
+            MIN_PAID_VIEW_FEE_ATOMS,
+            3 + PAID_VIEW_RETENTION_EPOCHS,
+        )
+        .unwrap();
+        assert_eq!(r.paid_views.len(), 1);
     }
 }
