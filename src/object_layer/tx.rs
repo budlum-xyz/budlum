@@ -90,15 +90,15 @@ impl ObjectLayerActivation {
     #[must_use]
     pub fn is_open_for_chain_at(&self, chain_id: u64, height: u64) -> bool {
         chain_id
-            != crate::core::chain_config::Network::Mainnet
+            == crate::core::chain_config::Network::Devnet
                 .chain_id()
                 .value()
             && self.is_open_at(height)
     }
 }
 
-/// Active on testnet (`45261`) and devnet (`45262`) from genesis (height 0);
-/// mainnet (`45260`) stays gated by chain-id check until launch sign-off.
+/// Active on devnet (`45262`) from genesis (height 0); public testnet (`45261`)
+/// and mainnet (`45260`) stay gated by chain-id check until launch activation.
 pub const ACTIVATION: ObjectLayerActivation = ObjectLayerActivation { height: Some(0) };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

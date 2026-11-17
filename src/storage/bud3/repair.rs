@@ -34,8 +34,11 @@ pub const REPAIR_TAG: &[u8] = b"BDLM_BUD3_REPAIR_V1";
 /// Domain tag binding independent Full-validator repair attestations.
 pub const REPAIR_ATTEST_DOMAIN: &[u8] = b"BDLM_BUD3_REPAIR_ATTEST_V1";
 
-/// Minimum independent active Full-validator attestations required when repair
-/// does not carry an inline Merkle-verified symbol witness.
+/// Legacy fixed attestation count retained for wire and tooling compatibility.
+///
+/// Consensus admission rejects attestation-only repairs until the witness carries
+/// a seat- or stake-weighted quorum certificate. Three signatures are not a
+/// finality threshold.
 pub const MIN_REPAIR_ATTESTATIONS: usize = 3;
 
 /// Maximum inline Merkle-verified witness symbols accepted in one `RecordRepair` tx.
@@ -70,8 +73,9 @@ pub enum RepairWitness {
     /// Merkle-verified live symbols from existing `obj.roots` entries that decode
     /// the segment and deterministically reproduce `new_symbols`.
     ProvenSymbols(Vec<RepairSymbolProof>),
-    /// Independent Full-validator ML-DSA-65 attestations over `new_root` bound
-    /// to the segment's original committed root (`>= MIN_REPAIR_ATTESTATIONS`).
+    /// Legacy independent Full-validator ML-DSA-65 attestations over `new_root`.
+    /// The variant remains decodable, but consensus refuses it until it includes
+    /// a seat- or stake-weighted quorum certificate.
     ValidatorAttestations(Vec<RepairAttestation>),
 }
 
