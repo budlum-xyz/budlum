@@ -29,8 +29,10 @@ pub trait BudlumApi {
     /// Inclusion or absence proof for one account.
     ///
     /// `bud_getBalance` returns what this node says; this returns what it can
-    /// prove. The bundle carries its own root, which is the proof-bearing
-    /// trie root and *not* the consensus state root.
+    /// prove. The bundle carries the consensus accounts root (folded into the
+    /// block state root body) and the height it was drawn at, so a light
+    /// client anchors the claim to a finalized block and verifies the proof
+    /// against that root.
     #[method(name = "bud_getAccountProof")]
     async fn get_account_proof(
         &self,
