@@ -4411,11 +4411,12 @@ impl ChainActor {
                     response,
                 } => {
                     let _ = response.send(
-                        crate::registry::check_receipt(
+                        crate::registry::check_receipt_at(
                             &self.blockchain.state.identity,
                             &receipt,
                             &requester,
                             &document,
+                            self.blockchain.state.epoch_index,
                         )
                         .map_err(|e| e.to_string()),
                     );
