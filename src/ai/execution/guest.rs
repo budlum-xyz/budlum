@@ -876,6 +876,10 @@ pub fn i32_to_field(v: i32) -> u64 {
 
 /// Decode a Goldilocks field element back to i32, rejecting anything that is
 /// not a faithful i32 in the signed embedding.
+///
+/// # Errors
+///
+/// Returns an error if `f` is non-canonical or outside the signed `i32` embedding.
 pub fn field_to_i32(f: u64) -> Result<i32, String> {
     if f >= GOLDILOCKS_P {
         return Err(format!("field element {f} is not canonical"));
@@ -906,6 +910,11 @@ pub struct GuestMemoryLayout {
 }
 
 impl GuestMemoryLayout {
+    /// Computes the deterministic guest memory layout for `spec`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `spec` validation fails.
     pub fn for_spec(spec: &FixedPointMlpSpec) -> Result<Self, String> {
         spec.validate()?;
         let input_base = 0usize;
@@ -954,6 +963,10 @@ impl GuestMemoryLayout {
 /// Without this the guest reads zeroes: the previous version documented a
 /// layout that nothing ever populated, so every proof attested to a forward
 /// pass over an all-zero model.
+///
+/// # Errors
+///
+/// Returns an error if `spec`, input length, or buffer size is invalid.
 pub fn setup_guest_memory(
     memory: &mut [u8],
     spec: &FixedPointMlpSpec,
@@ -994,6 +1007,10 @@ pub fn setup_guest_memory(
 }
 
 /// Read the guest's output words back as i32.
+///
+/// # Errors
+///
+/// Returns an error if `memory` is too short or any output word is not a valid `i32`.
 pub fn read_guest_output(
     memory: &[u8],
     layout: &GuestMemoryLayout,
@@ -1044,6 +1061,10 @@ fn emit_load_half(prog: &mut Vec<u64>) {
 ///
 /// Kept exact: [`build_matmul_guest_program`] asserts the emitted length
 /// equals this estimate, so the two cannot drift apart.
+///
+/// # Errors
+///
+/// Returns an error if `spec` validation fails.
 pub fn estimate_guest_instruction_count(spec: &FixedPointMlpSpec) -> Result<usize, String> {
     spec.validate()?;
     // Prologue: Load 0, Sub->zero, Load 1, 7 rows for FIELD_HALF, 1 row to
@@ -1094,6 +1115,10 @@ pub fn estimate_guest_instruction_count(spec: &FixedPointMlpSpec) -> Result<usiz
 /// [`setup_guest_memory`] writes, accumulates each neuron in the Goldilocks
 /// field, applies a branchless ReLU on hidden layers, stores the outputs and
 /// folds them into a Poseidon commitment that is logged before `Halt`.
+///
+/// # Errors
+///
+/// Returns an error if `spec` validation or instruction encoding fails.
 pub fn build_matmul_guest_program(spec: &FixedPointMlpSpec) -> Result<Vec<u64>, String> {
     let expected_ops = estimate_guest_instruction_count(spec)?;
     let layout = GuestMemoryLayout::for_spec(spec)?;
@@ -1223,6 +1248,11 @@ fn bias_count(dims: &[u16]) -> usize {
     dims.iter().skip(1).map(|d| *d as usize).sum()
 }
 
+/// Computes the canonical `Keccak-256` program hash for the compiled matmul guest.
+///
+/// # Errors
+///
+/// Returns an error if compiling the guest program for `spec` fails.
 pub fn matmul_program_hash(spec: &FixedPointMlpSpec) -> Result<[u8; 32], String> {
     let words = build_matmul_guest_program(spec)?;
     // Registration and proofs have to name the guest program the same way, and
@@ -1238,6 +1268,10 @@ pub fn matmul_program_hash(spec: &FixedPointMlpSpec) -> Result<[u8; 32], String>
 /// This is the bridge that was missing: the guest program, the memory layout
 /// and the host evaluator are now checked against each other instead of each
 /// being tested in isolation.
+///
+/// # Errors
+///
+/// Returns an error if compilation, memory setup, VM execution, or output decoding fails.
 pub fn run_matmul_guest(
     spec: &FixedPointMlpSpec,
     input: &[i32],

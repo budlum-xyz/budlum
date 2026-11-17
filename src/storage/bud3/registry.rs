@@ -1207,6 +1207,10 @@ impl Bud3Registry {
     }
 
     /// Check grant issuance without changing registry state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] if the NFT, object, signer, tag, or grant row is invalid.
     pub fn validate_view_grant(
         &self,
         nft: &NftId,
@@ -1233,6 +1237,10 @@ impl Bud3Registry {
     }
 
     /// Issue a view grant through the canonical issuance path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] if [`Self::validate_view_grant`] fails.
     pub fn issue_grant(
         &mut self,
         nft: &NftId,
@@ -1381,6 +1389,10 @@ impl Bud3Registry {
 
     /// Admit and record a Mobile validator's declared custody quota under `limits`.
     /// Convenience: exposed for Mobile validator quota updates and RPC admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::BadQuota`] if `quota_bytes` violates `limits`.
     pub fn set_mobile_custody_quota(
         &mut self,
         validator: Address,
@@ -1403,6 +1415,10 @@ impl Bud3Registry {
     /// References move at proposal, but old shares and their endowment stay
     /// until every new share is acknowledged. The old commitment then remains
     /// as a finalized redirect instead of becoming a deletion tombstone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] if the object, authorization, shares, or attestations are invalid.
     pub fn replace_object(
         &mut self,
         proposer: (Address, u64),
