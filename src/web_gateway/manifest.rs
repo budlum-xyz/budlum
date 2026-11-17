@@ -106,7 +106,7 @@ impl SiteManifest {
     /// # Errors
     ///
     /// Returns a human-readable error if the bytes are not valid JSON or the
-    /// manifest declares more than [`MAX_MANIFEST_ROUTES`] routes.
+    /// manifest declares more than `MAX_MANIFEST_ROUTES` routes.
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, String> {
         let manifest: Self = serde_json::from_slice(bytes).map_err(|e| format!("manifest: {e}"))?;
         if manifest.routes.len() > MAX_MANIFEST_ROUTES {
