@@ -327,8 +327,8 @@ mod tests {
 
     #[test]
     fn listed_content_refuses_a_read_with_no_grant() {
-        // The finding, stated as a test: before this, knowing the manifest id
-        // was enough to fetch bytes someone was selling.
+        // Security invariant: knowing the manifest id is not
+        // sufficient to fetch bytes someone is selling without a grant.
         let mut gate = ProtectedContent::new();
         gate.bind(mid(1), aid(9), addr(5), addr(5)).unwrap();
 

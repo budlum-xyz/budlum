@@ -3186,7 +3186,7 @@ mod tests {
     /// them a genuine set of signatures captured over one commitment could be
     /// replayed under a commitment whose `state_root` (and tx/event roots)
     /// were swapped, and the fabricated external root would be anchored with
-    /// real signatures (Review 9 - finality proofs do not bind the roots).
+    /// real signatures; finality proofs bind canonical roots deterministically.
     #[test]
     fn poa_signatures_do_not_replay_under_swapped_roots() {
         use crate::crypto::primitives::KeyPair;

@@ -10,7 +10,7 @@
 //! flip (the muxer picking the patched backend, DNSSEC not being compiled in,
 //! the node never serving DNS). None of that is needed any more: libp2p 0.56
 //! pinned the vulnerable versions, and pinning the 0.57.0 tree moves the graph
-//! to yamux 0.14.0 and hickory 0.26.1, so the findings are **fixed** rather
+//! to yamux 0.14.0 and hickory 0.26.1, so vulnerabilities are **fixed** rather
 //! than argued away.
 //!
 //! These tests now guard the fix instead of the excuse. They fail if the graph
@@ -263,7 +263,7 @@ mod tests {
     /// The three advisories must not reappear in any scanner's ignore list.
     ///
     /// This is the canary for the whole change: they are patched, so ignoring
-    /// them would be silencing a finding that is already fixed, and would
+    /// them would silence a vulnerability that is already fixed, and would
     /// hide a regression if the graph ever slid back.
     #[test]
     fn patched_advisories_are_not_ignored_anywhere() {
@@ -292,7 +292,7 @@ mod tests {
             ),
         ];
 
-        // Only lines that actually suppress a finding count; the files explain
+        // Only lines that actually suppress an advisory count; the files explain
         // the history in comments and that has to stay allowed.
         for (name, body) in configs {
             for line in body.lines() {

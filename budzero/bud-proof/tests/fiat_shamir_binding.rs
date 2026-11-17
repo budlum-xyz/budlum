@@ -143,8 +143,7 @@ fn both_sides_absorb_the_same_items_before_the_first_challenge() {
     }
 
     // public_values must be the *last* thing absorbed before the challenges.
-    // Anything absorbed after it would be outside the binding that the six-zkVM
-    // findings were all about.
+    // Anything absorbed after it would be outside the cryptographic binding.
     for (name, body) in [("prover", PROVER), ("verifier", VERIFIER)] {
         let lines = code(body);
         let stop = lines

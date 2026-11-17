@@ -629,7 +629,7 @@ mod tests {
         //
         // The count moved from 22 when the two delegation bounds
         // (`min_delegation_amount`, `max_delegations_per_validator`) were
-        // added: the entry-side half of the delegation-flood finding. Both are
+        // added: entry-side delegation-flood protection. Both are
         // economic values, so they belong in `RegistryParams` rather than in
         // constants, and the shape change is the deliberate one the note above
         // describes.

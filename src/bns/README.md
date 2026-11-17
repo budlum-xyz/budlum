@@ -223,7 +223,7 @@
     (`fill_per_minute`), and the process logs its counters once a minute. `serve`
     and `tls` live in the binary, not in `src/web_gateway/`.
 
-### Proof hardening (review findings)
+### Proof hardening (cryptographic invariants)
 
 The `bns-gate` list also names the two tests below. Both close a hole where a
 proof was well formed, opened to the header root, and still said something the

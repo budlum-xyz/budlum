@@ -5,8 +5,8 @@ root `README.md` is only a dashboard; the maturity and risk warnings live here.
 
 ## Status
 
-- **Maturity:** F10.1 and F10.2 shipped, closing the H4 spoofed-authorization
-  finding. F10.3, the sync committee light client, is implemented and reachable
+- **Maturity:** F10.1 and F10.2 shipped, enforcing authentication invariants.
+  F10.3, the sync committee light client, is implemented and reachable
   from the production verification path; see the warnings below for what it does
   and does not cover.
 - **Where the code is:** `src/cross_domain/evm/`, holding `rlp.rs` (an in-tree

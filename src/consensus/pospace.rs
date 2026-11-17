@@ -325,7 +325,7 @@ mod tests {
 
         // Zero response must fail.
         assert!(!engine.verify_response("validator-2", &challenge, &[0u8; 32]));
-        // Arbitrary non-zero forged response must fail (closes CWE-345).
+        // Arbitrary non-zero forged response must fail constant-time authentication.
         assert!(!engine.verify_response("validator-2", &challenge, &[0xAB; 32]));
         // Unknown validator must fail.
         assert!(!engine.verify_response("unknown", &challenge, &valid_response));
