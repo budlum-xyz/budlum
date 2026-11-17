@@ -4315,6 +4315,7 @@ impl AccountState {
                     .poa_compliance
                     .freeze_suspicious(
                         crate::registry::ComplianceDomainKind::PoA,
+                        req.domain_id,
                         req.admin,
                         req.target,
                         req.reason_hash,
@@ -4334,6 +4335,7 @@ impl AccountState {
                     .poa_compliance
                     .unfreeze(
                         crate::registry::ComplianceDomainKind::PoA,
+                        req.domain_id,
                         req.admin,
                         req.target,
                         req.reason_hash,
@@ -7255,6 +7257,7 @@ mod tests {
         st.poa_compliance
             .freeze_suspicious(
                 crate::registry::ComplianceDomainKind::PoA,
+                0,
                 Address::from([1u8; 32]),
                 Address::from([2u8; 32]),
                 [7u8; 32],

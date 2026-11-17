@@ -76,9 +76,10 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::persistence::state_trie::AccountProofBundle>>,
     ),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
-    /// Run the aggregation side of the node for this address; the answer
-    /// is the tick interval in milliseconds when the chain has the layer on.
-    EnableAggregator(Address, oneshot::Sender<Option<u64>>),
+    /// Run the aggregation side of the node with this ML-DSA-87 seed; the
+    /// answer is the tick interval in milliseconds when the chain has the
+    /// layer on.
+    EnableAggregator(zeroize::Zeroizing<[u8; 32]>, oneshot::Sender<Option<u64>>),
     /// An object from `agg/object` with the transaction it authorizes.
     AggObject(
         Vec<u8>,
@@ -736,14 +737,17 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
-    /// Run the aggregation side of the node, proving for `aggregator`.
+    /// Run the aggregation side of the node, proving with `signer_seed`.
     /// Returns the tick interval in milliseconds when the chain has the
     /// layer on, `None` otherwise.
-    pub async fn enable_aggregator(&self, aggregator: Address) -> Option<u64> {
+    pub async fn enable_aggregator(
+        &self,
+        signer_seed: zeroize::Zeroizing<[u8; 32]>,
+    ) -> Option<u64> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(ChainCommand::EnableAggregator(aggregator, tx))
+            .send(ChainCommand::EnableAggregator(signer_seed, tx))
             .await;
         rx.await.unwrap_or(None)
     }
@@ -3096,8 +3100,8 @@ impl ChainActor {
                             .map_err(|e| e.to_string()),
                     );
                 }
-                ChainCommand::EnableAggregator(aggregator, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.enable_aggregator(aggregator));
+                ChainCommand::EnableAggregator(signer_seed, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.enable_aggregator(signer_seed));
                 }
                 ChainCommand::AggObject(envelope, transaction, res_tx) => {
                     let _ = res_tx.send(self.blockchain.receive_object(&envelope, transaction));

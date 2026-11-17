@@ -173,17 +173,18 @@ fn compliance_freeze_can_be_lifted() {
     let mut registry = PoaComplianceRegistry::new();
     let (admin, subject) = (fixture_addr(1), fixture_addr(2));
     let domain = ComplianceDomainKind::PoA;
+    let domain_id = 3u32;
     registry
-        .freeze_suspicious(domain, admin, subject, [7u8; 32], 10)
+        .freeze_suspicious(domain, domain_id, admin, subject, [7u8; 32], 10)
         .expect("freeze");
-    assert!(registry.is_frozen(domain, &subject));
+    assert!(registry.is_frozen(domain, domain_id, &subject));
     registry
-        .unfreeze(domain, admin, subject, [8u8; 32], 11)
+        .unfreeze(domain, domain_id, admin, subject, [8u8; 32], 11)
         .expect("unfreeze");
-    assert!(!registry.is_frozen(domain, &subject));
+    assert!(!registry.is_frozen(domain, domain_id, &subject));
     assert_eq!(registry.frozen_count(), 0);
     assert!(registry
-        .freeze_suspicious(domain, Address::zero(), subject, [7u8; 32], 12)
+        .freeze_suspicious(domain, domain_id, Address::zero(), subject, [7u8; 32], 12)
         .is_err());
 }
 
