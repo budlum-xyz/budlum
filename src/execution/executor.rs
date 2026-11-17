@@ -6278,8 +6278,11 @@ mod tests {
 
         let mut state = AccountState::new();
         let validator = Address::from([0xE2; 32]);
-        let base_stake = crate::core::chain_config::Network::from_chain_id(DEFAULT_CHAIN_ID)
+        let floor = crate::core::chain_config::Network::from_chain_id(DEFAULT_CHAIN_ID)
             .map_or(1_000, |n| n.min_stake().max(1_000));
+        // Keep headroom above `min_stake` so the partial self-unstake below
+        // remains an active validator while clamping its snapshotted weight.
+        let base_stake = floor.saturating_add(1_000);
         let topup = 600;
         state.add_balance(
             &validator,
