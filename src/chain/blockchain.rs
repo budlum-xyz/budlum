@@ -10590,10 +10590,10 @@ impl Blockchain {
         String,
     > {
         let resp = self.fetch_verified_bud3_symbols(holder, object, segment, first_esi, count)?;
-        let entry = self
+        let (_, entry) = self
             .state
             .bud3_registry
-            .object(object)
+            .resolve_live_object(object)
             .ok_or_else(|| "unknown or tombstoned B.U.D. 3.0 object".to_string())?;
         let roots = entry
             .roots
@@ -10617,7 +10617,11 @@ impl Blockchain {
     ) -> Result<Vec<u8>, crate::storage::bud3::view::ViewBud3Error> {
         use crate::storage::bud3::content_id::ContentIdKind;
         use crate::storage::bud3::view::{fallback_decode_public, ViewBud3Error};
-        let Some(entry) = self.state.bud3_registry.object(&receipt.object) else {
+        let Some((_, entry)) = self
+            .state
+            .bud3_registry
+            .resolve_live_object(&receipt.object)
+        else {
             return Err(ViewBud3Error::UnknownObject);
         };
         if entry.record.content_id.kind == ContentIdKind::Sealed {
@@ -10651,16 +10655,16 @@ impl Blockchain {
                 "symbol count must be within 1..={MAX_SYMBOLS_PER_REQUEST}"
             ));
         }
-        let entry = self
+        let (live_key, entry) = self
             .state
             .bud3_registry
-            .object(object)
+            .resolve_live_object(object)
             .ok_or_else(|| "unknown or tombstoned B.U.D. 3.0 object".to_string())?;
         let mut by_esi: BTreeMap<u32, VerifiedSymbolItem> = BTreeMap::new();
         let mem = self.bud3_symbols.verified_range(
             &self.state.bud3_registry,
             holder,
-            object,
+            &live_key,
             segment,
             first_esi,
             count,
@@ -10670,7 +10674,7 @@ impl Blockchain {
         }
         if let Some(ref store) = self.storage {
             let disk_items = store
-                .get_bud3_verified_symbols(holder, object, segment, first_esi, count)
+                .get_bud3_verified_symbols(holder, &live_key, segment, first_esi, count)
                 .map_err(|e| format!("failed to read persisted symbols: {e}"))?;
             for item in disk_items {
                 verify_item_against_entry(entry, holder, segment, &item).map_err(|e| {
@@ -10724,7 +10728,7 @@ impl crate::storage::bud3::view::NetworkSymbolSource for BlockchainSymbolSource<
         use crate::storage::bud3::symbol_protocol::{
             verify_item_against_entry, MAX_SYMBOLS_PER_REQUEST,
         };
-        let Some(entry) = self.registry.object(object) else {
+        let Some((live_key, entry)) = self.registry.resolve_live_object(object) else {
             return Vec::new();
         };
         if count == 0 {
@@ -10735,15 +10739,20 @@ impl crate::storage::bud3::view::NetworkSymbolSource for BlockchainSymbolSource<
         let mut remaining = count;
         while remaining > 0 {
             let chunk = remaining.min(MAX_SYMBOLS_PER_REQUEST);
-            let mem_resp =
-                self.symbols
-                    .verified_range(self.registry, holder, object, segment, cursor, chunk);
+            let mem_resp = self.symbols.verified_range(
+                self.registry,
+                holder,
+                &live_key,
+                segment,
+                cursor,
+                chunk,
+            );
             for item in mem_resp.items {
                 collected.insert(item.symbol.esi, item.symbol);
             }
             if let Some(store) = self.storage {
                 if let Ok(disk_items) =
-                    store.get_bud3_verified_symbols(holder, object, segment, cursor, chunk)
+                    store.get_bud3_verified_symbols(holder, &live_key, segment, cursor, chunk)
                 {
                     for item in disk_items {
                         if !collected.contains_key(&item.symbol.esi)

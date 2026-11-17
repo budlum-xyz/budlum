@@ -101,7 +101,8 @@ pub fn extract_object_from_frames(
     }
     const MAX_STREAM_SEGMENTS: usize = 1024;
     type GeomKey = (u32, usize, u32);
-    let mut by_segment: BTreeMap<u64, BTreeMap<GeomKey, Vec<&Bud3Frame>>> = BTreeMap::new();
+    let mut by_segment: BTreeMap<u64, BTreeMap<GeomKey, BTreeMap<u32, &Bud3Frame>>> =
+        BTreeMap::new();
     for frame in frames {
         let _ = u16::try_from(frame.data.len())
             .map_err(|_| TwoPathError::Frame(FrameWireError::BadGeometry))?;
@@ -113,7 +114,8 @@ pub fn extract_object_from_frames(
             .or_default()
             .entry((frame.segment_len, frame.data.len(), frame.source_symbols))
             .or_default()
-            .push(frame);
+            .entry(frame.esi)
+            .or_insert(frame);
     }
 
     let seg_count = u64::try_from(by_segment.len())
@@ -124,9 +126,10 @@ pub fn extract_object_from_frames(
             .remove(&expected_seg)
             .ok_or(TwoPathError::MissingSegment(expected_seg))?;
         let multi_geom = geom_map.len() > 1;
-        let mut candidates: Vec<(GeomKey, Vec<&Bud3Frame>)> = geom_map.into_iter().collect();
-        // Try the geometry with the highest frame count first so outlier rogue
-        // frames cannot preempt an honest majority stream.
+        let mut candidates: Vec<(GeomKey, BTreeMap<u32, &Bud3Frame>)> =
+            geom_map.into_iter().collect();
+        // Try the geometry with the highest unique-ESI count first so duplicate
+        // rogue-frame floods cannot preempt an honest majority stream.
         candidates.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
 
         let mut recovered: Option<Vec<u8>> = None;
@@ -162,7 +165,7 @@ pub fn extract_object_from_frames(
                 Err(e) => return Err(TwoPathError::Fountain(e)),
             };
             let mut push_ok = true;
-            for frame in group {
+            for frame in group.into_values() {
                 if !dec.is_done() {
                     if let Err(e) = dec.push((*frame).clone().into_symbol(), meter) {
                         if multi_geom {
@@ -460,6 +463,30 @@ mod tests {
 
         let mut meter = Meter::for_object(4 << 20);
         let recovered = extract_object_from_frames(&mixed, &mut meter).unwrap();
+        assert_eq!(recovered.public_content().unwrap(), content);
+    }
+
+    #[test]
+    fn extract_object_from_frames_defeats_duplicate_rogue_frame_flood() {
+        use super::super::fountain::SymbolKind;
+        use super::super::frame::Bud3Frame;
+
+        let content = b"duplicate rogue frames must never outweigh honest frames".repeat(12);
+        let obj = Object::raw_public(&content);
+        let honest_frames = frames_for_object_bytes(&obj.encode(), &FAST_PROFILE, 3).unwrap();
+        let rogue = Bud3Frame {
+            kind: SymbolKind::Source,
+            segment: 0,
+            segment_len: honest_frames[0].segment_len.saturating_add(37),
+            esi: 0,
+            source_symbols: 99,
+            data: vec![0xAA; 37],
+        };
+        let mut flood = vec![rogue; 64];
+        flood.extend(honest_frames);
+
+        let mut meter = Meter::for_object(4 << 20);
+        let recovered = extract_object_from_frames(&flood, &mut meter).unwrap();
         assert_eq!(recovered.public_content().unwrap(), content);
     }
 }
