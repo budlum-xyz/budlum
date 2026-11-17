@@ -25,7 +25,7 @@ pub const POLKAVM_JIT_ENABLED: bool = false;
 /// Budlum testnet chain ID (`Section 1.5`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed activation height on testnet `45261` (open from block zero).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 pub const PROPOSED_POLKAVM_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing PolkaVM code blobs and contract key-value storage.
@@ -333,11 +333,11 @@ impl Default for PolkaVmWorker {
 }
 
 impl PolkaVmWorker {
-    /// Open on testnet `45261` from [`PROPOSED_POLKAVM_ACTIVATION_HEIGHT`] (`0`).
+    /// Default public-testnet posture: closed until an explicit activation height.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            testnet_activation_height: Some(PROPOSED_POLKAVM_ACTIVATION_HEIGHT),
+            testnet_activation_height: None,
         }
     }
 
@@ -579,7 +579,7 @@ mod tests {
     /// Directive IP-53 conformance gate (1/5): `uel_conformance_polkavm`.
     #[test]
     fn uel_conformance_polkavm() {
-        let mut worker = PolkaVmWorker::new();
+        let mut worker = PolkaVmWorker::with_activation_height(Some(0));
         let slot = [0x07u8; 32];
         let prog = PolkaVmProgram {
             constructor: vec![
@@ -793,7 +793,7 @@ mod tests {
                 },
             ],
         };
-        let mut worker = PolkaVmWorker::new();
+        let mut worker = PolkaVmWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(5_000_000);
         let Ok(alice) = EeIdentity::new(EeId::POLKAVM, vec![0x11; 32]) else {
             panic!("alice")

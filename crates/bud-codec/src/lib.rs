@@ -71,6 +71,16 @@ pub const fn is_open(id: CodecId) -> bool {
     registry::is_registered(id)
 }
 
+/// Whether new testnet objects may select `id` at launch.
+///
+/// Expansion codecs remain decodable so historical or explicitly activated
+/// data can be read, but they are not admitted into public-testnet consensus
+/// until their activation gate is set.
+#[must_use]
+pub const fn is_open_on_testnet(id: CodecId) -> bool {
+    is_open(id) && !matches!(id, 6 | 7 | 8 | 12 | 13 | 23 | 24 | 25 | 26)
+}
+
 /// Decode `payload` with `codec` to exactly `content_len` bytes.
 ///
 /// # Errors

@@ -3,8 +3,8 @@
 //!
 //! Executes deterministic TON Virtual Machine cell/stack bytecode in interpreter
 //! mode across `x86_64` and `aarch64`, persists contract cells and persistent `c4`
-//! data registers under `ee/tvm/state`, and opens at block zero on testnet `45261`
-//! (`PROPOSED_TVM_ACTIVATION_HEIGHT = 0`).
+//! data registers under `ee/tvm/state`, and remains closed by default on
+//! public testnet `45261` until an explicit activation height.
 
 #![forbid(unsafe_code)]
 
@@ -22,7 +22,7 @@ pub const AUDITED_TVM_SPDX: &str = "MIT OR Apache-2.0";
 /// Budlum testnet chain ID (`45261`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed testnet activation height (open from block zero on `45261`, `IP-53`).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 pub const PROPOSED_TVM_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing TVM code cells and persistent `c4` contract data.
@@ -336,11 +336,11 @@ impl Default for TvmWorker {
 }
 
 impl TvmWorker {
-    /// Open on testnet `45261` from [`PROPOSED_TVM_ACTIVATION_HEIGHT`] (`0`).
+    /// Default public-testnet posture: closed until an explicit activation height.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            testnet_activation_height: Some(PROPOSED_TVM_ACTIVATION_HEIGHT),
+            testnet_activation_height: None,
         }
     }
 
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn uel_conformance_tvm() {
         assert_eq!(AUDITED_TVM_SPDX, "MIT OR Apache-2.0");
-        let mut worker = TvmWorker::new();
+        let mut worker = TvmWorker::with_activation_height(Some(0));
         let contract = TvmContract {
             init: vec![
                 TvmInsn::PushInt(42),
@@ -813,7 +813,7 @@ mod tests {
                 },
             ],
         };
-        let mut worker = TvmWorker::new();
+        let mut worker = TvmWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(5_000_000);
         let Ok(alice) = EeIdentity::new(EeId::TVM, vec![0x2A; 32]) else {
             panic!("alice")

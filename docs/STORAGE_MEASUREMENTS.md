@@ -104,7 +104,7 @@ codec on chain `45261`).
 ## 4. Verification Locks
 
 - `cargo test --lib storage::bud3::compression_context::tests`
- - `compression_context_is_open_on_testnet`
+ - `compression_context_is_closed_on_testnet`
  - `bud3_context_codec_vectors`
  - `bud3_context_rotation_keeps_content_id`
  - `bud3_context_burned_corpus_leaves`
