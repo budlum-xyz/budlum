@@ -1,7 +1,7 @@
 //! Domains, cross-domain bridge, settlement, and testnet feature-matrix
 //! regression locks (`zk_domain_refuses_empty_halt_proof`,
 //! `bridge_e2e_lock_mint_burn_unlock`, `ethereum_sync_committee_is_open_on_testnet`,
-//! `shared_security_is_open_on_testnet`, `app_binding_is_open_on_devnet`,
+//! `shared_security_is_closed_on_testnet`, `app_binding_is_open_on_devnet`,
 //! and functional regression names).
 
 use crate::chain::blockchain::Blockchain;

@@ -4,8 +4,11 @@
 //! finality snapshot through `Validator::voting_weight`; the Ethereum-side
 //! `BudlumRegistrar` and `BudlumSlasher` contracts are.
 //!
-//! Mikoriza: shared security from restaked Ethereum collateral (testnet
-//!).
+//! Shared security from restaked Ethereum collateral.
+//!
+//! The implementation is active only on devnet. Public testnet and mainnet
+//! fail closed until their activation gates and external evidence rehearsals
+//! pass.
 //!
 //! An Ethereum operator that restakes (`EigenLayer` first; Symbiotic and
 //! Babylon are later sources behind the same [`SharedSecuritySource`] trait)
