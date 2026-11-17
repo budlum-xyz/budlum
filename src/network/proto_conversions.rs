@@ -1398,6 +1398,12 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     Some(pb::proto_transaction::TypePayload::StateUpdate(p)) => p,
                     _ => return Err("Missing or mismatched StateUpdate payload".into()),
                 };
+                if payload.state_updates.len() > crate::domain::types::MAX_STATE_UPDATES {
+                    return Err(format!(
+                        "StateUpdate exceeds maximum entry count ({})",
+                        crate::domain::types::MAX_STATE_UPDATES
+                    ));
+                }
                 let mut state_updates = Vec::with_capacity(payload.state_updates.len());
                 for entry in payload.state_updates {
                     if entry.address.len() != 32 {
@@ -1604,6 +1610,12 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     execution_dims: if payload.execution_dims.is_empty() {
                         None
                     } else {
+                        const MAX_PROTO_EXECUTION_DIMS: usize = 64;
+                        if payload.execution_dims.len() > MAX_PROTO_EXECUTION_DIMS {
+                            return Err(format!(
+                                "AiModelRegister execution_dims exceeds {MAX_PROTO_EXECUTION_DIMS}"
+                            ));
+                        }
                         let mut dims = Vec::with_capacity(payload.execution_dims.len());
                         for d in &payload.execution_dims {
                             dims.push(u16::try_from(*d).map_err(|_| {

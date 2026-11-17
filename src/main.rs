@@ -1937,12 +1937,16 @@ async fn main() {
                         .serve_connection(
                             io,
                             service_fn(move |req: Request<hyper::body::Incoming>| {
-                                let body = m.encode();
+                                let metrics = m.clone();
                                 async move {
                                     if req.uri().path() != "/metrics" {
                                         return Ok::<_, std::convert::Infallible>(
                                             Response::builder()
                                                 .status(404)
+                                                .header(
+                                                    hyper::header::CONTENT_TYPE,
+                                                    "text/plain; charset=utf-8",
+                                                )
                                                 .body(Full::new(Bytes::from("404 Not Found\n")))
                                                 .unwrap_or_else(|_| Response::new(Full::new(Bytes::from("404")))),
                                         );
@@ -1969,15 +1973,25 @@ async fn main() {
                                                 return Ok(
                                                     Response::builder()
                                                         .status(401)
+                                                        .header(
+                                                            hyper::header::CONTENT_TYPE,
+                                                            "text/plain; charset=utf-8",
+                                                        )
                                                         .body(Full::new(Bytes::from("401 Unauthorized: metrics require valid BUDLUM_METRICS_API_KEY\n")))
                                                         .unwrap_or_else(|_| Response::new(Full::new(Bytes::from("401")))),
                                                 );
                                             }
                                         }
                                     }
-                                    Ok::<_, std::convert::Infallible>(Response::new(Full::new(
-                                        Bytes::from(body),
-                                    )))
+                                    let body = metrics.encode();
+                                    let mut resp = Response::new(Full::new(Bytes::from(body)));
+                                    resp.headers_mut().insert(
+                                        hyper::header::CONTENT_TYPE,
+                                        hyper::header::HeaderValue::from_static(
+                                            "text/plain; version=0.0.4; charset=utf-8",
+                                        ),
+                                    );
+                                    Ok::<_, std::convert::Infallible>(resp)
                                 }
                             }),
                         )
