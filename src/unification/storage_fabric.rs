@@ -15,7 +15,7 @@ use crate::unification::{hash_domain_fields, unification_merkle_root, validate_s
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum URI length accepted by [`UniversalContentUri::parse`].
 pub const MAX_CONTENT_URI_LEN: usize = 512;
@@ -160,7 +160,7 @@ impl UniversalContentUri {
         }
         let locator = if scheme == "bns" {
             let lowered = locator_raw.to_ascii_lowercase();
-            if !lowered.ends_with(".bud")
+            if lowered.strip_suffix(".bud").is_none()
                 || !lowered
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
@@ -191,10 +191,10 @@ impl UniversalContentUri {
     /// Formats the canonical normalized URI string.
     #[must_use]
     pub fn canonical_string(&self) -> String {
-        match &self.sub_path {
-            Some(path) => format!("{}://{}/{path}", self.scheme, self.locator),
-            None => format!("{}://{}", self.scheme, self.locator),
-        }
+        self.sub_path.as_ref().map_or_else(
+            || format!("{}://{}", self.scheme, self.locator),
+            |path| format!("{}://{}/{path}", self.scheme, self.locator),
+        )
     }
 }
 
@@ -240,7 +240,7 @@ impl StorageReplica {
 pub struct UnifiedContentRecord {
     /// Canonical `SHA3-256` digest of the object bytes.
     pub sha3_256_digest: Hash32,
-    /// Cross-ecosystem `SHA-256` digest (used by IPFS CIDv1 / Filecoin / Arweave).
+    /// Cross-ecosystem `SHA-256` digest (used by IPFS `CIDv1` / Filecoin / Arweave).
     pub sha256_digest: Hash32,
     /// Exact plaintext object byte length.
     pub byte_len: u64,
@@ -337,6 +337,7 @@ pub enum StorageFabricError {
 /// Walrus, Swarm, Sia, Storj, and BNS Web3 names under one verified fabric.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnifiedStorageFabric {
+    #[serde(with = "crate::core::map_keys")]
     objects: BTreeMap<Hash32, UnifiedContentRecord>,
     locator_index: BTreeMap<String, Hash32>,
     bns_bindings: BTreeMap<String, Hash32>,
@@ -361,27 +362,67 @@ impl UnifiedStorageFabric {
     ) -> Result<Hash32, StorageFabricError> {
         validate_safe_label("content_type", &record.content_type, 96)
             .map_err(StorageFabricError::InvalidMetadata)?;
+        if record.sha3_256_digest == [0u8; 32] || record.sha256_digest == [0u8; 32] {
+            return Err(StorageFabricError::InvalidMetadata(String::from(
+                "content digests must be non-zero",
+            )));
+        }
         if record.replicas.is_empty() || record.replicas.len() > MAX_REPLICAS_PER_OBJECT {
             return Err(StorageFabricError::ReplicaLimitExceeded);
         }
+        let digest = record.sha3_256_digest;
+        let mut seen_uris: BTreeSet<String> = BTreeSet::new();
         for replica in &record.replicas {
+            if replica.domain_id == 0 {
+                return Err(StorageFabricError::InvalidMetadata(String::from(
+                    "replica domain_id must be non-zero",
+                )));
+            }
             validate_safe_label("native_locator", &replica.native_locator, 128)
                 .map_err(StorageFabricError::InvalidMetadata)?;
-            let parsed = UniversalContentUri::parse(&replica.uri())?;
+            let uri = replica.uri();
+            let parsed = UniversalContentUri::parse(&uri)?;
             let _ = parsed.canonical_string();
+            if !seen_uris.insert(uri.clone()) {
+                return Err(StorageFabricError::InvalidMetadata(format!(
+                    "duplicate replica URI `{uri}`"
+                )));
+            }
+            if let Some(&existing_owner) = self.locator_index.get(&uri) {
+                if existing_owner != digest {
+                    return Err(StorageFabricError::InvalidMetadata(format!(
+                        "replica URI `{uri}` is already bound to a different content digest"
+                    )));
+                }
+            }
         }
-        if !self.objects.contains_key(&record.sha3_256_digest)
-            && self.objects.len() >= MAX_FABRIC_OBJECTS
-        {
+        if !self.objects.contains_key(&digest) && self.objects.len() >= MAX_FABRIC_OBJECTS {
             return Err(StorageFabricError::FabricFull);
         }
-        let digest = record.sha3_256_digest;
         let record_hash = record.record_hash();
+        // Prune stale locators if updating an existing object's replica list.
+        if let Some(previous) = self.objects.get(&digest) {
+            for old_replica in &previous.replicas {
+                let old_uri = old_replica.uri();
+                if self.locator_index.get(&old_uri) == Some(&digest) {
+                    self.locator_index.remove(&old_uri);
+                }
+            }
+        }
         for replica in &record.replicas {
             self.locator_index.insert(replica.uri(), digest);
         }
         self.objects.insert(digest, record);
         Ok(record_hash)
+    }
+
+    /// Verifies that `candidate` bytes cryptographically match BOTH the
+    /// `SHA3-256` and `SHA-256` digests of the registered object for `digest`.
+    #[must_use]
+    pub fn verify_resolved_bytes(&self, digest: &Hash32, candidate: &[u8]) -> bool {
+        self.objects
+            .get(digest)
+            .is_some_and(|record| record.verify_bytes(candidate))
     }
 
     /// Binds a `bns://name.bud` Web3 site name to a verified content digest.
@@ -519,9 +560,12 @@ fn normalize_web3_asset_path(raw: &str) -> Result<String, StorageFabricError> {
             "web3 asset path exceeds 512-byte limit",
         )));
     }
-    if raw.bytes().any(|b| b < 0x20 || b == 0x7F || b == b'\\') {
+    if raw
+        .bytes()
+        .any(|b| b < 0x20 || b == 0x7F || b == b'\\' || b == b'%' || b == b'?' || b == b'#')
+    {
         return Err(StorageFabricError::InvalidUri(String::from(
-            "web3 asset path contains forbidden control or backslash bytes",
+            "web3 asset path contains forbidden control, delimiter, or encoding bytes",
         )));
     }
     if raw.contains("//") {
@@ -551,27 +595,21 @@ fn normalize_web3_asset_path(raw: &str) -> Result<String, StorageFabricError> {
 }
 
 fn classify_web3_mime(path: &str) -> &'static str {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".html") || lower.ends_with(".htm") {
-        "text/html; charset=utf-8"
-    } else if lower.ends_with(".css") {
-        "text/css; charset=utf-8"
-    } else if lower.ends_with(".js") || lower.ends_with(".mjs") {
-        "application/javascript; charset=utf-8"
-    } else if lower.ends_with(".json") {
-        "application/json; charset=utf-8"
-    } else if lower.ends_with(".wasm") {
-        "application/wasm"
-    } else if lower.ends_with(".svg") {
-        "image/svg+xml"
-    } else if lower.ends_with(".png") {
-        "image/png"
-    } else if lower.ends_with(".webp") {
-        "image/webp"
-    } else if lower.ends_with(".txt") || lower.ends_with(".md") {
-        "text/plain; charset=utf-8"
-    } else {
-        "application/octet-stream"
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js" | "mjs") => "application/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("txt" | "md") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
     }
 }
 
@@ -594,8 +632,13 @@ impl UnifiedStorageFabric {
     /// storage network (`Bud3`, `Arweave`, `Filecoin`, `Walrus`, etc.) so a
     /// user can pay from ANY mix of tokens on ANY blockchain via
     /// [`crate::unification::UniversalPaymentRouter`].
+    ///
+    /// Convenience: exposed for storage funding callers constructing cross-chain
+    /// storage intents.
     #[must_use]
-    pub fn build_storage_payment_intent(req: &StoragePaymentRequest) -> UniversalPaymentIntent {
+    pub const fn build_storage_payment_intent(
+        req: &StoragePaymentRequest,
+    ) -> UniversalPaymentIntent {
         UniversalPaymentIntent {
             payer_id: req.payer_id,
             merchant_id: req.storage_provider_id,
@@ -795,6 +838,9 @@ mod tests {
             "/assets\\evil.js",
             "/pkg//app.wasm",
             "/app\0.wasm",
+            "/%2e%2e/secret",
+            "/index.html?x=1",
+            "/index.html#frag",
         ] {
             assert!(
                 fabric
@@ -803,5 +849,45 @@ mod tests {
                 "traversal path `{bad}` must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn fabric_json_roundtrips_and_blocks_locator_hijack_and_zero_digest() {
+        let original = b"budlum verified object A";
+        let mut rec_a = UnifiedContentRecord::from_bytes(original, "text/plain");
+        rec_a.replicas = vec![StorageReplica {
+            network: StorageNetworkKind::Ipfs,
+            domain_id: StorageNetworkKind::Ipfs.default_domain_id(),
+            native_locator: String::from("bafysharedlocator123"),
+            verification: VerificationStrength::CryptographicHash,
+            latency_ms: 40,
+            available: true,
+        }];
+        let mut fabric = UnifiedStorageFabric::new();
+        fabric.register_object(rec_a.clone()).unwrap();
+
+        // JSON serialization roundtrip must succeed (Hash32 keys encoded via map_keys).
+        let json = serde_json::to_string(&fabric).expect("fabric serializes to JSON");
+        let decoded: UnifiedStorageFabric =
+            serde_json::from_str(&json).expect("fabric deserializes from JSON");
+        assert_eq!(decoded, fabric);
+        assert!(decoded.verify_resolved_bytes(&rec_a.sha3_256_digest, original));
+        assert!(!decoded.verify_resolved_bytes(&rec_a.sha3_256_digest, b"tampered"));
+
+        // Different content attempting to hijack the same replica URI must be rejected.
+        let mut rec_b = UnifiedContentRecord::from_bytes(b"malicious object B", "text/plain");
+        rec_b.replicas = rec_a.replicas.clone();
+        assert!(matches!(
+            fabric.register_object(rec_b),
+            Err(StorageFabricError::InvalidMetadata(_))
+        ));
+
+        // Zero digest record must be rejected.
+        let mut zero_rec = rec_a;
+        zero_rec.sha3_256_digest = [0u8; 32];
+        assert!(matches!(
+            fabric.register_object(zero_rec),
+            Err(StorageFabricError::InvalidMetadata(_))
+        ));
     }
 }

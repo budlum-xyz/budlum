@@ -4846,6 +4846,8 @@ impl BudlumApiServer for RpcServer {
             min_strength: crate::unification::VerificationStrength,
             #[serde(default)]
             asset_path: Option<String>,
+            #[serde(default)]
+            verify_payload_hex: Option<String>,
         }
         const fn default_rpc_storage_strength() -> crate::unification::VerificationStrength {
             crate::unification::VerificationStrength::AttestedDeal
@@ -4878,16 +4880,45 @@ impl BudlumApiServer for RpcServer {
                 .bind_bns_name(&name, digest)
                 .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
         }
+        let verify_payload = |sha3_digest: &[u8; 32]| -> Result<(), ErrorObjectOwned> {
+            if let Some(payload_hex) = req.verify_payload_hex.as_deref() {
+                let trimmed = payload_hex.strip_prefix("0x").unwrap_or(payload_hex);
+                if trimmed.len() > 131_072 {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "verify_payload_hex exceeds 64 KiB limit",
+                        None::<()>,
+                    ));
+                }
+                let payload_bytes = hex::decode(trimmed).map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("Invalid verify_payload_hex: {e}"),
+                        None::<()>,
+                    )
+                })?;
+                if !fabric.verify_resolved_bytes(sha3_digest, &payload_bytes) {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "candidate payload bytes failed SHA3-256/SHA-256 digest verification",
+                        None::<()>,
+                    ));
+                }
+            }
+            Ok(())
+        };
         if let Some(asset_path) = req.asset_path {
             let asset: crate::unification::Web3SiteAsset = fabric
                 .resolve_web3_asset(&req.uri, &asset_path, req.min_strength)
                 .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+            verify_payload(&asset.resolution.sha3_256_digest)?;
             return serde_json::to_value(asset)
                 .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>));
         }
         let resolved = fabric
             .resolve(&req.uri, req.min_strength)
             .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        verify_payload(&resolved.sha3_256_digest)?;
         serde_json::to_value(resolved)
             .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
     }
