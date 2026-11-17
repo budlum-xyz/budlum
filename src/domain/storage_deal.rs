@@ -767,6 +767,11 @@ pub struct StorageRegistry {
     results: BTreeMap<u64, ChallengeResult>,
     #[serde(default)]
     reallocations: BTreeMap<u64, StorageReallocationTicket>,
+    /// Deterministic O(log N) index of `failed_deal_id` across live `FailedDeal`
+    /// reallocation tickets so missed-challenge and expiry settlement avoid
+    /// scanning `reallocations` linearly for each failed deal.
+    #[serde(default)]
+    failed_deal_reallocations: std::collections::BTreeSet<u64>,
     #[serde(default)]
     #[serde(with = "crate::core::map_keys")]
     pub manifests: BTreeMap<ContentId, ContentManifest>,
@@ -1609,6 +1614,7 @@ impl StorageRegistry {
             && self.challenges.is_empty()
             && self.results.is_empty()
             && self.reallocations.is_empty()
+            && self.failed_deal_reallocations.is_empty()
             && self.settled_tickets.is_empty()
             && self.next_coding_audit_id == 0
             && self.coding_audits.is_empty()
@@ -1665,6 +1671,9 @@ impl StorageRegistry {
         }
         for ticket in self.reallocations.values() {
             hasher.update(bincode::serialize(ticket).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
+        }
+        for failed_deal_id in &self.failed_deal_reallocations {
+            hasher.update(failed_deal_id.to_le_bytes());
         }
         // The settled-ticket queue decides which tickets the next sweep
         // drops, so two registries with the same tickets and different
@@ -4371,6 +4380,32 @@ impl StorageRegistry {
         (program, expected_inputs)
     }
 
+    fn ensure_failed_deal_index(&mut self) {
+        if !self.failed_deal_reallocations.is_empty() || self.reallocations.is_empty() {
+            return;
+        }
+        // Populate from `reallocations` when upgrading a pre-index snapshot.
+        self.failed_deal_reallocations = self
+            .reallocations
+            .values()
+            .filter(|t| t.cause == ReallocationCause::FailedDeal)
+            .map(|t| t.failed_deal_id)
+            .collect();
+    }
+
+    fn has_failed_deal_reallocation(&mut self, deal_id: u64) -> bool {
+        self.ensure_failed_deal_index();
+        self.failed_deal_reallocations.contains(&deal_id)
+    }
+
+    fn record_failed_deal_reallocation(&mut self, ticket: StorageReallocationTicket) {
+        self.ensure_failed_deal_index();
+        if ticket.cause == ReallocationCause::FailedDeal {
+            self.failed_deal_reallocations.insert(ticket.failed_deal_id);
+        }
+        self.reallocations.insert(ticket.ticket_id, ticket);
+    }
+
     /// Opens the repair ticket for the slot a slashed deal leaves empty, once per
     /// failed deal, and returns its id.
     ///
@@ -4379,14 +4414,10 @@ impl StorageRegistry {
     /// the deal and opened nothing, and the free-slot sweep only reopens
     /// `Expired` slots, so that replica was never replaced.
     fn open_slash_reallocation(&mut self, deal_id: u64, now_epoch: u64) -> Option<u64> {
-        let deal = self.deals.get(&deal_id)?;
-        if self
-            .reallocations
-            .values()
-            .any(|ticket| ticket.names_failed_deal(deal_id))
-        {
+        if self.has_failed_deal_reallocation(deal_id) {
             return None;
         }
+        let deal = self.deals.get(&deal_id)?;
         let ticket_id = self.next_reallocation_id;
         self.next_reallocation_id = self.next_reallocation_id.saturating_add(1);
         let ticket = StorageReallocationTicket {
@@ -4406,7 +4437,7 @@ impl StorageRegistry {
             expected_holder: None,
             cause: ReallocationCause::FailedDeal,
         };
-        self.reallocations.insert(ticket_id, ticket);
+        self.record_failed_deal_reallocation(ticket);
         Some(ticket_id)
     }
 
@@ -4729,14 +4760,10 @@ impl StorageRegistry {
     /// Returns the ticket id, or `None` when a ticket for this deal already
     /// exists, which is what makes the sweep safe to run every block.
     pub fn open_expiry_reallocation(&mut self, deal_id: u64, now_epoch: u64) -> Option<u64> {
-        let deal = self.deals.get(&deal_id)?;
-        if self
-            .reallocations
-            .values()
-            .any(|ticket| ticket.names_failed_deal(deal_id))
-        {
+        if self.has_failed_deal_reallocation(deal_id) {
             return None;
         }
+        let deal = self.deals.get(&deal_id)?;
         let ticket_id = self.next_reallocation_id;
         self.next_reallocation_id = self.next_reallocation_id.saturating_add(1);
         let ticket = StorageReallocationTicket {
@@ -4759,7 +4786,7 @@ impl StorageRegistry {
             expected_holder: None,
             cause: ReallocationCause::FailedDeal,
         };
-        self.reallocations.insert(ticket_id, ticket);
+        self.record_failed_deal_reallocation(ticket);
         Some(ticket_id)
     }
 
@@ -4961,8 +4988,19 @@ impl StorageRegistry {
                     .reallocations
                     .get(&ticket_id)
                     .is_some_and(|t| t.status == ReallocationStatus::ActiveReplacement);
-                if settled && self.reallocations.remove(&ticket_id).is_some() {
-                    dropped += 1;
+                if settled {
+                    if let Some(removed) = self.reallocations.remove(&ticket_id) {
+                        if removed.cause == ReallocationCause::FailedDeal
+                            && !self.reallocations.values().any(|t| {
+                                t.cause == ReallocationCause::FailedDeal
+                                    && t.failed_deal_id == removed.failed_deal_id
+                            })
+                        {
+                            self.failed_deal_reallocations
+                                .remove(&removed.failed_deal_id);
+                        }
+                        dropped += 1;
+                    }
                 }
             }
         }
@@ -11293,5 +11331,38 @@ mod demand_driven_replication_tests {
             .expect("a correct recipe must be accepted");
         let id = manifest.manifest_id;
         (reg, id)
+    }
+
+    #[test]
+    fn failed_deal_reallocation_index_deduplicates_rehydrates_and_sweeps() {
+        let mut reg = StorageRegistry::new();
+        let manifest = ContentManifest::from_bytes_sliced(b"indexed-reallocation-proof!!", 16)
+            .expect("manifest");
+        let manifest_id = manifest.manifest_id;
+        let shard_id = manifest.shards[0].shard_id;
+        reg.register_manifest(&manifest);
+        reg.insert_test_deal(7, manifest_id, shard_id, 0, DealStatus::Slashed);
+
+        let first = reg.open_slash_reallocation(7, 5).expect("opens ticket");
+        assert!(reg.failed_deal_reallocations.contains(&7));
+        assert_eq!(
+            reg.open_slash_reallocation(7, 6),
+            None,
+            "O(log N) index rejects duplicate FailedDeal ticket"
+        );
+
+        // Simulate a pre-index deserialized snapshot with an empty index set.
+        reg.failed_deal_reallocations.clear();
+        assert_eq!(reg.open_slash_reallocation(7, 7), None);
+        assert!(reg.failed_deal_reallocations.contains(&7));
+
+        // Sweeping the settled ticket removes the index entry cleanly.
+        reg.reallocations.get_mut(&first).unwrap().status = ReallocationStatus::ActiveReplacement;
+        reg.settled_tickets.entry(10).or_default().push(first);
+        assert_eq!(
+            reg.sweep_settled_reallocations(10 + super::REALLOCATION_RECORD_RETENTION_EPOCHS),
+            1
+        );
+        assert!(!reg.failed_deal_reallocations.contains(&7));
     }
 }
