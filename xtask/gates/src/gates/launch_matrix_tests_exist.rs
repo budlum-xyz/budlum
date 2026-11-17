@@ -355,4 +355,28 @@ mod tests {
             expected
         );
     }
+
+    #[test]
+    fn machine_matrix_refuses_a_state_that_disagrees_with_its_test() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".quality")).unwrap();
+        std::fs::write(
+            dir.path().join("src/widget.rs"),
+            "#[test]\nfn widget_is_closed_on_testnet() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/codec.rs"),
+            "pub const fn codec_is_open_on_testnet(id: u8) -> bool { id != 9 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".quality/testnet-feature-matrix.toml"),
+            "version = 1\n\n[[feature]]\nid = \"widget\"\nstate = \"open\"\nevidence = \"widget_is_closed_on_testnet\"\n",
+        )
+        .unwrap();
+
+        assert!(super::run(dir.path()).is_err());
+    }
 }
