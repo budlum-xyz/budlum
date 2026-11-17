@@ -1,8 +1,8 @@
 //! Sui `TransactionData` + `Ed25519` intent-message foreign envelope decoder (
 //! `Section 8.6.2`, `ForeignScheme::SuiEd25519`).
 //!
-//! Proposed activation height `PROPOSED_SUI_ACTIVATION_HEIGHT` (`0` = open from
-//! block zero on testnet `45261`, `foreign_sui_is_open_on_testnet`), verifies
+//! Closed by default on public testnet `45261` until an explicit activation
+//! height (`foreign_sui_is_closed_on_testnet`), verifies
 //! `Ed25519` signatures (`0x00 || sig64 || pk32`) over `BLAKE2b-256([0, 0, 0] || tx_bytes)`,
 //! and derives the 32-byte Sui address `BLAKE2b-256(0x00 || pk32)`.
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 
-/// Proposed activation height for Sui foreign envelopes on testnet `45261` (`0` = open).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 ///
 /// Convenience: shared by Sui foreign-envelope policy and RPC read/submit hooks.
 pub const PROPOSED_SUI_ACTIVATION_HEIGHT: u64 = 0;
@@ -233,7 +233,7 @@ impl Default for SuiActivationPolicy {
 }
 
 impl SuiActivationPolicy {
-    /// Launch posture on testnet `45261`: open from `PROPOSED_SUI_ACTIVATION_HEIGHT` (`0`).
+    /// Launch posture on testnet `45261`: closed until explicit activation.
     ///
     /// Convenience: default launch policy for `Foreign::Sui`.
     #[must_use]
@@ -241,7 +241,7 @@ impl SuiActivationPolicy {
         Self {
             chain_id: BUDLUM_TESTNET_CHAIN_ID,
             block_height: 0,
-            activation_height: Some(PROPOSED_SUI_ACTIVATION_HEIGHT),
+            activation_height: None,
         }
     }
 

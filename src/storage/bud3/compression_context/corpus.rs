@@ -44,8 +44,8 @@ pub struct ContextActivation {
     pub height: Option<u64>,
 }
 
-/// Testnet configuration: shared compression context opens at genesis (height 0).
-pub const ACTIVATION: ContextActivation = ContextActivation { height: Some(0) };
+/// Public-testnet launch configuration: shared compression context is closed.
+pub const ACTIVATION: ContextActivation = ContextActivation { height: None };
 
 impl ContextActivation {
     /// Whether shared compression context is open at `block_height`.

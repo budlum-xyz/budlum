@@ -22,7 +22,7 @@ pub const AUDITED_UTXO_SPDX: &str = "MIT";
 /// Budlum testnet chain ID (`45261`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed testnet activation height (open from block zero on `45261`, `IP-53`).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 pub const PROPOSED_UTXO_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing locked UTXO spending scripts and unspent notes.
@@ -338,11 +338,11 @@ impl Default for UtxoScriptWorker {
 }
 
 impl UtxoScriptWorker {
-    /// Open on testnet `45261` from [`PROPOSED_UTXO_ACTIVATION_HEIGHT`] (`0`).
+    /// Default public-testnet posture: closed until an explicit activation height.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            testnet_activation_height: Some(PROPOSED_UTXO_ACTIVATION_HEIGHT),
+            testnet_activation_height: None,
         }
     }
 
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn uel_conformance_utxo() {
         assert_eq!(AUDITED_UTXO_SPDX, "MIT");
-        let mut worker = UtxoScriptWorker::new();
+        let mut worker = UtxoScriptWorker::with_activation_height(Some(0));
         let preimage = b"budlum-htlc-secret".to_vec();
         let hash: [u8; 32] = Sha256::digest(&preimage).into();
         let lock = UtxoLockScript {
@@ -746,7 +746,7 @@ mod tests {
         let Ok(blob) = encode_utxo_script(&lock) else {
             panic!("encode");
         };
-        let mut worker = UtxoScriptWorker::new();
+        let mut worker = UtxoScriptWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::UTXO, vec![0x41; 32]) else {
             panic!("caller");

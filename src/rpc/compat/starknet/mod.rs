@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::core::account::AccountState;
 use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 
-/// Proposed activation height for Cairo/Starknet on testnet `45261` (`0` = open).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 ///
 /// Convenience: shared by Starknet RPC policy and activation checks.
 pub const PROPOSED_CAIRO_ACTIVATION_HEIGHT: u64 = 0;
@@ -39,7 +39,7 @@ impl Default for StarknetActivationPolicy {
 }
 
 impl StarknetActivationPolicy {
-    /// Default launch posture on testnet `45261`: open from block `0`.
+    /// Default launch posture on testnet `45261`: closed until explicit activation.
     ///
     /// Convenience: default policy for Starknet RPC handlers.
     #[must_use]
@@ -47,7 +47,7 @@ impl StarknetActivationPolicy {
         Self {
             chain_id: BUDLUM_TESTNET_CHAIN_ID,
             block_height: 0,
-            activation_height: Some(PROPOSED_CAIRO_ACTIVATION_HEIGHT),
+            activation_height: None,
         }
     }
 
@@ -183,7 +183,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn starknet_rpc_is_closed_on_testnet_at_launch() {
+    fn starknet_rpc_is_closed_on_testnet() {
         let state = AccountState::new();
         let closed = handle_starknet_rpc(
             &state,

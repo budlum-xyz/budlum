@@ -63,16 +63,16 @@ impl Default for ParallelSchedulerPolicy {
 }
 
 impl ParallelSchedulerPolicy {
-    /// Default Testnet (`45261`) policy: cross-tx wave scheduler and intra-EE
-    /// Block-STM both active from genesis (`height = 0`), equality-verified (`IP-59`).
+    /// Default Testnet (`45261`) policy: both parallel layers are closed until
+    /// an explicit activation height and equality evidence are committed (`IP-59`).
     #[must_use]
     pub const fn testnet_launch() -> Self {
         Self {
             chain_id: BUDLUM_TESTNET_CHAIN_ID,
             block_height: 0,
-            activation_height: Some(0),
-            intra_ee_block_stm_enabled: true,
-            intra_ee_equality_verified: true,
+            activation_height: None,
+            intra_ee_block_stm_enabled: false,
+            intra_ee_equality_verified: false,
         }
     }
 
@@ -489,7 +489,7 @@ pub struct ParallelExecutionConfig {
 impl Default for ParallelExecutionConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             block_stm_enabled: false,
             worker_threads: 4,
         }
