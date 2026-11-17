@@ -564,11 +564,23 @@ fn ensure_serving_origin(state: &AccountState, domain_key: u32) -> Result<(), Se
             "app-binding origin domain is not active with finality anchoring",
         ));
     }
-    if domain.kind == crate::domain::types::ConsensusKind::PoW
+    // Only a domain the chain bootstrapped or permissioned may anchor an
+    // AppBinding. Every permissionlessly registered domain lets its registrant
+    // choose what the finality adapter compares against (the difficulty floor
+    // of a PoW domain, the authority set of a PoA one), so a commitment root on
+    // it is the registrant's own statement rather than an external chain's.
+    if domain.kind == crate::domain::ConsensusKind::PoW
         && crate::settlement::domains::anchor_recognized_chain(domain_key).is_none()
     {
         return Err(refused(
             "permissionless PoW domain cannot serve as an AppBinding trust anchor",
+        ));
+    }
+    let bootstrapped = crate::settlement::domains::anchor_recognized_chain(domain_key).is_some()
+        || state.poa_is_permissioned(domain_key);
+    if !bootstrapped {
+        return Err(refused(
+            "a permissionlessly registered domain cannot serve as an AppBinding trust anchor",
         ));
     }
     Ok(())
@@ -841,6 +853,11 @@ fn apply_claim(
     }
     if let Some(row) = state.settlement.app_binding.apps.get_mut(app_binding_id) {
         row.owner = payout;
+        // The manifest a permissionless registrant wrote is unattested: nobody
+        // proved it names this application's metadata. Proving the owner does
+        // not attest it either, so it is cleared here and the owner registers
+        // its own; the owner-override path accepts that without a new fee.
+        row.manifest_hash = [0u8; 32];
     }
     if swept > 0 {
         let mirror = state.get_or_create(&app.mirror_account);
@@ -1004,11 +1021,12 @@ pub fn execute_app_binding_tx(
                 .get(app.domain_key)
                 .filter(|domain| domain.is_active())
                 .ok_or_else(|| refused("the remote app binding's domain is not Active"))?;
-            if domain.kind == crate::domain::types::ConsensusKind::PoW
-                && crate::settlement::domains::anchor_recognized_chain(app.domain_key).is_none()
-            {
+            let bootstrapped = crate::settlement::domains::anchor_recognized_chain(domain.id)
+                .is_some()
+                || state.poa_is_permissioned(domain.id);
+            if !bootstrapped {
                 return Err(refused(
-                    "a permissionless PoW domain cannot authorize AppBinding claims",
+                    "a permissionlessly registered domain cannot authorize AppBinding claims",
                 ));
             }
             if evidence.chain.domain_id() != app.domain_key {
@@ -1465,14 +1483,11 @@ pub fn execute_app_binding_tx(
                 .get(&intent.app_binding_id)
                 .cloned()
                 .ok_or_else(|| refused("AppBinding application not found"))?;
-            if !state
-                .settlement
-                .domains
-                .get(app.domain_key)
-                .is_some_and(crate::domain::types::ConsensusDomain::is_active)
-            {
-                return Err(refused("the remote app binding's domain is not Active"));
-            }
+            // The escrow-release arm applies the same origin gate as
+            // `Register`, `Claim` and `OpenIntent`: an app binding whose domain
+            // cannot serve as a trust anchor, or that has stopped anchoring,
+            // must not settle, even for an intent opened while it could.
+            ensure_serving_origin(state, app.domain_key)?;
             // The intent's own snapshot decides which emitter may prove this
             // call, so a rotation after the award cannot invalidate work the
             // solver was awarded and already performed. Rows written before the
@@ -1716,6 +1731,7 @@ mod tests {
         domain.operator = Some(operator);
         state.add_balance(&operator, domain.operator_bond.saturating_add(FEE));
         crate::settlement::domains::register_domain(&mut state, domain).unwrap();
+        state.poa_onboarding.add_admin(DOMAIN, operator);
         state
     }
 
@@ -3623,13 +3639,41 @@ mod tests {
             &ctx(squatter),
             &BindingTx::Register {
                 domain_key: pow_domain_id,
-                origin_app,
+                origin_app: origin_app.clone(),
                 manifest_hash: bogus_manifest,
             },
         )
         .expect_err("permissionless PoW domain must not serve as AppBinding origin");
         assert!(
             format!("{err:?}").contains("permissionless PoW"),
+            "got: {err:?}"
+        );
+
+        // Likewise, a permissionlessly registered PoA domain without an
+        // onboarded PoA admin must be refused as an AppBinding trust anchor.
+        let rogue_poa_id = 43u32;
+        let mut rogue_poa = crate::domain::plugin::default_domain(
+            rogue_poa_id,
+            crate::domain::ConsensusKind::PoA,
+            45262,
+            "poa-authority-quorum",
+            1,
+        );
+        rogue_poa.operator = Some(squatter);
+        state.add_balance(&squatter, rogue_poa.operator_bond + FEE);
+        crate::settlement::domains::register_domain(&mut state, rogue_poa).unwrap();
+        let err = run_binding_tx(
+            &mut state,
+            &ctx(squatter),
+            &BindingTx::Register {
+                domain_key: rogue_poa_id,
+                origin_app,
+                manifest_hash: bogus_manifest,
+            },
+        )
+        .expect_err("unpermissioned PoA domain must not serve as AppBinding origin");
+        assert!(
+            format!("{err:?}").contains("permissionlessly registered domain"),
             "got: {err:?}"
         );
     }

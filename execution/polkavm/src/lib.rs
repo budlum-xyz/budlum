@@ -557,7 +557,10 @@ mod tests {
         }));
         let activated = PolkaVmWorker::with_activation_height(Some(10));
         assert!(!activated.is_active(&launch));
-        assert!(activated.is_active(&BlockContext { height: 10, ..launch }));
+        assert!(activated.is_active(&BlockContext {
+            height: 10,
+            ..launch
+        }));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::POLKAVM, vec![0xAA; 32]) else {
             panic!("caller");

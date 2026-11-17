@@ -636,6 +636,7 @@ fn uol_k1_home_key_stipend_all_four_chains_alert_and_pq_ceiling() {
                 silence_window: 1_000,
                 data_policy: DataPolicy::Public,
                 status: CharterStatus::Active,
+                operator: None,
             },
         );
     };
