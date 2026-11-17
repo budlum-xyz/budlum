@@ -368,10 +368,15 @@ impl PcsOpeningObject {
     /// Returns [`ObjectError::Invalid`] on bad magic, bad version, oversized
     /// inflation, trailing bytes, or malformed bincode.
     pub fn decode(bytes: &[u8]) -> Result<Self, ObjectError> {
-        if bytes.len() < 5 || bytes[..4] != PCS_OBJECT_MAGIC || bytes[4] != PCS_OBJECT_VERSION {
+        let (Some(magic), Some(&version), Some(payload)) =
+            (bytes.get(..4), bytes.get(4), bytes.get(5..))
+        else {
+            return Err(ObjectError::Invalid);
+        };
+        if magic != PCS_OBJECT_MAGIC || version != PCS_OBJECT_VERSION {
             return Err(ObjectError::Invalid);
         }
-        let mut decoder = DeflateDecoder::new(&bytes[5..]);
+        let mut decoder = DeflateDecoder::new(payload);
         let mut raw = Vec::new();
         let limit = (MAX_DECOMPRESSED_PCS_BYTES as u64).saturating_add(1);
         decoder

@@ -181,7 +181,7 @@ pub fn verify_chip_pcs_openings(
     stmt: &crate::bud_stark::PcsOpeningStatement<'_, MyConfig>,
 ) -> Result<[u64; 3], String> {
     let config = build_config();
-    let transcript =
+    let transcript: crate::bud_stark::VerifiedTranscript<_> =
         crate::bud_stark::verify_pcs_openings(&config, stmt).map_err(|e| format!("{e:?}"))?;
     Ok(chip_ext_to_limbs(transcript.zeta))
 }

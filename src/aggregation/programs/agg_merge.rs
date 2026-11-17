@@ -153,9 +153,9 @@ fn emit_check_allowlisted(a: &mut Asm, prog_cell: u64, tick_cell: u64, self_cell
 
 /// Emits `SWrite` calls publishing the 8 limbs stored at `base_cell` to
 /// consecutive state slots starting at `start_slot`.
-fn emit_publish_digest(a: &mut Asm, base_cell: u64, start_slot: u64) {
-    for i in 0..LIMBS as u64 {
-        a.load_abs(R[1], base_cell + i);
+fn emit_publish_digest(a: &mut Asm, base_cell: u64, start_slot: u32) {
+    for i in 0..u32::try_from(LIMBS).unwrap_or(8) {
+        a.load_abs(R[1], base_cell + u64::from(i));
         a.swrite(start_slot + i, R[1]);
     }
 }
@@ -181,9 +181,10 @@ pub fn agg_merge(tick_program_hash: &Hash32) -> Result<AggMergeProgram, AggMerge
     emit_check_allowlisted(&mut a, cells.left_prog, cells.tick_prog, cells.self_prog);
     emit_check_allowlisted(&mut a, cells.right_prog, cells.tick_prog, cells.self_prog);
 
+    let limb_step = u32::try_from(LIMBS).unwrap_or(8);
     emit_publish_digest(&mut a, cells.left_pi, 0);
-    emit_publish_digest(&mut a, cells.right_pi, LIMBS as u64);
-    emit_publish_digest(&mut a, cells.merge_pi, (2 * LIMBS) as u64);
+    emit_publish_digest(&mut a, cells.right_pi, limb_step);
+    emit_publish_digest(&mut a, cells.merge_pi, limb_step.saturating_mul(2));
     a.halt();
 
     let program = a.finish().map_err(AggMergeError::Assemble)?;
