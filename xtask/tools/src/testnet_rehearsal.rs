@@ -539,7 +539,12 @@ impl LocalStack {
         let alice_out = self.run_bin(
             root,
             "bud",
-            &["wallet", "create", "--key-file", &alice_key.to_string_lossy()],
+            &[
+                "wallet",
+                "create",
+                "--key-file",
+                &alice_key.to_string_lossy(),
+            ],
         )?;
         let alice_addr = line_value(&alice_out, "address: 0x")
             .ok_or("bud wallet create printed no address for alice")?;
