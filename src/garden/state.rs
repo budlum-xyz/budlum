@@ -474,6 +474,15 @@ impl GardenState {
         }
         let height = self.height.saturating_add(1);
         for target in wanted.into_iter().take(reserved) {
+            // A report about a validator the chosen transactions already took
+            // out of the electorate is one no voter can use: the block carried
+            // that validator's departure or suspension itself. Writing one
+            // anyway made `apply_tx` refuse it and `assemble` drop it silently,
+            // so the proposer never learned the block it built was short of
+            // the reports it meant to carry.
+            if !next.is_active(&target) {
+                continue;
+            }
             let report = sign(GardenTx {
                 chain_id: self.chain_id(),
                 sender: *me,
@@ -1859,6 +1868,62 @@ mod tests {
         assert!(refusal.contains("not of the last"), "{refusal}");
         net.commit(vec![back]).unwrap();
         assert!(net.ledger.state.is_active(&target));
+    }
+
+    /// A leader's block must not spend a report on a validator the pool
+    /// already took out of the electorate: the report would be refused and
+    /// dropped silently, so the proposer would never learn that the block it
+    /// built carries fewer reports than the validators it meant to release.
+    #[test]
+    fn garden_assemble_skips_an_absence_report_for_a_validator_the_block_departs() {
+        let mut net = Net::new();
+        let host = net.host;
+        let _a = net.join("a");
+        let _b = net.join("b");
+        let _c = net.join("c");
+        let leader = net.ledger.state.leader(0).unwrap();
+        // Two members that are neither the host nor the leader: one departs in
+        // the pool, the other is only absent.
+        let candidates: Vec<GardenKey> = net
+            .ledger
+            .state
+            .active()
+            .into_iter()
+            .filter(|key| *key != host && *key != leader)
+            .collect();
+        assert_eq!(candidates.len(), 2);
+        let (leaver, quiet) = (candidates[0], candidates[1]);
+
+        let leave = net.tx(&leaver, GardenTxKind::Leave);
+        let pool = vec![leave];
+        let (txs, _dead) =
+            net.ledger
+                .state
+                .assemble(pool.iter(), &leader, &[leaver, quiet], |tx| {
+                    Some(GardenTx::sign(tx, net.key(&leader)).unwrap())
+                });
+        let reported: Vec<GardenKey> = txs
+            .iter()
+            .filter_map(|signed| match &signed.tx.kind {
+                GardenTxKind::Suspend { target } => Some(*target),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !reported.contains(&leaver),
+            "the block reported a validator its own transactions departed"
+        );
+        assert!(
+            reported.contains(&quiet),
+            "the silent validator lost its report"
+        );
+        // What the leader built is a valid block, which is the point.
+        let block = net.block(txs).unwrap();
+        let votes = net.votes(&block, &net.ledger.state.electorate(&block.txs));
+        net.ledger.append(GardenCommit { block, votes }).unwrap();
+        assert!(!net.ledger.state.is_active(&leaver));
+        assert!(!net.ledger.state.is_active(&quiet));
+        assert!(net.ledger.state.is_active(&host));
     }
 
     /// The vote list of a commit comes from the wire. A block takes one vote
