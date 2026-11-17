@@ -39,6 +39,8 @@ pub mod params;
 pub mod pool;
 pub mod programs;
 pub mod schemes;
+pub mod shadow;
+pub mod stark;
 
 #[cfg(test)]
 mod tests;

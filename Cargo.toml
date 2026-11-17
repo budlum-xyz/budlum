@@ -328,6 +328,15 @@ path = "benches/agg_tick_steps.rs"
 harness = false
 required-features = ["wallet-ml-dsa"]
 
+# Aggregation Phase 3 measurement: AggMerge BudAir + BoundKeccakAir proof,
+# StarkBackend recursive MasterProofs (16 / 64 / 256 / 1024 claims), and
+# 10,000-block ShadowAuditor native/aggregation parity audit.
+[[bench]]
+name = "agg_phase3_stark"
+path = "benches/agg_phase3_stark.rs"
+harness = false
+required-features = ["wallet-ml-dsa"]
+
 # Domain throughput/latency benchmarks (criterion.rs)
 [[bench]]
 name = "domain_throughput"
