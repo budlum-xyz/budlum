@@ -4883,6 +4883,52 @@ impl BudlumApiServer for RpcServer {
             .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
     }
 
+    async fn encode_cross_vm_call(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let req: crate::unification::CrossVmCallRequest =
+            serde_json::from_value(request).map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid cross-VM call request: {e}"),
+                    None::<()>,
+                )
+            })?;
+        let catalog = crate::unification::UniversalDomainCatalog::with_canonical_ecosystems();
+        let envelope = crate::unification::CrossVmBridge::encode_call(&catalog, &req)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        crate::unification::CrossVmBridge::verify_envelope(&envelope)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))?;
+        serde_json::to_value(envelope)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn verify_universal_bundle(
+        &self,
+        bundle: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let parsed: crate::unification::UnifiedOutputBundle = serde_json::from_value(bundle)
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid universal output bundle: {e}"),
+                    None::<()>,
+                )
+            })?;
+        crate::unification::OutputComposer::verify_bundle(&parsed)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        Ok(serde_json::json!({
+            "valid": true,
+            "planId": parsed.plan_id,
+            "stepCount": parsed.execution_order.len(),
+            "bindingCount": parsed.resolved_bindings.len(),
+            "totalGasBgu": parsed.total_gas_bgu,
+            "stepsMerkleRoot": format!("0x{}", hex::encode(parsed.steps_merkle_root)),
+            "bundleRoot": format!("0x{}", hex::encode(parsed.bundle_root)),
+        }))
+    }
+
     async fn subscribe(
         &self,
         pending: jsonrpsee::PendingSubscriptionSink,

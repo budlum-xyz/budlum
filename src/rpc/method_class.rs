@@ -285,6 +285,8 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_quoteUniversalPayment", Public, Read),
     row("bud_composeExecutionOutputs", Public, Read),
     row("bud_resolveUnifiedStorage", Public, Read),
+    row("bud_encodeCrossVmCall", Public, Read),
+    row("bud_verifyUniversalBundle", Public, Read),
     // WebSocket subscriptions: read-only feeds (src/rpc/subscriptions.rs).
     row("bud_subscribe", Public, Read),
     row("bud_unsubscribe", Public, Read),

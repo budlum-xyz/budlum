@@ -196,7 +196,9 @@ impl BudlumClient {
     #[must_use]
     pub fn new(url: String) -> Self {
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { url, client }
@@ -293,7 +295,9 @@ impl EthClient {
     #[must_use]
     pub fn new(url: String, bridge_address: String) -> Self {
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {

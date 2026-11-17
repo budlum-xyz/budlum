@@ -869,7 +869,7 @@ async fn start_with(
                                             }
                                             None
                                         } else {
-                                            match bincode::deserialize::<GardenRequest>(&request) {
+                                            match crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(&request, MAX_UNADMITTED_REQUEST_BYTES) {
                                                 Ok(request @ GardenRequest::Hello { .. }) => {
                                                     Some(NetEvent::Request { peer, request, channel })
                                                 }
@@ -890,7 +890,7 @@ async fn start_with(
                                             }
                                         }
                                     }
-                                } else if let Ok(request) = bincode::deserialize::<GardenRequest>(&request) {
+                                } else if let Ok(request) = crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(&request, MAX_REQUEST_BYTES) {
                                     // Rate-limit repeated greetings and admission polls from
                                     // already-admitted peers so one member cannot spend the
                                     // validator loop on invite signature checks and genesis copies.
@@ -929,7 +929,7 @@ async fn start_with(
                                 tags.remove(&request_id).map(|tag| NetEvent::Response {
                                     peer,
                                     tag,
-                                    response: bincode::deserialize::<GardenResponse>(&response)
+                                    response: crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(&response, MAX_RESPONSE_BYTES)
                                         .map_err(|_| "malformed response".to_string()),
                                 })
                             }
@@ -1588,5 +1588,29 @@ mod tests {
         assert!(limiter
             .handle_pending_inbound_connection(id3, &local, &same_net_c)
             .is_ok());
+    }
+
+    #[test]
+    fn forged_length_prefix_garden_frames_are_rejected_without_allocating() {
+        // Variant tag 0 (`GardenRequest::Hello` / `GardenResponse::Refused`) followed by
+        // a forged 8-byte collection length claiming 281 TB in a 16-byte buffer.
+        let mut forged = Vec::with_capacity(16);
+        forged.extend_from_slice(&0u32.to_le_bytes());
+        forged.extend_from_slice(&0x0000_FFFF_FFFF_FFFFu64.to_le_bytes());
+        forged.extend_from_slice(&[0u8; 4]);
+        assert!(
+            crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(
+                &forged,
+                MAX_UNADMITTED_REQUEST_BYTES,
+            )
+            .is_err()
+        );
+        assert!(
+            crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
+                &forged,
+                MAX_RESPONSE_BYTES,
+            )
+            .is_err()
+        );
     }
 }

@@ -275,7 +275,9 @@ struct RpcProver {
 impl RpcProver {
     fn new(url: String) -> Result<Self, String> {
         let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("rpc client for {url}: {e}"))?;
         Ok(Self { url, client })
@@ -682,7 +684,9 @@ impl Bud3RpcSource {
             ));
         }
         let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("bud3 rpc client: {e}"))?;
         Ok(Self {

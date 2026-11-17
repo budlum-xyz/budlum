@@ -1227,7 +1227,7 @@ impl Executor {
                         ),
                     ));
                 }
-                let req: crate::bns::CreateNameOffer = bincode::deserialize(&tx.data)
+                let req: crate::bns::CreateNameOffer = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 match req.kind {
@@ -1296,7 +1296,7 @@ impl Executor {
                         ),
                     ));
                 }
-                let offer_id: u64 = bincode::deserialize(&tx.data)
+                let offer_id: u64 = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 state
@@ -1317,7 +1317,7 @@ impl Executor {
                         "BNS buy name requires a positive payment and zero header recipient",
                     ));
                 }
-                let offer_id: u64 = bincode::deserialize(&tx.data)
+                let offer_id: u64 = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 let offer = state
@@ -1449,7 +1449,7 @@ impl Executor {
                 })?;
             }
             TransactionType::BnsRenew => {
-                let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
+                let (name, duration): (String, u64) = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 let cost = state.bns_registry.calculate_cost(&name, duration);
@@ -1503,7 +1503,7 @@ impl Executor {
                 state.record_destroyed(u128::from(cost));
             }
             TransactionType::BnsTransfer => {
-                let (name, new_owner): (String, Address) = bincode::deserialize(&tx.data)
+                let (name, new_owner): (String, Address) = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err(BudlumError::validation(
@@ -1552,7 +1552,7 @@ impl Executor {
                     ));
                 }
                 let (name, target, domain_id): (String, Option<Address>, Option<u32>) =
-                    bincode::deserialize(&tx.data)
+                    crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                         .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 state
@@ -1585,7 +1585,7 @@ impl Executor {
                         ),
                     ));
                 }
-                let primary: Option<String> = bincode::deserialize(&tx.data)
+                let primary: Option<String> = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 state
@@ -1621,7 +1621,7 @@ impl Executor {
                 let (name, updates): (
                     String,
                     std::collections::BTreeMap<String, Option<String>>,
-                ) = bincode::deserialize(&tx.data)
+                ) = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 state
@@ -1657,7 +1657,7 @@ impl Executor {
                 let (name, cref): (
                     String,
                     Option<crate::storage::bud3::content_ref::ContentRef>,
-                ) = bincode::deserialize(&tx.data)
+                ) = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 // The record may only point at a B.U.D. 3.0 object the chain
@@ -1696,7 +1696,7 @@ impl Executor {
                     ));
                 }
                 let (parent, label, sub_owner): (String, String, Address) =
-                    bincode::deserialize(&tx.data)
+                    crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                         .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 state
@@ -1727,7 +1727,7 @@ impl Executor {
                         ),
                     ));
                 }
-                let (parent, label): (String, String) = bincode::deserialize(&tx.data)
+                let (parent, label): (String, String) = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 state
@@ -1764,7 +1764,7 @@ impl Executor {
                     String,
                     String,
                     Option<crate::storage::bud3::content_ref::ContentRef>,
-                ) = bincode::deserialize(&tx.data)
+                ) = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 // Same rule as `BnsSetContent`: a record points only at a
@@ -1806,7 +1806,7 @@ impl Executor {
                         ),
                     ));
                 }
-                let (name, root, dom_id): (String, [u8; 32], u32) = bincode::deserialize(&tx.data)
+                let (name, root, dom_id): (String, [u8; 32], u32) = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 // A name may point only at a root this chain holds for the
@@ -1835,7 +1835,7 @@ impl Executor {
             }
             TransactionType::NftMint => {
                 let (cid, author): (crate::storage::content_id::ContentId, Option<String>) =
-                    bincode::deserialize(&tx.data)
+                    crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                         .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
 
                 // A duplicate id means the registry's counter disagrees with
@@ -1855,7 +1855,7 @@ impl Executor {
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::NftTransfer => {
-                let (id, to): (u64, Address) = bincode::deserialize(&tx.data)
+                let (id, to): (u64, Address) = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
 
                 // Folder-lock rule: a membership is the token owner's claim
@@ -1892,7 +1892,7 @@ impl Executor {
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::NftBurn => {
-                let id: u64 = bincode::deserialize(&tx.data)
+                let id: u64 = crate::network::bounded_bincode::decode_bounded_bincode(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                     .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
 
                 // The same lock burns enforce as transfers, for the same

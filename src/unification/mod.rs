@@ -12,19 +12,29 @@
 //! - [`payment_router`]: Atomic multi-token split-tender payment router (with
 //!   on-chain, POS terminal, and card-network settlement rails) and cross-domain
 //!   collateral liquidation coordinator.
+//! - [`abi_bridge`]: Cross-VM and multi-language canonical call envelope bridge
+//!   projecting typed calls across EVM, SVM, Move, CosmWasm, UTXO, Cairo, and
+//!   `BudZero` without altering any domain's inner rules.
 //! - [`storage_fabric`]: Unified Web3 and decentralized storage fabric binding
 //!   B.U.D. 3.0, IPFS, Arweave, Filecoin, Walrus, Swarm, Sia, and Storj under
 //!   one verified content-addressed URI and failover resolver.
 //!
 //! WIRING: wired through `src/lib.rs` and the read-only JSON-RPC doors
 //! `bud_getUniversalDomains`, `bud_quoteUniversalPayment`,
-//! `bud_composeExecutionOutputs`, and `bud_resolveUnifiedStorage` in
+//! `bud_composeExecutionOutputs`, `bud_resolveUnifiedStorage`,
+//! `bud_encodeCrossVmCall`, and `bud_verifyUniversalBundle` in
 //! `src/rpc/api.rs` and `src/rpc/server.rs`.
 
+pub mod abi_bridge;
 pub mod domain_catalog;
 pub mod output_composer;
 pub mod payment_router;
 pub mod storage_fabric;
+
+pub use abi_bridge::{
+    AbiBridgeError, CanonicalCallArg, CrossVmBridge, CrossVmCallEnvelope, CrossVmCallRequest,
+    TargetWireEncoding,
+};
 
 pub use domain_catalog::{
     CatalogError, DomainCapability, UniversalDomainCatalog, UniversalDomainRecord,
