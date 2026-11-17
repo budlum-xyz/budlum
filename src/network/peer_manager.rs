@@ -543,18 +543,35 @@ impl PeerManager {
     /// Penalty paths use this so that hitting the ceiling reads as "this peer
     /// is not tracked" rather than silently skipping the penalty.
     pub fn check_rate_limit(&mut self, peer_id: &PeerId) -> bool {
+        self.check_rate_limit_from(peer_id, true)
+    }
+
+    /// Check per-peer general message rate budget. When `authored_by_peer` is
+    /// `false` (a gossipsub mesh relayer forwarding another peer's message),
+    /// exhaustion still drops the excess traffic and demotes the peer in
+    /// selection order, but floors above `BAN_THRESHOLD` so a transaction or
+    /// vote burst originated by a third party cannot get honest mesh relayers
+    /// banned and partition finality quorum.
+    pub(crate) fn check_rate_limit_from(
+        &mut self,
+        peer_id: &PeerId,
+        authored_by_peer: bool,
+    ) -> bool {
         let refill = self.msg_refill_rate;
         let Some(score) = self.get_or_create(peer_id) else {
             return false;
         };
         if !score.consume_token_with_rate(refill) {
-            score.score = (score.score + RATE_LIMIT_PENALTY).max(MIN_SCORE);
+            let floor = if authored_by_peer {
+                MIN_SCORE
+            } else {
+                MIN_SCORE.saturating_add(1)
+            };
+            score.score = score.score.saturating_add(RATE_LIMIT_PENALTY).max(floor);
             score.last_seen = Some(Instant::now());
-            if score.score <= BAN_THRESHOLD {
-                let until = Instant::now() + BAN_DURATION;
-                score.banned_until = Some(until);
-                score.ban_expires_unix =
-                    Some(unix_now_secs().saturating_add(BAN_DURATION.as_secs()));
+            let spent = authored_by_peer && score.score <= BAN_THRESHOLD;
+            if spent {
+                self.ban_peer(peer_id);
             }
             return false;
         }
@@ -1245,6 +1262,24 @@ mod tests {
             .get_peer_info(&peer)
             .and_then(|score| score.ban_expires_unix)
             .is_some());
+    }
+
+    #[test]
+    fn relayed_rate_limit_exhaustion_throttles_without_banning_relayer() {
+        let mut manager = PeerManager::new();
+        manager.msg_refill_rate = 0.0;
+        let relayer = test_peer_id();
+        for _ in 0..MAX_MSG_BURST as u32 {
+            assert!(manager.check_rate_limit_from(&relayer, false));
+        }
+        for _ in 0..100 {
+            assert!(!manager.check_rate_limit_from(&relayer, false));
+        }
+        assert!(
+            !manager.is_banned(&relayer),
+            "honest gossipsub relayer must be throttled, never auto-banned, on third-party bursts"
+        );
+        assert_eq!(manager.get_score(&relayer), MIN_SCORE.saturating_add(1));
     }
 
     /// Eclipse protection - /24 subnet connection bound.

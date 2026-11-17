@@ -1369,6 +1369,9 @@ impl ConsensusEngine for PoSEngine {
             let before = seen_blocks.len();
             seen_blocks.retain(|(_, slot), _| *slot >= min_slot);
             let pruned = before - seen_blocks.len();
+            if let Ok(mut signed) = self.signed_rounds.write() {
+                signed.retain(|(height, _, _, _, _), _| *height >= min_slot);
+            }
             if pruned > 0 {
                 if let Some(store) = storage {
                     if let Err(error) = store.prune_seen_blocks_below(min_slot) {
