@@ -3676,6 +3676,89 @@ mod tests {
         );
     }
 
+    /// A fixed three-signature witness is not a finality certificate. Until the
+    /// repair path carries a seat- or stake-weighted quorum certificate, the
+    /// cryptographic symbol witness is the only fail-closed admission path.
+    #[test]
+    fn minority_validator_attestations_cannot_authorize_a_segment_repair() {
+        let mut r = Bud3Registry::default();
+        let content: Vec<u8> = (0u16..1500).map(|i| (i.wrapping_mul(31)) as u8).collect();
+        let (up, shares) = upload(&content);
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record.clone(), shares, 0, 1_000)
+            .unwrap();
+        for holder in 10u8..14 {
+            r.ack(&key, &addr(holder)).unwrap();
+        }
+        assert_eq!(r.mark_unseen(&addr(13)), 1);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        let object_bytes = super::super::bof1::Object::raw_public(&content).encode();
+        let encoder = SegmentEncoder::new(0, &object_bytes, &P).unwrap();
+        let k = encoder.k();
+        let repaired = encoder.repair_symbols(20 - k, 5).unwrap();
+        let new_root = symbol_root(
+            &repaired
+                .iter()
+                .map(|symbol| (symbol.esi, symbol_leaf(&symbol.data)))
+                .collect::<Vec<_>>(),
+        );
+        let new_share = Share {
+            validator: addr(21),
+            class: Class::Full,
+            first_esi: 20,
+            symbols: 5,
+        };
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [13u8, 20, 21, 30, 31, 32, 33, 34]
+            .into_iter()
+            .map(|id| {
+                (
+                    addr(id),
+                    crate::crypto::pq::ml_dsa_public_key(
+                        crate::crypto::scheme::SchemeId::ML_DSA_65,
+                        &[id; 32],
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        let original_root = up.record.symbol_roots[0];
+        let claim = super::super::repair::RepairClaim {
+            object: &key,
+            segment: 0,
+            first_esi: 20,
+            count: 5,
+            new_root: &new_root,
+            original_segment_root: &original_root,
+        };
+        let attestations = [30u8, 31, 32]
+            .into_iter()
+            .map(|id| {
+                super::super::repair::sign_repair_attestation(addr(id), &[id; 32], &claim).unwrap()
+            })
+            .collect();
+        let witness = super::super::repair::RepairWitness::ValidatorAttestations(attestations);
+
+        let result = r.record_repair_with_validators(
+            &key,
+            SegmentRepair {
+                segment: 0,
+                new_shares: vec![new_share],
+                new_symbols: repaired,
+                new_root,
+                witness: &witness,
+            },
+            Some(&addr(20)),
+            &validator_keys,
+            (crate::core::transaction::DEFAULT_CHAIN_ID, 100),
+        );
+        assert!(
+            result.is_err(),
+            "three independent signatures are not a stake- or seat-weighted finality certificate"
+        );
+    }
+
     #[test]
     fn unacknowledged_repair_share_expires_after_deadline_and_unblocks_segment() {
         let mut r = Bud3Registry::default();
