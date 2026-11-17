@@ -1161,6 +1161,8 @@ impl Blockchain {
             .map(|network| network.mempool_config())
             .unwrap_or_default();
         let mut mempool = Mempool::new(mempool_config);
+        mempool.sync_scheme_registry(&state.scheme_registry);
+        mempool.sync_duty_validators(state.duty_lane_signers_for_chain(chain_id));
         if let Some(ref store) = storage {
             if let Ok(txs) = store.load_mempool_txs() {
                 let count = txs.len();
@@ -6410,7 +6412,7 @@ impl Blockchain {
     /// authority, [`AccountState::duty_lane_signers`], so no door can install
     /// a wider set than another.
     fn active_duty_validators(&self) -> std::collections::BTreeSet<Address> {
-        self.state.duty_lane_signers()
+        self.state.duty_lane_signers_for_chain(self.chain_id)
     }
 
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {

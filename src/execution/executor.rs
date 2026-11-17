@@ -860,19 +860,33 @@ impl Executor {
                     ));
                 }
 
-                for proposal in state.governance.proposals.iter_mut() {
-                    if proposal.status == crate::core::governance::ProposalStatus::Active {
-                        proposal.reduce_vote_weight(&tx.from, tx.amount);
+                let new_stake = current_stake
+                    .checked_sub(tx.amount)
+                    .ok_or_else(|| BudlumError::validation("stake_underflow", "stake underflow"))?;
+
+                let min_stake = state.registry.params().min_stake.max(1);
+                if let Some(validator) = state.get_validator_mut(&tx.from) {
+                    validator.stake = new_stake;
+                    if validator.stake < min_stake {
+                        validator.active = false;
                     }
                 }
 
-                let min_stake = state.registry.params().min_stake;
-                if let Some(validator) = state.get_validator_mut(&tx.from) {
-                    validator.stake = validator.stake.checked_sub(tx.amount).ok_or_else(|| {
-                        BudlumError::validation("stake_underflow", "stake underflow")
-                    })?;
-                    if validator.stake < min_stake {
-                        validator.active = false;
+                // Clamp snapshotted vote weight on open proposals to `min(snapshot, live_stake)`
+                // (or zero when the validator leaves the eligible set), matching delegation and
+                // redelegation exits so self-stake added after a vote and later unstaked cannot
+                // erase snapshotted weight it was never part of, while pre-vote exits trim the gap.
+                let live_eligible_stake = state
+                    .get_validator(&tx.from)
+                    .filter(|v| v.is_eligible(state.epoch_index))
+                    .map_or(0, |v| v.stake);
+                for proposal in &mut state.governance.proposals {
+                    if proposal.status == crate::core::governance::ProposalStatus::Active {
+                        let snapshot = proposal.vote_weight_of(&tx.from);
+                        proposal.reduce_vote_weight(
+                            &tx.from,
+                            snapshot.saturating_sub(snapshot.min(live_eligible_stake)),
+                        );
                     }
                 }
 
@@ -4041,7 +4055,7 @@ impl Executor {
                             let holder = Address::from(share.validator);
                             let active_validator = state
                                 .get_validator(&holder)
-                                .is_some_and(|v| v.active && !v.slashed && !v.jailed);
+                                .is_some_and(|v| v.active && !v.slashed && !v.jailed && v.stake > 0);
                             if !active_validator {
                                 return Err(BudlumError::validation(
                                     "storage_v3_refused",
@@ -4053,7 +4067,7 @@ impl Executor {
                     StorageTxV3::CustodyAck { .. } => {
                         let active_validator = state
                             .get_validator(&tx.from)
-                            .is_some_and(|v| v.active && !v.slashed && !v.jailed);
+                            .is_some_and(|v| v.active && !v.slashed && !v.jailed && v.stake > 0);
                         if !active_validator {
                             return Err(BudlumError::validation(
                                 "storage_v3_refused",
@@ -4070,7 +4084,7 @@ impl Executor {
                             let holder = Address::from(share.validator);
                             let active_validator = state
                                 .get_validator(&holder)
-                                .is_some_and(|v| v.active && !v.slashed && !v.jailed);
+                                .is_some_and(|v| v.active && !v.slashed && !v.jailed && v.stake > 0);
                             if !active_validator {
                                 return Err(BudlumError::validation(
                                     "storage_v3_refused",
@@ -4084,7 +4098,7 @@ impl Executor {
                             // present in consensus state but slashed, jailed, or inactive.
                             let key_opt = match state.get_validator(&v_addr) {
                                 Some(v) => {
-                                    if v.active && !v.slashed && !v.jailed {
+                                    if v.active && !v.slashed && !v.jailed && v.stake > 0 {
                                         if v.pq_public_key.is_empty() {
                                             state
                                                 .validator_directory
@@ -4120,7 +4134,7 @@ impl Executor {
                         // and every Full share recipient (not only attestation signers).
                         let mut full_candidates = Vec::new();
                         for (v_addr, v) in &state.validators {
-                            if !v.active || v.slashed || v.jailed {
+                            if !v.active || v.slashed || v.jailed || v.stake == 0 {
                                 continue;
                             }
                             if state
@@ -4158,7 +4172,7 @@ impl Executor {
                         for s in new_shares {
                             let recipient_addr = Address::from(s.validator);
                             let active_validator = match state.get_validator(&recipient_addr) {
-                                Some(v) => v.active && !v.slashed && !v.jailed,
+                                Some(v) => v.active && !v.slashed && !v.jailed && v.stake > 0,
                                 None => state.validator_directory.get(&recipient_addr).is_some(),
                             };
                             if !active_validator {
@@ -6254,5 +6268,120 @@ mod tests {
             "1-unit Stake top-up must never lift a V-4 liveness suspension"
         );
         assert!(state.liveness.is_suspended(&validator));
+    }
+
+    #[test]
+    fn self_unstake_clamps_vote_weight_and_zero_stake_resume_stays_inactive() {
+        use crate::core::governance::{Proposal, ProposalType};
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::registry::RegistryParams;
+
+        let mut state = AccountState::new();
+        let validator = Address::from([0xE2; 32]);
+        let base_stake = crate::core::chain_config::Network::from_chain_id(DEFAULT_CHAIN_ID)
+            .map_or(1_000, |n| n.min_stake().max(1_000));
+        let topup = 600;
+        state.add_balance(
+            &validator,
+            base_stake.saturating_add(topup).saturating_add(500_000),
+        );
+        state.add_validator(validator, base_stake);
+        if let Some(v) = state.get_validator_mut(&validator) {
+            v.vrf_public_key = vec![0xAA; 32];
+            v.bls_public_key = vec![0xBB; 48];
+            v.pq_public_key = vec![0xCC; 64];
+            v.pop_signature = vec![0xDD; 96];
+        }
+        state.sync_validator_registration_with_floor(&validator, base_stake);
+
+        // Cast an active governance vote at `base_stake`.
+        let mut proposal = Proposal::new(
+            1,
+            validator,
+            ProposalType::ParameterUpdate("unbonding_epochs".into(), "7".into()),
+            0,
+            100,
+        );
+        proposal
+            .add_vote(validator, base_stake, true, state.epoch_index)
+            .unwrap();
+        state.governance.proposals.push(proposal);
+
+        // Top up self-stake after voting, then unstake the post-vote top-up:
+        // snapshotted vote weight must remain `base_stake`, not drop by `topup`.
+        let add_tx = Transaction::new_with_chain_id(
+            validator,
+            Address::zero(),
+            topup,
+            10,
+            0,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::Stake,
+        );
+        Executor::apply_transaction_checked(&mut state, &add_tx).unwrap();
+        let exit_topup = Transaction::new_with_chain_id(
+            validator,
+            Address::zero(),
+            topup,
+            10,
+            1,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::Unstake,
+        );
+        Executor::apply_transaction_checked(&mut state, &exit_topup).unwrap();
+        assert_eq!(
+            state.governance.proposals[0].vote_weight_of(&validator),
+            base_stake
+        );
+
+        // Unstaking into the pre-vote bond reduces the snapshotted vote weight to live stake.
+        let exit_partial = Transaction::new_with_chain_id(
+            validator,
+            Address::zero(),
+            400,
+            10,
+            2,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::Unstake,
+        );
+        Executor::apply_transaction_checked(&mut state, &exit_partial).unwrap();
+        assert_eq!(
+            state.governance.proposals[0].vote_weight_of(&validator),
+            base_stake - 400
+        );
+
+        // Suspend, unstake remaining self-stake to zero, request resume, advance epoch:
+        // zero-stake validator must stay inactive and carry zero vote weight.
+        let params = RegistryParams::default();
+        for ep in 1..=params.liveness_max_missed_epochs {
+            let _ = state
+                .liveness
+                .record_epoch(ep, &[validator], |_| false, &params);
+        }
+        if let Some(v) = state.get_validator_mut(&validator) {
+            v.active = false;
+        }
+        let exit_rest = Transaction::new_with_chain_id(
+            validator,
+            Address::zero(),
+            base_stake - 400,
+            10,
+            3,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::Unstake,
+        );
+        Executor::apply_transaction_checked(&mut state, &exit_rest).unwrap();
+        assert_eq!(state.governance.proposals[0].vote_weight_of(&validator), 0);
+        state.liveness.request_resume(&validator, state.epoch_index);
+        state.advance_epoch(1_000, DEFAULT_CHAIN_ID);
+        state.advance_epoch(2_000, DEFAULT_CHAIN_ID);
+        assert!(
+            !state.get_validator(&validator).unwrap().active,
+            "zero-stake validator must not re-activate on ResumeValidator"
+        );
     }
 }
