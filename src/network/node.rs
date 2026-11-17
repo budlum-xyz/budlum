@@ -1104,6 +1104,11 @@ pub struct Node {
     pub dns_seeds: Vec<String>,
     pub dns_seed_port: u16,
     pub peer_count: Arc<AtomicUsize>,
+    /// When each live connection was admitted. A peer that connects and never
+    /// completes the application handshake holds an inbound slot until the
+    /// sweep passes this deadline, so this is what lets the node tell a
+    /// squatter from a peer that is still handshaking.
+    peer_connected_at: HashMap<PeerId, std::time::Instant>,
     pub sync_state: Arc<AtomicUsize>,
     /// Timestamp when `sync_state` was set to 1.
     pub sync_started_at: Arc<AtomicU64>,
@@ -2894,6 +2899,7 @@ impl Node {
             dns_seeds: Vec::new(),
             dns_seed_port: 0,
             peer_count,
+            peer_connected_at: HashMap::new(),
             sync_state,
             sync_started_at,
             sync_round_started_at,
@@ -3435,6 +3441,38 @@ impl Node {
         loop {
             tokio::select! {
                 _ = gc_interval.tick() => {
+                    // A peer completes the transport handshake long before it
+                    // sends the application `Handshake`, and until it does the
+                    // connection still holds one of the inbound slots the
+                    // connection limits enforce. Refusing the newcomer is not
+                    // enough: nothing reclaims that slot, so the GC beat is
+                    // what disconnects a connection that never handshaked.
+                    {
+                        const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(30);
+                        let expired = {
+                            let pm = self.peer_manager.lock().unwrap_or_else(|poisoned| {
+                                tracing::error!(
+                                    "PeerManager lock was poisoned by an earlier panic; \
+                                     continuing with the recovered state"
+                                );
+                                poisoned.into_inner()
+                            });
+                            drain_expired_unhandshaked_peers(
+                                &mut self.peer_connected_at,
+                                &pm,
+                                std::time::Instant::now(),
+                                HANDSHAKE_DEADLINE,
+                            )
+                        };
+                        for peer in expired {
+                            warn!(
+                                "Peer {peer} held a connection past {:?} without handshaking; \
+                                 disconnecting to free the slot",
+                                HANDSHAKE_DEADLINE
+                            );
+                            let _ = self.swarm.disconnect_peer_id(peer);
+                        }
+                    }
                     let removed = self.chain.cleanup_mempool().await;
                     if removed > 0 {
                         info!("Cleaned up {removed} expired transactions from mempool");
@@ -4292,6 +4330,10 @@ impl Node {
                                 }
                                 continue;
                             }
+                            if newly_connected {
+                                self.peer_connected_at
+                                    .insert(peer_id, std::time::Instant::now());
+                            }
                             if let Some(ref m) = self.metrics {
                                 m.p2p_peers_connected.set(count as i64);
                                 let mean_quality = self
@@ -4345,6 +4387,7 @@ impl Node {
                             // cid from `bitswap_requests` so unrelated peer churn never
                             // drains in-flight fetches (CWE-404).
                             if num_established == 0 {
+                                self.peer_connected_at.remove(&peer_id);
                                 self.cert_fetches.retain(|_, (p, _)| *p != peer_id);
                                 let retired_ids: Vec<_> = self
                                     .bitswap_request_peers
@@ -5646,7 +5689,11 @@ impl Node {
                                             continue;
                                         }
 
-                                        match serde_json::from_slice::<crate::consensus::qc::QcFaultProof>(&proof_data) {
+                                        match crate::network::proto_conversions::decode_bounded_json::<
+                                            crate::consensus::qc::QcFaultProof,
+                                        >(
+                                            &proof_data, "qc fault proof"
+                                        ) {
                                             Ok(proof) => {
                                                 match self.chain.handle_qc_fault_proof(proof).await {
                                                     Ok(_) => {
@@ -8188,6 +8235,68 @@ mod finality_publish_tests {
             "Invalid PQ attestation in precommit: forged"
         ));
     }
+
+    #[test]
+    fn unhandshaked_peer_is_reclaimed_after_deadline_while_handshaked_survives() {
+        use super::{Duration, HashMap, PeerId, PeerManager};
+
+        let mut pm = PeerManager::new();
+        let squatter = PeerId::random();
+        let honest = PeerId::random();
+        let fresh = PeerId::random();
+        let gone = PeerId::random();
+
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(squatter, None));
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(honest, None));
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(fresh, None));
+        pm.set_handshaked(&honest, true);
+
+        let now = std::time::Instant::now();
+        let deadline = Duration::from_secs(30);
+        let mut connected_at = HashMap::new();
+        connected_at.insert(squatter, now - Duration::from_secs(31));
+        connected_at.insert(honest, now - Duration::from_secs(60));
+        connected_at.insert(fresh, now - Duration::from_secs(5));
+        connected_at.insert(gone, now - Duration::from_secs(60));
+
+        let expired =
+            super::drain_expired_unhandshaked_peers(&mut connected_at, &pm, now, deadline);
+        assert_eq!(expired, vec![squatter]);
+        assert!(!connected_at.contains_key(&squatter));
+        assert!(!connected_at.contains_key(&honest));
+        assert!(!connected_at.contains_key(&gone));
+        assert!(
+            connected_at.contains_key(&fresh),
+            "a fresh unhandshaked peer must stay tracked until its deadline passes"
+        );
+    }
+}
+
+/// Identify connected peers that have exceeded `deadline` without completing
+/// the application `Handshake`, while pruning entries for peers that already
+/// disconnected or completed the handshake.
+fn drain_expired_unhandshaked_peers(
+    connected_at: &mut HashMap<PeerId, std::time::Instant>,
+    pm: &PeerManager,
+    now: std::time::Instant,
+    deadline: Duration,
+) -> Vec<PeerId> {
+    let mut expired = Vec::new();
+    let mut spent = Vec::new();
+    for (peer, admitted) in connected_at.iter() {
+        if !pm.is_connected(peer) || pm.is_handshaked(peer) {
+            spent.push(*peer);
+        } else if now.duration_since(*admitted) >= deadline {
+            expired.push(*peer);
+        }
+    }
+    for peer in spent {
+        connected_at.remove(&peer);
+    }
+    for peer in &expired {
+        connected_at.remove(peer);
+    }
+    expired
 }
 
 #[cfg(test)]
