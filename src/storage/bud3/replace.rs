@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::bof1::{codec_is_open_on_testnet, codec_is_registered, CodecId};
 use super::content_id::{ContentId, ContentIdKind};
 use super::pipeline::ObjectRecord;
+use super::placement::{Class, Share};
 use super::registry::{Address, ObjectKey};
 use super::repair::bad_repair_slash_amount;
 use crate::core::hash::hash_fields_bytes;
@@ -14,8 +15,12 @@ use crate::crypto::ctx::STORAGE_V2;
 use crate::crypto::pq::{ml_dsa_sign, verify, PqError};
 use crate::crypto::scheme::SchemeId;
 
-/// Domain tag binding Full-validator replacement attestations to `(old_key, new_record)`.
-pub const REPLACE_ATTEST_DOMAIN: &[u8] = b"BDLM_BUD3_REPLACE_ATTEST_V1";
+/// Domain tag binding Full-validator replacement attestations to
+/// `(old_key, new_record, new_shares)`.
+pub const REPLACE_ATTEST_DOMAIN: &[u8] = b"BDLM_BUD3_REPLACE_ATTEST_V2";
+
+/// Domain tag committing a replacement's custody placement on its own.
+pub const REPLACE_PLACEMENT_DOMAIN: &[u8] = b"BDLM_BUD3_REPLACE_PLACEMENT_V1";
 
 /// Minimum independent Full validators from the placement group required to
 /// verify `decode(new_object)` produces the exact same `ContentId` (Section 6.14 item 3).
@@ -38,13 +43,52 @@ pub struct ReplaceAttestation {
     pub signature: Vec<u8>,
 }
 
+/// Canonical commitment to the replacement's custody placement.
+///
+/// Every `(segment, share)` pair is folded in a canonical order, so two nodes
+/// that hold the same placement fold the same digest whatever order the shares
+/// arrived in. `new_shares` is signed through
+/// [`replace_attestation_digest`], which is what stops a Full share holder from
+/// collecting a quorum over one placement and committing another.
+#[must_use]
+pub fn replacement_placement_digest(new_shares: &[(u64, Share)]) -> [u8; 32] {
+    let mut rows: Vec<(u64, [u8; 32], u8, u32, u32)> = new_shares
+        .iter()
+        .map(|(segment, share)| {
+            let class = match share.class {
+                Class::Full => 0u8,
+                Class::Mobile => 1u8,
+            };
+            (
+                *segment,
+                share.validator,
+                class,
+                share.first_esi,
+                share.symbols,
+            )
+        })
+        .collect();
+    rows.sort_unstable();
+    let count = (rows.len() as u64).to_le_bytes();
+    let mut flat = Vec::with_capacity(rows.len() * (8 + 32 + 1 + 4 + 4));
+    for (segment, validator, class, first_esi, symbols) in rows {
+        flat.extend_from_slice(&segment.to_le_bytes());
+        flat.extend_from_slice(&validator);
+        flat.push(class);
+        flat.extend_from_slice(&first_esi.to_le_bytes());
+        flat.extend_from_slice(&symbols.to_le_bytes());
+    }
+    hash_fields_bytes(&[REPLACE_PLACEMENT_DOMAIN, &count, &flat])
+}
+
 /// Canonical domain-separated digest signed by each placement-group Full
-/// validator over `(chain_id, old_key, new_record)`.
+/// validator over `(chain_id, old_key, new_record, new_shares)`.
 #[must_use]
 pub fn replace_attestation_digest(
     chain_id: u64,
     old_key: &ObjectKey,
     new_record: &ObjectRecord,
+    new_shares: &[(u64, Share)],
 ) -> [u8; 32] {
     let chain_bytes = chain_id.to_le_bytes();
     let kind_byte = [match new_record.content_id.kind {
@@ -65,10 +109,12 @@ pub fn replace_attestation_digest(
     for root in &new_record.symbol_roots {
         roots_flat.extend_from_slice(root);
     }
+    let placement = replacement_placement_digest(new_shares);
     hash_fields_bytes(&[
         REPLACE_ATTEST_DOMAIN,
         &chain_bytes,
         old_key,
+        &placement,
         &kind_byte,
         &new_record.content_id.digest,
         &cid_len,
@@ -97,8 +143,9 @@ pub fn sign_replace_attestation_with_chain_id(
     ml_dsa_seed: &[u8; 32],
     old_key: &ObjectKey,
     new_record: &ObjectRecord,
+    new_shares: &[(u64, Share)],
 ) -> Result<ReplaceAttestation, PqError> {
-    let digest = replace_attestation_digest(chain_id, old_key, new_record);
+    let digest = replace_attestation_digest(chain_id, old_key, new_record, new_shares);
     let signature = ml_dsa_sign(
         SchemeId::ML_DSA_65,
         ml_dsa_seed,
@@ -126,6 +173,7 @@ pub fn sign_replace_attestation(
     ml_dsa_seed: &[u8; 32],
     old_key: &ObjectKey,
     new_record: &ObjectRecord,
+    new_shares: &[(u64, Share)],
 ) -> Result<ReplaceAttestation, PqError> {
     sign_replace_attestation_with_chain_id(
         crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -133,6 +181,7 @@ pub fn sign_replace_attestation(
         ml_dsa_seed,
         old_key,
         new_record,
+        new_shares,
     )
 }
 
@@ -250,6 +299,7 @@ pub fn admit_object_replacement(
     chain_id: u64,
     (sender, old_owner, proposer_stake): (&Address, &Address, u64),
     (old_record, new_record): (&ObjectRecord, &ObjectRecord),
+    new_shares: &[(u64, Share)],
     (placement_group_full, validator_keys): (&BTreeSet<Address>, &BTreeMap<Address, Vec<u8>>),
     attestations: &[ReplaceAttestation],
 ) -> Result<(), ReplaceError> {
@@ -272,7 +322,8 @@ pub fn admit_object_replacement(
         });
     }
 
-    let digest = replace_attestation_digest(chain_id, &old_record.commitment, new_record);
+    let digest =
+        replace_attestation_digest(chain_id, &old_record.commitment, new_record, new_shares);
     let mut distinct_attesters = BTreeSet::new();
     for att in attestations {
         if !placement_group_full.contains(&att.validator) {
@@ -360,19 +411,38 @@ mod tests {
             .collect()
     }
 
+    fn sample_shares(ids: &[u8]) -> Vec<(u64, Share)> {
+        ids.iter()
+            .enumerate()
+            .map(|(index, b)| {
+                (
+                    0,
+                    Share {
+                        validator: [*b; 32],
+                        class: Class::Full,
+                        first_esi: u32::try_from(index).unwrap_or(0),
+                        symbols: 1,
+                    },
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn closed_codecs_refuse_on_testnet() {
         let cid = ContentId::public(b"closed codec test");
         let old_rec = sample_record([1u8; 32], cid, 0);
         let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32]].into();
         let keys = key_map(&[1, 2, 3]);
+        let shares = sample_shares(&[1, 2, 3]);
 
         for closed in [9u16, 27u16] {
             let bad = sample_record([2u8; 32], cid, closed);
             let atts: Vec<ReplaceAttestation> = [1u8, 2, 3]
                 .into_iter()
                 .map(|b| {
-                    sign_replace_attestation([b; 32], &[b; 32], &old_rec.commitment, &bad).unwrap()
+                    sign_replace_attestation([b; 32], &[b; 32], &old_rec.commitment, &bad, &shares)
+                        .unwrap()
                 })
                 .collect();
             assert_eq!(
@@ -380,6 +450,7 @@ mod tests {
                     crate::core::transaction::DEFAULT_CHAIN_ID,
                     (&[1u8; 32], &[1u8; 32], 50_000),
                     (&old_rec, &bad),
+                    &shares,
                     (&pg, &keys),
                     &atts
                 ),
@@ -409,12 +480,13 @@ mod tests {
         let new_rec = sample_record([20u8; 32], cid, 1);
         let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]].into();
         let keys = key_map(&[1, 2, 3, 4]);
+        let shares = sample_shares(&[1, 2, 3]);
         let home = crate::core::transaction::DEFAULT_CHAIN_ID;
         let other = home + 1;
 
         assert_ne!(
-            replace_attestation_digest(home, &old_rec.commitment, &new_rec),
-            replace_attestation_digest(other, &old_rec.commitment, &new_rec),
+            replace_attestation_digest(home, &old_rec.commitment, &new_rec, &shares),
+            replace_attestation_digest(other, &old_rec.commitment, &new_rec, &shares),
             "the digest must commit to the chain it was signed for"
         );
 
@@ -427,6 +499,7 @@ mod tests {
                     &[v; 32],
                     &old_rec.commitment,
                     &new_rec,
+                    &shares,
                 )
                 .unwrap()
             })
@@ -435,6 +508,7 @@ mod tests {
             home,
             (&[9u8; 32], &[1u8; 32], 100_000),
             (&old_rec, &new_rec),
+            &shares,
             (&pg, &keys),
             &quorum,
         )
@@ -447,6 +521,7 @@ mod tests {
                 other,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &new_rec),
+                &shares,
                 (&pg, &keys),
                 &quorum,
             ),
@@ -461,16 +536,32 @@ mod tests {
         let new_rec = sample_record([20u8; 32], cid, 1);
         let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]].into();
         let keys = key_map(&[1, 2, 3, 4]);
+        let shares = sample_shares(&[1, 2, 3]);
 
         let two_att = vec![
-            sign_replace_attestation([1u8; 32], &[1u8; 32], &old_rec.commitment, &new_rec).unwrap(),
-            sign_replace_attestation([2u8; 32], &[2u8; 32], &old_rec.commitment, &new_rec).unwrap(),
+            sign_replace_attestation(
+                [1u8; 32],
+                &[1u8; 32],
+                &old_rec.commitment,
+                &new_rec,
+                &shares,
+            )
+            .unwrap(),
+            sign_replace_attestation(
+                [2u8; 32],
+                &[2u8; 32],
+                &old_rec.commitment,
+                &new_rec,
+                &shares,
+            )
+            .unwrap(),
         ];
         assert!(matches!(
             admit_object_replacement(
                 crate::core::transaction::DEFAULT_CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &new_rec),
+                &shares,
                 (&pg, &keys),
                 &two_att
             ),
@@ -479,12 +570,20 @@ mod tests {
 
         let mut three_att = two_att;
         three_att.push(
-            sign_replace_attestation([3u8; 32], &[3u8; 32], &old_rec.commitment, &new_rec).unwrap(),
+            sign_replace_attestation(
+                [3u8; 32],
+                &[3u8; 32],
+                &old_rec.commitment,
+                &new_rec,
+                &shares,
+            )
+            .unwrap(),
         );
         admit_object_replacement(
             crate::core::transaction::DEFAULT_CHAIN_ID,
             (&[9u8; 32], &[1u8; 32], 100_000),
             (&old_rec, &new_rec),
+            &shares,
             (&pg, &keys),
             &three_att,
         )
@@ -498,6 +597,7 @@ mod tests {
                 crate::core::transaction::DEFAULT_CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &new_rec),
+                &shares,
                 (&pg, &keys),
                 &forged
             ),
@@ -511,12 +611,77 @@ mod tests {
                 crate::core::transaction::DEFAULT_CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &bad_rec),
+                &shares,
                 (&pg, &keys),
                 &three_att
             ),
             Err(ReplaceError::ContentIdMismatch {
                 proposer_slash_atoms: 1_000
             })
+        );
+    }
+
+    /// The quorum is over the placement too, not only over the record: a Full
+    /// share holder that collected signatures for one placement cannot commit
+    /// another one under them and delete every other copy of the object.
+    #[test]
+    fn a_replacement_quorum_does_not_transfer_to_a_different_placement() {
+        let cid = ContentId::public(b"placement binding");
+        let old_rec = sample_record([10u8; 32], cid, 0);
+        let new_rec = sample_record([20u8; 32], cid, 1);
+        let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32]].into();
+        let keys = key_map(&[1, 2, 3]);
+        let attesters = [1u8, 2, 3];
+        let signed_shares = sample_shares(&[1, 2, 3]);
+        // The same object, placed entirely on the proposer's own share.
+        let swapped_shares: Vec<(u64, Share)> = vec![(
+            0,
+            Share {
+                validator: [9u8; 32],
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 3,
+            },
+        )];
+        assert_ne!(
+            replacement_placement_digest(&signed_shares),
+            replacement_placement_digest(&swapped_shares),
+            "a different placement must fold to a different digest"
+        );
+
+        let atts: Vec<ReplaceAttestation> = attesters
+            .into_iter()
+            .map(|b| {
+                sign_replace_attestation(
+                    [b; 32],
+                    &[b; 32],
+                    &old_rec.commitment,
+                    &new_rec,
+                    &signed_shares,
+                )
+                .unwrap()
+            })
+            .collect();
+        admit_object_replacement(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            (&[9u8; 32], &[1u8; 32], 100_000),
+            (&old_rec, &new_rec),
+            &signed_shares,
+            (&pg, &keys),
+            &atts,
+        )
+        .expect("the placement the quorum signed is admitted");
+        assert_eq!(
+            admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &new_rec),
+                &swapped_shares,
+                (&pg, &keys),
+                &atts
+            ),
+            Err(ReplaceError::InvalidAttestationSignature([1u8; 32])),
+            "the same signatures must not admit a placement they never signed"
         );
     }
 }
