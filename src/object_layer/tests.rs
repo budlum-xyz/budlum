@@ -843,9 +843,12 @@ fn settlement_door_refuses_object_layer_on_testnet() {
     let tx = crate::settlement::domains::SettlementTx::ObjectLayer(Box::new(
         ObjectLayerTx::SetTentativeConsent { consent: true },
     ));
-    crate::settlement::domains::execute_settlement_tx(&mut state, &ctx, &tx)
-        .expect("object layer door is open on testnet 45261 from height 0");
-    assert!(!state.settlement.object_layer.is_empty());
+    let before = state.calculate_state_root();
+    let error = crate::settlement::domains::execute_settlement_tx(&mut state, &ctx, &tx)
+        .expect_err("object layer must remain closed on public testnet");
+    assert!(error.to_string().contains("object_layer_closed"), "{error}");
+    assert_eq!(state.calculate_state_root(), before);
+    assert!(state.settlement.object_layer.is_empty());
 }
 
 #[test]
