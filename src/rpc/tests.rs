@@ -3467,5 +3467,52 @@ mod rpc_tests {
             .await
             .unwrap();
         assert_eq!(storage_res["primary"]["network"].as_str(), Some("ipfs"));
+
+        // 5. bud_encodeCrossVmCall (refusal + answer)
+        assert!(server
+            .encode_cross_vm_call(serde_json::json!({
+                "source_domain": 3,
+                "target_domain": 99999,
+                "source_language": "solidity",
+                "target_language": "move",
+                "method": "swap",
+                "args": [],
+                "nonce": 1,
+            }))
+            .await
+            .is_err());
+        let envelope = server
+            .encode_cross_vm_call(serde_json::json!({
+                "source_domain": 3,
+                "target_domain": 7,
+                "source_language": "solidity",
+                "target_language": "move",
+                "method": "dex::settle",
+                "args": [
+                    {"name": "amount", "value": {"kind": "u128", "value": 4200}}
+                ],
+                "nonce": 11,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(envelope["target_encoding"].as_str(), Some("bcs_le"));
+        assert!(envelope["encoded_payload"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()));
+
+        // 6. bud_verifyUniversalBundle (answer + refusal on tampered root)
+        let verified = server
+            .verify_universal_bundle(composed.clone())
+            .await
+            .unwrap();
+        assert_eq!(verified["valid"].as_bool(), Some(true));
+        assert_eq!(verified["stepCount"].as_u64(), Some(2));
+        let mut tampered_bundle = composed;
+        tampered_bundle["bundle_root"][0] =
+            serde_json::json!(tampered_bundle["bundle_root"][0].as_u64().unwrap() ^ 0xFF);
+        assert!(server
+            .verify_universal_bundle(tampered_bundle)
+            .await
+            .is_err());
     }
 }

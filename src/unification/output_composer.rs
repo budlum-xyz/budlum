@@ -63,7 +63,7 @@ pub enum LanguageTag {
 }
 
 impl LanguageTag {
-    fn encode_bytes(&self) -> Vec<u8> {
+    pub(crate) fn encode_bytes(&self) -> Vec<u8> {
         match self {
             Self::Solidity => b"solidity".to_vec(),
             Self::Vyper => b"vyper".to_vec(),
@@ -644,6 +644,8 @@ pub enum CompositionError {
     BindingMismatch { step: String, input: String },
     #[error("bundle exceeds {MAX_COMPOSITION_BUNDLE_BYTES}-byte limit")]
     BundleTooLarge,
+    #[error("bundle integrity verification failed: {0}")]
+    BundleVerificationFailed(String),
 }
 
 /// Stateless deterministic composer turning multi-VM execution outputs into one
@@ -752,6 +754,100 @@ impl OutputComposer {
             steps_merkle_root,
             bundle_root,
         })
+    }
+
+    /// Independently verifies that a [`UnifiedOutputBundle`]'s topological
+    /// ordering, binding value commitments, `steps_merkle_root`, and
+    /// `bundle_root` are all cryptographically consistent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompositionError`] if any bound is violated, any binding
+    /// reverses execution order, or either Merkle root disagrees with the
+    /// bundle contents.
+    pub fn verify_bundle(bundle: &UnifiedOutputBundle) -> Result<(), CompositionError> {
+        validate_safe_label("plan_id", &bundle.plan_id, 64)
+            .map_err(CompositionError::InvalidInput)?;
+        if bundle.execution_order.is_empty() || bundle.execution_order.len() > MAX_COMPOSITION_STEPS
+        {
+            return Err(CompositionError::BundleVerificationFailed(String::from(
+                "execution_order must contain between 1 and MAX_COMPOSITION_STEPS steps",
+            )));
+        }
+        if bundle.execution_order.len() != bundle.step_hashes.len() {
+            return Err(CompositionError::BundleVerificationFailed(String::from(
+                "execution_order length disagrees with step_hashes length",
+            )));
+        }
+        if bundle.resolved_bindings.len() > MAX_COMPOSITION_BINDINGS {
+            return Err(CompositionError::BundleVerificationFailed(String::from(
+                "resolved_bindings exceeds MAX_COMPOSITION_BINDINGS",
+            )));
+        }
+        let mut step_positions = BTreeMap::new();
+        for (idx, step_id) in bundle.execution_order.iter().enumerate() {
+            validate_safe_label("step_id", step_id, 64).map_err(CompositionError::InvalidInput)?;
+            if step_positions.insert(step_id.as_str(), idx).is_some() {
+                return Err(CompositionError::DuplicateStep(step_id.clone()));
+            }
+        }
+        for binding in &bundle.resolved_bindings {
+            let Some(&from_pos) = step_positions.get(binding.from_step.as_str()) else {
+                return Err(CompositionError::UnknownStep(binding.from_step.clone()));
+            };
+            let Some(&to_pos) = step_positions.get(binding.to_step.as_str()) else {
+                return Err(CompositionError::UnknownStep(binding.to_step.clone()));
+            };
+            if from_pos >= to_pos {
+                return Err(CompositionError::CycleDetected);
+            }
+            if binding.value.commitment_hash() != binding.value_hash {
+                return Err(CompositionError::BundleVerificationFailed(format!(
+                    "binding value commitment mismatch for `{}.{}`",
+                    binding.to_step, binding.target_input
+                )));
+            }
+        }
+
+        let expected_steps_root =
+            unification_merkle_root(b"BDLM_UNIFIED_STEPS_V1", &bundle.step_hashes);
+        if expected_steps_root != bundle.steps_merkle_root {
+            return Err(CompositionError::BundleVerificationFailed(String::from(
+                "steps_merkle_root mismatch",
+            )));
+        }
+        let binding_hashes: Vec<Hash32> = bundle
+            .resolved_bindings
+            .iter()
+            .map(|b| {
+                hash_domain_fields(
+                    b"BDLM_RESOLVED_BINDING_V1",
+                    &[
+                        b.from_step.as_bytes(),
+                        b.to_step.as_bytes(),
+                        b.target_input.as_bytes(),
+                        &b.value_hash,
+                    ],
+                )
+            })
+            .collect();
+        let bindings_root = unification_merkle_root(b"BDLM_UNIFIED_BINDINGS_V1", &binding_hashes);
+        let gas_bytes = bundle.total_gas_bgu.to_le_bytes();
+        let expected_bundle_root = hash_domain_fields(
+            b"BDLM_UNIFIED_OUTPUT_V1",
+            &[
+                bundle.plan_id.as_bytes(),
+                &expected_steps_root,
+                &bindings_root,
+                &gas_bytes,
+            ],
+        );
+        if expected_bundle_root != bundle.bundle_root {
+            return Err(CompositionError::BundleVerificationFailed(String::from(
+                "bundle_root mismatch",
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -1076,5 +1172,64 @@ mod tests {
             OutputComposer::compose(&mismatch),
             Err(CompositionError::BindingMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn verify_bundle_accepts_valid_bundle_and_refuses_tampering() {
+        let mut a_vals = BTreeMap::new();
+        a_vals.insert(String::from("settled"), CanonicalValue::U128(500));
+        let a = NormalizedMachineOutput::from_svm(
+            "step_svm",
+            4,
+            true,
+            10_000,
+            vec![1, 2],
+            Vec::new(),
+            a_vals,
+        )
+        .unwrap();
+
+        let mut b_vals = BTreeMap::new();
+        b_vals.insert(String::from("settled"), CanonicalValue::U128(500));
+        let b = NormalizedMachineOutput::from_utxo(
+            "step_btc",
+            2,
+            true,
+            800,
+            vec![3, 4],
+            Vec::new(),
+            b_vals,
+        )
+        .unwrap();
+
+        let plan = OutputCompositionPlan {
+            plan_id: String::from("verify-bundle-test"),
+            steps: vec![a, b],
+            bindings: vec![OutputBinding {
+                from_step: String::from("step_svm"),
+                selector: OutputSelector::TypedField {
+                    key: String::from("settled"),
+                },
+                to_step: String::from("step_btc"),
+                target_input: String::from("settled"),
+                enforce_match: true,
+            }],
+        };
+        let bundle = OutputComposer::compose(&plan).expect("compose succeeds");
+        OutputComposer::verify_bundle(&bundle).expect("valid bundle verifies");
+
+        let mut bad_root = bundle.clone();
+        bad_root.bundle_root[0] ^= 0xFF;
+        assert!(matches!(
+            OutputComposer::verify_bundle(&bad_root),
+            Err(CompositionError::BundleVerificationFailed(_))
+        ));
+
+        let mut reversed_order = bundle;
+        reversed_order.execution_order.reverse();
+        assert_eq!(
+            OutputComposer::verify_bundle(&reversed_order),
+            Err(CompositionError::CycleDetected)
+        );
     }
 }
