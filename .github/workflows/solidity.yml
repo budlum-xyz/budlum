@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
-
 concurrency:
   group: solidity-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}

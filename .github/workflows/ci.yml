@@ -8,7 +8,6 @@ on:
     # `refs/pull/<n>/merge`), which doubled the queue and starved the runners.
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
   # A manual run on a snapshot ref (a branch or a tag that names one commit).
   # Its concurrency group is the snapshot ref, so a push to a stacked branch
   # cannot cancel it, and a head gets one complete result.
