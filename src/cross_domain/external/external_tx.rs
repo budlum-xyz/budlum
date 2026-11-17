@@ -128,6 +128,40 @@ fn is_mainnet(chain_id: u64) -> bool {
             .value()
 }
 
+fn is_testnet(chain_id: u64) -> bool {
+    chain_id
+        == crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value()
+}
+
+/// Whether this transaction operates on an Ethereum sync-committee adapter.
+///
+/// The public testnet gate covers the complete lifecycle, not only
+/// registration. This keeps restored pre-activation state fail-closed too.
+fn uses_ethereum_sync(state: &AccountState, tx: &ExternalDomainTx) -> bool {
+    let entry_is_sync = |domain: &DomainKey| {
+        state
+            .settlement
+            .external_intake
+            .entries
+            .get(domain)
+            .is_some_and(|entry| matches!(&entry.spec, AdapterSpec::EthereumSync { .. }))
+    };
+    match tx {
+        ExternalDomainTx::Register(request) => {
+            matches!(&request.spec, AdapterSpec::EthereumSync { .. })
+        }
+        ExternalDomainTx::SubmitEvidence(evidence) => {
+            entry_is_sync(&DomainKey::from_parts(&evidence.adapter, &evidence.network))
+        }
+        ExternalDomainTx::BondProver { domain, .. }
+        | ExternalDomainTx::Readmit { domain, .. }
+        | ExternalDomainTx::ScheduleFork { domain, .. }
+        | ExternalDomainTx::SetQuorumPolicy { domain, .. } => entry_is_sync(domain),
+    }
+}
+
 /// Apply one external-domain write to `state`.
 ///
 /// Every variant decides its refusals before it writes, and a refusal leaves
@@ -148,6 +182,9 @@ pub fn execute_external_domain_tx(
 ) -> Result<(), ExternalDomainTxError> {
     if is_mainnet(ctx.chain_id) {
         return Err(ExternalDomainTxError::MainnetDisabled);
+    }
+    if is_testnet(ctx.chain_id) && uses_ethereum_sync(state, tx) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
     }
     match tx {
         ExternalDomainTx::Register(request) => register(state, ctx, request),
