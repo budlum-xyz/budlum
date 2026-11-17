@@ -1880,10 +1880,27 @@ impl Executor {
                     ));
                 }
 
+                let bud3_nft_id = crate::socialfi::nft_folders::derive_bud3_nft_id(id);
+                let has_bud3_ref = state
+                    .bud3_registry
+                    .can_transfer_nft_reference(&bud3_nft_id, &tx.from.0, &to.0)
+                    .map_err(|e| {
+                        BudlumError::validation("bud3_nft_transfer_refused", format!("{e:?}"))
+                    })?;
+
                 state
                     .nft_registry
                     .transfer(id, &tx.from, to)
                     .map_err(|e| BudlumError::validation("nft_transfer_failed", e.to_string()))?;
+
+                if has_bud3_ref {
+                    state
+                        .bud3_registry
+                        .transfer_nft_reference(&bud3_nft_id, &tx.from.0, &to.0)
+                        .map_err(|e| {
+                            BudlumError::validation("bud3_nft_transfer_failed", format!("{e:?}"))
+                        })?;
+                }
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -1917,6 +1934,14 @@ impl Executor {
                     ));
                 }
 
+                let bud3_nft_id = crate::socialfi::nft_folders::derive_bud3_nft_id(id);
+                let has_bud3_ref = state
+                    .bud3_registry
+                    .can_release_verified_nft_reference(&bud3_nft_id, &tx.from.0)
+                    .map_err(|e| {
+                        BudlumError::validation("bud3_nft_burn_refused", format!("{e:?}"))
+                    })?;
+
                 let cid = state
                     .nft_registry
                     .burn(id, &tx.from)
@@ -1927,6 +1952,15 @@ impl Executor {
                     state.vault.close_folder(id).map_err(|e| {
                         BudlumError::validation("vault_close_failed", e.to_string())
                     })?;
+                }
+
+                if has_bud3_ref {
+                    state
+                        .bud3_registry
+                        .release_verified_nft_reference(&bud3_nft_id, &tx.from.0, state.epoch_index)
+                        .map_err(|e| {
+                            BudlumError::validation("bud3_nft_burn_failed", format!("{e:?}"))
+                        })?;
                 }
 
                 // Constitution section 1: when an NFT is burned the data is physically deleted from B.U.D. storage.
@@ -6386,5 +6420,151 @@ mod tests {
             !state.get_validator(&validator).unwrap().active,
             "zero-stake validator must not re-activate on ResumeValidator"
         );
+    }
+
+    #[test]
+    fn nft_transfer_and_burn_sync_bud3_registry_ownership() {
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::socialfi::nft_folders::derive_bud3_nft_id;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::prepare_public_upload;
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::tx::StorageTxV3;
+        use crate::storage::content_id::ContentId;
+
+        let mut state = AccountState::new();
+        let alice = Address::from([0xA1; 32]);
+        let bob = Address::from([0xB2; 32]);
+        state.add_balance(&alice, 1_000_000_000);
+        state.add_balance(&bob, 1_000_000_000);
+        state.add_validator(Address::from([10u8; 32]), 1_000);
+        state.add_validator(Address::from([11u8; 32]), 1_000);
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload = b"nft ownership synced with bud3 registry".repeat(5);
+        let up = prepare_public_upload(&payload, &profile, &Bud3Limits::default(), 8).unwrap();
+        let key = up.record.commitment;
+        let legacy_cid = ContentId(up.record.content_id.digest);
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: [10u8; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: [11u8; 32],
+                    class: Class::Full,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+
+        let reg_tx = Transaction::new_with_chain_id(
+            alice,
+            Address::zero(),
+            0,
+            10,
+            0,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::StorageV3(Box::new(StorageTxV3::RegisterObject {
+                record: up.record,
+                shares,
+                lifetime_epochs: 10,
+            })),
+        );
+        Executor::apply_transaction_checked(&mut state, &reg_tx).unwrap();
+
+        let mint_tx = Transaction::new_with_chain_id(
+            alice,
+            Address::zero(),
+            0,
+            10,
+            1,
+            bincode::serialize(&(legacy_cid, None::<String>)).unwrap(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::NftMint,
+        );
+        Executor::apply_transaction_checked(&mut state, &mint_tx).unwrap();
+        let id = *state.nft_registry.nfts.keys().next().unwrap();
+        let bud3_nft_id = derive_bud3_nft_id(id);
+
+        let bind_tx = Transaction::new_with_chain_id(
+            alice,
+            Address::zero(),
+            0,
+            10,
+            2,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::StorageV3(Box::new(StorageTxV3::BindNft {
+                nft: bud3_nft_id,
+                object: key,
+            })),
+        );
+        Executor::apply_transaction_checked(&mut state, &bind_tx).unwrap();
+        assert_eq!(
+            state.bud3_registry.nft_binding(&bud3_nft_id),
+            Some((key, alice.0))
+        );
+
+        let transfer_tx = Transaction::new_with_chain_id(
+            alice,
+            Address::zero(),
+            0,
+            10,
+            3,
+            bincode::serialize(&(id, bob)).unwrap(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::NftTransfer,
+        );
+        Executor::apply_transaction_checked(&mut state, &transfer_tx).unwrap();
+        assert_eq!(state.nft_registry.get_nft(id).unwrap().owner, bob);
+        assert_eq!(
+            state.bud3_registry.nft_binding(&bud3_nft_id),
+            Some((key, bob.0))
+        );
+        assert_eq!(state.bud3_registry.object(&key).unwrap().owner, bob.0);
+
+        let alice_stale_burn = Transaction::new_with_chain_id(
+            alice,
+            Address::zero(),
+            0,
+            10,
+            4,
+            bincode::serialize(&id).unwrap(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::NftBurn,
+        );
+        assert!(Executor::apply_transaction_checked(&mut state, &alice_stale_burn).is_err());
+
+        let bob_burn = Transaction::new_with_chain_id(
+            bob,
+            Address::zero(),
+            0,
+            10,
+            0,
+            bincode::serialize(&id).unwrap(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::NftBurn,
+        );
+        Executor::apply_transaction_checked(&mut state, &bob_burn).unwrap();
+        assert!(state.nft_registry.get_nft(id).is_none());
+        assert!(state.bud3_registry.nft_binding(&bud3_nft_id).is_none());
+        assert!(state.bud3_registry.object(&key).is_none());
+        assert!(state.bud3_registry.is_tombstoned(&key));
     }
 }

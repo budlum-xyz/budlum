@@ -10,7 +10,7 @@ use crate::aggregation::chain::{
     validate_params, ChainBackend,
 };
 use crate::aggregation::fees::{ClaimSettlement, FeePayout};
-use crate::aggregation::frame::ClaimFrame;
+use crate::aggregation::frame::{aggregator_address_from_seed, ClaimFrame};
 use crate::aggregation::object::derive_claim;
 use crate::aggregation::params::{AggMode, AggParams};
 use crate::aggregation::pool::PoolItem;
@@ -32,8 +32,12 @@ pub(super) const AMOUNT: u64 = 10;
 /// over 67 bytes.
 pub(super) const SIG_CLAIM_FEE: u64 = 4288;
 
+pub(super) fn aggregator_seed() -> zeroize::Zeroizing<[u8; 32]> {
+    zeroize::Zeroizing::new([0xA6; 32])
+}
+
 pub(super) fn aggregator() -> Address {
-    Address::from([0xA6; 32])
+    aggregator_address_from_seed(&aggregator_seed()).expect("valid aggregator seed")
 }
 
 pub(super) fn producer() -> Address {
@@ -95,10 +99,7 @@ fn tick(params: &AggParams, txs: &[Transaction]) -> (Vec<Transaction>, ClaimFram
         items.push(PoolItem { envelope, claim });
         claimed.push(body);
     }
-    let ctx = TickCtx {
-        domain,
-        aggregator: aggregator(),
-    };
+    let ctx = TickCtx::from_seed(domain, aggregator_seed()).expect("seed");
     let frame = ChainBackend::new(params, &registry)
         .prove_tick(&ctx, &items)
         .expect("tick");
@@ -416,6 +417,24 @@ fn a_block_whose_transaction_claims_without_a_frame_is_refused() {
         .validate_and_add_block(bare)
         .unwrap_err()
         .contains("outside the frame"));
+}
+
+#[test]
+fn a_resealed_block_with_stolen_segment_aggregator_is_refused() {
+    let (_, mut right, block, _) = frame_block();
+    let mut stolen = block;
+    let frame = stolen.claim_frame.as_mut().expect("frame");
+    frame.segments[0].aggregator = Address::from([0x99; 32]);
+    let domain = claim_domain(CHAIN).expect("domain");
+    stolen.frame_hash = Some(frame.hash(domain).expect("hash"));
+    reseal(&mut stolen);
+    let err = right
+        .validate_and_add_block(stolen)
+        .expect_err("stolen aggregator segment must fail attestation");
+    assert!(
+        err.contains("attestation"),
+        "expected attestation refusal, got: {err}"
+    );
 }
 
 #[test]

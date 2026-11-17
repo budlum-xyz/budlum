@@ -404,6 +404,8 @@ pub struct RpcServer {
     /// are served through sessions opened by `bud_storageOpenReveal`, never
     /// as raw handle-passing.
     reveal_gateway: Arc<Mutex<crate::storage::RevealGateway>>,
+    /// Bounded node-local replay tracker for G8 `bud_storageGetContent` paid view receipts.
+    consumed_paid_views: Arc<Mutex<ConsumedPaidViews>>,
     /// Bounded, expiring, per-peer filter table of the Ethereum gateway
     /// . It is node-local bookkeeping, never consensus state.
     eth_filters: Arc<Mutex<ethereum::filters::FilterPool>>,
@@ -424,6 +426,32 @@ pub struct RpcServer {
     /// The Garden of this node. Both listeners share one service, and every
     /// `bud_garden*` method is answered on the operator listener only.
     garden: Arc<crate::garden::GardenService>,
+}
+
+const MAX_CONSUMED_PAID_VIEWS: usize = 65_536;
+
+#[derive(Default)]
+struct ConsumedPaidViews {
+    seen: std::collections::BTreeSet<[u8; 32]>,
+    order: VecDeque<[u8; 32]>,
+}
+
+impl ConsumedPaidViews {
+    fn contains(&self, receipt_id: &[u8; 32]) -> bool {
+        self.seen.contains(receipt_id)
+    }
+
+    fn record(&mut self, receipt_id: [u8; 32]) {
+        if !self.seen.insert(receipt_id) {
+            return;
+        }
+        self.order.push_back(receipt_id);
+        while self.order.len() > MAX_CONSUMED_PAID_VIEWS {
+            if let Some(evicted) = self.order.pop_front() {
+                self.seen.remove(&evicted);
+            }
+        }
+    }
 }
 
 /// One dedicated, loopback-only Aptos HTTP listener. It reuses the RPC
@@ -626,6 +654,7 @@ impl RpcServer {
             security: RpcSecurityConfig::default(),
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            consumed_paid_views: Arc::new(Mutex::new(ConsumedPaidViews::default())),
             eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
@@ -648,6 +677,7 @@ impl RpcServer {
             security,
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            consumed_paid_views: Arc::new(Mutex::new(ConsumedPaidViews::default())),
             eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
@@ -671,6 +701,7 @@ impl RpcServer {
             security,
             mode,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            consumed_paid_views: Arc::new(Mutex::new(ConsumedPaidViews::default())),
             eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
@@ -6184,6 +6215,12 @@ impl BudlumApiServer for RpcServer {
     async fn social_get_post(&self, id: u64) -> Result<serde_json::Value, ErrorObjectOwned> {
         if let Some(nft) = self.chain.nft_get(id).await {
             let author_bud_name = self.chain.bns_reverse_resolve(nft.owner).await;
+            let bud3_nft_id = crate::socialfi::nft_folders::derive_bud3_nft_id(nft.id);
+            let bud3 = self
+                .chain
+                .bud3(crate::storage::bud3::registry::Bud3Query::Nft(bud3_nft_id))
+                .await
+                .unwrap_or(serde_json::Value::Null);
             Ok(serde_json::json!({
                 "id": nft.id,
                 "owner": Self::to_0x_hash(nft.owner.to_hex()),
@@ -6191,6 +6228,8 @@ impl BudlumApiServer for RpcServer {
                 "minted_at": nft.minted_at_epoch,
                 "author": nft.author_name,
                 "author_bud_name": author_bud_name,
+                "bud3_nft_id": Self::bytes32_to_0x(bud3_nft_id),
+                "bud3": bud3,
             }))
         } else {
             Ok(serde_json::json!(null))
@@ -6207,15 +6246,28 @@ impl BudlumApiServer for RpcServer {
         })?;
         let author_bud_name = self.chain.bns_reverse_resolve(addr).await;
         let nfts = self.chain.nft_get_by_owner(addr).await;
+        let bud3_nft_ids: Vec<[u8; 32]> = nfts
+            .iter()
+            .map(|nft| crate::socialfi::nft_folders::derive_bud3_nft_id(nft.id))
+            .collect();
+        let bud3_bindings = self
+            .chain
+            .bud3_nfts(bud3_nft_ids.clone())
+            .await
+            .unwrap_or_else(|_| vec![serde_json::Value::Null; bud3_nft_ids.len()]);
         let list: Vec<_> = nfts
             .into_iter()
-            .map(|nft| {
+            .zip(bud3_nft_ids)
+            .zip(bud3_bindings)
+            .map(|((nft, bud3_nft_id), bud3)| {
                 serde_json::json!({
                     "id": nft.id,
                     "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
                     "minted_at": nft.minted_at_epoch,
                     "author": nft.author_name,
                     "author_bud_name": author_bud_name,
+                    "bud3_nft_id": Self::bytes32_to_0x(bud3_nft_id),
+                    "bud3": bud3,
                 })
             })
             .collect();
@@ -6232,9 +6284,20 @@ impl BudlumApiServer for RpcServer {
                 e.insert(handle);
             }
         }
+        let bud3_nft_ids: Vec<[u8; 32]> = nfts
+            .iter()
+            .map(|nft| crate::socialfi::nft_folders::derive_bud3_nft_id(nft.id))
+            .collect();
+        let bud3_bindings = self
+            .chain
+            .bud3_nfts(bud3_nft_ids.clone())
+            .await
+            .unwrap_or_else(|_| vec![serde_json::Value::Null; bud3_nft_ids.len()]);
         let list: Vec<_> = nfts
             .into_iter()
-            .map(|nft| {
+            .zip(bud3_nft_ids)
+            .zip(bud3_bindings)
+            .map(|((nft, bud3_nft_id), bud3)| {
                 let author_bud_name = resolved_handles.get(&nft.owner).cloned().flatten();
                 serde_json::json!({
                     "id": nft.id,
@@ -6243,6 +6306,8 @@ impl BudlumApiServer for RpcServer {
                     "minted_at": nft.minted_at_epoch,
                     "author": nft.author_name,
                     "author_bud_name": author_bud_name,
+                    "bud3_nft_id": Self::bytes32_to_0x(bud3_nft_id),
+                    "bud3": bud3,
                 })
             })
             .collect();
@@ -6957,7 +7022,6 @@ impl BudlumApiServer for RpcServer {
             let state_root = self.chain.get_state_root(height).await;
             let resolved = self.chain.bns_resolve_full(name.clone()).await;
             let bns_proof = self.chain.bns_prove_name(name.clone()).await;
-            let current_epoch = bns_proof.as_ref().map_or(0, |p| p.epoch);
             let reverse_primary_name = match resolved.as_ref() {
                 Some(r) => self.chain.bns_reverse_resolve(r.owner).await,
                 None => None,
@@ -6965,14 +7029,13 @@ impl BudlumApiServer for RpcServer {
             // The root carried in this reply's own proof is not an independent
             // trust anchor: checking the proof against it proves only that the
             // answering node is self-consistent, while a hostile or on-path
-            // node can mint both. Leave `expected_bns_root` empty so the card
+            // node can mint both. Leave `expected_bns_anchor` empty so the card
             // stays Unverified, and return `bns_proof`, `observed_height`, and
             // `observed_state_root` so callers can verify against a finalized
-            // header root they trust themselves.
+            // header root and epoch they trust themselves.
             let proof_ctx = crate::wallet::identity_profile::IdentityProofContext {
-                expected_bns_root: None,
+                expected_bns_anchor: None,
                 bns_proof,
-                current_epoch,
                 reverse_primary_name,
             };
             let manifest_id = resolved.as_ref().and_then(|r| {
@@ -7031,7 +7094,6 @@ impl BudlumApiServer for RpcServer {
             let state_root = self.chain.get_state_root(height).await;
             let resolved = self.chain.bns_resolve_full(name.clone()).await;
             let bns_proof = self.chain.bns_prove_name(name.clone()).await;
-            let current_epoch = bns_proof.as_ref().map_or(0, |p| p.epoch);
             let reverse_primary_name = match resolved.as_ref() {
                 Some(r) => self.chain.bns_reverse_resolve(r.owner).await,
                 None => None,
@@ -7040,9 +7102,8 @@ impl BudlumApiServer for RpcServer {
             // commits to the card statuses, so a self-supplied root would turn
             // a node's own assertion into a portable Verified attestation.
             let proof_ctx = crate::wallet::identity_profile::IdentityProofContext {
-                expected_bns_root: None,
+                expected_bns_anchor: None,
                 bns_proof,
-                current_epoch,
                 reverse_primary_name,
             };
             let manifest_id = resolved.as_ref().and_then(|r| {
@@ -8266,6 +8327,266 @@ impl BudlumApiServer for RpcServer {
             .bud3(crate::storage::bud3::registry::Bud3Query::Custody(key))
             .await
             .map_err(|_| bud3_actor_unavailable())
+    }
+
+    async fn storage_get_content(
+        &self,
+        payer: String,
+        object: String,
+        receipt_id: String,
+        fee_paid_atoms: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let payer = parse_hex32_field(&payer, "payer")?;
+        let object = parse_hex32_field(&object, "object")?;
+        let receipt_id = parse_hex32_field(&receipt_id, "receipt_id")?;
+        if fee_paid_atoms < crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "fee_paid_atoms must be at least {}",
+                    crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS
+                ),
+                None::<()>,
+            ));
+        }
+        {
+            let guard = self.consumed_paid_views.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
+            })?;
+            if guard.contains(&receipt_id) {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "paid view receipt already consumed on this node",
+                    None::<()>,
+                ));
+            }
+        }
+        let receipt = crate::storage::bud3::view::PaidViewReceipt {
+            payer,
+            object,
+            receipt_id,
+            fee_paid_atoms,
+        };
+        let bytes = self
+            .chain
+            .bud3_get_content(receipt)
+            .await
+            .map_err(|_| bud3_actor_unavailable())?
+            .map_err(|e| match e {
+                crate::storage::bud3::view::ViewBud3Error::SealedFallbackForbidden => {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        "G8 paid fallback decode is forbidden for sealed objects",
+                        None::<()>,
+                    )
+                }
+                crate::storage::bud3::view::ViewBud3Error::UnpaidFallbackView => {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        "paid view receipt missing, expired, or insufficient",
+                        None::<()>,
+                    )
+                }
+                crate::storage::bud3::view::ViewBud3Error::UnknownObject => {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        "unknown or tombstoned B.U.D. 3.0 object",
+                        None::<()>,
+                    )
+                }
+                other => ErrorObjectOwned::owned(
+                    -32000,
+                    format!("B.U.D. 3.0 fallback decode failed: {other:?}"),
+                    None::<()>,
+                ),
+            })?;
+        {
+            let mut guard = self.consumed_paid_views.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
+            })?;
+            guard.record(receipt_id);
+        }
+        Ok(serde_json::json!({
+            "object": hex::encode(object),
+            "content_hex": hex::encode(&bytes),
+            "content_len": bytes.len(),
+        }))
+    }
+
+    async fn storage_get_symbols(
+        &self,
+        holder: String,
+        object: String,
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let holder = parse_hex32_field(&holder, "holder")?;
+        let object = parse_hex32_field(&object, "object")?;
+        if count == 0 || count > crate::storage::bud3::symbol_protocol::MAX_SYMBOLS_PER_REQUEST {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "count must be within 1..={}",
+                    crate::storage::bud3::symbol_protocol::MAX_SYMBOLS_PER_REQUEST
+                ),
+                None::<()>,
+            ));
+        }
+        let page = self
+            .chain
+            .bud3_get_symbols(holder, object, segment, first_esi, count)
+            .await
+            .map_err(|_| bud3_actor_unavailable())?
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        let items: Vec<serde_json::Value> = page
+            .items
+            .into_iter()
+            .map(|item| {
+                let sym_hex = hex::encode(&item.symbol.data);
+                serde_json::json!({
+                    "symbol": item.symbol,
+                    "proof": item.proof,
+                    "symbol_hex": sym_hex,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "holder": hex::encode(holder),
+            "object": hex::encode(object),
+            "segment": segment,
+            "first_esi": first_esi,
+            "count": count,
+            "symbol_size": page.symbol_size,
+            "symbol_roots": page.roots.iter().map(|r| serde_json::json!({
+                "segment": r.segment,
+                "root": hex::encode(r.root),
+                "first_esi": r.first_esi,
+                "count": r.count,
+            })).collect::<Vec<_>>(),
+            "items": items,
+        }))
+    }
+
+    async fn storage_get_placement(
+        &self,
+        commitment: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = parse_hex32_field(&commitment, "object commitment")?;
+        self.chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Placement(key))
+            .await
+            .map_err(|_| bud3_actor_unavailable())
+    }
+
+    async fn storage_get_nft_object(
+        &self,
+        nft_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if nft_id.is_empty() || nft_id != nft_id.trim() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid nft_id: empty or padded identifier",
+                None::<()>,
+            ));
+        }
+        let (bud3_nft, social_id) = if nft_id.starts_with("0x")
+            || (nft_id.len() == 64 && nft_id.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            (parse_hex32_field(&nft_id, "nft_id")?, None)
+        } else {
+            let id = nft_id.parse::<u64>().map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid nft_id (expected u64 or 32-byte hex): {e}"),
+                    None::<()>,
+                )
+            })?;
+            (
+                crate::socialfi::nft_folders::derive_bud3_nft_id(id),
+                Some(id),
+            )
+        };
+        let mut val = self
+            .chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Nft(bud3_nft))
+            .await
+            .map_err(|_| bud3_actor_unavailable())?;
+        if let Some(id) = social_id {
+            let social_nft = self.chain.nft_get(id).await;
+            if let Some(map) = val.as_object_mut() {
+                map.insert("socialfi_id".to_string(), serde_json::json!(id));
+                if let Some(nft) = social_nft {
+                    map.insert(
+                        "socialfi_nft".to_string(),
+                        serde_json::json!({
+                            "id": nft.id,
+                            "owner": Self::to_0x_hash(nft.owner.to_hex()),
+                            "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                            "minted_at": nft.minted_at_epoch,
+                            "author": nft.author_name,
+                        }),
+                    );
+                }
+            } else if let Some(nft) = social_nft {
+                val = serde_json::json!({
+                    "status": "socialfi_only",
+                    "nft_id": hex::encode(bud3_nft),
+                    "socialfi_id": id,
+                    "owner": Self::to_0x_hash(nft.owner.to_hex()),
+                    "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                    "minted_at": nft.minted_at_epoch,
+                    "author": nft.author_name,
+                });
+            }
+        }
+        Ok(val)
+    }
+
+    async fn storage_store_verified_symbols(
+        &self,
+        holder: String,
+        object: String,
+        segment: u64,
+        items: Vec<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_storageStoreVerifiedSymbols")?;
+        let holder = parse_hex32_field(&holder, "holder")?;
+        let object = parse_hex32_field(&object, "object")?;
+        let max_items =
+            usize::try_from(crate::storage::bud3::symbol_protocol::MAX_SYMBOLS_PER_REQUEST)
+                .unwrap_or(64);
+        if items.is_empty() || items.len() > max_items {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("items length must be within 1..={max_items}"),
+                None::<()>,
+            ));
+        }
+        let mut decoded = Vec::with_capacity(items.len());
+        for raw in items {
+            let item: crate::storage::bud3::symbol_protocol::VerifiedSymbolItem =
+                serde_json::from_value(raw).map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("Invalid VerifiedSymbolItem JSON: {e}"),
+                        None::<()>,
+                    )
+                })?;
+            decoded.push(item);
+        }
+        let stored = self
+            .chain
+            .bud3_store_verified_symbols(holder, object, segment, decoded)
+            .await
+            .map_err(|_| bud3_actor_unavailable())?
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({
+            "stored": stored,
+            "holder": hex::encode(holder),
+            "object": hex::encode(object),
+            "segment": segment,
+        }))
     }
 
     async fn list_relays(&self) -> Result<serde_json::Value, ErrorObjectOwned> {

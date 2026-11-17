@@ -184,6 +184,53 @@ impl NftFolderRegistry {
         Ok(meta)
     }
 
+    /// Transfer a `SocialFi` NFT to `to`, keeping [`Bud3Registry`] ownership
+    /// synchronized and removing the transferred id from `caller`'s folders.
+    /// exposed for `SocialFi` transfer transaction execution and RPC handlers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SocialFiBud3Error`] if `caller` is not the NFT owner or B.U.D.
+    /// 3.0 dependency invariants forbid the transfer.
+    pub fn transfer_bud3_nft(
+        &mut self,
+        nft_reg: &mut NftRegistry,
+        bud3_reg: &mut Bud3Registry,
+        id: u64,
+        caller: &Address,
+        to: Address,
+    ) -> Result<(), SocialFiBud3Error> {
+        let current = nft_reg
+            .get_nft(id)
+            .ok_or_else(|| SocialFiBud3Error::Nft(NftError::NotFound.to_string()))?;
+        if &current.owner != caller {
+            return Err(SocialFiBud3Error::Nft(NftError::NotOwner.to_string()));
+        }
+        let nft_id = derive_bud3_nft_id(id);
+        let has_binding = bud3_reg
+            .can_transfer_nft_reference(&nft_id, &caller.0, &to.0)
+            .map_err(SocialFiBud3Error::Registry)?;
+        nft_reg
+            .transfer(id, caller, to)
+            .map_err(|e| SocialFiBud3Error::Nft(e.to_string()))?;
+        if has_binding {
+            bud3_reg
+                .transfer_nft_reference(&nft_id, &caller.0, &to.0)
+                .map_err(SocialFiBud3Error::Registry)?;
+        }
+        if let Some(meta) = self.commitments.get_mut(&id) {
+            meta.owner = to;
+        }
+        if let Some(fids) = self.owner_folders.get(caller).cloned() {
+            for fid in fids {
+                if let Some(folder) = self.folders.get_mut(&fid) {
+                    folder.nft_ids.retain(|&x| x != id);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Burn a `SocialFi` NFT with strict owner verification and B.U.D. 3.0
     /// reference release / cryptographic grant shredding.
     /// exposed for `SocialFi` burn transaction execution and RPC handlers.
@@ -403,5 +450,63 @@ mod tests {
             .unwrap();
         assert!(bud3_reg.object(&key).is_some());
         assert_eq!(bud3_reg.object(&key).unwrap().references.len(), 1);
+    }
+
+    #[test]
+    fn socialfi_nft_transfer_updates_bud3_binding_and_clears_sender_folder() {
+        let alice = Address([3u8; 32]);
+        let bob = Address([4u8; 32]);
+        let mut nft_reg = NftRegistry::new();
+        let mut bud3_reg = Bud3Registry::default();
+        let mut folders = NftFolderRegistry::new();
+
+        let body = b"transferable socialfi bud3 nft".repeat(5);
+        let up = prepare_public_upload(&body, &P, &Bud3Limits::default(), 8).unwrap();
+        let key = up.record.commitment;
+        bud3_reg
+            .register_object(
+                alice.0,
+                up.record,
+                vec![
+                    (
+                        0,
+                        Share {
+                            validator: [9u8; 32],
+                            class: Class::Full,
+                            first_esi: 0,
+                            symbols: 4,
+                        },
+                    ),
+                    (
+                        0,
+                        Share {
+                            validator: [10u8; 32],
+                            class: Class::Full,
+                            first_esi: 4,
+                            symbols: 4,
+                        },
+                    ),
+                ],
+                1,
+                20,
+            )
+            .unwrap();
+
+        let nft = folders
+            .mint_bud3_nft(&mut nft_reg, &mut bud3_reg, alice, key, 1, None)
+            .unwrap();
+        let fid = folders.create_folder(alice, "owned").unwrap();
+        folders
+            .add_nft_to_folder(&nft_reg, &alice, fid, nft.id)
+            .unwrap();
+
+        folders
+            .transfer_bud3_nft(&mut nft_reg, &mut bud3_reg, nft.id, &alice, bob)
+            .unwrap();
+        assert_eq!(nft_reg.get_nft(nft.id).unwrap().owner, bob);
+        assert_eq!(folders.commitment(nft.id).unwrap().owner, bob);
+        assert!(folders.folder(fid).unwrap().nft_ids.is_empty());
+        assert_eq!(bud3_reg.nft_binding(&nft.nft_id), Some((key, bob.0)));
+        assert_eq!(bud3_reg.object(&key).unwrap().owner, bob.0);
     }
 }
