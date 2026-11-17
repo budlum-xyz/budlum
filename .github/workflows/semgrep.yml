@@ -45,7 +45,7 @@ name: Semgrep
 
 on:
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack]
   push:
     branches: [main]
   schedule:
