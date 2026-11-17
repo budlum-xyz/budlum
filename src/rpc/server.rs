@@ -4844,6 +4844,8 @@ impl BudlumApiServer for RpcServer {
             bns_bindings: std::collections::BTreeMap<String, [u8; 32]>,
             #[serde(default = "default_rpc_storage_strength")]
             min_strength: crate::unification::VerificationStrength,
+            #[serde(default)]
+            asset_path: Option<String>,
         }
         const fn default_rpc_storage_strength() -> crate::unification::VerificationStrength {
             crate::unification::VerificationStrength::AttestedDeal
@@ -4875,6 +4877,13 @@ impl BudlumApiServer for RpcServer {
             fabric
                 .bind_bns_name(&name, digest)
                 .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        }
+        if let Some(asset_path) = req.asset_path {
+            let asset: crate::unification::Web3SiteAsset = fabric
+                .resolve_web3_asset(&req.uri, &asset_path, req.min_strength)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+            return serde_json::to_value(asset)
+                .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>));
         }
         let resolved = fabric
             .resolve(&req.uri, req.min_strength)
