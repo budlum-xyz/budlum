@@ -381,3 +381,20 @@ impl fmt::Display for WireError {
 }
 
 impl std::error::Error for WireError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn svm_and_move_pointers_are_closed_on_testnet() {
+        for target in [EeId::SVM, EeId::MOVE] {
+            assert!(!pointer_target_enabled_by_default(45_261, target));
+            assert!(pointer_target_enabled_by_default(45_262, target));
+        }
+        for target in [EeId::EVM, EeId::WASM] {
+            assert!(pointer_target_enabled_by_default(45_261, target));
+        }
+        assert!(!pointer_target_enabled_by_default(99_999, EeId::EVM));
+    }
+}
