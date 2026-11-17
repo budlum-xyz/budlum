@@ -409,6 +409,7 @@ fn app_binding_is_open_on_devnet() {
     );
     domain.operator = Some(registrant);
     crate::settlement::domains::register_domain(&mut state, domain).expect("register domain");
+    state.poa_onboarding.add_admin(9, registrant);
 
     let devnet_ctx = SettlementTxContext {
         sender: registrant,

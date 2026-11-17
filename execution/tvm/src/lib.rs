@@ -572,10 +572,7 @@ mod tests {
         let mut closed = TvmWorker::new();
         assert!(!closed.is_active(&ctx()));
         for chain_id in [45_260, 99_999] {
-            assert!(!closed.is_active(&BlockContext {
-                chain_id,
-                ..ctx()
-            }));
+            assert!(!closed.is_active(&BlockContext { chain_id, ..ctx() }));
         }
         assert!(closed.is_active(&BlockContext {
             chain_id: 45_262,
@@ -583,7 +580,10 @@ mod tests {
         }));
         let activated = TvmWorker::with_activation_height(Some(10));
         assert!(!activated.is_active(&ctx()));
-        assert!(activated.is_active(&BlockContext { height: 10, ..ctx() }));
+        assert!(activated.is_active(&BlockContext {
+            height: 10,
+            ..ctx()
+        }));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::TVM, vec![0x09; 32]) else {
             panic!("caller");

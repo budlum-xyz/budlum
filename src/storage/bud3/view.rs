@@ -336,8 +336,8 @@ pub fn collect_symbols_full_then_mobile<N: NetworkSymbolSource>(
     object: &ObjectKey,
     network: &N,
 ) -> Result<(ObjectRecord, Vec<Symbol>), ViewBud3Error> {
-    let entry = registry
-        .object(object)
+    let (resolved_key, entry) = registry
+        .resolve_live_object(object)
         .ok_or(ViewBud3Error::UnknownObject)?;
     let record = entry.record.clone();
     let mut shares_ordered: Vec<(u64, Share)> = entry
@@ -358,8 +358,24 @@ pub fn collect_symbols_full_then_mobile<N: NetworkSymbolSource>(
     let expected_sym_len = usize::from(record.profile.symbol_size);
     let mut per_segment_batches: BTreeMap<u64, Vec<Vec<Symbol>>> = BTreeMap::new();
     for (seg, sh) in shares_ordered {
-        let syms =
-            network.fetch_holder_symbols(&sh.validator, object, seg, sh.first_esi, sh.symbols);
+        let mut syms = Vec::new();
+        let mut cursor = sh.first_esi;
+        let mut remaining = sh.symbols;
+        while remaining > 0 {
+            let chunk = remaining.min(super::symbol_protocol::MAX_SYMBOLS_PER_REQUEST);
+            syms.extend(network.fetch_holder_symbols(
+                &sh.validator,
+                &resolved_key,
+                seg,
+                cursor,
+                chunk,
+            ));
+            remaining -= chunk;
+            let Some(next) = cursor.checked_add(chunk) else {
+                break;
+            };
+            cursor = next;
+        }
         let end_esi = sh.first_esi.saturating_add(sh.symbols);
         let mut seen_esis = BTreeSet::new();
         let clean: Vec<Symbol> = syms
@@ -424,13 +440,16 @@ pub fn fallback_decode_public<N: NetworkSymbolSource>(
     receipt: &PaidViewReceipt,
     network: &N,
 ) -> Result<Vec<u8>, ViewBud3Error> {
-    let entry = registry
-        .object(object)
+    let (resolved_key, entry) = registry
+        .resolve_live_object(object)
         .ok_or(ViewBud3Error::UnknownObject)?;
     if entry.record.content_id.kind == ContentIdKind::Sealed {
         return Err(ViewBud3Error::SealedFallbackForbidden);
     }
-    if receipt.object != *object
+    let receipt_resolved = registry
+        .resolve_live_object(&receipt.object)
+        .map(|(k, _)| k);
+    if receipt_resolved != Some(resolved_key)
         || receipt.fee_paid_atoms < MIN_PAID_VIEW_FEE_ATOMS
         || !registry.verify_paid_view(receipt)
     {
@@ -907,5 +926,142 @@ mod tests {
             view_from_network(&reg, &key, None, &net),
             Err(ViewBud3Error::Pipeline(PipelineError::SegmentMissing(0)))
         ));
+    }
+
+    #[test]
+    fn finalized_replacement_redirects_view_reveal_and_paid_fallback() {
+        use super::super::bof1::Object;
+        use super::super::custody::{symbol_leaf, symbol_root};
+        use super::super::pipeline::ObjectRecord;
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let payload = b"redirectable public B.U.D. 3.0 payload ".repeat(6);
+        let up_old = prepare_public_upload(&payload, &SMALL, &Bud3Limits::default(), 16).unwrap();
+        let old_key = up_old.record.commitment;
+        let raw_obj = Object::raw_public(&payload);
+        let raw_bytes = raw_obj.encode();
+        let new_commit = commit_object(&raw_bytes, &SMALL).unwrap();
+        let enc_raw = SegmentEncoder::new(0, &raw_bytes, &SMALL).unwrap();
+        let k_raw = enc_raw.k();
+        let mut syms_new = enc_raw.source_symbols();
+        syms_new.extend(enc_raw.repair_symbols(0, 16 - k_raw).unwrap());
+        let leaves_new: Vec<(u32, [u8; 32])> = syms_new
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let new_record = ObjectRecord {
+            content_id: up_old.record.content_id,
+            object_len: raw_bytes.len() as u64,
+            commitment: new_commit,
+            profile: SMALL,
+            codec: raw_obj.header.codec,
+            symbols_per_segment: 16,
+            symbol_roots: vec![symbol_root(&leaves_new)],
+        };
+
+        let validators = [[50u8; 32], [51u8; 32], [52u8; 32]];
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: validators[0],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[1],
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[2],
+                    class: Class::Full,
+                    first_esi: 12,
+                    symbols: 4,
+                },
+            ),
+        ];
+
+        let mut reg = Bud3Registry::default();
+        reg.register_object([1; 32], up_old.record, shares.clone(), 0, 40)
+            .unwrap();
+        for v in &validators {
+            reg.ack(&old_key, v).unwrap();
+        }
+        let receipt_id = [0xE4; 32];
+        reg.record_paid_view([9; 32], old_key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 1)
+            .unwrap();
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [50u8, 51, 52]
+            .into_iter()
+            .map(|v| {
+                (
+                    [v; 32],
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let attestations: Vec<_> = [50u8, 51, 52]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation([v; 32], &[v; 32], &old_key, &new_record, &shares).unwrap()
+            })
+            .collect();
+        let new_key = reg
+            .replace_object(
+                (validators[0], 10_000),
+                &old_key,
+                new_record,
+                shares,
+                &attestations,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    2,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for v in &validators {
+            reg.ack(&new_key, v).unwrap();
+        }
+        assert!(reg.object(&old_key).is_none());
+
+        let mut net = MemorySymbolNetwork::default();
+        net.store_holder_share(validators[0], new_key, 0, syms_new[0..6].to_vec());
+        net.store_holder_share(validators[1], new_key, 0, syms_new[6..12].to_vec());
+        net.store_holder_share(validators[2], new_key, 0, syms_new[12..16].to_vec());
+
+        assert_eq!(
+            view_from_network(&reg, &old_key, None, &net).unwrap(),
+            payload
+        );
+        let mut reveal = RevealSessionManager::default();
+        let sid = reveal.open_reveal(&reg, &old_key, 1, &net).unwrap();
+        reveal.close_reveal(sid).unwrap();
+        assert_eq!(
+            fallback_decode_public(
+                &reg,
+                &old_key,
+                &PaidViewReceipt {
+                    payer: [9; 32],
+                    object: old_key,
+                    receipt_id,
+                    fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS,
+                },
+                &net,
+            )
+            .unwrap(),
+            payload
+        );
     }
 }

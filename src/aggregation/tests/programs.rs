@@ -1125,8 +1125,12 @@ fn chip_offload_proves_and_verifies_tick_pi_and_rejects_tampering() {
         .collect();
     let digests: Vec<Hash32> = claims.iter().map(|c| c.digest(domain)).collect();
     let root = claims_root(&digests).expect("claims root");
-    let expected_tick_pi =
-        crate::aggregation::frame::tick_pi_of(domain, &root, claims.len() as u32, &aggregator);
+    let expected_tick_pi = crate::aggregation::frame::tick_pi_of(
+        domain,
+        &root,
+        u32::try_from(claims.len()).expect("len fits u32"),
+        &aggregator,
+    );
 
     let poly: [u64; bud_proof::chips::mldsa_ntt::N] =
         core::array::from_fn(|i| ((i as u64 + 3) * 1337) % bud_proof::chips::mldsa_ntt::Q);
