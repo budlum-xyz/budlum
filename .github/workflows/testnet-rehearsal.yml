@@ -124,6 +124,21 @@ jobs:
             if ! docker compose -f ops/testnet-local.yml logs --tail=200; then
               echo "::error::\`docker compose logs\` also failed."
             fi
+            # The tail above starts long after a stall began. The whole log of
+            # every container is kept as an artifact, and the lines that tell
+            # what the finality rounds and the fork choice did are printed
+            # here, so a failed scenario can be read from its first second.
+            mkdir -p target
+            if docker compose -f ops/testnet-local.yml logs --no-color --timestamps > target/testnet-rehearsal-containers.log 2>&1; then
+              if grep -E 'Started prevote task|prevote quorum|precommit quorum|Finalized|finalized checkpoint|displaced an active round|Reorg|reorg|Refusing to start finality' target/testnet-rehearsal-containers.log > target/testnet-rehearsal-finality.log; then
+                echo "finality and fork choice, all containers, in time order:"
+                sort -k3,3 target/testnet-rehearsal-finality.log | tail -n 600
+              else
+                echo "no finality or fork choice line in the container logs"
+              fi
+            else
+              echo "::error::the full container log could not be written."
+            fi
             exit 1
           fi
       - name: Keep the report
@@ -131,7 +146,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: testnet-rehearsal-report
-          path: target/testnet-rehearsal.md
+          path: |
+            target/testnet-rehearsal.md
+            target/testnet-rehearsal-containers.log
           if-no-files-found: warn
       - name: Teardown (always)
         if: always()

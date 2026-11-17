@@ -47,8 +47,8 @@ const SYNC_TIMEOUT_SECS: u64 = 15;
 /// round itself, a peer that keeps answering index-contiguous, hash-chained
 /// chunks - data the fork-recovery path stages without validating it against
 /// consensus - holds the node's only sync round for `chunks x SYNC_TIMEOUT_SECS`
-/// and never accrues an unanswered-sync strike, so the four-strike ban can never
-/// engage and no other peer can be asked. Four stall windows is enough for an
+/// and never accrues an unanswered-sync strike, so it is never set aside as a
+/// sync source and no other peer can be asked. Four stall windows is enough for an
 /// honest but slow peer to finish a round; past it the round is closed and the
 /// peer is charged, which is what makes the strike path reachable.
 const MAX_SYNC_ROUND_SECS: u64 = SYNC_TIMEOUT_SECS.saturating_mul(4);
@@ -84,6 +84,35 @@ fn select_sync_peer(
         .or_else(|| eligible_best.iter().copied().find(not_empty))
         .or(preferred)
         .or_else(|| eligible_best.first().copied())
+}
+
+/// [`select_sync_peer`], with the peers set aside as sync sources asked last.
+///
+/// A peer that left a run of sync requests unanswered rests
+/// (`PeerManager::is_sync_resting`): it is passed over while any other
+/// eligible peer is there, whatever its score and even when it is the peer
+/// that asked for the round. When every eligible peer rests, the choice is
+/// made among all of them as if none did: with all of them looking slow the
+/// slow one is this node, and it still has to sync from someone.
+fn select_sync_peer_resting_last(
+    preferred: Option<PeerId>,
+    eligible_best: &[PeerId],
+    stalled: Option<PeerId>,
+    empty_at_tip: Option<PeerId>,
+    resting: impl Fn(&PeerId) -> bool,
+) -> Option<PeerId> {
+    let rested_best: Vec<PeerId> = eligible_best
+        .iter()
+        .copied()
+        .filter(|p| !resting(p))
+        .collect();
+    select_sync_peer(
+        preferred.filter(|p| !resting(p)),
+        &rested_best,
+        stalled,
+        empty_at_tip,
+    )
+    .or_else(|| select_sync_peer(preferred, eligible_best, stalled, empty_at_tip))
 }
 const MAX_PENDING_BITSWAP_FETCH_WAITERS: usize = 128;
 /// QC blobs assembled at once, across all peers.
@@ -1458,6 +1487,31 @@ impl Node {
         error.contains("no validator set recorded for epoch")
     }
 
+    /// A certificate whose seat table this node cannot derive yet.
+    ///
+    /// The seat table of a checkpoint follows from the participation records
+    /// of the chain up to that checkpoint. A node whose own chain does not
+    /// reach the checkpoint derives an older table, and an honest
+    /// certificate then fails with a seat table version mismatch. The
+    /// certificate is checked before the block it names is looked up, so
+    /// this error comes first and used to be charged as bad behaviour: a
+    /// validator that fell behind banned, for an hour, the peers that
+    /// answered its own certificate requests (testnet rehearsal, validator
+    /// loss and rejoin).
+    ///
+    /// With `tip` below the checkpoint the mismatch says where this node is,
+    /// not what the peer did. Such a certificate is neither credited nor
+    /// charged and opens no sync round: it is not authenticated, and block
+    /// announcements and handshakes are what a node syncs on. With the
+    /// checkpoint block in hand the same mismatch stays an offence.
+    fn finality_cert_names_a_seat_table_we_lack(
+        error: &str,
+        tip: u64,
+        checkpoint_height: u64,
+    ) -> bool {
+        error.contains("names seat table version") && tip < checkpoint_height
+    }
+
     fn request_finality_cert(&mut self, peer: PeerId, checkpoint_height: u64) {
         if checkpoint_height == 0
             || self.cert_fetches.len() >= 8
@@ -1640,6 +1694,17 @@ impl Node {
                     Err(e) if Self::finality_cert_missing_validator_set(&e) => {
                         warn!(
                             "Synced FinalityCert from {peer} names a validator epoch this node no longer retains; ignoring without sync credit"
+                        );
+                    }
+                    Err(e)
+                        if Self::finality_cert_names_a_seat_table_we_lack(
+                            &e,
+                            self.chain.get_height().await,
+                            checkpoint_height,
+                        ) =>
+                    {
+                        warn!(
+                            "Synced FinalityCert from {peer} names a seat table this node cannot derive yet (height={checkpoint_height}); ignoring without sync credit"
                         );
                     }
                     Err(e) => {
@@ -2023,7 +2088,13 @@ impl Node {
                 .into_iter()
                 .filter(|p| connected.contains(p) && eligible(p))
                 .collect();
-            select_sync_peer(preferred_eligible, &eligible_best, stalled, empty_at_tip)
+            select_sync_peer_resting_last(
+                preferred_eligible,
+                &eligible_best,
+                stalled,
+                empty_at_tip,
+                |p| pm.is_sync_resting(p),
+            )
         };
         let Some(peer) = target else {
             info!("No handshaked peer available to sync from; waiting for one");
@@ -2259,7 +2330,7 @@ impl Node {
     /// `false` once the round is older than [`MAX_SYNC_ROUND_SECS`]: the refresh
     /// is then skipped, the stall sweep closes the round on its own clock and
     /// charges `report_unanswered_request`, which is the only path that accrues
-    /// the four strikes a pinned peer is banned on.
+    /// the strikes a pinning peer is set aside as a sync source on.
     fn sync_round_may_refresh(&self, now_secs: u64) -> bool {
         let round_start = self.sync_round_started_at.load(Ordering::SeqCst);
         round_start == 0 || now_secs.saturating_sub(round_start) < MAX_SYNC_ROUND_SECS
@@ -5738,6 +5809,15 @@ impl Node {
                                                         self.trigger_fork_sync(peer_id).await;
                                                     }
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                } else if Self::finality_cert_names_a_seat_table_we_lack(
+                                                    &e,
+                                                    self.chain.get_height().await,
+                                                    checkpoint_height,
+                                                ) {
+                                                    warn!(
+                                                        "FinalityCert from {peer_id} names a seat table this node cannot derive yet (height={checkpoint_height}); ignoring"
+                                                    );
+                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                 } else {
                                                     self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
@@ -7807,9 +7887,9 @@ mod sync_handler_order_tests {
     /// contiguous and hash chained, but never validated against consensus - and
     /// used to refresh the stall deadline on each answer, so a peer that keeps
     /// replying keeps the round alive, never accrues an unanswered-sync strike,
-    /// and the four-strike ban cannot engage. The round now has its own ceiling:
+    /// and the peer is never set aside as a sync source. The round now has its own ceiling:
     /// past it the refresh is skipped, the stall sweep closes the round and
-    /// charges the peer, which is the only path that reaches a ban.
+    /// charges the peer, which is the only path that sets it aside.
     #[test]
     fn a_sync_round_cannot_be_extended_past_its_ceiling_by_peer_answers() {
         assert_eq!(
@@ -8198,6 +8278,78 @@ mod finality_publish_tests {
         assert_eq!(
             super::select_sync_peer(Some(ahead), &[sibling, ahead], None, Some(sibling)),
             Some(ahead),
+        );
+    }
+
+    #[test]
+    fn a_seat_table_this_node_cannot_derive_is_not_charged_to_the_peer() {
+        let lag = "Certificate names seat table version 15, the verifier holds 0";
+        // Behind the checkpoint: the mismatch is this node's own lag.
+        assert!(super::Node::finality_cert_names_a_seat_table_we_lack(
+            lag, 30, 35
+        ));
+        // With the checkpoint block in hand it is an offence, as before.
+        assert!(!super::Node::finality_cert_names_a_seat_table_we_lack(
+            lag, 35, 35
+        ));
+        assert!(!super::Node::finality_cert_names_a_seat_table_we_lack(
+            lag, 40, 35
+        ));
+        // No other refusal is excused by being behind.
+        for other in [
+            "Invalid aggregated BLS signature",
+            "Validator set hash mismatch",
+            "Height 33 is not a valid checkpoint height",
+        ] {
+            assert!(!super::Node::finality_cert_names_a_seat_table_we_lack(
+                other, 30, 35
+            ));
+        }
+        // The text is the one the chain produces.
+        let source = include_str!("../chain/finality.rs");
+        assert!(source.contains("Certificate names seat table version {}, the verifier holds {}"));
+        // Both doors of a certificate take the excuse before the charge.
+        let prod = production_source();
+        assert_eq!(
+            prod.matches("Self::finality_cert_names_a_seat_table_we_lack(")
+                .count(),
+            2,
+            "the gossip arm and the sync response both classify the refusal"
+        );
+    }
+
+    #[test]
+    fn a_resting_sync_peer_is_asked_only_when_nobody_else_is_left() {
+        let best = super::PeerId::random();
+        let other = super::PeerId::random();
+        let third = super::PeerId::random();
+        let order = [best, other, third];
+        let pick = |preferred, resting: &[super::PeerId]| {
+            super::select_sync_peer_resting_last(preferred, &order, None, None, |p| {
+                resting.contains(p)
+            })
+        };
+        // Nobody rests: the plain choice.
+        assert_eq!(pick(None, &[]), Some(best));
+        assert_eq!(pick(Some(third), &[]), Some(third));
+        // The best scored peer rests: the next one is asked, also when the
+        // resting peer is the one that asked for the round.
+        assert_eq!(pick(None, &[best]), Some(other));
+        assert_eq!(pick(Some(best), &[best]), Some(other));
+        assert_eq!(pick(Some(third), &[best, other]), Some(third));
+        // Everybody rests: the node still asks, as if nobody did.
+        assert_eq!(pick(None, &order), Some(best));
+        assert_eq!(pick(Some(third), &order), Some(third));
+        // The stalled peer and the peer that had nothing new keep their
+        // place in the order among the rested ones.
+        assert_eq!(
+            super::select_sync_peer_resting_last(None, &order, Some(other), None, |p| *p == best),
+            Some(third)
+        );
+        // Nobody eligible, nobody asked.
+        assert_eq!(
+            super::select_sync_peer_resting_last(None, &[], None, None, |_| false),
+            None
         );
     }
 
