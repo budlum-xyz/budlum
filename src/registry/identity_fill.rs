@@ -18,7 +18,7 @@
 //!    slot, or a disclosure for a slot nobody asked for, fails the fill; there
 //!    is no partial document that "looks complete".
 //! 2. **Values bind to the requester.** The receipt carries the requester and
-//!    the document digest, and [`check_receipt`] refuses a receipt presented
+//!    the document digest, and [`check_receipt_at`] refuses a receipt presented
 //!    to anyone else or for any other document. This is the on-chain half of
 //!    "the opened value lands in the requester's wallet, only": a node cannot
 //!    unshow what a wallet displayed, but it can make a re-purposed
@@ -669,6 +669,7 @@ fn first_unsupported_entry_slot(document: &str, entries: &[ReceiptEntry]) -> Opt
 /// [`FillError::TooManyEntries`], [`FillError::WrongRequester`],
 /// [`FillError::WrongDocument`], [`FillError::DisclosureMismatch`], or the
 /// first entry whose credential no longer stands.
+#[cfg(test)]
 pub fn check_receipt(
     registry: &IdentityRegistry,
     receipt: &PresentationReceipt,
@@ -685,9 +686,11 @@ pub fn check_receipt(
 ///
 /// # Errors
 ///
-/// Same refusal surface as [`check_receipt`], plus
-/// [`FillError::CredentialNotValid`] when `receipt.epoch > current_epoch` or a
-/// backing credential is no longer live at `current_epoch`.
+/// [`FillError::MissingSlot`], [`FillError::TooManyEntries`],
+/// [`FillError::WrongRequester`], [`FillError::WrongDocument`],
+/// [`FillError::DisclosureMismatch`], or [`FillError::CredentialNotValid`] when
+/// `receipt.epoch > current_epoch` or a backing credential is no longer live at
+/// `current_epoch`.
 pub fn check_receipt_at(
     registry: &IdentityRegistry,
     receipt: &PresentationReceipt,

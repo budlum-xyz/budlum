@@ -4607,30 +4607,33 @@ impl ChainActor {
                     let _ = response.send(receipts);
                 }
                 ChainCommand::HubGetAppBindingApps { response } => {
-                    const MAX_APP_LIST_ROWS: usize = 1000;
-                    let apps = self
+                    let mut apps: Vec<_> = self
                         .blockchain
                         .state
                         .settlement
                         .app_binding
                         .apps
                         .values()
-                        .take(MAX_APP_LIST_ROWS)
                         .cloned()
                         .collect();
+                    apps.sort_by_key(|app| {
+                        (
+                            std::cmp::Reverse(app.registered_at_block),
+                            app.app_binding_id,
+                        )
+                    });
                     let _ = response.send(apps);
                 }
                 ChainCommand::HubGetApps { response } => {
-                    const MAX_APP_LIST_ROWS: usize = 1000;
-                    let apps: Vec<_> = self
+                    let mut apps: Vec<_> = self
                         .blockchain
                         .state
                         .budlumxyz
                         .apps
                         .values()
-                        .take(MAX_APP_LIST_ROWS)
                         .cloned()
                         .collect();
+                    apps.sort_by_key(|app| (std::cmp::Reverse(app.registered_at_epoch), app.id));
                     let _ = response.send(apps);
                 }
             }
