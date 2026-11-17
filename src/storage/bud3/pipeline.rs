@@ -318,12 +318,9 @@ where
         if s.segment >= seg_count {
             continue;
         }
-        if !decoders.contains_key(&s.segment) {
+        if let std::collections::btree_map::Entry::Vacant(e) = decoders.entry(s.segment) {
             let len = seg.len(s.segment).ok_or(PipelineError::TooLarge)?;
-            decoders.insert(
-                s.segment,
-                SegmentDecoder::new(s.segment, len, &record.profile)?,
-            );
+            e.insert(SegmentDecoder::new(s.segment, len, &record.profile)?);
         }
         let Some(dec) = decoders.get_mut(&s.segment) else {
             continue;
