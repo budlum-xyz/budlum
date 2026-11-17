@@ -8,10 +8,9 @@
 //! the feature after launch (M7). This module delivers all three.
 //!
 //! Directive 6.16 and 1.5: a live segment is a T-Expansion feature behind an
-//! activation height. The testnet gateway activates it at height zero and a
-//! gateway with no activation height refuses every bit1 object. Both verdicts
-//! are proved by `live_stream_is_open_on_testnet`, and the refusal is checked
-//! at the object door, not in a comment.
+//! activation height. The public-testnet gateway has no launch activation and
+//! refuses every bit1 object. `live_stream_is_closed_on_testnet` proves the
+//! refusal at the object door rather than in a comment.
 //!
 //! Supplies [`LiveGateway`] and
 //! [`BroadcastDriver`], but the current content gateway and block executor do
@@ -91,7 +90,7 @@ impl LiveGateway {
         }
     }
 
-    /// The testnet gateway: bit1 objects are active from genesis (`height = 0`).
+    /// The public-testnet launch gateway: bit1 objects are closed.
     #[must_use]
     pub fn testnet() -> Self {
         Self::for_chain(Network::Testnet.chain_id(), ACTIVATION)

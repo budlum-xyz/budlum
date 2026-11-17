@@ -178,7 +178,7 @@ mod tests {
     use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 
     #[test]
-    fn sui_rpc_is_closed_on_testnet_at_launch_and_reads_mist_after_activation() {
+    fn sui_rpc_is_closed_on_testnet() {
         let mut state = AccountState::new();
         let closed = handle_sui_rpc(
             &state,

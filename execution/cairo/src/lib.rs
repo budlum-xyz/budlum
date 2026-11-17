@@ -26,7 +26,7 @@ pub const AUDITED_CAIRO_ENGINE_SPDX: &str = "Apache-2.0";
 /// Budlum testnet chain ID (`Section 1.5`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed activation height on testnet `45261` (open from block zero).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 pub const PROPOSED_CAIRO_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing Starknet classes, contract instances, nonces, and storage.
@@ -288,11 +288,11 @@ impl Default for CairoWorker {
 }
 
 impl CairoWorker {
-    /// Default testnet posture: open from [`PROPOSED_CAIRO_ACTIVATION_HEIGHT`] (`0`).
+    /// Default public-testnet posture: closed until an explicit activation height.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            testnet_activation_height: Some(PROPOSED_CAIRO_ACTIVATION_HEIGHT),
+            testnet_activation_height: None,
         }
     }
 
@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn starknet_foundry_declare_and_deploy_unchanged() {
-        let mut worker = CairoWorker::new();
+        let mut worker = CairoWorker::with_activation_height(Some(0));
         assert_eq!(worker.id(), EeId::CAIRO);
 
         let mut host = MemoryHost::new(10_000_000);

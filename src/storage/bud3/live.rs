@@ -20,10 +20,9 @@
 //! * The optical transfer: the frames are the RFC 6330 symbols of the
 //!   segment object. [`RatiolessPlan`] yields the order they are sent in;
 //!   the sender maps each frame to its symbol through `SegmentEncoder`.
-//! * The gate: live segments are enabled from genesis on testnet
-//!   (`ACTIVATION` holds `height: Some(0)`). `LiveContext::closed()`
-//!   exercises the pre-activation refusal (`bud3_live_is_open_on_testnet`),
-//!   while `LiveContext::testnet(h)` admits bit1 objects at all heights `h`.
+//! * The gate: live segments are closed at public-testnet launch
+//!   (`ACTIVATION` holds `height: None`). `LiveContext::testnet(h)` therefore
+//!   refuses bit1 objects until a later release commits an activation height.
 //!
 //! WIRING: unwired - the block executor reaches live segments through the
 //! live `StorageTx` variants once the activation height is set, and the final
@@ -68,8 +67,8 @@ impl LiveActivation {
     }
 }
 
-/// Testnet configuration: live streaming opens at genesis (height 0).
-pub const ACTIVATION: LiveActivation = LiveActivation { height: Some(0) };
+/// Public-testnet launch configuration: live streaming is closed.
+pub const ACTIVATION: LiveActivation = LiveActivation { height: None };
 
 /// The gate context of one live call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +89,7 @@ impl LiveContext {
         }
     }
 
-    /// The active testnet live-stream context at `height`.
+    /// The public-testnet launch context at `height` (closed by default).
     #[must_use]
     pub const fn testnet(height: u64) -> Self {
         Self {

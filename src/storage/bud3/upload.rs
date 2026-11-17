@@ -125,15 +125,20 @@ impl From<Bud3QrError> for UploadError {
 
 /// Whether raw BOF-1 flag byte `raw_flags` is admitted on testnet.
 ///
-/// All defined BOF-1 flags (`SEALED` bit0, `LIVE` bit1, `HAS_BASE` bit2,
-/// `HAS_CONTEXT` bit3) are active on testnet; unknown high bits (`>= 0x10`)
-/// are refused.
+/// `SEALED` bit0 and `HAS_BASE` bit2 are admitted. `LIVE` bit1,
+/// `HAS_CONTEXT` bit3, and unknown high bits are closed at launch.
 ///
 /// # Errors
 ///
-/// [`UploadError::ClosedFeatureFlag`] when `raw_flags` carries unknown high bits.
+/// [`UploadError::ClosedFeatureFlag`] when `raw_flags` carries a closed or
+/// unknown bit.
 pub fn admit_testnet_flags(raw_flags: u8) -> Result<Flags, UploadError> {
-    Flags::from_byte(raw_flags).map_err(|_| UploadError::ClosedFeatureFlag(raw_flags))
+    let flags =
+        Flags::from_byte(raw_flags).map_err(|_| UploadError::ClosedFeatureFlag(raw_flags))?;
+    if flags.has(Flags::LIVE) || flags.has(Flags::HAS_CONTEXT) {
+        return Err(UploadError::ClosedFeatureFlag(raw_flags));
+    }
+    Ok(flags)
 }
 
 /// Deterministically choose which frame indices of a segment must undergo pixel
