@@ -254,7 +254,7 @@ struct GatewayState {
     fill_limiter: std::sync::Mutex<RateLimiter>,
     cache: std::sync::Mutex<ContentCache>,
     resolved: std::sync::Mutex<std::collections::BTreeMap<String, (u64, CachedResolution)>>,
-    manifests: std::sync::Mutex<std::collections::BTreeMap<[u8; 32], Arc<SiteManifest>>>,
+    manifests: std::sync::Mutex<std::collections::BTreeMap<[u8; 32], (usize, Arc<SiteManifest>)>>,
     counters: Counters,
 }
 
@@ -661,6 +661,11 @@ struct Bud3RpcSource {
     receipt_id_hex: String,
     fee_paid_atoms: u64,
     cache_dir: PathBuf,
+    /// The bytes `cache_dir` may hold, matching the in-memory cache budget.
+    cache_max_bytes: u64,
+    /// Bytes currently held inside `cache_dir` so bounded writes never walk
+    /// the whole directory on each fill.
+    cache_bytes: std::sync::Mutex<u64>,
 }
 
 impl Bud3RpcSource {
@@ -668,6 +673,7 @@ impl Bud3RpcSource {
         endpoints: Vec<String>,
         cfg: &Bud3SourceConfig,
         cache_dir: PathBuf,
+        cache_max_bytes: usize,
     ) -> Result<Self, String> {
         if endpoints.is_empty() {
             return Err("bud3 content source requires at least one rpc endpoint".into());
@@ -685,6 +691,15 @@ impl Bud3RpcSource {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| format!("bud3 rpc client: {e}"))?;
+        let held = std::fs::read_dir(&cache_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| entry.metadata().ok())
+                    .map(|meta| meta.len())
+                    .sum::<u64>()
+            })
+            .unwrap_or(0);
         Ok(Self {
             endpoints,
             client,
@@ -692,6 +707,8 @@ impl Bud3RpcSource {
             receipt_id_hex: hex::encode(receipt_id),
             fee_paid_atoms: cfg.fee_paid_atoms,
             cache_dir,
+            cache_max_bytes: cache_max_bytes as u64,
+            cache_bytes: std::sync::Mutex::new(held),
         })
     }
 
@@ -805,18 +822,38 @@ impl Bud3RpcSource {
         }
     }
 
+    /// Persist verified bytes, within the byte budget the operator configured.
+    ///
+    /// An object that does not fit within `cache_max_bytes` is still served to
+    /// the caller, just not persisted to disk.
     fn write_verified_cache(&self, digest: &[u8; 32], bytes: &[u8]) {
         if std::fs::create_dir_all(&self.cache_dir).is_err() {
             return;
         }
         let target = self.cache_path(digest);
+        let replaced = std::fs::metadata(&target)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let len = bytes.len() as u64;
+        let mut held = match self.cache_bytes.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let projected = held.saturating_sub(replaced).saturating_add(len);
+        if projected > self.cache_max_bytes {
+            return;
+        }
         let tmp = self.cache_dir.join(format!(
             "{}.{}.tmp",
             hex::encode(digest),
             std::process::id()
         ));
         if std::fs::write(&tmp, bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, &target);
+            if std::fs::rename(&tmp, &target).is_ok() {
+                *held = projected;
+            } else {
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
     }
 }
@@ -1098,6 +1135,23 @@ fn answer(
     response
 }
 
+/// Bytes of parsed site manifests the gateway retains in memory at once.
+const MAX_MANIFEST_CACHE_BYTES: usize = 256 * 1024 * 1024;
+/// Maximum number of parsed site manifests retained in memory at once.
+const MAX_MANIFEST_CACHE_ENTRIES: usize = 1024;
+
+fn manifest_footprint(manifest: &SiteManifest) -> usize {
+    std::mem::size_of::<SiteManifest>()
+        + 96
+        + manifest.index.len()
+        + manifest.csp.as_deref().map_or(0, str::len)
+        + manifest
+            .routes
+            .iter()
+            .map(|(path, route)| 96 + path.len() + route.mime.len())
+            .sum::<usize>()
+}
+
 /// The parsed manifest for `content`, kept between requests.
 ///
 /// A site has one manifest and every request for that site needs it, so a read
@@ -1117,7 +1171,7 @@ fn cached_manifest(
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some(manifest) = cache.get(&key) {
+        if let Some((_, manifest)) = cache.get(&key) {
             return Ok(Arc::clone(manifest));
         }
     }
@@ -1139,15 +1193,28 @@ fn cached_manifest(
             "content unavailable",
         )));
     };
+    let footprint = manifest_footprint(&manifest);
     let manifest = Arc::new(manifest);
+    if footprint > MAX_MANIFEST_CACHE_BYTES {
+        return Ok(manifest);
+    }
     let mut cache = match state.manifests.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if cache.len() >= 4096 {
-        cache.clear();
+    let mut held: usize = cache.values().map(|(bytes, _)| *bytes).sum();
+    while !cache.is_empty()
+        && (cache.len() >= MAX_MANIFEST_CACHE_ENTRIES
+            || held.saturating_add(footprint) > MAX_MANIFEST_CACHE_BYTES)
+    {
+        let Some(victim) = cache.keys().next().copied() else {
+            break;
+        };
+        if let Some((bytes, _)) = cache.remove(&victim) {
+            held = held.saturating_sub(bytes);
+        }
     }
-    cache.insert(key, Arc::clone(&manifest));
+    cache.insert(key, (footprint, Arc::clone(&manifest)));
     Ok(manifest)
 }
 
@@ -1269,6 +1336,7 @@ fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
                 config.rpc.clone(),
                 &bud3_cfg,
                 config.cache_dir.clone(),
+                config.cache_max_bytes,
             )?),
         };
     let pinned = checkpoint_table(&config.checkpoints)?;
@@ -1913,6 +1981,7 @@ mod tests {
             vec![format!("http://{addr}")],
             &cfg,
             cache.path().to_path_buf(),
+            1024 * 1024,
         )
         .unwrap();
 
@@ -2083,5 +2152,81 @@ mod tests {
                 "malformed CSP must fall back to strict baseline: {bad_csp:?}"
             );
         }
+    }
+
+    #[test]
+    fn manifest_cache_evicts_before_exceeding_entry_ceiling() {
+        use budlum_core::storage::bud3::content_id::{ContentId, ContentIdKind};
+        use budlum_core::storage::bud3::content_ref::ContentRef;
+
+        struct StubManifestSource(SiteManifest);
+        impl ContentSource for StubManifestSource {
+            fn fetch(&self, _content: &ContentRef) -> Result<Vec<u8>, String> {
+                Ok(Vec::new())
+            }
+            fn fetch_manifest(&self, _content: &ContentRef) -> Result<SiteManifest, String> {
+                Ok(self.0.clone())
+            }
+        }
+
+        let mut cfg = serving_config(true, Vec::new());
+        cfg.fill_per_minute = 5000;
+        let mut state = build_state(cfg).expect("gateway state");
+        state.content = Arc::new(StubManifestSource(SiteManifest {
+            index: "/index.html".to_string(),
+            routes: std::collections::BTreeMap::new(),
+            csp: None,
+        }));
+
+        for idx in 0..(MAX_MANIFEST_CACHE_ENTRIES + 5) {
+            let mut digest = [0u8; 32];
+            digest[..8].copy_from_slice(&(idx as u64).to_le_bytes());
+            let cref = ContentRef::new(
+                ContentId {
+                    kind: ContentIdKind::Public,
+                    digest,
+                    len: 64,
+                },
+                [0x11; 32],
+                None,
+            )
+            .unwrap();
+            let _ = cached_manifest(&state, &cref, "198.51.100.9", 1000).expect("cached");
+        }
+        let held = state.manifests.lock().unwrap();
+        assert!(held.len() <= MAX_MANIFEST_CACHE_ENTRIES);
+        let total_bytes: usize = held.values().map(|(bytes, _)| *bytes).sum();
+        assert!(total_bytes <= MAX_MANIFEST_CACHE_BYTES);
+    }
+
+    #[test]
+    fn rpc_disk_cache_refuses_writes_above_cache_max_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Bud3SourceConfig {
+            payer: hex::encode([0x11; 32]),
+            receipt_id: hex::encode([0x22; 32]),
+            fee_paid_atoms: budlum_core::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS,
+        };
+        let source = Bud3RpcSource::new(
+            vec!["http://127.0.0.1:9".to_string()],
+            &cfg,
+            dir.path().to_path_buf(),
+            64,
+        )
+        .unwrap();
+
+        source.write_verified_cache(&[0x01; 32], &[1u8; 40]);
+        assert!(dir.path().join(hex::encode([0x01; 32])).exists());
+
+        // Second write pushes total over the 64-byte budget and is skipped on disk.
+        source.write_verified_cache(&[0x02; 32], &[2u8; 40]);
+        assert!(!dir.path().join(hex::encode([0x02; 32])).exists());
+
+        // Overwriting the existing 40-byte entry with 50 bytes stays under 64.
+        source.write_verified_cache(&[0x01; 32], &[3u8; 50]);
+        assert_eq!(
+            std::fs::read(dir.path().join(hex::encode([0x01; 32]))).unwrap(),
+            vec![3u8; 50]
+        );
     }
 }

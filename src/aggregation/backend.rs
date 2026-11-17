@@ -1,18 +1,51 @@
 //! The proving backend: what produces and checks the proof of a frame.
 
-use super::frame::{ClaimFrame, FrameError};
+use zeroize::Zeroizing;
+
+use super::frame::{aggregator_address_from_seed, ClaimFrame, FrameError};
 use super::object::ObjectError;
 use super::pool::PoolItem;
 use crate::core::address::Address;
 use crate::domain::types::DomainId;
 
 /// What a tick is proven for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TickCtx {
     /// The domain of the claims.
     pub domain: DomainId,
     /// The aggregator that proves the tick and earns its share.
     pub aggregator: Address,
+    /// The aggregator's 32-byte FIPS 204 ML-DSA-87 seed used to attest
+    /// ownership of each tick segment. Redacted in `Debug` and zeroized on drop.
+    pub signer_seed: Zeroizing<[u8; 32]>,
+}
+
+impl std::fmt::Debug for TickCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TickCtx")
+            .field("domain", &self.domain)
+            .field("aggregator", &self.aggregator)
+            .field("signer_seed", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl TickCtx {
+    /// Construct a `TickCtx` whose `aggregator` address matches `signer_seed`.
+    ///
+    /// # Errors
+    ///
+    /// [`AggError::InvalidSegmentAttestation`] if `signer_seed` fails ML-DSA-87
+    /// key derivation.
+    pub fn from_seed(domain: DomainId, signer_seed: Zeroizing<[u8; 32]>) -> Result<Self, AggError> {
+        let aggregator = aggregator_address_from_seed(&signer_seed)
+            .map_err(|_| AggError::InvalidSegmentAttestation(0))?;
+        Ok(Self {
+            domain,
+            aggregator,
+            signer_seed,
+        })
+    }
 }
 
 /// Why a backend refused to prove or to accept.
@@ -32,6 +65,9 @@ pub enum AggError {
     WrongParameterSet,
     /// The proof does not cover the claims of the frame.
     ProofMismatch,
+    /// A segment's aggregator attestation is missing, malformed, or does not
+    /// bind its `tick_pi` to `segment.aggregator`.
+    InvalidSegmentAttestation(usize),
     /// This build has no backend that could prove or check a frame.
     Unavailable,
 }
@@ -46,6 +82,9 @@ impl std::fmt::Display for AggError {
             Self::MalformedProof => write!(f, "the proof bytes are malformed"),
             Self::WrongParameterSet => write!(f, "the proof belongs to another parameter set"),
             Self::ProofMismatch => write!(f, "the proof does not cover the claims"),
+            Self::InvalidSegmentAttestation(at) => {
+                write!(f, "invalid aggregator attestation on segment {at}")
+            }
             Self::Unavailable => write!(f, "this build has no aggregation backend"),
         }
     }

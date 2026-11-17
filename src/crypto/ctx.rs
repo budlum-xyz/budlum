@@ -103,6 +103,9 @@ pub const APB_LEVEL_V1: &[u8] = b"BDLM/APB_LEVEL/V1";
 /// Universal Execution Layer transaction envelope (`UelTx`).
 pub const UEL_TX_V1: &[u8] = b"BDLM/UEL_TX/V1";
 
+/// Aggregator ownership attestation over a segment's `tick_pi`.
+pub const AGG_SEGMENT_V1: &[u8] = b"BDLM/AGG_SEGMENT/V1";
+
 /// table, in the order of section 6.5.
 pub const TABLE: &[&[u8]] = &[
     TX_V7,
@@ -143,6 +146,7 @@ pub const EXTRAS: &[&[u8]] = &[
     ADOPT_FOREIGN_V1,
     APB_LEVEL_V1,
     UEL_TX_V1,
+    AGG_SEGMENT_V1,
 ];
 
 /// Whether `ctx` is a registered context string.

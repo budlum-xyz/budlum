@@ -6761,7 +6761,6 @@ impl BudlumApiServer for RpcServer {
             let state_root = self.chain.get_state_root(height).await;
             let resolved = self.chain.bns_resolve_full(name.clone()).await;
             let bns_proof = self.chain.bns_prove_name(name.clone()).await;
-            let current_epoch = bns_proof.as_ref().map_or(0, |p| p.epoch);
             let reverse_primary_name = match resolved.as_ref() {
                 Some(r) => self.chain.bns_reverse_resolve(r.owner).await,
                 None => None,
@@ -6769,14 +6768,13 @@ impl BudlumApiServer for RpcServer {
             // The root carried in this reply's own proof is not an independent
             // trust anchor: checking the proof against it proves only that the
             // answering node is self-consistent, while a hostile or on-path
-            // node can mint both. Leave `expected_bns_root` empty so the card
+            // node can mint both. Leave `expected_bns_anchor` empty so the card
             // stays Unverified, and return `bns_proof`, `observed_height`, and
             // `observed_state_root` so callers can verify against a finalized
-            // header root they trust themselves.
+            // header root and epoch they trust themselves.
             let proof_ctx = crate::wallet::identity_profile::IdentityProofContext {
-                expected_bns_root: None,
+                expected_bns_anchor: None,
                 bns_proof,
-                current_epoch,
                 reverse_primary_name,
             };
             let manifest_id = resolved.as_ref().and_then(|r| {
@@ -6835,7 +6833,6 @@ impl BudlumApiServer for RpcServer {
             let state_root = self.chain.get_state_root(height).await;
             let resolved = self.chain.bns_resolve_full(name.clone()).await;
             let bns_proof = self.chain.bns_prove_name(name.clone()).await;
-            let current_epoch = bns_proof.as_ref().map_or(0, |p| p.epoch);
             let reverse_primary_name = match resolved.as_ref() {
                 Some(r) => self.chain.bns_reverse_resolve(r.owner).await,
                 None => None,
@@ -6844,9 +6841,8 @@ impl BudlumApiServer for RpcServer {
             // commits to the card statuses, so a self-supplied root would turn
             // a node's own assertion into a portable Verified attestation.
             let proof_ctx = crate::wallet::identity_profile::IdentityProofContext {
-                expected_bns_root: None,
+                expected_bns_anchor: None,
                 bns_proof,
-                current_epoch,
                 reverse_primary_name,
             };
             let manifest_id = resolved.as_ref().and_then(|r| {
