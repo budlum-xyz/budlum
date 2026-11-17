@@ -28,8 +28,9 @@ mod wire;
 pub use frame::{ABI_VERSION, MAX_FRAME_BYTES};
 pub use host::{panic_digest, panic_message, ExecutionEnvironment, HostApi, HostRead};
 pub use types::{
-    pointer_target_enabled_by_default, BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind,
-    EeFault, EeId, EeIdentity, EeLog, EeOutcome, EeQuery, EeRefusal, HostError, Namespace,
-    OutOfGas, OutcomeStatus, RefusalCode, UniversalCall, UniversalResult, WireError,
-    BUDLUM_DEVNET_CHAIN_ID, BUDLUM_MAINNET_CHAIN_ID, BUDLUM_TESTNET_CHAIN_ID,
+    expansion_environment_enabled_by_default, pointer_target_enabled_by_default, BlockContext,
+    BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog, EeOutcome, EeQuery,
+    EeRefusal, HostError, Namespace, OutOfGas, OutcomeStatus, RefusalCode, UniversalCall,
+    UniversalResult, WireError, BUDLUM_DEVNET_CHAIN_ID, BUDLUM_MAINNET_CHAIN_ID,
+    BUDLUM_TESTNET_CHAIN_ID,
 };
