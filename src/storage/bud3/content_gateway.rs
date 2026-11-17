@@ -125,7 +125,7 @@ impl Bud3ContentGateway {
     ///
     /// # Errors
     ///
-    /// Returns [`SymbolExchangeError`] if rate limits, link policy, or Merkle verification fail.
+    /// Returns `SymbolExchangeError` if rate limits, link policy, or Merkle verification fail.
     pub fn serve_verified_symbol_exchange(
         limiter: &mut SymbolPeerLimiter,
         mobile_policy: &mut MobileServePolicy,
