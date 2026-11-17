@@ -53,7 +53,7 @@ pub use payment_router::{
 pub use storage_fabric::{
     ReplicaResolution, StorageFabricError, StorageNetworkKind, StoragePaymentRequest,
     StorageReplica, UnifiedContentRecord, UnifiedStorageFabric, UniversalContentUri,
-    VerificationStrength,
+    VerificationStrength, Web3SiteAsset,
 };
 
 use crate::domain::types::Hash32;

@@ -3461,12 +3461,31 @@ mod rpc_tests {
         let storage_res = server
             .resolve_unified_storage(serde_json::json!({
                 "uri": "bns://site.bud",
-                "objects": [obj],
-                "bns_bindings": bns,
+                "objects": [&obj],
+                "bns_bindings": &bns,
             }))
             .await
             .unwrap();
         assert_eq!(storage_res["primary"]["network"].as_str(), Some("ipfs"));
+        let asset_res = server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "asset_path": "/app/main.wasm",
+            }))
+            .await
+            .unwrap();
+        assert_eq!(asset_res["mime_type"].as_str(), Some("application/wasm"));
+        assert!(server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "asset_path": "/../secret",
+            }))
+            .await
+            .is_err());
 
         // 5. bud_encodeCrossVmCall (refusal + answer)
         assert!(server

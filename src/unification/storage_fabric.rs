@@ -466,6 +466,113 @@ impl UnifiedStorageFabric {
             record_hash: record.record_hash(),
         })
     }
+
+    /// Resolves a Web3 site asset path under any unified URI (`bns://`,
+    /// `bud://`, `ipfs://`, `ar://`, `filecoin://`, `walrus://`, ...),
+    /// strictly blocking path-traversal attempts (`..`, `\`, NUL, control
+    /// characters, empty segments) and binding a deterministic MIME type and
+    /// asset commitment hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageFabricError`] if `relative_path` attempts traversal or
+    /// is malformed, or if the underlying URI cannot be resolved.
+    pub fn resolve_web3_asset(
+        &self,
+        raw_uri: &str,
+        relative_path: &str,
+        min_strength: VerificationStrength,
+    ) -> Result<Web3SiteAsset, StorageFabricError> {
+        let normalized_path = normalize_web3_asset_path(relative_path)?;
+        let resolution = self.resolve(raw_uri, min_strength)?;
+        let mime_type = String::from(classify_web3_mime(&normalized_path));
+        let asset_commitment = hash_domain_fields(
+            b"BDLM_UNIF_WEB3_ASSET_V1",
+            &[
+                resolution.requested_uri.as_bytes(),
+                normalized_path.as_bytes(),
+                &resolution.sha3_256_digest,
+                mime_type.as_bytes(),
+            ],
+        );
+        Ok(Web3SiteAsset {
+            normalized_path,
+            mime_type,
+            asset_commitment,
+            resolution,
+        })
+    }
+}
+
+/// Verified Web3 site asset resolved across multi-network decentralized storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Web3SiteAsset {
+    pub normalized_path: String,
+    pub mime_type: String,
+    pub asset_commitment: Hash32,
+    pub resolution: ReplicaResolution,
+}
+
+fn normalize_web3_asset_path(raw: &str) -> Result<String, StorageFabricError> {
+    if raw.len() > 512 {
+        return Err(StorageFabricError::InvalidUri(String::from(
+            "web3 asset path exceeds 512-byte limit",
+        )));
+    }
+    if raw.bytes().any(|b| b < 0x20 || b == 0x7F || b == b'\\') {
+        return Err(StorageFabricError::InvalidUri(String::from(
+            "web3 asset path contains forbidden control or backslash bytes",
+        )));
+    }
+    if raw.contains("//") {
+        return Err(StorageFabricError::InvalidUri(String::from(
+            "web3 asset path contains empty path segments",
+        )));
+    }
+    let trimmed = raw.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return Ok(String::from("/index.html"));
+    }
+    let mut parts = Vec::new();
+    for segment in trimmed.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(StorageFabricError::InvalidUri(String::from(
+                "web3 asset path traversal segment rejected",
+            )));
+        }
+        if segment.contains("..") {
+            return Err(StorageFabricError::InvalidUri(String::from(
+                "web3 asset path contains forbidden dot-dot sequence",
+            )));
+        }
+        parts.push(segment);
+    }
+    Ok(format!("/{}", parts.join("/")))
+}
+
+fn classify_web3_mime(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".html") || lower.ends_with(".htm") {
+        "text/html; charset=utf-8"
+    } else if lower.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if lower.ends_with(".js") || lower.ends_with(".mjs") {
+        "application/javascript; charset=utf-8"
+    } else if lower.ends_with(".json") {
+        "application/json; charset=utf-8"
+    } else if lower.ends_with(".wasm") {
+        "application/wasm"
+    } else if lower.ends_with(".svg") {
+        "image/svg+xml"
+    } else if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".txt") || lower.ends_with(".md") {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 /// Parameters used to build a universal payment intent funding storage on any
@@ -643,5 +750,58 @@ mod tests {
             .unwrap();
         assert_eq!(receipt.target_amount_delivered, 500);
         assert!(router.is_settled(&intent.intent_id()));
+    }
+
+    #[test]
+    fn resolve_web3_asset_normalizes_paths_and_blocks_traversal() {
+        let mut fabric = UnifiedStorageFabric::new();
+        let mut record = UnifiedContentRecord::from_bytes(b"<html>budlum</html>", "text/html");
+        let digest = record.sha3_256_digest;
+        record.replicas.push(StorageReplica {
+            network: StorageNetworkKind::Bud3,
+            domain_id: StorageNetworkKind::Bud3.default_domain_id(),
+            native_locator: hex::encode(digest),
+            verification: VerificationStrength::ErasureVerified,
+            available: true,
+            latency_ms: 8,
+        });
+        fabric.register_object(record).unwrap();
+        fabric.bind_bns_name("portal.bud", digest).unwrap();
+
+        let root_asset = fabric
+            .resolve_web3_asset(
+                "bns://portal.bud",
+                "/",
+                VerificationStrength::ErasureVerified,
+            )
+            .unwrap();
+        assert_eq!(root_asset.normalized_path, "/index.html");
+        assert_eq!(root_asset.mime_type, "text/html; charset=utf-8");
+
+        let wasm_asset = fabric
+            .resolve_web3_asset(
+                "bns://portal.bud",
+                "/pkg/app.wasm",
+                VerificationStrength::ErasureVerified,
+            )
+            .unwrap();
+        assert_eq!(wasm_asset.normalized_path, "/pkg/app.wasm");
+        assert_eq!(wasm_asset.mime_type, "application/wasm");
+        assert_ne!(root_asset.asset_commitment, wasm_asset.asset_commitment);
+
+        for bad in [
+            "/../etc/passwd",
+            "/pkg/../../secret",
+            "/assets\\evil.js",
+            "/pkg//app.wasm",
+            "/app\0.wasm",
+        ] {
+            assert!(
+                fabric
+                    .resolve_web3_asset("bns://portal.bud", bad, VerificationStrength::AttestedDeal)
+                    .is_err(),
+                "traversal path `{bad}` must be rejected"
+            );
+        }
     }
 }
