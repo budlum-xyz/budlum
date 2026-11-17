@@ -378,6 +378,31 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     Ok(())
 }
 
+/// Ingest-only reservation check for bit-31 Garden domain identifiers.
+///
+/// Enforced on transaction admission, precheck, aggregation pool intake and
+/// block assembly rather than unconditionally inside committed-block replay, so
+/// upgrading a chain whose committed history already contains a bit-31
+/// `RegisterDomain` never rejects history or splits upgraded from un-upgraded
+/// nodes. `Blockchain::register_garden_domain` separately refuses any id
+/// already present in `state.settlement.domains`.
+pub fn check_ingest_garden_domain_reservation(
+    tx: &crate::core::transaction::Transaction,
+) -> Result<(), String> {
+    if let crate::core::transaction::TransactionType::Settlement(SettlementTx::RegisterDomain(
+        domain,
+    )) = &tx.tx_type
+    {
+        if crate::garden::is_garden_domain_id(domain.id) {
+            return Err(format!(
+                "Domain {} lies in the reserved Garden domain id range",
+                domain.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Register a consensus domain in the settlement registry.
 ///
 /// # Errors
@@ -386,12 +411,6 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
 /// refusal (duplicate id, bond, lifecycle, ceiling).
 pub fn register_domain(state: &mut AccountState, domain: ConsensusDomain) -> Result<(), String> {
     validate_domain_registration(&domain)?;
-    if crate::garden::is_garden_domain_id(domain.id) {
-        return Err(format!(
-            "Domain {} lies in the reserved Garden domain id range",
-            domain.id
-        ));
-    }
     // The other half of the admission gate in `AccountState::execute_proposal`:
     // a domain that already carries PoA admins must be a PoA domain.
     if state.poa_is_permissioned(domain.id) && domain.kind != ConsensusKind::PoA {
@@ -1572,12 +1591,6 @@ pub fn execute_settlement_tx(
                     "domain {} is reserved for canonical external chain {:?}; \
                      canonical external-chain ids are seeded by genesis only",
                     domain.id, chain
-                )));
-            }
-            if crate::garden::is_garden_domain_id(domain.id) {
-                return Err(SettlementTxError::Refused(format!(
-                    "domain {} lies in the reserved Garden domain id range",
-                    domain.id
                 )));
             }
             let balance = state.spendable_balance(&ctx.sender);
@@ -5301,28 +5314,64 @@ mod tests {
     }
 
     #[test]
-    fn permissionless_register_domain_refuses_reserved_garden_domain_ids() {
-        let mut state = AccountState::new();
+    fn permissionless_register_domain_refuses_reserved_garden_domain_ids_at_ingest_without_breaking_replay(
+    ) {
         let garden_id = crate::garden::garden_domain_id(42);
         let mut domain = pow(garden_id);
         domain.domain_chain_id = 9_999;
         let op = operator(&domain);
-        state.add_balance(&op, MIN_DOMAIN_OPERATOR_BOND + FEE);
-        let err = execute_settlement_tx(
-            &mut state,
-            &ctx(op),
-            &SettlementTx::RegisterDomain(Box::new(domain.clone())),
-        )
-        .unwrap_err();
-        assert!(
-            format!("{err:?}").contains("reserved Garden domain id"),
-            "got: {err:?}"
+        let ingest_tx = crate::core::transaction::Transaction::new_with_chain_id(
+            op,
+            Address::zero(),
+            0,
+            FEE,
+            0,
+            Vec::new(),
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            crate::core::transaction::TransactionType::Settlement(SettlementTx::RegisterDomain(
+                Box::new(domain.clone()),
+            )),
         );
-        assert!(state.settlement.domains.get(garden_id).is_none());
-        let direct_err = register_domain(&mut state, domain).unwrap_err();
+        let ingest_err = check_ingest_garden_domain_reservation(&ingest_tx).unwrap_err();
         assert!(
-            direct_err.contains("reserved Garden domain id"),
-            "{direct_err}"
+            ingest_err.contains("reserved Garden domain id"),
+            "{ingest_err}"
+        );
+
+        // Historical block replay must still apply a pre-upgrade committed
+        // bit-31 registration cleanly, and local Garden registration refuses
+        // the colliding slot instead of corrupting it.
+        let mut chain = crate::chain::blockchain::Blockchain::new(
+            std::sync::Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            None,
+        );
+        chain
+            .state
+            .add_balance(&op, MIN_DOMAIN_OPERATOR_BOND + FEE * 2);
+        execute_settlement_tx(
+            &mut chain.state,
+            &ctx(op),
+            &SettlementTx::RegisterDomain(Box::new(domain)),
+        )
+        .expect("committed pre-upgrade registration replays cleanly");
+        assert!(chain.state.settlement.domains.get(garden_id).is_some());
+
+        let mut local_garden = crate::domain::plugin::default_domain(
+            garden_id,
+            ConsensusKind::PoA,
+            42,
+            "poa-authority-quorum",
+            1,
+        );
+        local_garden.bridge_enabled = false;
+        local_garden.operator = Some(op);
+        local_garden.operator_bond = 0;
+        local_garden.validator_set_hash = [7u8; 32];
+        assert!(
+            chain.register_garden_domain(local_garden).is_err(),
+            "local Garden registration must refuse an already-occupied settlement domain id"
         );
     }
 }

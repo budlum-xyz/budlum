@@ -69,8 +69,23 @@ const MAX_TURNED_AWAY_KEYS: usize = 4096;
 const MAX_GOSSIP_ITEMS_PER_PEER_PER_SEC: usize = 128;
 /// Maximum `GetCommits` sync requests accepted from one peer per second.
 const MAX_SYNC_REQS_PER_PEER_PER_SEC: usize = 8;
+/// Maximum peer-triggered outbound `GetCommits` requests sent per second.
+const MAX_PEER_TRIGGERED_SYNCS_PER_SEC: usize = 8;
+/// Maximum age of an unanswered in-flight outbound `GetCommits` request before
+/// another sync request for the same height may be dispatched.
+const SYNC_IN_FLIGHT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Maximum `PutObject` deposits accepted from one peer per second.
 const MAX_PUT_OBJECT_REQS_PER_PEER_PER_SEC: usize = 96;
+/// Maximum concurrent disk `PutObject` write/fsync jobs across the node.
+const MAX_IN_FLIGHT_DEPOSITS: usize = 8;
+/// Maximum concurrent disk `PutObject` write/fsync jobs for one peer.
+const MAX_IN_FLIGHT_DEPOSITS_PER_PEER: usize = 2;
+/// Maximum unjoined invite holders admitted concurrently from one non-loopback
+/// source prefix, so a single host cannot consume all `MAX_UNJOINED_PEERS`
+/// slots and shut the join door to other newcomers.
+const MAX_UNJOINED_PEERS_PER_SOURCE: usize = 1;
+/// Maximum `(validator, address)` entries retained in `rejected_addresses`.
+const MAX_REJECTED_ADDRESSES: usize = 512;
 /// Sliding window for per-peer `GetObject` rate limiting.
 const OBJECT_RATE_WINDOW: Duration = Duration::from_secs(10);
 /// Maximum `GetObject` requests accepted from one peer per window.
@@ -540,9 +555,10 @@ struct Node {
     /// Validators that have authenticated over a live connection.
     verified_peers: BTreeSet<GardenKey>,
     /// `(validator, announced_address)` pairs whose dial failed with a wrong
-    /// peer id or exhausted retries; never dialed again until the validator
-    /// announces a different address.
+    /// peer id or exhausted retries; bounded FIFO so address churn cannot grow
+    /// validator memory without limit.
     rejected_addresses: BTreeSet<(GardenKey, String)>,
+    rejected_address_order: VecDeque<(GardenKey, String)>,
     /// Consecutive dial failures per `(validator, announced_address)`, kept
     /// across leaves and returns.
     dial_failures: BTreeMap<(GardenKey, String), u8>,
@@ -553,10 +569,24 @@ struct Node {
     gossip_budget: BTreeMap<PeerId, (Instant, usize)>,
     /// Per-peer sliding window for inbound `GetCommits` sync requests.
     sync_budget: BTreeMap<PeerId, (Instant, usize)>,
+    /// Coalesced outbound `GetCommits` request currently in flight: `(peer, from_height, sent_at)`.
+    sync_in_flight: Option<(PeerId, u64, Instant)>,
+    /// Node-wide 1-second budget for peer-triggered outbound `GetCommits` requests.
+    outbound_sync_budget: (Instant, usize),
     /// Per-peer sliding window for inbound `GetObject` requests and served bytes.
     object_budget: BTreeMap<PeerId, (Instant, usize, u64)>,
     /// Per-peer sliding window for inbound `PutObject` requests and deposited bytes.
     put_object_budget: BTreeMap<PeerId, (Instant, usize, u64)>,
+    /// Background disk write/fsync completions for offloaded `PutObject` requests.
+    deposit_tx: mpsc::Sender<DepositDone>,
+    /// Live offloaded `PutObject` jobs per peer.
+    deposits_in_flight: BTreeMap<PeerId, usize>,
+    /// Total live offloaded `PutObject` jobs across all peers.
+    total_deposits_in_flight: usize,
+    /// Shared map of observed remote source prefixes per connected peer.
+    peer_sources: std::sync::Arc<std::sync::Mutex<BTreeMap<PeerId, net::SourceKey>>>,
+    /// Per-source sliding window throttling unjoined `Hello` slot churn from one non-loopback prefix.
+    unjoined_source_budget: BTreeMap<net::SourceKey, (Instant, usize)>,
     /// When each connected peer passed `Hello`, used to expire idle unjoined peers.
     peer_admitted_at: BTreeMap<PeerId, Instant>,
     /// Peers scheduled for disconnect after their refusal/status response flushes.
@@ -578,6 +608,16 @@ struct Node {
     /// asking: an answer is not something to be worn down.
     turned_away: bool,
     stopped: bool,
+}
+
+struct DepositDone {
+    peer: PeerId,
+    sender: GardenKey,
+    content_id: Hash32,
+    charged_len: u64,
+    already_published_for_me: bool,
+    outcome: Result<bool, String>,
+    channel: ResponseChannel<Vec<u8>>,
 }
 
 /// True when a gap of `gap` between two ticks means the node itself stood
@@ -749,7 +789,8 @@ pub async fn spawn(
     let mut reported = 0;
     let mut budlum_status = None;
     if let Some(link) = &link {
-        if let Some(view) = link.view(chain_id).await {
+        let genesis_hash = ledger.state.genesis.hash();
+        if let Some(view) = link.view_for_genesis(chain_id, genesis_hash).await {
             reported = view.last_committed_height.min(ledger.state.height);
             budlum_status = Some(view.status);
         } else {
@@ -759,6 +800,7 @@ pub async fn spawn(
     }
 
     let (commands, command_rx) = mpsc::channel(256);
+    let (deposit_tx, deposit_rx) = mpsc::channel(MAX_IN_FLIGHT_DEPOSITS.saturating_mul(2));
     let now = Instant::now();
     let my_next_nonce = ledger.state.next_nonce(&me);
     // What this node starts with came from the validators it synced from.
@@ -815,12 +857,20 @@ pub async fn spawn(
         unreferenced: BTreeMap::new(),
         verified_peers,
         rejected_addresses: BTreeSet::new(),
+        rejected_address_order: VecDeque::new(),
         dial_failures: BTreeMap::new(),
         dials: BTreeMap::new(),
         gossip_budget: BTreeMap::new(),
         sync_budget: BTreeMap::new(),
+        sync_in_flight: None,
+        outbound_sync_budget: (now, 0),
         object_budget: BTreeMap::new(),
         put_object_budget: BTreeMap::new(),
+        deposit_tx,
+        deposits_in_flight: BTreeMap::new(),
+        total_deposits_in_flight: 0,
+        peer_sources: std::sync::Arc::clone(&garden_net.peer_sources),
+        unjoined_source_budget: BTreeMap::new(),
         peer_admitted_at,
         disconnect_after: BTreeMap::new(),
         turned_away_keys: BTreeSet::new(),
@@ -836,7 +886,7 @@ pub async fn spawn(
         turned_away: false,
         stopped: false,
     };
-    tokio::spawn(node.run(garden_net.events, command_rx));
+    tokio::spawn(node.run(garden_net.events, command_rx, deposit_rx));
     Ok(GardenHandle { commands, chain_id })
 }
 
@@ -1106,6 +1156,7 @@ impl Node {
         mut self,
         mut events: mpsc::Receiver<NetEvent>,
         mut commands: mpsc::Receiver<GardenCommand>,
+        mut deposits: mpsc::Receiver<DepositDone>,
     ) {
         let limits = self.ledger.state.genesis.limits.clone();
         let step = (limits.presence_interval_ms.min(limits.round_ms) / 4).clamp(10, 250);
@@ -1114,6 +1165,11 @@ impl Node {
         self.dial_known().await;
         while !self.stopped {
             tokio::select! {
+                done = deposits.recv() => {
+                    if let Some(done) = done {
+                        self.on_deposit_done(done).await;
+                    }
+                },
                 event = events.recv() => match event {
                     Some(event) => self.on_net(event).await,
                     None => break,
@@ -1127,6 +1183,108 @@ impl Node {
                 _ = ticker.tick() => self.on_tick().await,
             }
         }
+    }
+
+    async fn on_deposit_done(&mut self, done: DepositDone) {
+        self.total_deposits_in_flight = self.total_deposits_in_flight.saturating_sub(1);
+        if let Some(count) = self.deposits_in_flight.get_mut(&done.peer) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.deposits_in_flight.remove(&done.peer);
+            }
+        }
+        let response = match done.outcome {
+            Ok(wrote_new) => {
+                if !wrote_new {
+                    self.store.release_background_charge(done.charged_len);
+                }
+                if done.already_published_for_me {
+                    self.wanted.remove(&done.content_id);
+                    GardenResponse::Ack
+                } else if self.note_unreferenced(done.sender, done.content_id) {
+                    GardenResponse::Ack
+                } else {
+                    GardenResponse::Refused("deposit queue is full".into())
+                }
+            }
+            Err(err) => {
+                self.store.release_background_charge(done.charged_len);
+                GardenResponse::Refused(err)
+            }
+        };
+        self.respond(done.channel, response).await;
+    }
+
+    fn record_rejected_address(&mut self, addr_key: (GardenKey, String)) {
+        if self.rejected_addresses.contains(&addr_key) {
+            return;
+        }
+        while self.rejected_addresses.len() >= MAX_REJECTED_ADDRESSES {
+            let Some(oldest) = self.rejected_address_order.pop_front() else {
+                break;
+            };
+            self.rejected_addresses.remove(&oldest);
+        }
+        self.rejected_addresses.insert(addr_key.clone());
+        self.rejected_address_order.push_back(addr_key);
+    }
+
+    fn peer_source(&self, peer: &PeerId) -> Option<net::SourceKey> {
+        self.peer_sources
+            .lock()
+            .ok()
+            .and_then(|map| map.get(peer).copied())
+    }
+
+    fn source_unjoined_blocked(&mut self, peer: PeerId, grace: Duration) -> bool {
+        let Some(src) = self.peer_source(&peer) else {
+            return false;
+        };
+        if src.is_loopback() {
+            return false;
+        }
+        let held_by_source = self
+            .peers
+            .iter()
+            .filter(|(p, k)| {
+                **p != peer && !self.is_seated_validator(k) && self.peer_source(p) == Some(src)
+            })
+            .count();
+        if held_by_source >= MAX_UNJOINED_PEERS_PER_SOURCE {
+            return true;
+        }
+        let now = Instant::now();
+        while self.unjoined_source_budget.len() >= 1024
+            && !self.unjoined_source_budget.contains_key(&src)
+        {
+            self.unjoined_source_budget
+                .retain(|_, (start, _)| now.duration_since(*start) < grace);
+            if self.unjoined_source_budget.len() >= 1024 {
+                if let Some(first) = self.unjoined_source_budget.keys().next().copied() {
+                    self.unjoined_source_budget.remove(&first);
+                }
+            }
+        }
+        let entry = self.unjoined_source_budget.entry(src).or_insert((now, 0));
+        if now.duration_since(entry.0) >= grace {
+            *entry = (now, 0);
+        }
+        entry.1 >= MAX_UNJOINED_PEERS_PER_SOURCE.saturating_mul(2)
+    }
+
+    fn note_source_unjoined_admitted(&mut self, peer: PeerId, grace: Duration) {
+        let Some(src) = self.peer_source(&peer) else {
+            return;
+        };
+        if src.is_loopback() {
+            return;
+        }
+        let now = Instant::now();
+        let entry = self.unjoined_source_budget.entry(src).or_insert((now, 0));
+        if now.duration_since(entry.0) >= grace {
+            *entry = (now, 0);
+        }
+        entry.1 = entry.1.saturating_add(1);
     }
 
     const fn limits(&self) -> &GardenLimits {
@@ -1364,6 +1522,9 @@ impl Node {
                 self.gossip_in_flight.remove(&peer);
                 self.gossip_budget.remove(&peer);
                 self.sync_budget.remove(&peer);
+                if self.sync_in_flight.is_some_and(|(p, _, _)| p == peer) {
+                    self.sync_in_flight = None;
+                }
                 self.object_budget.remove(&peer);
                 self.put_object_budget.remove(&peer);
                 self.finish_when_delivered().await;
@@ -1382,7 +1543,7 @@ impl Node {
                 if let Some(addr_key) = matched {
                     if !addr_key.1.is_empty() {
                         if wrong_peer_id {
-                            self.rejected_addresses.insert(addr_key);
+                            self.record_rejected_address(addr_key);
                         } else {
                             if self.dial_failures.len() >= MAX_DIAL_RECORDS
                                 && !self.dial_failures.contains_key(&addr_key)
@@ -1394,7 +1555,7 @@ impl Node {
                             let count = self.dial_failures.entry(addr_key.clone()).or_insert(0);
                             *count = count.saturating_add(1);
                             if *count >= MAX_DIAL_FAILURES {
-                                self.rejected_addresses.insert(addr_key);
+                                self.record_rejected_address(addr_key);
                             }
                         }
                     }
@@ -1556,6 +1717,13 @@ impl Node {
                 self.disconnect_after
                     .insert(peer, Instant::now() + Duration::from_millis(250));
                 GardenResponse::Refused("the host turned this key away".into())
+            } else if !already
+                && !known_validator
+                && self.source_unjoined_blocked(peer, unjoined_grace)
+            {
+                GardenResponse::Refused(
+                    "this source already holds its share of unjoined slots".into(),
+                )
             } else if !already && !known_validator && unjoined_count >= MAX_UNJOINED_PEERS {
                 // Reclaim an expired or turned-away unjoined slot so idle or
                 // rejected invite holders can never wedge the join door.
@@ -1623,6 +1791,9 @@ impl Node {
                 }
             };
             if admit {
+                if !already && !known_validator {
+                    self.note_source_unjoined_admitted(peer, unjoined_grace);
+                }
                 self.peers.insert(peer, *key);
                 self.peer_admitted_at
                     .entry(peer)
@@ -1661,7 +1832,10 @@ impl Node {
                 if now.duration_since(entry.0) >= Duration::from_secs(1) {
                     *entry = (now, 0);
                 }
-                if entry.1.saturating_add(items.len()) > MAX_GOSSIP_ITEMS_PER_PEER_PER_SEC {
+                // Charge at least one unit even for an empty frame so a peer
+                // cannot flood zero-item Gossip requests without hitting its quota.
+                let charge = items.len().max(1);
+                if entry.1.saturating_add(charge) > MAX_GOSSIP_ITEMS_PER_PEER_PER_SEC {
                     self.respond(
                         channel,
                         GardenResponse::Refused("gossip rate limit exceeded".into()),
@@ -1669,11 +1843,14 @@ impl Node {
                     .await;
                     return;
                 }
-                entry.1 = entry.1.saturating_add(items.len());
-                self.respond(channel, GardenResponse::Ack).await;
+                entry.1 = entry.1.saturating_add(charge);
+                // Apply the batch before acknowledging it so a departing
+                // validator that waits for `Ack` knows a peer actually applied
+                // and retained its block before reporting to Budlum.
                 for item in items {
                     self.on_gossip(item, Some(peer)).await;
                 }
+                self.respond(channel, GardenResponse::Ack).await;
             }
             GardenRequest::GetCommits { from_height, max } => {
                 if !self.is_seated(&peer) {
@@ -1797,39 +1974,115 @@ impl Node {
                 }
             }
             GardenRequest::PutObject { bytes } => {
-                let response = match self.peers.get(&peer).copied() {
-                    None => GardenResponse::Refused("show the invite first".into()),
-                    Some(sender) => {
-                        let now = Instant::now();
-                        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                        let max_bytes = u64::from(self.limits().max_object_bytes)
-                            .saturating_mul(2)
-                            .max(4 * 1024 * 1024);
-                        let budget = self.put_object_budget.entry(peer).or_insert((now, 0, 0));
-                        if now.duration_since(budget.0) >= Duration::from_secs(1) {
-                            *budget = (now, 0, 0);
-                        }
-                        if budget.1 >= MAX_PUT_OBJECT_REQS_PER_PEER_PER_SEC
-                            || budget.2.saturating_add(len) > max_bytes
-                        {
-                            GardenResponse::Refused("deposit rate limit exceeded".into())
-                        } else {
-                            budget.1 = budget.1.saturating_add(1);
-                            budget.2 = budget.2.saturating_add(len);
-                            match self.store.put(&bytes) {
-                                Ok(content_id) => {
-                                    if self.note_unreferenced(sender, content_id) {
-                                        GardenResponse::Ack
-                                    } else {
-                                        GardenResponse::Refused("deposit queue is full".into())
-                                    }
-                                }
-                                Err(e) => GardenResponse::Refused(e),
-                            }
-                        }
-                    }
+                let Some(sender) = self.peers.get(&peer).copied() else {
+                    self.respond(
+                        channel,
+                        GardenResponse::Refused("show the invite first".into()),
+                    )
+                    .await;
+                    return;
                 };
-                self.respond(channel, response).await;
+                let now = Instant::now();
+                let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                let max_bytes = u64::from(self.limits().max_object_bytes)
+                    .saturating_mul(2)
+                    .max(4 * 1024 * 1024);
+                let budget = self.put_object_budget.entry(peer).or_insert((now, 0, 0));
+                if now.duration_since(budget.0) >= Duration::from_secs(1) {
+                    *budget = (now, 0, 0);
+                }
+                if budget.1 >= MAX_PUT_OBJECT_REQS_PER_PEER_PER_SEC
+                    || budget.2.saturating_add(len) > max_bytes
+                {
+                    self.respond(
+                        channel,
+                        GardenResponse::Refused("deposit rate limit exceeded".into()),
+                    )
+                    .await;
+                    return;
+                }
+                let peer_in_flight = self.deposits_in_flight.get(&peer).copied().unwrap_or(0);
+                if self.total_deposits_in_flight >= MAX_IN_FLIGHT_DEPOSITS
+                    || peer_in_flight >= MAX_IN_FLIGHT_DEPOSITS_PER_PEER
+                {
+                    self.respond(
+                        channel,
+                        GardenResponse::Refused("deposit write queue is busy".into()),
+                    )
+                    .await;
+                    return;
+                }
+                budget.1 = budget.1.saturating_add(1);
+                budget.2 = budget.2.saturating_add(len);
+                if bytes.is_empty() || bytes.len() > self.limits().max_object_bytes as usize {
+                    self.respond(
+                        channel,
+                        GardenResponse::Refused(format!(
+                            "object size {} is outside 1..={} bytes",
+                            bytes.len(),
+                            self.limits().max_object_bytes
+                        )),
+                    )
+                    .await;
+                    return;
+                }
+                let content_id = crate::storage::content_id::ContentId::of(&bytes).0;
+                // Refuse unsolicited copies of already-finalized publications
+                // on validators outside that object's placement holder set, so
+                // a peer cannot stuff past objects onto non-holders outside the
+                // unreferenced deposit quotas.
+                let published = self.ledger.state.accounts_for(&content_id, len);
+                let is_holder = published && self.holders(&content_id).contains(&self.me);
+                if published && !is_holder {
+                    self.respond(
+                        channel,
+                        GardenResponse::Refused(
+                            "this validator is not a holder of that publication".into(),
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+                match self.store.reserve_background_write(content_id, &bytes) {
+                    Ok(Some((path, charged_len))) => {
+                        self.total_deposits_in_flight =
+                            self.total_deposits_in_flight.saturating_add(1);
+                        *self.deposits_in_flight.entry(peer).or_insert(0) += 1;
+                        let tx = self.deposit_tx.clone();
+                        tokio::spawn(async move {
+                            let outcome = tokio::task::spawn_blocking(move || {
+                                GardenContentStore::write_object_file_blocking(path, bytes)
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(format!("garden object write panicked: {e}")));
+                            let _ = tx
+                                .send(DepositDone {
+                                    peer,
+                                    sender,
+                                    content_id,
+                                    charged_len,
+                                    already_published_for_me: is_holder,
+                                    outcome,
+                                    channel,
+                                })
+                                .await;
+                        });
+                    }
+                    Ok(None) => {
+                        let response = if is_holder {
+                            self.wanted.remove(&content_id);
+                            GardenResponse::Ack
+                        } else if self.note_unreferenced(sender, content_id) {
+                            GardenResponse::Ack
+                        } else {
+                            GardenResponse::Refused("deposit queue is full".into())
+                        };
+                        self.respond(channel, response).await;
+                    }
+                    Err(err) => {
+                        self.respond(channel, GardenResponse::Refused(err)).await;
+                    }
+                }
             }
         }
     }
@@ -2008,12 +2261,16 @@ impl Node {
                 }
             }
             TAG_ADMISSION => {
+                // Only the Garden's host has authority to refuse or accept a
+                // waiting request; a non-host validator can never forge a
+                // sticky `TurnedAway` verdict on a newcomer.
+                let from_host = self.peers.get(&peer) == Some(&self.ledger.state.host());
                 if let Ok(GardenResponse::AdmissionStatus(state)) = response {
                     match state {
-                        GardenAdmissionState::Waiting => {
+                        GardenAdmissionState::Waiting if from_host => {
                             self.remote_admission = Some(GardenAdmissionState::Waiting);
                         }
-                        GardenAdmissionState::TurnedAway => {
+                        GardenAdmissionState::TurnedAway if from_host => {
                             self.turned_away = true;
                             self.remote_admission = None;
                         }
@@ -2021,12 +2278,17 @@ impl Node {
                             self.remote_admission = None;
                             self.request_sync(Some(peer)).await;
                         }
-                        GardenAdmissionState::Pending => {}
+                        _ => {}
                     }
                 }
             }
             TAG_SYNC => {
+                if self.sync_in_flight.is_some_and(|(p, _, _)| p == peer) {
+                    self.sync_in_flight = None;
+                }
                 if let Ok(GardenResponse::Commits(commits)) = response {
+                    let had_commits = !commits.is_empty();
+                    let before = self.ledger.state.height;
                     for commit in commits {
                         if commit.block.header.height != self.ledger.state.height.saturating_add(1)
                         {
@@ -2035,6 +2297,9 @@ impl Node {
                         if !self.apply_commit(commit, Some(peer), false).await {
                             break;
                         }
+                    }
+                    if had_commits && self.ledger.state.height > before {
+                        self.request_sync(Some(peer)).await;
                     }
                 }
             }
@@ -2232,11 +2497,16 @@ impl Node {
     async fn on_gossip(&mut self, item: GardenGossip, from: Option<PeerId>) {
         match item {
             GardenGossip::Tx(tx) => {
+                let id = tx.id();
+                // Verify signature and state admission before inserting `id`
+                // into `seen`, so a peer cannot pre-poison `tx.id()` with a
+                // forged-signature or premature frame before the real tx lands.
                 if tx_bytes(&tx) <= MAX_TX_BYTES
+                    && !self.seen.contains(&Seen::Tx(id))
                     && self.ledger.state.check_tx_shape(&tx).is_ok()
-                    && self.first_sight(Seen::Tx(tx.id()))
                     && self.admit_tx(tx.clone())
                 {
+                    self.first_sight(Seen::Tx(id));
                     self.gossip(&GardenGossip::Tx(tx), from).await;
                 }
             }
@@ -2585,6 +2855,33 @@ impl Node {
     }
 
     async fn request_sync(&mut self, from: Option<PeerId>) {
+        if self.peers.is_empty() {
+            return;
+        }
+        let needed = self.ledger.state.height.saturating_add(1);
+        let now = Instant::now();
+        // Coalesce concurrent sync requests for the same height while a fresh
+        // request to a still-connected peer is already awaiting its reply, and
+        // cap peer-triggered syncs so future-height spam cannot fan out bursts
+        // of multi-megabyte `GetCommits` exchanges.
+        if let Some((in_flight_peer, in_flight_from, sent_at)) = self.sync_in_flight {
+            if in_flight_from == needed
+                && self.peers.contains_key(&in_flight_peer)
+                && now.duration_since(sent_at) < SYNC_IN_FLIGHT_TIMEOUT
+            {
+                return;
+            }
+            self.sync_in_flight = None;
+        }
+        if from.is_some() {
+            if now.duration_since(self.outbound_sync_budget.0) >= Duration::from_secs(1) {
+                self.outbound_sync_budget = (now, 0);
+            }
+            if self.outbound_sync_budget.1 >= MAX_PEER_TRIGGERED_SYNCS_PER_SEC {
+                return;
+            }
+            self.outbound_sync_budget.1 = self.outbound_sync_budget.1.saturating_add(1);
+        }
         let peer = if let Some(peer) = from.filter(|peer| self.peers.contains_key(peer)) {
             Some(peer)
         } else {
@@ -2593,10 +2890,11 @@ impl Node {
             self.peers.keys().nth(self.sync_cursor).copied()
         };
         if let Some(peer) = peer {
+            self.sync_in_flight = Some((peer, needed, now));
             self.send(
                 peer,
                 GardenRequest::GetCommits {
-                    from_height: self.ledger.state.height.saturating_add(1),
+                    from_height: needed,
                     max: MAX_SYNC_COMMITS,
                 },
                 TAG_SYNC,
@@ -2654,6 +2952,32 @@ impl Node {
                 for queue in self.unreferenced.values_mut() {
                     queue.retain(|id| id != content_id);
                 }
+                self.unreferenced.retain(|_, queue| !queue.is_empty());
+                if tx.tx.sender != self.me && !self.holders(content_id).contains(&self.me) {
+                    let own = self.has_pending(|pending| {
+                        matches!(pending, GardenTxKind::Publish { content_id: cid, .. } if cid == content_id)
+                    });
+                    if !own {
+                        self.store.remove(content_id);
+                    }
+                }
+            }
+            match &tx.tx.kind {
+                GardenTxKind::Join { address, .. } | GardenTxKind::Resume { address } => {
+                    let sender = tx.tx.sender;
+                    self.rejected_addresses
+                        .retain(|(k, a)| *k != sender || a == address);
+                    self.rejected_address_order
+                        .retain(|(k, a)| *k != sender || a == address);
+                }
+                GardenTxKind::Leave => {
+                    let sender = tx.tx.sender;
+                    if !self.ledger.state.validators.contains_key(&sender) {
+                        self.rejected_addresses.retain(|(k, _)| *k != sender);
+                        self.rejected_address_order.retain(|(k, _)| *k != sender);
+                    }
+                }
+                _ => {}
             }
             if matches!(
                 tx.tx.kind,
@@ -3055,7 +3379,14 @@ impl Node {
                 && !self.is_key_seated(&self.me)
                 && !self.turned_away
             {
-                if let Some(peer) = self.peers.keys().next().copied() {
+                let host = self.ledger.state.host();
+                let target_peer = self
+                    .peers
+                    .iter()
+                    .find(|(_, key)| **key == host)
+                    .map(|(peer, _)| *peer)
+                    .or_else(|| self.peers.keys().next().copied());
+                if let Some(peer) = target_peer {
                     self.send(peer, GardenRequest::AdmissionStatus, TAG_ADMISSION)
                         .await;
                 }
@@ -3452,11 +3783,15 @@ impl Node {
                 })
             })
             .collect();
+        let genesis_hash = state.genesis.hash();
         let budlum = match &self.link {
-            Some(link) => link.view(self.chain_id()).await.map_or_else(
-                || json!({ "linked": false, "error": self.budlum_error }),
-                |view| budlum_record(&view, self.budlum_error.as_deref()),
-            ),
+            Some(link) => link
+                .view_for_genesis(self.chain_id(), genesis_hash)
+                .await
+                .map_or_else(
+                    || json!({ "linked": false, "error": self.budlum_error }),
+                    |view| budlum_record(&view, self.budlum_error.as_deref()),
+                ),
             None => json!({ "linked": false, "error": Value::Null }),
         };
         json!({
@@ -6040,5 +6375,419 @@ mod tests {
         }
         drop(waiting);
         handle.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn forged_tx_gossip_does_not_poison_seen_filter_and_empty_gossip_is_budgeted() {
+        let handle = host().await;
+        let invite = handle.invite().await.unwrap();
+        let (mut peer_net, peer_key, host_peer) = stranger(&invite).await;
+        let pk = peer_key.public_key_bytes();
+        let invite_sig = invite_keypair(&invite.token)
+            .unwrap()
+            .sign(&join_message(invite.chain_id, &pk))
+            .to_vec();
+        let hello = GardenRequest::Hello {
+            chain_id: invite.chain_id,
+            key: pk,
+            invite_signature: invite_sig.clone(),
+        };
+        assert!(matches!(
+            ask(&mut peer_net, host_peer, hello).await,
+            GardenResponse::Welcome { .. }
+        ));
+
+        // 164-02: send a Join tx with a valid tx.id() but corrupted Ed25519
+        // signature, then send the genuine signed Join with the exact same id.
+        let real_join = (GardenTx {
+            chain_id: invite.chain_id,
+            sender: pk,
+            nonce: 0,
+            kind: GardenTxKind::Join {
+                name: "alice".into(),
+                address: String::new(),
+                invite_signature: invite_sig,
+            },
+        })
+        .sign(&peer_key)
+        .unwrap();
+        let mut forged_join = real_join.clone();
+        if let Some(byte) = forged_join.signature.first_mut() {
+            *byte ^= 0x55;
+        }
+        assert_eq!(forged_join.id(), real_join.id());
+        assert!(matches!(
+            ask(
+                &mut peer_net,
+                host_peer,
+                GardenRequest::Gossip(vec![GardenGossip::Tx(forged_join)])
+            )
+            .await,
+            GardenResponse::Ack
+        ));
+        assert!(matches!(
+            ask(
+                &mut peer_net,
+                host_peer,
+                GardenRequest::Gossip(vec![GardenGossip::Tx(real_join)])
+            )
+            .await,
+            GardenResponse::Ack
+        ));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = handle.status().await.unwrap();
+            let seated = status["validators"]
+                .as_array()
+                .is_some_and(|vs| vs.iter().any(|v| v["name"] == "alice"));
+            if seated {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "forged tx pre-poisoned seen filter; alice never seated: {status}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // 164-12: empty Gossip(vec![]) frames must consume rate-limit quota.
+        let mut refused_empty = false;
+        for _ in 0..=MAX_GOSSIP_ITEMS_PER_PEER_PER_SEC {
+            if matches!(
+                ask(&mut peer_net, host_peer, GardenRequest::Gossip(Vec::new())).await,
+                GardenResponse::Refused(msg) if msg.contains("gossip rate limit")
+            ) {
+                refused_empty = true;
+                break;
+            }
+        }
+        assert!(
+            refused_empty,
+            "empty Gossip frames must exhaust MAX_GOSSIP_ITEMS_PER_PEER_PER_SEC"
+        );
+        handle.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disk_put_object_offloads_write_and_refuses_published_object_on_non_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host_cfg = config("host", "/ip4/127.0.0.1/tcp/0");
+        host_cfg.content_dir = Some(dir.path().join("host"));
+        let host_handle = spawn(
+            GardenEntry::Create {
+                title: "DiskRoom".into(),
+                limits: GardenLimits::testnet_default(),
+            },
+            host_cfg,
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = host_handle.invite().await.unwrap();
+
+        // Seat 4 additional validators (5 active total > REPLICAS=3) so every
+        // published object has at least two non-holder validators.
+        let mut members = Vec::new();
+        for idx in 0..4 {
+            let mut cfg = config(&format!("v{idx}"), "/ip4/127.0.0.1/tcp/0");
+            cfg.content_dir = Some(dir.path().join(format!("v{idx}")));
+            let h = spawn(
+                GardenEntry::Invite(invite.clone()),
+                cfg,
+                random_bytes(),
+                None,
+            )
+            .await
+            .unwrap();
+            members.push(h);
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let st = host_handle.status().await.unwrap();
+            if st["validators"].as_array().is_some_and(|v| v.len() == 5) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cluster did not reach 5 validators"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Publish an object (exercises 164-04 offloaded disk PutObject on holders).
+        let payload = b"offloaded-disk-publication-payload".to_vec();
+        let pub_res = host_handle
+            .publish(
+                GardenContentKind::Message,
+                payload.clone(),
+                "text/plain".into(),
+                "hello".into(),
+            )
+            .await
+            .unwrap();
+        let cid_hex = pub_res["content_id"].as_str().unwrap();
+        let cid_vec = hex::decode(cid_hex).unwrap();
+        let mut cid = [0u8; 32];
+        cid.copy_from_slice(&cid_vec);
+
+        // Wait until the publication is finalized on host and every member.
+        let pub_deadline = Instant::now() + Duration::from_secs(10);
+        let pub_height = loop {
+            let st = host_handle.status().await.unwrap();
+            if st["objects"].as_u64().unwrap_or(0) >= 1 {
+                break st["height"].as_u64().unwrap();
+            }
+            assert!(
+                Instant::now() < pub_deadline,
+                "publication did not finalize on host: {st}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        for m in &members {
+            let wait = Instant::now() + Duration::from_secs(10);
+            while m.status().await.unwrap()["height"].as_u64().unwrap_or(0) < pub_height {
+                assert!(Instant::now() < wait, "member did not sync publication");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        // Dial each validator's own announced address directly (with 5 active
+        // validators and 3 holders, exactly 2 validators are non-holders).
+        let peer_addrs = host_handle.invite().await.unwrap().peers;
+        assert_eq!(peer_addrs.len(), 5, "expected all 5 validator addresses");
+        let mut refused_non_holders = 0usize;
+        for addr in &peer_addrs {
+            let mut one_peer_invite = invite.clone();
+            one_peer_invite.peers = vec![addr.clone()];
+            let (mut probe, probe_key, target_peer) = stranger(&one_peer_invite).await;
+            let pk = probe_key.public_key_bytes();
+            let sig = invite_keypair(&invite.token)
+                .unwrap()
+                .sign(&join_message(invite.chain_id, &pk))
+                .to_vec();
+            assert!(matches!(
+                ask(
+                    &mut probe,
+                    target_peer,
+                    GardenRequest::Hello {
+                        chain_id: invite.chain_id,
+                        key: pk,
+                        invite_signature: sig,
+                    }
+                )
+                .await,
+                GardenResponse::Welcome { .. }
+            ));
+            if let GardenResponse::Refused(reason) = ask(
+                &mut probe,
+                target_peer,
+                GardenRequest::PutObject {
+                    bytes: payload.clone(),
+                },
+            )
+            .await
+            {
+                if reason.contains("not a holder") {
+                    refused_non_holders += 1;
+                }
+            }
+        }
+        assert_eq!(
+            refused_non_holders,
+            2,
+            "both non-holder validators must refuse unsolicited published PutObject for {}",
+            hex::encode(cid)
+        );
+
+        for m in members {
+            let _ = m.leave().await;
+        }
+        let _ = host_handle.leave().await;
+    }
+
+    #[tokio::test]
+    async fn node_unit_guards_cover_host_only_admission_sync_coalescing_source_cap_and_rejected_fifo(
+    ) {
+        let host_key = KeyPair::generate().unwrap();
+        let peer_a_key = KeyPair::generate().unwrap();
+        let peer_b_key = KeyPair::generate().unwrap();
+        let token = [0x42u8; 32];
+        let mut limits = GardenLimits::testnet_default();
+        limits.admission = GardenAdmission::HostApproval;
+        let genesis = GardenGenesis::new(
+            GardenFounding {
+                title: "UnitGuard".into(),
+                host_name: "host".into(),
+                host_address: String::new(),
+                limits,
+            },
+            host_key.public_key_bytes(),
+            1_700_000_000_000,
+            7,
+            &token,
+        )
+        .unwrap();
+        let chain_id = genesis.chain_id;
+        let ledger = GardenLedger::new(genesis).unwrap();
+        let joiner_key = KeyPair::generate().unwrap();
+        let me = joiner_key.public_key_bytes();
+        let invite_signature = invite_keypair(&token)
+            .unwrap()
+            .sign(&join_message(chain_id, &me))
+            .to_vec();
+        let (net_tx, mut net_rx) = mpsc::channel(64);
+        let (deposit_tx, _deposit_rx) = mpsc::channel(16);
+        let peer_sources = std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let now = Instant::now();
+        let host_peer = peer_id_of(&host_key.public_key_bytes()).unwrap();
+        let non_host_peer = peer_id_of(&peer_a_key.public_key_bytes()).unwrap();
+        let mut peers = BTreeMap::new();
+        peers.insert(non_host_peer, peer_a_key.public_key_bytes());
+        peers.insert(host_peer, host_key.public_key_bytes());
+
+        let mut node = Node {
+            key: joiner_key,
+            me,
+            name: "joiner".into(),
+            token,
+            invite_signature,
+            address: String::new(),
+            seeds: Vec::new(),
+            ledger,
+            store: GardenContentStore::open(None, 1024 * 1024).unwrap(),
+            net: net_tx,
+            link: None,
+            reported: 0,
+            budlum_status: None,
+            budlum_error: None,
+            peers,
+            unadmitted: BTreeMap::new(),
+            outbox: BTreeMap::new(),
+            gossip_in_flight: BTreeMap::new(),
+            held_elsewhere: 0,
+            mempool: BTreeMap::new(),
+            my_next_nonce: 0,
+            proposals: BTreeMap::new(),
+            candidate_rounds: BTreeMap::new(),
+            votes: BTreeMap::new(),
+            orphan_votes: VecDeque::new(),
+            my_votes: BTreeSet::new(),
+            host_voted: false,
+            proposed_rounds: BTreeSet::new(),
+            height_started: now,
+            pending_since: None,
+            seen: BTreeSet::new(),
+            seen_order: VecDeque::new(),
+            last_seen: BTreeMap::new(),
+            presence_windows: BTreeMap::new(),
+            my_window: 0,
+            started: now,
+            last_presence: now,
+            last_tick: now,
+            last_sync: now,
+            last_dial: now,
+            sync_cursor: 0,
+            wanted: BTreeSet::new(),
+            measured: BTreeMap::new(),
+            unreferenced: BTreeMap::new(),
+            verified_peers: BTreeSet::new(),
+            rejected_addresses: BTreeSet::new(),
+            rejected_address_order: VecDeque::new(),
+            dial_failures: BTreeMap::new(),
+            dials: BTreeMap::new(),
+            gossip_budget: BTreeMap::new(),
+            sync_budget: BTreeMap::new(),
+            sync_in_flight: None,
+            outbound_sync_budget: (now, 0),
+            object_budget: BTreeMap::new(),
+            put_object_budget: BTreeMap::new(),
+            deposit_tx,
+            deposits_in_flight: BTreeMap::new(),
+            total_deposits_in_flight: 0,
+            peer_sources: std::sync::Arc::clone(&peer_sources),
+            unjoined_source_budget: BTreeMap::new(),
+            peer_admitted_at: BTreeMap::new(),
+            disconnect_after: BTreeMap::new(),
+            turned_away_keys: BTreeSet::new(),
+            turned_away_order: VecDeque::new(),
+            remote_admission: None,
+            seed_dials: None,
+            fetches: BTreeMap::new(),
+            fetch_tags: BTreeMap::new(),
+            relays: BTreeMap::new(),
+            relay_tags: BTreeMap::new(),
+            next_tag: TAG_FIRST_FETCH,
+            leaving: None,
+            turned_away: false,
+            stopped: false,
+        };
+
+        // 164-05: forged TurnedAway from a non-host peer is ignored; host's is honored.
+        node.on_response(
+            non_host_peer,
+            TAG_ADMISSION,
+            Ok(GardenResponse::AdmissionStatus(
+                GardenAdmissionState::TurnedAway,
+            )),
+        )
+        .await;
+        assert!(!node.turned_away, "non-host peer must not set turned_away");
+        node.on_response(
+            host_peer,
+            TAG_ADMISSION,
+            Ok(GardenResponse::AdmissionStatus(
+                GardenAdmissionState::TurnedAway,
+            )),
+        )
+        .await;
+        assert!(node.turned_away, "host peer TurnedAway verdict must apply");
+
+        // 164-06: repeated sync triggers for the same height coalesce into one GetCommits.
+        node.request_sync(Some(host_peer)).await;
+        node.request_sync(Some(non_host_peer)).await;
+        node.request_sync(None).await;
+        let mut sent_syncs = 0usize;
+        while let Ok(cmd) = net_rx.try_recv() {
+            if matches!(
+                cmd,
+                NetCommand::Send {
+                    request: GardenRequest::GetCommits { .. },
+                    ..
+                }
+            ) {
+                sent_syncs += 1;
+            }
+        }
+        assert_eq!(sent_syncs, 1, "concurrent sync triggers must coalesce");
+
+        // 164-10: a non-loopback /24 holding an unjoined slot blocks a second unjoined
+        // peer from the same /24, while another /24 is allowed through.
+        let unjoined_2 = peer_id_of(&peer_b_key.public_key_bytes()).unwrap();
+        let other_net_peer = PeerId::random();
+        {
+            let mut map = peer_sources.lock().unwrap();
+            map.insert(non_host_peer, net::SourceKey::V4([203, 0, 113]));
+            map.insert(unjoined_2, net::SourceKey::V4([203, 0, 113]));
+            map.insert(other_net_peer, net::SourceKey::V4([198, 51, 100]));
+        }
+        let grace = Duration::from_secs(10);
+        assert!(
+            node.source_unjoined_blocked(unjoined_2, grace),
+            "second unjoined peer from same public /24 must be refused"
+        );
+        assert!(
+            !node.source_unjoined_blocked(other_net_peer, grace),
+            "newcomer from distinct public /24 must still be welcomed"
+        );
+
+        // 164-14: rejected_addresses stays strictly bounded by MAX_REJECTED_ADDRESSES.
+        for i in 0..(MAX_REJECTED_ADDRESSES + 40) {
+            node.record_rejected_address((me, format!("/ip4/198.51.100.1/tcp/{}", 2000 + i)));
+        }
+        assert_eq!(node.rejected_addresses.len(), MAX_REJECTED_ADDRESSES);
+        assert!(!node
+            .rejected_addresses
+            .contains(&(me, "/ip4/198.51.100.1/tcp/2000".into())));
     }
 }

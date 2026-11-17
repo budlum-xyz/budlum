@@ -4344,6 +4344,7 @@ impl Blockchain {
         // A transaction the block rules of the aggregation layer would refuse
         // must not wait here: the block built from it would be invalid.
         crate::aggregation::chain::check_pool_transaction(&self.aggregation_params(), tx)?;
+        crate::settlement::domains::check_ingest_garden_domain_reservation(tx)?;
 
         let (expected_nonce, spendable_balance) = self.projected_sender_state(tx);
         self.state.validate_transaction_with_context(
@@ -4361,6 +4362,9 @@ impl Blockchain {
             crate::execution::executor::check_transaction_features(self.chain_id, &tx.tx_type)
         {
             reasons.push(error.code().to_string());
+        }
+        if crate::settlement::domains::check_ingest_garden_domain_reservation(tx).is_err() {
+            reasons.push("garden_domain_id_reserved".to_string());
         }
         if tx.chain_id != self.chain_id {
             reasons.push("invalid_chain_id".to_string());
@@ -5009,6 +5013,8 @@ impl Blockchain {
                 crate::core::account::TxAuthority::ClaimChecked,
             )
             .map_err(ObjectRefusal::Transaction)?;
+        crate::settlement::domains::check_ingest_garden_domain_reservation(&tx)
+            .map_err(ObjectRefusal::Transaction)?;
         match self.agg_node.as_mut() {
             Some(node) => node.admit(envelope, tx, &self.state.scheme_registry),
             None => Err(ObjectRefusal::NoAggregator),
@@ -5160,6 +5166,15 @@ impl Blockchain {
             } else {
                 candidate.validate_transaction(tx)
             };
+            if let Err(error) =
+                crate::settlement::domains::check_ingest_garden_domain_reservation(tx)
+            {
+                warn!(
+                    "Block frame dropped: transaction {} refused: {error}",
+                    tx.hash
+                );
+                return Err(tx.signing_hash());
+            }
             if let Err(error) = checked {
                 warn!(
                     "Block frame dropped: transaction {} refused: {error}",
@@ -5287,6 +5302,9 @@ impl Blockchain {
                     continue;
                 }
                 if temp_state.validate_transaction(tx).is_err() {
+                    continue;
+                }
+                if crate::settlement::domains::check_ingest_garden_domain_reservation(tx).is_err() {
                     continue;
                 }
                 // A block built here carries no claim frame, so it may hold

@@ -177,6 +177,78 @@ impl GardenContentStore {
         Ok(content_id)
     }
 
+    /// Reserve local byte budget and return a standalone blocking writer closure
+    /// target `(path, charged_len)` so a caller can run disk create/fsync in a
+    /// background task while continuing to process consensus events.
+    pub fn reserve_background_write(
+        &mut self,
+        content_id: Hash32,
+        bytes: &[u8],
+    ) -> Result<Option<(PathBuf, u64)>, String> {
+        if bytes.is_empty() || bytes.len() > self.max_object_bytes {
+            return Err(format!(
+                "object size {} is outside 1..={} bytes",
+                bytes.len(),
+                self.max_object_bytes
+            ));
+        }
+        let len = charged_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        match self.path_of(&content_id) {
+            Some(path) => {
+                if !self.can_fit(len) {
+                    return Err(format!(
+                        "garden local storage limit of {} bytes reached",
+                        self.max_total_bytes
+                    ));
+                }
+                self.total_bytes = self.total_bytes.saturating_add(len);
+                Ok(Some((path, len)))
+            }
+            None => {
+                if !self.memory.contains_key(&content_id) {
+                    if !self.can_fit(len) {
+                        return Err(format!(
+                            "garden local storage limit of {} bytes reached",
+                            self.max_total_bytes
+                        ));
+                    }
+                    self.memory.insert(content_id, bytes.to_vec());
+                    self.total_bytes = self.total_bytes.saturating_add(len);
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Release a previously reserved background write charge (on write failure
+    /// or when the target file already existed on disk).
+    pub fn release_background_charge(&mut self, charged_len: u64) {
+        self.total_bytes = self.total_bytes.saturating_sub(charged_len);
+    }
+
+    /// Write `bytes` atomically to `path` on a blocking thread. Returns
+    /// `Ok(true)` when a new file was materialized, `Ok(false)` when `path`
+    /// already existed.
+    pub fn write_object_file_blocking(path: PathBuf, bytes: Vec<u8>) -> Result<bool, String> {
+        if path.is_file() {
+            return Ok(false);
+        }
+        let seq = TEMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp.{}.{seq}", std::process::id()));
+        let write_res = (|| -> std::io::Result<()> {
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            fs::rename(&tmp, &path)?;
+            Ok(())
+        })();
+        if let Err(e) = write_res {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("garden object cannot be written: {e}"));
+        }
+        Ok(true)
+    }
+
     /// Store bytes received from a peer, but only under the id they hash to.
     pub fn put_verified(&mut self, expected: &Hash32, bytes: &[u8]) -> Result<(), String> {
         if bytes.is_empty() || bytes.len() > self.max_object_bytes {
