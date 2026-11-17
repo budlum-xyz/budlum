@@ -15,9 +15,7 @@ use crate::storage::bud3::content_gateway::{Bud3ContentGateway, ContentGatewayEr
 use crate::storage::bud3::content_id::{ContentIdKind, ContentKey};
 use crate::storage::bud3::content_ref::{ContentRef, ContentRefError};
 use crate::storage::bud3::registry::Bud3Registry;
-use crate::storage::bud3::view::{
-    view_from_network, NetworkSymbolSource, PaidViewReceipt, ViewBud3Error,
-};
+use crate::storage::bud3::view::{NetworkSymbolSource, PaidViewReceipt, ViewBud3Error};
 
 /// Domain tag committing a BNS B.U.D. 3.0 content binding.
 pub const DOMAIN_BNS_BINDING: &[u8] = b"BDLM_BUD3_BNS_BINDING_V2";
@@ -191,11 +189,12 @@ impl Bud3BnsResolver {
     /// Resolve a `.bud` BNS name through `bud3::view` / [`Bud3ContentGateway`].
     /// exposed for BNS content gateway and `.bud` browser resolution.
     ///
-    /// * When `access.paid_receipt` is supplied, serves public content through
-    ///   [`Bud3ContentGateway::serve_paid_public_fallback`].
-    /// * Otherwise reconstructs and verifies content from network symbol holders
-    ///   via [`view_from_network`], requiring an active `grant_row` when `grant_tag`
-    ///   is specified.
+    /// * When `access.paid_receipt` is supplied, checks receipt validity at `current_epoch`
+    ///   and serves public content through [`Bud3ContentGateway::serve_paid_public_fallback`].
+    /// * Otherwise collects and verifies symbols once from network holders via
+    ///   [`Bud3ContentGateway::fetch_symbol_bundle`] and decodes them with
+    ///   [`Bud3ContentGateway::decode_symbol_bundle`], requiring an active `grant_row`
+    ///   when `grant_tag` is specified.
     ///
     /// # Errors
     ///
@@ -225,6 +224,9 @@ impl Bud3BnsResolver {
         }
 
         if let Some(receipt) = &access.paid_receipt {
+            if !bud3.verify_paid_view_at(receipt, current_epoch) {
+                return Err(BnsBud3Error::Gateway(ViewBud3Error::UnpaidFallbackView));
+            }
             return Bud3ContentGateway::serve_paid_public_fallback(
                 bud3,
                 &content_ref,
@@ -234,15 +236,10 @@ impl Bud3BnsResolver {
             .map_err(BnsBud3Error::Gateway);
         }
 
-        let _bundle = Bud3ContentGateway::fetch_symbol_bundle(bud3, &content_ref, network)
+        let bundle = Bud3ContentGateway::fetch_symbol_bundle(bud3, &content_ref, network)
             .map_err(BnsBud3Error::Gateway)?;
-        view_from_network(
-            bud3,
-            &content_ref.object_commitment,
-            access.content_key.as_ref(),
-            network,
-        )
-        .map_err(BnsBud3Error::View)
+        Bud3ContentGateway::decode_symbol_bundle(&bundle, access.content_key.as_ref())
+            .map_err(BnsBud3Error::View)
     }
 }
 
@@ -453,6 +450,127 @@ mod tests {
         assert_eq!(
             hex::encode(binding.digest()),
             "1f64b4ce979f1864d4ab5d6784d32094a6085e6adef0fcd5410fc0261516560c"
+        );
+    }
+
+    #[test]
+    fn bns_resolve_via_bud3_view_fetches_each_share_once_and_checks_paid_expiry() {
+        use crate::storage::bud3::view::{MIN_PAID_VIEW_FEE_ATOMS, PAID_VIEW_RETENTION_EPOCHS};
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingNetwork<'a> {
+            inner: &'a MemorySymbolNetwork,
+            calls: AtomicUsize,
+        }
+        impl NetworkSymbolSource for CountingNetwork<'_> {
+            fn fetch_holder_symbols(
+                &self,
+                holder: &crate::storage::bud3::registry::Address,
+                object: &crate::storage::bud3::registry::ObjectKey,
+                segment: u64,
+                first_esi: u32,
+                count: u32,
+            ) -> Vec<crate::storage::bud3::fountain::Symbol> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.inner
+                    .fetch_holder_symbols(holder, object, segment, first_esi, count)
+            }
+        }
+
+        let alice = Address([0x12; 32]);
+        let mut bns = BnsRegistry::new();
+        let lifetime = PAID_VIEW_RETENTION_EPOCHS.saturating_add(50);
+        bns.register(String::from("singlepass.bud"), alice, 1, lifetime)
+            .unwrap();
+
+        let mut bud3 = Bud3Registry::default();
+        let body = b"single pass BNS bud3 view".repeat(5);
+        let up = prepare_public_upload(&body, &P, &Bud3Limits::default(), 8).unwrap();
+        let key = up.record.commitment;
+        let cid = up.record.content_id;
+        let mut net = MemorySymbolNetwork::default();
+        for (seg_idx, syms) in up.segments.iter().enumerate() {
+            net.store_holder_share([1; 32], key, seg_idx as u64, syms[..4].to_vec());
+            net.store_holder_share([2; 32], key, seg_idx as u64, syms[4..].to_vec());
+        }
+        bud3.register_object(
+            alice.0,
+            up.record,
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: [1; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: [2; 32],
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
+            1,
+            lifetime,
+        )
+        .unwrap();
+
+        let cref = ContentRef::new(cid, key, None).unwrap();
+        Bud3BnsResolver::set_bud3_content(
+            &mut bns,
+            &bud3,
+            ("singlepass.bud", &alice),
+            Some(cref),
+            2,
+        )
+        .unwrap();
+
+        let expected_shares = bud3.object(&key).unwrap().shares.len();
+        let counting = CountingNetwork {
+            inner: &net,
+            calls: AtomicUsize::new(0),
+        };
+        let decoded = Bud3BnsResolver::resolve_via_bud3_view(
+            &bns,
+            &bud3,
+            &counting,
+            "singlepass.bud",
+            2,
+            &BnsViewAccess::default(),
+        )
+        .unwrap();
+        assert_eq!(decoded, body);
+        assert_eq!(counting.calls.load(Ordering::Relaxed), expected_shares);
+
+        let receipt_id = [0x91; 32];
+        bud3.record_paid_view([9; 32], key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 2)
+            .unwrap();
+        let receipt = PaidViewReceipt {
+            payer: [9; 32],
+            object: key,
+            receipt_id,
+            fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS,
+        };
+        let expired_epoch = 3 + PAID_VIEW_RETENTION_EPOCHS;
+        assert_eq!(
+            Bud3BnsResolver::resolve_via_bud3_view(
+                &bns,
+                &bud3,
+                &net,
+                "singlepass.bud",
+                expired_epoch,
+                &BnsViewAccess {
+                    paid_receipt: Some(receipt),
+                    ..Default::default()
+                },
+            ),
+            Err(BnsBud3Error::Gateway(ViewBud3Error::UnpaidFallbackView))
         );
     }
 }
