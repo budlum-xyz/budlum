@@ -4,8 +4,8 @@ use crate::core::block::Block;
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::finality_adapter::{
     block_finality_proof_hash, empty_event_root, BftFinalityAdapter, DagFinalityAdapter,
-    DomainFinalityAdapter, PohFinalityAdapter, PoAFinalityAdapter, PoSFinalityAdapter,
-    PospaceFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
+    DomainFinalityAdapter, PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter,
+    PohFinalityAdapter, PospaceFinalityAdapter, ZkFinalityAdapter,
 };
 use crate::domain::types::{
     ConsensusDomain, ConsensusKind, DomainCommitment, DomainId, DomainStatus, Hash32,
