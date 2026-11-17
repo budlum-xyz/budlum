@@ -206,6 +206,7 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::settlement::GlobalBlockHeader>>,
     ),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
+    GetDomainCommitmentsWithGarden(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
     GetConsensusDomainsWithGarden(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
     RegisterGardenDomain(
@@ -1711,6 +1712,18 @@ impl ChainHandle {
     pub async fn get_domain_commitments(&self) -> Vec<crate::domain::DomainCommitment> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetDomainCommitments(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// Canonical in-block domain commitments merged with this node's local
+    /// Garden commitments. Served only on the operator RPC listener so
+    /// public RPC callers never observe node-local Gardens.
+    pub async fn get_domain_commitments_with_garden(&self) -> Vec<crate::domain::DomainCommitment> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetDomainCommitmentsWithGarden(tx))
+            .await;
         rx.await.unwrap_or_default()
     }
 
@@ -3472,6 +3485,9 @@ impl ChainActor {
                             .commitments
                             .commitments_for_global_block(),
                     );
+                }
+                ChainCommand::GetDomainCommitmentsWithGarden(tx) => {
+                    let _ = tx.send(self.blockchain.domain_commitments_with_garden());
                 }
                 ChainCommand::GetConsensusDomains(tx) => {
                     // Public RPC (`bud_getConsensusDomains`) reads canonical

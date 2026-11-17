@@ -2291,7 +2291,12 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let commitments = cap_list_response(self.chain.get_domain_commitments().await);
+        let commitments = if self.mode == RpcMode::Operator {
+            self.chain.get_domain_commitments_with_garden().await
+        } else {
+            self.chain.get_domain_commitments().await
+        };
+        let commitments = cap_list_response(commitments);
         Ok(serde_json::Value::Array(
             commitments
                 .into_iter()
@@ -2301,7 +2306,11 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_consensus_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let domains = self.chain.get_consensus_domains().await;
+        let domains = if self.mode == RpcMode::Operator {
+            self.chain.get_consensus_domains_with_garden().await
+        } else {
+            self.chain.get_consensus_domains().await
+        };
         Ok(serde_json::Value::Array(
             domains
                 .into_iter()
