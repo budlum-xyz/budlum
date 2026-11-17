@@ -230,6 +230,7 @@ impl GardenService {
             .await?;
         let link = handle.invite().await?.to_link();
         *slot = Slot::Running(handle, seat);
+        drop(slot);
         Ok(json!({ "garden": status, "invite": link, "qr": link }))
     }
 
@@ -267,6 +268,7 @@ impl GardenService {
         };
         let (handle, seat, status) = self.enter(GardenEntry::Invite(invite), seat).await?;
         *slot = Slot::Running(handle, seat);
+        drop(slot);
         Ok(json!({ "garden": status }))
     }
 
@@ -302,10 +304,12 @@ impl GardenService {
                 if !outcome.retired {
                     *slot = Slot::Away(seat, outcome.invite);
                 }
+                drop(slot);
                 Ok(answer)
             }
             Slot::Away(seat, invite) => {
                 self.forget(&seat, &invite).await;
+                drop(slot);
                 Ok(json!({
                     "left": true,
                     "retired": true,
@@ -334,10 +338,12 @@ impl GardenService {
                 match self.enter(GardenEntry::Invite(invite.clone()), again).await {
                     Ok((handle, seat, status)) => {
                         *slot = Slot::Running(handle, seat);
+                        drop(slot);
                         Ok(json!({ "garden": status }))
                     }
                     Err(e) => {
                         *slot = Slot::Away(seat, invite);
+                        drop(slot);
                         Err(e)
                     }
                 }
