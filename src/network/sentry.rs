@@ -92,19 +92,19 @@ fn validate_dialable_multiaddr(raw: &str, label: &str) -> Result<(PeerId, Multia
     let mut has_host = false;
     let mut has_port = false;
     let components: Vec<Protocol<'_>> = addr.iter().collect();
-    let Some(Protocol::P2p(peer_id)) = components.last() else {
+    let Some((Protocol::P2p(peer_id), prefix)) = components.split_last() else {
         return Err(format!(
             "{label} multiaddr '{trimmed}' must end with /p2p/<PeerId>"
         ));
     };
     let peer_id = *peer_id;
-    if components.len() < 2 {
+    if prefix.is_empty() {
         return Err(format!(
             "{label} multiaddr '{trimmed}' must include a transport host and port before /p2p/<PeerId>"
         ));
     }
 
-    for proto in &components[..components.len() - 1] {
+    for proto in prefix {
         match proto {
             Protocol::Ip4(ip) => {
                 if ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
