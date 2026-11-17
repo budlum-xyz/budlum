@@ -133,9 +133,10 @@ pub fn program_hash_of(code: &[u64]) -> Hash32 {
     hasher.finalize().into()
 }
 
-/// Computes the `BudVM` `receipt.state_writes_digest` for a sequence of
-/// 32-byte digests published consecutively as 8 little-endian 32-bit `SWrite`
-/// calls each (`slot 0..8`, `slot 8..16`, `slot 16..24`, ...).
+/// Computes the `BudVM` `receipt.state_writes_digest` for a digest list.
+///
+/// Each 32-byte digest is published consecutively as 8 little-endian 32-bit
+/// `SWrite` calls (`slot 0..8`, `slot 8..16`, `slot 16..24`, ...).
 #[must_use]
 pub fn published_writes_digest_many(digests: &[&Hash32]) -> Hash32 {
     let mut acc = [0u64; 4];
@@ -196,13 +197,17 @@ fn emit_check_allowlisted(a: &mut Asm, prog_cell: u64, tick_cell: u64, self_cell
 /// Emits 8 `SWrite` instructions publishing the 8 limbs at `base_cell` into
 /// consecutive storage slots starting at `start_slot`.
 fn emit_publish_digest(a: &mut Asm, base_cell: u64, start_slot: u32) {
-    for i in 0..LIMBS as u64 {
-        a.load_abs(R[1], base_cell + i);
-        a.swrite(start_slot + i as u32, R[1]);
+    for i in 0..u32::try_from(LIMBS).unwrap_or(8) {
+        a.load_abs(R[1], base_cell + u64::from(i));
+        a.swrite(start_slot + i, R[1]);
     }
 }
 
 /// Compiles the `AggMerge` `BudVM` program bound to `tick_program_hash`.
+///
+/// # Errors
+///
+/// Returns [`AggMergeError::Assemble`] if guest bytecode assembly fails.
 pub fn agg_merge(tick_program_hash: &Hash32) -> Result<AggMergeProgram, AggMergeError> {
     let mut a = Asm::new();
     let cells = MergeCells {
@@ -297,6 +302,12 @@ fn map_vm_err(err: VmError) -> AggMergeError {
 }
 
 /// Executes `AggMerge` in `BudVM` and returns its step count and commitments.
+///
+/// # Errors
+///
+/// Returns [`AggMergeError::UnauthorizedChildProgram`] if a child program hash
+/// is outside `{tick_program_hash, self_program_hash}`, or
+/// [`AggMergeError::VmFailed`] on other VM errors.
 pub fn run_agg_merge(
     merge_prog: &AggMergeProgram,
     witness: &AggMergeWitness,
@@ -325,6 +336,11 @@ pub fn run_agg_merge(
 /// Proves one `AggMerge` step end-to-end with `Plonky3Adapter` (`BudAir`) plus
 /// `BoundKeccakAir` offloading `H(TAG_AGG_MERGE || left_pi || right_pi)`,
 /// binding the proof to `chain_id`.
+///
+/// # Errors
+///
+/// Returns [`AggMergeError`] if child allowlist checks, VM execution, or STARK
+/// proving fail.
 pub fn prove_agg_merge(
     merge_prog: &AggMergeProgram,
     witness: &AggMergeWitness,
@@ -381,6 +397,10 @@ pub fn prove_agg_merge(
 
 /// Verifies an [`AggMergeProof`] against `merge_prog`, `left_pi`, `right_pi`,
 /// `expected_merge_pi`, and `chain_id`.
+///
+/// # Errors
+///
+/// Returns [`AggMergeError::VerifyFailed`] if any binding or STARK proof check fails.
 pub fn verify_agg_merge(
     merge_prog: &AggMergeProgram,
     left_pi: &Hash32,
