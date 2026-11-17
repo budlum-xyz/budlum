@@ -107,6 +107,7 @@ mod gates {
     pub mod garden_nat;
     pub mod garden_scenario;
     pub mod gas_calibration;
+    pub mod gate_references_are_real;
     pub mod gates_are_wired;
     pub mod gates_do_not_panic;
     pub mod gateway_gate;
@@ -1253,6 +1254,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::gas_calibration::self_test,
+    },
+    Gate {
+        name: "gate-references-are-real",
+        replaces: None,
+        run: gates::gate_references_are_real::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::gate_references_are_real::self_test,
     },
     Gate {
         name: "gates-are-wired",
