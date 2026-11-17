@@ -2405,6 +2405,309 @@ mod rpc_tests {
         assert_eq!(feed_res[0]["bud3"]["commitment"], hex::encode(pub_key));
     }
 
+    #[tokio::test]
+    async fn rpc_bud3_sealed_nft_grant_unwrap_and_verifiable_decrypt_end_to_end() {
+        use crate::consensus::pow::PoWEngine;
+        use crate::crypto::hpke::HpkeKeyPair;
+        use crate::socialfi::nft_folders::derive_bud3_nft_id;
+        use crate::storage::bud3::content_id::ContentKey;
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::grants::build_grant_row;
+        use crate::storage::bud3::keys::{
+            derive_grant_one_time_keypair, open_key_package, seal_key_package,
+        };
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::{prepare_sealed_upload, view_sealed};
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::seal::SEAL_SALT_LEN;
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, verify_symbol_range_response, SymbolRangeRequest,
+            VerifiedSymbolItem,
+        };
+        use crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS;
+        use crate::storage::content_id::ContentId;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let secret_payload =
+            b"Confidential sealed NFT payload decrypted solely by HPKE X-Wing grant".repeat(4);
+        let owner_key = ContentKey([0xC7u8; 32]);
+        let sealed_up = prepare_sealed_upload(
+            &secret_payload,
+            &owner_key,
+            [0x42u8; SEAL_SALT_LEN],
+            &profile,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
+        let sealed_key = sealed_up.record.commitment;
+
+        let alice = Address::from([0xA3u8; 32]);
+        let payer = Address::from([0xB4u8; 32]);
+        let holder_a = [0x21u8; 32];
+        let holder_b = [0x22u8; 32];
+        let grant_nonce = [0x31u8; 32];
+        let bob_kp = HpkeKeyPair::from_seed(&[0x51u8; 32]).unwrap();
+        let charlie_kp = HpkeKeyPair::from_seed(&[0x52u8; 32]).unwrap();
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        bc.state.epoch_index = 10;
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_a,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_b,
+                    class: Class::Mobile,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+        bc.state
+            .bud3_registry
+            .register_object(alice.0, sealed_up.record.clone(), shares, 10, 50)
+            .unwrap();
+        let social_id = bc
+            .state
+            .nft_registry
+            .mint(
+                alice,
+                ContentId(sealed_up.record.content_id.digest),
+                10,
+                Some("AliceSealed".to_string()),
+            )
+            .unwrap();
+        let bud3_nft = derive_bud3_nft_id(social_id);
+        bc.state
+            .bud3_registry
+            .bind_nft(bud3_nft, alice.0, Some(alice.0), &sealed_key)
+            .unwrap();
+
+        let (_otk_seed, otk_pk) =
+            derive_grant_one_time_keypair(&[0x71u8; 32], &bud3_nft, &grant_nonce).unwrap();
+        let grant_tag = crate::storage::bud3::grants::compute_grant_tag(&bud3_nft, &grant_nonce);
+        let sealed_pkg =
+            seal_key_package(bob_kp.public_key(), &grant_tag, &sealed_key, &owner_key).unwrap();
+        let grant_row =
+            build_grant_row(&bud3_nft, &grant_nonce, otk_pk, sealed_pkg, 25, 10).unwrap();
+        bc.state
+            .bud3_registry
+            .issue_view_grant(&bud3_nft, &grant_nonce, &alice.0, grant_row.clone(), 10)
+            .unwrap();
+
+        let (op_server, chain) = setup_with_blockchain(bc).await;
+        let pub_node = Node::new(chain.clone()).unwrap();
+        let pub_server = RpcServer::with_security_and_mode(
+            chain,
+            pub_node.get_client(),
+            RpcSecurityConfig::default(),
+            RpcMode::Public,
+        );
+
+        let leaves: Vec<(u32, [u8; 32])> = sealed_up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: sealed_key,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves,
+            &sealed_up.segments[0][0..4],
+        )
+        .unwrap()
+        .items;
+        let items_b = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: sealed_key,
+                segment: 0,
+                first_esi: 4,
+                count: 4,
+            },
+            &leaves,
+            &sealed_up.segments[0][4..8],
+        )
+        .unwrap()
+        .items;
+        let holder_a_hex = format!("0x{}", hex::encode(holder_a));
+        let holder_b_hex = format!("0x{}", hex::encode(holder_b));
+        let obj_hex = format!("0x{}", hex::encode(sealed_key));
+        let grant_hex = format!("0x{}", hex::encode(grant_tag));
+
+        op_server
+            .storage_store_verified_symbols(
+                holder_a_hex.clone(),
+                obj_hex.clone(),
+                0,
+                items_a
+                    .iter()
+                    .map(|i| serde_json::to_value(i).unwrap())
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        op_server
+            .storage_store_verified_symbols(
+                holder_b_hex.clone(),
+                obj_hex.clone(),
+                0,
+                items_b
+                    .iter()
+                    .map(|i| serde_json::to_value(i).unwrap())
+                    .collect(),
+            )
+            .await
+            .unwrap();
+
+        // Bob resolves the NFT metadata and fetches his unlinkable HPKE grant capsule over RPC.
+        let nft_obj = pub_server
+            .storage_get_nft_object(social_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(nft_obj["sealed"], true);
+        assert_eq!(nft_obj["commitment"], hex::encode(sealed_key));
+
+        let grant_res = pub_server
+            .storage_get_grant(grant_hex.clone())
+            .await
+            .unwrap();
+        assert_eq!(grant_res["status"], "active");
+        assert_eq!(grant_res["expires_at_epoch"], 25);
+        assert_eq!(
+            pub_server
+                .storage_get_grant("0x12".to_string())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        let pkg_bytes = hex::decode(grant_res["sealed_key_package"].as_str().unwrap()).unwrap();
+        assert!(open_key_package(&charlie_kp, &grant_tag, &pkg_bytes).is_err());
+        let (opened_obj, opened_key) = open_key_package(&bob_kp, &grant_tag, &pkg_bytes).unwrap();
+        assert_eq!(opened_obj, sealed_key);
+        assert_eq!(opened_key, owner_key);
+
+        // Fetch Merkle-verified symbols from both holders, verify proofs client-side, and decrypt.
+        let mut all_syms = Vec::new();
+        for holder_hex in [holder_a_hex, holder_b_hex] {
+            let page = pub_server
+                .storage_get_symbols(holder_hex, obj_hex.clone(), 0, 0, 8)
+                .await
+                .unwrap();
+            let page_items: Vec<VerifiedSymbolItem> = page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| {
+                    serde_json::from_value(serde_json::json!({
+                        "symbol": entry["symbol"].clone(),
+                        "proof": entry["proof"].clone(),
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            let root_hex = page["symbol_roots"][0]["root"].as_str().unwrap();
+            let mut root_arr = [0u8; 32];
+            root_arr.copy_from_slice(&hex::decode(root_hex).unwrap());
+            verify_symbol_range_response(
+                0,
+                root_arr,
+                page["symbol_roots"][0]["count"].as_u64().unwrap(),
+                profile.symbol_size,
+                &crate::storage::bud3::symbol_protocol::SymbolRangeResponse {
+                    items: page_items.clone(),
+                },
+            )
+            .unwrap();
+            all_syms.extend(page_items.into_iter().map(|i| i.symbol));
+        }
+        assert_eq!(
+            view_sealed(&sealed_up.record, &opened_key, all_syms).unwrap(),
+            secret_payload
+        );
+
+        // G8 paid fallback decode must refuse sealed objects unconditionally.
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    format!("0x{}", hex::encode(payer.0)),
+                    obj_hex,
+                    format!("0x{}", hex::encode([0x99u8; 32])),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Once consensus epoch reaches expires_at_epoch, `bud_storageGetGrant` reports `expired`.
+        let mut expired_bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        expired_bc.state.epoch_index = 25;
+        expired_bc
+            .state
+            .bud3_registry
+            .register_object(
+                alice.0,
+                sealed_up.record,
+                vec![
+                    (
+                        0,
+                        Share {
+                            validator: holder_a,
+                            class: Class::Full,
+                            first_esi: 0,
+                            symbols: 4,
+                        },
+                    ),
+                    (
+                        0,
+                        Share {
+                            validator: holder_b,
+                            class: Class::Mobile,
+                            first_esi: 4,
+                            symbols: 4,
+                        },
+                    ),
+                ],
+                10,
+                50,
+            )
+            .unwrap();
+        expired_bc
+            .state
+            .bud3_registry
+            .bind_nft(bud3_nft, alice.0, Some(alice.0), &sealed_key)
+            .unwrap();
+        expired_bc
+            .state
+            .bud3_registry
+            .issue_view_grant(&bud3_nft, &grant_nonce, &alice.0, grant_row, 10)
+            .unwrap();
+        let (exp_server, _) = setup_with_blockchain(expired_bc).await;
+        let expired_grant = exp_server.storage_get_grant(grant_hex).await.unwrap();
+        assert_eq!(expired_grant["status"], "expired");
+    }
+
     /// second descent: the node reads. A fresh node has a height of
     /// zero, no peers and nothing to sync, and every one of these reads says so
     /// in its own shape rather than failing. The address reads keep their
