@@ -989,6 +989,9 @@ impl BridgeState {
             if transfer.expiry_height > 0 {
                 if let Some(bucket) = self.expiry_queue.get_mut(&transfer.expiry_height) {
                     bucket.retain(|id| id != message_id);
+                    if bucket.is_empty() {
+                        self.expiry_queue.remove(&transfer.expiry_height);
+                    }
                 }
             }
         }
@@ -2127,5 +2130,20 @@ mod bridge_fee_split {
             bridge.transfer(&id).unwrap().status,
             BridgeStatus::Burned { domain: 2 }
         );
+    }
+
+    #[test]
+    fn unwind_lock_removes_empty_expiry_bucket() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"unwind-lock-bucket-cleanup"]));
+        let owner = Address::from([3u8; 32]);
+        let recipient = Address::from([4u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, _) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 99)
+            .unwrap();
+        assert!(bridge.expiry_queue.contains_key(&99));
+        bridge.unwind_lock(&transfer.message_id, 1);
+        assert!(!bridge.expiry_queue.contains_key(&99));
     }
 }
