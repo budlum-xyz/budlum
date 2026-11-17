@@ -342,14 +342,10 @@ fn main() {
         let Ok(root) = claims_root(&digests) else {
             fail("claims_root failed");
         };
-        let expected_pi = tick_pi(
-            DOMAIN,
-            &Segment {
-                claims_root: root,
-                count: count as u32,
-                aggregator,
-            },
-        );
+        let Ok(count_u32) = u32::try_from(count) else {
+            fail("count exceeds u32");
+        };
+        let expected_pi = tick_pi_of(DOMAIN, &root, count_u32, &aggregator);
         let started = Instant::now();
         let Ok(chip_proof) = prove_tick_chips(DOMAIN, &aggregator, &claims, &[]) else {
             fail("chip tick proving failed");

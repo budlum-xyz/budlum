@@ -114,7 +114,7 @@ pub struct OffloadAccounting {
 impl OffloadAccounting {
     /// Builds an offload summary from measured pure-VM stage counts and chip batch sizes.
     #[must_use]
-    pub fn compute(
+    pub const fn compute(
         total_vm_steps: u64,
         keccak_vm_steps: u64,
         ntt_vm_steps: u64,
