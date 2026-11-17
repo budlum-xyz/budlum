@@ -16,7 +16,7 @@
 //! multiplications of its own: it stitches each node's padded input directly
 //! from its children's proven chip outputs and checks the bound STARK proofs.
 //!
-//! WIRING: the Phase 3 `StarkBackend` invokes `prove_tick_chips` and
+//! WIRING: unwired - the Phase 3 `StarkBackend` invokes `prove_tick_chips` and
 //! `verify_tick_chips` for production tick proofs; until Phase 3 lands,
 //! `benches/agg_tick_steps` and `src/aggregation/tests/programs.rs` drive them.
 
@@ -164,14 +164,16 @@ fn single_block_state(parts: &[&[u8]]) -> Result<[u64; 25], TickChipError> {
         return Err(TickChipError::PreimageTooLong(total_len));
     };
     let mut state = [0u64; 25];
-    state[..17].copy_from_slice(rate);
+    for (dst, src) in state.iter_mut().zip(rate.iter()) {
+        *dst = *src;
+    }
     Ok(state)
 }
 
 fn squeeze_hash(output: &[u64; 25]) -> Hash32 {
     let mut out = [0u8; 32];
-    for (i, word) in output.iter().take(4).enumerate() {
-        out[i * 8..(i + 1) * 8].copy_from_slice(&word.to_le_bytes());
+    for (chunk, word) in out.chunks_exact_mut(8).zip(output.iter().take(4)) {
+        chunk.copy_from_slice(&word.to_le_bytes());
     }
     out
 }

@@ -1,8 +1,4 @@
-//! WIRING: unwired - this verifier surface is reached through the prover pipeline tests; the production call sites land with the verifier wiring.
 //! See [`crate::prover`] for an overview of the protocol and a more detailed soundness analysis.
-//!
-//! WIRING: unwired - reached through the `verify` entry points re-exported by
-//! bud-proof, not by name from this workspace.
 
 use p3_air::symbolic::{get_symbolic_constraints, SymbolicAirBuilder};
 use p3_air::{Air, RowWindow};

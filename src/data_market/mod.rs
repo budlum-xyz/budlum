@@ -246,8 +246,8 @@ impl DataMarketRegistry {
         if !listing.active {
             return Err(DataMarketError::InactiveListing);
         }
-        let live_obj = bud3
-            .object(&listing.content_ref.object_commitment)
+        let (live_commitment, live_obj) = bud3
+            .resolve_live_object(&listing.content_ref.object_commitment)
             .ok_or(DataMarketError::UnknownObject)?;
         if live_obj.owner != *listing.seller.as_bytes()
             || !live_obj.references.contains(&listing.nft_id)
@@ -268,7 +268,7 @@ impl DataMarketRegistry {
         let sealed_pkg = seal_grant_key_package(
             &auth.buyer_hpke_pk,
             &grant_tag,
-            &listing.content_ref.object_commitment,
+            &live_commitment,
             &seller_grant.content_key,
         )
         .map_err(DataMarketError::Grant)?;

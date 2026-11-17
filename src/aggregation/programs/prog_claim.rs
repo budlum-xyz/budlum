@@ -151,11 +151,15 @@ impl StarkProofObject {
     /// Returns [`ObjectError::Invalid`] if the header, compression stream,
     /// bounds, or inner bincode payload are malformed.
     pub fn decode(bytes: &[u8]) -> Result<Self, ObjectError> {
-        if bytes.len() < 6 || bytes[..4] != MAGIC || bytes[4] != VERSION {
+        let Some((header, body)) = bytes.split_at_checked(6) else {
+            return Err(ObjectError::Invalid);
+        };
+        let [m0, m1, m2, m3, ver, flag] = *header else {
+            return Err(ObjectError::Invalid);
+        };
+        if [m0, m1, m2, m3] != MAGIC || ver != VERSION {
             return Err(ObjectError::Invalid);
         }
-        let flag = bytes[5];
-        let body = &bytes[6..];
         let raw = match flag {
             ENCODING_RAW => {
                 if body.len() > MAX_DECOMPRESSED_STARK_BYTES {
@@ -212,7 +216,10 @@ impl StarkProofObject {
 /// `u32` values (one per 64-bit VM cell).
 pub(crate) fn write_digest_cells(vm: &mut Vm, base_cell: u64, digest: &Hash32) {
     for (i, chunk) in digest.chunks_exact(4).enumerate() {
-        let limb = u64::from(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        let [b0, b1, b2, b3] = *chunk else {
+            continue;
+        };
+        let limb = u64::from(u32::from_le_bytes([b0, b1, b2, b3]));
         write_cell(vm, base_cell + i as u64, limb);
     }
 }
@@ -220,7 +227,9 @@ pub(crate) fn write_digest_cells(vm: &mut Vm, base_cell: u64, digest: &Hash32) {
 /// Writes one 64-bit Goldilocks word into `vm.memory` at `cell`.
 pub(crate) fn write_cell(vm: &mut Vm, cell: u64, value: u64) {
     let off = usize::try_from(cell).unwrap_or(0).saturating_mul(8);
-    vm.memory[off..off + 8].copy_from_slice(&value.to_le_bytes());
+    if let Some(slot) = vm.memory.get_mut(off..off + 8) {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
 }
 
 /// Emits 8 `SWrite` instructions publishing the 8 limbs at `base_cell` into
@@ -236,7 +245,10 @@ pub(crate) fn emit_swrite_digest_cells(a: &mut Asm, base_cell: u64, start_slot: 
 /// consecutive storage slots starting at `start_slot`.
 pub(crate) fn emit_swrite_const_digest(a: &mut Asm, digest: &Hash32, start_slot: u32) {
     for (i, chunk) in (0u32..).zip(digest.chunks_exact(4)) {
-        let limb = u64::from(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        let [b0, b1, b2, b3] = *chunk else {
+            continue;
+        };
+        let limb = u64::from(u32::from_le_bytes([b0, b1, b2, b3]));
         a.li(R[1], limb);
         a.swrite(start_slot + i, R[1]);
     }

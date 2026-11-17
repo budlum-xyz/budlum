@@ -307,6 +307,20 @@ impl PoaMembershipRegistry {
             ) {
                 return Err(PoaMembershipError::AlreadyApplied { account, domain });
             }
+        } else {
+            const MAX_POA_MEMBERS_PER_DOMAIN: usize = 4_096;
+            const MAX_POA_MEMBERS_TOTAL: usize = 65_536;
+            if self.members.len() >= MAX_POA_MEMBERS_TOTAL {
+                return Err(PoaMembershipError::InvalidTransition {
+                    from: MembershipStatus::Pending,
+                });
+            }
+            let domain_count = self.members.keys().filter(|(d, _)| *d == domain).count();
+            if domain_count >= MAX_POA_MEMBERS_PER_DOMAIN {
+                return Err(PoaMembershipError::InvalidTransition {
+                    from: MembershipStatus::Pending,
+                });
+            }
         }
         self.members.insert(
             (domain, account),
@@ -482,5 +496,28 @@ mod tests {
         reg.approve(DOMAIN, addr(1), addr(2)).unwrap();
         reg.revoke(DOMAIN, addr(1), addr(2)).unwrap();
         assert!(!reg.is_authorized(DOMAIN, &addr(2)));
+    }
+
+    #[test]
+    fn submit_application_caps_distinct_applicants_per_domain() {
+        let mut reg = PoaMembershipRegistry::new();
+        let admin = Address::from([0xFFu8; 32]);
+        reg.add_admin(DOMAIN, admin);
+        for idx in 0u32..4_096 {
+            let mut raw = [0u8; 32];
+            raw[..4].copy_from_slice(&idx.to_le_bytes());
+            reg.submit_application(DOMAIN, Address::from(raw), kyc(7))
+                .expect("within per-domain ceiling");
+        }
+        let overflow = Address::from([0xEEu8; 32]);
+        assert!(matches!(
+            reg.submit_application(DOMAIN, overflow, kyc(7)),
+            Err(PoaMembershipError::InvalidTransition {
+                from: MembershipStatus::Pending
+            })
+        ));
+        // Another PoA domain retains its own independent admission capacity.
+        reg.submit_application(DOMAIN + 1, overflow, kyc(7))
+            .expect("other domain unaffected");
     }
 }
