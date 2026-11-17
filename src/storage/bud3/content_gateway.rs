@@ -55,14 +55,16 @@ impl Bud3ContentGateway {
         content_ref: &ContentRef,
         network: &N,
     ) -> Result<GatewaySymbolBundle, ViewBud3Error> {
-        let (resolved_key, _) = registry
+        let _ = registry
             .resolve_live_object(&content_ref.object_commitment)
             .ok_or(ViewBud3Error::UnknownObject)?;
         if let Some(nft) = content_ref.nft_id {
             let Some((bound_key, _)) = registry.nft_binding(&nft) else {
                 return Err(ViewBud3Error::AccessDenied);
             };
-            if bound_key != content_ref.object_commitment && bound_key != resolved_key {
+            if bound_key != content_ref.object_commitment
+                && !registry.nft_matches_object(&nft, &content_ref.object_commitment)
+            {
                 return Err(ViewBud3Error::AccessDenied);
             }
         }
@@ -116,6 +118,11 @@ impl Bud3ContentGateway {
         let (_, entry) = registry
             .resolve_live_object(&content_ref.object_commitment)
             .ok_or(ViewBud3Error::UnknownObject)?;
+        if let Some(nft) = content_ref.nft_id {
+            if !registry.nft_matches_object(&nft, &content_ref.object_commitment) {
+                return Err(ViewBud3Error::AccessDenied);
+            }
+        }
         if entry.record.content_id != content_ref.content_id {
             return Err(ViewBud3Error::AccessDenied);
         }
@@ -349,6 +356,29 @@ mod tests {
                 ),
             )
             .unwrap();
+
+        // While the replacement is pending (unfinalized), `nfts[nft]` already moved
+        // to `new_key`, whereas `old_key` still holds the live confirmed shares.
+        // Reading via `cref_old` must still authorize and recover from `old_key`,
+        // while an unbound/wrong NFT id is denied.
+        let mut net_pending = MemorySymbolNetwork::default();
+        let old_syms = &up_old.segments[0];
+        net_pending.store_holder_share(validators[0], old_key, 0, old_syms[0..6].to_vec());
+        net_pending.store_holder_share(validators[1], old_key, 0, old_syms[6..12].to_vec());
+        net_pending.store_holder_share(validators[2], old_key, 0, old_syms[12..16].to_vec());
+        let pending_bundle =
+            Bud3ContentGateway::fetch_symbol_bundle(&reg, &cref_old, &net_pending).unwrap();
+        assert_eq!(
+            Bud3ContentGateway::decode_symbol_bundle(&pending_bundle, None).unwrap(),
+            payload
+        );
+        let wrong_ref =
+            ContentRef::new(up_old.record.content_id, old_key, Some([0x77; 32])).unwrap();
+        assert!(matches!(
+            Bud3ContentGateway::fetch_symbol_bundle(&reg, &wrong_ref, &net_pending),
+            Err(ViewBud3Error::AccessDenied)
+        ));
+
         for v in &validators {
             reg.ack(&new_key, v).unwrap();
         }

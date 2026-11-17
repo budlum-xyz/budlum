@@ -115,6 +115,24 @@ fn select_sync_peer_resting_last(
     .or_else(|| select_sync_peer(preferred, eligible_best, stalled, empty_at_tip))
 }
 const MAX_PENDING_BITSWAP_FETCH_WAITERS: usize = 128;
+/// Maximum concurrent outbound B.U.D. 3.0 P2P symbol/custody requests tracked in memory.
+const MAX_INFLIGHT_BUD3_REQUESTS: usize = 256;
+
+struct PendingBud3SymbolRequest {
+    peer_id: PeerId,
+    request: crate::network::bud3_protocol::Bud3SymbolsRequest,
+    symbol_size: u16,
+    roots: Vec<crate::storage::bud3::registry::SymbolRoot>,
+    sender: oneshot::Sender<
+        Result<Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>, String>,
+    >,
+}
+
+struct PendingBud3CustodyRequest {
+    peer_id: PeerId,
+    request: crate::network::bud3_protocol::Bud3CustodyRequest,
+    sender: oneshot::Sender<Result<usize, String>>,
+}
 /// QC blobs assembled at once, across all peers.
 const MAX_QC_ASSEMBLIES: usize = 8;
 /// A slow or malicious peer cannot occupy every outbound fetch slot.
@@ -642,6 +660,10 @@ pub struct BudlumBehaviour {
     /// `/budlum/witness/1.0.0`: witnesses of a block for a node that
     /// pruned them, checked against the block's `witness_root`.
     witness: request_response::Behaviour<crate::network::witness_protocol::WitnessCodec>,
+    /// `/budlum/bud3/symbols/1`: B.U.D. 3.0 bounded symbol range serving & Merkle verification.
+    bud3_symbols: request_response::Behaviour<crate::network::bud3_protocol::Bud3SymbolsCodec>,
+    /// `/budlum/bud3/custody/1`: B.U.D. 3.0 verified custody share delivery.
+    bud3_custody: request_response::Behaviour<crate::network::bud3_protocol::Bud3CustodyCodec>,
     /// Connection budget: without it a peer can open unbounded connections
     /// and exhaust memory (libp2p resource-management `DoS`, RUSTSEC-2022-0084).
     /// The incoming cap plus the per-peer cap also blunt eclipse attempts: an
@@ -714,6 +736,22 @@ pub enum NodeCommand {
     /// role, discovery state, and connection counts.
     AdminSentryStatus {
         response: oneshot::Sender<Result<crate::network::sentry::SentryStatus, String>>,
+    },
+    /// Fetch and Merkle-verify B.U.D. 3.0 symbols from a specific custody peer over `/budlum/bud3/symbols/1`.
+    Bud3FetchSymbols {
+        peer_id: PeerId,
+        request: crate::network::bud3_protocol::Bud3SymbolsRequest,
+        symbol_size: u16,
+        roots: Vec<crate::storage::bud3::registry::SymbolRoot>,
+        response: oneshot::Sender<
+            Result<Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>, String>,
+        >,
+    },
+    /// Push Merkle-verified B.U.D. 3.0 custody symbols to a validator peer over `/budlum/bud3/custody/1`.
+    Bud3PushCustody {
+        peer_id: PeerId,
+        request: crate::network::bud3_protocol::Bud3CustodyRequest,
+        response: oneshot::Sender<Result<usize, String>>,
     },
 }
 #[derive(Clone)]
@@ -923,6 +961,64 @@ impl NodeClient {
             .await
             .map_err(|_| "sentry status request timed out".to_string())?
             .map_err(|e| format!("failed to receive sentry status response: {e}"))?
+    }
+
+    /// Fetch and Merkle-verify B.U.D. 3.0 symbols from `peer_id` over `/budlum/bud3/symbols/1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request times out, the peer is banned or unavailable,
+    /// or any returned symbol fails Merkle custody verification against `roots`.
+    pub async fn bud3_fetch_symbols(
+        &self,
+        peer_id: PeerId,
+        request: crate::network::bud3_protocol::Bud3SymbolsRequest,
+        symbol_size: u16,
+        roots: Vec<crate::storage::bud3::registry::SymbolRoot>,
+    ) -> Result<Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>, String> {
+        const BUD3_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(NodeCommand::Bud3FetchSymbols {
+                peer_id,
+                request,
+                symbol_size,
+                roots,
+                response: tx,
+            })
+            .await
+            .map_err(|e| format!("failed to queue B.U.D. 3.0 symbol fetch: {e}"))?;
+        tokio::time::timeout(BUD3_FETCH_TIMEOUT, rx)
+            .await
+            .map_err(|_| "B.U.D. 3.0 symbol fetch timed out".to_string())?
+            .map_err(|e| format!("failed to receive B.U.D. 3.0 symbol response: {e}"))?
+    }
+
+    /// Push verified B.U.D. 3.0 custody symbols to `peer_id` over `/budlum/bud3/custody/1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request times out, the peer rejects the custody
+    /// items, or the receipt digest fails verification.
+    pub async fn bud3_push_custody(
+        &self,
+        peer_id: PeerId,
+        request: crate::network::bud3_protocol::Bud3CustodyRequest,
+    ) -> Result<usize, String> {
+        const BUD3_PUSH_TIMEOUT: Duration = Duration::from_secs(15);
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(NodeCommand::Bud3PushCustody {
+                peer_id,
+                request,
+                response: tx,
+            })
+            .await
+            .map_err(|e| format!("failed to queue B.U.D. 3.0 custody push: {e}"))?;
+        tokio::time::timeout(BUD3_PUSH_TIMEOUT, rx)
+            .await
+            .map_err(|_| "B.U.D. 3.0 custody push timed out".to_string())?
+            .map_err(|e| format!("failed to receive B.U.D. 3.0 custody receipt: {e}"))?
     }
 }
 #[tokio::test]
@@ -1376,6 +1472,12 @@ pub struct Node {
             PeerId,
         ),
     >,
+    /// B.U.D. 3.0 symbol fetch requests in flight on `/budlum/bud3/symbols/1`.
+    bud3_symbol_requests: HashMap<request_response::OutboundRequestId, PendingBud3SymbolRequest>,
+    /// B.U.D. 3.0 custody push requests in flight on `/budlum/bud3/custody/1`.
+    bud3_custody_requests: HashMap<request_response::OutboundRequestId, PendingBud3CustodyRequest>,
+    /// Per-peer rate and custody stream limits for B.U.D. 3.0 protocols.
+    bud3_peer_limiter: crate::storage::bud3::symbol_protocol::SymbolPeerLimiter,
     /// Single-flight guard ensuring peer-supplied fork batches can keep at
     /// most one `reorg_to_peer_suffix` task running at a time (CWE-407).
     reorg_in_flight: Arc<std::sync::atomic::AtomicBool>,
@@ -3031,6 +3133,24 @@ impl Node {
                             StreamProtocol::new(crate::network::witness_protocol::WITNESS_PROTOCOL),
                             request_response::ProtocolSupport::Full,
                         )],
+                        req_cfg.clone(),
+                    );
+                    let bud3_symbols = request_response::Behaviour::new(
+                        [(
+                            StreamProtocol::new(
+                                crate::storage::bud3::symbol_protocol::SYMBOLS_PROTOCOL_ID,
+                            ),
+                            request_response::ProtocolSupport::Full,
+                        )],
+                        req_cfg.clone(),
+                    );
+                    let bud3_custody = request_response::Behaviour::new(
+                        [(
+                            StreamProtocol::new(
+                                crate::storage::bud3::symbol_protocol::CUSTODY_PROTOCOL_ID,
+                            ),
+                            request_response::ProtocolSupport::Full,
+                        )],
                         req_cfg,
                     );
 
@@ -3051,6 +3171,8 @@ impl Node {
                             sync,
                             bitswap,
                             witness,
+                            bud3_symbols,
+                            bud3_custody,
                             limits: libp2p::connection_limits::Behaviour::new(
                                 libp2p::connection_limits::ConnectionLimits::default()
                                     .with_max_established(Some(
@@ -3150,6 +3272,9 @@ impl Node {
             recovery_mempool: crate::chain::state_recovery::RecoveryMempool::new(),
             recovery_stash_from: None,
             witness_requests: HashMap::new(),
+            bud3_symbol_requests: HashMap::new(),
+            bud3_custody_requests: HashMap::new(),
+            bud3_peer_limiter: crate::storage::bud3::symbol_protocol::SymbolPeerLimiter::default(),
             reorg_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reorg_last_completed_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reorg_strikes: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -4676,6 +4801,76 @@ impl Node {
                                     .collect();
                                 let status = self.sentry_policy.status(&connected);
                                 let _ = response.send(Ok(status));
+                            }
+                            NodeCommand::Bud3FetchSymbols {
+                                peer_id,
+                                request,
+                                symbol_size,
+                                roots,
+                                response,
+                            } => {
+                                self.bud3_symbol_requests
+                                    .retain(|_, pending| !pending.sender.is_closed());
+                                if self.peer_manager_lock().is_banned(&peer_id) {
+                                    let _ = response.send(Err(format!(
+                                        "refused B.U.D. 3.0 symbol fetch to banned peer {peer_id}"
+                                    )));
+                                } else if self.bud3_symbol_requests.len()
+                                    >= MAX_INFLIGHT_BUD3_REQUESTS
+                                {
+                                    let _ = response.send(Err(String::from(
+                                        "B.U.D. 3.0 outbound symbol request limit reached",
+                                    )));
+                                } else {
+                                    let req_id = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .bud3_symbols
+                                        .send_request(&peer_id, request.clone());
+                                    self.bud3_symbol_requests.insert(
+                                        req_id,
+                                        PendingBud3SymbolRequest {
+                                            peer_id,
+                                            request,
+                                            symbol_size,
+                                            roots,
+                                            sender: response,
+                                        },
+                                    );
+                                }
+                            }
+                            NodeCommand::Bud3PushCustody {
+                                peer_id,
+                                request,
+                                response,
+                            } => {
+                                self.bud3_custody_requests
+                                    .retain(|_, pending| !pending.sender.is_closed());
+                                if self.peer_manager_lock().is_banned(&peer_id) {
+                                    let _ = response.send(Err(format!(
+                                        "refused B.U.D. 3.0 custody push to banned peer {peer_id}"
+                                    )));
+                                } else if self.bud3_custody_requests.len()
+                                    >= MAX_INFLIGHT_BUD3_REQUESTS
+                                {
+                                    let _ = response.send(Err(String::from(
+                                        "B.U.D. 3.0 outbound custody request limit reached",
+                                    )));
+                                } else {
+                                    let req_id = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .bud3_custody
+                                        .send_request(&peer_id, request.clone());
+                                    self.bud3_custody_requests.insert(
+                                        req_id,
+                                        PendingBud3CustodyRequest {
+                                            peer_id,
+                                            request,
+                                            sender: response,
+                                        },
+                                    );
+                                }
                             }
                             NodeCommand::FetchRemoteContent { cid, response } => {
                                 // 1. Try local fetch first
@@ -7565,6 +7760,300 @@ impl Node {
                                 }
                                 request_response::Event::OutboundFailure { request_id, .. } => {
                                     self.witness_requests.remove(&request_id);
+                                }
+                                _ => {}
+                            }
+                        }
+                        SwarmEvent::Behaviour(BudlumBehaviourEvent::Bud3Symbols(event)) => {
+                            use crate::network::bud3_protocol::{
+                                verify_bud3_symbols_response, Bud3SymbolsResponse,
+                            };
+                            use crate::storage::bud3::symbol_protocol::SymbolRangeResponse;
+                            match event {
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Request {
+                                            request, channel, ..
+                                        },
+                                    ..
+                                } => {
+                                    let allowed = {
+                                        let mut pm = self.peer_manager_lock();
+                                        !pm.is_banned(&peer)
+                                            && pm.is_handshaked(&peer)
+                                            && pm.check_rate_limit(&peer)
+                                    };
+                                    if !allowed {
+                                        warn!("Rejected B.U.D. 3.0 symbol request from banned/unhandshaked/rate-limited peer {peer}");
+                                        continue;
+                                    }
+                                    let peer_key = crate::core::hash::calculate_hash_bytes(&peer.to_bytes());
+                                    let now_sec = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs();
+                                    if let Err(err) = self.bud3_peer_limiter.check_symbol_request(
+                                        &peer_key,
+                                        &request.range,
+                                        now_sec,
+                                    ) {
+                                        let _ = self
+                                            .swarm
+                                            .behaviour_mut()
+                                            .bud3_symbols
+                                            .send_response(
+                                                channel,
+                                                Bud3SymbolsResponse::Unavailable(format!("{err:?}")),
+                                            );
+                                        continue;
+                                    }
+                                    if self.mobile_mode
+                                        && self.mobile_profile.as_ref().is_some_and(|p| {
+                                            p.battery.power_mode()
+                                                == crate::network::mobile::PowerMode::Critical
+                                        })
+                                    {
+                                        let _ = self
+                                            .swarm
+                                            .behaviour_mut()
+                                            .bud3_symbols
+                                            .send_response(
+                                                channel,
+                                                Bud3SymbolsResponse::Unavailable(String::from(
+                                                    "mobile validator in critical power mode",
+                                                )),
+                                            );
+                                        continue;
+                                    }
+                                    let chain = self.chain.clone();
+                                    let reply = match chain
+                                        .bud3_get_symbols(
+                                            request.holder,
+                                            request.range.object,
+                                            request.range.segment,
+                                            request.range.first_esi,
+                                            request.range.count,
+                                        )
+                                        .await
+                                    {
+                                        Ok(Ok(page)) => {
+                                            Bud3SymbolsResponse::Symbols(SymbolRangeResponse {
+                                                items: page.items,
+                                            })
+                                        }
+                                        Ok(Err(err)) => Bud3SymbolsResponse::Unavailable(err),
+                                        Err(err) => {
+                                            Bud3SymbolsResponse::Unavailable(err.to_string())
+                                        }
+                                    };
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .bud3_symbols
+                                        .send_response(channel, reply);
+                                }
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Response {
+                                            request_id,
+                                            response,
+                                        },
+                                    ..
+                                } => {
+                                    let Some(PendingBud3SymbolRequest {
+                                        peer_id: asked,
+                                        request: req,
+                                        symbol_size,
+                                        roots,
+                                        sender,
+                                    }) = self.bud3_symbol_requests.remove(&request_id)
+                                    else {
+                                        warn!("Unsolicited B.U.D. 3.0 symbol response from {peer}");
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        continue;
+                                    };
+                                    if asked != peer {
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        let _ = sender.send(Err(String::from(
+                                            "B.U.D. 3.0 symbol response peer mismatch",
+                                        )));
+                                        continue;
+                                    }
+                                    match verify_bud3_symbols_response(
+                                        &req,
+                                        &response,
+                                        symbol_size,
+                                        &roots,
+                                    ) {
+                                        Ok(items) => {
+                                            self.peer_manager_lock().report_good_behavior(&peer);
+                                            let _ = sender.send(Ok(items));
+                                        }
+                                        Err(err) => {
+                                            if matches!(response, Bud3SymbolsResponse::Symbols(_)) {
+                                                self.peer_manager_lock()
+                                                    .report_bad_behavior(&peer);
+                                            }
+                                            let _ = sender.send(Err(err));
+                                        }
+                                    }
+                                }
+                                request_response::Event::OutboundFailure {
+                                    peer,
+                                    request_id,
+                                    error,
+                                    ..
+                                } => {
+                                    if let Some(PendingBud3SymbolRequest { sender, .. }) =
+                                        self.bud3_symbol_requests.remove(&request_id)
+                                    {
+                                        let _ = sender.send(Err(format!(
+                                            "B.U.D. 3.0 symbol request to {peer} failed: {error:?}"
+                                        )));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        SwarmEvent::Behaviour(BudlumBehaviourEvent::Bud3Custody(event)) => {
+                            use crate::network::bud3_protocol::{
+                                custody_receipt_digest, verify_bud3_custody_response,
+                                Bud3CustodyResponse,
+                            };
+                            match event {
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Request {
+                                            request, channel, ..
+                                        },
+                                    ..
+                                } => {
+                                    let allowed = {
+                                        let mut pm = self.peer_manager_lock();
+                                        !pm.is_banned(&peer)
+                                            && pm.is_handshaked(&peer)
+                                            && pm.check_rate_limit(&peer)
+                                    };
+                                    if !allowed {
+                                        warn!("Rejected B.U.D. 3.0 custody push from banned/unhandshaked/rate-limited peer {peer}");
+                                        continue;
+                                    }
+                                    let peer_key = crate::core::hash::calculate_hash_bytes(&peer.to_bytes());
+                                    if let Err(err) =
+                                        self.bud3_peer_limiter.open_custody_stream(&peer_key)
+                                    {
+                                        let _ = self
+                                            .swarm
+                                            .behaviour_mut()
+                                            .bud3_custody
+                                            .send_response(
+                                                channel,
+                                                Bud3CustodyResponse::Rejected(format!("{err:?}")),
+                                            );
+                                        continue;
+                                    }
+                                    let holder = request.holder;
+                                    let object = request.object;
+                                    let segment = request.segment;
+                                    let chain = self.chain.clone();
+                                    let local_peer = self.peer_id;
+                                    let is_target_holder = matches!(
+                                        chain.validator_peer_id(holder).await,
+                                        Ok(Some(pk))
+                                            if crate::network::bud3_protocol::ed25519_key_to_peer_id(
+                                                &pk,
+                                            ) == Ok(local_peer)
+                                    );
+                                    let res = if is_target_holder {
+                                        chain
+                                            .bud3_store_verified_symbols(
+                                                holder,
+                                                object,
+                                                segment,
+                                                request.items,
+                                            )
+                                            .await
+                                    } else {
+                                        Ok(Err(String::from(
+                                            "node is not the registered custody holder",
+                                        )))
+                                    };
+                                    self.bud3_peer_limiter.close_custody_stream(&peer_key);
+                                    let reply = match res {
+                                        Ok(Ok(stored)) => Bud3CustodyResponse::Accepted {
+                                            stored,
+                                            receipt_digest: custody_receipt_digest(
+                                                &holder, &object, segment, stored,
+                                            ),
+                                        },
+                                        Ok(Err(err)) => Bud3CustodyResponse::Rejected(err),
+                                        Err(err) => Bud3CustodyResponse::Rejected(err.to_string()),
+                                    };
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .bud3_custody
+                                        .send_response(channel, reply);
+                                }
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Response {
+                                            request_id,
+                                            response,
+                                        },
+                                    ..
+                                } => {
+                                    let Some(PendingBud3CustodyRequest {
+                                        peer_id: asked,
+                                        request: req,
+                                        sender,
+                                    }) = self.bud3_custody_requests.remove(&request_id)
+                                    else {
+                                        warn!("Unsolicited B.U.D. 3.0 custody response from {peer}");
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        continue;
+                                    };
+                                    if asked != peer {
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        let _ = sender.send(Err(String::from(
+                                            "B.U.D. 3.0 custody response peer mismatch",
+                                        )));
+                                        continue;
+                                    }
+                                    match verify_bud3_custody_response(&req, &response) {
+                                        Ok(stored) => {
+                                            self.peer_manager_lock().report_good_behavior(&peer);
+                                            let _ = sender.send(Ok(stored));
+                                        }
+                                        Err(err) => {
+                                            if matches!(
+                                                response,
+                                                Bud3CustodyResponse::Accepted { .. }
+                                            ) {
+                                                self.peer_manager_lock()
+                                                    .report_bad_behavior(&peer);
+                                            }
+                                            let _ = sender.send(Err(err));
+                                        }
+                                    }
+                                }
+                                request_response::Event::OutboundFailure {
+                                    peer,
+                                    request_id,
+                                    error,
+                                    ..
+                                } => {
+                                    if let Some(PendingBud3CustodyRequest { sender, .. }) =
+                                        self.bud3_custody_requests.remove(&request_id)
+                                    {
+                                        let _ = sender.send(Err(format!(
+                                            "B.U.D. 3.0 custody push to {peer} failed: {error:?}"
+                                        )));
+                                    }
                                 }
                                 _ => {}
                             }
