@@ -148,6 +148,17 @@ pub trait BlockchainStorage: Send + Sync {
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
     fn load_global_headers(&self) -> std::io::Result<Vec<GlobalBlockHeader>>;
+    /// Remove persisted global headers with `global_height >= from_height` when
+    /// a chain reorganization replaces or truncates uncommitted checkpoint
+    /// headers.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the underlying store.
+    fn prune_global_headers_from(&self, from_height: u64) -> std::io::Result<()> {
+        let _ = from_height;
+        Ok(())
+    }
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused

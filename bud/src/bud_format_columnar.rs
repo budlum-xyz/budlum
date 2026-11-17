@@ -172,6 +172,14 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
             a.cmp(&b)
         });
     }
+    const MAX_COLUMNAR_CELLS: usize = 1_048_576;
+    if keys
+        .len()
+        .checked_mul(arr.len())
+        .is_none_or(|cells| cells > MAX_COLUMNAR_CELLS)
+    {
+        return None;
+    }
     // detect column types from the first value; a mismatching value degrades the column to Str
     let mut col_types: Vec<ColType> = Vec::with_capacity(keys.len());
     let mut columns: Vec<Vec<Value>> = vec![Vec::with_capacity(arr.len()); keys.len()];

@@ -243,9 +243,12 @@ pub fn fallback_decode_public<N: NetworkSymbolSource>(
     Ok(view_public(&record, symbols)?)
 }
 
+const MAX_REVEAL_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
 struct RevealSession {
     object: ObjectKey,
     frames: Vec<Bud3Frame>,
+    retained_bytes: usize,
 }
 
 /// Node-local reveal session manager (`bud_storageOpenReveal`, `bud_storageRevealFrames`,
@@ -254,6 +257,7 @@ struct RevealSession {
 pub struct RevealSessionManager {
     next_id: u64,
     sessions: BTreeMap<u64, RevealSession>,
+    retained_bytes: usize,
 }
 
 impl RevealSessionManager {
@@ -272,34 +276,36 @@ impl RevealSessionManager {
         repair_per_segment: u32,
         network: &N,
     ) -> Result<u64, ViewBud3Error> {
-        if self.sessions.len() >= MAX_REVEAL_SESSIONS {
+        if self.sessions.len() >= MAX_REVEAL_SESSIONS
+            || self.retained_bytes >= MAX_REVEAL_TOTAL_BYTES
+        {
             return Err(ViewBud3Error::TooManyRevealSessions);
         }
         let (record, symbols) = collect_symbols_full_then_mobile(registry, object, network)?;
         let seg = Segmentation::new(record.object_len, &record.profile).ok_or(
             ViewBud3Error::Pipeline(PipelineError::Fountain(FountainError::InvalidProfile)),
         )?;
-        let seg_count = usize::try_from(seg.count())
+        let seg_count = seg.count();
+        let _ = usize::try_from(seg_count)
             .map_err(|_| ViewBud3Error::Pipeline(PipelineError::TooLarge))?;
-        let mut decoders = Vec::with_capacity(seg_count.min(1 << 16));
-        for index in 0..seg.count() {
-            let len = seg
-                .len(index)
-                .ok_or(ViewBud3Error::Pipeline(PipelineError::TooLarge))?;
-            decoders.push(
-                SegmentDecoder::new(index, len, &record.profile)
-                    .map_err(PipelineError::Fountain)?,
-            );
-        }
+        let mut decoders: BTreeMap<u64, SegmentDecoder> = BTreeMap::new();
         let mut meter = Meter::new(
             record.object_len.saturating_mul(4).saturating_add(1 << 20),
-            u64::from(record.symbols_per_segment).saturating_mul(seg.count()),
+            u64::from(record.symbols_per_segment).saturating_mul(seg_count),
         );
         for sym in symbols {
-            if let Some(dec) = usize::try_from(sym.segment)
-                .ok()
-                .and_then(|i| decoders.get_mut(i))
-            {
+            if sym.segment >= seg_count {
+                continue;
+            }
+            if let std::collections::btree_map::Entry::Vacant(e) = decoders.entry(sym.segment) {
+                let len = seg
+                    .len(sym.segment)
+                    .ok_or(ViewBud3Error::Pipeline(PipelineError::TooLarge))?;
+                let dec = SegmentDecoder::new(sym.segment, len, &record.profile)
+                    .map_err(PipelineError::Fountain)?;
+                e.insert(dec);
+            }
+            if let Some(dec) = decoders.get_mut(&sym.segment) {
                 if !dec.is_done() {
                     let _ = dec.push(sym, &mut meter);
                 }
@@ -308,10 +314,13 @@ impl RevealSessionManager {
         let cap = usize::try_from(record.object_len)
             .map_err(|_| ViewBud3Error::Pipeline(PipelineError::TooLarge))?;
         let mut object_bytes = Vec::with_capacity(cap.min(1 << 20));
-        for (idx, dec) in decoders.into_iter().enumerate() {
+        for idx in 0..seg_count {
+            let dec = decoders
+                .remove(&idx)
+                .ok_or(ViewBud3Error::InsufficientNetworkSymbols(idx))?;
             let bytes = dec
                 .into_bytes()
-                .ok_or(ViewBud3Error::InsufficientNetworkSymbols(idx as u64))?;
+                .ok_or(ViewBud3Error::InsufficientNetworkSymbols(idx))?;
             object_bytes.extend_from_slice(&bytes);
         }
         if commit_object(&object_bytes, &record.profile) != Some(record.commitment) {
@@ -321,14 +330,23 @@ impl RevealSessionManager {
         let _ = Object::decode(&object_bytes, &mut parse_meter).map_err(PipelineError::Object)?;
         let frames = frames_for_object_bytes(&object_bytes, &record.profile, repair_per_segment)
             .map_err(|_| ViewBud3Error::Pipeline(PipelineError::TooLarge))?;
+        let session_bytes = frames.iter().fold(0usize, |acc, f| {
+            acc.saturating_add(f.data.len())
+                .saturating_add(core::mem::size_of::<Bud3Frame>())
+        });
+        if self.retained_bytes.saturating_add(session_bytes) > MAX_REVEAL_TOTAL_BYTES {
+            return Err(ViewBud3Error::TooManyRevealSessions);
+        }
 
         self.next_id = self.next_id.saturating_add(1);
         let id = self.next_id;
+        self.retained_bytes = self.retained_bytes.saturating_add(session_bytes);
         self.sessions.insert(
             id,
             RevealSession {
                 object: *object,
                 frames,
+                retained_bytes: session_bytes,
             },
         );
         Ok(id)
@@ -366,10 +384,12 @@ impl RevealSessionManager {
     ///
     /// [`ViewBud3Error::UnknownRevealSession`].
     pub fn close_reveal(&mut self, session_id: u64) -> Result<(), ViewBud3Error> {
-        self.sessions
+        let removed = self
+            .sessions
             .remove(&session_id)
-            .map(|_| ())
-            .ok_or(ViewBud3Error::UnknownRevealSession)
+            .ok_or(ViewBud3Error::UnknownRevealSession)?;
+        self.retained_bytes = self.retained_bytes.saturating_sub(removed.retained_bytes);
+        Ok(())
     }
 }
 

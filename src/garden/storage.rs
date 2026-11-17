@@ -29,6 +29,22 @@ static TEMP_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// budget so a hostile host cannot fill a joiner's disk via genesis limits.
 pub const MAX_LOCAL_GARDEN_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
+/// What one object of `len` bytes costs against the local ceiling.
+///
+/// The ceiling is a budget on disk, and every object is one file: a one-byte
+/// publication still costs an inode and a directory entry, and a whole
+/// filesystem block where the filesystem does not inline small files.
+/// Charging the floor the genesis share already charges keeps the local
+/// budget an upper bound on a Garden's disk use instead of a count of the
+/// bytes it declares.
+const fn charged_bytes(len: u64) -> u64 {
+    if len > super::types::MIN_PUBLICATION_CHARGE {
+        len
+    } else {
+        super::types::MIN_PUBLICATION_CHARGE
+    }
+}
+
 /// Where the objects of one Garden live on this node.
 #[derive(Debug)]
 pub struct GardenContentStore {
@@ -54,7 +70,7 @@ fn scan_disk_bytes(root: &Path) -> u64 {
                 .is_some_and(|bytes| bytes.len() == 32);
             if valid_name {
                 if let Ok(meta) = fs::metadata(&path) {
-                    total = total.saturating_add(meta.len());
+                    total = total.saturating_add(charged_bytes(meta.len()));
                 }
             }
         }
@@ -100,7 +116,7 @@ impl GardenContentStore {
 
     /// True when storing an object of `size` bytes fits within the local cap.
     pub const fn can_fit(&self, size: u64) -> bool {
-        self.total_bytes.saturating_add(size) <= self.max_total_bytes
+        self.total_bytes.saturating_add(charged_bytes(size)) <= self.max_total_bytes
     }
 
     fn path_of(&self, content_id: &Hash32) -> Option<PathBuf> {
@@ -119,7 +135,7 @@ impl GardenContentStore {
             ));
         }
         let content_id = ContentId::of(bytes).0;
-        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let len = charged_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         match self.path_of(&content_id) {
             Some(path) => {
                 if !path.is_file() {
@@ -216,14 +232,14 @@ impl GardenContentStore {
                 let len = fs::metadata(&path)
                     .ok()
                     .filter(fs::Metadata::is_file)
-                    .map_or(0, |meta| meta.len());
+                    .map_or(0, |meta| charged_bytes(meta.len()));
                 if fs::remove_file(path).is_ok() {
                     self.total_bytes = self.total_bytes.saturating_sub(len);
                 }
             }
             None => {
                 if let Some(bytes) = self.memory.remove(content_id) {
-                    let len = u64::try_from(bytes.len()).unwrap_or(0);
+                    let len = charged_bytes(u64::try_from(bytes.len()).unwrap_or(0));
                     self.total_bytes = self.total_bytes.saturating_sub(len);
                 }
             }
@@ -261,7 +277,7 @@ impl GardenContentStore {
             self.total_bytes = self
                 .memory
                 .values()
-                .map(|bytes| u64::try_from(bytes.len()).unwrap_or(0))
+                .map(|bytes| charged_bytes(u64::try_from(bytes.len()).unwrap_or(0)))
                 .fold(0u64, u64::saturating_add);
         }
         removed
@@ -361,28 +377,31 @@ mod tests {
 
     #[test]
     fn garden_store_enforces_local_total_byte_ceiling_and_reclaims_on_remove() {
+        let floor = crate::garden::types::MIN_PUBLICATION_CHARGE;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("garden");
-        let mut store = GardenContentStore::open_with_limit(Some(&root), 16, 20).unwrap();
+        let mut store = GardenContentStore::open_with_limit(Some(&root), 16, floor + 1024).unwrap();
         let a = store.put(&[1u8; 12]).unwrap();
-        assert_eq!(store.total_bytes(), 12);
+        assert_eq!(store.total_bytes(), floor);
         // Re-putting identical bytes is idempotent and does not double-count.
         assert_eq!(store.put(&[1u8; 12]).unwrap(), a);
-        assert_eq!(store.total_bytes(), 12);
-        // A second 12-byte object exceeds the 20-byte ceiling and is refused.
+        assert_eq!(store.total_bytes(), floor);
+        // A second 12-byte object still costs `floor` bytes on disk, exceeding
+        // `floor + 1024`, so tiny-object amplification is refused.
         let err = store.put(&[2u8; 12]).unwrap_err();
         assert!(err.contains("local storage limit"), "{err}");
-        assert_eq!(store.total_bytes(), 12);
-        // Removing `a` reclaims the budget so the new object fits.
+        assert_eq!(store.total_bytes(), floor);
+        // Removing `a` reclaims the full floor charge so the new object fits.
         store.remove(&a);
         assert_eq!(store.total_bytes(), 0);
         let b = store.put(&[2u8; 12]).unwrap();
-        assert_eq!(store.total_bytes(), 12);
+        assert_eq!(store.total_bytes(), floor);
         assert!(store.contains(&b));
-        // Re-opening from disk recovers the accurate total byte count.
-        let reopened = GardenContentStore::open_with_limit(Some(&root), 16, 20).unwrap();
-        assert_eq!(reopened.total_bytes(), 12);
-        assert!(!reopened.can_fit(9));
-        assert!(reopened.can_fit(8));
+        // Re-opening from disk recovers the accurate floor-charged byte count.
+        let reopened = GardenContentStore::open_with_limit(Some(&root), 16, 2 * floor).unwrap();
+        assert_eq!(reopened.total_bytes(), floor);
+        assert!(reopened.can_fit(1));
+        assert!(reopened.can_fit(floor));
+        assert!(!reopened.can_fit(floor + 1));
     }
 }
