@@ -3875,6 +3875,65 @@ mod tests {
     }
 
     #[test]
+    fn test_verifier_stake_lock_rejects_overflow() {
+        let (mut registry, _, _) = setup_ai_registry(2, 2);
+        let v1 = Address::from([0x41; 32]);
+        registry.lock_verifier_stake(&v1, u64::MAX - 10).unwrap();
+        let err = registry
+            .lock_verifier_stake(&v1, 11)
+            .expect_err("stake addition past u64::MAX must be refused");
+        assert!(err.contains("overflow"), "unexpected error: {err}");
+        assert_eq!(registry.verifier_stake(&v1), u64::MAX - 10);
+    }
+
+    #[test]
+    fn test_verifier_stake_withdraw_rejects_zero() {
+        let (mut registry, _, _) = setup_ai_registry(2, 2);
+        let v1 = Address::from([0x42; 32]);
+        registry.lock_verifier_stake(&v1, 5000).unwrap();
+        let err = registry
+            .withdraw_verifier_stake(&v1, 0, 100)
+            .expect_err("zero withdrawal must be refused");
+        assert!(err.contains("> 0"), "unexpected error: {err}");
+        assert_eq!(registry.verifier_stake(&v1), 5000);
+    }
+
+    #[test]
+    fn test_partial_withdraw_below_min_stake_clears_effort_ceiling() {
+        use crate::ai::registry::MIN_VERIFIER_STAKE;
+        use crate::ai_inference::effort::EffortTier;
+
+        let (mut registry, _, _) = setup_ai_registry(2, 2);
+        let v1 = Address::from([0x43; 32]);
+        registry
+            .lock_verifier_stake(&v1, MIN_VERIFIER_STAKE + 500)
+            .unwrap();
+        registry
+            .declare_effort_ceiling(&v1, EffortTier::DEEPEST)
+            .unwrap();
+        assert_eq!(registry.effort_ceiling(&v1), EffortTier::DEEPEST);
+
+        // Staying at or above MIN_VERIFIER_STAKE keeps the declared ceiling.
+        registry.withdraw_verifier_stake(&v1, 500, 10).unwrap();
+        assert!(registry.is_verifier_authorized(&v1));
+        assert_eq!(registry.effort_ceiling(&v1), EffortTier::DEEPEST);
+
+        // Dropping below MIN_VERIFIER_STAKE revokes authorization and prunes the ceiling.
+        registry.withdraw_verifier_stake(&v1, 1, 11).unwrap();
+        assert!(!registry.is_verifier_authorized(&v1));
+        assert_eq!(registry.verifier_stake(&v1), MIN_VERIFIER_STAKE - 1);
+        assert!(!registry.verifier_effort_ceilings.contains_key(&v1));
+        assert_eq!(registry.effort_ceiling(&v1), EffortTier::BASELINE);
+
+        // State root must match a registry with the same sub-threshold stake and no ceiling.
+        let (mut clean, _, _) = setup_ai_registry(2, 2);
+        clean
+            .lock_verifier_stake(&v1, MIN_VERIFIER_STAKE - 1)
+            .unwrap();
+        assert_eq!(registry.state_root(), clean.state_root());
+    }
+
+    #[test]
     fn test_verifier_stake_withdraw_blocked_by_dispute() {
         // Cannot withdraw if pending equivocation dispute
         let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
