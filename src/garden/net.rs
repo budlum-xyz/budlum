@@ -211,9 +211,9 @@ pub fn validator_dial_address(address: &str, key: &GardenKey) -> Result<Multiadd
 pub fn member_dial_address(address: &str, key: &GardenKey) -> Result<Multiaddr, String> {
     use libp2p::multiaddr::Protocol;
     let parsed = validator_dial_address(address, key)?;
-    if matches!(
+    if !matches!(
         parsed.iter().next(),
-        Some(Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_))
+        Some(Protocol::Ip4(_) | Protocol::Ip6(_))
     ) {
         return Err("a validator announces the address it answers at, not a name".into());
     }
