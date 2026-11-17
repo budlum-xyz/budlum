@@ -1399,7 +1399,6 @@ src/domain/storage_params.rs	const	MAX_CHUNK_SIZE
 src/domain/storage_params.rs	const	MIN_CHUNK_SIZE
 src/domain/types.rs	fn	is_ai
 src/domain/types.rs	fn	is_storage
-src/domain/types.rs	fn	normalize_hash32
 src/execution/executor.rs	fn	apply_block
 src/execution/proof_verifier.rs	const	GAS_PER_DEGREE_BIT
 src/execution/proof_verifier.rs	const	MIN_PROOF_FORMAT_VERSION
@@ -1471,7 +1470,6 @@ src/network/gossip_dedup.rs	fn	is_below_threshold
 src/network/gossip_dedup.rs	fn	peer_score
 src/network/gossip_dedup.rs	fn	peers_below_threshold
 src/network/gossip_dedup.rs	fn	record_invalid
-src/network/gossip_dedup.rs	fn	remove_peer
 src/network/gossip_dedup.rs	fn	total_duplicates
 src/network/gossip_dedup.rs	fn	total_processed
 src/network/gossip_dedup.rs	fn	window_utilization

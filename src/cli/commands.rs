@@ -233,6 +233,17 @@ pub struct NodeConfig {
     #[arg(long)]
     pub dns_seeds: Vec<String>,
 
+    /// Sentry shield endpoints (`<Multiaddr>/p2p/<PeerId>`) for a shielded
+    /// `validator` node. When set, the validator connects exclusively to these
+    /// sentry peers and blocks all direct public inbound and outbound P2P links.
+    #[arg(long, value_delimiter = ',')]
+    pub sentry_peers: Vec<String>,
+
+    /// Protected upstream validator identities (`<PeerId>` or
+    /// `<Multiaddr>/p2p/<PeerId>`) shielded by a `sentry` node.
+    #[arg(long, value_delimiter = ',')]
+    pub validator_peers: Vec<String>,
+
     #[arg(long)]
     pub max_peers: Option<usize>,
 
@@ -259,12 +270,6 @@ pub struct NodeConfig {
     /// validator link (for example `/ip4/10.10.0.11/tcp/30334`).
     #[arg(long)]
     pub p2p_private_listen_addr: Option<String>,
-
-    /// Multiaddrs (`/ip4/.../tcp/.../p2p/<PeerId>`) of sentry nodes shielding
-    /// this validator. Non-empty on `role = "validator"` activates shielded
-    /// validator mode (discovery off, strict sentry-only connections).
-    #[arg(long)]
-    pub sentry_peers: Vec<String>,
 
     /// `PeerId`s of private validators shielded behind this sentry node (never
     /// entered into Kademlia/PEX and protected from eviction).
@@ -473,13 +478,14 @@ impl Default for NodeConfig {
             migrate_v2: None,
             p2p_identity_file: None,
             dns_seeds: Vec::new(),
+            sentry_peers: Vec::new(),
+            validator_peers: Vec::new(),
             max_peers: None,
             banned_peer_db: None,
             vote_history_db: None,
             mdns_enabled: None,
             p2p_listen_addr: None,
             p2p_private_listen_addr: None,
-            sentry_peers: Vec::new(),
             private_peers: Vec::new(),
             unconditional_peers: Vec::new(),
             allowed_private_cidrs: Vec::new(),
@@ -653,13 +659,16 @@ pub struct P2pSection {
     /// Archive bootnodes that serve witnesses (`/budlum/witness/1.0.0`).
     pub archive_bootnodes: Option<Vec<String>>,
     pub dns_seeds: Option<Vec<String>>,
+    /// Sentry node multiaddrs (`/ip4/.../tcp/.../p2p/<PeerId>`) shielding a validator.
+    pub sentry_peers: Option<Vec<String>>,
+    /// Upstream validator `PeerId`s or private multiaddrs protected by a sentry node.
+    pub validator_peers: Option<Vec<String>>,
     pub max_peers: Option<usize>,
     pub banned_peer_db: Option<String>,
     pub vote_history_db: Option<String>,
     pub mdns_enabled: Option<bool>,
     pub listen_addr: Option<String>,
     pub private_listen_addr: Option<String>,
-    pub sentry_peers: Option<Vec<String>>,
     pub private_peers: Option<Vec<String>>,
     pub unconditional_peers: Option<Vec<String>>,
     pub allowed_private_cidrs: Option<Vec<String>>,
@@ -926,6 +935,16 @@ impl NodeConfig {
                     self.dns_seeds = seeds;
                 }
             }
+            if self.sentry_peers.is_empty() {
+                if let Some(peers) = p2p.sentry_peers {
+                    self.sentry_peers = peers;
+                }
+            }
+            if self.validator_peers.is_empty() {
+                if let Some(peers) = p2p.validator_peers {
+                    self.validator_peers = peers;
+                }
+            }
             if self.max_peers.is_none() {
                 self.max_peers = p2p.max_peers;
             }
@@ -943,11 +962,6 @@ impl NodeConfig {
             }
             if self.p2p_private_listen_addr.is_none() {
                 self.p2p_private_listen_addr = p2p.private_listen_addr;
-            }
-            if self.sentry_peers.is_empty() {
-                if let Some(peers) = p2p.sentry_peers {
-                    self.sentry_peers = peers;
-                }
             }
             if self.private_peers.is_empty() {
                 if let Some(peers) = p2p.private_peers {
@@ -1290,6 +1304,22 @@ impl NodeConfig {
         if let Ok(mobile) = std::env::var("BUDLUM_MOBILE_MODE") {
             self.mobile_mode = mobile.to_lowercase() == "true" || mobile == "1";
         }
+        if let Ok(sentries) = std::env::var("BUDLUM_SENTRY_PEERS") {
+            self.sentry_peers = sentries
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+        }
+        if let Ok(validators) = std::env::var("BUDLUM_VALIDATOR_PEERS") {
+            self.validator_peers = validators
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+        }
     }
 
     /// Effective P2P connection ceiling. Explicit configuration may reduce the
@@ -1333,10 +1363,29 @@ impl NodeConfig {
         &self,
     ) -> Result<crate::network::sentry::SentryPolicy, crate::network::sentry::SentryConfigError>
     {
+        let mut combined_private_peers = self.private_peers.clone();
+        for entry in &self.validator_peers {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let peer_str = if trimmed.contains('/') {
+                trimmed
+                    .parse::<libp2p::Multiaddr>()
+                    .ok()
+                    .and_then(|ma| crate::network::sentry::peer_id_from_multiaddr(&ma))
+                    .map_or_else(|| trimmed.to_string(), |id| id.to_string())
+            } else {
+                trimmed.to_string()
+            };
+            if !combined_private_peers.contains(&peer_str) {
+                combined_private_peers.push(peer_str);
+            }
+        }
         let cfg = crate::network::sentry::SentryConfig {
             role: self.role.clone(),
             sentry_peers: self.sentry_peers.clone(),
-            private_peers: self.private_peers.clone(),
+            private_peers: combined_private_peers,
             unconditional_peers: self.unconditional_peers.clone(),
             allowed_private_cidrs: self.allowed_private_cidrs.clone(),
             disable_peer_discovery: self.disable_peer_discovery,
@@ -1363,6 +1412,16 @@ impl NodeConfig {
             }
         };
         if let Err(e) = pruning_policy.validate() {
+            eprintln!("CRITICAL CONFIGURATION ERROR: {e}.");
+            std::process::exit(1);
+        }
+
+        if let Err(e) = crate::network::sentry::SentryShieldConfig::from_role_and_peers(
+            &self.role,
+            &self.sentry_peers,
+            &self.validator_peers,
+            None,
+        ) {
             eprintln!("CRITICAL CONFIGURATION ERROR: {e}.");
             std::process::exit(1);
         }
@@ -1476,11 +1535,26 @@ impl NodeConfig {
                 );
             }
 
-            // Rule 2: No empty bootnodes on mainnet (except shielded validators,
-            // which connect exclusively to their configured sentry_peers).
-            if self.bootnodes.is_empty() && self.bootstrap.is_none() && self.sentry_peers.is_empty()
-            {
+            // Rule 2: No empty bootnodes on mainnet unless this validator is
+            // explicitly shielded behind sentry_peers!
+            let shielded_validator = self.role == "validator" && !self.sentry_peers.is_empty();
+            if !shielded_validator && self.bootnodes.is_empty() && self.bootstrap.is_none() {
                 eprintln!("CRITICAL SECURITY FAILURE: Mainnet profile cannot start without explicit seed/bootnodes!");
+                std::process::exit(1);
+            }
+            if let Some(bad) = crate::core::chain_config::first_placeholder_peer(&self.sentry_peers)
+            {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: mainnet sentry_peers entry is still a ceremony placeholder: {bad}"
+                );
+                std::process::exit(1);
+            }
+            if let Some(bad) =
+                crate::core::chain_config::first_placeholder_peer(&self.validator_peers)
+            {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: mainnet validator_peers entry is still a ceremony placeholder: {bad}"
+                );
                 std::process::exit(1);
             }
 
@@ -1579,6 +1653,14 @@ impl NodeConfig {
     /// exposed for: the CLI surface - the commands that read these land with their subcommand wiring.
     pub fn mainnet_archive_bootnode_violation(&self) -> Option<String> {
         if self.role == "archive" {
+            return None;
+        }
+        // A sentry-shielded validator communicates exclusively through its
+        // sentry nodes and never dials external archive bootnodes directly.
+        if self.role == "validator"
+            && !self.sentry_peers.is_empty()
+            && self.archive_bootnodes.is_empty()
+        {
             return None;
         }
         let distinct: std::collections::BTreeSet<&str> = self
@@ -2122,6 +2204,38 @@ mod tests {
         assert!(parsed.rpc_auth_required);
         assert_eq!(parsed.rpc_allowed_ips, expected.rpc_allowed_ips);
         assert!(!parsed.rpc_allowed_ips.is_empty());
+    }
+
+    #[test]
+    fn sentry_and_validator_peers_parse_from_cli_and_strict_v2_toml() {
+        use clap::Parser;
+        let s1 = format!(
+            "/ip4/203.0.113.10/tcp/26656/p2p/{}",
+            libp2p::PeerId::random()
+        );
+        let s2 = format!(
+            "/ip4/203.0.113.11/tcp/26656/p2p/{}",
+            libp2p::PeerId::random()
+        );
+        let cli = NodeConfig::try_parse_from([
+            "budlum-node",
+            "--role",
+            "validator",
+            "--sentry-peers",
+            &format!("{s1},{s2}"),
+        ])
+        .expect("CLI sentry-peers must parse");
+        assert_eq!(cli.sentry_peers, vec![s1.clone(), s2.clone()]);
+        assert_eq!(cli.mainnet_archive_bootnode_violation(), None);
+
+        let v1 = libp2p::PeerId::random().to_string();
+        let toml_doc =
+            format!("[node]\nrole = \"sentry\"\n\n[p2p]\nvalidator_peers = [\"{v1}\"]\n");
+        let fc: FileConfig = toml::from_str(&toml_doc).expect("TOML validator_peers must parse");
+        let mut cfg = NodeConfig::default();
+        cfg.apply_file_config(fc);
+        assert_eq!(cfg.role, "sentry");
+        assert_eq!(cfg.validator_peers, vec![v1]);
     }
 }
 
