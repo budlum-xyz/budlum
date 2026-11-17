@@ -390,8 +390,8 @@ fn shared_security_is_closed_on_testnet() {
     assert!(err.to_string().contains("not enabled"), "{err}");
 }
 
-/// Remote app binding (`app_binding`) is open on Devnet (`45262`) and gated
-/// on Mainnet (`45260`).
+/// Remote app binding (`app_binding`) is open on Devnet (`45262`) and closed
+/// on Testnet (`45261`) and Mainnet (`45260`).
 #[test]
 fn app_binding_is_open_on_devnet() {
     assert!(!Network::Testnet.app_binding_enabled());
@@ -456,13 +456,17 @@ fn app_binding_is_open_on_devnet() {
         origin_app: vec![0x45; 20],
         manifest_hash: [0x56; 32],
     };
-    execute_settlement_tx(
+    let testnet_err = execute_settlement_tx(
         &mut state,
         &testnet_ctx,
         &SettlementTx::AppBinding(Box::new(testnet_tx)),
     )
-    .expect("settlement app registration must execute on testnet 45261");
-    assert_eq!(state.settlement.app_binding.apps.len(), 2);
+    .expect_err("settlement app registration must remain closed on testnet 45261");
+    assert!(
+        testnet_err.to_string().contains("not enabled"),
+        "{testnet_err}"
+    );
+    assert_eq!(state.settlement.app_binding.apps.len(), 1);
 
     let outer_err = execute_settlement_tx(
         &mut state,

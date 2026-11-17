@@ -719,9 +719,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("not enabled"), "{err}");
-        assert!(execute_shared_security_tx(
+        let testnet_err = execute_shared_security_tx(
             &mut state,
             &ctx(operator, testnet),
+            &SharedSecurityTx::SetRegistrar {
+                domain_key: DOMAIN,
+                registrar: REGISTRAR.to_vec(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            testnet_err.to_string().contains("not enabled"),
+            "{testnet_err}"
+        );
+        assert!(execute_shared_security_tx(
+            &mut state,
+            &ctx(operator, devnet()),
             &SharedSecurityTx::SetRegistrar {
                 domain_key: DOMAIN,
                 registrar: REGISTRAR.to_vec(),
