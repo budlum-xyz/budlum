@@ -35,6 +35,12 @@ const ALLOWED_MIME_TYPES: &[&str] = &[
     "font/woff2",
 ];
 
+/// Maximum number of routes a single site manifest may declare.
+///
+/// Bounds parsing and in-memory manifest caching so a hostile site owner
+/// cannot publish a manifest with unbounded route entries.
+const MAX_MANIFEST_ROUTES: usize = 4096;
+
 /// One file of a site.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Route {
@@ -95,6 +101,24 @@ fn is_well_formed_path(path: &str) -> bool {
 }
 
 impl SiteManifest {
+    /// Parse a JSON site manifest and enforce the route-count ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable error if the bytes are not valid JSON or the
+    /// manifest declares more than [`MAX_MANIFEST_ROUTES`] routes.
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let manifest: Self = serde_json::from_slice(bytes).map_err(|e| format!("manifest: {e}"))?;
+        if manifest.routes.len() > MAX_MANIFEST_ROUTES {
+            return Err(format!(
+                "manifest declares {} routes, exceeding ceiling {}",
+                manifest.routes.len(),
+                MAX_MANIFEST_ROUTES
+            ));
+        }
+        Ok(manifest)
+    }
+
     /// Resolve a request path to the route that answers it.
     ///
     /// `/` goes to [`Self::index`]. A trailing slash on any other path is
@@ -239,5 +263,21 @@ mod tests {
         let back: SiteManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back, site);
         assert_eq!(back.csp, None);
+    }
+
+    #[test]
+    fn from_json_bytes_refuses_manifest_above_route_ceiling() {
+        let mut routes = BTreeMap::new();
+        for idx in 0..=MAX_MANIFEST_ROUTES {
+            routes.insert(format!("/r{idx}"), route(0x01, "text/plain"));
+        }
+        let manifest = SiteManifest {
+            index: "/r0".to_string(),
+            routes,
+            csp: None,
+        };
+        let bytes = serde_json::to_vec(&manifest).expect("manifest json");
+        let err = SiteManifest::from_json_bytes(&bytes).unwrap_err();
+        assert!(err.contains("exceeding ceiling"), "got: {err}");
     }
 }

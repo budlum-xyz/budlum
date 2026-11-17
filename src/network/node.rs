@@ -47,8 +47,8 @@ const SYNC_TIMEOUT_SECS: u64 = 15;
 /// round itself, a peer that keeps answering index-contiguous, hash-chained
 /// chunks - data the fork-recovery path stages without validating it against
 /// consensus - holds the node's only sync round for `chunks x SYNC_TIMEOUT_SECS`
-/// and never accrues an unanswered-sync strike, so the four-strike ban can never
-/// engage and no other peer can be asked. Four stall windows is enough for an
+/// and never accrues an unanswered-sync strike, so it is never set aside as a
+/// sync source and no other peer can be asked. Four stall windows is enough for an
 /// honest but slow peer to finish a round; past it the round is closed and the
 /// peer is charged, which is what makes the strike path reachable.
 const MAX_SYNC_ROUND_SECS: u64 = SYNC_TIMEOUT_SECS.saturating_mul(4);
@@ -84,6 +84,35 @@ fn select_sync_peer(
         .or_else(|| eligible_best.iter().copied().find(not_empty))
         .or(preferred)
         .or_else(|| eligible_best.first().copied())
+}
+
+/// [`select_sync_peer`], with the peers set aside as sync sources asked last.
+///
+/// A peer that left a run of sync requests unanswered rests
+/// (`PeerManager::is_sync_resting`): it is passed over while any other
+/// eligible peer is there, whatever its score and even when it is the peer
+/// that asked for the round. When every eligible peer rests, the choice is
+/// made among all of them as if none did: with all of them looking slow the
+/// slow one is this node, and it still has to sync from someone.
+fn select_sync_peer_resting_last(
+    preferred: Option<PeerId>,
+    eligible_best: &[PeerId],
+    stalled: Option<PeerId>,
+    empty_at_tip: Option<PeerId>,
+    resting: impl Fn(&PeerId) -> bool,
+) -> Option<PeerId> {
+    let rested_best: Vec<PeerId> = eligible_best
+        .iter()
+        .copied()
+        .filter(|p| !resting(p))
+        .collect();
+    select_sync_peer(
+        preferred.filter(|p| !resting(p)),
+        &rested_best,
+        stalled,
+        empty_at_tip,
+    )
+    .or_else(|| select_sync_peer(preferred, eligible_best, stalled, empty_at_tip))
 }
 const MAX_PENDING_BITSWAP_FETCH_WAITERS: usize = 128;
 /// QC blobs assembled at once, across all peers.
@@ -1006,11 +1035,25 @@ enum OutboundSyncKind {
 
 impl OutboundSyncKind {
     /// Only an active chain-sync round or an explicit finality cert/QC fetch
-    /// accrues unanswered-sync strikes. Handshakes share `/sync`, and a
-    /// connection closed during admission churn (such as a full `/24` subnet
-    /// table or simultaneous dial deduplication) must not ban an honest peer.
+    /// that stalls on an open connection (`Timeout`) or lacks `/sync` support
+    /// (`UnsupportedProtocols`) accrues unanswered-sync strikes. Handshakes
+    /// share `/sync`, and transient `ConnectionClosed`, `DialFailure`, or `Io`
+    /// errors during `/24` subnet-cap admission churn, simultaneous dial
+    /// deduplication, or peer restarts must not ban an honest validator.
     const fn counts_as_sync_strike(self) -> bool {
         !matches!(self, Self::Handshake)
+    }
+
+    const fn counts_as_sync_strike_for_error(
+        self,
+        error: &request_response::OutboundFailure,
+    ) -> bool {
+        self.counts_as_sync_strike()
+            && matches!(
+                error,
+                request_response::OutboundFailure::Timeout
+                    | request_response::OutboundFailure::UnsupportedProtocols
+            )
     }
 }
 
@@ -1104,6 +1147,11 @@ pub struct Node {
     pub dns_seeds: Vec<String>,
     pub dns_seed_port: u16,
     pub peer_count: Arc<AtomicUsize>,
+    /// When each live connection was admitted. A peer that connects and never
+    /// completes the application handshake holds an inbound slot until the
+    /// sweep passes this deadline, so this is what lets the node tell a
+    /// squatter from a peer that is still handshaking.
+    peer_connected_at: HashMap<PeerId, std::time::Instant>,
     pub sync_state: Arc<AtomicUsize>,
     /// Timestamp when `sync_state` was set to 1.
     pub sync_started_at: Arc<AtomicU64>,
@@ -1439,6 +1487,31 @@ impl Node {
         error.contains("no validator set recorded for epoch")
     }
 
+    /// A certificate whose seat table this node cannot derive yet.
+    ///
+    /// The seat table of a checkpoint follows from the participation records
+    /// of the chain up to that checkpoint. A node whose own chain does not
+    /// reach the checkpoint derives an older table, and an honest
+    /// certificate then fails with a seat table version mismatch. The
+    /// certificate is checked before the block it names is looked up, so
+    /// this error comes first and used to be charged as bad behaviour: a
+    /// validator that fell behind banned, for an hour, the peers that
+    /// answered its own certificate requests (testnet rehearsal, validator
+    /// loss and rejoin).
+    ///
+    /// With `tip` below the checkpoint the mismatch says where this node is,
+    /// not what the peer did. Such a certificate is neither credited nor
+    /// charged and opens no sync round: it is not authenticated, and block
+    /// announcements and handshakes are what a node syncs on. With the
+    /// checkpoint block in hand the same mismatch stays an offence.
+    fn finality_cert_names_a_seat_table_we_lack(
+        error: &str,
+        tip: u64,
+        checkpoint_height: u64,
+    ) -> bool {
+        error.contains("names seat table version") && tip < checkpoint_height
+    }
+
     fn request_finality_cert(&mut self, peer: PeerId, checkpoint_height: u64) {
         if checkpoint_height == 0
             || self.cert_fetches.len() >= 8
@@ -1534,6 +1607,13 @@ impl Node {
         expected_height: u64,
         response: &[u8],
     ) {
+        if response.is_empty() {
+            // A rate-limited or not-yet-handshaked responder closes the `/sync`
+            // request channel with an empty payload; treat it as an unanswered
+            // poll rather than a malformed certificate so load bursts do not
+            // trigger mutual `report_bad_behavior` bans.
+            return;
+        }
         match NetworkMessage::from_bytes_validated(response) {
             Ok(NetworkMessage::FinalityCertResponse { found: false, .. }) => {
                 let chain_id = self.chain.get_chain_id().await;
@@ -1589,7 +1669,7 @@ impl Node {
                 };
                 match self.chain.handle_finality_cert(cert).await {
                     Ok(()) => {
-                        self.peer_manager_lock().report_good_behavior(&peer);
+                        self.peer_manager_lock().report_sync_success(&peer);
                         let interval =
                             crate::core::chain_config::finality_checkpoint_interval_for_chain_id(
                                 cert_chain_id,
@@ -1614,6 +1694,17 @@ impl Node {
                     Err(e) if Self::finality_cert_missing_validator_set(&e) => {
                         warn!(
                             "Synced FinalityCert from {peer} names a validator epoch this node no longer retains; ignoring without sync credit"
+                        );
+                    }
+                    Err(e)
+                        if Self::finality_cert_names_a_seat_table_we_lack(
+                            &e,
+                            self.chain.get_height().await,
+                            checkpoint_height,
+                        ) =>
+                    {
+                        warn!(
+                            "Synced FinalityCert from {peer} names a seat table this node cannot derive yet (height={checkpoint_height}); ignoring without sync credit"
                         );
                     }
                     Err(e) => {
@@ -1657,6 +1748,18 @@ impl Node {
         };
         all_peers.sort_by_key(|p| p.to_bytes());
         sync_peers.sort_by_key(|p| p.to_bytes());
+        if all_peers.is_empty()
+            && !self.bootstrap_peers.is_empty()
+            && self.stale_tip_ticks >= 3
+            && self.stale_tip_ticks.is_multiple_of(3)
+        {
+            for addr in self.bootstrap_peers.clone() {
+                if let Err(e) = self.bootstrap(&addr) {
+                    tracing::debug!("Starvation bootstrap retry failed for {addr}: {e}");
+                }
+            }
+            return;
+        }
         if !all_peers.is_empty() {
             let peer = all_peers[self.sync_poll_cursor % all_peers.len()];
             self.sync_poll_cursor = self.sync_poll_cursor.wrapping_add(1);
@@ -1985,7 +2088,13 @@ impl Node {
                 .into_iter()
                 .filter(|p| connected.contains(p) && eligible(p))
                 .collect();
-            select_sync_peer(preferred_eligible, &eligible_best, stalled, empty_at_tip)
+            select_sync_peer_resting_last(
+                preferred_eligible,
+                &eligible_best,
+                stalled,
+                empty_at_tip,
+                |p| pm.is_sync_resting(p),
+            )
         };
         let Some(peer) = target else {
             info!("No handshaked peer available to sync from; waiting for one");
@@ -2221,7 +2330,7 @@ impl Node {
     /// `false` once the round is older than [`MAX_SYNC_ROUND_SECS`]: the refresh
     /// is then skipped, the stall sweep closes the round on its own clock and
     /// charges `report_unanswered_request`, which is the only path that accrues
-    /// the four strikes a pinned peer is banned on.
+    /// the strikes a pinning peer is set aside as a sync source on.
     fn sync_round_may_refresh(&self, now_secs: u64) -> bool {
         let round_start = self.sync_round_started_at.load(Ordering::SeqCst);
         round_start == 0 || now_secs.saturating_sub(round_start) < MAX_SYNC_ROUND_SECS
@@ -2894,6 +3003,7 @@ impl Node {
             dns_seeds: Vec::new(),
             dns_seed_port: 0,
             peer_count,
+            peer_connected_at: HashMap::new(),
             sync_state,
             sync_started_at,
             sync_round_started_at,
@@ -3168,6 +3278,9 @@ impl Node {
             Some(libp2p::multiaddr::Protocol::P2p(peer_id)) => peer_id,
             _ => return Err("Bootstrap address must contain /p2p/<ID>".into()),
         };
+        if self.peer_manager_lock().is_banned(&peer_id) {
+            return Ok(());
+        }
         info!("Bootstrapping via {addr}");
         self.swarm
             .behaviour_mut()
@@ -3435,6 +3548,38 @@ impl Node {
         loop {
             tokio::select! {
                 _ = gc_interval.tick() => {
+                    // A peer completes the transport handshake long before it
+                    // sends the application `Handshake`, and until it does the
+                    // connection still holds one of the inbound slots the
+                    // connection limits enforce. Refusing the newcomer is not
+                    // enough: nothing reclaims that slot, so the GC beat is
+                    // what disconnects a connection that never handshaked.
+                    {
+                        const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(30);
+                        let expired = {
+                            let pm = self.peer_manager.lock().unwrap_or_else(|poisoned| {
+                                tracing::error!(
+                                    "PeerManager lock was poisoned by an earlier panic; \
+                                     continuing with the recovered state"
+                                );
+                                poisoned.into_inner()
+                            });
+                            drain_expired_unhandshaked_peers(
+                                &mut self.peer_connected_at,
+                                &pm,
+                                std::time::Instant::now(),
+                                HANDSHAKE_DEADLINE,
+                            )
+                        };
+                        for peer in expired {
+                            warn!(
+                                "Peer {peer} held a connection past {:?} without handshaking; \
+                                 disconnecting to free the slot",
+                                HANDSHAKE_DEADLINE
+                            );
+                            let _ = self.swarm.disconnect_peer_id(peer);
+                        }
+                    }
                     let removed = self.chain.cleanup_mempool().await;
                     if removed > 0 {
                         info!("Cleaned up {removed} expired transactions from mempool");
@@ -3509,10 +3654,14 @@ impl Node {
                     // once - the same bytes are a duplicate to gossipsub - so
                     // a dropped vote is a vote the author cannot re-send, and
                     // the round it belonged to is short a validator forever.
+                    self.deferred_votes
+                        .prune_through(self.chain.get_finalized_height().await);
                     if agg_state.active {
-                        let due = self
-                            .deferred_votes
-                            .take_for(agg_state.epoch, agg_state.checkpoint_height);
+                        let due = self.deferred_votes.take_for_round(
+                            agg_state.epoch,
+                            agg_state.checkpoint_height,
+                            &agg_state.checkpoint_hash,
+                        );
                         if !due.is_empty() {
                             info!(
                                 "Finality: replaying {} vote(s) held for checkpoint height {} (epoch {})",
@@ -4292,6 +4441,10 @@ impl Node {
                                 }
                                 continue;
                             }
+                            if newly_connected {
+                                self.peer_connected_at
+                                    .insert(peer_id, std::time::Instant::now());
+                            }
                             if let Some(ref m) = self.metrics {
                                 m.p2p_peers_connected.set(count as i64);
                                 let mean_quality = self
@@ -4345,6 +4498,7 @@ impl Node {
                             // cid from `bitswap_requests` so unrelated peer churn never
                             // drains in-flight fetches (CWE-404).
                             if num_established == 0 {
+                                self.peer_connected_at.remove(&peer_id);
                                 self.cert_fetches.retain(|_, (p, _)| *p != peer_id);
                                 let retired_ids: Vec<_> = self
                                     .bitswap_request_peers
@@ -4491,7 +4645,12 @@ impl Node {
                                 }
                             }
 
-                            if !self.peer_manager_lock().check_rate_limit(&peer_id) {
+                            let gossip_authored =
+                                handshake_origin_matches_peer(peer_id, message.source);
+                            if !self
+                                .peer_manager_lock()
+                                .check_rate_limit_from(&peer_id, gossip_authored)
+                            {
                                 warn!("Rate limit exceeded or lock error for peer {peer_id}");
                                 self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                 continue;
@@ -4512,9 +4671,9 @@ impl Node {
                                 });
                                 match dedup.check_and_record(&message.data, &peer_id) {
                                     DedupResult::New => None,
-                                    DedupResult::Duplicate => {
-                                        Some(dedup.peer_should_be_banned(&peer_id))
-                                    }
+                                    DedupResult::Duplicate => Some(
+                                        dedup.peer_should_be_banned_from(&peer_id, gossip_authored),
+                                    ),
                                 }
                             };
                             if let Some(should_ban) = duplicate_action {
@@ -5269,6 +5428,14 @@ impl Node {
                                                             crate::network::deferred_votes::DeferredVote::Prevote(prevote),
                                                         );
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
                                                     } else {
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
@@ -5300,11 +5467,36 @@ impl Node {
                                                         );
                                                         continue;
                                                     }
-                                                    self.report_gossip(
-                                                        &id,
-                                                        &peer_id,
-                                                        gossipsub::MessageAcceptance::Ignore,
-                                                    );
+                                                    if e.contains("checkpoint hash mismatch") {
+                                                        // Hold authenticated votes for a competing
+                                                        // branch at this height so a subsequent
+                                                        // reorg replays them instead of losing the
+                                                        // author's single gossip delivery.
+                                                        self.deferred_votes.push(
+                                                            prevote.epoch,
+                                                            prevote.checkpoint_height,
+                                                            crate::network::deferred_votes::DeferredVote::Prevote(prevote),
+                                                        );
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Accept,
+                                                        );
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
+                                                    } else {
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Ignore,
+                                                        );
+                                                    }
                                                     self.trigger_fork_sync(peer_id).await;
                                                     continue;
                                                 }
@@ -5425,6 +5617,14 @@ impl Node {
                                                             crate::network::deferred_votes::DeferredVote::Precommit(precommit),
                                                         );
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
                                                     } else {
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
@@ -5456,11 +5656,32 @@ impl Node {
                                                         );
                                                         continue;
                                                     }
-                                                    self.report_gossip(
-                                                        &id,
-                                                        &peer_id,
-                                                        gossipsub::MessageAcceptance::Ignore,
-                                                    );
+                                                    if e.contains("checkpoint hash mismatch") {
+                                                        self.deferred_votes.push(
+                                                            precommit.epoch,
+                                                            precommit.checkpoint_height,
+                                                            crate::network::deferred_votes::DeferredVote::Precommit(precommit),
+                                                        );
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Accept,
+                                                        );
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
+                                                    } else {
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Ignore,
+                                                        );
+                                                    }
                                                     self.trigger_fork_sync(peer_id).await;
                                                     continue;
                                                 }
@@ -5588,6 +5809,15 @@ impl Node {
                                                         self.trigger_fork_sync(peer_id).await;
                                                     }
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                } else if Self::finality_cert_names_a_seat_table_we_lack(
+                                                    &e,
+                                                    self.chain.get_height().await,
+                                                    checkpoint_height,
+                                                ) {
+                                                    warn!(
+                                                        "FinalityCert from {peer_id} names a seat table this node cannot derive yet (height={checkpoint_height}); ignoring"
+                                                    );
+                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                 } else {
                                                     self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
@@ -5646,7 +5876,11 @@ impl Node {
                                             continue;
                                         }
 
-                                        match serde_json::from_slice::<crate::consensus::qc::QcFaultProof>(&proof_data) {
+                                        match crate::network::proto_conversions::decode_bounded_json::<
+                                            crate::consensus::qc::QcFaultProof,
+                                        >(
+                                            &proof_data, "qc fault proof"
+                                        ) {
                                             Ok(proof) => {
                                                 match self.chain.handle_qc_fault_proof(proof).await {
                                                     Ok(_) => {
@@ -6566,7 +6800,7 @@ impl Node {
                                         OutboundSyncKind::Handshake
                                     };
                                     warn!("Outbound sync failure to {}: {:?}", peer, error);
-                                    if kind.counts_as_sync_strike() {
+                                    if kind.counts_as_sync_strike_for_error(&error) {
                                         let mut pm = self.peer_manager_lock();
                                         pm.report_unanswered_request(&peer);
                                     }
@@ -7653,9 +7887,9 @@ mod sync_handler_order_tests {
     /// contiguous and hash chained, but never validated against consensus - and
     /// used to refresh the stall deadline on each answer, so a peer that keeps
     /// replying keeps the round alive, never accrues an unanswered-sync strike,
-    /// and the four-strike ban cannot engage. The round now has its own ceiling:
+    /// and the peer is never set aside as a sync source. The round now has its own ceiling:
     /// past it the refresh is skipped, the stall sweep closes the round and
-    /// charges the peer, which is the only path that reaches a ban.
+    /// charges the peer, which is the only path that sets it aside.
     #[test]
     fn a_sync_round_cannot_be_extended_past_its_ceiling_by_peer_answers() {
         assert_eq!(
@@ -7982,10 +8216,24 @@ mod finality_publish_tests {
 
     #[test]
     fn outbound_handshake_failure_does_not_accrue_sync_strikes() {
+        use libp2p::request_response::OutboundFailure;
         assert!(!super::OutboundSyncKind::Handshake.counts_as_sync_strike());
         assert!(super::OutboundSyncKind::ActiveSync.counts_as_sync_strike());
         assert!(super::OutboundSyncKind::CertFetch.counts_as_sync_strike());
         assert!(super::OutboundSyncKind::QcFetch.counts_as_sync_strike());
+
+        assert!(!super::OutboundSyncKind::Handshake
+            .counts_as_sync_strike_for_error(&OutboundFailure::Timeout));
+        for kind in [
+            super::OutboundSyncKind::ActiveSync,
+            super::OutboundSyncKind::CertFetch,
+            super::OutboundSyncKind::QcFetch,
+        ] {
+            assert!(kind.counts_as_sync_strike_for_error(&OutboundFailure::Timeout));
+            assert!(kind.counts_as_sync_strike_for_error(&OutboundFailure::UnsupportedProtocols));
+            assert!(!kind.counts_as_sync_strike_for_error(&OutboundFailure::ConnectionClosed));
+            assert!(!kind.counts_as_sync_strike_for_error(&OutboundFailure::DialFailure));
+        }
     }
 
     #[test]
@@ -8030,6 +8278,78 @@ mod finality_publish_tests {
         assert_eq!(
             super::select_sync_peer(Some(ahead), &[sibling, ahead], None, Some(sibling)),
             Some(ahead),
+        );
+    }
+
+    #[test]
+    fn a_seat_table_this_node_cannot_derive_is_not_charged_to_the_peer() {
+        let lag = "Certificate names seat table version 15, the verifier holds 0";
+        // Behind the checkpoint: the mismatch is this node's own lag.
+        assert!(super::Node::finality_cert_names_a_seat_table_we_lack(
+            lag, 30, 35
+        ));
+        // With the checkpoint block in hand it is an offence, as before.
+        assert!(!super::Node::finality_cert_names_a_seat_table_we_lack(
+            lag, 35, 35
+        ));
+        assert!(!super::Node::finality_cert_names_a_seat_table_we_lack(
+            lag, 40, 35
+        ));
+        // No other refusal is excused by being behind.
+        for other in [
+            "Invalid aggregated BLS signature",
+            "Validator set hash mismatch",
+            "Height 33 is not a valid checkpoint height",
+        ] {
+            assert!(!super::Node::finality_cert_names_a_seat_table_we_lack(
+                other, 30, 35
+            ));
+        }
+        // The text is the one the chain produces.
+        let source = include_str!("../chain/finality.rs");
+        assert!(source.contains("Certificate names seat table version {}, the verifier holds {}"));
+        // Both doors of a certificate take the excuse before the charge.
+        let prod = production_source();
+        assert_eq!(
+            prod.matches("Self::finality_cert_names_a_seat_table_we_lack(")
+                .count(),
+            2,
+            "the gossip arm and the sync response both classify the refusal"
+        );
+    }
+
+    #[test]
+    fn a_resting_sync_peer_is_asked_only_when_nobody_else_is_left() {
+        let best = super::PeerId::random();
+        let other = super::PeerId::random();
+        let third = super::PeerId::random();
+        let order = [best, other, third];
+        let pick = |preferred, resting: &[super::PeerId]| {
+            super::select_sync_peer_resting_last(preferred, &order, None, None, |p| {
+                resting.contains(p)
+            })
+        };
+        // Nobody rests: the plain choice.
+        assert_eq!(pick(None, &[]), Some(best));
+        assert_eq!(pick(Some(third), &[]), Some(third));
+        // The best scored peer rests: the next one is asked, also when the
+        // resting peer is the one that asked for the round.
+        assert_eq!(pick(None, &[best]), Some(other));
+        assert_eq!(pick(Some(best), &[best]), Some(other));
+        assert_eq!(pick(Some(third), &[best, other]), Some(third));
+        // Everybody rests: the node still asks, as if nobody did.
+        assert_eq!(pick(None, &order), Some(best));
+        assert_eq!(pick(Some(third), &order), Some(third));
+        // The stalled peer and the peer that had nothing new keep their
+        // place in the order among the rested ones.
+        assert_eq!(
+            super::select_sync_peer_resting_last(None, &order, Some(other), None, |p| *p == best),
+            Some(third)
+        );
+        // Nobody eligible, nobody asked.
+        assert_eq!(
+            super::select_sync_peer_resting_last(None, &[], None, None, |_| false),
+            None
         );
     }
 
@@ -8188,6 +8508,68 @@ mod finality_publish_tests {
             "Invalid PQ attestation in precommit: forged"
         ));
     }
+
+    #[test]
+    fn unhandshaked_peer_is_reclaimed_after_deadline_while_handshaked_survives() {
+        use super::{Duration, HashMap, PeerId, PeerManager};
+
+        let mut pm = PeerManager::new();
+        let squatter = PeerId::random();
+        let honest = PeerId::random();
+        let fresh = PeerId::random();
+        let gone = PeerId::random();
+
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(squatter, None));
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(honest, None));
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(fresh, None));
+        pm.set_handshaked(&honest, true);
+
+        let now = std::time::Instant::now();
+        let deadline = Duration::from_secs(30);
+        let mut connected_at = HashMap::new();
+        connected_at.insert(squatter, now - Duration::from_secs(31));
+        connected_at.insert(honest, now - Duration::from_secs(60));
+        connected_at.insert(fresh, now - Duration::from_secs(5));
+        connected_at.insert(gone, now - Duration::from_secs(60));
+
+        let expired =
+            super::drain_expired_unhandshaked_peers(&mut connected_at, &pm, now, deadline);
+        assert_eq!(expired, vec![squatter]);
+        assert!(!connected_at.contains_key(&squatter));
+        assert!(!connected_at.contains_key(&honest));
+        assert!(!connected_at.contains_key(&gone));
+        assert!(
+            connected_at.contains_key(&fresh),
+            "a fresh unhandshaked peer must stay tracked until its deadline passes"
+        );
+    }
+}
+
+/// Identify connected peers that have exceeded `deadline` without completing
+/// the application `Handshake`, while pruning entries for peers that already
+/// disconnected or completed the handshake.
+fn drain_expired_unhandshaked_peers(
+    connected_at: &mut HashMap<PeerId, std::time::Instant>,
+    pm: &PeerManager,
+    now: std::time::Instant,
+    deadline: Duration,
+) -> Vec<PeerId> {
+    let mut expired = Vec::new();
+    let mut spent = Vec::new();
+    for (peer, admitted) in connected_at.iter() {
+        if !pm.is_connected(peer) || pm.is_handshaked(peer) {
+            spent.push(*peer);
+        } else if now.duration_since(*admitted) >= deadline {
+            expired.push(*peer);
+        }
+    }
+    for peer in spent {
+        connected_at.remove(&peer);
+    }
+    for peer in &expired {
+        connected_at.remove(peer);
+    }
+    expired
 }
 
 #[cfg(test)]
