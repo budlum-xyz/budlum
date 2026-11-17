@@ -297,13 +297,13 @@ impl RevealSessionManager {
             if sym.segment >= seg_count {
                 continue;
             }
-            if !decoders.contains_key(&sym.segment) {
+            if let std::collections::btree_map::Entry::Vacant(e) = decoders.entry(sym.segment) {
                 let len = seg
                     .len(sym.segment)
                     .ok_or(ViewBud3Error::Pipeline(PipelineError::TooLarge))?;
                 let dec = SegmentDecoder::new(sym.segment, len, &record.profile)
                     .map_err(PipelineError::Fountain)?;
-                decoders.insert(sym.segment, dec);
+                e.insert(dec);
             }
             if let Some(dec) = decoders.get_mut(&sym.segment) {
                 if !dec.is_done() {
