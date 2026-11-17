@@ -593,6 +593,12 @@ impl IdentityRegistry {
                 did: did_of(&subject),
             });
         }
+        const MAX_IDENTITY_RECORDS: usize = 65_536;
+        if self.records.len() >= MAX_IDENTITY_RECORDS {
+            return Err(IdentityError::BadApproval(format!(
+                "identity registry reached {MAX_IDENTITY_RECORDS} records"
+            )));
+        }
         self.records.insert(subject, record);
         Ok(())
     }
@@ -637,6 +643,22 @@ impl IdentityRegistry {
                 return Err(IdentityError::AlreadyIssued {
                     did: did_of(&subject),
                 });
+            }
+            const MAX_IDENTITY_CREDENTIALS: usize = 262_144;
+            const MAX_CREDENTIALS_PER_SUBJECT: usize = 256;
+            if self.credentials.len() >= MAX_IDENTITY_CREDENTIALS {
+                return Err(IdentityError::BadApproval(format!(
+                    "identity registry reached {MAX_IDENTITY_CREDENTIALS} credentials"
+                )));
+            }
+            if let Some(record) = self.records.get(&subject) {
+                if !record.credential_roots.contains(&root)
+                    && record.credential_roots.len() >= MAX_CREDENTIALS_PER_SUBJECT
+                {
+                    return Err(IdentityError::BadApproval(format!(
+                        "subject reached {MAX_CREDENTIALS_PER_SUBJECT} credential roots"
+                    )));
+                }
             }
         }
         self.credentials.insert(hex32(&id), credential);
@@ -2710,5 +2732,85 @@ mod tests {
             record.live_method(&new_key, 200).is_some(),
             "the quorum must have rotated the DID to the new key"
         );
+    }
+
+    #[test]
+    fn identity_registry_caps_credential_roots_per_subject() {
+        let mut registry = IdentityRegistry::new();
+        let subject = Address::from([0x61u8; 32]);
+        let issuer = Address::from([0x62u8; 32]);
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register {
+                    record: IdentityRecord::new(
+                        subject,
+                        vec![VerificationMethod::new([1u8; 32], MethodKind::MlDsa87)],
+                        vec![],
+                        0,
+                    )
+                    .unwrap(),
+                },
+                0,
+            )
+            .unwrap();
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register {
+                    record: IdentityRecord::new(
+                        issuer,
+                        vec![VerificationMethod::new([2u8; 32], MethodKind::MlDsa87)],
+                        vec![],
+                        0,
+                    )
+                    .unwrap(),
+                },
+                0,
+            )
+            .unwrap();
+        for idx in 0u64..256 {
+            let mut salt = [0u8; 32];
+            salt[..8].copy_from_slice(&idx.to_le_bytes());
+            let cred = CredentialCommitment {
+                issuer,
+                subject,
+                schema: "cap".to_string(),
+                fields: vec![FieldCommitment {
+                    name: "seq".to_string(),
+                    commitment: field_commitment("cap", "seq", &salt, &[0xAB; 32]),
+                }],
+                issued_at: idx,
+                expires_at: None,
+            };
+            registry
+                .apply(
+                    &ConsensusKind::PoA,
+                    IdentityOp::Issue { credential: cred },
+                    idx,
+                )
+                .unwrap();
+        }
+        let overflow = CredentialCommitment {
+            issuer,
+            subject,
+            schema: "cap".to_string(),
+            fields: vec![FieldCommitment {
+                name: "seq".to_string(),
+                commitment: field_commitment("cap", "seq", &[0xFF; 32], &[0xCD; 32]),
+            }],
+            issued_at: 256,
+            expires_at: None,
+        };
+        assert!(matches!(
+            registry.apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Issue {
+                    credential: overflow
+                },
+                256
+            ),
+            Err(IdentityError::BadApproval(_))
+        ));
     }
 }

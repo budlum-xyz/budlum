@@ -73,6 +73,7 @@ fn charter_for(family: HomeVmFamily, fx: &dyn EventFixture) -> DomainCharter {
         silence_window: 1_000,
         data_policy: DataPolicy::Public,
         status: CharterStatus::Active,
+        operator: None,
     }
 }
 
@@ -1474,4 +1475,28 @@ fn home_stipend_call_requires_verifier_and_enforces_nonce_and_cap() {
             .home_stipend_call(DOMAIN, &over_cap, &action, 100, Some(&AllowAllVerifier)),
         Err(Refusal::NotAuthorized)
     );
+}
+
+#[test]
+fn register_class_verified_rejects_unrelated_registrant_when_charter_binds_operator() {
+    let family = HomeVmFamily::CosmWasm;
+    let fx = fixture_for(family);
+    let operator = Address([0x11; 32]);
+    let outsider = Address([0x22; 32]);
+    let mut reg = ObjectLayerRegistry::with_params(params(family));
+    let mut ch = charter_for(family, fx);
+    ch.operator = Some(operator);
+    assert_eq!(reg.charter(DOMAIN, ch, &good_proof(), true), Ok(true));
+
+    let mut slice = ClassSlice::new();
+    slice.insert(
+        profile_for(family).upgrade_authority_field().into(),
+        vec![1],
+    );
+    let class_reg = registration(family, AssetKind::Unique, fx.address(0x44), slice);
+    assert_eq!(
+        reg.register_class(outsider, class_reg.clone()),
+        Err(Refusal::NotAuthorized)
+    );
+    assert!(reg.register_class(operator, class_reg).is_ok());
 }

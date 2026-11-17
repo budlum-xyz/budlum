@@ -864,10 +864,19 @@ impl Executor {
                     .checked_sub(tx.amount)
                     .ok_or_else(|| BudlumError::validation("stake_underflow", "stake underflow"))?;
 
-                let min_stake = state.full_validator_stake_floor(tx.chain_id);
+                let is_full_seat = state
+                    .get_validator(&tx.from)
+                    .is_some_and(|validator| validator.filiz.is_some());
+                let full_floor = state.full_validator_stake_floor(tx.chain_id);
+                let unstake_floor = if is_full_seat {
+                    full_floor
+                } else {
+                    crate::core::chain_config::Network::from_chain_id(tx.chain_id)
+                        .map_or(1, |network| network.min_stake())
+                };
                 if let Some(validator) = state.get_validator_mut(&tx.from) {
                     validator.stake = new_stake;
-                    if validator.stake < min_stake {
+                    if validator.stake < full_floor {
                         validator.active = false;
                     }
                 }
@@ -913,8 +922,6 @@ impl Executor {
                 // Is what the liveness / invalid-vote slashing paths and the
                 // RPC member views consult, and `registry.root()` is hashed
                 // Into the state root, so the stale entry was consensus state.
-                let unstake_floor = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
-                    .map_or(1, |network| network.min_stake());
                 state.sync_validator_registration_with_floor(&tx.from, unstake_floor);
 
                 let sender = state.get_or_create(&tx.from);
@@ -6487,6 +6494,8 @@ mod tests {
             })),
         );
         Executor::apply_transaction_checked(&mut state, &reg_tx).unwrap();
+        state.bud3_registry.ack(&key, &[10u8; 32]).unwrap();
+        state.bud3_registry.ack(&key, &[11u8; 32]).unwrap();
 
         let mint_tx = Transaction::new_with_chain_id(
             alice,
@@ -6566,5 +6575,50 @@ mod tests {
         assert!(state.bud3_registry.nft_binding(&bud3_nft_id).is_none());
         assert!(state.bud3_registry.object(&key).is_none());
         assert!(state.bud3_registry.is_tombstoned(&key));
+    }
+
+    #[test]
+    fn unstake_below_network_floor_deactivates_validator_in_ledger_and_registry() {
+        let mut state = AccountState::new();
+        let network = crate::core::chain_config::Network::Testnet;
+        let chain_id = network.chain_id().value();
+        let floor = network.min_stake_full();
+        let val = Address::from([0x77u8; 32]);
+        state.add_balance(&val, 1_000);
+        state.add_validator_with_floor(val, floor, floor);
+        if let Some(entry) = state.get_validator_mut(&val) {
+            entry.filiz = Some(crate::consensus::filiz::FilizRegistration::default());
+            entry.active = true;
+        }
+        let unstake = Transaction::new_with_chain_id(
+            val,
+            Address::zero(),
+            1,
+            10,
+            0,
+            Vec::new(),
+            chain_id,
+            TransactionType::Unstake,
+        );
+        Executor::apply_transaction_checked(&mut state, &unstake)
+            .expect("self-unstake of 1 atto succeeds");
+        let after = state.get_validator(&val).expect("validator entry kept");
+        assert_eq!(after.stake, floor - 1);
+        assert!(
+            !after.active,
+            "full-seat validator below min_stake_full must be marked inactive"
+        );
+        assert!(
+            !after.is_eligible(state.epoch_index),
+            "underbonded full-seat validator must leave the eligible consensus set"
+        );
+        assert_eq!(
+            state
+                .registry
+                .get(&val, crate::registry::roles::VALIDATOR)
+                .map(|record| record.stake),
+            Some(floor - 1),
+            "permissionless registry keeps the remaining slashable stake synced"
+        );
     }
 }
