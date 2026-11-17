@@ -213,6 +213,36 @@ impl NetworkMessage {
         Self::try_from(proto_msg)
     }
 
+    /// Cheap pre-decode wire check: returns `true` iff `bytes` carries a
+    /// top-level `Handshake` (tag 1) or `HandshakeAck` (tag 2) payload and no
+    /// other payload field (`1..=63`). Used before `from_bytes_validated` so
+    /// unhandshaked peers cannot force full protobuf decode, canonical
+    /// re-encode, or Debug formatting of large payloads such as `AggFrame`.
+    #[must_use]
+    pub fn wire_is_handshake(mut bytes: &[u8]) -> bool {
+        if bytes.is_empty() || bytes.len() > MAX_MESSAGE_SIZE {
+            return false;
+        }
+        let mut saw_handshake = false;
+        while !bytes.is_empty() {
+            let Ok((tag, wire_type)) = prost::encoding::decode_key(&mut bytes) else {
+                return false;
+            };
+            if matches!(tag, 1 | 2) {
+                if saw_handshake {
+                    return false;
+                }
+                saw_handshake = true;
+            } else if (1..=63).contains(&tag) {
+                return false;
+            }
+            if skip_wire_field(&mut bytes, wire_type).is_err() {
+                return false;
+            }
+        }
+        saw_handshake
+    }
+
     /// Performs the requested operation.
     ///
     /// # Errors
@@ -943,6 +973,59 @@ fn validate_wire_frame_caps(mut slice: &[u8]) -> Result<(), MessageError> {
                     }
                 }
             }
+            29 => {
+                // `agg/frame`: bound the inner frame length and peek the 16-byte
+                // claim-frame header before `ProtoNetworkMessage::decode`
+                // allocates `Vec<u8>`.
+                let mut agg_frame = take_len_delimited(&mut slice, wire_type)?;
+                let mut seen_fields = 0u128;
+                let mut frame_payload: Option<&[u8]> = None;
+                while !agg_frame.is_empty() {
+                    let (field, field_wire) =
+                        prost::encoding::decode_key(&mut agg_frame).map_err(|e| {
+                            MessageError::ParseError(format!("Protobuf key error: {e}"))
+                        })?;
+                    mark_unique_tag(&mut seen_fields, field, "Duplicate agg_frame field")?;
+                    if field == 1 {
+                        let payload = take_len_delimited(&mut agg_frame, field_wire)?;
+                        if payload.is_empty() || payload.len() > MAX_MESSAGE_SIZE {
+                            return Err(MessageError::ParseError(
+                                "agg/frame payload is empty or over MAX_MESSAGE_SIZE".into(),
+                            ));
+                        }
+                        frame_payload = Some(payload);
+                    } else {
+                        skip_wire_field(&mut agg_frame, field_wire)?;
+                    }
+                }
+                let payload = frame_payload
+                    .ok_or_else(|| MessageError::ParseError("agg/frame carries no frame".into()))?;
+                if payload.len() < 16 {
+                    return Err(MessageError::ParseError(
+                        "agg/frame header is truncated".into(),
+                    ));
+                }
+                let claim_count =
+                    u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+                let segment_count =
+                    u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+                let shape_len =
+                    u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
+                let proof_len =
+                    u32::from_be_bytes([payload[12], payload[13], payload[14], payload[15]])
+                        as usize;
+                if claim_count == 0
+                    || claim_count > crate::aggregation::chain::WIRE_FRAME_LIMITS.max_claims
+                    || segment_count > claim_count
+                    || shape_len > segment_count.saturating_mul(2)
+                    || proof_len > crate::aggregation::chain::WIRE_FRAME_LIMITS.max_proof_bytes
+                {
+                    return Err(MessageError::ParseError(
+                        "agg/frame header exceeds wire limits".into(),
+                    ));
+                }
+                bump_frame_items(&mut frame_item_budget)?;
+            }
             _ => skip_wire_field(&mut slice, wire_type)?,
         }
     }
@@ -1267,6 +1350,50 @@ mod tests {
         assert!(matches!(
             NetworkMessage::from_bytes_validated(&dup_envelope),
             Err(MessageError::ParseError(msg)) if msg.contains("Duplicate network message payload")
+        ));
+    }
+
+    #[test]
+    fn wire_is_handshake_identifies_handshake_tags_without_full_decode() {
+        let hs = NetworkMessage::Handshake {
+            version_major: 1,
+            version_minor: 0,
+            chain_id: 45261,
+            best_height: 0,
+            validator_set_hash: String::new(),
+            supported_schemes: vec![],
+        }
+        .to_bytes();
+        let ack = NetworkMessage::HandshakeAck {
+            version_major: 1,
+            version_minor: 0,
+            chain_id: 45261,
+            best_height: 0,
+            validator_set_hash: String::new(),
+            supported_schemes: vec![],
+        }
+        .to_bytes();
+        let frame = NetworkMessage::AggFrame(vec![0u8; 32]).to_bytes();
+        assert!(NetworkMessage::wire_is_handshake(&hs));
+        assert!(NetworkMessage::wire_is_handshake(&ack));
+        assert!(!NetworkMessage::wire_is_handshake(&frame));
+        assert!(!NetworkMessage::wire_is_handshake(&[]));
+        assert!(!NetworkMessage::wire_is_handshake(&[0xff, 0xff]));
+    }
+
+    #[test]
+    fn wire_frame_caps_rejects_oversized_agg_frame_header() {
+        // Header claims 65_537 claims (> WIRE_FRAME_LIMITS.max_claims).
+        let mut bogus = Vec::with_capacity(20);
+        bogus.extend_from_slice(&65_537u32.to_be_bytes());
+        bogus.extend_from_slice(&1u32.to_be_bytes());
+        bogus.extend_from_slice(&1u32.to_be_bytes());
+        bogus.extend_from_slice(&4u32.to_be_bytes());
+        bogus.extend_from_slice(&[0u8; 4]);
+        let bytes = NetworkMessage::AggFrame(bogus).to_bytes();
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&bytes),
+            Err(MessageError::ParseError(msg)) if msg.contains("agg/frame header exceeds wire limits")
         ));
     }
 }

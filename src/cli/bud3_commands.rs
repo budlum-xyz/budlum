@@ -25,9 +25,7 @@ use crate::storage::bud3::registry::{Bud3Registry, NftId, ObjectKey, RegistryErr
 use crate::storage::bud3::segment::Segmentation;
 use crate::storage::bud3::tx::StorageTxV3;
 use crate::storage::bud3::upload::{FinishedUploadSession, UploadError, UploadSessionManager};
-use crate::storage::bud3::view::{
-    view_from_network, NetworkSymbolSource, PaidViewReceipt, ViewBud3Error,
-};
+use crate::storage::bud3::view::{NetworkSymbolSource, PaidViewReceipt, ViewBud3Error};
 
 /// Domain tag deriving deterministic cross-environment account aliases (`bud alias show`).
 pub const DOMAIN_CLI_ALIAS: &[u8] = b"BDLM_BUD3_CLI_ALIAS_V1";
@@ -209,9 +207,9 @@ pub fn cli_storage_view<N: NetworkSymbolSource>(
             .map_err(CliBud3Error::Gateway);
     }
 
-    let _bundle = Bud3ContentGateway::fetch_symbol_bundle(bud3, &cref, network)
+    let bundle = Bud3ContentGateway::fetch_symbol_bundle(bud3, &cref, network)
         .map_err(CliBud3Error::Gateway)?;
-    view_from_network(bud3, object_commitment, content_key, network).map_err(CliBud3Error::View)
+    Bud3ContentGateway::decode_symbol_bundle(&bundle, content_key).map_err(CliBud3Error::View)
 }
 
 /// Prepare a public upload through optical two-path verification (Y10-Y12).
@@ -675,5 +673,97 @@ mod tests {
         let (nonce, digest) = solve_faucet_pow(&addr, &[0xAB; 32], 8, 100_000).unwrap();
         assert!(leading_zero_bits(&digest) >= 8);
         let _ = nonce;
+    }
+
+    #[test]
+    fn cli_storage_view_fetches_each_share_once() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingNetwork<'a> {
+            inner: &'a MemorySymbolNetwork,
+            calls: AtomicUsize,
+        }
+        impl NetworkSymbolSource for CountingNetwork<'_> {
+            fn fetch_holder_symbols(
+                &self,
+                holder: &crate::storage::bud3::registry::Address,
+                object: &ObjectKey,
+                segment: u64,
+                first_esi: u32,
+                count: u32,
+            ) -> Vec<crate::storage::bud3::fountain::Symbol> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.inner
+                    .fetch_holder_symbols(holder, object, segment, first_esi, count)
+            }
+        }
+
+        let uploader = [0x41; 32];
+        let mut sessions = UploadSessionManager::new(Bud3Limits::default());
+        let mut bud3 = Bud3Registry::default();
+        let mut net = MemorySymbolNetwork::default();
+        let payload = b"single pass cli storage view".repeat(4);
+        let row = PlacementRow {
+            n_full: 2,
+            s_full: 4,
+            n_mobile: 1,
+            s_mobile: 2,
+        };
+        let mut candidates: Vec<Candidate> = (0..2u8)
+            .map(|i| Candidate {
+                validator: [10 + i; 32],
+                account: [10 + i; 32],
+                class: Class::Full,
+                stake: 5_000,
+                free_quota_bytes: u64::MAX,
+                network: None,
+            })
+            .collect();
+        candidates.push(Candidate {
+            validator: [12; 32],
+            account: [12; 32],
+            class: Class::Mobile,
+            stake: 1_000,
+            free_quota_bytes: u64::MAX,
+            network: None,
+        });
+        let finished = cli_storage_upload(
+            &mut sessions,
+            &bud3,
+            &CliUploadParams {
+                uploader,
+                signing_chain_id: 45261,
+                chunk_size: 199,
+                profile: P,
+                lifetime_epochs: 20,
+                now_secs: 100,
+            },
+            &payload,
+            &row,
+            &candidates,
+        )
+        .unwrap();
+        let key = finished.record.commitment;
+        if let StorageTxV3::RegisterObject { shares, .. } = &finished.unsigned_tx {
+            for (seg, sh) in shares {
+                let start = sh.first_esi as usize;
+                let end = start + sh.symbols as usize;
+                net.store_holder_share(
+                    sh.validator,
+                    key,
+                    *seg,
+                    finished.segments[*seg as usize][start..end].to_vec(),
+                );
+            }
+        }
+        apply_bud3_tx(&mut bud3, uploader, finished.unsigned_tx, 1).unwrap();
+        let expected_shares = bud3.object(&key).unwrap().shares.len();
+        let counting = CountingNetwork {
+            inner: &net,
+            calls: AtomicUsize::new(0),
+        };
+        let recovered = cli_storage_view(&bud3, &counting, &key, None, None, None).unwrap();
+        assert_eq!(recovered, payload);
+        assert_eq!(counting.calls.load(Ordering::Relaxed), expected_shares);
     }
 }

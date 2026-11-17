@@ -84,6 +84,10 @@ pub struct VerifiedOpticalObject {
 /// Reconstruct serialized BOF-1 object bytes and parse [`Object`] from a
 /// potentially lossy or out-of-order stream of [`Bud3Frame`]s using RFC 6330.
 ///
+/// Groups frames per segment by `(segment_len, symbol_len, source_symbols)` and
+/// prioritizes majority geometry so a single rogue/corrupted frame with spoofed
+/// dimensions cannot hijack or DoS the segment decoder.
+///
 /// # Errors
 ///
 /// Returns [`TwoPathError`] if any segment lacks enough independent symbols or
@@ -96,27 +100,51 @@ pub fn extract_object_from_frames(
         return Err(TwoPathError::MissingSegment(0));
     }
     const MAX_STREAM_SEGMENTS: usize = 1024;
-    let mut decoders: BTreeMap<u64, (u32, usize, SegmentDecoder)> = BTreeMap::new();
+    type GeomKey = (u32, usize, u32);
+    let mut by_segment: BTreeMap<u64, BTreeMap<GeomKey, Vec<&Bud3Frame>>> = BTreeMap::new();
     for frame in frames {
-        if frame.source_symbols == 0 || frame.source_symbols > Profile::P0.k_max {
+        let _ = u16::try_from(frame.data.len())
+            .map_err(|_| TwoPathError::Frame(FrameWireError::BadGeometry))?;
+        if !by_segment.contains_key(&frame.segment) && by_segment.len() >= MAX_STREAM_SEGMENTS {
             return Err(TwoPathError::Frame(FrameWireError::BadGeometry));
         }
-        let sym_size_u16 = u16::try_from(frame.data.len())
-            .map_err(|_| TwoPathError::Frame(FrameWireError::BadGeometry))?;
-        if let Some((seg_len, sym_len, _)) = decoders.get(&frame.segment) {
-            if *seg_len != frame.segment_len || *sym_len != frame.data.len() {
+        by_segment
+            .entry(frame.segment)
+            .or_default()
+            .entry((frame.segment_len, frame.data.len(), frame.source_symbols))
+            .or_default()
+            .push(frame);
+    }
+
+    let seg_count = u64::try_from(by_segment.len())
+        .map_err(|_| TwoPathError::Frame(FrameWireError::BadGeometry))?;
+    let mut object_bytes = Vec::new();
+    for expected_seg in 0..seg_count {
+        let geom_map = by_segment
+            .remove(&expected_seg)
+            .ok_or(TwoPathError::MissingSegment(expected_seg))?;
+        let multi_geom = geom_map.len() > 1;
+        let mut candidates: Vec<(GeomKey, Vec<&Bud3Frame>)> = geom_map.into_iter().collect();
+        // Try the geometry with the highest frame count first so outlier rogue
+        // frames cannot preempt an honest majority stream.
+        candidates.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+
+        let mut recovered: Option<Vec<u8>> = None;
+        for ((seg_len, sym_len, source_symbols), group) in candidates.into_iter().take(4) {
+            if source_symbols == 0 || source_symbols > Profile::P0.k_max {
+                if multi_geom {
+                    continue;
+                }
                 return Err(TwoPathError::Frame(FrameWireError::BadGeometry));
             }
-        } else {
-            if decoders.len() >= MAX_STREAM_SEGMENTS {
-                return Err(TwoPathError::Frame(FrameWireError::BadGeometry));
-            }
+            let sym_size_u16 = u16::try_from(sym_len)
+                .map_err(|_| TwoPathError::Frame(FrameWireError::BadGeometry))?;
             let eph = Profile {
                 id: 0,
                 qr_version: 40,
                 symbol_size: sym_size_u16,
                 fps: 10,
-                k_max: frame.source_symbols,
+                k_max: source_symbols,
             };
             // A decoder reserves both the padded segment buffer and the per-symbol
             // slot table (~24 bytes per source symbol) regardless of how tiny the
@@ -128,23 +156,37 @@ pub fn extract_object_from_frames(
             meter
                 .charge_bytes(decoder_overhead)
                 .map_err(|e| TwoPathError::Frame(FrameWireError::Budget(e)))?;
-            let dec = SegmentDecoder::new(frame.segment, u64::from(frame.segment_len), &eph)?;
-            decoders.insert(frame.segment, (frame.segment_len, frame.data.len(), dec));
+            let mut dec = match SegmentDecoder::new(expected_seg, u64::from(seg_len), &eph) {
+                Ok(d) => d,
+                Err(_) if multi_geom => continue,
+                Err(e) => return Err(TwoPathError::Fountain(e)),
+            };
+            let mut push_ok = true;
+            for frame in group {
+                if !dec.is_done() {
+                    if let Err(e) = dec.push((*frame).clone().into_symbol(), meter) {
+                        if multi_geom {
+                            push_ok = false;
+                            break;
+                        }
+                        return Err(TwoPathError::Fountain(e));
+                    }
+                }
+            }
+            if !push_ok {
+                continue;
+            }
+            if let Some(seg_bytes) = dec.into_bytes() {
+                recovered = Some(seg_bytes);
+                break;
+            }
         }
-        if let Some((_, _, dec)) = decoders.get_mut(&frame.segment) {
-            dec.push(frame.clone().into_symbol(), meter)?;
-        }
-    }
 
-    let seg_count = decoders.len() as u64;
-    let mut object_bytes = Vec::new();
-    for expected_seg in 0..seg_count {
-        let (_, _, dec) = decoders
-            .remove(&expected_seg)
-            .ok_or(TwoPathError::MissingSegment(expected_seg))?;
-        let seg_bytes = dec
-            .into_bytes()
-            .ok_or(TwoPathError::IncompleteSegment(expected_seg))?;
+        let seg_bytes = recovered.ok_or(if multi_geom {
+            TwoPathError::Frame(FrameWireError::BadGeometry)
+        } else {
+            TwoPathError::IncompleteSegment(expected_seg)
+        })?;
         object_bytes.extend_from_slice(&seg_bytes);
     }
 
@@ -395,5 +437,29 @@ mod tests {
             extract_object_from_frames(&[over], &mut meter),
             Err(TwoPathError::Frame(FrameWireError::BadGeometry))
         ));
+    }
+
+    #[test]
+    fn extract_object_from_frames_survives_poisoned_leading_frame_geometry() {
+        use super::super::fountain::SymbolKind;
+        use super::super::frame::Bud3Frame;
+
+        let content = b"majority honest frames defeat one leading rogue frame".repeat(12);
+        let obj = Object::raw_public(&content);
+        let honest_frames = frames_for_object_bytes(&obj.encode(), &FAST_PROFILE, 3).unwrap();
+        let rogue = Bud3Frame {
+            kind: SymbolKind::Source,
+            segment: 0,
+            segment_len: honest_frames[0].segment_len.saturating_add(19),
+            esi: 0,
+            source_symbols: 99,
+            data: vec![0xAA; 19],
+        };
+        let mut mixed = vec![rogue];
+        mixed.extend(honest_frames);
+
+        let mut meter = Meter::for_object(4 << 20);
+        let recovered = extract_object_from_frames(&mixed, &mut meter).unwrap();
+        assert_eq!(recovered.public_content().unwrap(), content);
     }
 }

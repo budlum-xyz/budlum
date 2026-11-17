@@ -2239,6 +2239,103 @@ impl Storage {
         }
         Ok(bytes)
     }
+
+    fn bud3_symbol_object_prefix(object: &[u8; 32]) -> [u8; 41] {
+        let mut prefix = [0u8; 41];
+        prefix[..9].copy_from_slice(b"BUD3_SYM:");
+        prefix[9..41].copy_from_slice(object);
+        prefix
+    }
+
+    fn bud3_symbol_key(object: &[u8; 32], holder: &[u8; 32], segment: u64, esi: u32) -> [u8; 85] {
+        let mut key = [0u8; 85];
+        key[..9].copy_from_slice(b"BUD3_SYM:");
+        key[9..41].copy_from_slice(object);
+        key[41..73].copy_from_slice(holder);
+        key[73..81].copy_from_slice(&segment.to_be_bytes());
+        key[81..85].copy_from_slice(&esi.to_be_bytes());
+        key
+    }
+
+    /// Persist B.U.D. 3.0 verified symbol items (`VerifiedSymbolItem`) atomically under
+    /// `(object, holder, segment, esi)` for node-local retrieval across restarts.
+    ///
+    /// # Errors
+    ///
+    /// Propagates serialization or `sled` batch persistence failures.
+    pub fn put_bud3_verified_symbols(
+        &self,
+        holder: &[u8; 32],
+        object: &[u8; 32],
+        segment: u64,
+        items: &[crate::storage::bud3::symbol_protocol::VerifiedSymbolItem],
+    ) -> std::io::Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut batch = sled::Batch::default();
+        for item in items {
+            let key = Self::bud3_symbol_key(object, holder, segment, item.symbol.esi);
+            let encoded = encode(item)?;
+            batch.insert(&key, encoded);
+        }
+        self.db.apply_batch(batch)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// Load up to `count` (`<= MAX_SYMBOLS_PER_REQUEST`) stored [`VerifiedSymbolItem`]s
+    /// for `(holder, object, segment)` starting at `first_esi` in ascending ESI order.
+    /// Callers must re-verify proofs against live consensus `Bud3Registry` state before serving.
+    ///
+    /// # Errors
+    ///
+    /// Refuses corrupted/un-decodable entries or `sled` I/O errors.
+    pub fn get_bud3_verified_symbols(
+        &self,
+        holder: &[u8; 32],
+        object: &[u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> std::io::Result<Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>> {
+        let capped = count.min(crate::storage::bud3::symbol_protocol::MAX_SYMBOLS_PER_REQUEST);
+        if capped == 0 {
+            return Ok(Vec::new());
+        }
+        let last_inclusive = first_esi.saturating_add(capped - 1);
+        let start = Self::bud3_symbol_key(object, holder, segment, first_esi);
+        let end = Self::bud3_symbol_key(object, holder, segment, last_inclusive);
+        let mut out = Vec::new();
+        for row in self.db.range(start.as_slice()..=end.as_slice()) {
+            let (_key, val) = row?;
+            let item: crate::storage::bud3::symbol_protocol::VerifiedSymbolItem = decode(&val)?;
+            out.push(item);
+        }
+        Ok(out)
+    }
+
+    /// Delete all locally persisted B.U.D. 3.0 symbols for `object` (for example after
+    /// tombstone/expiry cleanup) and return the number of keys removed.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `sled` scan/batch removal failures.
+    pub fn delete_bud3_object_symbols(&self, object: &[u8; 32]) -> std::io::Result<usize> {
+        let prefix = Self::bud3_symbol_object_prefix(object);
+        let mut batch = sled::Batch::default();
+        let mut deleted = 0usize;
+        for row in self.db.scan_prefix(prefix) {
+            let (key, _) = row?;
+            batch.remove(key);
+            deleted = deleted.saturating_add(1);
+        }
+        if deleted > 0 {
+            self.db.apply_batch(batch)?;
+            self.db.flush()?;
+        }
+        Ok(deleted)
+    }
 }
 
 impl BlockchainStorage for Storage {
@@ -3605,5 +3702,103 @@ mod storage_decode_locks {
 
         // And a readable version is still just read, not defaulted.
         assert!(opened >= 1, "an opened database reports its real version");
+    }
+
+    #[test]
+    fn bud3_verified_symbols_persist_across_reopen_and_delete_by_object() {
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::prepare_public_upload;
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, SymbolRangeRequest,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 path");
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let up_a = prepare_public_upload(
+            b"persisted bud3 payload a",
+            &profile,
+            &Bud3Limits::default(),
+            4,
+        )
+        .unwrap();
+        let up_b = prepare_public_upload(
+            b"persisted bud3 payload b",
+            &profile,
+            &Bud3Limits::default(),
+            4,
+        )
+        .unwrap();
+        let leaves_a: Vec<(u32, [u8; 32])> = up_a.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let leaves_b: Vec<(u32, [u8; 32])> = up_b.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let obj_a = up_a.record.commitment;
+        let obj_b = up_b.record.commitment;
+        let holder = [0x44u8; 32];
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj_a,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves_a,
+            &up_a.segments[0],
+        )
+        .unwrap()
+        .items;
+        let items_b = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj_b,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves_b,
+            &up_b.segments[0],
+        )
+        .unwrap()
+        .items;
+
+        let storage = super::Storage::new(path).expect("storage opens");
+        storage
+            .put_bud3_verified_symbols(&holder, &obj_a, 0, &items_a)
+            .unwrap();
+        storage
+            .put_bud3_verified_symbols(&holder, &obj_b, 0, &items_b)
+            .unwrap();
+        drop(storage);
+
+        let reopened = super::Storage::new(path).expect("storage reopens");
+        let got_a = reopened
+            .get_bud3_verified_symbols(&holder, &obj_a, 0, 1, 2)
+            .unwrap();
+        assert_eq!(got_a.len(), 2);
+        assert_eq!(got_a[0].symbol.esi, 1);
+        assert_eq!(got_a[1].symbol.esi, 2);
+        assert_eq!(reopened.delete_bud3_object_symbols(&obj_a).unwrap(), 4);
+        assert!(reopened
+            .get_bud3_verified_symbols(&holder, &obj_a, 0, 0, 4)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            reopened
+                .get_bud3_verified_symbols(&holder, &obj_b, 0, 0, 4)
+                .unwrap()
+                .len(),
+            4
+        );
     }
 }

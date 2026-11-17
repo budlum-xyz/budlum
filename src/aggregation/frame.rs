@@ -18,11 +18,23 @@
 
 use std::collections::BTreeSet;
 
+use sha3::{Digest, Sha3_256};
+use zeroize::Zeroizing;
+
+use super::backend::AggError;
 use super::claim::{Claim, ClaimError};
-use super::hash::{h, TAG_AGG_MERGE, TAG_AGG_TICK, TAG_FRAME};
+use super::hash::{
+    attestations_digest, h, segment_auth_message, TAG_AGG_MERGE, TAG_AGG_TICK, TAG_FRAME,
+};
 use super::merkle::claims_root;
 use super::params::AggParams;
 use crate::core::address::Address;
+use crate::crypto::ctx;
+use crate::crypto::pq;
+use crate::crypto::primitives::{
+    ADDRESS_DOMAIN_V2, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
+};
+use crate::crypto::scheme::{SchemeId, SchemeStatusRegistry};
 use crate::domain::types::{DomainId, Hash32};
 
 /// Shape op: push the public input of the next segment (a tick proof).
@@ -30,8 +42,8 @@ pub const SHAPE_TICK: u8 = 0;
 /// Shape op: pop two public inputs and push their merge.
 pub const SHAPE_MERGE: u8 = 1;
 
-/// Encoded bytes of a segment: root, count and aggregator.
-const SEGMENT_BYTES: usize = 32 + 4 + 32;
+/// Encoded bytes of a segment: root, count, aggregator, and fixed ML-DSA-87 attestation.
+const SEGMENT_BYTES: usize = 32 + 4 + 32 + ML_DSA_87_PUBLIC_KEY_LEN + ML_DSA_87_SIGNATURE_LEN;
 /// No encoded claim is shorter than this.
 const MIN_CLAIM_BYTES: usize = 64;
 
@@ -49,6 +61,8 @@ pub enum FrameError {
     /// The root of the segment at this index is not the root of its claims
     /// (rule 3).
     ClaimsRootMismatch(usize),
+    /// Signing the segment's aggregator ownership attestation failed.
+    InvalidAttestation,
     /// More claims than the limit (rule 9).
     TooManyClaims(usize),
     /// More proof bytes than the limit (rule 9).
@@ -69,6 +83,7 @@ impl std::fmt::Display for FrameError {
             Self::CountMismatch => write!(f, "segment counts do not add up to the claim count"),
             Self::EmptySegment => write!(f, "a segment covers no claim"),
             Self::ClaimsRootMismatch(at) => write!(f, "claims root of segment {at} does not match"),
+            Self::InvalidAttestation => write!(f, "failed to sign segment aggregator attestation"),
             Self::TooManyClaims(n) => write!(f, "{n} claims are over the limit"),
             Self::ProofTooLarge(n) => write!(f, "{n} proof bytes are over the limit"),
             Self::Truncated => write!(f, "frame bytes are truncated"),
@@ -86,6 +101,50 @@ impl From<ClaimError> for FrameError {
     }
 }
 
+/// ML-DSA-87 signature proving the aggregator that owns `segment.aggregator`
+/// produced that segment's `tick_pi`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SegmentAttestation {
+    /// Aggregator ML-DSA-87 public key (`SHA3-256("BUDLUM_ADDRESS_V2" || pk) == segment.aggregator`).
+    pub public_key: Box<[u8; ML_DSA_87_PUBLIC_KEY_LEN]>,
+    /// ML-DSA-87 signature under [`ctx::AGG_SEGMENT_V1`] over [`segment_auth_message(&tick_pi)`].
+    pub signature: Box<[u8; ML_DSA_87_SIGNATURE_LEN]>,
+}
+
+impl std::fmt::Debug for SegmentAttestation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SegmentAttestation")
+            .field("pk_prefix", &self.public_key.get(..4).unwrap_or(&[]))
+            .field("sig_prefix", &self.signature.get(..4).unwrap_or(&[]))
+            .finish()
+    }
+}
+
+/// Derive a user/aggregator [`Address`] from a 2592-byte ML-DSA-87 public key:
+/// `SHA3-256("BUDLUM_ADDRESS_V2" || public_key)`.
+#[must_use]
+pub fn address_from_ml_dsa_87_pk(public_key: &[u8]) -> Option<Address> {
+    if public_key.len() != ML_DSA_87_PUBLIC_KEY_LEN {
+        return None;
+    }
+    let mut hasher = Sha3_256::new();
+    hasher.update(ADDRESS_DOMAIN_V2);
+    hasher.update(public_key);
+    let digest: [u8; 32] = hasher.finalize().into();
+    Some(Address::from(digest))
+}
+
+/// Derive the aggregator [`Address`] for a 32-byte FIPS 204 ML-DSA-87 seed.
+///
+/// # Errors
+///
+/// [`FrameError::InvalidAttestation`] if key derivation yields malformed bytes.
+pub fn aggregator_address_from_seed(seed: &[u8; 32]) -> Result<Address, FrameError> {
+    let pk = pq::ml_dsa_public_key(SchemeId::ML_DSA_87, seed)
+        .map_err(|_| FrameError::InvalidAttestation)?;
+    address_from_ml_dsa_87_pk(&pk).ok_or(FrameError::InvalidAttestation)
+}
+
 /// The claims one tick proof covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
@@ -95,18 +154,36 @@ pub struct Segment {
     pub count: u32,
     /// The aggregator that proved the tick and earns its share.
     pub aggregator: Address,
+    /// Ownership attestation binding `aggregator` to this segment's `tick_pi`.
+    pub attestation: SegmentAttestation,
 }
 
 /// `tick_pi = H("BDLM_AGG_TICK_V1" || domain || claims_root || count || aggregator)`.
 #[must_use]
-pub fn tick_pi(domain: DomainId, segment: &Segment) -> Hash32 {
+pub fn tick_pi_of(
+    domain: DomainId,
+    claims_root: &Hash32,
+    count: u32,
+    aggregator: &Address,
+) -> Hash32 {
     h(&[
         TAG_AGG_TICK,
         &domain.to_be_bytes(),
-        &segment.claims_root,
-        &segment.count.to_be_bytes(),
-        segment.aggregator.as_bytes(),
+        claims_root,
+        &count.to_be_bytes(),
+        aggregator.as_bytes(),
     ])
+}
+
+/// `tick_pi = H("BDLM_AGG_TICK_V1" || domain || segment.claims_root || segment.count || segment.aggregator)`.
+#[must_use]
+pub fn tick_pi(domain: DomainId, segment: &Segment) -> Hash32 {
+    tick_pi_of(
+        domain,
+        &segment.claims_root,
+        segment.count,
+        &segment.aggregator,
+    )
 }
 
 /// `merge_pi = H("BDLM_AGG_MERGE_V1" || left_pi || right_pi)`.
@@ -115,10 +192,58 @@ pub fn merge_pi(left: &Hash32, right: &Hash32) -> Hash32 {
     h(&[TAG_AGG_MERGE, left, right])
 }
 
-/// `frame_hash = H("BDLM_FRAME_V1" || master_pi || H(proof))`.
+/// `attestations_hash = H("BDLM_AGG_SEGMENT_AUTH_V1" || count_be || (pk_i || sig_i)*)`.
 #[must_use]
-pub fn frame_hash(master_pi: &Hash32, proof: &[u8]) -> Hash32 {
-    h(&[TAG_FRAME, master_pi, &h(&[proof])])
+pub fn attestations_hash(segments: &[Segment]) -> Hash32 {
+    attestations_digest(
+        segments
+            .iter()
+            .map(|seg| (&*seg.attestation.public_key, &*seg.attestation.signature)),
+    )
+}
+
+/// `frame_hash = H("BDLM_FRAME_V1" || master_pi || attestations_hash || H(proof))`.
+#[must_use]
+pub fn frame_hash(master_pi: &Hash32, segments: &[Segment], proof: &[u8]) -> Hash32 {
+    let att_hash = attestations_hash(segments);
+    h(&[TAG_FRAME, master_pi, &att_hash, &h(&[proof])])
+}
+
+/// Verify that every segment carries a valid ML-DSA-87 attestation over
+/// `segment_auth_message(&tick_pi)` whose public key derives `segment.aggregator`.
+///
+/// # Errors
+///
+/// [`AggError::InvalidSegmentAttestation`] naming the first invalid segment.
+pub fn verify_segment_attestations(
+    registry: &SchemeStatusRegistry,
+    domain: DomainId,
+    segments: &[Segment],
+) -> Result<(), AggError> {
+    for (at, segment) in segments.iter().enumerate() {
+        let Some(derived) = address_from_ml_dsa_87_pk(segment.attestation.public_key.as_slice())
+        else {
+            return Err(AggError::InvalidSegmentAttestation(at));
+        };
+        if derived != segment.aggregator {
+            return Err(AggError::InvalidSegmentAttestation(at));
+        }
+        let pi = tick_pi(domain, segment);
+        let msg = segment_auth_message(&pi);
+        if pq::verify_in(
+            registry,
+            SchemeId::ML_DSA_87,
+            segment.attestation.public_key.as_slice(),
+            &msg,
+            ctx::AGG_SEGMENT_V1,
+            segment.attestation.signature.as_slice(),
+        )
+        .is_err()
+        {
+            return Err(AggError::InvalidSegmentAttestation(at));
+        }
+    }
+    Ok(())
 }
 
 /// The public input of the proof of a frame: the fold of the postfix `shape`
@@ -227,16 +352,18 @@ fn write_len(out: &mut Vec<u8>, len: usize) {
 
 impl ClaimFrame {
     /// The frame of one tick: `claims` sorted by digest, one segment owned by
-    /// `aggregator`, and the tick proof.
+    /// the address derived from `signer_seed`, an ML-DSA-87 ownership attestation
+    /// over `tick_pi`, and the tick proof.
     ///
     /// # Errors
     ///
     /// [`FrameError::EmptySegment`] without claims,
-    /// [`FrameError::DuplicateClaim`] when a claim repeats and
-    /// [`FrameError::TooManyClaims`] when the count does not fit the segment.
+    /// [`FrameError::DuplicateClaim`] when a claim repeats,
+    /// [`FrameError::TooManyClaims`] when the count does not fit the segment,
+    /// or [`FrameError::InvalidAttestation`] when signing fails.
     pub fn tick(
         domain: DomainId,
-        aggregator: Address,
+        signer_seed: &[u8; 32],
         claims: Vec<Claim>,
         proof: Vec<u8>,
     ) -> Result<Self, FrameError> {
@@ -255,11 +382,39 @@ impl ClaimFrame {
         let root = claims_root(&digests).map_err(|_| FrameError::EmptySegment)?;
         let count =
             u32::try_from(keyed.len()).map_err(|_| FrameError::TooManyClaims(keyed.len()))?;
+        let pk_vec = pq::ml_dsa_public_key(SchemeId::ML_DSA_87, signer_seed)
+            .map_err(|_| FrameError::InvalidAttestation)?;
+        let pk_arr: [u8; ML_DSA_87_PUBLIC_KEY_LEN] = pk_vec
+            .try_into()
+            .map_err(|_| FrameError::InvalidAttestation)?;
+        let aggregator =
+            address_from_ml_dsa_87_pk(&pk_arr).ok_or(FrameError::InvalidAttestation)?;
+        let pi = tick_pi_of(domain, &root, count, &aggregator);
+        let msg = segment_auth_message(&pi);
+        let mut rnd = Zeroizing::new([0u8; 32]);
+        if rand_core::RngCore::try_fill_bytes(&mut rand_core::OsRng, rnd.as_mut_slice()).is_err() {
+            rnd.copy_from_slice(&[0u8; 32]);
+        }
+        let sig_vec = pq::ml_dsa_sign(
+            SchemeId::ML_DSA_87,
+            signer_seed,
+            &msg,
+            ctx::AGG_SEGMENT_V1,
+            &rnd,
+        )
+        .map_err(|_| FrameError::InvalidAttestation)?;
+        let sig_arr: [u8; ML_DSA_87_SIGNATURE_LEN] = sig_vec
+            .try_into()
+            .map_err(|_| FrameError::InvalidAttestation)?;
         Ok(Self {
             segments: vec![Segment {
                 claims_root: root,
                 count,
                 aggregator,
+                attestation: SegmentAttestation {
+                    public_key: Box::new(pk_arr),
+                    signature: Box::new(sig_arr),
+                },
             }],
             shape: vec![SHAPE_TICK],
             claims: keyed.into_iter().map(|(_, claim)| claim).collect(),
@@ -388,7 +543,7 @@ impl ClaimFrame {
     /// [`FrameError::BadShape`] when the shape does not fold.
     pub fn hash(&self, domain: DomainId) -> Result<Hash32, FrameError> {
         let master_pi = fold_shape(domain, &self.segments, &self.shape)?;
-        Ok(frame_hash(&master_pi, &self.proof))
+        Ok(frame_hash(&master_pi, &self.segments, &self.proof))
     }
 
     /// The canonical encoding: the four lengths (claims, segments, shape,
@@ -404,6 +559,8 @@ impl ClaimFrame {
             out.extend_from_slice(&segment.claims_root);
             out.extend_from_slice(&segment.count.to_be_bytes());
             out.extend_from_slice(segment.aggregator.as_bytes());
+            out.extend_from_slice(segment.attestation.public_key.as_slice());
+            out.extend_from_slice(segment.attestation.signature.as_slice());
         }
         out.extend_from_slice(&self.shape);
         for claim in &self.claims {
@@ -446,10 +603,19 @@ impl ClaimFrame {
         // Capacity follows the bytes that are really there, not the header.
         let mut segments = Vec::with_capacity(segment_count.min(rest.len() / SEGMENT_BYTES));
         for _ in 0..segment_count {
+            let claims_root = read(&mut rest)?;
+            let count = u32::from_be_bytes(read(&mut rest)?);
+            let aggregator = Address::from(read::<32>(&mut rest)?);
+            let public_key = Box::new(read::<ML_DSA_87_PUBLIC_KEY_LEN>(&mut rest)?);
+            let signature = Box::new(read::<ML_DSA_87_SIGNATURE_LEN>(&mut rest)?);
             segments.push(Segment {
-                claims_root: read(&mut rest)?,
-                count: u32::from_be_bytes(read(&mut rest)?),
-                aggregator: Address::from(read::<32>(&mut rest)?),
+                claims_root,
+                count,
+                aggregator,
+                attestation: SegmentAttestation {
+                    public_key,
+                    signature,
+                },
             });
         }
         let (shape, tail) = rest

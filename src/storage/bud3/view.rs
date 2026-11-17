@@ -16,14 +16,15 @@
 
 use super::bof1::Object;
 use super::content_id::{ContentIdKind, ContentKey};
-use super::fountain::{FountainError, SegmentDecoder, Symbol};
+use super::custody::{symbol_leaf, symbol_root};
+use super::fountain::{FountainError, SegmentDecoder, SegmentEncoder, Symbol};
 use super::frame::{frames_for_object_bytes, Bud3Frame};
 use super::meter::Meter;
 use super::pipeline::{view_public, view_sealed, ObjectRecord, PipelineError};
 use super::placement::{Class, Share};
 use super::registry::{Address, Bud3Registry, ObjectKey};
 use super::segment::{commit_object, Segmentation};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Minimum fee in BUD base units required for G8 validator fallback decoding
 /// (`0.0001 BUD` = `100` base units at `10^6` scale, Section 6.5 G8).
@@ -88,8 +89,9 @@ impl MemorySymbolNetwork {
 
 /// Symbol source of a node that holds no symbols and has no symbol transport.
 ///
-/// Every read comes back empty, so a view through it fails with a
-/// missing-symbols error and never returns unverified bytes.
+/// Convenience: exposed for empty-network test callers and fixture views. Every
+/// read comes back empty, so a view through it fails with a missing-symbols
+/// error and never returns unverified bytes.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoSymbolsHeld;
 
@@ -153,8 +155,152 @@ impl From<PipelineError> for ViewBud3Error {
     }
 }
 
+fn verify_segment_candidate(
+    seg: u64,
+    seg_len: u64,
+    record: &ObjectRecord,
+    candidate_syms: &[Symbol],
+    all_share_batches: &[Vec<Symbol>],
+) -> Option<Vec<Symbol>> {
+    let mut dec = SegmentDecoder::new(seg, seg_len, &record.profile).ok()?;
+    let mut meter = Meter::new(
+        seg_len.saturating_mul(4).saturating_add(1 << 20),
+        u64::from(record.symbols_per_segment)
+            .saturating_add(u64::try_from(candidate_syms.len()).unwrap_or(u64::MAX)),
+    );
+    let mut seen = BTreeSet::new();
+    for sym in candidate_syms {
+        if !seen.insert(sym.esi) {
+            continue;
+        }
+        if !dec.is_done() {
+            let _ = dec.push(sym.clone(), &mut meter);
+        }
+    }
+    let bytes = dec.into_bytes()?;
+    if u64::try_from(bytes.len()) != Ok(seg_len) {
+        return None;
+    }
+    let enc = SegmentEncoder::new(seg, &bytes, &record.profile).ok()?;
+    let k = enc.k();
+    let initial_count = record.symbols_per_segment.max(k);
+    let mut initial = enc.source_symbols();
+    initial.extend(
+        enc.repair_symbols(0, initial_count.saturating_sub(k))
+            .ok()?,
+    );
+    if let Some(expected_root) = usize::try_from(seg)
+        .ok()
+        .and_then(|idx| record.symbol_roots.get(idx))
+    {
+        if *expected_root != [0u8; 32] && record.symbols_per_segment >= k {
+            let take_n = usize::try_from(record.symbols_per_segment).ok()?;
+            let leaves: Vec<(u32, [u8; 32])> = initial
+                .iter()
+                .take(take_n)
+                .map(|s| (s.esi, symbol_leaf(&s.data)))
+                .collect();
+            if symbol_root(&leaves) != *expected_root {
+                return None;
+            }
+        }
+    }
+    let mut verified = Vec::new();
+    let mut emitted = BTreeSet::new();
+    for batch in all_share_batches {
+        for sym in batch {
+            if !emitted.insert(sym.esi) {
+                continue;
+            }
+            let matches = if let Some(init_sym) = usize::try_from(sym.esi)
+                .ok()
+                .and_then(|idx| initial.get(idx))
+            {
+                init_sym.data == sym.data
+            } else if sym.esi >= k {
+                enc.repair_symbols(sym.esi - k, 1)
+                    .ok()
+                    .and_then(|mut r| r.pop())
+                    .is_some_and(|r| r.data == sym.data)
+            } else {
+                false
+            };
+            if matches {
+                verified.push(sym.clone());
+            }
+        }
+    }
+    Some(verified)
+}
+
+fn isolate_verified_segment_symbols(
+    seg: u64,
+    seg_len: u64,
+    record: &ObjectRecord,
+    share_batches: &[Vec<Symbol>],
+) -> Vec<Symbol> {
+    let mut all_flat = Vec::new();
+    for b in share_batches {
+        all_flat.extend(b.iter().cloned());
+    }
+    if all_flat.is_empty() {
+        return all_flat;
+    }
+    if let Some(verified) = verify_segment_candidate(seg, seg_len, record, &all_flat, share_batches)
+    {
+        return verified;
+    }
+    // Fast leave-one-share-out isolates a single Byzantine holder without failing recovery.
+    let m = share_batches.len();
+    if m > 1 {
+        for skip in 0..m {
+            let mut subset = Vec::new();
+            for (idx, batch) in share_batches.iter().enumerate() {
+                if idx != skip {
+                    subset.extend(batch.iter().cloned());
+                }
+            }
+            if let Some(verified) =
+                verify_segment_candidate(seg, seg_len, record, &subset, share_batches)
+            {
+                return verified;
+            }
+        }
+    }
+    // Bounded multi-holder fallback (single shares then pairs) when > 1 holder lies.
+    let mut budget = 64usize;
+    for batch in share_batches {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
+        if let Some(verified) = verify_segment_candidate(seg, seg_len, record, batch, share_batches)
+        {
+            return verified;
+        }
+    }
+    for (i, bi) in share_batches.iter().enumerate() {
+        for bj in share_batches.iter().skip(i + 1) {
+            if budget == 0 {
+                return all_flat;
+            }
+            budget -= 1;
+            let mut pair = Vec::with_capacity(bi.len().saturating_add(bj.len()));
+            pair.extend(bi.iter().cloned());
+            pair.extend(bj.iter().cloned());
+            if let Some(verified) =
+                verify_segment_candidate(seg, seg_len, record, &pair, share_batches)
+            {
+                return verified;
+            }
+        }
+    }
+    all_flat
+}
+
 /// Collect symbols for every segment of `object` from `network`, querying
-/// `Class::Full` shares before `Class::Mobile` shares (Section 6.5 G3).
+/// `Class::Full` shares before `Class::Mobile` shares (Section 6.5 G3) and
+/// isolating Byzantine holder replies against `record.symbol_roots`.
 ///
 /// # Errors
 ///
@@ -183,11 +329,41 @@ pub fn collect_symbols_full_then_mobile<N: NetworkSymbolSource>(
         (*seg, rank, sh.first_esi)
     });
 
-    let mut collected = Vec::new();
+    let expected_sym_len = usize::from(record.profile.symbol_size);
+    let mut per_segment_batches: BTreeMap<u64, Vec<Vec<Symbol>>> = BTreeMap::new();
     for (seg, sh) in shares_ordered {
         let syms =
             network.fetch_holder_symbols(&sh.validator, object, seg, sh.first_esi, sh.symbols);
-        collected.extend(syms);
+        let end_esi = sh.first_esi.saturating_add(sh.symbols);
+        let mut seen_esis = BTreeSet::new();
+        let clean: Vec<Symbol> = syms
+            .into_iter()
+            .filter(|s| {
+                s.segment == seg
+                    && s.esi >= sh.first_esi
+                    && s.esi < end_esi
+                    && s.data.len() == expected_sym_len
+                    && seen_esis.insert(s.esi)
+            })
+            .collect();
+        per_segment_batches.entry(seg).or_default().push(clean);
+    }
+
+    let mut collected = Vec::new();
+    if let Some(segmentation) = Segmentation::new(record.object_len, &record.profile) {
+        for (seg, batches) in per_segment_batches {
+            if let Some(seg_len) = segmentation.len(seg) {
+                collected.extend(isolate_verified_segment_symbols(
+                    seg, seg_len, &record, &batches,
+                ));
+            }
+        }
+    } else {
+        for (_, batches) in per_segment_batches {
+            for b in batches {
+                collected.extend(b);
+            }
+        }
     }
     Ok((record, collected))
 }
@@ -323,7 +499,9 @@ impl RevealSessionManager {
                 .ok_or(ViewBud3Error::InsufficientNetworkSymbols(idx))?;
             object_bytes.extend_from_slice(&bytes);
         }
-        if commit_object(&object_bytes, &record.profile) != Some(record.commitment) {
+        if u64::try_from(object_bytes.len()) != Ok(record.object_len)
+            || commit_object(&object_bytes, &record.profile) != Some(record.commitment)
+        {
             return Err(ViewBud3Error::Pipeline(PipelineError::CommitmentMismatch));
         }
         let mut parse_meter = Meter::for_object(record.object_len);
@@ -572,5 +750,72 @@ mod tests {
             ),
             Err(ViewBud3Error::SealedFallbackForbidden)
         );
+    }
+
+    #[test]
+    fn collect_and_reveal_survive_byzantine_full_holder_poisoning() {
+        let mut reg = Bud3Registry::default();
+        let mut net = MemorySymbolNetwork::default();
+
+        let payload = b"Byzantine holder poisoning must not stop verified recovery".repeat(8);
+        let up = prepare_public_upload(&payload, &SMALL, &Bud3Limits::default(), 16).unwrap();
+        let key = up.record.commitment;
+        let rogue_full = [30u8; 32];
+        let honest_full = [31u8; 32];
+        let honest_mobile = [32u8; 32];
+        reg.register_object(
+            [1; 32],
+            up.record,
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: rogue_full,
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: honest_full,
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 6,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: honest_mobile,
+                        class: Class::Mobile,
+                        first_esi: 10,
+                        symbols: 6,
+                    },
+                ),
+            ],
+            0,
+            20,
+        )
+        .unwrap();
+
+        let mut poisoned_share = up.segments[0][0..4].to_vec();
+        poisoned_share[0].data[0] ^= 0xFF;
+        net.store_holder_share(rogue_full, key, 0, poisoned_share);
+        net.store_holder_share(honest_full, key, 0, up.segments[0][4..10].to_vec());
+        net.store_holder_share(honest_mobile, key, 0, up.segments[0][10..16].to_vec());
+
+        assert_eq!(view_from_network(&reg, &key, None, &net).unwrap(), payload);
+
+        let mut reveal_mgr = RevealSessionManager::default();
+        let sid = reveal_mgr.open_reveal(&reg, &key, 2, &net).unwrap();
+        let (_, frames, _) = reveal_mgr.reveal_frames(sid, 0, 32).unwrap();
+        let mut meter = Meter::for_object(1 << 20);
+        let extracted = super::super::two_path::extract_object_from_frames(&frames, &mut meter)
+            .unwrap()
+            .public_content()
+            .unwrap();
+        assert_eq!(extracted, payload);
     }
 }
