@@ -39,7 +39,7 @@ All writes enter exclusively through `SettlementTx::ObjectLayer(Box<ObjectLayerT
 
 ### Testnet `45261` Posture
 
-`ACTIVATION` ships with `height: None`, keeping `SettlementTx::ObjectLayer` closed on public testnet `45261` (`object_layer_is_closed_on_testnet`, `settlement_door_refuses_object_layer_on_testnet`) until post-launch milestone `M7` governance activation.
+The settlement door supplies `ObjectLayerActivation { height: None }` on public testnet `45261` and mainnet `45260`, keeping `SettlementTx::ObjectLayer` closed (`object_layer_is_closed_on_testnet`, `settlement_door_refuses_object_layer_on_testnet`) until post-launch milestone `M7`. Devnet keeps `ACTIVATION` for integration tests.
 
 ---
 
