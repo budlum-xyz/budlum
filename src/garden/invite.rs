@@ -85,17 +85,40 @@ impl GardenInvite {
             // resolvers on untrusted pasted text before genesis verification).
             let (parsed, _) =
                 dial_address(peer).map_err(|e| format!("invite peer {peer} is refused: {e}"))?;
-            if matches!(
-                parsed.iter().next(),
-                Some(
-                    libp2p::multiaddr::Protocol::Dns(_)
-                        | libp2p::multiaddr::Protocol::Dns4(_)
-                        | libp2p::multiaddr::Protocol::Dns6(_)
-                )
-            ) {
-                return Err(format!(
-                    "invite peer {peer} is refused: invite peers must use numeric IP addresses, not DNS names"
-                ));
+            match parsed.iter().next() {
+                Some(libp2p::multiaddr::Protocol::Ip4(ip)) => {
+                    if ip.is_unspecified()
+                        || ip.is_link_local()
+                        || ip.is_multicast()
+                        || ip.is_broadcast()
+                    {
+                        return Err(format!(
+                            "invite peer {peer} is refused: unroutable or link-local IPv4 target"
+                        ));
+                    }
+                }
+                Some(libp2p::multiaddr::Protocol::Ip6(ip)) => {
+                    let bad_mapped = ip.to_ipv4_mapped().is_some_and(|v4| {
+                        v4.is_unspecified()
+                            || v4.is_link_local()
+                            || v4.is_multicast()
+                            || v4.is_broadcast()
+                    });
+                    if ip.is_unspecified()
+                        || ip.is_unicast_link_local()
+                        || ip.is_multicast()
+                        || bad_mapped
+                    {
+                        return Err(format!(
+                            "invite peer {peer} is refused: unroutable or link-local IPv6 target"
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "invite peer {peer} is refused: invite peers must use numeric IP addresses, not DNS names"
+                    ));
+                }
             }
         }
         Ok(())
@@ -276,5 +299,20 @@ mod tests {
         assert!(GardenInvite::parse(&"x".repeat(MAX_INVITE_BYTES + 1)).is_err());
         let no_peer = link.split("&peer=").next().unwrap().to_string();
         assert!(GardenInvite::parse(&no_peer).is_err());
+
+        // DNS/dnsaddr and cloud-metadata link-local/unroutable targets are refused.
+        for bad in [
+            peer("/dns4/relay.example", 4001),
+            peer("/ip4/169.254.169.254", 80),
+            peer("/ip4/0.0.0.0", 4001),
+            peer("/ip4/224.0.0.1", 4001),
+            peer("/ip6/fe80::1", 4001),
+            peer("/ip6/::ffff:169.254.169.254", 80),
+        ] {
+            assert!(
+                GardenInvite::new(&g, token, vec![bad.clone()]).is_err(),
+                "expected invite peer {bad} to be refused"
+            );
+        }
     }
 }
