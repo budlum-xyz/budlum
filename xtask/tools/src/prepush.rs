@@ -192,7 +192,8 @@ pub fn install_hook(root: &Path) -> Result<String, String> {
                 # installed by budlum-tools.\n\
                 exec cargo run --quiet --manifest-path xtask/tools/Cargo.toml \\\n\
                 \x20    --bin budlum-tools -- pre-push\n";
-    std::fs::write(&hook, body).map_err(|e| format!("the hook could not be written at {}: {e}", hook.display()))?;
+    std::fs::write(&hook, body)
+        .map_err(|e| format!("the hook could not be written at {}: {e}", hook.display()))?;
 
     #[cfg(unix)]
     {
@@ -201,10 +202,14 @@ pub fn install_hook(root: &Path) -> Result<String, String> {
             .map_err(|e| format!("could not read the hook permissions: {e}"))?
             .permissions();
         perm.set_mode(0o755);
-        std::fs::set_permissions(&hook, perm).map_err(|e| format!("the hook permissions could not be set: {e}"))?;
+        std::fs::set_permissions(&hook, perm)
+            .map_err(|e| format!("the hook permissions could not be set: {e}"))?;
     }
 
-    Ok(format!("the pre-push hook is installed at {}", hook.display()))
+    Ok(format!(
+        "the pre-push hook is installed at {}",
+        hook.display()
+    ))
 }
 
 /// Are `cargo fmt` and `cargo clippy` available?
@@ -213,10 +218,12 @@ pub fn install_hook(root: &Path) -> Result<String, String> {
 ///
 /// When either of the two components is missing.
 pub fn ensure_components(root: &Path) -> Result<(), String> {
-    run_checked("cargo", &["fmt", "--version"], root)
-        .map_err(|e| format!("`cargo fmt` is not available: {e}. Run `rustup component add rustfmt`"))?;
-    run_checked("cargo", &["clippy", "--version"], root)
-        .map_err(|e| format!("`cargo clippy` is not available: {e}. Run `rustup component add clippy`"))?;
+    run_checked("cargo", &["fmt", "--version"], root).map_err(|e| {
+        format!("`cargo fmt` is not available: {e}. Run `rustup component add rustfmt`")
+    })?;
+    run_checked("cargo", &["clippy", "--version"], root).map_err(|e| {
+        format!("`cargo clippy` is not available: {e}. Run `rustup component add clippy`")
+    })?;
     Ok(())
 }
 
