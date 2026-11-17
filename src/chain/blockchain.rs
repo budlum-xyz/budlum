@@ -15435,8 +15435,10 @@ mod bond_and_reorg_tests {
         assert_eq!(chain.state.calculate_state_root(), root_after_reg);
 
         // Reconstruct directly from verified symbol source.
-        let src = chain.bud3_symbol_source();
-        let recovered = view_from_network(&chain.state.bud3_registry, &obj, None, &src).unwrap();
+        let recovered = {
+            let src = chain.bud3_symbol_source();
+            view_from_network(&chain.state.bud3_registry, &obj, None, &src).unwrap()
+        };
         assert_eq!(recovered, payload);
         drop(chain);
 
