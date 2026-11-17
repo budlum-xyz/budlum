@@ -219,7 +219,7 @@ fn a_producer_carries_the_frame_of_another_aggregator() {
     // A frame for claims `builder` does NOT hold in `AggNode` is ignored
     // (`Ok(false)`) without failing or spending signature checks.
     let mut orphan = node(&[&sender], [0xC1; 32]);
-    let other_tx = transfer(&sender, 1, 1);
+    let other_tx = transfer(&sender, 0, 2);
     orphan.add_transaction(other_tx).expect("admitted");
     let orphan_frames = orphan.aggregation_tick();
     assert_eq!(orphan_frames.len(), 1);

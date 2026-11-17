@@ -52,8 +52,8 @@ pub use identity::{credential_issue_digest, credential_revoke_digest};
 #[cfg(test)]
 pub use identity_fill::{build_presentation, fill_template};
 pub use identity_fill::{
-    check_receipt, credential_proof, document_digest_of, template_slots, value_digest_of,
-    FillError, PresentationReceipt, ReceiptEntry, SlotDisclosure,
+    check_receipt, check_receipt_at, credential_proof, document_digest_of, template_slots,
+    value_digest_of, FillError, PresentationReceipt, ReceiptEntry, SlotDisclosure,
 };
 pub use invalid_vote::InvalidVoteTracker;
 pub use liveness::{LivenessTracker, SuspensionNotice};
