@@ -195,7 +195,11 @@ impl UelTx {
     ///
     /// Returns a deterministic rejection reason when authentication is missing,
     /// belongs to another address, or fails ML-DSA-87 verification.
-    pub fn verify_sender_auth(&self, chain_id: u64) -> Result<(), String> {
+    pub fn verify_sender_auth(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        chain_id: u64,
+    ) -> Result<(), String> {
         if self.auth.public_key.is_empty() || self.auth.signature.is_empty() {
             return Err(String::from("UEL transaction missing sender signature"));
         }
@@ -209,7 +213,8 @@ impl UelTx {
             ));
         }
         let digest = self.signing_message(chain_id);
-        crate::crypto::pq::verify(
+        crate::crypto::pq::verify_in(
+            registry,
             crate::crypto::scheme::SchemeId::ML_DSA_87,
             &self.auth.public_key,
             &digest,
@@ -779,7 +784,7 @@ impl ExecutionCoordinator {
         let mut receipts = Vec::with_capacity(txs.len());
 
         for tx in txs {
-            tx.verify_sender_auth(ctx.chain_id)
+            tx.verify_sender_auth(&state.scheme_registry, ctx.chain_id)
                 .map_err(AttemptError::Deterministic)?;
             if tx.gas_limit_bgu == 0 {
                 return Err(AttemptError::Deterministic(String::from(
