@@ -114,8 +114,8 @@ pub struct SegmentAttestation {
 impl std::fmt::Debug for SegmentAttestation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SegmentAttestation")
-            .field("pk_prefix", &&self.public_key[..4])
-            .field("sig_prefix", &&self.signature[..4])
+            .field("pk_prefix", &self.public_key.get(..4).unwrap_or(&[]))
+            .field("sig_prefix", &self.signature.get(..4).unwrap_or(&[]))
             .finish()
     }
 }
