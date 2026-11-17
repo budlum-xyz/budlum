@@ -222,7 +222,7 @@ impl GardenContentStore {
 
     /// Release a previously reserved background write charge (on write failure
     /// or when the target file already existed on disk).
-    pub fn release_background_charge(&mut self, charged_len: u64) {
+    pub const fn release_background_charge(&mut self, charged_len: u64) {
         self.total_bytes = self.total_bytes.saturating_sub(charged_len);
     }
 
