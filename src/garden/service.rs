@@ -846,6 +846,14 @@ mod tests {
         assert_eq!(domain.status, DomainStatus::Active);
         assert_eq!(domain.last_committed_height, 1);
         assert!(!domain.bridge_enabled);
+        assert!(
+            chain
+                .get_domain_commitments_with_garden()
+                .await
+                .into_iter()
+                .any(|c| u64::from(c.domain_id) == domain_id && c.domain_height == 1),
+            "operator get_domain_commitments_with_garden must expose node-local Garden commitments"
+        );
 
         let left = service.leave().await.unwrap();
         assert_eq!(left["retired"], json!(true));
