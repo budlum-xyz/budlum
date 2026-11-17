@@ -3706,11 +3706,13 @@ impl AccountState {
         }
 
         // ResumeValidator requests whose epoch has come lift the suspension
-        // (section 7.8.7); the validator re-enters the active set. Absence
+        // (section 7.8.7); the validator re-enters the active set only if it
+        // still carries at least the registry minimum stake floor. Absence
         // itself never slashed (V-4).
+        let resume_floor = self.registry.params().min_stake.max(1);
         for resumed in self.liveness.activate_due_resumes(self.epoch_index) {
             if let Some(v) = self.validators.get_mut(&resumed) {
-                if !v.slashed && !v.jailed {
+                if !v.slashed && !v.jailed && v.stake >= resume_floor {
                     v.active = true;
                 }
             }
