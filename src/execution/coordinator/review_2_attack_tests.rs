@@ -636,9 +636,13 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
             String::from("Review2 Token"),
         )
         .expect("register asset");
-        let wasm_ptr =
-            deploy_asset_pointer(&mut state, ctx_h.chain_id, &asset.asset_id, EeId::WASM)
-                .expect("wasm ptr");
+        let wasm_ptr = deploy_asset_pointer(
+            &mut state,
+            test_block_ctx(1).chain_id,
+            &asset.asset_id,
+            EeId::WASM,
+        )
+        .expect("wasm ptr");
         let ptr_bud =
             crate::execution::coordinator::alias::derive_contract_account(EeId::WASM, &wasm_ptr);
         assert_eq!(state.get_attos_balance(&ptr_bud), 0);
