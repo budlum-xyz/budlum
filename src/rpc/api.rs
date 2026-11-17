@@ -1484,6 +1484,22 @@ pub trait BudlumApi {
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Encode and cryptographically commit a canonical cross-VM, multi-language call envelope
+    /// between any two registered executable domains without mutating either chain's inner rules.
+    #[method(name = "bud_encodeCrossVmCall")]
+    async fn encode_cross_vm_call(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Independently verify a composed multi-VM `UnifiedOutputBundle`'s topological order,
+    /// binding commitments, steps Merkle root, and final bundle root.
+    #[method(name = "bud_verifyUniversalBundle")]
+    async fn verify_universal_bundle(
+        &self,
+        bundle: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// WebSocket subscriptions: `kind` is
     /// `newHeads`, `finalizedHeads` or `logs`; `logs` takes an optional
     /// address and yields the transactions that send to or from it.

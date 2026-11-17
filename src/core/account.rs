@@ -2406,7 +2406,11 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS create offer requires zero amount and recipient".into());
                 }
-                let req: crate::bns::CreateNameOffer = bincode::deserialize(&tx.data)
+                let req: crate::bns::CreateNameOffer =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS create offer data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&req.name) {
                     return Err(
@@ -2469,8 +2473,11 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS cancel offer requires zero amount and recipient".into());
                 }
-                let offer_id: u64 = bincode::deserialize(&tx.data)
-                    .map_err(|e| format!("Invalid BNS cancel offer data: {e}"))?;
+                let offer_id: u64 = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS cancel offer data: {e}"))?;
                 let offer = self
                     .marketplace
                     .get_name_offer(offer_id)
@@ -2488,8 +2495,11 @@ impl AccountState {
                         "BNS buy name requires a positive payment and zero header recipient".into(),
                     );
                 }
-                let offer_id: u64 = bincode::deserialize(&tx.data)
-                    .map_err(|e| format!("Invalid BNS buy name data: {e}"))?;
+                let offer_id: u64 = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS buy name data: {e}"))?;
                 let offer = self
                     .marketplace
                     .get_name_offer(offer_id)
@@ -2555,7 +2565,11 @@ impl AccountState {
                 if tx.amount == 0 || tx.to != Address::zero() {
                     return Err("BNS renewal requires a positive payment and zero recipient".into());
                 }
-                let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
+                let (name, duration): (String, u64) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS renewal data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_duration(duration) {
                     return Err(format!(
@@ -2585,7 +2599,11 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS transfer requires zero amount and recipient".into());
                 }
-                let (_name, new_owner): (String, Address) = bincode::deserialize(&tx.data)
+                let (_name, new_owner): (String, Address) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS transfer data: {e}"))?;
                 if new_owner == Address::zero() {
                     return Err("BNS transfer new owner cannot be the zero address".into());
@@ -2604,8 +2622,11 @@ impl AccountState {
                     return Err("BNS set address requires zero amount and recipient".into());
                 }
                 let (name, target, _domain_id): (String, Option<Address>, Option<u32>) =
-                    bincode::deserialize(&tx.data)
-                        .map_err(|e| format!("Invalid BNS set address data: {e}"))?;
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS set address data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&name) {
                     return Err("Invalid BNS name".into());
                 }
@@ -2623,7 +2644,11 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS set primary name requires zero amount and recipient".into());
                 }
-                let primary: Option<String> = bincode::deserialize(&tx.data)
+                let primary: Option<String> =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS set primary name data: {e}"))?;
                 if let Some(ref name) = primary {
                     if !crate::bns::BnsRegistry::is_valid_name(name) {
@@ -2647,8 +2672,11 @@ impl AccountState {
                     return Err("BNS set records requires zero amount and recipient".into());
                 }
                 let (name, updates): (String, std::collections::BTreeMap<String, Option<String>>) =
-                    bincode::deserialize(&tx.data)
-                        .map_err(|e| format!("Invalid BNS set records data: {e}"))?;
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS set records data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&name) {
                     return Err("Invalid BNS name".into());
                 }
@@ -2679,8 +2707,11 @@ impl AccountState {
                 let (name, cref): (
                     String,
                     Option<crate::storage::bud3::content_ref::ContentRef>,
-                ) = bincode::deserialize(&tx.data)
-                    .map_err(|e| format!("Invalid BNS set content data: {e}"))?;
+                ) = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS set content data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&name) {
                     return Err("Invalid BNS name".into());
                 }
@@ -2719,8 +2750,11 @@ impl AccountState {
                     return Err("BNS register subdomain requires zero amount and recipient".into());
                 }
                 let (parent, sub_label, sub_owner): (String, String, Address) =
-                    bincode::deserialize(&tx.data)
-                        .map_err(|e| format!("Invalid BNS subdomain data: {e}"))?;
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS subdomain data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&parent)
                     || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
                     || sub_owner == Address::zero()
@@ -2738,7 +2772,11 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS remove subdomain requires zero amount and recipient".into());
                 }
-                let (parent, sub_label): (String, String) = bincode::deserialize(&tx.data)
+                let (parent, sub_label): (String, String) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS remove subdomain data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&parent)
                     || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
@@ -2769,8 +2807,11 @@ impl AccountState {
                     String,
                     String,
                     Option<crate::storage::bud3::content_ref::ContentRef>,
-                ) = bincode::deserialize(&tx.data)
-                    .map_err(|e| format!("Invalid BNS set subdomain content data: {e}"))?;
+                ) = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS set subdomain content data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&parent)
                     || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
                 {
@@ -2789,8 +2830,11 @@ impl AccountState {
                     return Err("BNS set storage requires zero amount and recipient".into());
                 }
                 let (name, _root, _dom_id): (String, [u8; 32], u32) =
-                    bincode::deserialize(&tx.data)
-                        .map_err(|e| format!("Invalid BNS set storage data: {e}"))?;
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS set storage data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&name) {
                     return Err("Invalid BNS name".into());
                 }

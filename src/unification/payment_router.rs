@@ -829,7 +829,7 @@ mod tests {
             deadline_unix_secs: 2_000,
             invoice_hash: [0xCC; 32],
             rail: PaymentRail::PosTerminal {
-                terminal_id: String::from("POS-IST-0042"),
+                terminal_id: String::from("POS-TERM-0042"),
                 merchant_code: String::from("MCC5411"),
                 iso_currency_code: String::from("USD"),
             },
