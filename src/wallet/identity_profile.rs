@@ -474,7 +474,9 @@ pub fn build_passport_profile(
 }
 
 /// Build an evidence-labelled `.bud` identity profile with optional per-name
-/// Merkle state-proof verification and bidirectional primary-name binding.
+/// Merkle state-proof verification. The primary name is the answering node's
+/// reverse resolution: it is disclosed and carded as unverified, because the
+/// per-name proof does not commit to the `primary_names` map.
 pub fn build_identity_profile_verified(
     name: String,
     resolved: Option<BnsResolved>,
@@ -660,12 +662,29 @@ pub fn build_identity_profile_verified(
         ),
     });
 
+    // Reverse resolution is answered by this node from `primary_names`, which
+    // the per-name proof does not commit to: `meta_digest` folds the whole map
+    // and `prove_name` returns no path for one address. Whoever answers can
+    // therefore name any live `.bud` record as this address's primary name, so
+    // the claim is carded as node-asserted instead of riding along with the
+    // proof-bound fields.
     let primary_name = proof_ctx.and_then(|ctx| {
         ctx.reverse_primary_name
             .as_ref()
             .filter(|primary| !resolved.is_expired && BnsRegistry::is_valid_name(primary))
             .cloned()
     });
+    if let Some(ref primary) = primary_name {
+        evidence.push(EvidenceCard {
+            subject: "primary_name".into(),
+            status: EvidenceStatus::Unverified,
+            source: "BNS reverse resolution on the answering node".into(),
+            root: None,
+            warning: Some(format!(
+                "{primary} is asserted by the answering node; the per-name BNS proof commits to `primary_names` only as a whole, so this address to name binding is unproven"
+            )),
+        });
+    }
     let social = IdentitySocialSummary::from_records(&resolved.records);
     let subdomains_count = resolved.subdomains.len();
 
@@ -1126,6 +1145,16 @@ mod tests {
                 .status,
             EvidenceStatus::Verified
         );
+        let primary_card = profile
+            .evidence
+            .iter()
+            .find(|c| c.subject == "primary_name")
+            .expect("primary_name must always carry an explicit evidence card");
+        assert_eq!(primary_card.status, EvidenceStatus::Unverified);
+        assert!(primary_card
+            .warning
+            .as_deref()
+            .is_some_and(|w| w.contains("ayaz.bud") && w.contains("answering node")));
         let bundle = try_build_passport_proof_bundle(&profile, 88).unwrap();
         assert!(bundle.validate_against_profile(&profile).is_ok());
 
