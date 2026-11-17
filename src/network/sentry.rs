@@ -27,6 +27,11 @@
 //!    - Never inserts `private_peers` into Kademlia or peer-exchange responses,
 //!      hiding the validator's `PeerId` and private IP from the public network.
 
+pub use super::sentry_gate::{
+    peer_id_from_multiaddr, SentryGateBehaviour, SentryGateEvent, SentryShieldConfig,
+    RESERVED_SHIELD_SLOTS,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
@@ -496,6 +501,12 @@ impl SentryPolicy {
     #[must_use]
     pub const fn should_advertise_external(&self) -> bool {
         !matches!(self.role, SentryRole::ShieldedValidator)
+    }
+
+    /// Returns all private shielded validator `PeerId`s protected by this sentry.
+    #[must_use]
+    pub fn private_peer_ids(&self) -> Vec<PeerId> {
+        self.private_peers.iter().copied().collect()
     }
 
     /// Returns `true` when `peer_id` is a private shielded validator whose
