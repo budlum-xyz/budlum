@@ -604,22 +604,34 @@ mod upload_delivery_tests {
             .register_object(
                 [1; 32],
                 prepared.record,
-                vec![(
-                    0,
-                    Share {
-                        validator: [10; 32],
-                        class: Class::Full,
-                        first_esi: 0,
-                        symbols: 4,
-                    },
-                )],
+                vec![
+                    (
+                        0,
+                        Share {
+                            validator: [10; 32],
+                            class: Class::Full,
+                            first_esi: 0,
+                            symbols: 2,
+                        },
+                    ),
+                    (
+                        0,
+                        Share {
+                            validator: [11; 32],
+                            class: Class::Full,
+                            first_esi: 2,
+                            symbols: 2,
+                        },
+                    ),
+                ],
                 0,
                 20,
             )
             .unwrap();
 
         let mut net = MemorySymbolNetwork::default();
-        net.store_holder_share([10; 32], key, 0, prepared.segments[0].clone());
+        net.store_holder_share([10; 32], key, 0, prepared.segments[0][..2].to_vec());
+        net.store_holder_share([11; 32], key, 0, prepared.segments[0][2..].to_vec());
 
         let receipt_id = [0xD3; 32];
         let payer = [2u8; 32];

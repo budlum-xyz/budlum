@@ -10,6 +10,20 @@ pub type Hash32 = [u8; 32];
 
 pub const POW_HEADER_CHAIN_ADAPTER: &str = "pow-header-chain-v1";
 
+/// Canonical name of the Bitcoin SPV finality adapter.
+///
+/// Set as the `ConsensusDomain::finality_adapter` value when registering a
+/// `PoW` domain whose headers are Bitcoin headers (80-byte serialization,
+/// double-SHA256, compact `bits` targets, Bitcoin-style chainwork). It is a
+/// separate name from `POW_HEADER_CHAIN_ADAPTER` because the two adapters
+/// hash different header preimages and accumulate work under different
+/// rules; a proof for one must never be judged by the other. Registration
+/// accepts `pow_parameters` for this adapter exactly as for
+/// `POW_HEADER_CHAIN_ADAPTER` (difficulty bounds, chainwork floor, header
+/// ceiling), and `min_confirmations` is read the same way: the window starts
+/// at the committed header and must be at least that deep.
+pub const BITCOIN_SPV_ADAPTER: &str = "bitcoin-spv-v1";
+
 /// Canonical name of the storage-attestation domain finality adapter.
 ///
 /// Set as the `ConsensusDomain::finality_adapter` value when registering a
@@ -192,7 +206,8 @@ pub struct ConsensusDomain {
     pub tx_root_scheme: RootScheme,
     pub last_committed_height: u64,
     pub last_committed_hash: Hash32,
-    /// Required when `finality_adapter == "pow-header-chain-v1"`.
+    /// Required when `finality_adapter == "pow-header-chain-v1"` or
+    /// `finality_adapter == "bitcoin-spv-v1"`; rejected otherwise.
     /// Appended for bincode field-order stability; legacy records are migrated
     /// By the storage loader and remain bridge-gated.
     #[serde(default)]
