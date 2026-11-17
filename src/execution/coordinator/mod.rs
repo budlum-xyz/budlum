@@ -1253,8 +1253,10 @@ impl HostApi for HostBridge<'_> {
             Some(budget),
         )?;
         if call.value.0 > 0 {
-            let unit = BudEnvUnit::for_ee(call.to_ee)
-                .ok_or_else(|| HostError::Invalid(String::from("unsupported target EE")))?;
+            let Some(unit) = BudEnvUnit::for_ee(call.to_ee) else {
+                self.overlay.rollback_universal_frame(self.state);
+                return Err(HostError::Invalid(String::from("unsupported target EE")));
+            };
             let src = resolve_identity_address_in_state(
                 &self.state.execution_state,
                 call.from.ee,
