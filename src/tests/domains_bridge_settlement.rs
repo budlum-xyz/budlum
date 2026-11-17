@@ -1,6 +1,6 @@
 //! Domains, cross-domain bridge, settlement, and testnet feature-matrix
 //! regression locks (`zk_domain_refuses_empty_halt_proof`,
-//! `bridge_e2e_lock_mint_burn_unlock`, `ethereum_sync_committee_is_open_on_testnet`,
+//! `bridge_e2e_lock_mint_burn_unlock`, `ethereum_sync_committee_is_closed_on_testnet`,
 //! `shared_security_is_closed_on_testnet`, `app_binding_is_open_on_devnet`,
 //! and functional regression names).
 
@@ -225,7 +225,7 @@ fn zk_domain_refuses_empty_halt_proof() {
 fn zkvm_adapter_refuses_bare_halt_program() {
     zk_domain_refuses_empty_halt_proof();
     assert!(
-        crate::core::chain_config::Network::Testnet
+        !crate::core::chain_config::Network::Testnet
             .shared_security()
             .enabled
     );
@@ -236,10 +236,11 @@ fn zkvm_adapter_refuses_bare_halt_program() {
     );
 }
 
-/// Ethereum sync-committee external domain registration is open on Testnet (`45261`)
-/// with real BLS12-381 verification and gated on Mainnet (`45260`).
+/// Ethereum sync-committee verification exists, but external-domain admission
+/// remains closed on public Testnet (`45261`) and Mainnet (`45260`) until the
+/// weak-subjectivity and production-rehearsal gates pass.
 #[test]
-fn ethereum_sync_committee_is_open_on_testnet() {
+fn ethereum_sync_committee_is_closed_on_testnet() {
     use bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
 
     let poster = addr(0x21);
@@ -308,9 +309,12 @@ fn ethereum_sync_committee_is_open_on_testnet() {
         bls: IntakeState::production_bls,
     };
     let tx = ExternalDomainTx::Register(Box::new(request));
-    execute_external_domain_tx(&mut state, &ctx, &tx)
-        .expect("EthereumSync must register cleanly on testnet 45261");
-    assert_eq!(state.settlement.external_intake.entries.len(), 1);
+    let before = state.calculate_state_root();
+    let err = execute_external_domain_tx(&mut state, &ctx, &tx)
+        .expect_err("EthereumSync must remain closed on public testnet");
+    assert_eq!(err, ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    assert_eq!(state.calculate_state_root(), before);
+    assert!(state.settlement.external_intake.entries.is_empty());
 
     let mainnet_ctx = ExternalDomainTxContext {
         sender: poster,
@@ -324,8 +328,8 @@ fn ethereum_sync_committee_is_open_on_testnet() {
 }
 
 #[test]
-fn ethereum_sync_committee_open_on_testnet_chain_id() {
-    ethereum_sync_committee_is_open_on_testnet();
+fn ethereum_sync_committee_closed_on_testnet_chain_id() {
+    ethereum_sync_committee_is_closed_on_testnet();
 }
 
 /// Shared security is a post-launch feature. Public Testnet (`45261`) and
