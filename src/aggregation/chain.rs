@@ -184,11 +184,12 @@ const fn is_claimable(tx: &Transaction) -> bool {
 /// The claim the account rule asks for: `Claim::Sig { scheme of the
 /// account, signer: tx.from, msg_hash: tx.signing_hash() }`. `None` when the
 /// account cannot be authorized by a claim.
-/// The claim the account rule asks for:
-/// - for a program account (`auth_program_hash == Some(h)`):
-///   `Claim::Prog { program_hash: h, input_hash: tx.signing_hash(), output_hash: AUTH_OK }`;
-/// - otherwise for an ML-DSA-87 V5 account:
-///   `Claim::Sig { scheme: ML_DSA_87, signer: tx.from, msg_hash: tx.signing_hash() }`.
+/// Returns the required authorization claim for `tx`.
+///
+/// For a program account (`auth_program_hash == Some(h)`), this is
+/// `Claim::Prog { program_hash: h, input_hash: tx.signing_hash(), output_hash: AUTH_OK }`.
+/// Otherwise for an ML-DSA-87 V5 account, this is
+/// `Claim::Sig { scheme: ML_DSA_87, signer: tx.from, msg_hash: tx.signing_hash() }`.
 ///
 /// Returns `None` when the account cannot be authorized by a claim.
 #[must_use]
@@ -203,9 +204,10 @@ pub fn account_claim_for(tx: &Transaction, auth_program_hash: Option<Hash32>) ->
     account_claim(tx)
 }
 
-/// The claim the account rule asks for on a standard signature account:
-/// `Claim::Sig { scheme of the account, signer: tx.from, msg_hash: tx.signing_hash() }`.
-/// `None` when the account cannot be authorized by a signature claim.
+/// Returns the signature authorization claim for a standard V5 account.
+///
+/// Produces `Claim::Sig { scheme: ML_DSA_87, signer: tx.from, msg_hash: tx.signing_hash() }`,
+/// or `None` when the account cannot be authorized by a signature claim.
 #[must_use]
 pub fn account_claim(tx: &Transaction) -> Option<Claim> {
     is_claimable(tx).then(|| Claim::Sig {
@@ -215,12 +217,10 @@ pub fn account_claim(tx: &Transaction) -> Option<Claim> {
     })
 }
 
-/// Turn an unsigned or inline-signed transaction from a program account
-/// (`Account.auth_program_hash == Some(auth_program_hash)`) into its claimed
-/// form and its `ObjectKind::StarkProof` envelope for `agg/object`.
+/// Converts a program-account transaction into its claimed form and `agg/object` envelope.
 ///
-/// The resulting transaction carries zero inline signature bytes and binds
-/// `auth_claim = Some(Claim::Prog { program_hash, input_hash: tx.signing_hash(), output_hash: AUTH_OK }.digest(domain))`.
+/// Strips inline signature bytes and binds `auth_claim` to
+/// `Claim::Prog { program_hash, input_hash: tx.signing_hash(), output_hash: AUTH_OK }`.
 /// The hidden authorization logic never appears on chain.
 #[must_use]
 pub fn claim_program_auth(

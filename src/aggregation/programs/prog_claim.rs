@@ -47,10 +47,12 @@ const ENCODING_DEFLATE: u8 = 1;
 
 /// Maximum instruction words in a `StarkProofObject` guest program.
 const MAX_PROG_WORDS: usize = 4_096;
-/// Hard cap on decompressed bytes inside a `StarkProofObject` (prevents zip-bomb DoS).
+/// Hard cap on decompressed bytes inside a `StarkProofObject` (prevents zip-bomb `DoS`).
 const MAX_DECOMPRESSED_STARK_BYTES: usize = 4 * 1024 * 1024;
 /// Number of 32-bit little-endian limbs per 32-byte digest.
 pub(crate) const DIGEST_LIMBS: usize = 8;
+/// Number of 32-bit limbs per digest as `u32`.
+pub(crate) const DIGEST_LIMBS_U32: u32 = 8;
 
 /// Errors returned when building or proving a Phase 4 program claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,32 +219,34 @@ pub(crate) fn write_digest_cells(vm: &mut Vm, base_cell: u64, digest: &Hash32) {
 
 /// Writes one 64-bit Goldilocks word into `vm.memory` at `cell`.
 pub(crate) fn write_cell(vm: &mut Vm, cell: u64, value: u64) {
-    let off = (cell as usize) * 8;
+    let off = usize::try_from(cell).unwrap_or(0).saturating_mul(8);
     vm.memory[off..off + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 /// Emits 8 `SWrite` instructions publishing the 8 limbs at `base_cell` into
 /// consecutive storage slots starting at `start_slot`.
 pub(crate) fn emit_swrite_digest_cells(a: &mut Asm, base_cell: u64, start_slot: u32) {
-    for i in 0..DIGEST_LIMBS as u64 {
-        a.load_abs(R[1], base_cell + i);
-        a.swrite(start_slot + i as u32, R[1]);
+    for i in 0..DIGEST_LIMBS_U32 {
+        a.load_abs(R[1], base_cell + u64::from(i));
+        a.swrite(start_slot + i, R[1]);
     }
 }
 
 /// Emits 8 `SWrite` instructions publishing a constant 32-byte digest into
 /// consecutive storage slots starting at `start_slot`.
 pub(crate) fn emit_swrite_const_digest(a: &mut Asm, digest: &Hash32, start_slot: u32) {
-    for (i, chunk) in digest.chunks_exact(4).enumerate() {
+    for (i, chunk) in (0u32..).zip(digest.chunks_exact(4)) {
         let limb = u64::from(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         a.li(R[1], limb);
-        a.swrite(start_slot + i as u32, R[1]);
+        a.swrite(start_slot + i, R[1]);
     }
 }
 
-/// Runs a seeded `BudVM` guest program, verifies it halts cleanly with the
-/// expected `(input_hash, output_hash)` `SWrite` commitment, and produces a
-/// real 128-bit `BudAir` [`StarkProofObject`] bound to `domain`.
+/// Executes and proves a `BudVM` guest program into a [`StarkProofObject`].
+///
+/// Checks that the guest halts with `exit_code == 0` and commits
+/// `(input_hash, output_hash)` via `SWrite[0..16]`, then generates a real
+/// 128-bit `BudAir` proof bound to `domain`.
 ///
 /// # Errors
 ///
