@@ -267,11 +267,35 @@ fn isolate_verified_segment_symbols(
             }
         }
     }
-    // Bounded multi-holder fallback (single shares then pairs) when > 1 holder lies.
-    let mut budget = 64usize;
+    // Bounded multi-holder fallback (leave-two-out, single shares, then pairs)
+    // capped at `budget` evaluations so CWE-400 complexity stays strictly bounded.
+    let mut budget = 128usize;
+    if m >= 3 {
+        for skip_a in 0..m {
+            for skip_b in (skip_a + 1)..m {
+                if budget == 0 {
+                    return Vec::new();
+                }
+                budget -= 1;
+                let mut subset = Vec::new();
+                for (idx, batch) in share_batches.iter().enumerate() {
+                    if idx != skip_a && idx != skip_b {
+                        subset.extend(batch.iter().cloned());
+                    }
+                }
+                if !subset.is_empty() {
+                    if let Some(verified) =
+                        verify_segment_candidate(seg, seg_len, record, &subset, share_batches)
+                    {
+                        return verified;
+                    }
+                }
+            }
+        }
+    }
     for batch in share_batches {
         if budget == 0 {
-            break;
+            return Vec::new();
         }
         budget -= 1;
         if let Some(verified) = verify_segment_candidate(seg, seg_len, record, batch, share_batches)
@@ -282,7 +306,7 @@ fn isolate_verified_segment_symbols(
     for (i, bi) in share_batches.iter().enumerate() {
         for bj in share_batches.iter().skip(i + 1) {
             if budget == 0 {
-                return all_flat;
+                return Vec::new();
             }
             budget -= 1;
             let mut pair = Vec::with_capacity(bi.len().saturating_add(bj.len()));
@@ -295,7 +319,9 @@ fn isolate_verified_segment_symbols(
             }
         }
     }
-    all_flat
+    // Never forward unverified Byzantine symbols when no subset verifies against
+    // the segment's symbol root and decoded byte length.
+    Vec::new()
 }
 
 /// Collect symbols for every segment of `object` from `network`, querying
@@ -349,20 +375,15 @@ pub fn collect_symbols_full_then_mobile<N: NetworkSymbolSource>(
         per_segment_batches.entry(seg).or_default().push(clean);
     }
 
+    let segmentation = Segmentation::new(record.object_len, &record.profile).ok_or(
+        ViewBud3Error::Pipeline(PipelineError::Fountain(FountainError::InvalidProfile)),
+    )?;
     let mut collected = Vec::new();
-    if let Some(segmentation) = Segmentation::new(record.object_len, &record.profile) {
-        for (seg, batches) in per_segment_batches {
-            if let Some(seg_len) = segmentation.len(seg) {
-                collected.extend(isolate_verified_segment_symbols(
-                    seg, seg_len, &record, &batches,
-                ));
-            }
-        }
-    } else {
-        for (_, batches) in per_segment_batches {
-            for b in batches {
-                collected.extend(b);
-            }
+    for (seg, batches) in per_segment_batches {
+        if let Some(seg_len) = segmentation.len(seg) {
+            collected.extend(isolate_verified_segment_symbols(
+                seg, seg_len, &record, &batches,
+            ));
         }
     }
     Ok((record, collected))
@@ -465,12 +486,19 @@ impl RevealSessionManager {
         let _ = usize::try_from(seg_count)
             .map_err(|_| ViewBud3Error::Pipeline(PipelineError::TooLarge))?;
         let mut decoders: BTreeMap<u64, SegmentDecoder> = BTreeMap::new();
-        let mut meter = Meter::new(
-            record.object_len.saturating_mul(4).saturating_add(1 << 20),
-            u64::from(record.symbols_per_segment).saturating_mul(seg_count),
-        );
+        let mut seen_esis: BTreeSet<(u64, u32)> = BTreeSet::new();
+        let step_budget = u64::from(
+            record
+                .symbols_per_segment
+                .saturating_add(super::fountain::MAX_EXTRA_SYMBOLS),
+        )
+        .saturating_mul(seg_count);
+        let byte_budget = step_budget
+            .saturating_mul(u64::from(record.profile.symbol_size))
+            .max(record.object_len.saturating_mul(4).saturating_add(1 << 20));
+        let mut meter = Meter::new(byte_budget, step_budget);
         for sym in symbols {
-            if sym.segment >= seg_count {
+            if sym.segment >= seg_count || !seen_esis.insert((sym.segment, sym.esi)) {
                 continue;
             }
             if let std::collections::btree_map::Entry::Vacant(e) = decoders.entry(sym.segment) {
@@ -817,5 +845,67 @@ mod tests {
             .public_content()
             .unwrap();
         assert_eq!(extracted, payload);
+    }
+
+    #[test]
+    fn collect_survives_two_simultaneous_byzantine_holders_and_refuses_total_poison() {
+        let mut reg = Bud3Registry::default();
+        let mut net = MemorySymbolNetwork::default();
+
+        // Incompressible 1,536-byte payload => k = 13 > 8 with symbols_per_segment = 20 across
+        // 5 shares of 4 symbols each: recovering requires at least 4 or 3 honest shares (> 2 shares),
+        // so leave-one-out and pairs both fail when 2 holders are Byzantine, and leave-two-out recovers.
+        let payload: Vec<u8> = (0u64..48)
+            .flat_map(|i| crate::core::hash::hash_fields_bytes(&[b"BYZ5", &i.to_le_bytes()]))
+            .collect();
+        let up = prepare_public_upload(&payload, &SMALL, &Bud3Limits::default(), 20).unwrap();
+        let key = up.record.commitment;
+        let validators = [[40u8; 32], [41u8; 32], [42u8; 32], [43u8; 32], [44u8; 32]];
+        let shares: Vec<(u64, Share)> = validators
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                (
+                    0,
+                    Share {
+                        validator: *v,
+                        class: Class::Full,
+                        first_esi: u32::try_from(i).unwrap() * 4,
+                        symbols: 4,
+                    },
+                )
+            })
+            .collect();
+        reg.register_object([1; 32], up.record, shares, 0, 20)
+            .unwrap();
+
+        let mut bad0 = up.segments[0][0..4].to_vec();
+        bad0[0].data[5] ^= 0xAA;
+        let mut bad1 = up.segments[0][4..8].to_vec();
+        bad1[1].data[9] ^= 0x55;
+        net.store_holder_share(validators[0], key, 0, bad0);
+        net.store_holder_share(validators[1], key, 0, bad1);
+        net.store_holder_share(validators[2], key, 0, up.segments[0][8..12].to_vec());
+        net.store_holder_share(validators[3], key, 0, up.segments[0][12..16].to_vec());
+        net.store_holder_share(validators[4], key, 0, up.segments[0][16..20].to_vec());
+
+        assert_eq!(view_from_network(&reg, &key, None, &net).unwrap(), payload);
+
+        // When all shares are poisoned, collect_symbols_full_then_mobile returns zero
+        // unverified symbols rather than leaking Byzantine bytes.
+        for (i, v) in validators.iter().enumerate() {
+            let mut poisoned = up.segments[0][(i * 4)..((i + 1) * 4)].to_vec();
+            poisoned[0].data[0] ^= 0xFF;
+            net.store_holder_share(*v, key, 0, poisoned);
+        }
+        let (_, syms) = collect_symbols_full_then_mobile(&reg, &key, &net).unwrap();
+        assert!(
+            syms.is_empty(),
+            "unverified Byzantine symbols must never leak out of collect_symbols_full_then_mobile"
+        );
+        assert!(matches!(
+            view_from_network(&reg, &key, None, &net),
+            Err(ViewBud3Error::Pipeline(PipelineError::SegmentMissing(0)))
+        ));
     }
 }

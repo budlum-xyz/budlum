@@ -242,6 +242,9 @@ impl Counters {
 }
 
 /// Everything a request handler needs, built once at startup.
+type ResolvedCache = std::collections::BTreeMap<String, (u64, CachedResolution)>;
+type ManifestCache = std::collections::BTreeMap<[u8; 32], (usize, Arc<SiteManifest>)>;
+
 struct GatewayState {
     config: GatewayConfig,
     suffix: String,
@@ -253,8 +256,8 @@ struct GatewayState {
     limiter: std::sync::Mutex<RateLimiter>,
     fill_limiter: std::sync::Mutex<RateLimiter>,
     cache: std::sync::Mutex<ContentCache>,
-    resolved: std::sync::Mutex<std::collections::BTreeMap<String, (u64, CachedResolution)>>,
-    manifests: std::sync::Mutex<std::collections::BTreeMap<[u8; 32], (usize, Arc<SiteManifest>)>>,
+    resolved: std::sync::Mutex<ResolvedCache>,
+    manifests: std::sync::Mutex<ManifestCache>,
     counters: Counters,
 }
 

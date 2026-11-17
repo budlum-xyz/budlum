@@ -8543,6 +8543,17 @@ impl BudlumApiServer for RpcServer {
         Ok(val)
     }
 
+    async fn storage_get_grant(
+        &self,
+        grant_tag: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let tag = parse_hex32_field(&grant_tag, "grant_tag")?;
+        self.chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Grant(tag))
+            .await
+            .map_err(|_| bud3_actor_unavailable())
+    }
+
     async fn storage_store_verified_symbols(
         &self,
         holder: String,

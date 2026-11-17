@@ -1423,6 +1423,14 @@ pub trait BudlumApi {
         nft_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Look up an unlinkable B.U.D. 3.0 view grant (`GrantRow`) by 32-byte `grant_tag`
+    /// evaluated against live consensus epoch (`active`, `expired`, `revoked`, or null).
+    #[method(name = "bud_storageGetGrant")]
+    async fn storage_get_grant(
+        &self,
+        grant_tag: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Operator-only local admission of Merkle-verified B.U.D. 3.0 custody symbols.
     /// Every item is verified against consensus `Bud3Registry` roots before persistence.
     #[method(name = "bud_storageStoreVerifiedSymbols")]
