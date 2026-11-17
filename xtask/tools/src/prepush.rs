@@ -234,11 +234,11 @@ mod tests {
             .find(|(label, _)| label.contains("clippy"))
             .expect("a clippy check has to be on the list");
         assert!(
-            !clippy.1.iter().any(|arg| *arg == "--all-features"),
+            !clippy.1.contains(&"--all-features"),
             "the local clippy gate must not pass --all-features"
         );
-        assert!(clippy.1.iter().any(|arg| *arg == "--no-default-features"));
-        assert!(clippy.1.iter().any(|arg| *arg == "--all-targets"));
+        assert!(clippy.1.contains(&"--no-default-features"));
+        assert!(clippy.1.contains(&"--all-targets"));
         assert!(clippy.1.windows(2).any(|pair| pair == ["-D", "warnings"]));
         assert!(checks.iter().any(|(label, _)| label.contains("fmt")));
     }
