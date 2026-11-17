@@ -387,17 +387,17 @@ impl SovereignDomainRegistry {
         bundle.validate_against_template(template)
     }
 
-    /// The registered template's operator.
+    /// The registered template's domain id and operator.
     ///
-    /// Compliance gates read the identity from here: an identity coming from
-    /// inside the bundle would let a frozen operator write somebody else's
-    /// name.
+    /// Compliance gates read both the domain scope and the operator identity
+    /// from here: reading either from inside the bundle would let a frozen
+    /// operator spoof an un-frozen operator or domain.
     #[must_use]
-    pub fn template_operator(&self, template_id: Hash32) -> Option<Address> {
+    pub fn template_domain_and_operator(&self, template_id: Hash32) -> Option<(DomainId, Address)> {
         self.templates
             .values()
             .find(|t| t.template_id == template_id)
-            .map(|t| t.operator)
+            .map(|t| (t.domain_id, t.operator))
     }
 
     /// Performs the requested operation.
