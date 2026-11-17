@@ -28,7 +28,7 @@ impl AssetId {
     pub fn from_hex(s: &str) -> Result<Self, String> {
         let s = s.strip_prefix("0x").unwrap_or(s);
         if s == "0" {
-            return Ok(AssetId([0u8; 32]));
+            return Ok(Self([0u8; 32]));
         }
         let bytes = hex::decode(s).map_err(|e| e.to_string())?;
         if bytes.len() != 32 {
@@ -39,15 +39,18 @@ impl AssetId {
         }
         let mut id = [0u8; 32];
         id.copy_from_slice(&bytes);
-        Ok(AssetId(id))
+        Ok(Self(id))
     }
+    #[must_use]
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
-    pub fn zero() -> Self {
-        AssetId([0u8; 32])
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self([0u8; 32])
     }
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
@@ -114,7 +117,7 @@ impl std::fmt::Debug for AssetId {
 
 impl From<[u8; 32]> for AssetId {
     fn from(bytes: [u8; 32]) -> Self {
-        AssetId(bytes)
+        Self(bytes)
     }
 }
 
@@ -230,12 +233,12 @@ pub struct BridgeState {
     asset_locations: BTreeMap<AssetId, BridgeStatus>,
     #[serde(with = "crate::core::map_keys")]
     transfers: BTreeMap<MessageId, BridgeTransfer>,
-    /// Expiry queue: expiry_height -> [message_id]
+    /// Expiry queue: `expiry_height` -> `[message_id]`
     /// Fix O(N) sweep `DoS` by indexing by height.
     expiry_queue: BTreeMap<u64, Vec<MessageId>>,
     pub replay: ReplayNonceStore,
     /// Settled queue: the height a transfer reached a terminal status
-    /// (`Unlocked`, or `Active` again after its lock expired) -> [message_id].
+    /// (`Unlocked`, or `Active` again after its lock expired) -> `[message_id]`.
     /// `sweep_expired_locks` drops those rows `SETTLED_RETENTION_BLOCKS`
     /// later. Without it `transfers` only ever grew: every row stayed for
     /// the life of the chain, and with it the per-block cost of `root()`,
@@ -989,6 +992,9 @@ impl BridgeState {
             if transfer.expiry_height > 0 {
                 if let Some(bucket) = self.expiry_queue.get_mut(&transfer.expiry_height) {
                     bucket.retain(|id| id != message_id);
+                    if bucket.is_empty() {
+                        self.expiry_queue.remove(&transfer.expiry_height);
+                    }
                 }
             }
         }
@@ -2127,5 +2133,20 @@ mod bridge_fee_split {
             bridge.transfer(&id).unwrap().status,
             BridgeStatus::Burned { domain: 2 }
         );
+    }
+
+    #[test]
+    fn unwind_lock_removes_empty_expiry_bucket() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"unwind-lock-bucket-cleanup"]));
+        let owner = Address::from([3u8; 32]);
+        let recipient = Address::from([4u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, _) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 99)
+            .unwrap();
+        assert!(bridge.expiry_queue.contains_key(&99));
+        bridge.unwind_lock(&transfer.message_id, 1);
+        assert!(!bridge.expiry_queue.contains_key(&99));
     }
 }

@@ -835,7 +835,7 @@ impl PeerManager {
     /// moves - a peer that never answers sinks in `get_best_peers` - and
     /// stops one point above the ban threshold.
     ///
-    /// A peer that leaves [`MAX_UNANSWERED_SYNC_STRIKES`] requests in a row
+    /// A peer that leaves `MAX_UNANSWERED_SYNC_STRIKES` requests in a row
     /// unanswered is set aside as a sync source ([`Self::is_sync_resting`]):
     /// it is not asked again for a while, so it cannot hold the one sync
     /// round of this node by staying silent. It is not banned. A ban is an
