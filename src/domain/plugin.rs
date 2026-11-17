@@ -258,6 +258,16 @@ impl ConsensusDomainPlugin for DagDomainPlugin {
         block: &Block,
         ctx: DomainContext<'_>,
     ) -> Result<(), DomainError> {
+        if block.chain_id != ctx.domain.domain_chain_id {
+            return Err(DomainError(format!(
+                "DAG block chain_id {} does not match domain chain_id {}",
+                block.chain_id, ctx.domain.domain_chain_id
+            )));
+        }
+        let calculated_tx_root = block.calculate_tx_root();
+        if block.tx_root != calculated_tx_root {
+            return Err(DomainError("DAG block tx_root mismatch".into()));
+        }
         self.consensus()
             .validate_block(block, ctx.chain, ctx.state)
             .map_err(DomainError::from)
@@ -268,11 +278,28 @@ impl ConsensusDomainPlugin for DagDomainPlugin {
         block: &Block,
         ctx: DomainContext<'_>,
     ) -> Result<DomainCommitment, DomainError> {
-        let mut commitment =
-            DomainCommitment::from_block(ctx.domain.id, self.kind(), block, ctx.sequence)?;
+        if !ctx.domain.is_active() {
+            return Err(DomainError(format!(
+                "Domain {} is not active",
+                ctx.domain.id
+            )));
+        }
+        let mut commitment = DomainCommitment::from_block(
+            ctx.domain,
+            block,
+            empty_event_root(),
+            block_finality_proof_hash(block),
+            ctx.sequence,
+        )
+        .map_err(DomainError)?;
         let parents = crate::consensus::dag::parse_parent_hashes(&block.previous_hash);
         if let Some(first_parent) = parents.first() {
-            if let Ok(h) = crate::domain::types::normalize_hash32(first_parent) {
+            if let Ok(h) = crate::domain::types::normalize_hash32(
+                b"parent_domain_block_hash",
+                ctx.domain.id,
+                &ctx.domain.block_hash_scheme,
+                first_parent.as_bytes(),
+            ) {
                 commitment.parent_domain_block_hash = h;
             }
         }

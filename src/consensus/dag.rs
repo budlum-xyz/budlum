@@ -230,7 +230,7 @@ impl ConsensusEngine for DagEngine {
     fn record_block(
         &self,
         block: &Block,
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         self.add_block(block)
     }

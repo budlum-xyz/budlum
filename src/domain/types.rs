@@ -96,6 +96,7 @@ impl ConsensusKind {
             ConsensusKind::Dag => b"dag".to_vec(),
             ConsensusKind::Poh => b"poh".to_vec(),
             ConsensusKind::Pospace => b"pospace".to_vec(),
+            ConsensusKind::Custom(name) => format!("custom:{name}").into_bytes(),
         }
     }
 
