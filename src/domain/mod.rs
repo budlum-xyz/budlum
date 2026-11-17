@@ -51,5 +51,6 @@ pub use types::expected_initial_root;
 pub use types::{
     normalize_hash32, validator_set_commitment, ConsensusDomain, ConsensusKind, DomainCommitment,
     DomainId, DomainStatus, Hash32, PoWDomainParameters, RootScheme, VerifiedDomainCommitment,
-    AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER, STORAGE_ATTESTATION_ADAPTER,
+    AI_INFERENCE_ADAPTER, BITCOIN_SPV_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
+    STORAGE_ATTESTATION_ADAPTER,
 };

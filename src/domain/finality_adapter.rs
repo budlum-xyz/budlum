@@ -50,7 +50,7 @@ impl PoWHeader {
 
 /// A Bitcoin block header in consensus field order.
 ///
-/// The wire image is exactly the80 bytes Bitcoin hashes (version, previous
+/// The wire image is exactly the 80 bytes Bitcoin hashes (version, previous
 /// block hash, merkle root, time, bits, nonce, little-endian fixed fields);
 /// `height` is carried alongside it because Budlum commitments bind a height
 /// and a header window must be checked for contiguity against that height.
@@ -70,7 +70,7 @@ pub struct BitcoinHeader {
 }
 
 impl BitcoinHeader {
-    /// The exact80 bytes Bitcoin commits to with `SHA256d`.
+    /// The exact 80 bytes Bitcoin commits to with `SHA256d`.
     fn wire_bytes(&self) -> [u8; 80] {
         let mut out = [0u8; 80];
         out[0..4].copy_from_slice(&self.version.to_le_bytes());
@@ -83,7 +83,8 @@ impl BitcoinHeader {
     }
 
     /// `SHA256d` of the wire image, in Bitcoin wire (internal) order.
-    fn block_hash(&self) -> Hash32 {
+    #[must_use]
+    pub fn block_hash(&self) -> Hash32 {
         use sha2::{Digest, Sha256};
         let first = Sha256::digest(self.wire_bytes());
         let second = Sha256::digest(first);
@@ -96,16 +97,16 @@ impl BitcoinHeader {
 /// Decode a compact `bits` target and the chainwork one header of that
 /// difficulty is worth, both under Bitcoin's compact rules.
 ///
-/// Returns the target as32 big-endian bytes (so a byte-wise compare equals
+/// Returns the target as 32 big-endian bytes (so a byte-wise compare equals
 /// the integer compare) and `floor(2^(280 - 8*size) / mantissa)` as the work,
 /// saturating at `u128::MAX` for targets so hard the quotient cannot fit
-/// (size <= 19). Saturation is deterministic and cannot be reached by a
-/// header that did not meet its own verified target: size <= 19 means the
-/// target is at most2^152, and producing such a hash is the hard part of
+/// (`size <= 19`). Saturation is deterministic and cannot be reached by a
+/// header that did not meet its own verified target: `size <= 19` means the
+/// target is at most `2^152`, and producing such a hash is the hard part of
 /// proof-of-work itself. Refuses the cases Bitcoin refuses: the sign bit,
-/// a zero mantissa, a size below3 (sub-byte targets this adapter does not
-/// carry) or above32 (overflow past256 bits).
-fn decode_compact_bits(bits: u32) -> Option<([u8; 32], u128)> {
+/// a zero mantissa, a size below 3 (sub-byte targets this adapter does not
+/// carry) or above 32 (overflow past 256 bits).
+pub(crate) fn decode_compact_bits(bits: u32) -> Option<([u8; 32], u128)> {
     let mantissa = bits & 0x00ff_ffff;
     let size = bits >> 24;
     if bits & 0x0080_0000 != 0 || mantissa == 0 || !(3..=32).contains(&size) {
@@ -128,10 +129,10 @@ fn decode_compact_bits(bits: u32) -> Option<([u8; 32], u128)> {
     Some((target, work.max(1)))
 }
 
-/// The number of leading zero bits a32-byte big-endian target demands of a
+/// The number of leading zero bits a 32-byte big-endian target demands of a
 /// hash that does not exceed it: `256 - target.bit_length()`. Used to bound
 /// every header's difficulty inside the range the domain registered.
-fn target_leading_zero_bits(target: &[u8; 32]) -> u32 {
+pub(crate) fn target_leading_zero_bits(target: &[u8; 32]) -> u32 {
     let mut leading = 0u32;
     for byte in target {
         if *byte == 0 {
@@ -725,7 +726,7 @@ impl DomainFinalityAdapter for PoWHeaderChainFinalityAdapter {
 /// root, timestamp, block hash), whose successors link back through their
 /// `prev_hash`, and whose cumulative chainwork clears the floor the domain
 /// registered. What differs is Bitcoin's own consensus data: `SHA256d` of the
-///80-byte wire image, compact `bits` targets compared the way Bitcoin
+/// 80-byte wire image, compact `bits` targets compared the way Bitcoin
 /// compares them, and chainwork accumulated as `floor(2^(280-8*size)/mantissa)`
 /// rather than a leading-zero proxy. Everything fails closed: a malformed
 /// compact target, a window outside the registered bounds, a commitment that
@@ -2201,7 +2202,7 @@ mod tests {
 
     // --- Bitcoin SPV adapter (bitcoin-spv-v1) --------------------------------
 
-    /// Regtest-style compact target: size32, mantissa `0x7fffff`. The target
+    /// Regtest-style compact target: size 32, mantissa `0x7fffff`. The target
     /// is `0x7fffff << 232`, so a valid hash needs one leading zero bit and
     /// each header is worth `2^24 / 0x7fffff = 2` units of chainwork. Mining
     /// averages two nonces and is deterministic from the fixture fields.
