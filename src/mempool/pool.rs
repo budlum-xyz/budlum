@@ -613,7 +613,16 @@ impl Mempool {
 
         let count_victim =
             if existing_hash.is_none() && self.transactions.len() >= self.config.max_size {
-                let Some(victim) = self.evict_lowest_fee_silent(&tx) else {
+                // A duty batch pays no fee by design and cannot outbid paying
+                // entries; the duty lane's own ceiling and per-window limit
+                // bound what it can consume, so it takes its slot from the
+                // cheapest non-duty entry while paying entries stay fee-ordered.
+                let victim = if duty.is_some() {
+                    self.evict_cheapest_non_duty(&tx)
+                } else {
+                    self.evict_lowest_fee_silent(&tx)
+                };
+                let Some(victim) = victim else {
                     for victim in duty_victims {
                         self.restore_entry(victim);
                     }
@@ -645,7 +654,11 @@ impl Mempool {
             .saturating_sub(freed)
             .saturating_add(incoming);
         if projected > self.config.max_pool_bytes
-            && !self.evict_until_bytes_fit(&tx, projected - self.config.max_pool_bytes)
+            && !self.evict_until_bytes_fit(
+                &tx,
+                projected - self.config.max_pool_bytes,
+                duty.is_some(),
+            )
         {
             if let Some(victim) = count_victim {
                 self.restore_entry(victim);
@@ -1109,12 +1122,38 @@ impl Mempool {
             }
             // Deterministic choice among equal fees: the smallest hash. Two
             // nodes with the same mempool must evict the same transaction.
+            // A duty batch pays no fee by design, so it is never a fee victim:
+            // otherwise every paying submission deletes validator duty batches.
             let victim = hashes
                 .iter()
                 .filter(|h| {
                     self.transactions
                         .get(*h)
-                        .is_some_and(|entry| entry.tx.from != new_tx.from)
+                        .is_some_and(|entry| entry.tx.from != new_tx.from && entry.duty.is_none())
+                })
+                .min()
+                .cloned();
+            if let Some(hash) = victim {
+                return self.remove_entry_silent(&hash);
+            }
+        }
+        None
+    }
+
+    /// Drop the cheapest entry that is not a duty batch, whatever its fee, so a
+    /// fee-0 duty batch can take a slot from a pool full of paying entries.
+    ///
+    /// The duty lane's own byte ceiling and one-batch-per-window rule bound
+    /// what those admissions can consume, so this cannot clear the pool the
+    /// way an unbounded fee bid could.
+    fn evict_cheapest_non_duty(&mut self, new_tx: &Transaction) -> Option<PendingTx> {
+        for hashes in self.by_fee.values() {
+            let victim = hashes
+                .iter()
+                .filter(|h| {
+                    self.transactions
+                        .get(*h)
+                        .is_some_and(|entry| entry.tx.from != new_tx.from && entry.duty.is_none())
                 })
                 .min()
                 .cloned();
@@ -1127,8 +1166,11 @@ impl Mempool {
 
     /// Evict cheaper transactions until `needed` bytes have been freed.
     ///
-    /// The same rule as [`Self::evict_lowest_fee`], applied repeatedly: only
-    /// transactions strictly cheaper than the incoming one are candidates, the
+    /// The same rule as [`Self::evict_lowest_fee_silent`], applied repeatedly:
+    /// ordinary submissions evict only transactions strictly cheaper than the
+    /// incoming one, while a fee-0 duty batch (`is_duty == true`) may reclaim
+    /// bytes from the cheapest non-duty paying entries (bounded by the duty
+    /// lane's own ceiling). Duty batches are never evicted by this path, the
     /// incoming sender may not evict itself, and ties break on the smallest
     /// hash so two nodes with the same pool evict the same transactions.
     ///
@@ -1147,11 +1189,16 @@ impl Mempool {
     /// a rare worst case for a common per-insert cost, which is the worse
     /// trade for a pool this size. Revisit only if the entry cap grows an
     /// order of magnitude.
-    fn evict_until_bytes_fit(&mut self, new_tx: &Transaction, needed: usize) -> bool {
+    fn evict_until_bytes_fit(
+        &mut self,
+        new_tx: &Transaction,
+        needed: usize,
+        is_duty: bool,
+    ) -> bool {
         let mut victims: Vec<String> = Vec::new();
         let mut freed = 0usize;
         'outer: for (&fee, hashes) in &self.by_fee {
-            if new_tx.fee <= fee {
+            if !is_duty && new_tx.fee <= fee {
                 // `by_fee` is ordered, so nothing further down can be cheaper.
                 break;
             }
@@ -1159,7 +1206,9 @@ impl Mempool {
                 let Some(entry) = self.transactions.get(hash) else {
                     continue;
                 };
-                if entry.tx.from == new_tx.from {
+                // A duty batch is never a byte-eviction victim for the same
+                // reason it is never a count victim: it pays no fee by design.
+                if entry.tx.from == new_tx.from || entry.duty.is_some() {
                     continue;
                 }
                 freed = freed.saturating_add(entry.charged);
@@ -2317,5 +2366,126 @@ mod tests {
         let honest_tx = make_ack(&honest, 0, [0xEE; 32]);
         pool.admit_at(honest_tx, 20 * window_ms)
             .expect("other validator must still be admitted into the duty lane");
+    }
+
+    #[test]
+    fn fee_ordered_count_and_byte_eviction_never_drop_validator_duty_batches() {
+        use crate::core::transaction::TransactionType;
+        use crate::crypto::primitives::KeyPair;
+
+        let val_a = KeyPair::from_seed(&[0xA1; 32]).unwrap();
+        let val_b = KeyPair::from_seed(&[0xA2; 32]).unwrap();
+        let make_ack = |kp: &KeyPair, nonce: u64, object: [u8; 32]| {
+            let mut tx = Transaction::new(
+                Address::from(kp.public_key_bytes()),
+                Address::zero(),
+                0,
+                Vec::new(),
+            );
+            tx.nonce = nonce;
+            tx.fee = 0;
+            tx.tx_type = TransactionType::StorageV3(Box::new(
+                crate::storage::bud3::tx::StorageTxV3::CustodyAck { object },
+            ));
+            tx.hash = tx.calculate_hash();
+            tx.sign(kp);
+            tx
+        };
+
+        // 1. Count saturation: paying tx must not evict a duty batch; instead
+        //    it evicts a cheaper paying tx, or fails if only duty batches exist.
+        let mut count_pool = Mempool::new(MempoolConfig {
+            max_size: 2,
+            max_pool_bytes: 1_000_000,
+            duty_block_bytes: 50_000,
+            min_fee: 10,
+            ..Default::default()
+        });
+        count_pool.sync_duty_validators([
+            Address::from(val_a.public_key_bytes()),
+            Address::from(val_b.public_key_bytes()),
+        ]);
+        let duty_a = make_ack(&val_a, 0, [0x11; 32]);
+        let duty_a_hash = duty_a.hash.clone();
+        count_pool.admit_at(duty_a, 1).unwrap();
+
+        let paying_low = create_test_tx_from_seed(1, 0, 20);
+        let paying_low_hash = paying_low.hash.clone();
+        count_pool.admit_at(paying_low, 2).unwrap();
+
+        // A high-fee tx at max_size evicts `paying_low`, never `duty_a`.
+        let paying_high = create_test_tx_from_seed(2, 0, 500);
+        let paying_high_hash = paying_high.hash.clone();
+        count_pool.admit_at(paying_high, 3).unwrap();
+        assert!(count_pool.transactions.contains_key(&duty_a_hash));
+        assert!(!count_pool.transactions.contains_key(&paying_low_hash));
+        assert!(count_pool.transactions.contains_key(&paying_high_hash));
+
+        // A free duty batch arriving at max_size reclaims the paying slot while
+        // keeping `duty_a` intact.
+        let duty_b = make_ack(&val_b, 0, [0x22; 32]);
+        let duty_b_hash = duty_b.hash.clone();
+        count_pool.admit_at(duty_b, 4).unwrap();
+        assert!(count_pool.transactions.contains_key(&duty_a_hash));
+        assert!(count_pool.transactions.contains_key(&duty_b_hash));
+        assert!(!count_pool.transactions.contains_key(&paying_high_hash));
+
+        // When every slot is held by duty batches, a paying tx cannot evict them.
+        let paying_blocked = create_test_tx_from_seed(3, 0, 9_999);
+        assert!(matches!(
+            count_pool.admit_at(paying_blocked, 5),
+            Err(MempoolError::PoolFull)
+        ));
+        assert!(count_pool.transactions.contains_key(&duty_a_hash));
+        assert!(count_pool.transactions.contains_key(&duty_b_hash));
+
+        // 2. Byte saturation: a large paying tx must not byte-evict a duty batch,
+        //    and a free duty batch can reclaim bytes from paying entries.
+        let probe_duty = make_ack(&val_a, 0, [0x33; 32]);
+        let mut probe_paying = create_test_tx_from_seed(10, 0, 20);
+        probe_paying.data = vec![0xBB; 128];
+        probe_paying.hash = probe_paying.calculate_hash();
+        let kp_paying = KeyPair::from_seed(&[10; 32]).unwrap();
+        probe_paying.sign(&kp_paying);
+        let duty_sz = charged_bytes(&probe_duty);
+        let paying_sz = charged_bytes(&probe_paying);
+        assert!(paying_sz >= duty_sz);
+        let probe_paying_hash = probe_paying.hash.clone();
+        let mut byte_pool = Mempool::new(MempoolConfig {
+            max_size: 10,
+            max_pool_bytes: duty_sz + paying_sz + 16,
+            duty_block_bytes: 50_000,
+            min_fee: 10,
+            ..Default::default()
+        });
+        byte_pool.sync_duty_validators([
+            Address::from(val_a.public_key_bytes()),
+            Address::from(val_b.public_key_bytes()),
+        ]);
+        let duty_bytes_hash = probe_duty.hash.clone();
+        byte_pool.admit_at(probe_duty, 10).unwrap();
+        byte_pool.admit_at(probe_paying, 11).unwrap();
+
+        // A larger high-fee tx that would only fit by evicting both the paying
+        // entry and the duty batch must be refused rather than drop the duty batch.
+        let mut oversized_paying = create_test_tx_from_seed(11, 0, 5_000);
+        oversized_paying.data = vec![0xAA; paying_sz + 64];
+        oversized_paying.hash = oversized_paying.calculate_hash();
+        let kp_oversized = KeyPair::from_seed(&[11; 32]).unwrap();
+        oversized_paying.sign(&kp_oversized);
+        assert!(matches!(
+            byte_pool.admit_at(oversized_paying, 12),
+            Err(MempoolError::PoolBytesFull)
+        ));
+        assert!(byte_pool.transactions.contains_key(&duty_bytes_hash));
+
+        // A second validator's free duty batch reclaims bytes from the paying tx
+        // when the pool is byte-full.
+        let duty_second = make_ack(&val_b, 0, [0x44; 32]);
+        let duty_second_hash = duty_second.hash.clone();
+        byte_pool.admit_at(duty_second, 13).unwrap();
+        assert!(byte_pool.transactions.contains_key(&duty_bytes_hash));
+        assert!(byte_pool.transactions.contains_key(&duty_second_hash));
+        assert!(!byte_pool.transactions.contains_key(&probe_paying_hash));
     }
 }

@@ -254,6 +254,7 @@ struct GatewayState {
     fill_limiter: std::sync::Mutex<RateLimiter>,
     cache: std::sync::Mutex<ContentCache>,
     resolved: std::sync::Mutex<std::collections::BTreeMap<String, (u64, CachedResolution)>>,
+    manifests: std::sync::Mutex<std::collections::BTreeMap<[u8; 32], Arc<SiteManifest>>>,
     counters: Counters,
 }
 
@@ -614,7 +615,20 @@ impl ContentSource for DirectorySource {
         &self,
         content: &budlum_core::storage::bud3::content_ref::ContentRef,
     ) -> Result<Vec<u8>, String> {
+        let ceiling = budlum_core::storage::content_gateway::MAX_GATEWAY_CONTENT_BYTES as u64;
+        if content.content_id.len > ceiling {
+            return Err(format!(
+                "content length {} exceeds the gateway ceiling {ceiling}",
+                content.content_id.len
+            ));
+        }
         let path = self.root.join(hex::encode(content.content_id.digest));
+        // The rehearsal source serves the same objects the production source
+        // does, so it applies the same ceiling, and refuses an object above it
+        // before the bytes are read rather than after they are hashed.
+        if std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) > ceiling {
+            return Err(format!("{} exceeds the gateway ceiling", path.display()));
+        }
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         // This read also backs fetch_manifest: parse no unverified site rules
         // and serve no body unless both digest and length match the public
@@ -630,7 +644,7 @@ impl ContentSource for DirectorySource {
         content: &budlum_core::storage::bud3::content_ref::ContentRef,
     ) -> Result<SiteManifest, String> {
         let bytes = self.fetch(content)?;
-        serde_json::from_slice(&bytes).map_err(|e| format!("manifest: {e}"))
+        SiteManifest::from_json_bytes(&bytes)
     }
 }
 
@@ -776,7 +790,12 @@ impl Bud3RpcSource {
         &self,
         content: &budlum_core::storage::bud3::content_ref::ContentRef,
     ) -> Option<Vec<u8>> {
-        let bytes = std::fs::read(self.cache_path(&content.content_id.digest)).ok()?;
+        let path = self.cache_path(&content.content_id.digest);
+        let ceiling = budlum_core::storage::content_gateway::MAX_GATEWAY_CONTENT_BYTES as u64;
+        if std::fs::metadata(&path).ok()?.len() > ceiling {
+            return None;
+        }
+        let bytes = std::fs::read(&path).ok()?;
         if bytes.len() <= budlum_core::storage::content_gateway::MAX_GATEWAY_CONTENT_BYTES
             && content.content_id.matches_public(&bytes)
         {
@@ -872,7 +891,7 @@ impl ContentSource for Bud3RpcSource {
         content: &budlum_core::storage::bud3::content_ref::ContentRef,
     ) -> Result<SiteManifest, String> {
         let bytes = self.fetch(content)?;
-        serde_json::from_slice(&bytes).map_err(|e| format!("manifest: {e}"))
+        SiteManifest::from_json_bytes(&bytes)
     }
 }
 
@@ -993,12 +1012,9 @@ fn answer(
         }
     };
 
-    let manifest = match state.content.fetch_manifest(&resolution.content) {
+    let manifest = match cached_manifest(state, &resolution.content, &client, now) {
         Ok(manifest) => manifest,
-        Err(_) => {
-            let response = plain(StatusCode::BAD_GATEWAY, "content unavailable");
-            return response;
-        }
+        Err(response) => return *response,
     };
     let path = request.uri().path();
     let route = match route_of(&manifest, path) {
@@ -1065,6 +1081,59 @@ fn answer(
         *response.body_mut() = BoxBody::from(Bytes::new());
     }
     response
+}
+
+/// The parsed manifest for `content`, kept between requests.
+///
+/// A site has one manifest and every request for that site needs it, so a read
+/// and a parse per request would let a few header bytes buy the whole object,
+/// outside the content cache and the fill budget that bound every other read of
+/// the content source. The parse is kept in memory, and a miss is charged to
+/// the fill budget.
+fn cached_manifest(
+    state: &GatewayState,
+    content: &budlum_core::storage::bud3::content_ref::ContentRef,
+    client: &str,
+    now: u64,
+) -> Result<Arc<SiteManifest>, Box<Response<BoxBody>>> {
+    let key = content.content_id.digest;
+    {
+        let cache = match state.manifests.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(manifest) = cache.get(&key) {
+            return Ok(Arc::clone(manifest));
+        }
+    }
+    {
+        let mut fills = match state.fill_limiter.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if fills.check(client, now) == LimitDecision::Refused {
+            return Err(Box::new(plain(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many requests",
+            )));
+        }
+    }
+    let Ok(manifest) = state.content.fetch_manifest(content) else {
+        return Err(Box::new(plain(
+            StatusCode::BAD_GATEWAY,
+            "content unavailable",
+        )));
+    };
+    let manifest = Arc::new(manifest);
+    let mut cache = match state.manifests.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if cache.len() >= 4096 {
+        cache.clear();
+    }
+    cache.insert(key, Arc::clone(&manifest));
+    Ok(manifest)
 }
 
 /// Resolve a name, or return the reason it did not resolve.
@@ -1213,6 +1282,7 @@ fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
         fill_limiter: std::sync::Mutex::new(RateLimiter::new(fill_rate, 60)),
         cache: std::sync::Mutex::new(ContentCache::new(cache_max)),
         resolved: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        manifests: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         counters: Counters::default(),
     })
 }
@@ -1859,5 +1929,121 @@ mod tests {
         assert!(cache.path().join(hex::encode(content_id.digest)).exists());
 
         server.abort();
+    }
+
+    #[test]
+    fn directory_source_refuses_object_above_gateway_ceiling_before_reading() {
+        use budlum_core::storage::bud3::content_id::{ContentId, ContentIdKind};
+        use budlum_core::storage::bud3::content_ref::ContentRef;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ceiling = budlum_core::storage::content_gateway::MAX_GATEWAY_CONTENT_BYTES;
+        let digest = [0xAB; 32];
+        let oversized_path = dir.path().join(hex::encode(digest));
+        let file = std::fs::File::create(&oversized_path).unwrap();
+        // Sparse file above the ceiling so the test allocates no huge buffer.
+        file.set_len((ceiling as u64) + 1).unwrap();
+        drop(file);
+
+        let source = DirectorySource {
+            root: dir.path().to_path_buf(),
+        };
+        // Even if the ContentRef claims a small length, metadata check refuses
+        // the oversized file on disk before reading it.
+        let claimed_small = ContentRef::new(
+            ContentId {
+                kind: ContentIdKind::Public,
+                digest,
+                len: 16,
+            },
+            [0x11; 32],
+            None,
+        )
+        .unwrap();
+        let err = source.fetch(&claimed_small).unwrap_err();
+        assert!(err.contains("exceeds the gateway ceiling"), "got: {err}");
+    }
+
+    #[test]
+    fn cached_manifest_reads_source_once_and_charges_fill_budget() {
+        use budlum_core::storage::bud3::content_id::ContentId;
+        use budlum_core::storage::bud3::content_ref::ContentRef;
+        use budlum_core::web_gateway::manifest::Route;
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingManifestSource {
+            manifest: SiteManifest,
+            manifest_reads: Arc<AtomicUsize>,
+        }
+
+        impl ContentSource for CountingManifestSource {
+            fn fetch(&self, _content: &ContentRef) -> Result<Vec<u8>, String> {
+                Ok(b"ok".to_vec())
+            }
+
+            fn fetch_manifest(&self, _content: &ContentRef) -> Result<SiteManifest, String> {
+                self.manifest_reads.fetch_add(1, Ordering::Relaxed);
+                Ok(self.manifest.clone())
+            }
+        }
+
+        let body = b"<h1>hello</h1>";
+        let body_id = ContentId::public(body);
+        let body_ref = ContentRef::new(body_id, [0x22; 32], None).unwrap();
+        let mut routes = std::collections::BTreeMap::new();
+        routes.insert(
+            "/index.html".to_string(),
+            Route {
+                content: body_ref,
+                mime: "text/html".to_string(),
+            },
+        );
+        let manifest = SiteManifest {
+            index: "/index.html".to_string(),
+            routes,
+            csp: None,
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_ref_a =
+            ContentRef::new(ContentId::public(&manifest_bytes), [0x33; 32], None).unwrap();
+        let mut digest_b = manifest_ref_a.content_id.digest;
+        digest_b[0] ^= 0xFF;
+        let manifest_ref_b = ContentRef::new(
+            budlum_core::storage::bud3::content_id::ContentId {
+                kind: budlum_core::storage::bud3::content_id::ContentIdKind::Public,
+                digest: digest_b,
+                len: manifest_bytes.len() as u64,
+            },
+            [0x44; 32],
+            None,
+        )
+        .unwrap();
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut cfg = serving_config(true, Vec::new());
+        cfg.fill_per_minute = 1;
+        let mut state = build_state(cfg).expect("gateway state");
+        state.content = Arc::new(CountingManifestSource {
+            manifest: manifest.clone(),
+            manifest_reads: Arc::clone(&reads),
+        });
+
+        let first = cached_manifest(&state, &manifest_ref_a, "198.51.100.1", 1000)
+            .expect("first manifest fetch succeeds");
+        let second = cached_manifest(&state, &manifest_ref_a, "198.51.100.1", 1000)
+            .expect("second manifest fetch hits cache");
+        assert_eq!(*first, manifest);
+        assert_eq!(*second, manifest);
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            1,
+            "consecutive requests for the same site must fetch the manifest only once"
+        );
+
+        // A miss for a distinct manifest is charged against fill_limiter (limit=1).
+        let refused = cached_manifest(&state, &manifest_ref_b, "198.51.100.1", 1000)
+            .expect_err("second miss in same window must be rate-limited");
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
     }
 }
