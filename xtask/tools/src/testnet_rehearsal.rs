@@ -2114,4 +2114,70 @@ mod tests {
         assert!(text.contains("| 1. chain is live | pass | tip 1 -> 2 |"));
         assert!(text.contains("| 2. four PoS producers | FAIL | only 3 \\| producers |"));
     }
+
+    #[test]
+    fn compose_rehearsal_gives_each_p2p_service_a_distinct_slash24_and_healthcheck() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("xtask/tools lives two levels below repo root");
+        let compose =
+            fs::read_to_string(root.join(COMPOSE_FILE)).expect("read ops/testnet-local.yml");
+
+        let mut subnets = BTreeSet::new();
+        for service in [
+            "validator1",
+            "validator2",
+            "validator3",
+            "validator4",
+            "rpc",
+        ] {
+            let header = format!("  {service}:\n");
+            let start = compose
+                .find(&header)
+                .unwrap_or_else(|| panic!("missing service {service} in {COMPOSE_FILE}"));
+            let rest = &compose[start + header.len()..];
+            let end = rest
+                .lines()
+                .scan(0usize, |offset, line| {
+                    let pos = *offset;
+                    *offset += line.len() + 1;
+                    Some((pos, line))
+                })
+                .find(|(_, line)| {
+                    (!line.starts_with(' ') && !line.is_empty() && !line.starts_with('#'))
+                        || (line.starts_with("  ")
+                            && !line.starts_with("   ")
+                            && line.trim_end().ends_with(':'))
+                })
+                .map_or(rest.len(), |(pos, _)| pos);
+            let block = &rest[..end];
+
+            let ip = block
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("ipv4_address:"))
+                .map_or_else(
+                    || panic!("{service} must pin a static ipv4_address"),
+                    str::trim,
+                );
+            let octets: Vec<&str> = ip.split('.').collect();
+            assert_eq!(octets.len(), 4, "{service} invalid IPv4 address: {ip}");
+            let slash24 = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
+            assert!(
+                subnets.insert(slash24.clone()),
+                "{service} shares /24 subnet {slash24} with another P2P container, \
+                 which collides with Network::Testnet max_peers_per_subnet = 4"
+            );
+
+            if service.starts_with("validator") {
+                assert!(
+                    block.contains("/dev/tcp/127.0.0.1/5001")
+                        && block.contains("/dev/tcp/127.0.0.1/5002"),
+                    "{service} must probe both seat P2P sockets in its healthcheck"
+                );
+            }
+        }
+        assert_eq!(subnets.len(), 5);
+        assert!(compose.contains("subnet: 172.28.0.0/16"));
+    }
 }

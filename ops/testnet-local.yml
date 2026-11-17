@@ -82,6 +82,9 @@ services:
   validator1:
     <<: *node
     container_name: testnet-validator1
+    networks:
+      testnet-local:
+        ipv4_address: 172.28.1.10
     volumes:
       - validator1_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
@@ -103,6 +106,9 @@ services:
   validator2:
     <<: *node
     container_name: testnet-validator2
+    networks:
+      testnet-local:
+        ipv4_address: 172.28.2.10
     volumes:
       - validator2_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
@@ -110,6 +116,11 @@ services:
     # Two seats share a container, never a key, port, database, or process.
     entrypoint: ["python3", "/home/budlum/testnet-local-validator.py"]
     command: ["2", "6", "validator1"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/5001 && exec 4<>/dev/tcp/127.0.0.1/5002'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     depends_on:
       ceremony:
         condition: service_completed_successfully
@@ -119,6 +130,9 @@ services:
   validator3:
     <<: *node
     container_name: testnet-validator3
+    networks:
+      testnet-local:
+        ipv4_address: 172.28.3.10
     volumes:
       - validator3_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
@@ -126,6 +140,11 @@ services:
     # Two seats share a container, never a key, port, database, or process.
     entrypoint: ["python3", "/home/budlum/testnet-local-validator.py"]
     command: ["3", "7", "validator1"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/5001 && exec 4<>/dev/tcp/127.0.0.1/5002'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     depends_on:
       ceremony:
         condition: service_completed_successfully
@@ -135,6 +154,9 @@ services:
   validator4:
     <<: *node
     container_name: testnet-validator4
+    networks:
+      testnet-local:
+        ipv4_address: 172.28.4.10
     volumes:
       - validator4_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
@@ -142,6 +164,11 @@ services:
     # Two seats share a container, never a key, port, database, or process.
     entrypoint: ["python3", "/home/budlum/testnet-local-validator.py"]
     command: ["4", "8", "validator1"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/5001 && exec 4<>/dev/tcp/127.0.0.1/5002'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     depends_on:
       ceremony:
         condition: service_completed_successfully
@@ -151,6 +178,9 @@ services:
   rpc:
     <<: *node
     container_name: testnet-rpc
+    networks:
+      testnet-local:
+        ipv4_address: 172.28.5.10
     ports:
       - "127.0.0.1:28545:8545"
     volumes:
@@ -265,6 +295,15 @@ volumes:
   faucet_data:
   indexer_data:
 
+# Place each P2P node container in its own /24 inside a /16 bridge network so
+# the nine rehearsal processes (eight validator seats plus RPC) stay within
+# Network::Testnet's H5.1 max_peers_per_subnet = 4 eclipse bound without
+# weakening subnet enforcement.
 networks:
   testnet-local:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+          ip_range: 172.28.0.0/24
+          gateway: 172.28.0.1
