@@ -28,6 +28,7 @@ use super::view::{
     fallback_decode_public, NetworkSymbolSource, PaidViewReceipt, RevealSessionManager,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 /// Canonical Section 6.22.2 B.U.D. 3.0 RPC method names.
 pub const BUD3_RPC_METHODS: &[&str] = &[
@@ -80,6 +81,7 @@ pub struct Bud3RpcService {
     tiers: AccessTierTracker,
     limiter: SymbolPeerLimiter,
     metrics: Bud3StorageMetrics,
+    consumed_paid_views: BTreeSet<[u8; 32]>,
 }
 
 impl Default for Bud3RpcService {
@@ -90,6 +92,7 @@ impl Default for Bud3RpcService {
             tiers: AccessTierTracker::default(),
             limiter: SymbolPeerLimiter::default(),
             metrics: Bud3StorageMetrics::default(),
+            consumed_paid_views: BTreeSet::new(),
         }
     }
 }
@@ -255,6 +258,9 @@ impl Bud3RpcService {
                 let payer: Address = parse_hex32(params.get("payer"), "payer")?;
                 let object: ObjectKey = parse_hex32(params.get("object"), "object")?;
                 let receipt_id: [u8; 32] = parse_hex32(params.get("receipt_id"), "receipt_id")?;
+                if self.consumed_paid_views.contains(&receipt_id) {
+                    return Err(String::from("paid view receipt already consumed"));
+                }
                 let fee_paid_atoms = params
                     .get("fee_paid_atoms")
                     .and_then(Value::as_u64)
@@ -265,8 +271,14 @@ impl Bud3RpcService {
                     receipt_id,
                     fee_paid_atoms,
                 };
+                if let Some(current_epoch) = params.get("current_epoch").and_then(Value::as_u64) {
+                    if !registry.verify_paid_view_at(&receipt, current_epoch) {
+                        return Err(String::from("paid view receipt expired or unpaid"));
+                    }
+                }
                 let content = fallback_decode_public(registry, &object, &receipt, network)
                     .map_err(|e| format!("{e:?}"))?;
+                self.consumed_paid_views.insert(receipt_id);
                 let _ = self.tiers.record_access(object, false, now_sec);
                 Ok(json!({ "content_hex": hex::encode(content) }))
             }
@@ -577,5 +589,73 @@ mod upload_delivery_tests {
         .unwrap();
         assert_eq!(reply["deduplicated_existing"], hex::encode(key));
         assert_eq!(reply["object_commitment"], hex::encode(key));
+    }
+
+    #[test]
+    fn bud_storage_get_content_blocks_paid_view_receipt_replay() {
+        use super::super::view::{MemorySymbolNetwork, MIN_PAID_VIEW_FEE_ATOMS};
+
+        let content = b"one time paid view content".repeat(4);
+        let prepared =
+            prepare_public_upload(&content, &Profile::P0, &Bud3Limits::default(), 4).unwrap();
+        let key = prepared.record.commitment;
+        let mut registry = Bud3Registry::default();
+        registry
+            .register_object(
+                [1; 32],
+                prepared.record,
+                vec![(
+                    0,
+                    Share {
+                        validator: [10; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                )],
+                0,
+                20,
+            )
+            .unwrap();
+
+        let mut net = MemorySymbolNetwork::default();
+        net.store_holder_share([10; 32], key, 0, prepared.segments[0].clone());
+
+        let receipt_id = [0xD3; 32];
+        let payer = [2u8; 32];
+        registry
+            .record_paid_view(payer, key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 1)
+            .unwrap();
+
+        let mut rpc = Bud3RpcService::default();
+        let (row, candidates) = placement();
+        let req = json!({
+            "payer": hex::encode(payer),
+            "object": hex::encode(key),
+            "receipt_id": hex::encode(receipt_id),
+            "fee_paid_atoms": MIN_PAID_VIEW_FEE_ATOMS,
+            "current_epoch": 1,
+        });
+        let first = rpc
+            .handle(
+                "bud_storageGetContent",
+                &req,
+                &registry,
+                &net,
+                (&row, &candidates, 10),
+            )
+            .unwrap();
+        assert_eq!(first["content_hex"], hex::encode(&content));
+
+        let replay = rpc
+            .handle(
+                "bud_storageGetContent",
+                &req,
+                &registry,
+                &net,
+                (&row, &candidates, 11),
+            )
+            .unwrap_err();
+        assert!(replay.contains("already consumed"), "{replay}");
     }
 }
