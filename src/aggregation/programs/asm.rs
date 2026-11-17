@@ -9,7 +9,8 @@
 //! Conventions every generated program keeps:
 //!
 //! * register 0 is the zero of the machine;
-//! * register 30 is never written, so it holds zero and serves as the base of an
+//! * register 30 is set to zero by the first instruction of every program
+//!   and never written again: it serves as the base of an
 //!   absolute memory read (a load whose base is register 0 is an immediate
 //!   load in this machine);
 //! * register 31 belongs to the assembler: [`Asm::li`] uses it for constants
@@ -135,7 +136,7 @@ pub struct Program {
 }
 
 /// The assembler.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Asm {
     code: Vec<Instruction>,
     labels: Vec<Option<usize>>,
@@ -145,11 +146,28 @@ pub struct Asm {
     error: Option<AsmError>,
 }
 
+impl Default for Asm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Asm {
-    /// An empty program.
+    /// A program that so far only sets the base register of absolute reads
+    /// to zero. Every program starts with that instruction, so none
+    /// depends on what the registers held before the run.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let mut asm = Self {
+            code: Vec::new(),
+            labels: Vec::new(),
+            fixups: Vec::new(),
+            marks: Vec::new(),
+            cells: 0,
+            error: None,
+        };
+        asm.emit(Opcode::Load, ZB, ZERO, ZERO, 0);
+        asm
     }
 
     fn fail(&mut self, error: AsmError) {
