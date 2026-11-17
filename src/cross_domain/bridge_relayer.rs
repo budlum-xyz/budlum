@@ -44,16 +44,16 @@ pub enum PipelineError {
 impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PipelineError::Bridge(e) => write!(f, "bridge error: {e}"),
-            PipelineError::Relayer(e) => write!(f, "relayer error: {e}"),
-            PipelineError::MessageRegistry(e) => write!(f, "message registry: {e}"),
-            PipelineError::UnexpectedMessageKind { expected, got } => {
+            Self::Bridge(e) => write!(f, "bridge error: {e}"),
+            Self::Relayer(e) => write!(f, "relayer error: {e}"),
+            Self::MessageRegistry(e) => write!(f, "message registry: {e}"),
+            Self::UnexpectedMessageKind { expected, got } => {
                 write!(f, "expected message kind {expected}, got {got}")
             }
-            PipelineError::NoEventTree(domain) => {
+            Self::NoEventTree(domain) => {
                 write!(f, "no event tree for domain {domain}")
             }
-            PipelineError::MissingCorrelationId => {
+            Self::MissingCorrelationId => {
                 write!(f, "correlated message is missing its correlation id")
             }
         }
@@ -64,13 +64,13 @@ impl std::error::Error for PipelineError {}
 
 impl From<BridgeError> for PipelineError {
     fn from(e: BridgeError) -> Self {
-        PipelineError::Bridge(e)
+        Self::Bridge(e)
     }
 }
 
 impl From<RelayerError> for PipelineError {
     fn from(e: RelayerError) -> Self {
-        PipelineError::Relayer(e)
+        Self::Relayer(e)
     }
 }
 
@@ -195,14 +195,11 @@ impl<'a> BridgeRelayerPipeline<'a> {
         )?;
 
         // Register the cross-domain message
-        let message = match event.message.clone() {
-            Some(message) => message,
-            None => {
-                self.bridge.unwind_lock(&transfer.message_id, source_domain);
-                return Err(PipelineError::Relayer(RelayerError::Other(
-                    "lock event missing message".into(),
-                )));
-            }
+        let Some(message) = event.message.clone() else {
+            self.bridge.unwind_lock(&transfer.message_id, source_domain);
+            return Err(PipelineError::Relayer(RelayerError::Other(
+                "lock event missing message".into(),
+            )));
         };
         if let Err(e) = self.messages.insert(message.clone()) {
             self.bridge.unwind_lock(&message.message_id, source_domain);

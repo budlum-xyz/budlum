@@ -28,7 +28,7 @@ impl AssetId {
     pub fn from_hex(s: &str) -> Result<Self, String> {
         let s = s.strip_prefix("0x").unwrap_or(s);
         if s == "0" {
-            return Ok(AssetId([0u8; 32]));
+            return Ok(Self([0u8; 32]));
         }
         let bytes = hex::decode(s).map_err(|e| e.to_string())?;
         if bytes.len() != 32 {
@@ -39,15 +39,18 @@ impl AssetId {
         }
         let mut id = [0u8; 32];
         id.copy_from_slice(&bytes);
-        Ok(AssetId(id))
+        Ok(Self(id))
     }
+    #[must_use]
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
-    pub fn zero() -> Self {
-        AssetId([0u8; 32])
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self([0u8; 32])
     }
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
@@ -114,7 +117,7 @@ impl std::fmt::Debug for AssetId {
 
 impl From<[u8; 32]> for AssetId {
     fn from(bytes: [u8; 32]) -> Self {
-        AssetId(bytes)
+        Self(bytes)
     }
 }
 
@@ -230,12 +233,12 @@ pub struct BridgeState {
     asset_locations: BTreeMap<AssetId, BridgeStatus>,
     #[serde(with = "crate::core::map_keys")]
     transfers: BTreeMap<MessageId, BridgeTransfer>,
-    /// Expiry queue: expiry_height -> [message_id]
+    /// Expiry queue: `expiry_height` -> `[message_id]`
     /// Fix O(N) sweep `DoS` by indexing by height.
     expiry_queue: BTreeMap<u64, Vec<MessageId>>,
     pub replay: ReplayNonceStore,
     /// Settled queue: the height a transfer reached a terminal status
-    /// (`Unlocked`, or `Active` again after its lock expired) -> [message_id].
+    /// (`Unlocked`, or `Active` again after its lock expired) -> `[message_id]`.
     /// `sweep_expired_locks` drops those rows `SETTLED_RETENTION_BLOCKS`
     /// later. Without it `transfers` only ever grew: every row stayed for
     /// the life of the chain, and with it the per-block cost of `root()`,
