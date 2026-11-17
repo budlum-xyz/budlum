@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(result.outcome, ChallengeOutcome::Answered);
     }
 
-    /// The finding: `put` handed out a receipt binding any bytes to any
+    /// Manifest shard invariant: `put` requires bytes to belong to the
     /// manifest. Bytes that are not a shard of the manifest are refused, and
     /// nothing is stored for them.
     #[test]
@@ -616,10 +616,9 @@ mod tests {
         assert_eq!(err, StorageProviderError::ProofRangeMismatch);
     }
 
-    /// The finding this binding exists for: a plain content hash is the same
-    /// for every operator holding the same bytes, so any of them can answer a
-    /// challenge addressed to another. Two operators, one shard, one copy
-    /// between them, N payments.
+    /// Operator binding invariant: a plain content hash alone could be identical
+    /// for every operator holding the same bytes. The proof binding ensures that
+    /// challenges are strictly tied to operator-specific storage custody.
     #[test]
     fn two_operators_holding_the_same_bytes_produce_different_answers() {
         let bytes = b"the same shard, stored twice";

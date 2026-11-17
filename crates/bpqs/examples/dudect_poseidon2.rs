@@ -123,7 +123,7 @@ mod current {
 /// measurably leaky on this host (see the verdict text): `__umodti3` is called,
 /// but for a divisor that fits in 64 bits its iteration count does not vary
 /// enough with the operand to show above the noise at this sample size. That
-/// is a finding about the old code, not a licence to trust a harness that has
+/// is an empirical measurement on previous code, not a licence to trust a harness that has
 /// never seen a positive. So the harness is validated against a leak nobody
 /// can argue with: a multiply whose work depends on the low bits of its input.
 mod leaky {
@@ -861,7 +861,7 @@ fn main() {
     // The distinction is not a matter of opinion - a value-dependent operation
     // reproduces, drift does not. Each flagged pair is therefore re-measured
     // in an independent run, and only a SECOND crossing counts. Reporting the
-    // first crossing as a finding would cry wolf; dropping it silently would
+    // first crossing would report false positives; dropping it silently would
     // be worse, so both numbers are printed either way.
     let mut confirmed: Vec<(u64, f64, f64)> = Vec::new();
     if !flagged.is_empty() {

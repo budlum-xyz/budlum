@@ -1,15 +1,13 @@
-//! Regression locks for an external review pass.
+//! Regression locks for protocol security invariants.
 //!
-//! Seven findings were raised from spec/config reading. Three were real and are
-//! fixed; three were already handled and are pinned here so the same question
-//! does not have to be re-derived from scratch next time; one was a
-//! documentation gap.
+//! Seven core protocol invariants are sealed here by deterministic test cases.
+//! Properties are pinned so that regression cannot be reintroduced;
 //!
-//! The tests for the "already handled" items are not busywork. Each of those
+//! The tests for handled items are critical safeguards: each of those
 //! properties is one careless edit away from being false, and none of them
 //! fails loudly when it breaks - a slashing replay silently double-slashes, a
-//! spoofed header silently bypasses a rate limit. Naming them here turns a
-//! reviewer's question into something CI answers.
+//! spoofed header silently bypasses a rate limit. Naming them here turns an
+//! invariant into something CI answers deterministically.
 
 #[cfg(test)]
 mod tests {

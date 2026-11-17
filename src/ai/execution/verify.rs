@@ -256,11 +256,11 @@ mod tests {
         assert!(rep2.program_hash_matches_model);
     }
 
-    /// The finding this field exists for: two models with the same layer shape
+    /// Architectural separation invariant: two models with the same layer shape
     /// compile to the same guest program, because the fixed-point MLP guest
     /// reads its weights from memory rather than baking them into immediates.
     /// The STARK does not bind that memory either. So without a weights digest
-    /// a proof produced for one model verifies against the other.
+    /// a proof produced for one model could verify against the other.
     #[test]
     fn program_hash_alone_does_not_separate_two_models_of_the_same_shape() {
         use crate::ai::execution::{matmul_program_hash, weights_digest, FixedPointMlpSpec};

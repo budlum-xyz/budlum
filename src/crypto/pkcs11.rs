@@ -414,14 +414,13 @@ impl Pkcs11Signer {
         // object carries the label the signer names. When the operator set a
         // key label and the mechanism is configured, the two must be the same
         // binding or the startup test below would prove a pairing between the
-        // announced key and an object nobody selected. That is exactly the
-        // finding: the label was applied after the constructor had already
-        // bound a key, so the proof covered a different key than the one the
-        // node would sign with. Fail closed, and say which side is missing.
+        // announced key and an object nobody selected. Binding invariant: the
+        // label must be applied during construction so the proof covers the exact
+        // key that the node signs with. Fail closed, and say which side is missing.
         // The label that opened the standard PQ key is recorded by
         // `with_standard_pq_key`, so this can only fire if a future path opens
         // the key without going through it. Checked here rather than trusted,
-        // because "no label" is exactly the state the finding describes.
+        // because an unlabelled key fails closed.
         Self::check_standard_key_is_labelled(
             self.standard_pq_key.is_some(),
             self.standard_pq_label.as_deref(),

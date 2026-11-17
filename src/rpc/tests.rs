@@ -2928,13 +2928,13 @@ mod rpc_tests {
     }
 
     /// the estimate is the fee the chain will actually enforce for
-    /// this transaction, not the base fee. The finding is that
-    /// `bud_estimateGas` quoted `base_fee` while admission charged
+    /// this transaction, not the base fee. Invariant:
+    /// `bud_estimateGas` must not quote `base_fee` alone while admission charges
     /// `required_fee`, which bills the proportional cut on a transfer
     /// (`transfer_fee_ppm` of the amount, on top of the base fee) and a
     /// multiplied base fee for a governance proposal. A wallet sized its
-    /// transaction from the quote and was then refused for the fee the RPC had
-    /// just suggested.
+    /// transaction from the quote and was previously refused for the fee the RPC had
+    /// suggested without proportional accounting.
     ///
     /// Canary: restore `Ok(Self::to_hex(base_fee))` in `estimate_gas` and this
     /// fails: the proportional cut alone is 1% of the amount.
@@ -2981,7 +2981,7 @@ mod rpc_tests {
         );
         assert_ne!(
             estimate, base_fee,
-            "quoting only the base fee is the finding"
+            "estimate must include proportional fee in addition to base fee"
         );
     }
 

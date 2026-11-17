@@ -279,8 +279,8 @@ pub fn zstd_decompress(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// THE DECODER (spec section 4): a drop stream -> the original body.
-/// Peeling + GF(2) elimination - "peeling alone IS NOT ENOUGH" (Finding-5:
-/// k=3, 11 correct drops, the single lost degree-1 drop -> pure peeling stalled).
+/// Peeling + GF(2) elimination - peeling complemented with algebraic elimination:
+/// k=3, 11 correct drops, the single lost degree-1 drop -> pure peeling stalls without GF(2).
 /// If the rank is insufficient it returns None. If the assembled body does not
 /// match the expected digest it returns None too, so it never returns wrong data.
 /// The decoder is built from the stream header that `derive_stream` writes first.
@@ -421,7 +421,7 @@ impl KaruselDecoder {
         }
     }
 
-    /// GF(2) elimination if peeling stalls (the Finding-5 fix).
+    /// GF(2) Gaussian elimination if peeling stalls.
     /// A word-array bitset (u64 x N) - k <= 65535 is supported.
     fn eliminate(&mut self) -> bool {
         if self.is_complete() {

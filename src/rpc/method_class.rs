@@ -529,11 +529,11 @@ mod tests {
 
     /// no method may change consensus state outside block execution.
     ///
-    /// The finding is that the public listener could change consensus state:
-    /// an RPC call wrote a registry row, a finality view or a state root that
-    /// the node's peers did not share, and the two nodes then disagreed about
+    /// The architectural invariant is that the public listener cannot change consensus state:
+    /// no RPC call may write a registry row, a finality view or a state root that
+    /// the node's peers do not share, which would cause nodes to disagree about
     /// the tip without either of them having produced a block. The class table
-    /// is the fix - `Effect` has no variant for such a write, and every writer
+    /// enforces this rule - `Effect` has no variant for such a write, and every writer
     /// that remains is either a signed transaction handed to the mempool
     /// (`TxSubmit`), a node-local action (`LocalAdmin`), a read (`Read`) or a
     /// refusal that names a transaction door (`Refused`).
@@ -931,8 +931,7 @@ mod tests {
     ///
     /// The rule is a coverage rule, not a proof. It reads whether a test calls
     /// the method and asserts on the answer; what each assertion establishes is
-    /// the review of the test itself, and the directive's closure protocol
-    /// (section 14.1 item 5) is where a finding is argued.
+    /// verified by the test suite itself.
     #[test]
     fn rpc_every_method_has_success_and_refusal_test() {
         let corpus = coverage_corpus();

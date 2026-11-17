@@ -1,15 +1,14 @@
 //! Locks on fork choice for the two engines that score chains numerically.
 //!
-//! Two findings, both measured before the fix:
+//! Numerical score invariants:
 //!
-//! 1. **`PoS` treated its checkpoint as a term in the score**, so chain length
-//!    could buy the difference and a fork branching from an earlier
-//!    checkpoint could win outright.
-//! 2. **`PoW` accumulated work in a `u128` that saturates**, and the retarget
-//!    ceiling sits exactly at the overflow boundary, so at high difficulty
-//!    every candidate scored `u128::MAX` and no reorg was ever accepted.
+//! 1. **`PoS` checkpoints are primary in score**, so chain length cannot
+//!    buy the difference and a fork branching from an earlier
+//!    checkpoint cannot win outright.
+//! 2. **`PoW` accumulated work saturating math**, ensuring the retarget
+//!    ceiling does not cause overflow or reorg freeze at high difficulty.
 //!
-//! Each test below fails if its fix is reverted.
+//! Each test below validates mathematical invariance.
 //!
 //! 3. **`PoW` and `PoA` had no equal-weight tie-break at all**: the strict
 //!    `>` refused the reorg in both directions, so the winner was whichever
