@@ -161,12 +161,14 @@ STARK proving on every call.
 
 ## 13. SVM and Move Stateless Pointers & `KR-UEL-REENTRANCY` (`the implementation track`)
 
-- Active from genesis on testnet `45261`: the coordinator serves SVM and Move
- pointer calls with no activation height
- (`home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint`).
+- EVM and WASM pointers are launch features. SVM, Move, and later catalog
+ pointer targets are closed on public testnet and mainnet; unknown chain ids
+ fail closed (`svm_and_move_pointers_are_closed_on_testnet`). Devnet retains the
+ explicit conformance path.
 - Stateless pointer codecs in `execution/svm/src/pointer/` and `execution/move/src/pointer/`
- plus 4-way coordinator translation (`svm_pointer_holds_no_balance`,
- `move_pointer_holds_no_balance`, `pointer_allowance_lives_at_home`).
+ plus 4-way coordinator translation remain testable on devnet
+ (`svm_pointer_holds_no_balance`, `move_pointer_holds_no_balance`,
+ `pointer_allowance_lives_at_home`).
 - `KR-UEL-REENTRANCY` (`IP-52` item 3): cross-environment reentrancy prohibition
  (`Section 8.7.3` item 6) remains enforced (`ReentrancyForbidden`,
  `uel_reentrancy_forbidden`).

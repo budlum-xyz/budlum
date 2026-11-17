@@ -637,7 +637,8 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
         )
         .expect("register asset");
         let wasm_ptr =
-            deploy_asset_pointer(&mut state, &asset.asset_id, EeId::WASM).expect("wasm ptr");
+            deploy_asset_pointer(&mut state, ctx_h.chain_id, &asset.asset_id, EeId::WASM)
+                .expect("wasm ptr");
         let ptr_bud =
             crate::execution::coordinator::alias::derive_contract_account(EeId::WASM, &wasm_ptr);
         assert_eq!(state.get_attos_balance(&ptr_bud), 0);
