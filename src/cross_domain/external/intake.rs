@@ -1797,11 +1797,10 @@ mod tests {
         assert!(matches!(err, IntakeError::CommitteeNotPinned), "got: {err}");
     }
 
-    /// EthereumSync admission and evidence verification are open on Testnet
-    /// (`45261`) with pinned committee + `PairingBls`, while Mainnet (`45260`)
-    /// stays gated (`MainnetDisabled`).
+    /// EthereumSync remains available on devnet for cryptographic integration
+    /// tests, while public Testnet and Mainnet refuse the complete lifecycle.
     #[test]
-    fn ethereum_sync_committee_is_open_on_testnet() {
+    fn ethereum_sync_committee_is_closed_on_public_networks() {
         use crate::core::account::AccountState;
         use crate::core::chain_config::Network;
         use crate::cross_domain::external::ethereum::signing_root_v2;
@@ -1876,8 +1875,21 @@ mod tests {
             fee: 10,
             bls: IntakeState::production_bls,
         };
-        execute_external_domain_tx(&mut state, &ctx_testnet, &tx)
-            .expect("EthereumSync must succeed on testnet with real BLS signature");
+        let before = state.calculate_state_root();
+        let err = execute_external_domain_tx(&mut state, &ctx_testnet, &tx)
+            .expect_err("EthereumSync must remain closed on public testnet");
+        assert_eq!(err, ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+        assert_eq!(state.calculate_state_root(), before);
+        assert!(state.settlement.external_intake.entries.is_empty());
+
+        let ctx_devnet = ExternalDomainTxContext {
+            sender: poster,
+            chain_id: Network::Devnet.chain_id().value(),
+            fee: 10,
+            bls: IntakeState::production_bls,
+        };
+        execute_external_domain_tx(&mut state, &ctx_devnet, &tx)
+            .expect("EthereumSync implementation must remain testable on devnet");
         assert_eq!(state.settlement.external_intake.entries.len(), 1);
 
         let ctx_mainnet = ExternalDomainTxContext {
