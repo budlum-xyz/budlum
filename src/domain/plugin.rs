@@ -3,8 +3,9 @@ use crate::core::account::AccountState;
 use crate::core::block::Block;
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::finality_adapter::{
-    block_finality_proof_hash, empty_event_root, BftFinalityAdapter, DomainFinalityAdapter,
-    PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
+    block_finality_proof_hash, empty_event_root, BftFinalityAdapter, DagFinalityAdapter,
+    DomainFinalityAdapter, PohFinalityAdapter, PoAFinalityAdapter, PoSFinalityAdapter,
+    PospaceFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
 };
 use crate::domain::types::{
     ConsensusDomain, ConsensusKind, DomainCommitment, DomainId, DomainStatus, Hash32,
@@ -204,6 +205,90 @@ impl ZkDomainPlugin {
 impl ConsensusDomainPlugin for ZkDomainPlugin {
     fn kind(&self) -> ConsensusKind {
         ConsensusKind::Zk
+    }
+
+    fn consensus(&self) -> &dyn ConsensusEngine {
+        self.consensus.as_ref()
+    }
+
+    fn finality_adapter(&self) -> &dyn DomainFinalityAdapter {
+        &self.finality
+    }
+}
+
+pub struct DagDomainPlugin {
+    consensus: Arc<dyn ConsensusEngine>,
+    finality: DagFinalityAdapter,
+}
+
+impl DagDomainPlugin {
+    pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
+        Self {
+            consensus,
+            finality: DagFinalityAdapter,
+        }
+    }
+}
+
+impl ConsensusDomainPlugin for DagDomainPlugin {
+    fn kind(&self) -> ConsensusKind {
+        ConsensusKind::Dag
+    }
+
+    fn consensus(&self) -> &dyn ConsensusEngine {
+        self.consensus.as_ref()
+    }
+
+    fn finality_adapter(&self) -> &dyn DomainFinalityAdapter {
+        &self.finality
+    }
+}
+
+pub struct PohDomainPlugin {
+    consensus: Arc<dyn ConsensusEngine>,
+    finality: PohFinalityAdapter,
+}
+
+impl PohDomainPlugin {
+    pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
+        Self {
+            consensus,
+            finality: PohFinalityAdapter,
+        }
+    }
+}
+
+impl ConsensusDomainPlugin for PohDomainPlugin {
+    fn kind(&self) -> ConsensusKind {
+        ConsensusKind::Poh
+    }
+
+    fn consensus(&self) -> &dyn ConsensusEngine {
+        self.consensus.as_ref()
+    }
+
+    fn finality_adapter(&self) -> &dyn DomainFinalityAdapter {
+        &self.finality
+    }
+}
+
+pub struct PospaceDomainPlugin {
+    consensus: Arc<dyn ConsensusEngine>,
+    finality: PospaceFinalityAdapter,
+}
+
+impl PospaceDomainPlugin {
+    pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
+        Self {
+            consensus,
+            finality: PospaceFinalityAdapter,
+        }
+    }
+}
+
+impl ConsensusDomainPlugin for PospaceDomainPlugin {
+    fn kind(&self) -> ConsensusKind {
+        ConsensusKind::Pospace
     }
 
     fn consensus(&self) -> &dyn ConsensusEngine {

@@ -35,6 +35,9 @@ pub enum ConsensusKind {
     PoA,
     Bft,
     Zk,
+    Dag,
+    Poh,
+    Pospace,
     Custom(String),
     /// B.U.D. Storage ConsensusDomain.
     ///
@@ -67,6 +70,9 @@ impl ConsensusKind {
             ConsensusKind::PoA => b"poa".to_vec(),
             ConsensusKind::Bft => b"bft".to_vec(),
             ConsensusKind::Zk => b"zk".to_vec(),
+            ConsensusKind::Dag => b"dag".to_vec(),
+            ConsensusKind::Poh => b"poh".to_vec(),
+            ConsensusKind::Pospace => b"pospace".to_vec(),
             ConsensusKind::Custom(name) => {
                 let mut out = b"custom:".to_vec();
                 out.extend_from_slice(name.as_bytes());
@@ -92,6 +98,21 @@ impl ConsensusKind {
     /// Convenience: is this an AI Inference domain?
     pub fn is_ai(&self) -> bool {
         matches!(self, ConsensusKind::AiInference)
+    }
+
+    /// Convenience: is this a DAG domain?
+    pub fn is_dag(&self) -> bool {
+        matches!(self, ConsensusKind::Dag)
+    }
+
+    /// Convenience: is this a PoH domain?
+    pub fn is_poh(&self) -> bool {
+        matches!(self, ConsensusKind::Poh)
+    }
+
+    /// Convenience: is this a PoSpace domain?
+    pub fn is_pospace(&self) -> bool {
+        matches!(self, ConsensusKind::Pospace)
     }
 }
 

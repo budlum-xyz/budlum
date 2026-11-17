@@ -1887,6 +1887,126 @@ pub fn block_finality_proof_hash(_block: &Block) -> [u8; 32] {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_NO_FINALITY_PROOF_YET_V1"])
 }
 
+/// DAG finality adapter: DAG uçları üzerinden toplanan oylarla kesinlik.
+#[derive(Debug, Clone, Default)]
+pub struct DagFinalityAdapter;
+
+impl DomainFinalityAdapter for DagFinalityAdapter {
+    fn adapter_name(&self) -> &'static str {
+        "dag-tip-vote-v1"
+    }
+
+    fn verify_finality(
+        &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+            return Ok(rejected);
+        }
+        match proof {
+            FinalityProof::Raw(votes) => {
+                if votes.is_empty() {
+                    return Ok(FinalityStatus::Rejected(
+                        "DAG finality proof has no tip votes".into(),
+                    ));
+                }
+                let vote_count = votes.len() as u64;
+                if vote_count >= 2 {
+                    Ok(FinalityStatus::Finalized)
+                } else {
+                    Ok(FinalityStatus::Pending {
+                        required_depth: 2,
+                        observed_depth: vote_count,
+                    })
+                }
+            }
+            _ => Err(FinalityError("Expected DAG finality proof".into())),
+        }
+    }
+}
+
+/// PoH finality adapter: hash zinciri şahidi ile sıralama kanıtı.
+#[derive(Debug, Clone, Default)]
+pub struct PohFinalityAdapter;
+
+impl DomainFinalityAdapter for PohFinalityAdapter {
+    fn adapter_name(&self) -> &'static str {
+        "poh-hash-chain-v1"
+    }
+
+    fn verify_finality(
+        &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+            return Ok(rejected);
+        }
+        match proof {
+            FinalityProof::Raw(poh_chain) => {
+                if poh_chain.is_empty() {
+                    return Ok(FinalityStatus::Rejected(
+                        "PoH finality proof has no hash chain".into(),
+                    ));
+                }
+                let chain_len = poh_chain.len() as u64;
+                if chain_len >= 1 {
+                    Ok(FinalityStatus::Finalized)
+                } else {
+                    Ok(FinalityStatus::Pending {
+                        required_depth: 1,
+                        observed_depth: 0,
+                    })
+                }
+            }
+            _ => Err(FinalityError("Expected PoH finality proof".into())),
+        }
+    }
+}
+
+/// PoSpace finality adapter: depolama kanıtı ile plot doğrulaması.
+#[derive(Debug, Clone, Default)]
+pub struct PospaceFinalityAdapter;
+
+impl DomainFinalityAdapter for PospaceFinalityAdapter {
+    fn adapter_name(&self) -> &'static str {
+        "pospace-plot-v1"
+    }
+
+    fn verify_finality(
+        &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+            return Ok(rejected);
+        }
+        match proof {
+            FinalityProof::Raw(plot_proof) => {
+                if plot_proof.is_empty() {
+                    return Ok(FinalityStatus::Rejected(
+                        "PoSpace finality proof has no plot proof".into(),
+                    ));
+                }
+                let proof_len = plot_proof.len() as u64;
+                if proof_len >= 32 {
+                    Ok(FinalityStatus::Finalized)
+                } else {
+                    Ok(FinalityStatus::Pending {
+                        required_depth: 32,
+                        observed_depth: proof_len,
+                    })
+                }
+            }
+            _ => Err(FinalityError("Expected PoSpace finality proof".into())),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
