@@ -867,16 +867,21 @@ async fn bootstrap(
     let mut dial_targets: Vec<(libp2p::Multiaddr, PeerId)> = Vec::new();
     for peer in &invite.peers {
         if let Ok((address, id)) = net::dial_address(peer) {
-            let _ = garden_net
-                .commands
-                .send(NetCommand::Dial(address.clone()))
-                .await;
             named.insert(id);
             dial_targets.push((address, id));
         }
     }
     if named.is_empty() {
         return Err("invite carries no dialable peer address".into());
+    }
+    // Dial one peer at a time before genesis is verified so untrusted invite
+    // text cannot trigger a simultaneous probe against dozens of arbitrary IPs.
+    let mut dialed_count = 1usize;
+    if let Some((address, _)) = dial_targets.first() {
+        let _ = garden_net
+            .commands
+            .send(NetCommand::Dial(address.clone()))
+            .await;
     }
     let deadline = tokio::time::Instant::now() + BOOTSTRAP_TIMEOUT;
     let mut next_retry = tokio::time::Instant::now() + BOOTSTRAP_RETRY_INTERVAL;
@@ -899,6 +904,19 @@ async fn bootstrap(
                 ask_commits(garden_net, peer, 1).await;
             } else if named.iter().all(|peer| passed.contains_key(peer)) {
                 return Err(nobody_admitted(&passed));
+            } else if dialed_count < dial_targets.len()
+                && dial_targets
+                    .iter()
+                    .take(dialed_count)
+                    .all(|(_, id)| passed.contains_key(id))
+            {
+                if let Some((address, _)) = dial_targets.get(dialed_count) {
+                    let _ = garden_net
+                        .commands
+                        .send(NetCommand::Dial(address.clone()))
+                        .await;
+                }
+                dialed_count += 1;
             }
         }
         let wake = deadline.min(next_retry);
@@ -914,7 +932,10 @@ async fn bootstrap(
                     return Err(nobody_admitted(&passed));
                 }
                 next_retry = now + BOOTSTRAP_RETRY_INTERVAL;
-                for (address, id) in &dial_targets {
+                if dialed_count < dial_targets.len() {
+                    dialed_count += 1;
+                }
+                for (address, id) in dial_targets.iter().take(dialed_count) {
                     if !peers.contains_key(id) && !passed.contains_key(id) {
                         let _ = garden_net
                             .commands
@@ -1866,7 +1887,13 @@ impl Node {
             let heaviest = self
                 .unreferenced
                 .iter()
+                .filter(|(_, queue)| queue.iter().any(|id| !self.is_pending_content(id)))
                 .max_by_key(|(key, queue)| (!state.is_active(key), queue.len()))
+                .or_else(|| {
+                    self.unreferenced
+                        .iter()
+                        .max_by_key(|(key, queue)| (!state.is_active(key), queue.len()))
+                })
                 .map(|(key, _)| *key);
             if let Some(owner) = heaviest {
                 let evicted = self.evict_deposit(owner, sender, content_id);

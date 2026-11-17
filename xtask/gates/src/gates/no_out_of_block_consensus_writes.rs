@@ -65,6 +65,7 @@ const CALLS: &[(&str, Class)] = &[
     ("consensus", Read),
     ("consensus_domains_with_garden", Read),
     ("credit_development_account", DevnetOnly),
+    ("domain_commitments_with_garden", Read),
     ("drain_local_slashing_evidence", NodeLocal),
     ("enable_aggregator", NodeLocal),
     ("external_domain_profile", Read),
