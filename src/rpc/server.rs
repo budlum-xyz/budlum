@@ -716,18 +716,16 @@ pub struct RpcServer {
 }
 
 const MAX_CONSUMED_PAID_VIEWS: usize = 65_536;
+const MAX_IN_FLIGHT_PAID_VIEWS: usize = 4_096;
 
 #[derive(Default)]
 struct ConsumedPaidViews {
     seen: std::collections::BTreeSet<[u8; 32]>,
+    in_flight: std::collections::BTreeSet<[u8; 32]>,
     order: VecDeque<[u8; 32]>,
 }
 
 impl ConsumedPaidViews {
-    fn contains(&self, receipt_id: &[u8; 32]) -> bool {
-        self.seen.contains(receipt_id)
-    }
-
     fn record(&mut self, receipt_id: [u8; 32]) {
         if !self.seen.insert(receipt_id) {
             return;
@@ -736,6 +734,66 @@ impl ConsumedPaidViews {
         while self.order.len() > MAX_CONSUMED_PAID_VIEWS {
             if let Some(evicted) = self.order.pop_front() {
                 self.seen.remove(&evicted);
+            }
+        }
+    }
+}
+
+/// RAII reservation preventing concurrent `bud_storageGetContent` replay of the
+/// same `receipt_id` across `.await` points. On error or task cancellation the
+/// reservation releases the in-flight slot without burning an unserved receipt.
+struct PaidViewReservation {
+    cache: Arc<Mutex<ConsumedPaidViews>>,
+    receipt_id: Option<[u8; 32]>,
+}
+
+impl PaidViewReservation {
+    fn acquire(
+        cache: &Arc<Mutex<ConsumedPaidViews>>,
+        receipt_id: [u8; 32],
+    ) -> Result<Self, ErrorObjectOwned> {
+        let mut guard = cache.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
+        })?;
+        if guard.seen.contains(&receipt_id) || guard.in_flight.contains(&receipt_id) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "paid view receipt already consumed on this node",
+                None::<()>,
+            ));
+        }
+        if guard.in_flight.len() >= MAX_IN_FLIGHT_PAID_VIEWS {
+            return Err(ErrorObjectOwned::owned(
+                -32005,
+                "too many in-flight paid view requests",
+                None::<()>,
+            ));
+        }
+        guard.in_flight.insert(receipt_id);
+        Ok(Self {
+            cache: Arc::clone(cache),
+            receipt_id: Some(receipt_id),
+        })
+    }
+
+    fn commit(mut self) -> Result<(), ErrorObjectOwned> {
+        let Some(receipt_id) = self.receipt_id.take() else {
+            return Ok(());
+        };
+        let mut guard = self.cache.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
+        })?;
+        guard.in_flight.remove(&receipt_id);
+        guard.record(receipt_id);
+        Ok(())
+    }
+}
+
+impl Drop for PaidViewReservation {
+    fn drop(&mut self) {
+        if let Some(receipt_id) = self.receipt_id.take() {
+            if let Ok(mut guard) = self.cache.lock() {
+                guard.in_flight.remove(&receipt_id);
             }
         }
     }
@@ -8730,18 +8788,7 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        {
-            let guard = self.consumed_paid_views.lock().map_err(|_| {
-                ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
-            })?;
-            if guard.contains(&receipt_id) {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    "paid view receipt already consumed on this node",
-                    None::<()>,
-                ));
-            }
-        }
+        let reservation = PaidViewReservation::acquire(&self.consumed_paid_views, receipt_id)?;
         let receipt = crate::storage::bud3::view::PaidViewReceipt {
             payer,
             object,
@@ -8781,12 +8828,7 @@ impl BudlumApiServer for RpcServer {
                     None::<()>,
                 ),
             })?;
-        {
-            let mut guard = self.consumed_paid_views.lock().map_err(|_| {
-                ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
-            })?;
-            guard.record(receipt_id);
-        }
+        reservation.commit()?;
         Ok(serde_json::json!({
             "object": hex::encode(object),
             "content_hex": hex::encode(&bytes),
@@ -11457,6 +11499,50 @@ mod view_claim_tests {
         assert!(
             limiter.per_source.lock().unwrap().is_empty(),
             "released sources must leave zero residual entries"
+        );
+    }
+}
+
+#[cfg(test)]
+mod paid_view_reservation_tests {
+    use super::{ConsumedPaidViews, PaidViewReservation};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn paid_view_reservation_blocks_concurrent_replay_and_rolls_back_on_drop() {
+        let cache = Arc::new(Mutex::new(ConsumedPaidViews::default()));
+        let receipt_id = [0x42u8; 32];
+
+        // First caller reserves the receipt before awaiting backend decode.
+        let first = PaidViewReservation::acquire(&cache, receipt_id)
+            .expect("initial reservation must succeed");
+
+        // A concurrent caller presenting the same receipt_id must be rejected
+        // before the first request completes.
+        let dup_err = PaidViewReservation::acquire(&cache, receipt_id)
+            .err()
+            .expect("concurrent duplicate receipt_id must fail closed");
+        assert!(
+            dup_err.message().contains("already consumed"),
+            "unexpected concurrent error: {}",
+            dup_err.message()
+        );
+
+        // If the first call errors or is cancelled, dropping releases in-flight
+        // without burning the unserved receipt.
+        drop(first);
+        let retry = PaidViewReservation::acquire(&cache, receipt_id)
+            .expect("cancelled/errored reservation must roll back cleanly");
+        retry.commit().expect("commit must mark receipt consumed");
+
+        // Once committed, subsequent replay is permanently refused.
+        let replay_err = PaidViewReservation::acquire(&cache, receipt_id)
+            .err()
+            .expect("committed receipt_id must be rejected on replay");
+        assert!(
+            replay_err.message().contains("already consumed"),
+            "unexpected replay error: {}",
+            replay_err.message()
         );
     }
 }
