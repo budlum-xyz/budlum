@@ -3495,6 +3495,15 @@ impl ChainActor {
                     let _ = tx.send(self.blockchain.quantum_view());
                 }
                 ChainCommand::GetBud3(query, tx) => {
+                    let query = match query {
+                        crate::storage::bud3::registry::Bud3Query::Grant(tag) => {
+                            crate::storage::bud3::registry::Bud3Query::GrantAt(
+                                tag,
+                                self.blockchain.state.epoch_index,
+                            )
+                        }
+                        other => other,
+                    };
                     let _ = tx.send(self.blockchain.state.bud3_registry.query_json(&query));
                 }
                 ChainCommand::GetBud3Nfts(nfts, tx) => {

@@ -273,6 +273,7 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_storageGetSymbols", Public, Read),
     row("bud_storageGetPlacement", Public, Read),
     row("bud_storageGetNftObject", Public, Read),
+    row("bud_storageGetGrant", Public, Read),
     row("bud_storageStoreVerifiedSymbols", Operator, LocalAdmin),
     row("bud_listRelays", Public, Read),
     row("bud_listGateways", Public, Read),
