@@ -782,13 +782,11 @@ budzero/bud-state/src/note.rs	struct	NoteRegistry
 budzero/bud-state/src/note.rs	struct	PrivacyNote
 budzero/bud-vm/src/lib.rs	const	POSEIDON_ALPHA
 budzero/bud-vm/src/lib.rs	const	POSEIDON_ROUNDS_IN_USE
-budzero/bud-vm/src/lib.rs	enum	VmError
 budzero/bud-vm/src/lib.rs	fn	consume_gas
 budzero/bud-vm/src/lib.rs	fn	field_mul_goldilocks
 budzero/bud-vm/src/lib.rs	fn	poseidon4_hash3
 budzero/bud-vm/src/lib.rs	fn	poseidon4_hash_state
 budzero/bud-vm/src/lib.rs	fn	poseidon_full_hash_state
-budzero/bud-vm/src/lib.rs	fn	poseidon_full_state
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_attester_proof
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_content_validation
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_relay_proof

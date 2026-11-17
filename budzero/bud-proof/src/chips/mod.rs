@@ -6,5 +6,6 @@
 //! the `BudZKVM` CPU trace.
 
 pub mod batch;
+pub mod fold;
 pub mod keccak;
 pub mod mldsa_ntt;

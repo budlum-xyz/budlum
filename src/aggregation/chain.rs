@@ -44,9 +44,17 @@ const WIRE_FRAME_LIMITS: FrameLimits = FrameLimits {
 /// size limit of consensus.
 const MAX_BLOCK_PROOF_BYTES: usize = crate::consensus::MAX_BLOCK_SIZE / 3;
 
-/// The parameter set of the native backend of a chain. A proof made under
-/// another value is refused.
+/// The parameter set of the native devnet/test backend of a chain. A proof
+/// made under another value is refused.
+#[cfg(any(test, feature = "agg-native-backend"))]
 const NATIVE_PARAMETER_SET: u32 = 1;
+
+/// The parameter set active in this build (devnet/test native id 1, production
+/// STARK id 2).
+#[cfg(any(test, feature = "agg-native-backend"))]
+const ACTIVE_PARAMETER_SET: u32 = NATIVE_PARAMETER_SET;
+#[cfg(not(any(test, feature = "agg-native-backend")))]
+const ACTIVE_PARAMETER_SET: u32 = super::stark::STARK_PARAMETER_SET;
 
 /// Tag of the commitment to the consensus parameters of the layer.
 const TAG_AGG_PARAMS: &[u8] = b"BDLM_AGG_PARAMS_V1";
@@ -152,9 +160,12 @@ pub fn claim_domain(chain_id: u64) -> Option<DomainId> {
 }
 
 /// Whether this build can check the proof of a frame.
+///
+/// Production builds use [`super::stark::StarkBackend`] (Phase 3); devnet and
+/// test builds may opt into the native backend via `agg-native-backend`.
 #[must_use]
 const fn backend_available() -> bool {
-    cfg!(any(test, feature = "agg-native-backend"))
+    true
 }
 
 /// Whether the account of a transaction signs with a scheme this layer
@@ -267,6 +278,15 @@ impl ChainBackend {
             NATIVE_PARAMETER_SET,
         )
     }
+
+    #[cfg(not(any(test, feature = "agg-native-backend")))]
+    fn stark(&self) -> super::stark::StarkBackend {
+        super::stark::StarkBackend::new(
+            self.registry.clone(),
+            FrameLimits::from(&self.params),
+            super::stark::STARK_PARAMETER_SET,
+        )
+    }
 }
 
 impl AggBackend for ChainBackend {
@@ -274,30 +294,21 @@ impl AggBackend for ChainBackend {
         #[cfg(any(test, feature = "agg-native-backend"))]
         return self.native().prove_tick(ctx, items);
         #[cfg(not(any(test, feature = "agg-native-backend")))]
-        {
-            let _ = (ctx, items, &self.params, &self.registry);
-            Err(AggError::Unavailable)
-        }
+        return self.stark().prove_tick(ctx, items);
     }
 
     fn prove_merge(&self, left: &ClaimFrame, right: &ClaimFrame) -> Result<Vec<u8>, AggError> {
         #[cfg(any(test, feature = "agg-native-backend"))]
         return self.native().prove_merge(left, right);
         #[cfg(not(any(test, feature = "agg-native-backend")))]
-        {
-            let _ = (left, right);
-            Err(AggError::Unavailable)
-        }
+        return self.stark().prove_merge(left, right);
     }
 
     fn verify(&self, frame: &ClaimFrame, domain: DomainId) -> Result<(), AggError> {
         #[cfg(any(test, feature = "agg-native-backend"))]
         return self.native().verify(frame, domain);
         #[cfg(not(any(test, feature = "agg-native-backend")))]
-        {
-            let _ = (frame, domain);
-            Err(AggError::Unavailable)
-        }
+        return self.stark().verify(frame, domain);
     }
 }
 
@@ -315,7 +326,7 @@ fn params_commitment(params: &AggParams, domain: DomainId) -> Hash32 {
         &max_proof.to_be_bytes(),
         &params.claim_fee_per_byte.to_be_bytes(),
         &params.agg_share_bps.to_be_bytes(),
-        &NATIVE_PARAMETER_SET.to_be_bytes(),
+        &ACTIVE_PARAMETER_SET.to_be_bytes(),
     ])
 }
 

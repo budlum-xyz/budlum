@@ -113,7 +113,8 @@ pub fn absorb_states(bytes: &[u8]) -> Vec<[u64; 25]> {
 }
 
 /// Keccak-f[1600], the reference permutation (FIPS 202).
-fn keccak_f(a: &mut [u64; 25]) {
+/// Reference 24-round `Keccak-f[1600]` permutation on a 25-lane state.
+pub fn keccak_f(a: &mut [u64; 25]) {
     const RC: [u64; 24] = [
         0x0000_0000_0000_0001,
         0x0000_0000_0000_8082,

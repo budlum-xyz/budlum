@@ -24,6 +24,7 @@
 //! tests run the result on the virtual machine against the native
 //! verifier, the native backend and the digests of the claim layer.
 
+pub mod agg_merge;
 pub mod agg_tick;
 pub mod asm;
 pub mod bytes;
