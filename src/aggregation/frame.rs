@@ -107,7 +107,7 @@ impl From<ClaimError> for FrameError {
 pub struct SegmentAttestation {
     /// Aggregator ML-DSA-87 public key (`SHA3-256("BUDLUM_ADDRESS_V2" || pk) == segment.aggregator`).
     pub public_key: Box<[u8; ML_DSA_87_PUBLIC_KEY_LEN]>,
-    /// ML-DSA-87 signature under [`ctx::AGG_SEGMENT_V1`] over [`segment_auth_message(&tick_pi)`].
+    /// ML-DSA-87 signature under [`ctx::AGG_SEGMENT_V1`] over [`segment_auth_message`] over `tick_pi`.
     pub signature: Box<[u8; ML_DSA_87_SIGNATURE_LEN]>,
 }
 
