@@ -1,7 +1,7 @@
 //! Domains, cross-domain bridge, settlement, and testnet feature-matrix
 //! regression locks (`zk_domain_refuses_empty_halt_proof`,
 //! `bridge_e2e_lock_mint_burn_unlock`, `ethereum_sync_committee_is_open_on_testnet`,
-//! `shared_security_is_open_on_testnet`, `app_binding_is_open_on_devnet`,
+//! `shared_security_is_closed_on_testnet`, `app_binding_is_open_on_devnet`,
 //! and functional regression names).
 
 use crate::chain::blockchain::Blockchain;
@@ -326,18 +326,15 @@ fn ethereum_sync_committee_is_open_on_testnet() {
 #[test]
 fn ethereum_sync_committee_open_on_testnet_chain_id() {
     ethereum_sync_committee_is_open_on_testnet();
-    assert!(
-        crate::core::chain_config::Network::Testnet
-            .shared_security()
-            .enabled
-    );
 }
 
-/// Shared security (`shared_security`) is open on Testnet (`45261`) and gated
-/// on Mainnet (`45260`).
+/// Shared security is a post-launch feature. Public Testnet (`45261`) and
+/// Mainnet (`45260`) refuse it; Devnet (`45262`) keeps the implementation door
+/// available for integration tests.
 #[test]
-fn shared_security_is_open_on_testnet() {
-    assert!(Network::Testnet.shared_security().enabled);
+fn shared_security_is_closed_on_testnet() {
+    assert!(!Network::Testnet.shared_security().enabled);
+    assert!(Network::Devnet.shared_security().enabled);
     assert!(!Network::Mainnet.shared_security().enabled);
     let operator = addr(0x31);
     let mut state = AccountState::new();
@@ -358,7 +355,8 @@ fn shared_security_is_open_on_testnet() {
         fee: 10,
         bls: IntakeState::production_bls,
     };
-    execute_shared_security_tx(
+    let before = state.calculate_state_root();
+    let err = execute_shared_security_tx(
         &mut state,
         &testnet_ctx,
         &SharedSecurityTx::SetRegistrar {
@@ -366,7 +364,9 @@ fn shared_security_is_open_on_testnet() {
             registrar: vec![0xAB; 20],
         },
     )
-    .expect("shared_security must succeed on testnet 45261");
+    .expect_err("shared_security must remain closed on testnet");
+    assert!(err.to_string().contains("not enabled"), "{err}");
+    assert_eq!(state.calculate_state_root(), before);
 
     let mainnet_ctx = SettlementTxContext {
         sender: operator,
@@ -390,7 +390,7 @@ fn shared_security_is_open_on_testnet() {
 /// on Mainnet (`45260`).
 #[test]
 fn app_binding_is_open_on_devnet() {
-    assert!(Network::Testnet.app_binding_enabled());
+    assert!(!Network::Testnet.app_binding_enabled());
     assert!(Network::Devnet.app_binding_enabled());
     assert!(!Network::Mainnet.app_binding_enabled());
     let registrant = addr(0x32);
