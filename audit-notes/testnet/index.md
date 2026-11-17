@@ -1,0 +1,383 @@
+# Budlum Testnet ve Agregasyon Direktif Maddeleri Dizini
+
+## Bolum A: THE_BUDLUM_DIREKTIF.md Tum Baslik ve Maddeler
+
+- [ ] Satir 17: ## İçindekiler
+- [ ] Satir 49: ## 0. Belge bilgisi ve okuma kuralları
+- [ ] Satir 51: ### 0.1 Konum
+- [ ] Satir 60: ### 0.2 Bağlayıcılık
+- [ ] Satir 67: ### 0.3 Ajanın davranışı
+- [ ] Satir 75: ### 0.4 Canlı durum kuralı
+- [ ] Satir 82: ### 0.5 Ölçü kuralı
+- [ ] Satir 90: ## 1. Hedef ve testnet tanımı
+- [ ] Satir 92: ### 1.1 Budlum'un tanımı
+- [ ] Satir 102: ### 1.2 Yedi köklü değişiklik
+- [ ] Satir 115: ### 1.3 Testnet'e hazır tanımı
+- [ ] Satir 129: ### 1.4 Kapsam katmanları
+- [ ] Satir 137: ### 1.5 Testnet özellik matrisi
+- [ ] Satir 175: ## 2. Terim politikası ve yeniden adlandırma
+- [ ] Satir 177: ### 2.1 Kural
+- [ ] Satir 186: ### 2.2 Yeniden adlandırma tablosu
+- [ ] Satir 268: ### 2.3 Yeniden adlandırma yöntemi
+- [ ] Satir 280: ### 2.4 Ana terimler sözlüğü
+- [ ] Satir 302: ## 3. Değişmezler
+- [ ] Satir 306: ### 3.1 Genel
+- [ ] Satir 319: ### 3.2 Depolama (B.U.D. 3.0)
+- [ ] Satir 339: ### 3.3 Doğrulayıcı ağı
+- [ ] Satir 349: ### 3.4 Yürütme
+- [ ] Satir 361: ### 3.5 Kriptografi ve gizlilik
+- [ ] Satir 370: ### 3.6 Süreç
+- [ ] Satir 382: ## 4. Hedef mimari
+- [ ] Satir 384: ### 4.1 Katmanlar
+- [ ] Satir 418: ### 4.2 Bir uygulamanın Budlum'a gelmesinin üç yolu
+- [ ] Satir 426: ### 4.3 Hedef depo yerleşimi
+- [ ] Satir 481: ## 5. Kaldırma planı: B.U.D. 3.0 dışındaki depolama sistemleri
+- [ ] Satir 483: ### 5.1 İlke
+- [ ] Satir 492: ### 5.2 Dosya düzeyinde karar tablosu
+- [ ] Satir 531: ### 5.3 İşlem ve RPC değişimi
+- [ ] Satir 542: ### 5.4 CI kapısı değişimi
+- [ ] Satir 564: ### 5.5 `no_legacy_storage` kapısının yasak listesi
+- [ ] Satir 580: ### 5.6 Bağımlı modüllerin geçişi
+- [ ] Satir 593: ### 5.7 Geçici arayüz
+- [ ] Satir 604: ## 6. B.U.D. 3.0: tek depolama sistemi
+- [ ] Satir 608: ### 6.1 Amaç ve ilkeler
+- [ ] Satir 610: #### 6.1.1 Amaç
+- [ ] Satir 623: #### 6.1.2 Tasarım cevapları
+- [ ] Satir 630: #### 6.1.3 Ölçülmüş oranlar (kaynak direktif, laboratuvar, Python)
+- [ ] Satir 645: #### 6.1.4 Yasak ifadeler
+- [ ] Satir 657: ### 6.2 Terimler
+- [ ] Satir 682: ### 6.3 Nesne biçimi: BOF-1
+- [ ] Satir 684: #### 6.3.1 İlke
+- [ ] Satir 688: #### 6.3.2 Kanonik ikili biçim
+- [ ] Satir 718: #### 6.3.3 Metin biçimi
+- [ ] Satir 740: ### 6.4 Yükleme akışı
+- [ ] Satir 794: ### 6.5 Görüntüleme akışı
+- [ ] Satir 809: ### 6.6 A0: kodek kayıt defteri
+- [ ] Satir 811: #### 6.6.1 Kayıt defteri
+- [ ] Satir 849: #### 6.6.2 Seçim kuralı
+- [ ] Satir 864: #### 6.6.3 Kodek kuralları
+- [ ] Satir 878: #### 6.6.4 Sıkıştırma zinciri: içerikten QR videoya, QR videodan nesneye
+- [ ] Satir 902: #### 6.6.5 B.U.D. 2.0 kaynak eşlemesi
+- [ ] Satir 938: #### 6.6.6 Alınmayan B.U.D. 2.0 yöntemleri
+- [ ] Satir 959: ### 6.7 A2: fountain kodu (RFC 6330)
+- [ ] Satir 969: ### 6.8 Tekilleştirme, başvuru, silme
+- [ ] Satir 971: #### 6.8.1 Tekilleştirme
+- [ ] Satir 980: #### 6.8.2 Başvuru sayacı
+- [ ] Satir 986: #### 6.8.3 Silme
+- [ ] Satir 996: ### 6.9 Sınıf duyarlı geniş şeritli yerleşim
+- [ ] Satir 998: #### 6.9.1 İlke
+- [ ] Satir 1008: #### 6.9.2 Hedefler
+- [ ] Satir 1018: #### 6.9.3 Girdiler ve yerleşim tablosu
+- [ ] Satir 1027: #### 6.9.4 Hesap tablosu (ölçüm değildir)
+- [ ] Satir 1049: #### 6.9.5 Alt sınırın ücreti
+- [ ] Satir 1055: ### 6.10 Onarım
+- [ ] Satir 1067: ### 6.11 Saklama kanıtı ve sembol protokolü
+- [ ] Satir 1069: #### 6.11.1 Alt blok ağacı
+- [ ] Satir 1075: #### 6.11.2 Denetim
+- [ ] Satir 1086: #### 6.11.3 Sembol protokolleri (libp2p istek-yanıt)
+- [ ] Satir 1096: ### 6.12 Toplama hacmi
+- [ ] Satir 1105: ### 6.13 Ağ küçülmesi
+- [ ] Satir 1114: ### 6.14 Nesne değişimi ve erişim katmanı
+- [ ] Satir 1126: ### 6.15 Video taahhüdü
+- [ ] Satir 1132: ### 6.16 Canlı yayın (T-Genişleme, İP-55)
+- [ ] Satir 1141: ### 6.17 Profiller
+- [ ] Satir 1150: ### 6.18 Ücretler ve saklama ödülleri
+- [ ] Satir 1158: ### 6.19 Doğrulayıcının depolama görevleri
+- [ ] Satir 1182: ### 6.20 Paylaşılan sıkıştırma bağlamı ve gizli tekilleştirme (T-Genişleme)
+- [ ] Satir 1194: ### 6.21 Sertleştirme kuralları
+- [ ] Satir 1198: #### 6.21.1 Sınırlar
+- [ ] Satir 1212: #### 6.21.2 Bellek ve CPU
+- [ ] Satir 1218: #### 6.21.3 Zaman
+- [ ] Satir 1223: #### 6.21.4 Gizlilik
+- [ ] Satir 1230: #### 6.21.5 Anahtar yönetimi
+- [ ] Satir 1235: #### 6.21.6 Kötüye kullanım ve hukuki talep
+- [ ] Satir 1242: ### 6.22 İşlemler ve RPC
+- [ ] Satir 1244: #### 6.22.1 `StorageTx` v3
+- [ ] Satir 1261: #### 6.22.2 RPC
+- [ ] Satir 1275: ### 6.23 Kabul testleri
+- [ ] Satir 1323: ## 7. Doğrulayıcı ağı: sınıflar, mobil doğrulayıcı ve Anında Görev Devri
+- [ ] Satir 1325: ### 7.1 Temel karar
+- [ ] Satir 1335: ### 7.2 Sınıflar
+- [ ] Satir 1356: ### 7.3 Kayıt
+- [ ] Satir 1379: ### 7.4 Kurul tabanlı kesinlik
+- [ ] Satir 1381: #### 7.4.1 Bulgu
+- [ ] Satir 1385: #### 7.4.2 Kurul
+- [ ] Satir 1395: #### 7.4.3 Nisap
+- [ ] Satir 1402: #### 7.4.4 Oy iletisi
+- [ ] Satir 1408: #### 7.4.5 Sıralı kesinlik
+- [ ] Satir 1413: #### 7.4.6 Devir sertifikası
+- [ ] Satir 1419: #### 7.4.7 Lider seçimi
+- [ ] Satir 1425: ### 7.5 Anında Koltuk Devri
+- [ ] Satir 1427: #### 7.5.1 Kural
+- [ ] Satir 1437: #### 7.5.2 Güvenlik gerekçesi
+- [ ] Satir 1443: #### 7.5.3 Gecikme
+- [ ] Satir 1447: ### 7.6 Anında Görev Devri (bütün görevler)
+- [ ] Satir 1463: ### 7.7 Felaket durumu
+- [ ] Satir 1471: ### 7.8 Varlık protokolü
+- [ ] Satir 1483: ### 7.9 Android mobil doğrulayıcı uygulaması
+- [ ] Satir 1485: #### 7.9.1 Bileşenler
+- [ ] Satir 1493: #### 7.9.2 Rust hedefleri ve derleme
+- [ ] Satir 1500: #### 7.9.3 Ön plan hizmeti ve arka plan işleri
+- [ ] Satir 1520: #### 7.9.4 Çalışma politikası
+- [ ] Satir 1530: #### 7.9.5 Depolama
+- [ ] Satir 1537: #### 7.9.6 Anahtarlar
+- [ ] Satir 1544: #### 7.9.7 Ağ
+- [ ] Satir 1551: #### 7.9.8 Hafif istemci doğrulaması
+- [ ] Satir 1558: #### 7.9.9 Kullanıcı akışları
+- [ ] Satir 1566: #### 7.9.10 Dağıtım
+- [ ] Satir 1572: #### 7.9.11 Üretici pil kısıtları
+- [ ] Satir 1578: ### 7.10 iOS fırsatçı mobil doğrulayıcı
+- [ ] Satir 1588: ### 7.11 Ağ değişiklikleri
+- [ ] Satir 1607: ### 7.12 Testler
+- [ ] Satir 1631: ## 8. Evrensel Yürütme Katmanı (UEL)
+- [ ] Satir 1633: ### 8.1 Amaç ve ilke
+- [ ] Satir 1641: ### 8.2 Yürütme ortamı kataloğu
+- [ ] Satir 1666: ### 8.3 Mimari
+- [ ] Satir 1668: #### 8.3.1 Bileşenler
+- [ ] Satir 1690: #### 8.3.2 İşçi süreçleri
+- [ ] Satir 1700: #### 8.3.3 Arayüz
+- [ ] Satir 1731: #### 8.3.4 Örtü günlüğü ve atomiklik
+- [ ] Satir 1738: #### 8.3.5 Hata sınıfları
+- [ ] Satir 1750: ### 8.4 Birleşik hesap ve adres modeli
+- [ ] Satir 1752: #### 8.4.1 Hesap türleri
+- [ ] Satir 1762: #### 8.4.2 Takma adresler
+- [ ] Satir 1784: ### 8.5 BUD her ortamda
+- [ ] Satir 1803: ### 8.6 İşlem zarfları
+- [ ] Satir 1805: #### 8.6.1 Yerel zarf
+- [ ] Satir 1819: #### 8.6.2 Yabancı zarf
+- [ ] Satir 1842: #### 8.6.3 İşlem havuzu şeritleri
+- [ ] Satir 1849: ### 8.7 Evrensel Çağrı
+- [ ] Satir 1851: #### 8.7.1 İleti
+- [ ] Satir 1860: #### 8.7.2 Ortam giriş noktaları
+- [ ] Satir 1870: #### 8.7.3 Anlam
+- [ ] Satir 1881: ### 8.8 Evrensel Varlık Kaydı ve işaretçiler
+- [ ] Satir 1902: ### 8.9 Gaz ve ücret
+- [ ] Satir 1922: ### 8.10 Durum taahhüdü
+- [ ] Satir 1946: ### 8.11 Uyumluluk RPC ağ geçitleri
+- [ ] Satir 1948: #### 8.11.1 Uç noktalar
+- [ ] Satir 1961: #### 8.11.2 Ethereum yöntemleri (T-Açılış)
+- [ ] Satir 1965: #### 8.11.3 Solana yöntemleri (T-Açılış)
+- [ ] Satir 1969: #### 8.11.4 Aptos REST (T-Açılış)
+- [ ] Satir 1973: #### 8.11.5 Cosmos alt kümesi (T-Açılış)
+- [ ] Satir 1979: ### 8.12 Göç Kiti
+- [ ] Satir 1981: #### 8.12.1 Amaç
+- [ ] Satir 1985: #### 8.12.2 Akış
+- [ ] Satir 1997: #### 8.12.3 Kapsam
+- [ ] Satir 2006: ### 8.13 Araç uyumluluğu ve uygunluk
+- [ ] Satir 2022: ### 8.14 Güvenlik ve tedarik zinciri
+- [ ] Satir 2032: ### 8.15 "Değişmeden çalışır" iddiasının sınırları
+- [ ] Satir 2042: ### 8.16 Testler
+- [ ] Satir 2064: ## 9. Evrensel Nesne Katmanı (UOL)
+- [ ] Satir 2068: ### 9.1 Tez
+- [ ] Satir 2078: ### 9.2 Değişmezler
+- [ ] Satir 2095: ### 9.3 Bileşenler
+- [ ] Satir 2097: #### 9.3.1 Domain sözleşmesi
+- [ ] Satir 2103: #### 9.3.2 Uzlaşma uç noktası sözleşmesi
+- [ ] Satir 2110: #### 9.3.3 Kimlikler
+- [ ] Satir 2121: #### 9.3.4 Sınıf kuralı
+- [ ] Satir 2130: #### 9.3.5 Sınıf kabulü ve sadakat itirazı
+- [ ] Satir 2136: #### 9.3.6 Standart arayüz
+- [ ] Satir 2146: #### 9.3.7 Varlık yeri ve yer değiştirme
+- [ ] Satir 2154: #### 9.3.8 Evreler ve bağımlılık defteri
+- [ ] Satir 2162: #### 9.3.9 Bileşik çağrı, teklif ve kabul
+- [ ] Satir 2168: #### 9.3.10 Ev çağrısı ve kimlik devralma
+- [ ] Satir 2174: #### 9.3.11 Ağ aileleri
+- [ ] Satir 2180: ### 9.4 UEL ile birleşme
+- [ ] Satir 2186: ### 9.5 Durum, işlem, başlık, RPC
+- [ ] Satir 2194: ### 9.6 Ekonomi
+- [ ] Satir 2198: ### 9.7 Testler
+- [ ] Satir 2202: ### 9.8 Kapalı kapılar
+- [ ] Satir 2213: ## 10. BudZero: güvenlik, gizlilik ve doğrulama paketi
+- [ ] Satir 2217: ### 10.1 Testnet açılışında BudZero
+- [ ] Satir 2224: ### 10.2 Değişmezler
+- [ ] Satir 2237: ### 10.3 Çekirdek yol haritası
+- [ ] Satir 2257: ### 10.4 Mühürlü nesne, rıza ve gizli transfer
+- [ ] Satir 2269: ### 10.5 Domain kesinlik kanıtı ve blok toplu kanıtı
+- [ ] Satir 2276: ### 10.6 AI Doğrulama Katmanı
+- [ ] Satir 2289: ### 10.7 Testler
+- [ ] Satir 2295: ## 11. Ekonomi
+- [ ] Satir 2299: ### 11.1 İlkeler
+- [ ] Satir 2308: ### 11.2 Arz ve testnet dağılımı
+- [ ] Satir 2321: ### 11.3 Gelir kaynakları
+- [ ] Satir 2332: ### 11.4 Ağ Güvenliği Havuzu
+- [ ] Satir 2350: ### 11.5 Depolama ücreti ve Saklama Vakfı
+- [ ] Satir 2363: ### 11.6 Stake ve sınıflar
+- [ ] Satir 2375: ### 11.7 Kesinti ve askıya alma
+- [ ] Satir 2390: ### 11.8 Evrensel Nesne Katmanı ekonomisi
+- [ ] Satir 2398: ### 11.9 Musluk
+- [ ] Satir 2405: ### 11.10 Parametre tablosu
+- [ ] Satir 2436: ### 11.11 Hesap örneği (ölçüm değildir)
+- [ ] Satir 2447: ## 12. Çekirdek sertleştirme
+- [ ] Satir 2451: ### 12.1 Konsensüs ve kesinlik
+- [ ] Satir 2461: ### 12.2 Ağ
+- [ ] Satir 2468: ### 12.3 RPC
+- [ ] Satir 2475: ### 12.4 Durum geçişi
+- [ ] Satir 2483: ### 12.5 Genesis ve tören
+- [ ] Satir 2490: ### 12.6 Egemen domainler ve köprü
+- [ ] Satir 2496: ### 12.7 Kriptografi ve anahtarlar
+- [ ] Satir 2506: ## 13. Pre-mortem
+- [ ] Satir 2553: ## 14. Birleşik bulgu defteri
+- [ ] Satir 2557: ### 14.1 Kurallar
+- [ ] Satir 2573: ### 14.2 Özet
+- [ ] Satir 2585: ### 14.3 Defterden gelen bulgular (BLG-001 ile BLG-207)
+- [ ] Satir 2805: ### 14.4 Kaynak direktiflerden gelen kod bulguları (BLG-208 ile BLG-245)
+- [ ] Satir 2848: ### 14.5 Bu direktifin yeni bulguları (BLG-246 ile BLG-267)
+- [ ] Satir 2875: ### 14.6 Defter arşiv aileleri
+- [ ] Satir 2926: ### 14.7 Kaynak direktif maddeleri
+- [ ] Satir 2932: ## 15. İş paketleri ve dört ajan modeli
+- [ ] Satir 2936: ### 15.1 Çalışma modeli
+- [ ] Satir 2949: ### 15.2 Şeritler ve sahiplik haritası
+- [ ] Satir 2983: ### 15.3 Kuyruk ve kilit kuralları
+- [ ] Satir 3008: ### 15.4 Öncelik kuralı
+- [ ] Satir 3020: ### 15.5 Dal, PR ve kanıt kuralları
+- [ ] Satir 3039: ### 15.6 Kilometre taşları
+- [ ] Satir 3056: ### 15.7 Bağımlılık tablosu
+- [ ] Satir 3131: ### 15.8 İş paketi kartları
+- [ ] Satir 3148: #### İP-01 Canlı doğrulama: çekirdek
+- [ ] Satir 3169: #### İP-02 Canlı doğrulama: depolama
+- [ ] Satir 3184: #### İP-03 Canlı doğrulama: yürütme, BudZero, domainler, gizlilik, AI
+- [ ] Satir 3200: #### İP-04 Canlı doğrulama: istemciler, işletim, CI, belgeler ve birleşik durum
+- [ ] Satir 3217: #### İP-05 Kavram adı haritası ve sayaç kapısı
+- [ ] Satir 3234: #### İP-06 Kalıcılık ve durum kurtarma taşıması
+- [ ] Satir 3250: #### İP-07 Eski depolama sistemlerinin kaldırılması
+- [ ] Satir 3271: #### İP-08 Doğrulayıcı sınıfları ve tek kayıt
+- [ ] Satir 3292: #### İP-09 Yürütme ortamı arayüzü
+- [ ] Satir 3308: #### İP-10 B.U.D. 3.0 iskeleti ve ortak tipler
+- [ ] Satir 3327: #### İP-11 Mobil çekirdek ve hafif istemci
+- [ ] Satir 3347: #### İP-12 Kurul tabanlı kesinlik, Anında Koltuk Devri ve konsensüs sertleştirme
+- [ ] Satir 3370: #### İP-13 Varlık protokolü ve askıya alma
+- [ ] Satir 3390: #### İP-14 Anında Görev Devri ve felaket kipi
+- [ ] Satir 3406: #### İP-15 Ağ: NAT geçişi ve P2P sertleştirme
+- [ ] Satir 3424: #### İP-16 Genesis, tören aracı ve ekonomi
+- [ ] Satir 3443: #### İP-17 Durum geçişi ve zincir sertleştirme
+- [ ] Satir 3459: #### İP-18 Segmentasyon ve RFC 6330 fountain kodu
+- [ ] Satir 3477: #### İP-19 BOF-1 nesne biçimi, QR sunumu ve video taahhüdü
+- [ ] Satir 3497: #### İP-20 Sınıf duyarlı yerleşim, saklama kanıtı ve onarım
+- [ ] Satir 3522: #### İP-21 Yükleme, görüntüleme, `StorageTx` v3 ve RPC
+- [ ] Satir 3543: #### İP-22 Tekilleştirme, başvuru, silme, mühürlü içerik ve izinler
+- [ ] Satir 3563: #### İP-23 Bağımlı modüllerin B.U.D. 3.0 geçişi
+- [ ] Satir 3582: #### İP-24 A0 kodek kayıt defteri ve erişim katmanı
+- [ ] Satir 3602: #### İP-25 Depolama ücreti, Saklama Vakfı ve saklama ödülleri
+- [ ] Satir 3621: #### İP-26 Yürütme Koordinatörü ve EE işçileri
+- [ ] Satir 3644: #### İP-27 EVM yürütme ortamı ve yabancı zarf
+- [ ] Satir 3664: #### İP-28 Ethereum JSON-RPC ağ geçidi
+- [ ] Satir 3681: #### İP-29 WASM (CosmWasm ABI) ve Cosmos RPC alt kümesi
+- [ ] Satir 3697: #### İP-30 Evrensel Çağrı ve Evrensel Varlık Kaydı
+- [ ] Satir 3713: #### İP-31 SVM ve Solana RPC alt kümesi
+- [ ] Satir 3730: #### İP-32 Move (Aptos) ve Aptos REST alt kümesi
+- [ ] Satir 3748: #### İP-33 BudZero yürütme ortamı ve BudZero sağlamlık
+- [ ] Satir 3767: #### İP-34 Göç Kiti
+- [ ] Satir 3782: #### İP-35 Uygunluk, gaz kalibrasyonu ve çapraz mimari
+- [ ] Satir 3796: #### İP-36 Android doğrulayıcı uygulaması
+- [ ] Satir 3821: #### İP-37 Mobil cihaz matrisi ve saha testi
+- [ ] Satir 3837: #### İP-38 iOS fırsatçı uygulaması
+- [ ] Satir 3853: #### İP-39 Cüzdan çekirdeği ve CLI
+- [ ] Satir 3875: #### İP-40 Gezgin ve dizinleyici
+- [ ] Satir 3893: #### İP-41 Musluk ve işletim
+- [ ] Satir 3913: #### İP-42 CI, kapılar ve tedarik zinciri
+- [ ] Satir 3932: #### İP-43 Belgeler, README ve TLG raporu
+- [ ] Satir 3950: #### İP-44 Domainler, köprü, uzlaşma ve sözleşmeler
+- [ ] Satir 3971: #### İP-45 Gizlilik, AI ve hesap soyutlama: testnet sınırı
+- [ ] Satir 3989: #### İP-46 Tören provası, prova ağı ve ölçümler
+- [ ] Satir 4013: #### İP-47 Bağımsız inceleme 1: çekirdek ve depolama
+- [ ] Satir 4029: #### İP-48 Bağımsız inceleme 2: yürütme, mobil ve istemciler
+- [ ] Satir 4044: #### İP-49 Evrensel Nesne Katmanı
+- [ ] Satir 4127: #### İP-50 Move (Sui lehçesi) yürütme ortamı
+- [ ] Satir 4135: #### İP-51 Cairo yürütme ortamı
+- [ ] Satir 4143: #### İP-52 SVM ve Move işaretçileri
+- [ ] Satir 4154: #### İP-53 NEAR WASM, PolkaVM, TVM, UTXO betiği, Plutus
+- [ ] Satir 4162: #### İP-54 Paylaşılan sıkıştırma bağlamı, ek kodekler, gizli tekilleştirme
+- [ ] Satir 4177: #### İP-55 Canlı yayın
+- [ ] Satir 4186: #### İP-56 BudZero gizlilik çekirdeği, yüklem kanıtları, rıza ve PTP-1
+- [ ] Satir 4275: #### İP-57 AI Doğrulama Katmanı
+- [ ] Satir 4335: #### İP-58 F-Droid ve yeniden üretilebilir Android derlemesi
+- [ ] Satir 4343: #### İP-59 Paralel yürütme
+- [ ] Satir 4351: #### İP-60 BudZero özyineleme, RV32, ön derlemeler, domain kesinlik kanıtı, blok toplu kanıtı
+- [ ] Satir 4392: #### İP-61 RPC ve kriptografi sertleştirme
+- [ ] Satir 4408: #### İP-62, İP-63, İP-64 Evrensel Nesne Katmanı aileleri
+- [ ] Satir 4419: ## 16. Testler ve CI kapıları
+- [ ] Satir 4421: ### 16.1 Test katmanları
+- [ ] Satir 4438: ### 16.2 İş akışları
+- [ ] Satir 4462: ### 16.3 Kapı envanteri
+- [ ] Satir 4495: ### 16.4 Test adı kuralları
+- [ ] Satir 4503: ### 16.5 Ölçüm kuralları
+- [ ] Satir 4512: ## 17. Testnet açılış planı
+- [ ] Satir 4514: ### 17.1 Roller
+- [ ] Satir 4520: ### 17.2 Açılış öncesi (M6 sonrası)
+- [ ] Satir 4532: ### 17.3 Açılış günü
+- [ ] Satir 4543: ### 17.4 İlk 14 gün
+- [ ] Satir 4557: ### 17.5 İlk 90 gün
+- [ ] Satir 4563: ### 17.6 Yükseltme yöntemi
+- [ ] Satir 4571: ## 18. Testnet Açılış Kapısı (TLG)
+- [ ] Satir 4613: ## 19. Kararlar
+- [ ] Satir 4664: ## 20. Kaynaklar
+- [ ] Satir 4668: ### 20.1 Platform ve ağ
+- [ ] Satir 4677: ### 20.2 Depolama
+- [ ] Satir 4692: ### 20.3 Yürütme
+- [ ] Satir 4705: ### 20.4 Kriptografi ve doğrulama
+- [ ] Satir 4714: ### 20.5 Nesne katmanı
+- [ ] Satir 4721: ### 20.6 Kaynak kaydı olan eski belgeler
+- [ ] Satir 4732: ## Ek A. `README.md` hedef metni
+- [ ] Satir 4782: ## Contents
+- [ ] Satir 4803: ## What Budlum is
+- [ ] Satir 4821: ## Testnet at a glance
+- [ ] Satir 4841: ## Join the testnet
+- [ ] Satir 4926: ## How it works
+- [ ] Satir 5001: ## Validator classes
+- [ ] Satir 5021: ## Testnet feature status
+- [ ] Satir 5044: ## Measured on the testnet rehearsal
+- [ ] Satir 5062: ## Repository layout
+- [ ] Satir 5085: ## Build from source
+- [ ] Satir 5111: ## JSON-RPC and compatibility gateways
+- [ ] Satir 5129: ## Engineering standards
+- [ ] Satir 5155: ## Security
+- [ ] Satir 5169: ## Project status
+- [ ] Satir 5186: ## Documentation
+- [ ] Satir 5204: ## Contributing
+- [ ] Satir 5214: ## License
+- [ ] Satir 5227: ## Ek B. `README.tr.md` hedef metni
+- [ ] Satir 5269: ## İçindekiler
+- [ ] Satir 5290: ## Budlum nedir
+- [ ] Satir 5308: ## Bir bakışta testnet
+- [ ] Satir 5328: ## Testnete katılın
+- [ ] Satir 5415: ## Nasıl çalışır
+- [ ] Satir 5493: ## Doğrulayıcı sınıfları
+- [ ] Satir 5513: ## Testnette özelliklerin durumu
+- [ ] Satir 5536: ## Testnet provasında ölçülenler
+- [ ] Satir 5554: ## Depo yerleşimi
+- [ ] Satir 5577: ## Kaynaktan derleme
+- [ ] Satir 5603: ## JSON-RPC ve uyumluluk ağ geçitleri
+- [ ] Satir 5621: ## Mühendislik standartları
+- [ ] Satir 5646: ## Güvenlik
+- [ ] Satir 5660: ## Proje durumu
+- [ ] Satir 5677: ## Belgeler
+- [ ] Satir 5695: ## Katkı
+- [ ] Satir 5705: ## Lisans
+- [ ] Satir 5718: ## Ek C. Kavram adı haritası (`config/naming/concept_map.toml`)
+- [ ] Satir 6019: ## Ek D. Ar-Ge kaydı
+
+## Bolum B: THE_BUDLUM_AGREGASYON_DIREKTIF.md Tum Baslik ve Fazlar
+
+- [ ] Satir 5: ## 1. Sistem
+- [ ] Satir 40: ## 2. Budlum ne yapabilir
+- [ ] Satir 53: ## 3. Terimler
+- [ ] Satir 70: ## 4. Veri yapıları
+- [ ] Satir 125: ### Özetler
+- [ ] Satir 145: ## 5. Blok kuralları
+- [ ] Satir 198: ## 6. Agregatör
+- [ ] Satir 200: ### 6.1 Kabul kuralları
+- [ ] Satir 216: ### 6.2 Tik döngüsü
+- [ ] Satir 229: ### 6.3 Birleştirme
+- [ ] Satir 246: ### 6.4 Blok üreticisi
+- [ ] Satir 255: ## 7. Ücret
+- [ ] Satir 265: ## 8. Saklama ve budama
+- [ ] Satir 272: ## 9. Parametreler
+- [ ] Satir 303: ## 10. Yol
+- [ ] Satir 315: ### Faz 0. Ölçüm
+- [ ] Satir 323: ### Faz 1. İddia katmanı
+- [ ] Satir 348: ### Faz 2. İmza iddiaları (Tik Kanıtı)
+- [ ] Satir 364: ### Faz 3. Özyineleme ve Ana Kanıt
+- [ ] Satir 378: ### Faz 4. Program iddiaları
+- [ ] Satir 387: ### Faz 5. PCS iddiaları
+- [ ] Satir 400: ## 11. Testler
+- [ ] Satir 421: ## 12. Teslim
