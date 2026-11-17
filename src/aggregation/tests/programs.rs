@@ -1102,3 +1102,116 @@ fn the_constants_of_the_programs_are_the_constants_of_the_node() {
         ])
     );
 }
+
+#[test]
+fn chip_offload_proves_and_verifies_tick_pi_and_rejects_tampering() {
+    use crate::aggregation::programs::chip_offload::{
+        prove_tick_chips, verify_tick_chips, OffloadAccounting, TickChipError,
+    };
+
+    let domain = 45262u32;
+    let aggregator = Address::from([0xA6; 32]);
+    let claims: Vec<Claim> = (0u8..5)
+        .map(|i| Claim::Sig {
+            scheme: SchemeId::ML_DSA_87,
+            signer: Address::from([i.wrapping_add(1); 32]),
+            msg_hash: [i.wrapping_add(0x40); 32],
+        })
+        .collect();
+    let digests: Vec<Hash32> = claims.iter().map(|c| c.digest(domain)).collect();
+    let root = claims_root(&digests).expect("claims root");
+    let expected_tick_pi = crate::aggregation::frame::tick_pi(
+        domain,
+        &crate::aggregation::frame::Segment {
+            claims_root: root,
+            count: claims.len() as u32,
+            aggregator,
+        },
+    );
+
+    let poly: [u64; bud_proof::chips::mldsa_ntt::N] =
+        core::array::from_fn(|i| ((i as u64 + 3) * 1337) % bud_proof::chips::mldsa_ntt::Q);
+    let ntt_inputs = [poly];
+
+    let proof =
+        prove_tick_chips(domain, &aggregator, &claims, &ntt_inputs).expect("chip tick proves");
+    assert_eq!(proof.tick_pi, expected_tick_pi);
+    assert_eq!(
+        proof.ntt_outputs[0],
+        bud_proof::chips::mldsa_ntt::ntt(&poly)
+    );
+    verify_tick_chips(
+        domain,
+        &aggregator,
+        &claims,
+        &expected_tick_pi,
+        &ntt_inputs,
+        &proof,
+    )
+    .expect("chip tick verifies");
+
+    // Wrong domain must be refused.
+    assert!(verify_tick_chips(
+        domain + 1,
+        &aggregator,
+        &claims,
+        &expected_tick_pi,
+        &ntt_inputs,
+        &proof,
+    )
+    .is_err());
+
+    // Wrong aggregator must be refused.
+    let bad_agg = Address::from([0xB7; 32]);
+    assert!(verify_tick_chips(
+        domain,
+        &bad_agg,
+        &claims,
+        &expected_tick_pi,
+        &ntt_inputs,
+        &proof,
+    )
+    .is_err());
+
+    // Tampered claim message hash must be refused.
+    let mut bad_claims = claims.clone();
+    if let Claim::Sig { msg_hash, .. } = &mut bad_claims[2] {
+        msg_hash[0] ^= 1;
+    }
+    assert!(verify_tick_chips(
+        domain,
+        &aggregator,
+        &bad_claims,
+        &expected_tick_pi,
+        &ntt_inputs,
+        &proof,
+    )
+    .is_err());
+
+    // Tampered expected tick_pi must be refused.
+    let mut bad_pi = expected_tick_pi;
+    bad_pi[31] ^= 1;
+    assert_eq!(
+        verify_tick_chips(domain, &aggregator, &claims, &bad_pi, &ntt_inputs, &proof),
+        Err(TickChipError::TickPiMismatch)
+    );
+
+    // Tampered NTT input must be refused.
+    let mut bad_ntt = ntt_inputs;
+    bad_ntt[0][0] = (bad_ntt[0][0] + 1) % bud_proof::chips::mldsa_ntt::Q;
+    assert!(verify_tick_chips(
+        domain,
+        &aggregator,
+        &claims,
+        &expected_tick_pi,
+        &bad_ntt,
+        &proof,
+    )
+    .is_err());
+
+    // Accounting consistency check.
+    let summary = OffloadAccounting::compute(11_874_779, 10_580_000, 546_000, 329, 8);
+    assert_eq!(summary.residual_vm_steps, 748_779);
+    assert_eq!(summary.keccak_chip_rows, 8192);
+    assert_eq!(summary.ntt_chip_rows, 8192);
+}

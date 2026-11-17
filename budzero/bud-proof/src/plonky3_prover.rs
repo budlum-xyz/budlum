@@ -120,6 +120,76 @@ where
     crate::bud_stark::verify(&config, air, proof, public_values).map_err(|e| format!("{e:?}"))
 }
 
+/// Proves a chip AIR that commits deterministic preprocessed columns under the
+/// canonical BudZero STARK parameters.
+///
+/// # Errors
+///
+/// Returns an error if the trace height is zero, not a power of two, or if
+/// preprocessed setup refuses the AIR's preprocessed trace.
+pub fn prove_chip_with_preprocessed<A>(
+    air: &A,
+    trace: RowMajorMatrix<Goldilocks>,
+    public_values: &[Goldilocks],
+) -> Result<ChipProof, String>
+where
+    A: p3_air::Air<crate::bud_stark::SymbolicAirBuilder<Goldilocks>>
+        + for<'a> p3_air::Air<crate::bud_stark::ProverConstraintFolder<'a, MyConfig>>
+        + for<'a> p3_air::Air<p3_air::DebugConstraintBuilder<'a, Goldilocks>>,
+{
+    let height = trace.height();
+    if height == 0 || !height.is_power_of_two() {
+        return Err(format!(
+            "chip trace height {height} must be a non-zero power of two"
+        ));
+    }
+    let degree_bits = height.trailing_zeros() as usize;
+    let config = build_config();
+    let (prover_data, _vk) = crate::bud_stark::setup_preprocessed(&config, air, degree_bits)
+        .ok_or_else(|| format!("preprocessed setup refused degree_bits={degree_bits}"))?;
+    Ok(crate::bud_stark::prove_with_preprocessed(
+        &config,
+        air,
+        trace,
+        None,
+        public_values,
+        Some(&prover_data),
+    ))
+}
+
+/// Verifies a chip proof against the preprocessed columns produced by `air` at
+/// `expected_degree_bits` under the canonical BudZero STARK parameters.
+///
+/// # Errors
+///
+/// Returns an error if `proof.degree_bits` does not match `expected_degree_bits`,
+/// if preprocessed setup refuses the AIR, or if the STARK proof fails verification.
+pub fn verify_chip_with_preprocessed<A>(
+    air: &A,
+    proof: &ChipProof,
+    expected_degree_bits: usize,
+    public_values: &[Goldilocks],
+) -> Result<(), String>
+where
+    A: p3_air::Air<crate::bud_stark::SymbolicAirBuilder<Goldilocks>>
+        + for<'a> p3_air::Air<crate::bud_stark::ProverConstraintFolder<'a, MyConfig>>
+        + for<'a> p3_air::Air<crate::bud_stark::VerifierConstraintFolder<'a, MyConfig>>,
+{
+    if proof.degree_bits != expected_degree_bits {
+        return Err(format!(
+            "chip proof degree_bits {} does not match expected {}",
+            proof.degree_bits, expected_degree_bits
+        ));
+    }
+    let config = build_config();
+    let (_prover_data, vk) =
+        crate::bud_stark::setup_preprocessed(&config, air, expected_degree_bits).ok_or_else(
+            || format!("preprocessed setup refused degree_bits={expected_degree_bits}"),
+        )?;
+    crate::bud_stark::verify_with_preprocessed(&config, air, proof, public_values, Some(&vk))
+        .map_err(|e| format!("{e:?}"))
+}
+
 /// Build the canonical Goldilocks/Keccak STARK configuration.
 pub fn build_config() -> ChipStarkConfig {
     let hash = MyHasher::new(Keccak256Hash {});
