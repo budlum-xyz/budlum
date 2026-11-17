@@ -172,6 +172,173 @@ pub struct Account {
     #[serde(default)]
     pub frac_attos: u64,
 }
+
+/// One leaf of the consensus accounts tree, with its Merkle path to the root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsensusTreeLeaf {
+    pub address: Address,
+    pub balance: u64,
+    pub nonce: u64,
+    pub frac_attos: u64,
+    pub leaf_hash: [u8; 32],
+    /// Sibling hashes from leaf toward root.
+    pub siblings: Vec<[u8; 32]>,
+    /// At each step, `true` means the proved node is the right child.
+    pub directions: Vec<bool>,
+}
+
+/// Inclusion or absence proof for one account against the consensus accounts
+/// root (the subtree root folded into the block state root body).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsensusAccountProof {
+    /// Accounts subtree root. Committed in the block state root body, which
+    /// the block header commits to via `root_from_opening`.
+    pub root: [u8; 32],
+    /// The address the proof is about.
+    pub address: Address,
+    /// `false` means the tree proves the address is absent, which is a
+    /// positive result, not a failure to answer.
+    pub present: bool,
+    pub balance: u64,
+    pub nonce: u64,
+    pub frac_attos: u64,
+    pub leaf_hash: [u8; 32],
+    /// Sibling hashes from leaf toward root (present case).
+    pub siblings: Vec<[u8; 32]>,
+    /// At each step, `true` means the proved node is the right child.
+    pub directions: Vec<bool>,
+    /// Absence case: the greatest key below the target, with its path.
+    pub predecessor: Option<ConsensusTreeLeaf>,
+    /// Absence case: the smallest key above the target, with its path.
+    pub successor: Option<ConsensusTreeLeaf>,
+}
+
+/// The consensus accounts leaf hash: `SHA-256(0x00 || pubkey || balance ||
+/// nonce || frac_attos?)`, with `frac_attos` folded in only when non-zero.
+/// This is the exact preimage the state root tree is built from.
+#[must_use]
+pub fn consensus_account_leaf(
+    address: &Address,
+    balance: u64,
+    nonce: u64,
+    frac_attos: u64,
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update([0x00]);
+    h.update(address.0);
+    h.update(balance.to_le_bytes());
+    h.update(nonce.to_le_bytes());
+    if frac_attos != 0 {
+        h.update(frac_attos.to_le_bytes());
+    }
+    h.finalize().into()
+}
+
+/// The consensus accounts internal node hash:
+/// `SHA-256(0x01 || left || right)`.
+#[must_use]
+pub fn consensus_tree_parent(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update([0x01]);
+    h.update(left);
+    h.update(right);
+    h.finalize().into()
+}
+
+/// The Merkle path of leaf `index` in a tree built by
+/// [`AccountState::ensure_accounts_tree`]: one sibling per level, with the
+/// last odd node duplicated (its sibling is itself).
+fn consensus_tree_path(tree: &[Vec<[u8; 32]>], mut index: usize) -> (Vec<[u8; 32]>, Vec<bool>) {
+    let mut siblings = Vec::new();
+    let mut directions = Vec::new();
+    for row in tree.iter().take(tree.len().saturating_sub(1)) {
+        let is_right = index % 2 == 1;
+        let sibling_idx = if is_right {
+            index - 1
+        } else if index + 1 < row.len() {
+            index + 1
+        } else {
+            index
+        };
+        siblings.push(row[sibling_idx]);
+        directions.push(is_right);
+        index /= 2;
+    }
+    (siblings, directions)
+}
+
+/// Walk `leaf_hash` up `siblings`/`directions` and check it lands on `root`.
+fn consensus_path_verifies(
+    leaf_hash: &[u8; 32],
+    siblings: &[[u8; 32]],
+    directions: &[bool],
+    root: &[u8; 32],
+) -> bool {
+    if siblings.len() != directions.len() {
+        return false;
+    }
+    let mut current = *leaf_hash;
+    for (sibling, is_right) in siblings.iter().zip(directions) {
+        current = if *is_right {
+            consensus_tree_parent(sibling, &current)
+        } else {
+            consensus_tree_parent(&current, sibling)
+        };
+    }
+    current == *root
+}
+
+impl ConsensusTreeLeaf {
+    /// Check this leaf against its own stated fields and `root`.
+    #[must_use]
+    pub fn verifies_against(&self, root: &[u8; 32]) -> bool {
+        self.leaf_hash
+            == consensus_account_leaf(&self.address, self.balance, self.nonce, self.frac_attos)
+            && consensus_path_verifies(&self.leaf_hash, &self.siblings, &self.directions, root)
+    }
+}
+
+impl ConsensusAccountProof {
+    /// Check the bundle against its own stated root.
+    ///
+    /// This is the weakest useful check: it says the bundle is internally
+    /// consistent. A caller that wants a claim about chain state must compare
+    /// `root` against the accounts root of a finalized block.
+    #[must_use]
+    pub fn verify_self_consistent(&self) -> bool {
+        if self.present {
+            if self.predecessor.is_some() || self.successor.is_some() {
+                return false;
+            }
+            self.leaf_hash
+                == consensus_account_leaf(&self.address, self.balance, self.nonce, self.frac_attos)
+                && consensus_path_verifies(
+                    &self.leaf_hash,
+                    &self.siblings,
+                    &self.directions,
+                    &self.root,
+                )
+        } else {
+            if self.balance != 0 || self.nonce != 0 || self.frac_attos != 0 {
+                return false;
+            }
+            if self.root == [0u8; 32] {
+                return self.predecessor.is_none() && self.successor.is_none();
+            }
+            let pred_ok = match &self.predecessor {
+                None => true,
+                Some(pred) => pred.address < self.address && pred.verifies_against(&self.root),
+            };
+            let succ_ok = match &self.successor {
+                None => true,
+                Some(succ) => succ.address > self.address && succ.verifies_against(&self.root),
+            };
+            pred_ok && succ_ok && (self.predecessor.is_some() || self.successor.is_some())
+        }
+    }
+}
 /// Stand-in bytes hashed when a state-root input cannot be serialized.
 ///
 /// Derived `Serialize` on owned data cannot fail. Not a panic because every
@@ -5225,7 +5392,16 @@ impl AccountState {
         )
     }
 
-    pub fn state_root_body(&mut self) -> [u8; 32] {
+    /// Ensure the cached accounts Merkle tree reflects `self.accounts`.
+    ///
+    /// This is the exact tree [`Self::state_root_body`] folds into the
+    /// consensus state root: leaves are
+    /// `SHA-256(0x00 || pubkey || balance || nonce || frac_attos?)` over
+    /// the sorted account keys, internal nodes are
+    /// `SHA-256(0x01 || left || right)` with the last odd node duplicated.
+    /// [`Self::get_account_proof`] reads proofs from this tree, so a proof
+    /// verifies against the accounts root a block header commits to.
+    fn ensure_accounts_tree(&mut self) {
         use sha2::{Digest, Sha256};
 
         if self.accounts.is_empty() {
@@ -5363,6 +5539,95 @@ impl AccountState {
         }
 
         self.dirty_accounts.clear();
+    }
+
+    /// The accounts subtree root: the root of the tree
+    /// [`Self::ensure_accounts_tree`] maintains, folded into the consensus
+    /// state root body. A light client that holds a finalized block checks
+    /// this root against the state root body the header commits to.
+    #[must_use]
+    pub fn accounts_root(&mut self) -> [u8; 32] {
+        self.ensure_accounts_tree();
+        if self.cached_tree.is_empty() {
+            [0u8; 32]
+        } else {
+            self.cached_tree.last().map_or([0u8; 32], |row| row[0])
+        }
+    }
+
+    /// Inclusion or absence proof for one account against
+    /// [`Self::accounts_root`].
+    ///
+    /// The proof is read from the same cached tree the state root is folded
+    /// from, so it verifies against the root a block header commits to.
+    /// Absence is proved by the neighboring leaves: the greatest key below
+    /// the target and the smallest key above it, each with its own path.
+    #[must_use]
+    pub fn get_account_proof(&mut self, addr: &Address) -> ConsensusAccountProof {
+        self.ensure_accounts_tree();
+        let root = if self.cached_tree.is_empty() {
+            [0u8; 32]
+        } else {
+            self.cached_tree.last().map_or([0u8; 32], |row| row[0])
+        };
+        match self.cached_keys.binary_search(addr) {
+            Ok(idx) => {
+                let acct = &self.accounts[addr];
+                let (siblings, directions) = consensus_tree_path(&self.cached_tree, idx);
+                ConsensusAccountProof {
+                    root,
+                    address: *addr,
+                    present: true,
+                    balance: acct.balance,
+                    nonce: acct.nonce,
+                    frac_attos: acct.frac_attos,
+                    leaf_hash: self.cached_leaves[idx],
+                    siblings,
+                    directions,
+                    predecessor: None,
+                    successor: None,
+                }
+            }
+            Err(insert_at) => {
+                let predecessor = (insert_at > 0).then(|| self.consensus_leaf_at(insert_at - 1));
+                let successor =
+                    (insert_at < self.cached_keys.len()).then(|| self.consensus_leaf_at(insert_at));
+                ConsensusAccountProof {
+                    root,
+                    address: *addr,
+                    present: false,
+                    balance: 0,
+                    nonce: 0,
+                    frac_attos: 0,
+                    leaf_hash: [0u8; 32],
+                    siblings: Vec::new(),
+                    directions: Vec::new(),
+                    predecessor,
+                    successor,
+                }
+            }
+        }
+    }
+
+    fn consensus_leaf_at(&self, idx: usize) -> ConsensusTreeLeaf {
+        let addr = self.cached_keys[idx];
+        let acct = &self.accounts[&addr];
+        let (siblings, directions) = consensus_tree_path(&self.cached_tree, idx);
+        ConsensusTreeLeaf {
+            address: addr,
+            balance: acct.balance,
+            nonce: acct.nonce,
+            frac_attos: acct.frac_attos,
+            leaf_hash: self.cached_leaves[idx],
+            siblings,
+            directions,
+        }
+    }
+
+    pub fn state_root_body(&mut self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+
+        self.ensure_accounts_tree();
         let accounts_root_bytes = if self.cached_tree.is_empty() {
             [0u8; 32]
         } else {
@@ -5714,6 +5979,101 @@ mod redelegation_and_claim_tests {
 mod tests {
     use super::*;
     use crate::crypto::primitives::KeyPair;
+
+    fn proof_state() -> AccountState {
+        let mut state = AccountState::new();
+        for i in 1..=7u8 {
+            let addr = test_addr_from_byte(i);
+            let acct = state.get_or_create(&addr);
+            acct.balance = u64::from(i) * 1_000;
+            acct.nonce = u64::from(i);
+            if i == 3 {
+                acct.frac_attos = 42;
+            }
+        }
+        state
+    }
+
+    #[test]
+    fn consensus_account_proof_verifies_against_accounts_root() {
+        let mut state = proof_state();
+        let root = state.accounts_root();
+        for i in 1..=7u8 {
+            let addr = test_addr_from_byte(i);
+            let proof = state.get_account_proof(&addr);
+            assert!(proof.present, "account {i} must be present");
+            assert_eq!(proof.root, root);
+            assert_eq!(proof.balance, u64::from(i) * 1_000);
+            assert_eq!(proof.nonce, u64::from(i));
+            assert!(proof.verify_self_consistent(), "proof {i} must verify");
+        }
+        // The frac_attos leaf folds the sub-atom balance in.
+        let frac = state.get_account_proof(&test_addr_from_byte(3));
+        assert_eq!(frac.frac_attos, 42);
+        assert!(frac.verify_self_consistent());
+    }
+
+    #[test]
+    fn consensus_account_proof_absent_verifies_via_neighbors() {
+        let mut state = proof_state();
+        // Between two keys.
+        let mid = {
+            let mut b = [0u8; 32];
+            b[0] = 3;
+            b[31] = 1;
+            Address::from(b)
+        };
+        let proof = state.get_account_proof(&mid);
+        assert!(!proof.present);
+        assert!(proof.predecessor.is_some());
+        assert!(proof.successor.is_some());
+        assert!(proof.verify_self_consistent());
+        // Before every key.
+        let low = test_addr_from_byte(0);
+        let proof = state.get_account_proof(&low);
+        assert!(!proof.present);
+        assert!(proof.predecessor.is_none());
+        assert!(proof.successor.is_some());
+        assert!(proof.verify_self_consistent());
+        // After every key.
+        let high = test_addr_from_byte(200);
+        let proof = state.get_account_proof(&high);
+        assert!(!proof.present);
+        assert!(proof.predecessor.is_some());
+        assert!(proof.successor.is_none());
+        assert!(proof.verify_self_consistent());
+    }
+
+    #[test]
+    fn consensus_account_proof_empty_state_is_zero_root() {
+        let mut state = AccountState::new();
+        assert_eq!(state.accounts_root(), [0u8; 32]);
+        let proof = state.get_account_proof(&test_addr_from_byte(9));
+        assert!(!proof.present);
+        assert_eq!(proof.root, [0u8; 32]);
+        assert!(proof.verify_self_consistent());
+    }
+
+    #[test]
+    fn consensus_account_proof_rejects_tampered_claims() {
+        let mut state = proof_state();
+        let addr = test_addr_from_byte(2);
+        let mut proof = state.get_account_proof(&addr);
+        proof.balance += 1;
+        assert!(!proof.verify_self_consistent());
+        let mut proof = state.get_account_proof(&addr);
+        proof.siblings[0] = [0u8; 32];
+        assert!(!proof.verify_self_consistent());
+        // Absence with a neighbor on the wrong side is refused.
+        let mut b = [0u8; 32];
+        b[0] = 3;
+        b[31] = 1;
+        let absent = state.get_account_proof(&Address::from(b));
+        let mut forged = absent.clone();
+        forged.predecessor = forged.successor.clone();
+        assert!(!forged.verify_self_consistent());
+    }
+
     /// A storage that cannot be read must not turn into an empty state.
     #[test]
     fn with_storage_refuses_unreadable_accounts() {

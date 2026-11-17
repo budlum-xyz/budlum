@@ -4804,6 +4804,10 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
             put_u8(out, 5);
             put_fixed(out, nft);
         }
+        StorageTxV3::DeleteObject { object } => {
+            put_u8(out, 14);
+            put_fixed(out, object);
+        }
         StorageTxV3::RenewObject {
             object,
             extra_epochs,
