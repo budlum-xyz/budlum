@@ -808,6 +808,16 @@ mod tests {
         assert_eq!(AUDITED_CAIRO_ENGINE_SPDX, "Apache-2.0");
         let mut closed_worker = CairoWorker::new();
         assert!(!closed_worker.is_active(&launch_ctx()));
+        for chain_id in [45_260, 99_999] {
+            assert!(!closed_worker.is_active(&BlockContext {
+                chain_id,
+                ..launch_ctx()
+            }));
+        }
+        assert!(closed_worker.is_active(&BlockContext {
+            chain_id: 45_262,
+            ..launch_ctx()
+        }));
         let activated_worker = CairoWorker::with_activation_height(Some(10));
         assert!(!activated_worker.is_active(&BlockContext {
             height: 9,

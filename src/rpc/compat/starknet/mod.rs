@@ -185,9 +185,19 @@ mod tests {
     #[test]
     fn starknet_rpc_is_closed_on_testnet() {
         let state = AccountState::new();
+        let launch = StarknetActivationPolicy::default();
+        assert!(!launch.is_active());
+        for chain_id in [45_260, 99_999] {
+            assert!(!StarknetActivationPolicy { chain_id, ..launch }.is_active());
+        }
+        assert!(StarknetActivationPolicy {
+            chain_id: 45_262,
+            ..launch
+        }
+        .is_active());
         let closed = handle_starknet_rpc(
             &state,
-            StarknetActivationPolicy::default(),
+            launch,
             StarknetRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: json!(1),

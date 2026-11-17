@@ -545,6 +545,13 @@ mod tests {
             timestamp_ms: 1_793_923_200_000,
         };
         assert!(!closed_worker.is_active(&launch));
+        for chain_id in [45_260, 99_999] {
+            assert!(!closed_worker.is_active(&BlockContext { chain_id, ..launch }));
+        }
+        assert!(closed_worker.is_active(&BlockContext {
+            chain_id: 45_262,
+            ..launch
+        }));
         let activated = PolkaVmWorker::with_activation_height(Some(10));
         assert!(!activated.is_active(&launch));
         assert!(activated.is_active(&BlockContext { height: 10, ..launch }));

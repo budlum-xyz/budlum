@@ -568,6 +568,16 @@ mod tests {
     fn tvm_is_closed_on_testnet() {
         let mut closed = TvmWorker::new();
         assert!(!closed.is_active(&ctx()));
+        for chain_id in [45_260, 99_999] {
+            assert!(!closed.is_active(&BlockContext {
+                chain_id,
+                ..ctx()
+            }));
+        }
+        assert!(closed.is_active(&BlockContext {
+            chain_id: 45_262,
+            ..ctx()
+        }));
         let activated = TvmWorker::with_activation_height(Some(10));
         assert!(!activated.is_active(&ctx()));
         assert!(activated.is_active(&BlockContext { height: 10, ..ctx() }));
