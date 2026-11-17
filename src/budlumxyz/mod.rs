@@ -25,7 +25,7 @@ pub struct BudlumxyzRegistry {
     /// [`Self::mark_verified_by_proposal`], on the authority of
     /// a counted vote rather than an address.
     #[serde(default)]
-    pub authorized_governors: std::collections::HashSet<Address>,
+    pub authorized_governors: std::collections::BTreeSet<Address>,
 }
 
 /// Longest app name in bytes.
@@ -806,5 +806,23 @@ mod tests {
             );
             assert_eq!(reg.apps[&id].website_url, good);
         }
+    }
+
+    #[test]
+    fn authorized_governors_serialize_in_canonical_order() {
+        let mut a = BudlumxyzRegistry::new();
+        a.authorized_governors.insert(Address::from([9u8; 32]));
+        a.authorized_governors.insert(Address::from([1u8; 32]));
+        a.authorized_governors.insert(Address::from([5u8; 32]));
+
+        let mut b = BudlumxyzRegistry::new();
+        b.authorized_governors.insert(Address::from([1u8; 32]));
+        b.authorized_governors.insert(Address::from([5u8; 32]));
+        b.authorized_governors.insert(Address::from([9u8; 32]));
+
+        assert_eq!(
+            serde_json::to_vec(&a).expect("serialize a"),
+            serde_json::to_vec(&b).expect("serialize b")
+        );
     }
 }
