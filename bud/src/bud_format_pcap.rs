@@ -1,4 +1,4 @@
-//! B.U.D. 2.0 - PCAP TRANSFORM (100-web finding: "PCAP -> zstd 10x (DNS)")
+//! B.U.D. 2.0 - PCAP TRANSFORM (100-web benchmark: "PCAP -> zstd 10x (DNS)")
 //!
 //! Remaining work #8: the PCAP transform. A network capture file (libpcap) is
 //! processed structurally: global header + packet records (ts_sec, ts_usec,

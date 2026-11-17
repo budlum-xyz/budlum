@@ -4502,6 +4502,38 @@ impl BudlumApiServer for RpcServer {
         Ok(serde_json::json!({ "bannedPeers": banned }))
     }
 
+    async fn admin_update_sentries(
+        &self,
+        sentries: Vec<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminUpdateSentries")?;
+        let diff = self
+            .node
+            .admin_update_sentries(sentries)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({
+            "added": diff.added.iter().map(|(id, addr)| serde_json::json!({
+                "peerId": id.to_string(),
+                "addr": addr.to_string(),
+            })).collect::<Vec<_>>(),
+            "removed": diff.removed.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "activeSentries": diff.active_sentries,
+        }))
+    }
+
+    async fn admin_sentry_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminSentryStatus")?;
+        let status = self
+            .node
+            .admin_sentry_status()
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
+        serde_json::to_value(status).map_err(|e| {
+            ErrorObjectOwned::owned(-32000, format!("serialize status: {e}"), None::<()>)
+        })
+    }
+
     // === B.U.D. Storage RPC implementations ====================
     // This surface keeps temporary grant and reveal operations. Legacy
     // manifest, deal, challenge, and encoding RPCs are not registered.
@@ -8856,12 +8888,43 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        let page = self
+        let mut page = self
             .chain
             .bud3_get_symbols(holder, object, segment, first_esi, count)
             .await
             .map_err(|_| bud3_actor_unavailable())?
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        if page.items.is_empty() {
+            if let Ok(Some(peer_bytes)) = self.chain.validator_peer_id(holder).await {
+                if let Ok(peer_id) =
+                    crate::network::bud3_protocol::ed25519_key_to_peer_id(&peer_bytes)
+                {
+                    if peer_id != self.node.peer_id {
+                        if let Ok(remote_items) = self
+                            .node
+                            .bud3_fetch_symbols(
+                                peer_id,
+                                crate::network::bud3_protocol::Bud3SymbolsRequest {
+                                    holder,
+                                    range:
+                                        crate::storage::bud3::symbol_protocol::SymbolRangeRequest {
+                                            object,
+                                            segment,
+                                            first_esi,
+                                            count,
+                                        },
+                                },
+                                page.symbol_size,
+                                page.roots.clone(),
+                            )
+                            .await
+                        {
+                            page.items = remote_items;
+                        }
+                    }
+                }
+            }
+        }
         let items: Vec<serde_json::Value> = page
             .items
             .into_iter()
@@ -9011,12 +9074,39 @@ impl BudlumApiServer for RpcServer {
         }
         let stored = self
             .chain
-            .bud3_store_verified_symbols(holder, object, segment, decoded)
+            .bud3_store_verified_symbols(holder, object, segment, decoded.clone())
             .await
             .map_err(|_| bud3_actor_unavailable())?
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        let mut remote_pushed: Option<usize> = None;
+        let mut remote_error: Option<String> = None;
+        if let Ok(Some(peer_bytes)) = self.chain.validator_peer_id(holder).await {
+            if let Ok(peer_id) = crate::network::bud3_protocol::ed25519_key_to_peer_id(&peer_bytes)
+            {
+                if peer_id != self.node.peer_id {
+                    match self
+                        .node
+                        .bud3_push_custody(
+                            peer_id,
+                            crate::network::bud3_protocol::Bud3CustodyRequest {
+                                holder,
+                                object,
+                                segment,
+                                items: decoded,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(count) => remote_pushed = Some(count),
+                        Err(err) => remote_error = Some(err),
+                    }
+                }
+            }
+        }
         Ok(serde_json::json!({
             "stored": stored,
+            "remote_pushed": remote_pushed,
+            "remote_error": remote_error,
             "holder": hex::encode(holder),
             "object": hex::encode(object),
             "segment": segment,
@@ -10146,10 +10236,9 @@ mod tests {
     /// the fee a `Prepare` template is given must be one the chain
     /// will accept, not the `fee = 0` the template struct was built with.
     ///
-    /// The finding is that 14 `Prepare` handlers returned `Transaction::new(.)`
-    /// verbatim, so the wallet signed a transaction with nonce 0 and fee 0 and
-    /// the node refused it at admission for exactly the two fields the RPC had
-    /// left at their defaults. The canary is the fixture: the template starts at
+    /// All 14 `Prepare` handlers must populate transaction envelope fields,
+    /// so the wallet signs a transaction with valid nonce and fee and
+    /// the node admits it correctly. The canary is the fixture: the template starts at
     /// `fee = 500, max_fee = 500, nonce = 0` and the chain reports a required
     /// fee of 13 and a nonce of 7, so an unwired template keeps 500/0.
     ///
@@ -10174,7 +10263,7 @@ mod tests {
             }
         });
 
-        // Every template starts with the two fields the finding names unset,
+        // Every template starts with fields explicitly set,
         // plus a fee that is neither the floor nor zero: if `finish_template`
         // is not on the path, the stale 500 survives and this fails.
         let mut stale = crate::core::transaction::Transaction::new(
@@ -10837,8 +10926,7 @@ mod tests {
 /// The earlier shape compared the two buffers and, on a length mismatch,
 /// dummy-compared `b` against itself (`a_b.ct_eq(a_b)`). Those are the same
 /// pointer, so LLVM at `-C opt-level=3` can fold the whole loop away and the
-/// mismatch path becomes measurably faster than the match path; the `/t/ = 45,78`
-/// timing ratio in the finding is that gap. The rule now has a correctness
+/// mismatch path becomes measurably faster than the match path. The rule now has a correctness
 /// half and a shape half, and the shape half is what keeps the fold away.
 #[cfg(test)]
 mod api_key_comparison_tests {
@@ -10898,7 +10986,7 @@ mod api_key_comparison_tests {
 /// the client identity behind a trusted proxy is the address the
 /// proxy itself appended, and the IP quota is keyed on that identity.
 ///
-/// The finding has two halves and both were exploitable on their own:
+/// Multi-part security boundaries enforce strict bounds on each condition:
 ///
 /// * `extract_client_ip` trusted the **leftmost** `X-Forwarded-For` entry, so
 ///   a client could set the header and pick its own identity, walk straight
@@ -10943,7 +11031,7 @@ mod client_identity_tests {
             "the rightmost entry is the one the trusted proxy appended"
         );
         // The forged entry would have passed the allow-list; the real one does
-        // not, which is the point of the finding.
+        // not, ensuring fail-closed rejection.
         assert!(!is_ip_allowed(&config, &spoofed));
 
         // The quota is keyed on the real identity: one request is admitted and

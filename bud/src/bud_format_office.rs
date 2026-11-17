@@ -1,4 +1,4 @@
-//! B.U.D. 2.0 - OFFICE (OPC) REPACKING; the 100-web finding of "10 to 60
+//! B.U.D. 2.0 - OFFICE (OPC) REPACKING; the 100-web benchmark of "10 to 60
 //! percent inside OPC/XML".
 //!
 //! Remaining work item 8b: Office OPC, meaning DOCX, XLSX and PPTX, is XML

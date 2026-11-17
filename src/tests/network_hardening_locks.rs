@@ -1,6 +1,6 @@
 //! Locks for network-layer hardening that is easy to undo by accident.
 //!
-//! Two classes of finding live here:
+//! Two classes of network invariants live here:
 //!
 //!   * A poisoned mutex must degrade the affected request, not kill the node.
 //!     `src/network/node.rs` holds ~20 lock sites; all but one already matched
@@ -340,7 +340,7 @@ mod tests {
     /// A sync request leaves this node over `/sync`, never over gossip.
     ///
     /// The gossip arms for `GetHeaders` and `GetBlocksRange` stopped
-    /// answering when the reflected-amplification finding was fixed: a reply
+    /// answering to prevent reflected amplification: a reply
     /// published to the topic reaches the whole mesh, not the asker. The
     /// requesting side was never moved, so every `GetHeaders` this node sent
     /// was published to a topic on which every receiver only logs and

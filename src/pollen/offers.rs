@@ -1545,7 +1545,7 @@ mod tests {
     /// The DAO ceiling is applied identically on EVERY path that writes to
     /// `access_grants`.
     ///
-    /// Finding CWE-862: the ceiling was applied only inside
+    /// Security invariant: the ceiling was applied only inside
     /// `create_access_grant`. The marketplace purchase path,
     /// `issue_grant_from_sale_authorization`, never looked at the policy, so an
     /// ordinary buyer carrying a seller-signed authorization could obtain a

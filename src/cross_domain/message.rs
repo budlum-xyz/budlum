@@ -178,7 +178,7 @@ impl CrossDomainMessage {
     /// declared sender - Ed25519 (the key bytes are the address) or
     /// ML-DSA-87 (the wallet address derives from the key). An empty
     /// envelope is a refusal, not a pass: the self-declared `sender` field
-    /// alone is what the finding's spoof ran on.
+    /// alone cannot authenticate a transaction without valid cryptographic envelope.
     ///
     /// # Errors
     ///

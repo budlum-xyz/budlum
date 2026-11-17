@@ -340,8 +340,8 @@ fn split_bridge_fee_u128(
 /// settled by refusing most of its range at the edges or by narrowing it
 /// back where nobody re-checked; the money type carries the invariant, the
 /// fee never exceeds the amount, and no bridge path narrows anything with
-/// a cast. The asymmetric-defence finding (the mint path checked the fee
-/// ceiling and the unlock path did not) cannot recur here: there is no
+/// a cast. The symmetric-defence invariant (both mint and unlock paths
+/// share identical bounds) holds unconditionally here: there is no
 /// ceiling left to check.
 ///
 /// # Errors

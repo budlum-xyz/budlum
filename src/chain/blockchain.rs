@@ -53,8 +53,8 @@ pub const MAX_VALIDATOR_SNAPSHOTS: usize = 100;
 /// Upper bound of the slashing evidence pool. The pool is copied into the next
 /// block, so it must stay small.
 /// How long an alarm stays in the ledger.
-/// Orders of magnitude past any honest audit window and still finite -
-/// "never trimmed" was the finding.
+/// Orders of magnitude past any honest audit window and strictly finite
+/// to bound state retention.
 const ALARM_RETENTION_BLOCKS: u64 = 100_000;
 const MAX_PENDING_SLASHING_EVIDENCE: usize = 64;
 #[cfg(test)]
@@ -14088,7 +14088,7 @@ mod bond_and_reorg_tests {
         assert!(error.contains("state root mismatch"));
     }
 
-    /// Regression for the HIGH finding: an externally submitted
+    /// Security regression test: an externally submitted
     /// `Unverified` report used to be promoted to `ConsensusVerified` after
     /// checking only that two signatures verify under the offender's key.
     /// That is not an equivocation proof: a validator signs one block per

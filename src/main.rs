@@ -2,8 +2,11 @@ use budlum_core::chain::blockchain::Blockchain;
 use budlum_core::chain::chain_actor::ChainActor;
 use budlum_core::chain::snapshot::PruningManager;
 use budlum_core::cli::{ConsensusType, NodeConfig};
+use budlum_core::consensus::dag::{DAGConfig, DagEngine};
 use budlum_core::consensus::poa::{PoAConfig, PoAEngine};
+use budlum_core::consensus::poh::{PohConfig, PohEngine};
 use budlum_core::consensus::pos::{PoSConfig, PoSEngine};
+use budlum_core::consensus::pospace::{PoSpaceConfig, PoSpaceEngine};
 use budlum_core::consensus::pow::PoWEngine;
 use budlum_core::consensus::ConsensusEngine;
 use budlum_core::core::address::Address;
@@ -11,7 +14,8 @@ use budlum_core::core::transaction::Transaction;
 use budlum_core::crypto::primitives::{KeyPair, ValidatorKeys};
 use budlum_core::crypto::signer::ConsensusSigner;
 use budlum_core::domain::{
-    BftDomainPlugin, ConsensusKind, PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin,
+    BftDomainPlugin, ConsensusKind, DagDomainPlugin, PoADomainPlugin, PoSDomainPlugin,
+    PoWDomainPlugin, PohDomainPlugin, PospaceDomainPlugin,
 };
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
@@ -1460,17 +1464,24 @@ async fn main() {
                     ))
                 }
             }
+            ConsensusKind::Dag => Arc::new(DagEngine::new(DAGConfig::default())),
+            ConsensusKind::Poh => Arc::new(PohEngine::new(PohConfig::default())),
+            ConsensusKind::Pospace => Arc::new(PoSpaceEngine::new(PoSpaceConfig::default())),
             _ => continue,
         };
 
-        let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> =
-            match &domain.kind {
-                ConsensusKind::PoW => std::sync::Arc::new(PoWDomainPlugin::new(plugin_engine)),
-                ConsensusKind::PoS => std::sync::Arc::new(PoSDomainPlugin::new(plugin_engine)),
-                ConsensusKind::PoA => std::sync::Arc::new(PoADomainPlugin::new(plugin_engine)),
-                ConsensusKind::Bft => std::sync::Arc::new(BftDomainPlugin::new(plugin_engine)),
-                _ => continue,
-            };
+        let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> = match &domain
+            .kind
+        {
+            ConsensusKind::PoW => std::sync::Arc::new(PoWDomainPlugin::new(plugin_engine)),
+            ConsensusKind::PoS => std::sync::Arc::new(PoSDomainPlugin::new(plugin_engine)),
+            ConsensusKind::PoA => std::sync::Arc::new(PoADomainPlugin::new(plugin_engine)),
+            ConsensusKind::Bft => std::sync::Arc::new(BftDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Dag => std::sync::Arc::new(DagDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Poh => std::sync::Arc::new(PohDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Pospace => std::sync::Arc::new(PospaceDomainPlugin::new(plugin_engine)),
+            _ => continue,
+        };
         if let Err(e) = blockchain.plugin_registry.register(domain.id, plugin) {
             println!("Plugin registration failed (domain {}): {}", domain.id, e);
         }
@@ -1653,12 +1664,19 @@ async fn main() {
         });
     }
 
+    let sentry_policy = config.sentry_policy().unwrap_or_else(|e| {
+        eprintln!("CRITICAL SECURITY FAILURE: {e}");
+        std::process::exit(1);
+    });
+    let mdns_enabled = !sentry_policy.is_discovery_disabled()
+        && config
+            .mdns_enabled
+            .unwrap_or(network.security_config().mdns_enabled);
+
     let mut node = Node::with_key(
         chain.clone(),
         identity_key,
-        config
-            .mdns_enabled
-            .unwrap_or(network.security_config().mdns_enabled),
+        mdns_enabled,
         storage_node,
         sharding_config,
     )
@@ -1666,16 +1684,44 @@ async fn main() {
         eprintln!("Error: could not build the P2P node: {e}");
         std::process::exit(1);
     })
+    .with_sentry_policy(sentry_policy.clone())
     .with_identity(config.p2p_identity_file.clone())
-    .with_dns_seeds(config.dns_seeds.clone(), network.default_port())
+    .with_dns_seeds(
+        if sentry_policy.is_discovery_disabled() {
+            Vec::new()
+        } else {
+            config.dns_seeds.clone()
+        },
+        network.default_port(),
+    )
     .with_banned_peer_db(config.banned_peer_db.clone())
     .with_vote_history_db(config.vote_history_db.clone())
-    .with_bootstrap_peers(bootstraps.clone())
+    .with_bootstrap_peers(if sentry_policy.is_discovery_disabled() {
+        Vec::new()
+    } else {
+        bootstraps.clone()
+    })
     .with_metrics(metrics.clone());
     node.apply_network_security(network);
+    match sentry_policy.role() {
+        budlum_core::network::sentry::SentryRole::ShieldedValidator => {
+            println!(
+                "Sentry architecture: SHIELDED VALIDATOR mode active (discovery disabled, {} sentry peer(s))",
+                sentry_policy.sentry_addrs().len()
+            );
+        }
+        budlum_core::network::sentry::SentryRole::Sentry => {
+            println!(
+                "Sentry architecture: SENTRY SHIELD mode active (protecting {} private validator peer(s))",
+                config.private_peers.len()
+            );
+        }
+        budlum_core::network::sentry::SentryRole::Standard => {}
+    }
     let profile_peer_cap = node.max_peers;
     let effective_max_peers = config.effective_max_peers();
     node.max_peers = effective_max_peers;
+    node.sync_connection_caps();
     if let Some(requested) = config.max_peers {
         if requested > profile_peer_cap {
             tracing::warn!(
@@ -1692,16 +1738,73 @@ async fn main() {
         }
     }
 
-    for addr in &bootstraps {
-        if let Err(e) = node.bootstrap(addr) {
-            eprintln!("Failed to bootstrap from {addr}: {e}");
+    let mut combined_validator_peers = config.validator_peers.clone();
+    for pp in &config.private_peers {
+        if !combined_validator_peers.contains(pp) {
+            combined_validator_peers.push(pp.clone());
+        }
+    }
+    let sentry_shield = budlum_core::network::sentry::SentryShieldConfig::from_role_and_peers(
+        &config.role,
+        &config.sentry_peers,
+        &combined_validator_peers,
+        Some(&node.peer_id),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("CRITICAL SECURITY ERROR: invalid sentry shield topology: {e}");
+        std::process::exit(1);
+    });
+    node.configure_sentry_shield(sentry_shield)
+        .unwrap_or_else(|e| {
+            eprintln!("CRITICAL SECURITY ERROR: failed to configure sentry shield: {e}");
+            std::process::exit(1);
+        });
+
+    if node.sentry_shield().is_validator_shielded() || sentry_policy.is_discovery_disabled() {
+        tracing::info!(
+            sentry_count = config.sentry_peers.len(),
+            "Validator sentry shield enabled: public bootnodes, DNS seeds, mDNS, and Kademlia DHT server mode disabled; speaking only with configured sentry peers"
+        );
+    } else {
+        if config.role == "validator" && network != budlum_core::core::chain_config::Network::Devnet
+        {
+            tracing::warn!(
+                "Validator is starting on a public network without --sentry-peers / [p2p] sentry_peers; configure sentry shield nodes to hide validator P2P endpoints from direct public exposure"
+            );
+        }
+        if node.sentry_shield().is_sentry_protecting_validators() {
+            tracing::info!(
+                protected_validators = combined_validator_peers.len(),
+                "Sentry shield node active: protecting upstream validator identities and withholding their listen addresses from Kademlia"
+            );
+        }
+        for addr in &bootstraps {
+            if let Err(e) = node.bootstrap(addr) {
+                eprintln!("Failed to bootstrap from {addr}: {e}");
+            }
         }
     }
 
-    if let Err(e) = node.listen(port) {
+    if let Some(ref listen_ip_str) = config.p2p_listen_addr {
+        let listen_ip: std::net::IpAddr = listen_ip_str.trim().parse().unwrap_or_else(|e| {
+            eprintln!("Error: invalid p2p.listen_addr '{listen_ip_str}': {e}");
+            std::process::exit(1);
+        });
+        if let Err(e) = node.listen_on(listen_ip, port) {
+            eprintln!("Error: could not listen on {listen_ip}:{port}: {e}");
+            std::process::exit(1);
+        }
+    } else if let Err(e) = node.listen(port) {
         eprintln!("Error: could not listen on port {port}: {e}");
         std::process::exit(1);
     }
+    if let Some(ref priv_addr) = config.p2p_private_listen_addr {
+        if let Err(e) = node.listen_multiaddr(priv_addr.trim()) {
+            eprintln!("Error: could not listen on private interface {priv_addr}: {e}");
+            std::process::exit(1);
+        }
+    }
+    node.maintain_sentry_shield_links();
     if let Some(ref addr) = config.dial {
         if let Err(e) = node.dial(addr) {
             eprintln!("Error: could not dial {addr}: {e}");
