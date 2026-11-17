@@ -172,6 +172,18 @@ fn parallel_scheduler_is_closed_on_testnet() {
     let default_policy = ParallelSchedulerPolicy::default();
     assert!(!default_policy.scheduler_active());
     assert!(!default_policy.intra_ee_parallelism_active());
+    for chain_id in [45_260, 99_999] {
+        assert!(!ParallelSchedulerPolicy {
+            chain_id,
+            ..default_policy
+        }
+        .scheduler_active());
+    }
+    assert!(ParallelSchedulerPolicy {
+        chain_id: 45_262,
+        ..default_policy
+    }
+    .scheduler_active());
     let checked_default = ParallelExecutionConfig::default();
     assert!(!checked_default.enabled);
     assert!(!checked_default.block_stm_enabled);

@@ -434,6 +434,14 @@ mod tests {
     fn foreign_sui_is_closed_on_testnet() {
         let closed = SuiActivationPolicy::default();
         assert!(!closed.is_active());
+        for chain_id in [45_260, 99_999] {
+            assert!(!SuiActivationPolicy { chain_id, ..closed }.is_active());
+        }
+        assert!(SuiActivationPolicy {
+            chain_id: 45_262,
+            ..closed
+        }
+        .is_active());
         assert_eq!(
             decode_and_recover_sui_tx(b"{}", closed),
             Err(SuiEnvelopeError::ClosedOnTestnet {
