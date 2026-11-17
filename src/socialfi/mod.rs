@@ -154,9 +154,17 @@ impl NftRegistry {
     ///
     /// Returns an error if the operation fails.
     pub fn transfer(&mut self, id: u64, from: &Address, to: Address) -> Result<(), NftError> {
-        let nft = self.nfts.get_mut(&id).ok_or(NftError::NotFound)?;
-        if &nft.owner != from {
+        let nft_owner = self.nfts.get(&id).ok_or(NftError::NotFound)?.owner;
+        if &nft_owner != from {
             return Err(NftError::NotOwner);
+        }
+        if from != &to
+            && self
+                .ownership
+                .get(&to)
+                .is_some_and(|ids| ids.len() >= MAX_NFTS_PER_OWNER)
+        {
+            return Err(NftError::TooManyNfts);
         }
 
         // Update ownership map. An owner whose list becomes empty loses the
@@ -170,7 +178,9 @@ impl NftRegistry {
         }
         self.ownership.entry(to).or_default().push(id);
 
-        nft.owner = to;
+        if let Some(nft) = self.nfts.get_mut(&id) {
+            nft.owner = to;
+        }
         Ok(())
     }
 
@@ -512,5 +522,37 @@ mod tests {
         assert_eq!(burned_cid, cid);
         assert!(reg.get_nft(id).is_none());
         assert!(!reg.ownership.contains_key(&owner));
+    }
+
+    #[test]
+    fn transfer_refuses_recipient_at_max_nfts_per_owner() {
+        let mut reg = NftRegistry::new();
+        let sender = Address::from([0x31; 32]);
+        let recipient = Address::from([0x32; 32]);
+        let cid = ContentId([0xEF; 32]);
+        let id = reg.mint(sender, cid, 1, None).expect("mint succeeds");
+
+        let cap = u64::try_from(MAX_NFTS_PER_OWNER).expect("cap fits u64");
+        reg.ownership
+            .insert(recipient, (100..100 + cap).collect::<Vec<u64>>());
+        let before = reg.root();
+
+        let err = reg
+            .transfer(id, &sender, recipient)
+            .expect_err("recipient at MAX_NFTS_PER_OWNER must refuse incoming transfer");
+        assert!(matches!(err, NftError::TooManyNfts));
+        assert_eq!(reg.root(), before);
+        assert_eq!(reg.get_nft(id).expect("nft remains live").owner, sender);
+
+        // Self-transfer does not increase the holder's count and still succeeds at the cap.
+        let mut at_cap: Vec<u64> = (200..200 + cap - 1).collect();
+        at_cap.push(id);
+        reg.ownership.insert(sender, at_cap);
+        reg.transfer(id, &sender, sender)
+            .expect("self-transfer at cap must succeed");
+        assert_eq!(
+            reg.ownership.get(&sender).map(Vec::len),
+            Some(MAX_NFTS_PER_OWNER)
+        );
     }
 }
