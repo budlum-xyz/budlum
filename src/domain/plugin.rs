@@ -284,6 +284,9 @@ impl ConsensusDomainPlugin for DagDomainPlugin {
                 ctx.domain.id
             )));
         }
+        // `from_block` derives the parent from the block's own parent pointer;
+        // for a DAG block that is its first parent, and the remaining parents
+        // stay in the DAG's own edge set rather than in the commitment.
         let mut commitment = DomainCommitment::from_block(
             ctx.domain,
             block,
