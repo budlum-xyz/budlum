@@ -58,6 +58,15 @@ pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 /// Development-network chain id.
 pub const BUDLUM_DEVNET_CHAIN_ID: u64 = 45_262;
 
+/// Whether any T-Expansion execution environment is enabled by default.
+///
+/// Expansion execution is a devnet integration surface until a later protocol
+/// release commits public-network activation heights. Unknown ids fail closed.
+#[must_use]
+pub const fn expansion_environment_enabled_by_default(chain_id: u64) -> bool {
+    chain_id == BUDLUM_DEVNET_CHAIN_ID
+}
+
 /// Whether a pointer target is admitted by the built-in network launch policy.
 ///
 /// EVM and WASM pointers are launch features on the two known public networks.

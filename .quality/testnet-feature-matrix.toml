@@ -35,6 +35,11 @@ state = "closed"
 evidence = "compression_context_is_closed_on_testnet"
 
 [[feature]]
+id = "expansion_coordinator"
+state = "closed"
+evidence = "expansion_coordinator_is_closed_on_testnet"
+
+[[feature]]
 id = "ethereum_sync_committee"
 state = "closed"
 evidence = "ethereum_sync_committee_is_closed_on_testnet"
