@@ -80,6 +80,60 @@ fn has_pair(text: &str, key: &str, value: &str) -> bool {
     })
 }
 
+/// The names that can sit as siblings of `pull_request:` inside an `on:`
+/// block. A `branches:` key belongs to the trigger only while it appears
+/// before any of these, which is what keeps a `push: branches:` filter out of
+/// the reach of [`pull_request_has_base_filter`].
+const EVENT_KEYS: &[&str] = &[
+    "pull_request_target",
+    "workflow_call",
+    "workflow_dispatch",
+    "workflow_run",
+    "schedule",
+    "repository_dispatch",
+    "discussion",
+    "issues",
+    "issue_comment",
+    "release",
+    "push",
+];
+
+/// Does the `pull_request` trigger restrict its base branches? A stacked pull
+/// request is merged into an intermediate branch, so a base allowlist silently
+/// skips every gate for such a PR, and the gate the allowlist was supposed to
+/// enforce is exactly the one that stops running.
+fn pull_request_has_base_filter(text: &str) -> bool {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or(""))
+        .collect();
+    let indent_of = |line: &str| line.len() - line.trim_start().len();
+    let Some(index) = lines
+        .iter()
+        .position(|line| line.trim() == "pull_request:" || line.trim() == "pull_request: {}")
+    else {
+        return false;
+    };
+    let trigger_indent = indent_of(lines[index]);
+    for line in lines.get(index + 1..).unwrap_or_default() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if indent_of(line) <= trigger_indent {
+            break;
+        }
+        let key = trimmed.split(':').next().unwrap_or("");
+        if EVENT_KEYS.contains(&key) {
+            break;
+        }
+        if key == "branches" || key == "branches-ignore" {
+            return true;
+        }
+    }
+    false
+}
+
 /// `\|\|\s*true` anywhere in the text.
 fn swallows_failure(text: &str) -> bool {
     (0..text.len()).any(|i| {
@@ -273,19 +327,9 @@ pub fn workflow_text_audit(rel: &str, text: &str, errors: &mut Vec<String>) {
 
     checkout_checks(rel, &lines, errors);
 
-    let has_pull_request = uncommented.iter().any(|line| {
-        let t = line.trim();
-        t == "pull_request:"
-            || t.strip_prefix("on:").is_some_and(|rest| {
-                let rest = rest.trim();
-                rest == "pull_request"
-                    || (rest.starts_with('[')
-                        && rest
-                            .trim_matches(|c| c == '[' || c == ']')
-                            .split(',')
-                            .any(|e| e.trim() == "pull_request"))
-            })
-    });
+    let has_pull_request = uncommented
+        .iter()
+        .any(|line| names_word(line, "pull_request"));
     if has_pull_request {
         for (index, line) in uncommented.iter().enumerate() {
             if is_write_permission(line) {
@@ -294,6 +338,16 @@ pub fn workflow_text_audit(rel: &str, text: &str, errors: &mut Vec<String>) {
                     index + 1
                 ));
             }
+        }
+        // Fail closed on the trigger too: a gate that only runs on a hand
+        // written list of base branches does not run at all for a base that
+        // was not on the list. The stacked PRs of this repository are exactly
+        // that case.
+        if pull_request_has_base_filter(text) {
+            errors.push(format!(
+                "{rel}: pull_request trigger restricts its base branches, so a PR \
+                 onto a stacked base runs no gate"
+            ));
         }
     }
 
@@ -414,7 +468,6 @@ permissions:
   contents: read
 on:
   pull_request:
-    branches: [main]
 jobs:
   check:
     permissions:
@@ -459,14 +512,12 @@ fn require_rejected(
     }
 }
 
-/// Mutate each protected rule and require the detector to go red.
-///
-/// # Errors
-///
-/// If any mutant passes the audit.
-pub fn red_team() -> Result<usize, String> {
+/// The protected workflow rules, each paired with the mutant that must break
+/// it. A rule that no mutant trips is a rule nobody enforces, so this list is
+/// the executable statement of what the guard covers.
+fn workflow_mutants() -> [(&'static str, String, &'static str); 12] {
     let sha = "actions/checkout@0123456789abcdef0123456789abcdef01234567";
-    let mutants: [(&str, String, &str); 10] = [
+    [
         (
             "unpinned-action",
             CLEAN.replace(sha, "actions/checkout@main"),
@@ -503,6 +554,22 @@ pub fn red_team() -> Result<usize, String> {
             "pull_request_target is forbidden",
         ),
         (
+            "pull-request-narrow-bases",
+            CLEAN.replace(
+                "  pull_request:\n",
+                "  pull_request:\n    branches: [main]\n",
+            ),
+            "restricts its base branches",
+        ),
+        (
+            "pull-request-narrow-bases-block",
+            CLEAN.replace(
+                "  pull_request:\n",
+                "  pull_request:\n    branches:\n      - main\n",
+            ),
+            "restricts its base branches",
+        ),
+        (
             "workflow-run-inline",
             format!("{CLEAN}\non: [workflow_run]\n"),
             "workflow_run is forbidden",
@@ -517,9 +584,17 @@ pub fn red_team() -> Result<usize, String> {
             format!("{CLEAN}\n# mutation\nrun: git push\n"),
             "workflow must not push",
         ),
-    ];
+    ]
+}
+
+/// Reject every workflow mutant and return how many were checked.
+///
+/// # Errors
+///
+/// If any mutant passes the audit.
+fn reject_workflow_mutants() -> Result<usize, String> {
     let mut count = 0;
-    for (name, mutant, expected) in &mutants {
+    for (name, mutant, expected) in &workflow_mutants() {
         require_rejected(
             &format!("red-team/{name}.yml"),
             name,
@@ -529,6 +604,16 @@ pub fn red_team() -> Result<usize, String> {
         )?;
         count += 1;
     }
+    Ok(count)
+}
+
+/// Mutate each protected rule and require the detector to go red.
+///
+/// # Errors
+///
+/// If any mutant passes the audit.
+pub fn red_team() -> Result<usize, String> {
+    let mut count = reject_workflow_mutants()?;
 
     let clean = guard_clean();
     let guard_mutants: [(&str, String, &str); 4] = [
@@ -690,8 +775,37 @@ mod tests {
     }
 
     #[test]
-    fn the_red_team_rejects_all_fourteen_mutants() {
-        assert_eq!(red_team(), Ok(14));
+    fn a_narrow_pull_request_base_list_is_a_finding() {
+        for filter in [
+            "    branches: [main, testnet]\n",
+            "    branches:\n      - main\n",
+            "    branches-ignore: [gh-pages]\n",
+        ] {
+            let text = CLEAN.replace("  pull_request:\n", &format!("  pull_request:\n{filter}"));
+            let errors = audit_text("x.yml", &text);
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("restricts its base branches")),
+                "{filter:?}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_base_agnostic_trigger_passes_and_a_push_filter_stays_innocent() {
+        let agnostic = "permissions:\n  contents: read\non:\n  pull_request:\njobs:\n  a:\n";
+        assert_eq!(audit_text("x.yml", agnostic), Vec::<String>::new());
+        let push_only = "permissions:\n  contents: read\non:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  a:\n";
+        assert_eq!(audit_text("x.yml", push_only), Vec::<String>::new());
+        let commented =
+            "permissions:\n  contents: read\non:\n  pull_request:\n    # branches: [main]\njobs:\n  a:\n";
+        assert_eq!(audit_text("x.yml", commented), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_red_team_rejects_all_sixteen_mutants() {
+        assert_eq!(red_team(), Ok(16));
     }
 
     #[test]
