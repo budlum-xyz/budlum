@@ -106,7 +106,7 @@ const TX_WIRE_VERSION: u32 = 2;
 /// the shared decoder above, which additionally bounds collection count hints.
 const MAX_WIRE_NESTED_PAYLOAD_BYTES: usize = 1024 * 1024;
 
-fn decode_bounded_json<T: serde::de::DeserializeOwned>(
+pub(crate) fn decode_bounded_json<T: serde::de::DeserializeOwned>(
     data: &[u8],
     what: &str,
 ) -> Result<T, String> {
@@ -3983,5 +3983,17 @@ mod tests {
             )),
         };
         assert!(NetworkMessage::try_from(malformed).is_err());
+    }
+
+    #[test]
+    fn qc_fault_proof_decode_rejects_oversized_payload_before_json_parse() {
+        let oversized = vec![b' '; MAX_WIRE_NESTED_PAYLOAD_BYTES + 1];
+        let err =
+            decode_bounded_json::<crate::consensus::qc::QcFaultProof>(&oversized, "qc fault proof")
+                .unwrap_err();
+        assert!(
+            err.contains("exceeds size limit"),
+            "expected size limit refusal, got: {err}"
+        );
     }
 }
