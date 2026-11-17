@@ -171,6 +171,13 @@ pub struct Account {
     /// Sub-atom balance in attoBUD (`0 <= frac_attos < 10^12`).
     #[serde(default)]
     pub frac_attos: u64,
+    /// Optional `BudZKVM` authorization program hash (Phase 4 program accounts).
+    ///
+    /// When set, transactions from this account authorize via
+    /// `Claim::Prog { program_hash, input_hash: tx.signing_hash(), output_hash: AUTH_OK }`
+    /// rather than an inline signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_program_hash: Option<[u8; 32]>,
 }
 /// Stand-in bytes hashed when a state-root input cannot be serialized.
 ///
@@ -178,6 +185,11 @@ pub struct Account {
 /// node recomputes this root: an abort would stop the whole validator set at
 /// once, and a fixed marker keeps the root identical across nodes.
 const STATE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/account-state";
+
+/// Domain separator mixed into an account's Merkle leaf only when
+/// `Account.auth_program_hash` is set, preserving existing leaf hashes for
+/// accounts without a program hook.
+const TAG_ACCOUNT_AUTH_PROGRAM: &[u8] = b"BDLM_AUTH_PROG_V1";
 
 impl Account {
     #[must_use]
@@ -187,6 +199,7 @@ impl Account {
             balance: 0,
             nonce: 0,
             frac_attos: 0,
+            auth_program_hash: None,
         }
     }
     #[must_use]
@@ -196,6 +209,24 @@ impl Account {
             balance,
             nonce: 0,
             frac_attos: 0,
+            auth_program_hash: None,
+        }
+    }
+
+    /// Creates a program-authorized account (Phase 4) with `balance` and
+    /// `auth_program_hash`.
+    #[must_use]
+    pub const fn with_auth_program(
+        public_key: Address,
+        balance: u64,
+        auth_program_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            public_key,
+            balance,
+            nonce: 0,
+            frac_attos: 0,
+            auth_program_hash: Some(auth_program_hash),
         }
     }
 
@@ -2065,6 +2096,22 @@ impl AccountState {
     }
     pub fn get_nonce(&self, public_key: &Address) -> u64 {
         self.accounts.get(public_key).map_or(0, |a| a.nonce)
+    }
+
+    /// Returns the `BudZKVM` authorization program hash bound to `public_key`,
+    /// or `None` for standard signature-authenticated accounts.
+    #[must_use]
+    pub fn auth_program_hash(&self, public_key: &Address) -> Option<[u8; 32]> {
+        self.accounts
+            .get(public_key)
+            .and_then(|a| a.auth_program_hash)
+    }
+
+    /// Binds or clears the Phase 4 `BudZKVM` authorization program hash on
+    /// `public_key` and marks the account dirty for state-root recomputation.
+    pub fn set_auth_program_hash(&mut self, public_key: &Address, program_hash: Option<[u8; 32]>) {
+        let acct = self.get_or_create(public_key);
+        acct.auth_program_hash = program_hash;
     }
     pub fn get_or_create(&mut self, public_key: &Address) -> &mut Account {
         if !self.accounts.contains_key(public_key) {
@@ -5350,6 +5397,24 @@ impl AccountState {
         )
     }
 
+    fn hash_account_leaf(pubkey: &Address, account: &Account) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+
+        let mut h = Sha256::new();
+        h.update([0x00]);
+        h.update(pubkey.0);
+        h.update(account.balance.to_le_bytes());
+        h.update(account.nonce.to_le_bytes());
+        if account.frac_attos != 0 {
+            h.update(account.frac_attos.to_le_bytes());
+        }
+        if let Some(auth_program_hash) = account.auth_program_hash {
+            h.update(TAG_ACCOUNT_AUTH_PROGRAM);
+            h.update(auth_program_hash);
+        }
+        h.finalize().into()
+    }
+
     pub fn state_root_body(&mut self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
 
@@ -5366,17 +5431,7 @@ impl AccountState {
                 self.cached_leaves = self
                     .accounts
                     .par_iter()
-                    .map(|(pubkey, account)| {
-                        let mut h = Sha256::new();
-                        h.update([0x00]);
-                        h.update(pubkey.0);
-                        h.update(account.balance.to_le_bytes());
-                        h.update(account.nonce.to_le_bytes());
-                        if account.frac_attos != 0 {
-                            h.update(account.frac_attos.to_le_bytes());
-                        }
-                        h.finalize().into()
-                    })
+                    .map(|(pubkey, account)| Self::hash_account_leaf(pubkey, account))
                     .collect();
             }
             #[cfg(miri)]
@@ -5384,17 +5439,7 @@ impl AccountState {
                 self.cached_leaves = self
                     .accounts
                     .iter()
-                    .map(|(pubkey, account)| {
-                        let mut h = Sha256::new();
-                        h.update([0x00]);
-                        h.update(pubkey.0);
-                        h.update(account.balance.to_le_bytes());
-                        h.update(account.nonce.to_le_bytes());
-                        if account.frac_attos != 0 {
-                            h.update(account.frac_attos.to_le_bytes());
-                        }
-                        h.finalize().into()
-                    })
+                    .map(|(pubkey, account)| Self::hash_account_leaf(pubkey, account))
                     .collect();
             }
 
@@ -5439,15 +5484,7 @@ impl AccountState {
             for dirty_key in &self.dirty_accounts {
                 if let Ok(pos) = self.cached_keys.binary_search(dirty_key) {
                     if let Some(account) = self.accounts.get(dirty_key) {
-                        let mut h = Sha256::new();
-                        h.update([0x00]);
-                        h.update(dirty_key.0);
-                        h.update(account.balance.to_le_bytes());
-                        h.update(account.nonce.to_le_bytes());
-                        if account.frac_attos != 0 {
-                            h.update(account.frac_attos.to_le_bytes());
-                        }
-                        self.cached_leaves[pos] = h.finalize().into();
+                        self.cached_leaves[pos] = Self::hash_account_leaf(dirty_key, account);
                         affected_indices.insert(pos);
                     }
                 }

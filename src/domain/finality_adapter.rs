@@ -158,6 +158,19 @@ pub enum FinalityProof {
         validator_snapshot: ValidatorSetSnapshot,
         qc: crate::consensus::qc::QcBlob,
     },
+    /// Aggregation-layer finality (Phase 4): references a verified
+    /// `Claim::Prog` inside a finalized block's `MasterProof` (`ClaimFrame`).
+    /// Appended at the end so earlier bincode variant indices stay stable.
+    AggregatedProg {
+        /// Registered state-transition program hash for this domain.
+        program_hash: Hash32,
+        /// Height of the predecessor state root.
+        prev_height: u64,
+        /// Predecessor state root.
+        prev_state_root: Hash32,
+        /// Digest of the verified `Claim::Prog` inside the block's `ClaimFrame`.
+        claim_digest: Hash32,
+    },
 }
 
 impl FinalityProof {

@@ -5812,7 +5812,11 @@ impl Blockchain {
     ) -> Result<(AccountState, Vec<DomainId>), String> {
         // The claim fees of the block: who pays, which transaction fails and
         // who is paid. Empty for a block without a claim frame.
-        let claim_fees = crate::aggregation::chain::settlement_of(aggregation, block)?;
+        let claim_fees = crate::aggregation::chain::settlement_of_with_accounts(
+            aggregation,
+            Some(base_state),
+            block,
+        )?;
         let burn_cids = Self::collect_nft_burn_cids_from_state(base_state, block);
         let mut next_state = base_state.clone();
         next_state.current_block_height = block.index;
@@ -6060,7 +6064,11 @@ impl Blockchain {
                     self.chain_id,
                 );
                 probe.claim_frame = Some(frame.clone());
-                match crate::aggregation::chain::settlement_of(&self.aggregation_params(), &probe) {
+                match crate::aggregation::chain::settlement_of_with_accounts(
+                    &self.aggregation_params(),
+                    Some(&self.state),
+                    &probe,
+                ) {
                     Ok(fees) if !fees.failed.contains(&true) => true,
                     Ok(_) => {
                         tracing::warn!(
@@ -6116,9 +6124,10 @@ impl Blockchain {
                     return None;
                 }
             }
-            if let Err(error) = crate::aggregation::chain::check_block(
+            if let Err(error) = crate::aggregation::chain::check_block_with_accounts(
                 &self.aggregation_params(),
                 &self.state.scheme_registry,
+                &self.state,
                 &block,
             ) {
                 tracing::warn!("Block frame refused, no block built: {error}");
@@ -6892,8 +6901,17 @@ impl Blockchain {
         // not. A claimed transaction below is accepted only because this
         // check passed: the frame proves its signature was verified.
         let aggregation = self.aggregation_params();
-        crate::aggregation::chain::check_block(&aggregation, &self.state.scheme_registry, &block)?;
-        let claim_fees = crate::aggregation::chain::settlement_of(&aggregation, &block)?;
+        crate::aggregation::chain::check_block_with_accounts(
+            &aggregation,
+            &self.state.scheme_registry,
+            &self.state,
+            &block,
+        )?;
+        let claim_fees = crate::aggregation::chain::settlement_of_with_accounts(
+            &aggregation,
+            Some(&self.state),
+            &block,
+        )?;
 
         if block.index > 0 && block.state_root.is_empty() {
             return Err("Block missing state_root".into());
@@ -7266,10 +7284,19 @@ impl Blockchain {
             Self::check_block_slashing_evidence(block)
                 .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
             // The claims of the candidate block, exactly as on the tip path.
-            crate::aggregation::chain::check_block(&aggregation, &state.scheme_registry, block)
-                .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
-            let claim_fees = crate::aggregation::chain::settlement_of(&aggregation, block)
-                .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
+            crate::aggregation::chain::check_block_with_accounts(
+                &aggregation,
+                &state.scheme_registry,
+                &state,
+                block,
+            )
+            .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
+            let claim_fees = crate::aggregation::chain::settlement_of_with_accounts(
+                &aggregation,
+                Some(&state),
+                block,
+            )
+            .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
 
             let mut projected = state.clone();
             projected.current_block_height = block.index;

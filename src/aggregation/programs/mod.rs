@@ -29,9 +29,11 @@ pub mod agg_tick;
 pub mod asm;
 pub mod bytes;
 pub mod chip_offload;
+pub mod hidden_multisig;
 pub mod keccak;
 pub mod mldsa;
 pub mod object;
+pub mod prog_claim;
 pub mod verify_sig;
 
 use super::claim::SIG_CLAIM_PREFIX;
