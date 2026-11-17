@@ -1,11 +1,11 @@
-//! Fixed-point MLP guest + host evaluator for BudZKVM AI execution.
+//! Fixed-point MLP guest + host evaluator for `BudZKVM` AI execution.
 //!
 //! Hardening goals:
-//! - Bit-exact host forward pass (i32 MAC, ReLU)
+//! - Bit-exact host forward pass (i32 MAC, `ReLU`)
 //! - Domain-separated input/output commitments
 //! - Guest bytecode computes the forward pass in-VM over a host-published
 //!   memory image, and its result is checked against the host evaluator
-//! - Optional STARK prove/verify via ZkVmExecutor / DefaultAdapter
+//! - Optional STARK prove/verify via `ZkVmExecutor` / `DefaultAdapter`
 
 use super::model_class::{AiExecutionModelClass, MAX_MLP_LAYERS, MAX_MLP_PARAMS, MAX_MLP_WIDTH};
 use bud_isa::{Instruction, Opcode};
@@ -16,7 +16,7 @@ pub const MLP_GUEST_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FixedPointMlpSpec {
-    /// Layer sizes: input_dim, hidden..., output_dim (len = layers+1).
+    /// Layer sizes: `input_dim`, hidden..., `output_dim` (len = layers+1).
     pub dims: Vec<u16>,
     /// Row-major weights per layer, concatenated.
     pub weights: Vec<i32>,
@@ -42,6 +42,11 @@ fn check_dims_shape(dims: &[u16]) -> Result<(), String> {
 }
 
 impl FixedPointMlpSpec {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         check_dims_shape(&self.dims)?;
         let mut expected_w = 0usize;
@@ -123,7 +128,11 @@ impl FixedPointMlpSpec {
 }
 
 /// Bit-exact fixed-point forward pass: y = ReLU(W x + b) per hidden layer;
-/// Final layer is linear (no ReLU) so regression outputs can be negative.
+/// Final layer is linear (no `ReLU`) so regression outputs can be negative.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn eval_fixed_point_mlp(spec: &FixedPointMlpSpec, input: &[i32]) -> Result<Vec<i32>, String> {
     spec.validate()?;
     if input.len() != spec.input_dim() {
@@ -179,6 +188,29 @@ pub fn input_commitment(limbs: &[i32]) -> [u8; 32] {
     commit_i32_limbs(b"BDLM_AI_INPUT_V1", limbs)
 }
 
+/// Encodes `i32` output limbs in canonical little-endian order so
+/// `AiInferenceResult::output_ref` and `canonical_output_commitment` match
+/// the proven STARK inference output commitment end-to-end.
+///
+/// exposed for: a requester building `output_ref` bytes outside this module;
+/// today only the blind-compute and B.U.D. 3.0 door tests do.
+#[must_use]
+pub fn encode_output_limbs(limbs: &[i32]) -> Vec<u8> {
+    limbs.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// Canonical little-endian input bytes for an MLP request's `input_ref`.
+/// The request and its execution proof must use the *same* admission hash:
+/// `AI_INPUT_COMMIT_V1` over these bytes, not the separate SHA3 limb commitment
+/// used by the private-execution guest.
+///
+/// exposed for: a requester building `input_ref` bytes outside this module;
+/// today only the blind-compute and B.U.D. 3.0 door tests do.
+#[must_use]
+pub fn encode_input_limbs(limbs: &[i32]) -> Vec<u8> {
+    encode_output_limbs(limbs)
+}
+
 pub fn output_commitment(limbs: &[i32]) -> [u8; 32] {
     commit_i32_limbs(b"BDLM_AI_OUTPUT_V1", limbs)
 }
@@ -220,6 +252,10 @@ pub fn weights_digest(spec: &FixedPointMlpSpec) -> [u8; 32] {
 /// limb down to its low 31 bits, which left ~31 bits of the commitment bound
 /// instead of 64 and put a birthday collision within reach of roughly 2^15.5
 /// attempts.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn build_fixed_point_mlp_guest(
     spec: &FixedPointMlpSpec,
     input_commit: &[u8; 32],
@@ -300,7 +336,7 @@ pub fn program_hash_from_words(words: &[u64]) -> [u8; 32] {
 /// compared the two and failed every time:
 ///
 /// ```text
-/// SONUC: Err("execution proof program_hash != public_inputs.program_hash")
+/// RESULT: Err("execution proof program_hash != public_inputs.program_hash")
 /// ```
 ///
 /// Everything else in that measurement lined up, the verifier rebuilt the
@@ -321,7 +357,83 @@ pub fn words_to_bytecode(words: &[u64]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
-/// End-to-end: eval MLP, build guest, STARK-prove, package AiExecutionProof.
+/// Transaction binding context for AI inference STARK proof generation.
+///
+/// Convenience: exposed for prover clients submitting `AiAttachExecutionProof`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProveInferenceContext {
+    pub chain_id: u64,
+    pub sender: crate::core::address::Address,
+    pub nonce: u64,
+    pub block_height: u64,
+}
+
+/// End-to-end: eval MLP, build guest, STARK-prove bound to transaction context,
+/// and package [`crate::ai::types::AiExecutionProof`].
+///
+/// Convenience: exposed for prover clients submitting replay-protected proofs to
+/// `AiAttachExecutionProof`.
+///
+/// # Errors
+///
+/// Returns an error if evaluation, memory setup, or STARK proving fails.
+pub fn prove_mlp_inference_with_context(
+    spec: &FixedPointMlpSpec,
+    model_id: crate::ai::types::AiModelId,
+    input: &[i32],
+    gas_limit: u64,
+    ctx: ProveInferenceContext,
+) -> Result<(crate::ai::types::AiExecutionProof, Vec<i32>), String> {
+    let host_output = eval_fixed_point_mlp(spec, input)?;
+    let (guest_output, _receipt) = run_matmul_guest(spec, input, gas_limit)?;
+    if guest_output != host_output {
+        return Err(format!(
+            "guest output {guest_output:?} != host output {host_output:?}"
+        ));
+    }
+
+    let in_c = crate::ai::types::canonical_input_commitment(&encode_input_limbs(input));
+    let out_c = crate::ai::types::canonical_output_commitment(&encode_output_limbs(&host_output));
+    let words = build_matmul_guest_program(spec)?;
+    let program_hash = stark_program_hash_from_words(&words);
+    let bytecode = words_to_bytecode(&words);
+
+    let sender_words = crate::execution::zkvm::address_to_four_words(&ctx.sender);
+    let tx_ctx = crate::execution::zkvm::TxContext {
+        sender: sender_words[0],
+        sender_words,
+        nonce: ctx.nonce,
+        block_height: ctx.block_height,
+    };
+    let (envelope, pi, _prog) = crate::execution::zkvm::prove_bytecode_with_memory_context(
+        &bytecode,
+        gas_limit,
+        ctx.chain_id,
+        tx_ctx,
+        |memory| setup_guest_memory(memory, spec, input).map(|_| ()),
+    )?;
+    let proof_bytes =
+        postcard::to_allocvec(&envelope).map_err(|e| format!("postcard serialize proof: {e}"))?;
+
+    let proof = crate::ai::types::AiExecutionProof {
+        model_id,
+        input_commitment: in_c,
+        output_commitment: out_c,
+        program_hash,
+        proof_bytes,
+        steps: pi.trace_len,
+        gas_used: pi.gas_used,
+        weights_digest: Some(weights_digest(spec)),
+        public_inputs: Some(crate::ai::types::AiExecutionPublicInputs::from_execution_inputs(&pi)),
+    };
+    Ok((proof, host_output))
+}
+
+/// End-to-end: eval MLP, build guest, STARK-prove, package `AiExecutionProof`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn prove_mlp_inference(
     spec: &FixedPointMlpSpec,
     model_id: crate::ai::types::AiModelId,
@@ -341,8 +453,8 @@ pub fn prove_mlp_inference(
         ));
     }
 
-    let in_c = input_commitment(input);
-    let out_c = output_commitment(&host_output);
+    let in_c = crate::ai::types::canonical_input_commitment(&encode_input_limbs(input));
+    let out_c = crate::ai::types::canonical_output_commitment(&encode_output_limbs(&host_output));
     let words = build_matmul_guest_program(spec)?;
     // The proof carries the hash the STARK binds, not the registry
     // identifier: `verify_execution_proof_stark` compares this field against
@@ -441,7 +553,7 @@ mod tests {
 
     /// Wheeler DDC pin: the canonical matmul guest program hash.
     ///
-    /// The same pins are asserted in `xtask/gates/src/gates/regeneration.rs`,
+    /// The same pins are asserted in `xtask/gates/src/gates/canonical_programs_reproduce.rs`,
     /// where the program is reproduced independently from the specification.
     /// The tree produces it here; the gate reproduces it there; both must land
     /// on the same value. If this builder drifts, this test turns red and the
@@ -764,6 +876,10 @@ pub fn i32_to_field(v: i32) -> u64 {
 
 /// Decode a Goldilocks field element back to i32, rejecting anything that is
 /// not a faithful i32 in the signed embedding.
+///
+/// # Errors
+///
+/// Returns an error if `f` is non-canonical or outside the signed `i32` embedding.
 pub fn field_to_i32(f: u64) -> Result<i32, String> {
     if f >= GOLDILOCKS_P {
         return Err(format!("field element {f} is not canonical"));
@@ -794,6 +910,11 @@ pub struct GuestMemoryLayout {
 }
 
 impl GuestMemoryLayout {
+    /// Computes the deterministic guest memory layout for `spec`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `spec` validation fails.
     pub fn for_spec(spec: &FixedPointMlpSpec) -> Result<Self, String> {
         spec.validate()?;
         let input_base = 0usize;
@@ -842,6 +963,10 @@ impl GuestMemoryLayout {
 /// Without this the guest reads zeroes: the previous version documented a
 /// layout that nothing ever populated, so every proof attested to a forward
 /// pass over an all-zero model.
+///
+/// # Errors
+///
+/// Returns an error if `spec`, input length, or buffer size is invalid.
 pub fn setup_guest_memory(
     memory: &mut [u8],
     spec: &FixedPointMlpSpec,
@@ -882,6 +1007,10 @@ pub fn setup_guest_memory(
 }
 
 /// Read the guest's output words back as i32.
+///
+/// # Errors
+///
+/// Returns an error if `memory` is too short or any output word is not a valid `i32`.
 pub fn read_guest_output(
     memory: &[u8],
     layout: &GuestMemoryLayout,
@@ -932,6 +1061,10 @@ fn emit_load_half(prog: &mut Vec<u64>) {
 ///
 /// Kept exact: [`build_matmul_guest_program`] asserts the emitted length
 /// equals this estimate, so the two cannot drift apart.
+///
+/// # Errors
+///
+/// Returns an error if `spec` validation fails.
 pub fn estimate_guest_instruction_count(spec: &FixedPointMlpSpec) -> Result<usize, String> {
     spec.validate()?;
     // Prologue: Load 0, Sub->zero, Load 1, 7 rows for FIELD_HALF, 1 row to
@@ -982,6 +1115,10 @@ pub fn estimate_guest_instruction_count(spec: &FixedPointMlpSpec) -> Result<usiz
 /// [`setup_guest_memory`] writes, accumulates each neuron in the Goldilocks
 /// field, applies a branchless ReLU on hidden layers, stores the outputs and
 /// folds them into a Poseidon commitment that is logged before `Halt`.
+///
+/// # Errors
+///
+/// Returns an error if `spec` validation or instruction encoding fails.
 pub fn build_matmul_guest_program(spec: &FixedPointMlpSpec) -> Result<Vec<u64>, String> {
     let expected_ops = estimate_guest_instruction_count(spec)?;
     let layout = GuestMemoryLayout::for_spec(spec)?;
@@ -1111,6 +1248,11 @@ fn bias_count(dims: &[u16]) -> usize {
     dims.iter().skip(1).map(|d| *d as usize).sum()
 }
 
+/// Computes the canonical `Keccak-256` program hash for the compiled matmul guest.
+///
+/// # Errors
+///
+/// Returns an error if compiling the guest program for `spec` fails.
 pub fn matmul_program_hash(spec: &FixedPointMlpSpec) -> Result<[u8; 32], String> {
     let words = build_matmul_guest_program(spec)?;
     // Registration and proofs have to name the guest program the same way, and
@@ -1126,6 +1268,10 @@ pub fn matmul_program_hash(spec: &FixedPointMlpSpec) -> Result<[u8; 32], String>
 /// This is the bridge that was missing: the guest program, the memory layout
 /// and the host evaluator are now checked against each other instead of each
 /// being tested in isolation.
+///
+/// # Errors
+///
+/// Returns an error if compilation, memory setup, VM execution, or output decoding fails.
 pub fn run_matmul_guest(
     spec: &FixedPointMlpSpec,
     input: &[i32],

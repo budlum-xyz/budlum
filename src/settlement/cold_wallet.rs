@@ -112,6 +112,10 @@ impl ColdWalletPolicy {
     /// backwards compatibility, so `check` calls this guard before it accepts
     /// any request; an invalid policy therefore fails closed rather than
     /// becoming a zero-quorum wallet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.chain_id == 0 {
             return Err("chain-id-zero");
@@ -441,6 +445,10 @@ impl ColdWalletState {
     /// but deserialization is not authentication. This guard prevents a
     /// tampered snapshot from smuggling in counters, a budget, or an unbounded
     /// audit log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), &'static str> {
         self.policy.validate()?;
         if self.key_epoch == 0 {

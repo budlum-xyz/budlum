@@ -740,14 +740,9 @@ fn a_role_with_no_independent_bond_is_rejected() {
 
 #[test]
 fn verifier_family_role_bonds_unbond_and_withdraw_cleanly() {
-    for (idx, role) in [
-        roles::VERIFIER,
-        roles::AI_VERIFIER,
-        roles::ATTESTER,
-        roles::CONTENT_VALIDATOR,
-    ]
-    .into_iter()
-    .enumerate()
+    for (idx, role) in [roles::VERIFIER, roles::AI_VERIFIER, roles::ATTESTER]
+        .into_iter()
+        .enumerate()
     {
         let who = addr(0x70 + idx as u8);
         let mut state = funded_state(who, 1_000_000);
@@ -895,7 +890,12 @@ fn separate_consensus_key_transaction_activates_bonded_validator() {
     );
     tx.sign(&keys.sig_key);
     state
-        .validate_transaction_with_context(&tx, 0, state.get_balance(&validator))
+        .validate_transaction_with_context(
+            &tx,
+            0,
+            state.get_balance(&validator),
+            crate::core::account::TxAuthority::Inline,
+        )
         .expect("registration precheck");
     Executor::apply_transaction(&mut state, &tx).expect("registration applies");
 

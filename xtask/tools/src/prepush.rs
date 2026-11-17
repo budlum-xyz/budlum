@@ -23,6 +23,39 @@ struct Outcome {
     code: i32,
 }
 
+/// The checks a push has to survive, as the same invocations CI runs.
+///
+/// The clippy line deliberately does not take `--all-features`: the two PQ
+/// backend features are mutually exclusive and a `compile_error!` enforces it,
+/// so `--all-features` cannot build. The helper used to pass it anyway, which
+/// made the documented local gate fail on every tree, including a clean one,
+/// and that is a gate nobody can run. `ci.yml` builds with
+/// `--no-default-features --features "pq-ml-dsa wallet-ml-dsa" --all-targets`,
+/// and this list copies that.
+#[must_use]
+pub fn checks() -> [(&'static str, Vec<&'static str>); 2] {
+    [
+        (
+            "cargo fmt --all -- --check",
+            vec!["fmt", "--all", "--", "--check"],
+        ),
+        (
+            "cargo clippy --no-default-features --features pq-ml-dsa,wallet-ml-dsa \
+             --all-targets -- -D warnings",
+            vec![
+                "clippy",
+                "--no-default-features",
+                "--features",
+                "pq-ml-dsa,wallet-ml-dsa",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        ),
+    ]
+}
+
 /// Runs the pre-push checks.
 ///
 /// `cargo fmt --check` and `cargo clippy -D warnings`. Both run; the second is
@@ -45,26 +78,10 @@ pub fn run(root: &Path) -> Result<String, String> {
             "toolchain: {}",
             String::from_utf8_lossy(&out.stdout).trim()
         )),
-        Err(e) => return Err(format!("`cargo` bulunamadi: {e}")),
+        Err(e) => return Err(format!("`cargo` was not found: {e}")),
     }
 
-    let checks = [
-        (
-            "cargo fmt --all -- --check",
-            vec!["fmt", "--all", "--", "--check"],
-        ),
-        (
-            "cargo clippy --all-targets --all-features -- -D warnings",
-            vec![
-                "clippy",
-                "--all-targets",
-                "--all-features",
-                "--",
-                "-D",
-                "warnings",
-            ],
-        ),
-    ];
+    let checks = checks();
 
     let mut outcomes: Vec<Outcome> = Vec::new();
     for (label, args) in checks {
@@ -175,7 +192,8 @@ pub fn install_hook(root: &Path) -> Result<String, String> {
                 # installed by budlum-tools.\n\
                 exec cargo run --quiet --manifest-path xtask/tools/Cargo.toml \\\n\
                 \x20    --bin budlum-tools -- pre-push\n";
-    std::fs::write(&hook, body).map_err(|e| format!("{} yazilamadi: {e}", hook.display()))?;
+    std::fs::write(&hook, body)
+        .map_err(|e| format!("the hook could not be written at {}: {e}", hook.display()))?;
 
     #[cfg(unix)]
     {
@@ -184,28 +202,53 @@ pub fn install_hook(root: &Path) -> Result<String, String> {
             .map_err(|e| format!("could not read the hook permissions: {e}"))?
             .permissions();
         perm.set_mode(0o755);
-        std::fs::set_permissions(&hook, perm).map_err(|e| format!("izin yazilamadi: {e}"))?;
+        std::fs::set_permissions(&hook, perm)
+            .map_err(|e| format!("the hook permissions could not be set: {e}"))?;
     }
 
-    Ok(format!("pre-push kancasi kuruldu: {}", hook.display()))
+    Ok(format!(
+        "the pre-push hook is installed at {}",
+        hook.display()
+    ))
 }
 
 /// Are `cargo fmt` and `cargo clippy` available?
 ///
 /// # Errors
 ///
-/// Ikisinden biri yoksa.
+/// When either of the two components is missing.
 pub fn ensure_components(root: &Path) -> Result<(), String> {
-    run_checked("cargo", &["fmt", "--version"], root)
-        .map_err(|e| format!("`cargo fmt` yok: {e}. `rustup component add rustfmt`"))?;
-    run_checked("cargo", &["clippy", "--version"], root)
-        .map_err(|e| format!("`cargo clippy` yok: {e}. `rustup component add clippy`"))?;
+    run_checked("cargo", &["fmt", "--version"], root).map_err(|e| {
+        format!("`cargo fmt` is not available: {e}. Run `rustup component add rustfmt`")
+    })?;
+    run_checked("cargo", &["clippy", "--version"], root).map_err(|e| {
+        format!("`cargo clippy` is not available: {e}. Run `rustup component add clippy`")
+    })?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The local gate must be the command CI runs. `--all-features` cannot
+    /// build here, so a helper that passes it fails on a clean tree.
+    #[test]
+    fn the_clippy_check_matches_the_ci_invocation() {
+        let checks = checks();
+        let clippy = checks
+            .iter()
+            .find(|(label, _)| label.contains("clippy"))
+            .expect("a clippy check has to be on the list");
+        assert!(
+            !clippy.1.contains(&"--all-features"),
+            "the local clippy gate must not pass --all-features"
+        );
+        assert!(clippy.1.contains(&"--no-default-features"));
+        assert!(clippy.1.contains(&"--all-targets"));
+        assert!(clippy.1.windows(2).any(|pair| pair == ["-D", "warnings"]));
+        assert!(checks.iter().any(|(label, _)| label.contains("fmt")));
+    }
 
     #[test]
     fn only_a_reported_diff_counts_as_a_refusal() {
@@ -228,8 +271,8 @@ mod tests {
     fn install_hook_writes_an_executable_hook() {
         let tmp = std::env::temp_dir().join("budlum-prepush-git");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join(".git").join("hooks")).expect("dizin");
-        let msg = install_hook(&tmp).expect("kanca kurulmali");
+        std::fs::create_dir_all(tmp.join(".git").join("hooks")).expect("the hooks directory");
+        let msg = install_hook(&tmp).expect("the hook has to install");
         assert!(msg.contains("pre-push"), "{msg}");
 
         let hook = tmp.join(".git").join("hooks").join("pre-push");

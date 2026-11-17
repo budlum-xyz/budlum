@@ -3,12 +3,14 @@
 // aderyn-fp-next-line(push-zero-opcode)
 pragma solidity 0.8.26;
 
-/// @notice Minimal finality read surface consumed by downstream Graft receivers.
+/// @notice Minimal finality read surface consumed by downstream AppBinding receivers.
 interface IBudlumFinality {
     function rootAtHeight(uint64 height) external view returns (bytes32);
     function heightFinal(uint64 height) external view returns (bool);
     function latestFinalHeight() external view returns (uint64);
 }
+
+import {BudlumHash} from "../lib/BudlumHash.sol";
 
 /// @title BudlumFinalityVerifier
 /// @notice Verifies Budlum's hybrid finality proof (BLS12-381 aggregate +
@@ -71,6 +73,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     uint256 internal constant G2_UNCOMPRESSED_LEN = 256;
     uint256 internal constant G1_UNCOMPRESSED_LEN = 128;
     uint256 internal constant WORD_LEN = 32;
+    uint256 internal constant HEADER_OPENING_FIELDS = 3;
     uint256 internal constant FP_PADDED_LEN = 64;
     uint256 internal constant FP_BYTE_LEN = 48;
     uint256 internal constant MODEXP_EXP_LEN = 1;
@@ -218,6 +221,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (a.chainId != budlumChainId) {
             revert WrongChainId(budlumChainId, a.chainId);
         }
+        if (a.stateRoot == bytes32(0)) {
+            revert SignatureInvalid("zero state root cannot be attested");
+        }
         digest = attestationDigest(a);
         if (accepted[digest]) {
             revert AlreadyAccepted(digest);
@@ -316,6 +322,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         emit AttestationOptimistic(digest, a.height, reason);
     }
 
+    // aderyn-fp-next-line(reentrancy-state-change)
     function challenge(bytes32 digest, bytes calldata fraudProof) external nonReentrant {
         Challenge storage c = challenges[digest];
         if (c.openedAt == 0) {
@@ -346,6 +353,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         ) returns (bool substanceProven) {
             substance = substanceProven;
         } catch {}
+        // aderyn-fp-next-line(reentrancy-state-change)
         c.challenger = msg.sender;
         c.resolved = true;
         // A verdict that only shows one envelope's post-quantum blob is invalid
@@ -421,6 +429,30 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     function isAccepted(bytes32 digest) external view returns (bool) {
         return accepted[digest];
     }
+
+    /// @notice Authenticate a global header through the finalized state root.
+    /// @param height Finalized Budlum block height.
+    /// @param headerHash Global header hash to verify.
+    /// @param stateRootBody State root body paired with the global header.
+    /// @return finalized True when the finalized root opens to `(stateRootBody, headerHash)`.
+    function isFinalizedHeader(uint64 height, bytes32 headerHash, bytes32 stateRootBody)
+        external
+        view
+        returns (bool finalized)
+    {
+        if (!heightFinal[height] || headerHash == bytes32(0)) {
+            return false;
+        }
+        bytes[] memory fields = new bytes[](HEADER_OPENING_FIELDS);
+        fields[0] = "BDLM_STATE_ROOT_GLOBAL_HEADER_V1";
+        fields[1] = bytes.concat(stateRootBody);
+        fields[2] = bytes.concat(headerHash);
+        return rootAtHeight[height] == BudlumHash.hashFields(fields);
+    }
+
+    // ---------------------------------------------------------------------
+    // Verification internals
+    // ---------------------------------------------------------------------
 
     function _verifyBls(bytes32 root, bytes calldata g2Pubkey, bytes calldata g2Generator, bytes calldata g1NegSignature)
         internal

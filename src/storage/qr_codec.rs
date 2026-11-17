@@ -69,6 +69,18 @@ pub enum CodecError {
         /// Declared count.
         count: u64,
     },
+    /// A frame or the frame count does not fit the container's 32-bit field.
+    ///
+    /// The writer used to cast with `as u32`, which silently truncates: a
+    /// 4 GiB frame became a short frame followed by bytes the reader then
+    /// counted as the next header. Refusing the write is the only answer that
+    /// keeps the container self-describing.
+    FieldTooWide {
+        /// The field that did not fit.
+        field: &'static str,
+        /// The value that did not fit.
+        value: u64,
+    },
 }
 
 impl std::fmt::Display for CodecError {
@@ -81,6 +93,10 @@ impl std::fmt::Display for CodecError {
             Self::BadFrameCount { count } => {
                 write!(f, "three codec refuses declared frame count {count}")
             }
+            Self::FieldTooWide { field, value } => write!(
+                f,
+                "three codec refuses {field} {value}: it does not fit the 32-bit container field"
+            ),
         }
     }
 }
@@ -124,6 +140,18 @@ pub trait FrameMux {
     fn split(&self, kind: CodecKind, blob: &[u8]) -> Result<Vec<Vec<u8>>, CodecError>;
 }
 
+/// Width check for one container field.
+///
+/// # Errors
+///
+/// [`CodecError::FieldTooWide`] when `value` does not fit a `u32`.
+fn field_u32(field: &'static str, value: usize) -> Result<u32, CodecError> {
+    u32::try_from(value).map_err(|_| CodecError::FieldTooWide {
+        field,
+        value: u64::try_from(value).unwrap_or(u64::MAX),
+    })
+}
+
 /// In-tree placeholder mux: only [`CodecKind::RawFrames`] concatenates with a length prefix.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RawFrameConcat;
@@ -138,10 +166,12 @@ impl FrameMux for RawFrameConcat {
             return Err(CodecError::EmptyFrames);
         }
         let mut out = Vec::new();
+        let count = field_u32("frame count", frames.len())?;
         out.extend_from_slice(&RAW_CONCAT_MAGIC);
-        out.extend_from_slice(&(frames.len() as u32).to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
         for fr in frames {
-            out.extend_from_slice(&(fr.len() as u32).to_le_bytes());
+            let len = field_u32("frame length", fr.len())?;
+            out.extend_from_slice(&len.to_le_bytes());
             out.extend_from_slice(fr);
         }
         Ok(out)
@@ -277,6 +307,43 @@ mod tests {
             CodecError::BadFrameCount {
                 count: u64::from(u32::MAX)
             }
+        );
+    }
+}
+
+#[cfg(test)]
+mod field_width_tests {
+    use super::*;
+
+    /// The container field is 32 bits, and the writer refuses a wider value
+    /// instead of truncating it. A truncated length is what let a 4 GiB frame
+    /// read back as a short frame followed by a forged header.
+    #[test]
+    fn a_container_field_wider_than_32_bits_is_refused() {
+        assert_eq!(field_u32("frame length", 0).unwrap(), 0);
+        assert_eq!(
+            field_u32("frame length", u32::MAX as usize).unwrap(),
+            u32::MAX
+        );
+        let error = field_u32("frame length", u32::MAX as usize + 1)
+            .expect_err("a value past u32::MAX must be refused");
+        let text = error.to_string();
+        assert!(text.contains("frame length"), "{text}");
+        assert!(text.contains("32-bit"), "{text}");
+    }
+
+    /// A container the writer wrote splits back into the frames it was given.
+    #[test]
+    fn a_muxed_container_splits_back_into_its_frames() {
+        let frames = vec![b"one".to_vec(), Vec::new(), b"three".to_vec()];
+        let blob = RawFrameConcat
+            .mux(CodecKind::RawFrames, &frames)
+            .expect("mux");
+        assert_eq!(
+            RawFrameConcat
+                .split(CodecKind::RawFrames, &blob)
+                .expect("split"),
+            frames
         );
     }
 }

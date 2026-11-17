@@ -23,7 +23,7 @@ pub enum ProofVerificationError {
     EventMessageIdMismatch,
     InvalidMerkleProof,
     CommitmentBlockHashMismatch,
-    /// The commitment's finality proof does not bind its event root (a PoS or
+    /// The commitment's finality proof does not bind its event root (a `PoS` or
     /// BFT certificate signs the checkpoint hash alone), so the root is the
     /// submitter's claim and no event may be proven against it.
     UnattestedEventRoot,
@@ -77,6 +77,11 @@ impl std::error::Error for ProofVerificationError {}
 pub struct SettlementProofVerifier;
 
 impl SettlementProofVerifier {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_event_against_commitment(
         commitment: &DomainCommitment,
         event: DomainEvent,
@@ -90,6 +95,7 @@ impl SettlementProofVerifier {
         // delivered into the registry its target domain reads.
         if !crate::settlement::domains::CommitmentAttestation::for_kind(&commitment.consensus_kind)
             .event_root
+            || commitment.event_root == [0u8; 32]
         {
             return Err(ProofVerificationError::UnattestedEventRoot);
         }
@@ -124,6 +130,11 @@ impl SettlementProofVerifier {
         })
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_event_from_registry(
         registry: &DomainCommitmentRegistry,
         domain_id: DomainId,

@@ -93,6 +93,8 @@ pub struct ExternalDomainTxContext {
 pub enum ExternalDomainTxError {
     #[error("external domains are not enabled on mainnet")]
     MainnetDisabled,
+    #[error("ethereum sync committee finality is closed on testnet")]
+    TestnetSyncCommitteeDisabled,
     #[error("the registration poster must be the transaction sender")]
     PosterIsNotSender,
     #[error("the evidence submitter must be the transaction sender")]
@@ -126,6 +128,40 @@ fn is_mainnet(chain_id: u64) -> bool {
             .value()
 }
 
+fn is_testnet(chain_id: u64) -> bool {
+    chain_id
+        == crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value()
+}
+
+/// Whether this transaction operates on an Ethereum sync-committee adapter.
+///
+/// The public testnet gate covers the complete lifecycle, not only
+/// registration. This keeps restored pre-activation state fail-closed too.
+fn uses_ethereum_sync(state: &AccountState, tx: &ExternalDomainTx) -> bool {
+    let entry_is_sync = |domain: &DomainKey| {
+        state
+            .settlement
+            .external_intake
+            .entries
+            .get(domain)
+            .is_some_and(|entry| matches!(&entry.spec, AdapterSpec::EthereumSync { .. }))
+    };
+    match tx {
+        ExternalDomainTx::Register(request) => {
+            matches!(&request.spec, AdapterSpec::EthereumSync { .. })
+        }
+        ExternalDomainTx::SubmitEvidence(evidence) => {
+            entry_is_sync(&DomainKey::from_parts(&evidence.adapter, &evidence.network))
+        }
+        ExternalDomainTx::BondProver { domain, .. }
+        | ExternalDomainTx::Readmit { domain, .. }
+        | ExternalDomainTx::ScheduleFork { domain, .. }
+        | ExternalDomainTx::SetQuorumPolicy { domain, .. } => entry_is_sync(domain),
+    }
+}
+
 /// Apply one external-domain write to `state`.
 ///
 /// Every variant decides its refusals before it writes, and a refusal leaves
@@ -146,6 +182,9 @@ pub fn execute_external_domain_tx(
 ) -> Result<(), ExternalDomainTxError> {
     if is_mainnet(ctx.chain_id) {
         return Err(ExternalDomainTxError::MainnetDisabled);
+    }
+    if is_testnet(ctx.chain_id) && uses_ethereum_sync(state, tx) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
     }
     match tx {
         ExternalDomainTx::Register(request) => register(state, ctx, request),
@@ -196,8 +235,12 @@ fn fundable_bond(
 ) -> Result<u64, ExternalDomainTxError> {
     let bond =
         u64::try_from(bond_atoms).map_err(|_| ExternalDomainTxError::BondTooLarge(bond_atoms))?;
-    let balance = state.get_balance(&ctx.sender);
-    let needed = bond.saturating_add(ctx.fee);
+    // The spendable balance, not the raw one: a bond is a spend, and the
+    // locked part of a vesting account does not fund collateral.
+    let balance = state.spendable_balance(&ctx.sender);
+    let needed = bond
+        .checked_add(ctx.fee)
+        .ok_or(ExternalDomainTxError::BondTooLarge(bond_atoms))?;
     if balance < needed {
         return Err(ExternalDomainTxError::BondUnfunded { needed, balance });
     }
@@ -226,6 +269,9 @@ fn register(
     ctx: &ExternalDomainTxContext,
     request: &RegistrationRequest,
 ) -> Result<(), ExternalDomainTxError> {
+    if is_testnet(ctx.chain_id) && matches!(request.spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
     if request.poster != ctx.sender {
         return Err(ExternalDomainTxError::PosterIsNotSender);
     }
@@ -263,6 +309,9 @@ fn submit_evidence(
     let Some(entry) = intake.entries.get(&key) else {
         return Err(ExternalDomainTxError::UnknownDomain);
     };
+    if is_testnet(ctx.chain_id) && matches!(entry.spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
     let bls = bls_for(&entry.spec, ctx);
     let before = intake.clone();
     match intake.submit_evidence(evidence, bls) {
@@ -370,7 +419,7 @@ mod tests {
     use crate::cross_domain::external::versioning::VersionPolicy;
     use crate::cross_domain::external::DomainState;
 
-    const TESTNET: u64 = 45261;
+    const DEVNET: u64 = 45262;
 
     /// The intake tests' strict fixture verifier: it refuses the corruptions
     /// the admission probes inject, without pairing arithmetic.
@@ -395,6 +444,10 @@ mod tests {
             }
             Ok(())
         }
+
+        fn sync_committee_closed(&self) -> bool {
+            false
+        }
     }
 
     fn test_bls() -> Box<dyn BlsVerifier> {
@@ -408,7 +461,7 @@ mod tests {
     fn ctx(sender: Address) -> ExternalDomainTxContext {
         ExternalDomainTxContext {
             sender,
-            chain_id: TESTNET,
+            chain_id: DEVNET,
             fee: 10,
             bls: test_bls,
         }
@@ -426,16 +479,20 @@ mod tests {
     }
 
     fn evidence(submitter: Address, height: u64, root: [u8; 32]) -> RawConsensusEvidence {
-        let mut payload = vec![0u8; layout::LEN];
-        payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-        payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-        payload[layout::ATTESTED_SLOT].copy_from_slice(&(height * 2).to_le_bytes());
-        payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-        payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-        payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-        payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-        payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-        payload[layout::STATE_ROOT].copy_from_slice(&root);
+        let committee = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        };
+        let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+            height,
+            height * 2,
+            0,
+            &committee,
+            &[0x22; 96],
+            &[0xff; 64],
+            root,
+        );
         let adapter = spec().build(Some(test_bls()), None);
         RawConsensusEvidence {
             adapter: adapter.descriptor().id,
@@ -472,6 +529,16 @@ mod tests {
         let mut state = AccountState::new();
         let poster = addr(9);
         state.add_balance(&poster, bond() * 4);
+        if let AdapterSpec::EthereumSync {
+            network,
+            committee: Some(committee),
+        } = spec()
+        {
+            state
+                .settlement
+                .external_intake
+                .pin_ethereum_committee(network, committee);
+        }
         let tx = ExternalDomainTx::Register(Box::new(request(poster)));
         execute_external_domain_tx(&mut state, &ctx(poster), &tx).expect("registers");
         let key = *state
@@ -500,6 +567,39 @@ mod tests {
             .expect("entry");
         assert_eq!(entry.registrant, poster);
         assert!(!state.settlement.is_empty());
+    }
+
+    /// The bond is collateral moved out of the
+    /// sender's balance, so it is a spend. The vesting lock of the team
+    /// account holds against it: locked funds cannot be escrowed as a bond.
+    #[test]
+    fn vesting_gate_covers_external_collateral() {
+        let mut state = AccountState::new();
+        let poster = addr(9);
+        state.add_balance(&poster, bond() * 4);
+        state.team_vesting = Some((
+            poster,
+            crate::tokenomics::VestingSchedule {
+                total: bond() * 4,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        assert_eq!(
+            state.spendable_balance(&poster),
+            0,
+            "pre-cliff: nothing is spendable"
+        );
+        let tx = ExternalDomainTx::Register(Box::new(request(poster)));
+        let err = execute_external_domain_tx(&mut state, &ctx(poster), &tx).unwrap_err();
+        assert!(
+            matches!(err, ExternalDomainTxError::BondUnfunded { .. }),
+            "unexpected refusal: {err:?}"
+        );
+        assert_eq!(state.get_balance(&poster), bond() * 4);
+        assert!(!state.external_bond_escrow.contains_key(&poster));
+        assert!(state.settlement.is_empty());
     }
 
     #[test]
@@ -535,6 +635,16 @@ mod tests {
         let mut state = AccountState::new();
         let poster = addr(9);
         state.add_balance(&poster, bond() * 4);
+        if let AdapterSpec::EthereumSync {
+            network,
+            committee: Some(committee),
+        } = spec()
+        {
+            state
+                .settlement
+                .external_intake
+                .pin_ethereum_committee(network, committee);
+        }
         let mut bad = request(poster);
         // A golden sample with no signers cannot verify: admission refuses.
         bad.golden.payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0x00; 64]);

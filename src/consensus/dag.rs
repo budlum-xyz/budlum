@@ -57,7 +57,8 @@ pub struct DagEngine {
     graph: RwLock<DagGraph>,
 }
 
-fn parse_parent_hashes(previous_hash: &str) -> Vec<String> {
+#[must_use]
+pub fn parse_parent_hashes(previous_hash: &str) -> Vec<String> {
     previous_hash
         .split(',')
         .map(str::trim)
@@ -256,12 +257,14 @@ impl ConsensusEngine for DagEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
-        let (tip_count, max_tip_height) = self.tip_summary();
-        let tip_weight = (tip_count as u128).saturating_mul(1_000);
-        let height = chain.last().map_or(u128::from(max_tip_height), |b| {
-            u128::from(b.index.max(max_tip_height))
-        });
-        tip_weight.saturating_add(height)
+        let height = chain.last().map_or(0u128, |b| u128::from(b.index));
+        let mut parent_refs = 0u128;
+        for block in chain {
+            let parents = parse_parent_hashes(&block.previous_hash);
+            parent_refs = parent_refs.saturating_add(parents.len() as u128);
+        }
+        let graph_weight = parent_refs.saturating_mul(100);
+        height.saturating_mul(1_000).saturating_add(graph_weight)
     }
 
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {

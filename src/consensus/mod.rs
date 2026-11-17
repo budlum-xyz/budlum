@@ -12,6 +12,7 @@ pub mod pow;
 pub mod qc;
 pub mod registration;
 pub mod split_resolver;
+pub mod zk_verifier;
 use crate::core::block::Block;
 pub use dag::DagEngine;
 pub use poa::PoAEngine;
@@ -346,7 +347,7 @@ pub trait ConsensusEngine: Send + Sync {
     fn record_block(
         &self,
         _block: &Block,
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         Ok(())
     }
@@ -372,7 +373,7 @@ pub trait ConsensusEngine: Send + Sync {
         &self,
         _block: &Block,
         _chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
     }
 
@@ -395,10 +396,10 @@ pub trait ConsensusEngine: Send + Sync {
         &self,
         _height: u64,
         _chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
     }
-    fn load_state(&self, _storage: &crate::storage::db::Storage) -> Result<(), ConsensusError> {
+    fn load_state(&self, _storage: &crate::persistence::db::Storage) -> Result<(), ConsensusError> {
         Ok(())
     }
     fn drain_slashing_evidence(

@@ -113,12 +113,12 @@ pub trait BudlumApi {
     #[method(name = "bud_getConsensusDomains")]
     async fn get_consensus_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Read one state-rooted Graft application by its canonical id. Writes
-    /// still travel as signed `SettlementTx::Graft` transactions.
-    #[method(name = "bud_getGraftApplication")]
-    async fn get_graft_application(
+    /// Read one state-rooted AppBinding application by its canonical id. Writes
+    /// still travel as signed `SettlementTx::AppBinding` transactions.
+    #[method(name = "bud_getAppBindingApplication")]
+    async fn get_app_binding_application(
         &self,
-        graft_id_hex: String,
+        app_binding_id_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// The Mikoriza restaked validators: the bound Ethereum operator,
@@ -127,12 +127,12 @@ pub trait BudlumApi {
     #[method(name = "bud_getRestakedValidators")]
     async fn get_restaked_validators(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prove a Graft payment against the latest checkpoint header whose
+    /// Prove an AppBinding payment against the latest checkpoint header whose
     /// payment window holds it. An application checks the
-    /// result with `settlement::graft::verify_graft_payment` and a finalized
+    /// result with `settlement::app_binding::verify_app_binding_payment` and a finalized
     /// checkpoint it trusts. `null` when no recent header covers the payment.
-    #[method(name = "bud_graftPaymentProof")]
-    async fn graft_payment_proof(
+    #[method(name = "bud_appBindingPaymentProof")]
+    async fn app_binding_payment_proof(
         &self,
         payment_id_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
@@ -244,7 +244,7 @@ pub trait BudlumApi {
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Assembles submission material for an external domain from its parts,
-    /// without submitting anything. For the BudZKVM adapter it encodes a
+    /// without submitting anything. For the `BudZKVM` adapter it encodes a
     /// `ZkFinalityEvidence` (envelope + public inputs + program) into the
     /// adapter's payload and wraps the whole evidence into the raw finality
     /// carrier used by consensus domains bridged through the external
@@ -531,7 +531,7 @@ pub trait BudlumApi {
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Refused: a ZK proof (chain ↔ BudZKVM bridge) rides a signed
+    /// Refused: a ZK proof (chain ↔ `BudZKVM` bridge) rides a signed
     /// `Settlement` transaction (`SettlementTx::SubmitZkProof`) from the
     /// submitter the proof names. The door stays permissionless: a valid
     /// proof is accepted regardless of registration, registered provers earn
@@ -610,12 +610,12 @@ pub trait BudlumApi {
     #[method(name = "bud_nodeInfo")]
     async fn node_info(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Operator-only: ban a peer by its libp2p PeerId. The public listener
+    /// Operator-only: ban a peer by its libp2p `PeerId`. The public listener
     /// refuses with -32004 before any node state is touched.
     #[method(name = "bud_adminBanPeer")]
     async fn admin_ban_peer(&self, peer_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Operator-only: lift a ban on a peer by its libp2p PeerId.
+    /// Operator-only: lift a ban on a peer by its libp2p `PeerId`.
     #[method(name = "bud_adminUnbanPeer")]
     async fn admin_unban_peer(
         &self,
@@ -627,72 +627,9 @@ pub trait BudlumApi {
     async fn admin_list_banned_peers(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     // === B.U.D. Storage RPC surface ============================
-    // The 7 RPCs below are the public, permissionless query/mutation surface
-    // For the storage domain. Per the data-sovereignty rule (plan
-    //) every endpoint is callable by any account on a standard node
-    // No team-gated "official indexer" or admin-only RPC exists.
-    //
-    // IMPORTANT: `StorageTx::AnswerChallenge` carries a `range_hash` only;
-    // It does NOT carry shard bytes. The chain does not store the bytes
-    // (only the ContentId/manifest commitments), and the retrieval
-    // Challenge is *interim* (not full Proof-of-Storage
-    // / vision). Off-chain verifiers must recompute the
-    // Expected range hash from the public shard bytes.
-
-    /// Refused: manifest registration is a signed
-    /// `StorageTx::RegisterManifest` transaction sent with
-    /// `bud_sendRawTransaction`. Operator-only, kept so a client is pointed
-    /// at the transaction.
-    #[method(name = "bud_storageRegisterManifest")]
-    async fn storage_register_manifest(
-        &self,
-        manifest: crate::storage::ContentManifest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Optional node-side encode path: re-encode `data` under the scheme the
-    /// client-built `manifest` claims and refuse a mismatch. Costly; the
-    /// client-built register path remains the default. Three/Generated has no
-    /// body to re-encode - callers should not send one.
-    #[method(name = "bud_storageVerifyEncoding")]
-    async fn storage_verify_encoding(
-        &self,
-        data_hex: String,
-        manifest: crate::storage::ContentManifest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Measure a QR feed before publishing it: every ceiling the pipe enforces,
-    /// the drop and frame schedule, what a viewer can rebuild from those frames,
-    /// and the commitments a publish would pin. Bounded by
-    /// `MAX_PREVIEW_CONTENT_BYTES`, so it is a question an operator can ask
-    /// twice on the same body and get the same answer.
-    ///
-    /// A non-public feed (the default) must be sealed or declared ciphertext:
-    /// pass `seal_seed` as 32 bytes hex to seal the body before it is
-    /// carouselled, or a manifest whose `encryption` is `client-side`. A clear
-    /// body over a gated pin is refused.
-    #[method(name = "bud_storageQrFeedPreview")]
-    async fn storage_qr_feed_preview(
-        &self,
-        data_hex: String,
-        block_len: u16,
-        manifest: Option<crate::storage::ContentManifest>,
-        seal_seed: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Re-emit `count` frames of that feed from `seq`, with the fold a client
-    /// checks them against. The caller supplies the body, so this publishes no
-    /// handle into stored content and grants nothing: whoever holds the bytes
-    /// can already produce the frames. Pass `seal_seed` (32 bytes hex) to emit
-    /// the feed over the sealed body instead of the clear one.
-    #[method(name = "bud_storageQrFeedFrames")]
-    async fn storage_qr_feed_frames(
-        &self,
-        data_hex: String,
-        block_len: u16,
-        first_frame: u32,
-        count: u32,
-        seal_seed: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+    // This temporary surface exposes grant and reveal operations. The legacy
+    // B.U.D. 1.0 and 2.0 endpoints stay removed until their B.U.D. 3.0 doors
+    // are implemented.
 
     /// Issue a view grant (key handle on-chain; key material off-chain).
     #[method(name = "bud_storageIssueViewGrant")]
@@ -785,182 +722,25 @@ pub trait BudlumApi {
     #[method(name = "bud_storageCloseReveal")]
     async fn storage_close_reveal(&self, session_id: u64) -> Result<bool, ErrorObjectOwned>;
 
-    /// Classic/2.0 confidential body commit. Three/recipe-only is refused.
-    #[method(name = "bud_storageRegisterConfidentialCommit")]
-    async fn storage_register_confidential_commit(
-        &self,
-        content_id: String,
-        encryption: String,
-        ciphertext_root: String,
-        proof_kind: String,
-        authorization: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    #[method(name = "bud_storageGetConfidentialCommit")]
-    async fn storage_get_confidential_commit(
-        &self,
-        content_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Refused: a deal is opened by a signed `StorageTx::OpenDeal`
-    /// transaction from the payer, carrying the operator's consent.
-    #[method(name = "bud_storageOpenDeal")]
-    async fn storage_open_deal(
-        &self,
-        domain_id: u32,
-        manifest: crate::storage::ContentManifest,
-        shard_id: String,
-        operator: String,
-        payer: String,
-        replica_index: u8,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        request_id: u64,
-        payer_signature: String,
-        operator_signature: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Refused: a repair ticket is filled by a signed
-    /// `StorageTx::AcceptReallocation` transaction from the payer, carrying
-    /// the replacement operator's consent. The placement (manifest, shard,
-    /// replica) is decided by the ticket, not the caller.
-    #[method(name = "bud_storageAcceptReallocation")]
-    async fn storage_accept_reallocation(
-        &self,
-        ticket_id: u64,
-        replacement_operator: String,
-        payer: String,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        request_id: u64,
-        payer_signature: String,
-        operator_signature: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Look up a previously-registered `ContentManifest` by its
-    /// `manifest_id`.
-    #[method(name = "bud_storageGetManifest")]
-    async fn storage_get_manifest(
-        &self,
-        manifest_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// All `StorageDeal`s bound to a given `manifest_id` (any replica
-    /// Index, any operator, any status). Permissionless read.
-    #[method(name = "bud_storageGetDealsByManifest")]
-    async fn storage_get_deals_by_manifest(
-        &self,
-        manifest_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// All `StorageDeal`s bound to a given `(manifest_id, shard_id)` pair.
-    /// Used by clients that downloaded one shard and want to know which
-    /// Operators are also holding it.
-    #[method(name = "bud_storageGetDealsByShard")]
-    async fn storage_get_deals_by_shard(
-        &self,
-        manifest_id: String,
-        shard_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// The retrieval challenges recorded against one deal, in id order. A
-    /// deal's operator reads this to find the challenge it must answer with
-    /// a `StorageTx::AnswerChallenge` transaction. Permissionless read; shard
-    /// ids are not returned (the deal row carries them, behind Pollen).
-    #[method(name = "bud_storageGetChallenges")]
-    async fn storage_get_challenges(
-        &self,
-        deal_id: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Refused: a retrieval challenge is opened by a signed
-    /// `StorageTx::OpenChallenge` transaction. Anyone may send one; the
-    /// opener bond is the anti-spam mechanism and is refunded when the
-    /// challenge resolves. The block draws the byte range.
-    #[method(name = "bud_storageOpenChallenge")]
-    async fn storage_open_challenge(
-        &self,
-        request: crate::domain::storage_deal::RetrievalChallengeRequest,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Refused: the deal's operator answers with a signed
-    /// `StorageTx::AnswerChallenge` transaction carrying the `range_hash`
-    /// and its proof.
-    #[method(name = "bud_storageAnswerChallenge")]
-    async fn storage_answer_challenge(
-        &self,
-        response: crate::domain::storage_deal::RetrievalResponse,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Query aggregate storage economics accounting from the chain actor.
-    /// Permissionless read: no official indexer or team-operated service.
-    #[method(name = "bud_storageGetEconomicsSummary")]
-    async fn storage_get_economics_summary(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Query storage economics events (operator reward accrual and slashed-bond
-    /// Accounting) from the chain actor. Permissionless read.
-    #[method(name = "bud_storageGetEconomicsEvents")]
-    async fn storage_get_economics_events(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Query one operator's accrued storage rewards, slash history, and
-    /// Active deal count. Permissionless read; no indexer is required.
-    #[method(name = "bud_storageGetOperatorEconomics")]
-    async fn storage_get_operator_economics(
-        &self,
-        operator: crate::core::address::Address,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Look up a finalized `ChallengeResult` by `challenge_id`.
-    ///
-    /// The response always carries `proofKind` and `proof_kind` set to
-    /// `"interim_availability_only"`.
-    /// A retrieval outcome demonstrates a timely response for one requested
-    /// Byte range; it is not a full Proof-of-Storage attestation.
-    #[method(name = "bud_storageGetOutcome")]
-    async fn storage_get_outcome(
-        &self,
-        challenge_id: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Objects within `margin` shards of unrecoverable, and those already past
-    /// it. Permissionless read; no indexer is required.
-    ///
-    /// The margin is the caller's. The node's maintenance sweep judges every
-    /// object by its own erasure scheme's margin, which is correct for a sweep
-    /// and useless to an operator asking a fixed question like "what is within
-    /// two shards of trouble?". Both lists come back separately: an object
-    /// below `k` cannot be repaired at all, and must not read as one that can.
-    #[method(name = "bud_storageRepairBand")]
-    async fn storage_repair_band(&self, margin: u32)
-        -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Query active storage operators (STORAGE_OPERATOR RoleId=5).
-    /// Previously documented as ghost RPC, now implemented.
-    /// Returns active `PermissionlessRegistry` members filtered by storage operator role.
-    #[method(name = "bud_storageActiveOperators")]
-    async fn storage_active_operators(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
-
     // --- B.U.D. Name Service (BNS) ---
 
     /// Resolve a human-readable name to an address.
     #[method(name = "bud_bnsResolve")]
     async fn bns_resolve(&self, name: String) -> Result<Option<String>, ErrorObjectOwned>;
 
-    /// Resolve a name to full BNS record (address, storage_root, etc).
+    /// Resolve a name to full BNS record (address, `storage_root`, etc).
     #[method(name = "bud_bnsResolveFull")]
     async fn bns_resolve_full(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Resolve a name to a B.U.D. Content ID (CID).
+    /// What a live name serves, read through the B.U.D. 3.0 view. `null`
+    /// when the name has no content. Otherwise `content` is the reference
+    /// the record holds, `bytes` the rebuilt object, and `view_error` the
+    /// reason when this node could not rebuild it.
     #[method(name = "bud_bnsResolveContent")]
-    async fn bns_resolve_content(&self, name: String) -> Result<Option<String>, ErrorObjectOwned>;
+    async fn bns_resolve_content(
+        &self,
+        name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Resolve a subdomain (e.g. photos.ayaz.bud).
     #[method(name = "bud_bnsResolveSubdomain")]
@@ -970,13 +750,123 @@ pub trait BudlumApi {
         sub_label: String,
     ) -> Result<Option<String>, ErrorObjectOwned>;
 
-    /// Prepare a registration transaction (offline helper).
-    #[method(name = "bud_bnsPrepareRegister")]
-    async fn bns_prepare_register(
+    /// The content reference a subdomain holds, or `null` when it has none
+    /// of its own, the label does not exist, or the parent name is expired.
+    #[method(name = "bud_bnsResolveSubdomainContent")]
+    async fn bns_resolve_subdomain_content(
+        &self,
+        parent_name: String,
+        sub_label: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Bidirectionally verified reverse `.bud` resolution for an address.
+    #[method(name = "bud_bnsReverseResolve")]
+    async fn bns_reverse_resolve(
+        &self,
+        address: String,
+    ) -> Result<Option<String>, ErrorObjectOwned>;
+
+    /// List all `active` and `grace` `.bud` names held by `owner`.
+    #[method(name = "bud_bnsListNamesByOwner")]
+    async fn bns_list_names_by_owner(
+        &self,
+        owner: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Generate a compact $O(\log N)$ per-name Merkle inclusion or non-existence proof
+    /// against `BnsRegistry::root()` (`BDLM_BNS_REGISTRY_V3`).
+    #[method(name = "bud_bnsGetProof")]
+    async fn bns_get_proof(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The same proof as `bud_bnsGetProof`, under the short name: the
+    /// record, the proof path, the state root and the block height, or a
+    /// proof that the name is absent.
+    #[method(name = "bud_bnsProof")]
+    async fn bns_proof(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsSetAddress` forwarding/target update transaction.
+    #[method(name = "bud_bnsPrepareSetAddress")]
+    async fn bns_prepare_set_address(
         &self,
         name: String,
         owner: String,
+        target: Option<String>,
+        consensus_domain_id: Option<u32>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsSetPrimary` reverse-name claim/clear transaction.
+    #[method(name = "bud_bnsPrepareSetPrimaryName")]
+    async fn bns_prepare_set_primary_name(
+        &self,
+        caller: String,
+        name: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The same template as `bud_bnsPrepareSetPrimaryName`, under the short name.
+    #[method(name = "bud_bnsPrepareSetPrimary")]
+    async fn bns_prepare_set_primary(
+        &self,
+        caller: String,
+        name: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The same answer as `bud_bnsReverseResolve`, under the short name: the
+    /// primary name of an address, only when the name resolves back to it.
+    #[method(name = "bud_bnsReverse")]
+    async fn bns_reverse(&self, address: String) -> Result<Option<String>, ErrorObjectOwned>;
+
+    /// Read all text/profile/multi-chain records of a live `.bud` name (`null` if unknown/expired).
+    #[method(name = "bud_bnsGetRecords")]
+    async fn bns_get_records(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsSetRecords` text/profile/multi-chain record update transaction.
+    #[method(name = "bud_bnsPrepareSetRecords")]
+    async fn bns_prepare_set_records(
+        &self,
+        name: String,
+        owner: String,
+        updates: std::collections::BTreeMap<String, Option<String>>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Fetch a single `.bud` domain offer by id (`null` if unknown).
+    #[method(name = "bud_bnsGetOffer")]
+    async fn bns_get_offer(&self, offer_id: u64) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// List active `.bud` domain offers, optionally filtered by kind (`"Primary"` or `"Resale"`).
+    #[method(name = "bud_bnsListOffers")]
+    async fn bns_list_offers(
+        &self,
+        kind: Option<String>,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsCreateOffer` marketplace listing transaction.
+    #[method(name = "bud_bnsPrepareCreateOffer")]
+    async fn bns_prepare_create_offer(
+        &self,
+        seller: String,
+        name: String,
+        price_atoms: u64,
         duration: u64,
+        kind: String,
+        expires_at_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsBuyName` marketplace purchase transaction.
+    #[method(name = "bud_bnsPrepareBuyName")]
+    async fn bns_prepare_buy_name(
+        &self,
+        buyer: String,
+        offer_id: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsCancelOffer` seller cancellation transaction.
+    #[method(name = "bud_bnsPrepareCancelOffer")]
+    async fn bns_prepare_cancel_offer(
+        &self,
+        seller: String,
+        offer_id: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a subdomain registration transaction.
@@ -988,13 +878,54 @@ pub trait BudlumApi {
         sub_owner: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare a transaction to link content (CID) to a name.
+    /// List all subdomains of a live `.bud` parent name (`null` if unknown/expired).
+    #[method(name = "bud_bnsListSubdomains")]
+    async fn bns_list_subdomains(
+        &self,
+        parent_name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsRemoveSubdomain` transaction for a live `.bud` parent name.
+    #[method(name = "bud_bnsPrepareRemoveSubdomain")]
+    async fn bns_prepare_remove_subdomain(
+        &self,
+        parent_name: String,
+        sub_label: String,
+        caller: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a `BnsSetSubdomainContent` transaction for the owner of a
+    /// subdomain. `content` is a reference in the proof shape
+    /// (`kind`, `digest`, `len`, `object_commitment`, `nft_id`); `null`
+    /// clears the content.
+    #[method(name = "bud_bnsPrepareSetSubdomainContent")]
+    async fn bns_prepare_set_subdomain_content(
+        &self,
+        parent_name: String,
+        sub_label: String,
+        caller: String,
+        content: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a `BnsSetContent` transaction for the owner of a name.
+    /// `content` is a reference in the proof shape (`kind`, `digest`, `len`,
+    /// `object_commitment`, `nft_id`); `null` clears the content.
     #[method(name = "bud_bnsPrepareSetContent")]
     async fn bns_prepare_set_content(
         &self,
         name: String,
         owner: String,
-        cid: String,
+        content: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a transaction that binds a storage root and its domain to a name.
+    #[method(name = "bud_bnsPrepareSetStorage")]
+    async fn bns_prepare_set_storage(
+        &self,
+        name: String,
+        owner: String,
+        storage_root: String,
+        storage_domain_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a signed renewal transaction. The caller must be the current
@@ -1023,14 +954,16 @@ pub trait BudlumApi {
     #[method(name = "bud_socialGetPost")]
     async fn social_get_post(&self, id: u64) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Get all posts by a user.
+    /// Get posts by a user (paginated, capped at 1000 per page).
     #[method(name = "bud_socialGetProfile")]
     async fn social_get_profile(
         &self,
         address: String,
+        offset: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// B.U.D. SocialFi: Get global social feed.
+    /// B.U.D. `SocialFi`: Get global social feed.
     #[method(name = "bud_socialGetFeed")]
     async fn social_get_feed(&self, limit: usize) -> Result<serde_json::Value, ErrorObjectOwned>;
 
@@ -1103,7 +1036,11 @@ pub trait BudlumApi {
 
     /// List all active data offers.
     #[method(name = "bud_marketGetOffers")]
-    async fn market_get_offers(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn market_get_offers(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a data offer transaction.
     #[method(name = "bud_marketPrepareOffer")]
@@ -1122,32 +1059,48 @@ pub trait BudlumApi {
         offer_id: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List Pollen DataAsset records visible in chain state.
-    #[method(name = "bud_pollenGetDataAssets")]
-    async fn pollen_get_data_assets(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    /// List Data Market `DataAsset` records visible in chain state.
+    #[method(name = "bud_dataMarketGetDataAssets")]
+    async fn pollen_get_data_assets(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List Pollen AccessGrant records visible in chain state.
-    #[method(name = "bud_pollenGetAccessGrants")]
-    async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    /// List Data Market `AccessGrant` records visible in chain state.
+    #[method(name = "bud_dataMarketGetAccessGrants")]
+    async fn pollen_get_access_grants(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List Pollen SaleAuthorization records visible in chain state.
-    #[method(name = "bud_pollenGetSaleAuthorizations")]
-    async fn pollen_get_sale_authorizations(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    /// List Data Market `SaleAuthorization` records visible in chain state.
+    #[method(name = "bud_dataMarketGetSaleAuthorizations")]
+    async fn pollen_get_sale_authorizations(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List Pollen purchase receipts visible in chain state.
-    #[method(name = "bud_pollenGetPurchaseReceipts")]
-    async fn pollen_get_purchase_receipts(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    /// List Data Market purchase receipts visible in chain state.
+    #[method(name = "bud_dataMarketGetPurchaseReceipts")]
+    async fn pollen_get_purchase_receipts(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Build canonical AiInferenceRequest.input_ref for Pollen-gated data reads.
-    #[method(name = "bud_pollenBuildAiInputRef")]
+    /// Build canonical `AiInferenceRequest`.`input_ref` for grant-gated data reads.
+    #[method(name = "bud_dataMarketBuildAiInputRef")]
     async fn pollen_build_ai_input_ref(
         &self,
         asset_id: String,
         grant_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare unsigned owner/seller authorization for selling DataAsset pollen.
-    #[method(name = "bud_pollenPrepareSaleAuthorization")]
+    /// Prepare unsigned owner/seller authorization for selling a `DataAsset`.
+    #[method(name = "bud_dataMarketPrepareSaleAuthorization")]
     async fn pollen_prepare_sale_authorization(
         &self,
         seller: String,
@@ -1158,13 +1111,12 @@ pub trait BudlumApi {
         terms_hash: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare an authorization-backed Pollen purchase without mutating state.
+    /// Prepare an authorization-backed Data Market purchase without mutating state.
     ///
     /// `buyer_signature`: an ed25519 signature by the buyer bound to the whole
-    /// purchase set (authorization, price, duration, max_reads,
-    /// payment_commitment, expiry) - finding #358: an unsigned purchase is
-    /// not accepted.
-    #[method(name = "bud_pollenPreparePurchase")]
+    /// purchase set (authorization, price, duration, `max_reads`,
+    /// `payment_commitment`, expiry): an unsigned purchase is not accepted.
+    #[method(name = "bud_dataMarketPreparePurchase")]
     async fn pollen_prepare_purchase(
         &self,
         authorization_id: String,
@@ -1176,15 +1128,23 @@ pub trait BudlumApi {
         buyer_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    // --- B.U.D. budlumxyz ---
+    // --- B.U.D. Hub ---
 
-    /// List all registered dApps.
+    /// List registered dApps (paginated).
     #[method(name = "bud_hubGetApps")]
-    async fn budlumxyz_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn budlumxyz_get_apps(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List the Graft applications (apps on other chains usable with BUD).
-    #[method(name = "bud_hubGetGraftApps")]
-    async fn budlumxyz_get_graft_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    /// List the AppBinding applications (apps on other chains usable with BUD).
+    #[method(name = "bud_hubGetAppBindingApps")]
+    async fn budlumxyz_get_app_binding_apps(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a dApp registration transaction.
     #[method(name = "bud_hubPrepareRegister")]
@@ -1233,7 +1193,7 @@ pub trait BudlumApi {
 
     // ---: AI Inference & Verifier Layer ---
 
-    /// Query registered AI model specification by model_id hex.
+    /// Query registered AI model specification by `model_id` hex.
     #[method(name = "bud_aiGetModel")]
     async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
@@ -1301,7 +1261,7 @@ pub trait BudlumApi {
     #[method(name = "bud_aiOpenRequests")]
     async fn ai_open_requests(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Query finalized AI inference outcome by request_id hex.
+    /// Query finalized AI inference outcome by `request_id` hex.
     #[method(name = "bud_aiGetOutcome")]
     async fn ai_get_outcome(
         &self,
@@ -1312,7 +1272,7 @@ pub trait BudlumApi {
     #[method(name = "bud_aiGetActiveVerifiers")]
     async fn ai_get_active_verifiers(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Reclaim escrowed max_fee for expired unfinalized AI inference request.
+    /// Reclaim escrowed `max_fee` for expired unfinalized AI inference request.
     #[method(name = "bud_aiReclaimFee")]
     async fn ai_reclaim_fee(
         &self,
@@ -1335,7 +1295,7 @@ pub trait BudlumApi {
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a dispute slash transaction for an equivocating verifier.
-    /// This creates an AiDisputeSlash transaction template that must be signed
+    /// This creates an `AiDisputeSlash` transaction template that must be signed
     /// And submitted via bud_sendRawTransaction.
     #[method(name = "bud_aiDisputeSlash")]
     async fn ai_dispute_slash(
@@ -1382,7 +1342,7 @@ pub trait BudlumApi {
         verifier: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Query QoS metrics for a verifier.
+    /// Query `QoS` metrics for a verifier.
     /// Returns reliability score, finalization rate, equivocation count,
     /// And response time metrics. Enables QoS-aware verifier selection.
     #[method(name = "bud_aiVerifierQos")]
@@ -1435,6 +1395,93 @@ pub trait BudlumApi {
     #[method(name = "bud_getValidatorSet")]
     async fn get_validator_set(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// One validator's directory record (class, operator key, quota, offers,
+    /// pending changes), or null.
+    #[method(name = "bud_getValidator")]
+    async fn get_validator(&self, owner: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// B.U.D. 3.0 object record by commitment (hex). Reads the chain actor's
+    /// state-rooted registry; returns null only when that live registry has no
+    /// object. An unavailable actor is an explicit RPC error.
+    #[method(name = "bud_storageGetObject")]
+    async fn storage_get_object(
+        &self,
+        commitment: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// B.U.D. 3.0 custody shares and audit state from the consensus registry.
+    /// An unavailable chain actor is an explicit RPC error, not an empty share set.
+    #[method(name = "bud_storageGetCustody")]
+    async fn storage_get_custody(
+        &self,
+        validator: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// B.U.D. 3.0 G8 paid fallback decode of a public object (`content_hex`).
+    /// Requires a verified on-chain `PaidViewReceipt` and unconditionally refuses sealed objects.
+    #[method(name = "bud_storageGetContent")]
+    async fn storage_get_content(
+        &self,
+        payer: String,
+        object: String,
+        receipt_id: String,
+        fee_paid_atoms: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// B.U.D. 3.0 verified symbol range (`VerifiedSymbolItem` with Merkle custody proofs)
+    /// held locally for `(holder, object, segment, first_esi..+count)`.
+    #[method(name = "bud_storageGetSymbols")]
+    async fn storage_get_symbols(
+        &self,
+        holder: String,
+        object: String,
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// B.U.D. 3.0 placement shares, confirmation state, and physical-byte endowment telemetry.
+    #[method(name = "bud_storageGetPlacement")]
+    async fn storage_get_placement(
+        &self,
+        commitment: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Resolve a SocialFi u64 NFT id or 32-byte `NftId` hex to its bound B.U.D. 3.0
+    /// object metadata and symbol roots, or null when unbound.
+    #[method(name = "bud_storageGetNftObject")]
+    async fn storage_get_nft_object(
+        &self,
+        nft_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Look up an unlinkable B.U.D. 3.0 view grant (`GrantRow`) by 32-byte `grant_tag`
+    /// evaluated against live consensus epoch (`active`, `expired`, `revoked`, or null).
+    #[method(name = "bud_storageGetGrant")]
+    async fn storage_get_grant(
+        &self,
+        grant_tag: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Operator-only local admission of Merkle-verified B.U.D. 3.0 custody symbols.
+    /// Every item is verified against consensus `Bud3Registry` roots before persistence.
+    #[method(name = "bud_storageStoreVerifiedSymbols")]
+    async fn storage_store_verified_symbols(
+        &self,
+        holder: String,
+        object: String,
+        segment: u64,
+        items: Vec<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Validators that offer a relay.
+    #[method(name = "bud_listRelays")]
+    async fn list_relays(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Validators that offer an upload gateway.
+    #[method(name = "bud_listGateways")]
+    async fn list_gateways(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Domain info by ID.
     #[method(name = "bud_getDomainInfo")]
     async fn get_domain_info(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned>;
@@ -1447,7 +1494,11 @@ pub trait BudlumApi {
 
     /// Slashing history (audit trail).
     #[method(name = "bud_getSlashingHistory")]
-    async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn get_slashing_history(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// AI inference layer readiness: chain-derived bonded operator count plus explicit
     /// Fail-closed flags for scheduler, worker, proof, and settlement wiring.
@@ -1485,6 +1536,63 @@ pub trait BudlumApi {
         document: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Read a Universal Object Layer domain charter by settlement domain id.
+    #[method(name = "bud_getCharter")]
+    async fn get_charter(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Read a Universal Object Layer asset class and its recorded custody by 32-byte hex id.
+    #[method(name = "bud_getAssetClass")]
+    async fn get_asset_class(
+        &self,
+        class_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Read a Universal Object Layer unique/record asset placement by 32-byte hex id.
+    #[method(name = "bud_getAsset")]
+    async fn get_asset(&self, asset_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Return the canonical universal blockchain domain catalog and its Merkle root.
+    #[method(name = "bud_getUniversalDomains")]
+    async fn get_universal_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Compute a dry-run atomic multi-token split-tender payment quote across domains.
+    #[method(name = "bud_quoteUniversalPayment")]
+    async fn quote_universal_payment(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Compose normalized multi-VM, multi-language execution outputs into one Merkle-verifiable bundle.
+    #[method(name = "bud_composeExecutionOutputs")]
+    async fn compose_execution_outputs(
+        &self,
+        plan: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Resolve a universal Web3 / decentralized storage URI (`bud://`, `ipfs://`, `ar://`, `bns://`, ...)
+    /// across multi-network replicas ordered by cryptographic verification strength.
+    #[method(name = "bud_resolveUnifiedStorage")]
+    async fn resolve_unified_storage(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Encode and cryptographically commit a canonical cross-VM, multi-language call envelope
+    /// between any two registered executable domains without mutating either chain's inner rules.
+    #[method(name = "bud_encodeCrossVmCall")]
+    async fn encode_cross_vm_call(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Independently verify a composed multi-VM `UnifiedOutputBundle`'s topological order,
+    /// binding commitments, steps Merkle root, and final bundle root.
+    #[method(name = "bud_verifyUniversalBundle")]
+    async fn verify_universal_bundle(
+        &self,
+        bundle: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// WebSocket subscriptions: `kind` is
     /// `newHeads`, `finalizedHeads` or `logs`; `logs` takes an optional
     /// address and yields the transactions that send to or from it.
@@ -1494,4 +1602,566 @@ pub trait BudlumApi {
         kind: String,
         address: Option<String>,
     ) -> jsonrpsee::core::SubscriptionResult;
+
+    // ---- Ethereum JSON-RPC compatibility gateway ----
+    //
+    // Section 8.11.2 names every method of this gateway. The table in
+    // `src/rpc/compat/ethereum/opening.rs` says what each one answers, the class
+    // rows in `src/rpc/method_class.rs` say on which listener, and
+    // `docs/RPC_COMPAT.md` says why every EVM-state method refuses today: the
+    // opening surface has no validated end-to-end EVM execution environment
+    // (the EVM execution environment), so a balance read here would be a number no EVM account backs.
+
+    /// `web3_clientVersion`: this node's name and version.
+    #[method(name = "web3_clientVersion")]
+    async fn web3_client_version(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `net_version`: the chain id in decimal, as Ethereum tools expect.
+    #[method(name = "net_version")]
+    async fn compat_net_version(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `net_listening`: whether this node accepts connections.
+    #[method(name = "net_listening")]
+    async fn compat_net_listening(&self) -> Result<bool, ErrorObjectOwned>;
+
+    /// `eth_chainId`: the EIP-155 chain id as a quantity.
+    #[method(name = "eth_chainId")]
+    async fn eth_chain_id(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `eth_syncing`: `false`, or the sync state while catching up.
+    #[method(name = "eth_syncing")]
+    async fn eth_syncing(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_blockNumber`: the head height as a quantity.
+    #[method(name = "eth_blockNumber")]
+    async fn eth_block_number(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `eth_getBalance`: refuses until the EVM execution environment (door: `bud_getBalance`).
+    #[method(name = "eth_getBalance")]
+    async fn eth_get_balance(
+        &self,
+        address: String,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getCode`: refuses until the EVM execution environment (door: `bud_getAccountProof`).
+    #[method(name = "eth_getCode")]
+    async fn eth_get_code(
+        &self,
+        address: String,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getStorageAt`: refuses until the EVM execution environment (door: `bud_getAccountProof`).
+    #[method(name = "eth_getStorageAt")]
+    async fn eth_get_storage_at(
+        &self,
+        address: String,
+        position: String,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getTransactionCount`: refuses until the EVM execution environment (door: `bud_getNonce`).
+    #[method(name = "eth_getTransactionCount")]
+    async fn eth_get_transaction_count(
+        &self,
+        address: String,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_call`: refuses until the EVM execution environment (door: `bud_txPrecheck`).
+    #[method(name = "eth_call")]
+    async fn eth_call(
+        &self,
+        call: serde_json::Value,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_estimateGas`: refuses until the EVM execution environment (door: `bud_estimateGas`).
+    #[method(name = "eth_estimateGas")]
+    async fn eth_estimate_gas(
+        &self,
+        call: serde_json::Value,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_createAccessList`: refuses until the EVM execution environment (door: `bud_txPrecheck`).
+    #[method(name = "eth_createAccessList")]
+    async fn eth_create_access_list(
+        &self,
+        call: serde_json::Value,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_gasPrice`: the base fee in wei per gas unit (Section 8.9.7).
+    #[method(name = "eth_gasPrice")]
+    async fn eth_gas_price(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `eth_maxPriorityFeePerGas`: zero, because this chain charges none.
+    #[method(name = "eth_maxPriorityFeePerGas")]
+    async fn eth_max_priority_fee_per_gas(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `eth_feeHistory`: refuses until the fee calibration work calibrates the series
+    /// (door: `bud_gasPrice`).
+    #[method(name = "eth_feeHistory")]
+    async fn eth_fee_history(
+        &self,
+        block_count: String,
+        newest_block: String,
+        reward_percentiles: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_sendRawTransaction`: refuses until the EVM execution environment accepts the envelope
+    /// (door: `bud_sendRawTransaction`).
+    #[method(name = "eth_sendRawTransaction")]
+    async fn eth_send_raw_transaction(
+        &self,
+        raw: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getBlockByNumber`: refuses until the EVM execution environment serves `execution_root`
+    /// (door: `bud_getBlockByNumber`).
+    #[method(name = "eth_getBlockByNumber")]
+    async fn eth_get_block_by_number(
+        &self,
+        block: String,
+        full: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getBlockByHash`: refuses until the EVM execution environment (door: `bud_getBlockByHash`).
+    #[method(name = "eth_getBlockByHash")]
+    async fn eth_get_block_by_hash(
+        &self,
+        hash: String,
+        full: Option<bool>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getBlockTransactionCountByNumber`: refuses until the EVM execution environment
+    /// (door: `bud_getBlockByNumber`).
+    #[method(name = "eth_getBlockTransactionCountByNumber")]
+    async fn eth_get_block_transaction_count_by_number(
+        &self,
+        block: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getBlockTransactionCountByHash`: refuses until the EVM execution environment
+    /// (door: `bud_getBlockByHash`).
+    #[method(name = "eth_getBlockTransactionCountByHash")]
+    async fn eth_get_block_transaction_count_by_hash(
+        &self,
+        hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getTransactionByHash`: refuses until the EVM execution environment
+    /// (door: `bud_getTransactionByHash`).
+    #[method(name = "eth_getTransactionByHash")]
+    async fn eth_get_transaction_by_hash(
+        &self,
+        hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getTransactionByBlockNumberAndIndex`: refuses until the EVM execution environment
+    /// (door: `bud_getBlockByNumber`).
+    #[method(name = "eth_getTransactionByBlockNumberAndIndex")]
+    async fn eth_get_transaction_by_block_number_and_index(
+        &self,
+        block: String,
+        index: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getTransactionReceipt`: refuses until the EVM execution environment
+    /// (door: `bud_getTransactionReceipt`).
+    #[method(name = "eth_getTransactionReceipt")]
+    async fn eth_get_transaction_receipt(
+        &self,
+        hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getBlockReceipts`: refuses until the EVM execution environment
+    /// (door: `bud_getBlockByNumber`).
+    #[method(name = "eth_getBlockReceipts")]
+    async fn eth_get_block_receipts(
+        &self,
+        block: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getLogs`: refuses until the EVM execution environment
+    /// (door: `bud_getTransactionReceipt`).
+    #[method(name = "eth_getLogs")]
+    async fn eth_get_logs(
+        &self,
+        filter: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_newFilter`: admits one record into the bounded filter table.
+    /// `with_extensions` gives the handler the peer key for the quota.
+    #[method(name = "eth_newFilter", with_extensions)]
+    async fn eth_new_filter(
+        &self,
+        filter: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_newBlockFilter`: admits one block-head filter record.
+    #[method(name = "eth_newBlockFilter", with_extensions)]
+    async fn eth_new_block_filter(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getFilterChanges`: refuses log data until the EVM execution environment (door: `bud_subscribe`).
+    #[method(name = "eth_getFilterChanges", with_extensions)]
+    async fn eth_get_filter_changes(
+        &self,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getFilterLogs`: refuses log data until the EVM execution environment (door: `bud_subscribe`).
+    #[method(name = "eth_getFilterLogs", with_extensions)]
+    async fn eth_get_filter_logs(
+        &self,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_uninstallFilter`: releases the slot of one filter id.
+    #[method(name = "eth_uninstallFilter", with_extensions)]
+    async fn eth_uninstall_filter(
+        &self,
+        filter_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_accounts`: the empty list. This node holds no unlocked key.
+    #[method(name = "eth_accounts")]
+    async fn eth_accounts(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `debug_traceTransaction`: operator only; refuses until the EVM execution environment.
+    #[method(name = "debug_traceTransaction")]
+    async fn debug_trace_transaction(
+        &self,
+        hash: String,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `debug_traceCall`: operator only; refuses until the EVM execution environment.
+    #[method(name = "debug_traceCall")]
+    async fn debug_trace_call(
+        &self,
+        call: serde_json::Value,
+        block: Option<String>,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `eth_getProof`: `-32601` on purpose (Section 8.10.6). The Budlum
+    /// native proof is `bud_getAccountProof`.
+    #[method(name = "eth_getProof")]
+    async fn eth_get_proof(
+        &self,
+        address: String,
+        keys: serde_json::Value,
+        block: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    // ---- Solana JSON-RPC compatibility gateway ----
+    //
+    // Section 8.11.3 names every method of this gateway. The table in
+    // `src/rpc/compat/solana.rs` says what each one answers, the class
+    // rows in `src/rpc/method_class.rs` declare listener and effect.
+    // State-dependent methods refuse until their production mapping is wired;
+    // this gateway never translates native ledger entries into invented SVM accounts.
+
+    /// `getHealth`: this node is up.
+    #[method(name = "getHealth")]
+    async fn solana_get_health(&self) -> Result<String, ErrorObjectOwned>;
+
+    /// `getVersion`: the Budlum version in the Solana version shape.
+    #[method(name = "getVersion")]
+    async fn solana_get_version(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getGenesisHash`: refuses until the Solana compatibility gateway (door: `bud_getBlockByNumber`).
+    #[method(name = "getGenesisHash")]
+    async fn solana_get_genesis_hash(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getSlot`: the head height, as a Solana slot.
+    #[method(name = "getSlot")]
+    async fn solana_get_slot(
+        &self,
+        config: Option<crate::rpc::compat::solana::subscriptions::SlotConfig>,
+    ) -> Result<u64, ErrorObjectOwned>;
+
+    /// `getBlockHeight`: the head height.
+    #[method(name = "getBlockHeight")]
+    async fn solana_get_block_height(
+        &self,
+        config: Option<crate::rpc::compat::solana::subscriptions::SlotConfig>,
+    ) -> Result<u64, ErrorObjectOwned>;
+
+    /// `getEpochInfo`: refuses until the Solana compatibility gateway (door: `bud_getStatus`).
+    #[method(name = "getEpochInfo")]
+    async fn solana_get_epoch_info(
+        &self,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getLatestBlockhash`: refuses until the Solana compatibility gateway (door: `bud_getBlockByNumber`).
+    #[method(name = "getLatestBlockhash")]
+    async fn solana_get_latest_blockhash(
+        &self,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `isBlockhashValid`: refuses until the Solana compatibility gateway (door: `bud_getBlockByNumber`).
+    #[method(name = "isBlockhashValid")]
+    async fn solana_is_blockhash_valid(
+        &self,
+        blockhash: String,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getBalance`: refuses until the Solana compatibility gateway (door: `bud_getBalance`).
+    #[method(name = "getBalance")]
+    async fn solana_get_balance(
+        &self,
+        address: String,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getAccountInfo`: refuses until the Solana compatibility gateway (door: `bud_getAccountProof`).
+    #[method(name = "getAccountInfo")]
+    async fn solana_get_account_info(
+        &self,
+        address: String,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getMultipleAccounts`: refuses until the Solana compatibility gateway (door: `bud_getAccountProof`).
+    #[method(name = "getMultipleAccounts")]
+    async fn solana_get_multiple_accounts(
+        &self,
+        addresses: Vec<String>,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getProgramAccounts`: refuses until the Solana compatibility gateway (door: `bud_getAccountProof`).
+    #[method(name = "getProgramAccounts")]
+    async fn solana_get_program_accounts(
+        &self,
+        program_id: String,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getTokenAccountsByOwner`: refuses until the Solana compatibility gateway (door: `bud_getAccountProof`).
+    #[method(name = "getTokenAccountsByOwner")]
+    async fn solana_get_token_accounts_by_owner(
+        &self,
+        owner: String,
+        token_accounts_filter: serde_json::Value,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getTokenAccountBalance`: refuses until the Solana compatibility gateway (door: `bud_getBalance`).
+    #[method(name = "getTokenAccountBalance")]
+    async fn solana_get_token_account_balance(
+        &self,
+        token_account: String,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getTokenSupply`: refuses until the Solana compatibility gateway (door: `bud_getStatus`).
+    #[method(name = "getTokenSupply")]
+    async fn solana_get_token_supply(
+        &self,
+        mint: String,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getMinimumBalanceForRentExemption`: refuses until the Solana compatibility gateway (door: `bud_getStatus`).
+    #[method(name = "getMinimumBalanceForRentExemption")]
+    async fn solana_get_minimum_balance_for_rent_exemption(
+        &self,
+        data_size: u64,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getFeeForMessage`: refuses until the Solana compatibility gateway (door: `bud_gasPrice`).
+    #[method(name = "getFeeForMessage")]
+    async fn solana_get_fee_for_message(
+        &self,
+        message: String,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getRecentPrioritizationFees`: refuses until the Solana compatibility gateway (door: `bud_gasPrice`).
+    #[method(name = "getRecentPrioritizationFees")]
+    async fn solana_get_recent_prioritization_fees(
+        &self,
+        addresses: Option<Vec<String>>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `sendTransaction`: refuses until the Solana compatibility gateway (door: `bud_sendRawTransaction`).
+    #[method(name = "sendTransaction")]
+    async fn solana_send_transaction(
+        &self,
+        transaction: String,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `simulateTransaction`: refuses until the Solana compatibility gateway (door: `bud_txPrecheck`).
+    #[method(name = "simulateTransaction")]
+    async fn solana_simulate_transaction(
+        &self,
+        transaction: String,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getSignatureStatuses`: refuses until the Solana compatibility gateway (door: `bud_getTransactionReceipt`).
+    #[method(name = "getSignatureStatuses")]
+    async fn solana_get_signature_statuses(
+        &self,
+        signatures: Vec<String>,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getSignaturesForAddress`: refuses until the Solana compatibility gateway (door: `bud_getTransactionByHash`).
+    #[method(name = "getSignaturesForAddress")]
+    async fn solana_get_signatures_for_address(
+        &self,
+        address: String,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getTransaction`: refuses until the Solana compatibility gateway (door: `bud_getTransactionByHash`).
+    #[method(name = "getTransaction")]
+    async fn solana_get_transaction(
+        &self,
+        signature: String,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `getBlock`: refuses until the Solana compatibility gateway (door: `bud_getBlockByNumber`).
+    #[method(name = "getBlock")]
+    async fn solana_get_block(
+        &self,
+        slot: u64,
+        options: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// `requestAirdrop`: refuses; the testnet faucet is a separate service.
+    #[method(name = "requestAirdrop")]
+    async fn solana_request_airdrop(
+        &self,
+        address: String,
+        lamports: u64,
+        config: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// SVM account notifications are refused by name until the SVM worker exists.
+    #[subscription(name = "accountSubscribe" => "accountNotification", unsubscribe = "accountUnsubscribe", item = serde_json::Value)]
+    async fn solana_account_subscribe(
+        &self,
+        address: String,
+        config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult;
+
+    /// SVM signature notifications are refused by name until the SVM worker exists.
+    #[subscription(name = "signatureSubscribe" => "signatureNotification", unsubscribe = "signatureUnsubscribe", item = serde_json::Value)]
+    async fn solana_signature_subscribe(
+        &self,
+        signature: String,
+        config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult;
+
+    /// Budlum chain-progress notifications in the Solana slot shape.
+    #[subscription(name = "slotSubscribe" => "slotNotification", unsubscribe = "slotUnsubscribe", item = serde_json::Value)]
+    async fn solana_slot_subscribe(
+        &self,
+        config: Option<crate::rpc::compat::solana::subscriptions::SlotConfig>,
+    ) -> jsonrpsee::core::SubscriptionResult;
+
+    /// SVM log notifications are refused by name until the SVM worker exists.
+    #[subscription(name = "logsSubscribe" => "logsNotification", unsubscribe = "logsUnsubscribe", item = serde_json::Value)]
+    async fn solana_logs_subscribe(
+        &self,
+        filter: serde_json::Value,
+        config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult;
+
+    /// SVM program-account notifications are refused by name until the SVM worker exists.
+    #[subscription(name = "programSubscribe" => "programNotification", unsubscribe = "programUnsubscribe", item = serde_json::Value)]
+    async fn solana_program_subscribe(
+        &self,
+        program_id: String,
+        config: Option<serde_json::Value>,
+    ) -> jsonrpsee::core::SubscriptionResult;
+
+    /// Found a Garden on this node. The node becomes the host.
+    ///
+    /// Operator method. Returns the Garden status, the invite link and the
+    /// QR content (the same line).
+    #[method(name = "bud_gardenCreate")]
+    async fn garden_create(
+        &self,
+        title: String,
+        name: String,
+        options: Option<crate::garden::GardenOptions>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The invite link of this node's Garden. The same line is the QR content.
+    #[method(name = "bud_gardenInvite")]
+    async fn garden_invite(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Join a Garden with its invite link or QR content. No account and no
+    /// earlier setup is needed: the node makes a validator key of its own.
+    #[method(name = "bud_gardenJoin")]
+    async fn garden_join(
+        &self,
+        invite: String,
+        name: String,
+        options: Option<crate::garden::GardenOptions>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Answer a key that waits to join this node's Garden: `accept` seats
+    /// it, otherwise it is turned away. Only the host of a Garden founded
+    /// with `"admission": "host_approval"` has anybody to answer.
+    #[method(name = "bud_gardenAdmit")]
+    async fn garden_admit(
+        &self,
+        key: String,
+        accept: bool,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Leave this node's Garden and wipe its data from this node.
+    #[method(name = "bud_gardenLeave")]
+    async fn garden_leave(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Return to the Garden this node left.
+    #[method(name = "bud_gardenReturn")]
+    async fn garden_return(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The Garden as this node sees it, and its domain status on Budlum.
+    #[method(name = "bud_gardenStatus")]
+    async fn garden_status(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Publish a message, a post or an image as this node's validator.
+    /// `encoding` is `utf8` (default) or `hex`.
+    #[method(name = "bud_gardenPublish")]
+    async fn garden_publish(
+        &self,
+        kind: String,
+        payload: String,
+        encoding: Option<String>,
+        mime: Option<String>,
+        caption: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Resolve published content on this node and verify its content id.
+    #[method(name = "bud_gardenResolve")]
+    async fn garden_resolve(
+        &self,
+        content_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The path of a Garden transaction or content item through the chain:
+    /// the transaction, its block and the validators that signed it.
+    #[method(name = "bud_gardenTrace")]
+    async fn garden_trace(&self, id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The newest content of this node's Garden.
+    #[method(name = "bud_gardenFeed")]
+    async fn garden_feed(&self, limit: Option<u32>) -> Result<serde_json::Value, ErrorObjectOwned>;
 }

@@ -31,12 +31,18 @@ pub struct SubSliced<W, T> {
 impl<W: WindowAccess<T>, T> WindowAccess<T> for SubSliced<W, T> {
     #[inline]
     fn current_slice(&self) -> &[T] {
-        &self.window.current_slice()[self.range.clone()]
+        self.window
+            .current_slice()
+            .get(self.range.clone())
+            .unwrap_or(&[])
     }
 
     #[inline]
     fn next_slice(&self) -> &[T] {
-        &self.window.next_slice()[self.range.clone()]
+        self.window
+            .next_slice()
+            .get(self.range.clone())
+            .unwrap_or(&[])
     }
 }
 

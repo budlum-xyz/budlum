@@ -3,17 +3,17 @@
 //! A closed-loop AI layer. This module binds the AI inference layer to real budlum-core
 //! primitives (no mocks):
 //!
-//! **Scope boundary:** verifiable here refers to the access and bond checks,
-//! not to cryptographic verification of the inference. On-chain inference
-//! proof is not verified today; the transaction path refuses models that request
-//! `require_execution_proof` fail-closed. Details: `docs/AI_VERIFICATION_STATUS.md`.
+//! **Scope boundary:** access grants, compute bonds, perception limits, and
+//! Plonky3 STARK verification for registered `require_execution_proof` MLP models
+//! stay closed on testnet until the AI opening gates pass. Details:
+//! `docs/AI_VERIFICATION_STATUS.md`.
 //!
 //! - **Operator compute bond** = `AiRegistry` verifier stake (the AI-layer-first decision).
 //! - **Closed-loop data** = real `Pollen` `AccessGrant` verification.
 //! - **Hardening types:** training-data grant (Pollen), AI-dataset metadata
-//!   (B.U.D. storage), social-data ref (SocialFi ↔ AI inference layer).
+//!   (B.U.D. storage), social-data ref (`SocialFi` ↔ AI inference layer).
 //!
-//! The operator role is bound to the AI-layer verifier stake (independent of the PoS validator,
+//! The operator role is bound to the AI-layer verifier stake (independent of the `PoS` validator,
 //! Composable). Verifier-registry'de `AI_OPERATOR` (RoleId(8)) mapping'i,
 //! and comes into play once the budlum-core verifier-registry dependency is added.
 
@@ -59,11 +59,15 @@ const _: () = assert!(
     "MIN_OPERATOR_BOND must exceed the zero-check it replaces"
 );
 
-/// Register an AI inference layer operator: the compute bond is the AiRegistry verifier stake.
-/// Independent of the PoS validator; the same actor may be both (composable).
+/// Register an AI inference layer operator: the compute bond is the `AiRegistry` verifier stake.
+/// Independent of the `PoS` validator; the same actor may be both (composable).
 ///
 /// Bonds below [`MIN_OPERATOR_BOND`] are rejected rather than accepted at face
 /// value, so Sybil registration has a floor cost.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn register_operator(
     registry: &mut AiRegistry,
     operator: &Address,
@@ -225,6 +229,10 @@ pub struct TrainingDataGrant {
 
 impl TrainingDataGrant {
     /// Consume one training epoch (fail-closed: errors once the limit is reached).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn consume_epoch(&mut self) -> Result<(), String> {
         if self.epochs_used >= self.max_epochs {
             return Err("AI inference layer: training-data grant epochs exhausted".into());
@@ -284,8 +292,8 @@ impl AiDatasetMetadata {
 
 // SocialFi hardening: social content as an AI inference layer data source
 
-/// An AI inference layer data reference from SocialFi NFT content (expects a Pollen grant).
-/// Closed loop: AI inference layer reads social content only with a Pollen grant.
+/// An AI inference layer data reference from `SocialFi` NFT content (expects a Data Market grant).
+/// Closed loop: AI inference layer reads social content only with a Data Market grant.
 #[derive(Clone, Debug)]
 pub struct SocialDataRef {
     pub nft_id: u64,
@@ -307,7 +315,7 @@ impl SocialDataRef {
 
 // Pollen grant runtime construction (the closed loop complete)
 
-/// Build a closed-loop Pollen AccessGrant for an AI inference layer inference.
+/// Build a closed-loop Data Market `AccessGrant` for an AI inference layer inference.
 ///
 /// The production AI read path (`validate_ai_read_ref`) is
 /// requester-bound. `grantee` must be the inference requester, not the

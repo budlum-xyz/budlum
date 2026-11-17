@@ -27,9 +27,9 @@
 //! ```rust
 //! use budlum_wallet_core::{Wallet, WalletPrivacyConfig, ML_DSA_87_SIGNATURE_LEN};
 //!
-//! // Fixed entropy: reproducible, and never a real wallet.
-//! let mut wallet = Wallet::from_entropy(&[1u8; 16]).unwrap();
-//! assert_eq!(wallet.mnemonic().split_whitespace().count(), 12);
+//! // Fixed 256-bit entropy: reproducible, and never a real wallet.
+//! let mut wallet = Wallet::from_entropy(&[1u8; 32]).unwrap();
+//! assert_eq!(wallet.mnemonic().split_whitespace().count(), 24);
 //! assert_eq!(wallet.address_hex().len(), 64);
 //!
 //! // Signing is what the wallet is for; the relayer it is handed to is not
@@ -47,7 +47,13 @@
 //! - `tee_enabled`: execution-time confidentiality - **fail-closed** without a
 //!   Linked SGX/Nitro runtime (no silent plaintext fallback).
 
+#[cfg(test)]
+mod api_surface_tests;
 mod bip39_wordlist;
+/// `.bud` recipient validation and Merkle state-proof verification.
+pub mod bns;
+/// Wallet-side blinded consent confirmation screen, Padme buckets, and Shamir escrow.
+pub mod consent_screen;
 /// The cryptographic core shared with the node: scheme registry, FIPS 204 and
 /// FIPS 205 context strings, the dual-verifier facade and the composite
 /// signature. The files are the node's own (`src/crypto`), mounted by path.
@@ -130,7 +136,7 @@ impl std::fmt::Display for WalletError {
                 write!(f, "invalid entropy size: {n} bytes (expected 16 or 32)")
             }
             WalletError::InvalidWordCount(n) => {
-                write!(f, "invalid mnemonic word count: {n} (expected 12 or 24)")
+                write!(f, "invalid mnemonic word count: {n} (expected 24)")
             }
             WalletError::InvalidSeed => write!(f, "invalid seed"),
             WalletError::InvalidMultisigPolicy(m) => write!(f, "invalid multisig policy: {m}"),
@@ -202,9 +208,27 @@ pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, WalletError> {
     Ok(words.join(" "))
 }
 
+/// Normalize a BIP39 mnemonic with Unicode NFKD, ASCII lowercasing, and
+/// canonical single-space word separation.
+/// exposed for: the wallet crate's SDK and V3 surfaces.
+#[must_use]
+pub fn normalize_mnemonic_nfkd(mnemonic: &str) -> zeroize::Zeroizing<String> {
+    use unicode_normalization::UnicodeNormalization;
+    let mut decomposed: zeroize::Zeroizing<String> =
+        zeroize::Zeroizing::new(mnemonic.nfkd().collect());
+    let canonical = decomposed
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    decomposed.zeroize();
+    zeroize::Zeroizing::new(canonical)
+}
+
 /// BIP39 mnemonic → entropy (reverse: checksum validation + entropy extraction).
 pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
-    let words: Vec<&str> = mnemonic.split_whitespace().collect();
+    let normalized = normalize_mnemonic_nfkd(mnemonic);
+    let words: Vec<&str> = normalized.split_whitespace().collect();
     if words.len() != 12 && words.len() != 24 {
         return Err(WalletError::InvalidMnemonic(format!(
             "expected 12 or 24 words, got {}",
@@ -893,6 +917,36 @@ pub mod uniffi_bindings {
     pub fn binding_capabilities() -> WalletBindingCapabilities {
         WalletBindingCapabilities::current()
     }
+
+    /// Verify a `bud_bnsProof` answer against the headers the host has
+    /// verified, and return what it proves as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::verify_bns_proof`].
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn verify_bns_proof(
+        name: &str,
+        proof_json: &str,
+        headers: &crate::bns::BnsHeaderBook,
+    ) -> Result<String, String> {
+        crate::bns::verify_bns_proof(name, proof_json, headers).map(|v| v.to_json())
+    }
+
+    /// Resolve `name` from the `bud_bnsGetProof` answers of the configured
+    /// nodes, and return what the freshest verified answer proves as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::resolve_bns`].
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn resolve_bns(
+        name: &str,
+        answers: &[String],
+        headers: &crate::bns::BnsHeaderBook,
+    ) -> Result<String, String> {
+        crate::bns::resolve_bns(name, answers, headers).map(|v| v.to_json())
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -924,13 +978,14 @@ pub mod wasm_bindings {
         /// Another word count, an unknown word or a bad checksum.
         #[wasm_bindgen(constructor)]
         pub fn new(mnemonic: &str) -> Result<BrowserWallet, JsError> {
-            let words = mnemonic.split_whitespace().count();
+            let normalized = super::normalize_mnemonic_nfkd(mnemonic);
+            let words = normalized.split_whitespace().count();
             if words != 24 {
                 return Err(JsError::new(&format!(
                     "a mnemonic has 24 words; this one has {words}"
                 )));
             }
-            super::Wallet::from_mnemonic(mnemonic)
+            super::Wallet::from_mnemonic(&normalized)
                 .map(|inner| Self { inner })
                 .map_err(|e| JsError::new(&format!("{e:?}")))
         }
@@ -977,6 +1032,88 @@ pub mod wasm_bindings {
                 &transfer,
             ))
         }
+    }
+
+    /// The headers a page has verified with its own light client. A `.bud`
+    /// proof is checked against these and nothing else.
+    #[wasm_bindgen]
+    #[derive(Default)]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub struct BrowserHeaderBook {
+        inner: crate::bns::BnsHeaderBook,
+    }
+
+    #[wasm_bindgen]
+    impl BrowserHeaderBook {
+        /// An empty book.
+        #[wasm_bindgen(constructor)]
+        #[must_use]
+        /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Add a header the page has verified: its height, the `.bud`
+        /// registry root it commits to as 32 bytes of hex, and its epoch.
+        ///
+        /// # Errors
+        ///
+        /// A root that is not 32 bytes of hex.
+        /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+        pub fn trust(
+            &mut self,
+            height: u64,
+            bns_root_hex: &str,
+            epoch: u64,
+        ) -> Result<(), JsError> {
+            let clean = bns_root_hex.strip_prefix("0x").unwrap_or(bns_root_hex);
+            let bytes = hex::decode(clean).map_err(|_| JsError::new("root is not hex"))?;
+            let bns_root = <[u8; 32]>::try_from(bytes.as_slice())
+                .map_err(|_| JsError::new("root is not 32 bytes"))?;
+            self.inner.trust(crate::bns::TrustedBnsHeader {
+                height,
+                bns_root,
+                epoch,
+            });
+            Ok(())
+        }
+    }
+
+    /// Verify a `bud_bnsProof` answer against `headers` and return what it
+    /// proves as JSON: `{"held": false, "height"}` or the record of the name.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::verify_bns_proof`].
+    #[wasm_bindgen]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn verify_bns_proof(
+        name: &str,
+        proof_json: &str,
+        headers: &BrowserHeaderBook,
+    ) -> Result<String, JsError> {
+        crate::bns::verify_bns_proof(name, proof_json, &headers.inner)
+            .map(|v| v.to_json())
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// Resolve `name` from the `bud_bnsGetProof` answers the page fetched
+    /// from its configured nodes. Returns the same JSON as
+    /// [`verify_bns_proof`], for the freshest answer that verifies.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::resolve_bns`].
+    #[wasm_bindgen]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn resolve_bns(
+        name: &str,
+        answers: Vec<String>,
+        headers: &BrowserHeaderBook,
+    ) -> Result<String, JsError> {
+        crate::bns::resolve_bns(name, &answers, &headers.inner)
+            .map(|v| v.to_json())
+            .map_err(|e| JsError::new(&e))
     }
 
     /// The `bud_sendRawTransaction` body of a signed transaction.
@@ -1097,7 +1234,8 @@ impl Wallet {
     }
     /// Create a new wallet (random entropy -> mnemonic -> seed -> keypair).
     ///
-    /// `word_count`: 12 (128-bit entropy) or 24 (256-bit entropy).
+    /// `word_count`: 24 (256-bit entropy). Twelve-word (128-bit) seeds are
+    /// refused fail-closed.
     ///
     /// **Production safety:** this function only works when the `production` feature
     /// is enabled. Without it `Wallet::generate` returns
@@ -1105,7 +1243,6 @@ impl Wallet {
     /// environment. Use `from_entropy` for test/dev environments.
     pub fn generate(word_count: usize) -> Result<Self, WalletError> {
         let entropy_len = match word_count {
-            12 => 16, // 128 bit
             24 => 32, // 256 bit
             _ => return Err(WalletError::InvalidWordCount(word_count)),
         };
@@ -1146,7 +1283,7 @@ impl Wallet {
     /// Use `Wallet::generate` for production wallet generation
     /// (production feature + getrandom CSPRNG gerektirir).
     pub fn from_entropy(entropy: &[u8]) -> Result<Self, WalletError> {
-        if entropy.len() != 16 && entropy.len() != 32 {
+        if entropy.len() != 32 {
             return Err(WalletError::InvalidEntropy(entropy.len()));
         }
 
@@ -1179,10 +1316,16 @@ impl Wallet {
         })
     }
 
-    /// Restore a wallet from a mnemonic (with BIP39 checksum verification).
+    /// Restore a wallet from a 24-word mnemonic (NFKD-normalized, with BIP39
+    /// checksum verification; 12-word seeds are refused per).
     pub fn from_mnemonic(mnemonic: &str) -> Result<Self, WalletError> {
+        let normalized = normalize_mnemonic_nfkd(mnemonic);
+        let word_count = normalized.split_whitespace().count();
+        if word_count != 24 {
+            return Err(WalletError::InvalidWordCount(word_count));
+        }
         // BIP39 reverse: mnemonic -> entropy (with checksum verification)
-        let mut entropy = mnemonic_to_entropy(mnemonic)?;
+        let mut entropy = mnemonic_to_entropy(&normalized)?;
 
         let mut hasher = Sha3_256::new();
         hasher.update(b"BUDLUM_MLDSA87_SEED_V1");
@@ -1197,7 +1340,7 @@ impl Wallet {
         let signing_key = signing_key_from_seed(&seed);
 
         Ok(Self {
-            mnemonic: mnemonic.to_string(),
+            mnemonic: normalized.as_str().to_owned(),
             seed,
             signing_key,
             privacy: WalletPrivacyConfig::default(),
@@ -1528,8 +1671,7 @@ impl Wallet {
             ));
         }
         let input_commitment = req.input.commitment();
-        let expected_secret_bytes =
-            derive_spend_secret(&self.seed, input_commitment).to_le_bytes();
+        let expected_secret_bytes = derive_spend_secret(&self.seed, input_commitment).to_le_bytes();
         let caller_secret_bytes = req.input.spend_secret.to_le_bytes();
         let mut secret_diff = 0u8;
         for (&lhs, &rhs) in caller_secret_bytes.iter().zip(expected_secret_bytes.iter()) {
@@ -1730,6 +1872,7 @@ impl Wallet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wallet_v3::WalletV3;
 
     /// Rotation is counter-indexed, so the property the
     /// design depends on must be pinned: same (seed, counter) -> same key no
@@ -1776,7 +1919,7 @@ mod tests {
     #[cfg(not(feature = "production"))]
     #[test]
     fn deterministic_fallback_signatures_verify_and_are_stable() {
-        let w = Wallet::from_entropy(&[0x77u8; 16]).unwrap();
+        let w = Wallet::from_entropy(&[0x77u8; 32]).unwrap();
         let msg = b"private transfer authorization";
         let a = w.sign(msg);
         let b = w.sign(msg);
@@ -1788,10 +1931,22 @@ mod tests {
     }
 
     #[test]
-    fn generate_12_word_wallet() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).expect("12-word wallet must succeed");
+    fn generate_12_word_wallet_is_refused() {
+        assert!(matches!(
+            Wallet::from_entropy(&[0x42u8; 16]),
+            Err(WalletError::InvalidEntropy(16))
+        ));
+        assert!(matches!(
+            Wallet::generate(12),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+    }
+
+    #[test]
+    fn generate_24_word_wallet() {
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).expect("24-word wallet must succeed");
         let words: Vec<&str> = wallet.mnemonic().split_whitespace().collect();
-        assert_eq!(words.len(), 12, "must have 12 words");
+        assert_eq!(words.len(), 24, "must have 24 words");
         assert_eq!(wallet.address().len(), 32, "address must be 32 bytes");
         assert_eq!(
             wallet.public_key().len(),
@@ -1800,17 +1955,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn generate_24_word_wallet() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 32]).expect("24-word wallet must succeed");
-        let words: Vec<&str> = wallet.mnemonic().split_whitespace().collect();
-        assert_eq!(words.len(), 24, "must have 24 words");
-    }
-
     /// A restored wallet resumes the saved counter and never goes back.
     #[test]
     fn a_resumed_blinding_counter_blocks_reuse_and_only_moves_forward() {
-        let mut wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let mut wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         wallet.set_note_privacy_enabled(true);
         wallet.resume_blinding_counter(5);
         assert_eq!(wallet.next_blinding_counter(), 5);
@@ -1837,7 +1985,7 @@ mod tests {
 
     #[test]
     fn sign_and_verify_roundtrip() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let msg = b"hello budlum";
         let sig = wallet.sign(msg);
         let pubkey = wallet.public_key();
@@ -1846,7 +1994,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_message() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let sig = wallet.sign(b"original message");
         let pubkey = wallet.public_key();
         assert!(
@@ -1858,7 +2006,7 @@ mod tests {
     #[test]
     fn restore_from_mnemonic() {
         // Generate a valid mnemonic from entropy, then restore from it
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let mnemonic = wallet.mnemonic().to_string();
         let restored = Wallet::from_mnemonic(&mnemonic).expect("restore must succeed");
         assert_eq!(restored.mnemonic(), mnemonic);
@@ -1872,8 +2020,8 @@ mod tests {
 
     #[test]
     fn different_mnemonics_different_addresses() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
         assert_ne!(
             w1.address(),
             w2.address(),
@@ -1892,15 +2040,23 @@ mod tests {
 
     #[test]
     fn from_entropy_valid_sizes() {
-        assert!(Wallet::from_entropy(&[0u8; 16]).is_ok(), "16 bytes OK");
+        assert!(
+            matches!(
+                Wallet::from_entropy(&[0u8; 16]),
+                Err(WalletError::InvalidEntropy(16))
+            ),
+            "16 bytes refused per "
+        );
         assert!(Wallet::from_entropy(&[0u8; 32]).is_ok(), "32 bytes OK");
     }
 
     #[test]
     fn entropy_size_preserves_mnemonic_word_count() {
-        let short = Wallet::from_entropy(&[0u8; 16]).unwrap();
+        assert!(matches!(
+            Wallet::from_entropy(&[0u8; 16]),
+            Err(WalletError::InvalidEntropy(16))
+        ));
         let long = Wallet::from_entropy(&[0u8; 32]).unwrap();
-        assert_eq!(short.mnemonic().split_whitespace().count(), 12);
         assert_eq!(long.mnemonic().split_whitespace().count(), 24);
     }
 
@@ -1910,7 +2066,7 @@ mod tests {
     #[test]
     fn wallet_generate_rejects_placeholder_entropy_in_production() {
         // Without --features production, Wallet::generate must fail-closed
-        let result = Wallet::generate(12);
+        let result = Wallet::generate(24);
         #[cfg(not(feature = "production"))]
         {
             assert!(
@@ -1941,7 +2097,7 @@ mod tests {
     #[test]
     fn mnemonic_checksum_validation_rejects_invalid() {
         // Valid 12-word mnemonic from from_entropy (deterministic)
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let valid_mnemonic = wallet.mnemonic().to_string();
 
         // Tampered mnemonic (last word changed) must fail checksum
@@ -2023,6 +2179,84 @@ mod tests {
         assert!(!caps.exports_seed_material);
     }
 
+    /// An absence proof over an empty registry, and the root it folds to.
+    #[cfg(any(feature = "uniffi", feature = "wasm"))]
+    fn binding_bns_fixture() -> (String, [u8; 32]) {
+        let meta = [0x33u8; 32];
+        let root = crate::bns::compute_bns_registry_root(&meta, &[0u8; 32]);
+        let proof = format!(
+            r#"{{"name":"free.bud","included":false,"meta_digest":"0x{}","height":7,"entry":null,"absence":{{"siblings":[],"occupant":null}}}}"#,
+            hex::encode(meta)
+        );
+        (proof, root)
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[test]
+    fn binding_uniffi_verifies_a_bns_proof_against_the_host_headers() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = crate::bns::BnsHeaderBook::new();
+        assert!(uniffi_bindings::verify_bns_proof("free.bud", &proof, &book).is_err());
+        book.trust(crate::bns::TrustedBnsHeader {
+            height: 7,
+            bns_root: root,
+            epoch: 10,
+        });
+        assert_eq!(
+            uniffi_bindings::verify_bns_proof("free.bud", &proof, &book).unwrap(),
+            r#"{"height":7,"held":false}"#
+        );
+        let bent = proof.replace("0x33", "0x34");
+        assert!(uniffi_bindings::verify_bns_proof("free.bud", &bent, &book).is_err());
+    }
+
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn binding_wasm_verifies_a_bns_proof_against_the_page_headers() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = wasm_bindings::BrowserHeaderBook::new();
+        assert!(book.trust(7, &hex::encode(root), 10).is_ok());
+        let verified = wasm_bindings::verify_bns_proof("free.bud", &proof, &book);
+        assert_eq!(
+            verified.ok().as_deref(),
+            Some(r#"{"height":7,"held":false}"#)
+        );
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[test]
+    fn binding_uniffi_resolves_a_name_past_a_node_that_lies() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = crate::bns::BnsHeaderBook::new();
+        book.trust(crate::bns::TrustedBnsHeader {
+            height: 7,
+            bns_root: root,
+            epoch: 10,
+        });
+        let bent = proof.replace("0x33", "0x34");
+        assert!(
+            uniffi_bindings::resolve_bns("free.bud", std::slice::from_ref(&bent), &book).is_err()
+        );
+        assert_eq!(
+            uniffi_bindings::resolve_bns("free.bud", &[bent, proof], &book).unwrap(),
+            r#"{"height":7,"held":false}"#
+        );
+    }
+
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn binding_wasm_resolves_a_name_past_a_node_that_lies() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = wasm_bindings::BrowserHeaderBook::new();
+        assert!(book.trust(7, &hex::encode(root), 10).is_ok());
+        let bent = proof.replace("0x33", "0x34");
+        let resolved = wasm_bindings::resolve_bns("free.bud", vec![bent, proof], &book);
+        assert_eq!(
+            resolved.ok().as_deref(),
+            Some(r#"{"height":7,"held":false}"#)
+        );
+    }
+
     #[cfg(feature = "wasm")]
     #[test]
     fn binding_wasm_feature_stub_exports_capabilities() {
@@ -2034,7 +2268,7 @@ mod tests {
 
     #[test]
     fn address_is_deterministic() {
-        let entropy = [0x42u8; 16];
+        let entropy = [0x42u8; 32];
         let w1 = Wallet::from_entropy(&entropy).unwrap();
         let w2 = Wallet::from_entropy(&entropy).unwrap();
         assert_eq!(
@@ -2061,8 +2295,8 @@ mod tests {
 
     #[test]
     fn multisig_policy_validates_threshold() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
         let policy = MultisigPolicy::new(vec![w1.public_key(), w2.public_key()], 2).unwrap();
         assert_eq!(policy.owner_count(), 2);
         assert!(MultisigPolicy::new(vec![w1.public_key()], 0).is_err());
@@ -2071,9 +2305,9 @@ mod tests {
 
     #[test]
     fn multisig_requires_distinct_valid_owner_signatures() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let w3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let w3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
         let msg = b"budlum multisig proposal digest";
         let policy =
             MultisigPolicy::new(vec![w1.public_key(), w2.public_key(), w3.public_key()], 2)
@@ -2112,9 +2346,9 @@ mod tests {
 
     #[test]
     fn multisig_rejects_wrong_message_or_non_owner() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let outsider = Wallet::from_entropy(&[9u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let outsider = Wallet::from_entropy(&[9u8; 32]).unwrap();
         let policy = MultisigPolicy::new(vec![w1.public_key(), w2.public_key()], 2).unwrap();
         let msg = b"proposal";
         let approvals = [
@@ -2149,7 +2383,7 @@ mod tests {
     #[test]
     fn multisig_accepts_all_two_of_three_combinations() {
         let wallets = (0u8..3)
-            .map(|i| Wallet::from_entropy(&[10u8 + i; 16]).unwrap())
+            .map(|i| Wallet::from_entropy(&[10u8 + i; 32]).unwrap())
             .collect::<Vec<_>>();
         let policy =
             MultisigPolicy::new(wallets.iter().map(Wallet::public_key).collect(), 2).unwrap();
@@ -2168,7 +2402,7 @@ mod tests {
     #[test]
     fn multisig_enforces_three_of_five_combinations() {
         let wallets = (0u8..5)
-            .map(|i| Wallet::from_entropy(&[20u8 + i; 16]).unwrap())
+            .map(|i| Wallet::from_entropy(&[20u8 + i; 32]).unwrap())
             .collect::<Vec<_>>();
         let policy =
             MultisigPolicy::new(wallets.iter().map(Wallet::public_key).collect(), 3).unwrap();
@@ -2186,8 +2420,8 @@ mod tests {
 
     #[test]
     fn social_recovery_policy_validates_threshold_and_timelock() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
         let policy =
             SocialRecoveryPolicy::new(vec![g1.public_key(), g2.public_key()], 2, 100).unwrap();
         assert_eq!(policy.threshold, 2);
@@ -2198,9 +2432,9 @@ mod tests {
 
     #[test]
     fn social_recovery_requires_distinct_guardian_signatures() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
         let digest = b"recover wallet to new key";
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
@@ -2234,9 +2468,9 @@ mod tests {
 
     #[test]
     fn social_recovery_rejects_non_guardian_or_wrong_digest() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let outsider = Wallet::from_entropy(&[9u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let outsider = Wallet::from_entropy(&[9u8; 32]).unwrap();
         let digest = b"recover";
         let policy =
             SocialRecoveryPolicy::new(vec![g1.public_key(), g2.public_key()], 2, 100).unwrap();
@@ -2255,12 +2489,12 @@ mod tests {
 
     #[test]
     fn social_recovery_rotates_compromised_guardian() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
-        let replacement = Wallet::from_entropy(&[4u8; 16]).unwrap();
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
+        let replacement = Wallet::from_entropy(&[4u8; 32]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
             2,
@@ -2310,10 +2544,10 @@ mod tests {
 
     #[test]
     fn social_recovery_removal_preserves_threshold_safety() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
-        let unknown = Wallet::from_entropy(&[9u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
+        let unknown = Wallet::from_entropy(&[9u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
             2,
@@ -2332,9 +2566,9 @@ mod tests {
 
     #[test]
     fn recovery_proposal_sets_timelock_and_addresses() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let guardian = Wallet::from_entropy(&[1u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         let proposal = RecoveryProposal::new(
             owner.public_key(),
@@ -2356,10 +2590,10 @@ mod tests {
 
     #[test]
     fn recovery_proposal_digest_binds_target_and_timelock() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let other_new_owner = Wallet::from_entropy(&[9u8; 16]).unwrap();
-        let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let other_new_owner = Wallet::from_entropy(&[9u8; 32]).unwrap();
+        let guardian = Wallet::from_entropy(&[1u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         let proposal = RecoveryProposal::new(
             owner.public_key(),
@@ -2388,11 +2622,11 @@ mod tests {
 
     #[test]
     fn recovery_proposal_requires_quorum_and_timelock() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
             2,
@@ -2453,9 +2687,9 @@ mod tests {
 
     #[test]
     fn recovery_proposal_rejects_same_owner_or_overflow() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let guardian = Wallet::from_entropy(&[1u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         assert!(RecoveryProposal::new(
             owner.public_key(),
@@ -2563,7 +2797,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_defaults_privacy_off() {
-        let w = Wallet::from_entropy(&[0x11u8; 16]).unwrap();
+        let w = Wallet::from_entropy(&[0x11u8; 32]).unwrap();
         assert!(!w.privacy_config().is_note_privacy_active());
         assert!(!w.privacy_config().is_privacy_active());
         assert_eq!(w.tee_backend_kind(), TeeBackendKind::None);
@@ -2571,7 +2805,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_private_transfer_requires_note_privacy() {
-        let w = Wallet::from_entropy(&[0x22u8; 16]).unwrap();
+        let w = Wallet::from_entropy(&[0x22u8; 32]).unwrap();
         let inp = PrivateNoteInput {
             amount: 100,
             recipient_tag: 1,
@@ -2599,7 +2833,7 @@ mod tests {
     /// formatted value takes to the terminal.
     #[test]
     fn a_formatted_transfer_never_prints_the_note_opening() {
-        let _w = Wallet::from_entropy(&[0x44u8; 16]).unwrap();
+        let _w = Wallet::from_entropy(&[0x44u8; 32]).unwrap();
         let inp = PrivateNoteInput {
             amount: 987_654_321,
             recipient_tag: 112_233_445_566,
@@ -2649,7 +2883,7 @@ mod tests {
     /// that refuses a counter it already handed out.
     #[test]
     fn the_final_blinding_counter_cannot_be_reused_after_overflow() {
-        let mut w = Wallet::from_entropy(&[0x34u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x34u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let err = w.prepare_receive_note(100, u64::MAX).unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
@@ -2662,7 +2896,7 @@ mod tests {
 
     #[test]
     fn a_reused_blinding_counter_is_refused() {
-        let mut w = Wallet::from_entropy(&[0x33u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x33u8; 32]).unwrap();
         w.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
         let first = w.prepare_receive_note(100, 7).unwrap();
         let err = w.prepare_receive_note(100, 7).unwrap_err();
@@ -2681,7 +2915,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_private_transfer_1in_1out_signs() {
-        let mut w = Wallet::from_entropy(&[0x33u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x33u8; 32]).unwrap();
         w.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
         let (blinding, _c, _) = w.prepare_receive_note(100, 0).unwrap();
         let input = w.note_input_from_receive(100, blinding).unwrap();
@@ -2733,7 +2967,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_private_transfer_with_change() {
-        let mut w = Wallet::from_entropy(&[0x44u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x44u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
         let input = w.note_input_from_receive(100, blinding).unwrap();
@@ -2756,7 +2990,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_change_cannot_be_redirected_by_a_foreign_tag() {
-        let mut w = Wallet::from_entropy(&[0x45u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x45u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
         let input = w.note_input_from_receive(100, blinding).unwrap();
@@ -2776,7 +3010,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_tee_enabled_fail_closed_without_runtime() {
-        let mut w = Wallet::from_entropy(&[0x55u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x55u8; 32]).unwrap();
         w.set_privacy_config(WalletPrivacyConfig::from_user_opt_in(true));
         assert!(w.privacy_config().tee_enabled);
         let rt = w.default_tee_runtime();
@@ -2804,7 +3038,7 @@ mod tests {
         use sha3::{Digest, Sha3_256};
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ClientSgx);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
-        let mut w = Wallet::from_entropy(&[0x66u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x66u8; 32]).unwrap();
         w.set_tee_enabled(true);
         // Enrol the measurement the mock attests with; without this the
         // wallet would refuse any attestation, self-attested or not.
@@ -2834,7 +3068,10 @@ mod tests {
 
     #[test]
     fn d2_wallet_rejects_forged_spend_secret_and_bad_blindings() {
-        let mut w = Wallet::from_entropy(&[0x67u8; 16]).unwrap();
+        // 32 bytes: this test is about the private-transfer refusals below,
+        // not about entropy size, and a 16-byte seed is refused by design
+        // (`generate_12_word_wallet_is_refused`).
+        let mut w = Wallet::from_entropy(&[0x67u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
         let mut bad_secret_input = w.note_input_from_receive(100, blinding).unwrap();
@@ -2915,7 +3152,7 @@ mod tests {
         // follow-up work).
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ClientSgx);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
-        let mut w = Wallet::from_entropy(&[0x6Au8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Au8; 32]).unwrap();
         w.set_tee_enabled(true);
         let err = w.sign_with_privacy(b"hello", &rt, &verifier).unwrap_err();
         assert!(matches!(err, WalletError::TeeUnavailable(_)));
@@ -2931,7 +3168,7 @@ mod tests {
         let verifier = crate::tee::mock::MockQuoteVerifier {
             recognized_measurements: vec![foreign],
         };
-        let mut w = Wallet::from_entropy(&[0x6Bu8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Bu8; 32]).unwrap();
         w.set_tee_enabled(true);
         w.set_trusted_tee_measurement(crate::tee::mock::MOCK_MEASUREMENT);
         let err = w.sign_with_privacy(b"hello", &rt, &verifier).unwrap_err();
@@ -2945,7 +3182,7 @@ mod tests {
         // user did not opt into must not satisfy it.
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ServerNitro);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
-        let mut w = Wallet::from_entropy(&[0x6Cu8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Cu8; 32]).unwrap();
         w.set_tee_enabled(true);
         w.set_trusted_tee_measurement(crate::tee::mock::MOCK_MEASUREMENT);
         let err = w.sign_with_privacy(b"hello", &rt, &verifier).unwrap_err();
@@ -2983,7 +3220,7 @@ mod tests {
                 Ok(fake)
             }
         }
-        let mut w = Wallet::from_entropy(&[0x6Du8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Du8; 32]).unwrap();
         w.set_tee_enabled(true);
         w.set_trusted_tee_measurement(crate::tee::mock::MOCK_MEASUREMENT);
         let err = w
@@ -2994,7 +3231,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_view_key_bound_to_seed() {
-        let mut w = Wallet::from_entropy(&[0x77u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x77u8; 32]).unwrap();
         let vk = w.ensure_view_key();
         let again = w.ensure_view_key();
         assert_eq!(vk, again);
@@ -3004,7 +3241,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_overspend_rejected() {
-        let mut w = Wallet::from_entropy(&[0x88u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x88u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let (blinding, _, _) = w.prepare_receive_note(50, 0).unwrap();
         let input = w.note_input_from_receive(50, blinding).unwrap();
@@ -3020,5 +3257,100 @@ mod tests {
             .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
+    }
+
+    #[test]
+    fn wallet_refuses_12_word_seed() {
+        let twelve = entropy_to_mnemonic(&[0x33u8; 16]).expect("12-word test phrase");
+        assert_eq!(twelve.split_whitespace().count(), 12);
+        assert!(matches!(
+            Wallet::from_mnemonic(&twelve),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+        assert!(matches!(
+            Wallet::generate(12),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+        assert!(matches!(
+            Wallet::from_entropy(&[0x33u8; 16]),
+            Err(WalletError::InvalidEntropy(16))
+        ));
+        assert!(matches!(
+            WalletV3::from_mnemonic(&twelve, ""),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+    }
+
+    #[test]
+    fn wallet_mnemonic_is_nfkd_normalised() {
+        let canonical = Wallet::from_entropy(&[0u8; 32]).expect("24-word wallet");
+        let compat = canonical
+            .mnemonic()
+            .replacen("abandon", "\u{FF41}Bandon", 4)
+            .replace(' ', "\u{3000}");
+        let restored = Wallet::from_mnemonic(&compat).expect("NFKD mnemonic must restore");
+        assert_eq!(restored.mnemonic(), canonical.mnemonic());
+        assert_eq!(restored.address(), canonical.address());
+
+        let v3_canonical =
+            WalletV3::from_mnemonic(canonical.mnemonic(), "resum\u{00e9}").expect("v3 canonical");
+        let v3_decomposed =
+            WalletV3::from_mnemonic(&compat, "resum\u{0065}\u{0301}").expect("v3 NFKD");
+        assert_eq!(
+            v3_canonical.account(0, 0).unwrap().address,
+            v3_decomposed.account(0, 0).unwrap().address
+        );
+    }
+
+    #[test]
+    fn wallet_refuses_12_word_and_normalizes_nfkd() {
+        wallet_refuses_12_word_seed();
+        wallet_mnemonic_is_nfkd_normalised();
+        assert!(Wallet::from_mnemonic(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn wallet_poseidon_recipient_tag_and_recovery_replay_guards() {
+        // Recipient tag keeps full Goldilocks field width (> u32::MAX), never
+        // truncated to i32.
+        let mut high_addr = [0u8; 32];
+        high_addr[..8].copy_from_slice(&0x0123_4567_89AB_CDEFu64.to_le_bytes());
+        let tag = crate::privacy_crypto::address_to_recipient_tag(&high_addr);
+        assert!(tag > u64::from(u32::MAX));
+
+        // Social recovery proposal binds chain_id and account_nonce so cross-chain
+        // and A-B-A replays are rejected.
+        let owner = Wallet::from_entropy(&[0x71u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[0x72u8; 32]).unwrap();
+        let g1 = Wallet::from_entropy(&[0x73u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[0x74u8; 32]).unwrap();
+        let policy =
+            SocialRecoveryPolicy::new(vec![g1.public_key(), g2.public_key()], 2, 10).unwrap();
+        let prop = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            100,
+            45261,
+            5,
+        )
+        .unwrap();
+        let digest = prop.digest();
+        let approvals = [
+            GuardianApproval {
+                public_key: g1.public_key(),
+                signature: g1.sign_for(RECOVERY_CTX, &digest),
+            },
+            GuardianApproval {
+                public_key: g2.public_key(),
+                signature: g2.sign_for(RECOVERY_CTX, &digest),
+            },
+        ];
+        assert!(prop.is_executable(&policy, &approvals, 110, 45261, 5));
+        assert!(!prop.is_executable(&policy, &approvals, 110, 45260, 5));
+        assert!(!prop.is_executable(&policy, &approvals, 110, 45261, 6));
     }
 }

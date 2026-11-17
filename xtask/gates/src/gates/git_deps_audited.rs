@@ -60,6 +60,45 @@ fn lockfile_revs(root: &Path) -> Result<BTreeSet<String>, String> {
     Ok(out)
 }
 
+/// How many lock files stand under `root`, and how many packages in them
+/// name where they come from.
+///
+/// "No git revision is built" is a statement about lock files that were
+/// read. Without one, or with lock files that name no source at all, the
+/// same empty set comes out of a tree the gate never looked at.
+///
+/// # Errors
+///
+/// An unreadable directory or lock file: a gate that cannot look is not clean.
+fn lockfile_evidence(root: &Path) -> Result<(usize, usize), String> {
+    let (mut files, mut sources) = (0usize, 0usize);
+    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rd =
+            std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+        for e in rd.filter_map(Result::ok) {
+            let Ok(path_kind) = e.file_type() else {
+                continue;
+            };
+            let path = e.path();
+            if path_kind.is_dir() {
+                if e.file_name() != "target" {
+                    stack.push(path);
+                }
+            } else if path.file_name().is_some_and(|n| n == "Cargo.lock") {
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                files += 1;
+                sources += text
+                    .lines()
+                    .filter(|l| l.trim_start().starts_with("source = \""))
+                    .count();
+            }
+        }
+    }
+    Ok((files, sources))
+}
+
 /// Collect `rev = "<40hex>"` from the audit record.
 fn recorded_revs(record: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
@@ -83,7 +122,7 @@ fn recorded_revs(record: &str) -> BTreeSet<String> {
 /// # Errors
 ///
 /// Returns a finding when a built revision is unrecorded, a recorded revision
-/// is unused, or both sets are empty.
+/// is unused, or no lock file with a package source was found to read.
 pub fn run(root: &Path) -> Result<String, String> {
     let record_path = root.join(".github/git-dep-audit.toml");
     if !record_path.is_file() {
@@ -94,9 +133,22 @@ pub fn run(root: &Path) -> Result<String, String> {
     let record = std::fs::read_to_string(&record_path).map_err(|e| e.to_string())?;
     let used = lockfile_revs(root)?;
     let recorded = recorded_revs(&record);
+    // An empty answer is only an answer when something was read. This gate
+    // used to refuse the empty case outright, as vacuous; now that no git
+    // dependency is built, "none" is the expected finding, and what keeps it
+    // from being vacuous is the count of what was looked at.
+    let (files, sources) = lockfile_evidence(root)?;
+    if files == 0 || sources == 0 {
+        return Err(format!(
+            "FAIL: {files} Cargo.lock file(s) naming {sources} package source(s) were found \
+             under {}; the gate looked at nothing and would be vacuous",
+            root.display()
+        ));
+    }
     if used.is_empty() && recorded.is_empty() {
-        return Ok(String::from(
-            "Git-dep audit OK: 0 git revisions built; all dependencies come from crates.io.",
+        return Ok(format!(
+            "Git-dep audit OK: 0 git revisions built; {sources} package source(s) in \
+             {files} lock file(s) all come from a registry."
         ));
     }
     let missing: Vec<&String> = used.difference(&recorded).collect();
@@ -164,9 +216,52 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: an unrecorded rev passed"));
     }
+    // No git dependency at all, which is what the repository builds today:
+    // registry sources and an empty record pass, and say what was read.
+    let registry = "source = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
+    std::fs::write(dir.join("src/Cargo.lock"), registry).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(".github/git-dep-audit.toml"), "# none\n")
+        .map_err(|e| e.to_string())?;
+    match run(&dir) {
+        Ok(found) if found.contains("1 package source(s) in 1 lock file(s)") => {}
+        other => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!(
+                "canary: a tree without git dependencies was not reported as read: {other:?}"
+            ));
+        }
+    }
+    // A branch pin is a git revision too, and the empty record does not cover it.
+    std::fs::write(
+        dir.join("src/Cargo.lock"),
+        format!("{registry}source = \"git+https://x/y?branch=main#{rev2}\"\n"),
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a branch-pinned git source passed an empty record",
+        ));
+    }
+    // A lock file that names no source, and no lock file at all: nothing was
+    // looked at, so "no git revision" is not a finding.
+    std::fs::write(dir.join("src/Cargo.lock"), "version = 4\n").map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a lock file without package sources passed",
+        ));
+    }
+    std::fs::remove_file(dir.join("src/Cargo.lock")).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: a tree without a lock file passed"));
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "git-deps canary OK: a recorded rev PASSes and an unrecorded one FAILs.",
+        "git-deps canary OK: a recorded rev PASSes, an unrecorded or branch-pinned one \
+         FAILs, an all-registry tree PASSes with its counts, and a tree with nothing to \
+         read FAILs.",
     ))
 }
 

@@ -1,3 +1,5 @@
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
 use crate::consensus::pos::SlashingEvidence;
 use crate::core::address::Address;
 
@@ -13,8 +15,8 @@ use crate::core::transaction::{Transaction, TransactionType};
 use crate::cross_domain::message_registry::CrossDomainMessageRegistry;
 use crate::cross_domain::BridgeState;
 use crate::domain::storage_deal::StorageRegistry;
+use crate::persistence::db::Storage;
 use crate::registry::role::{roles, RoleId};
-use crate::storage::db::Storage;
 #[cfg(not(miri))]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -66,11 +68,109 @@ pub struct PendingPoaCompliance {
     pub reason_hash: [u8; 32],
 }
 
+/// Number of attoBUD (`10^-18` BUD) in one native atom (`10^-6` BUD).
+///
+/// Every `Account.frac_attos` stays strictly below this ceiling; reaching it
+/// carries into `Account.balance`.
+pub const ATTOS_PER_ATOM: u64 = 1_000_000_000_000;
+/// Number of attoBUD in one whole BUD (`10^18`).
+pub const ATTOS_PER_BUD: u128 = 1_000_000_000_000_000_000;
+/// Number of attoBUD in one SVM lamport (`10^-9` BUD).
+pub const ATTOS_PER_LAMPORT: u128 = 1_000_000_000;
+/// Number of attoBUD in one Move octa (`10^-8` BUD).
+pub const ATTOS_PER_OCTA: u128 = 10_000_000_000;
+
+/// Environment-specific view and transfer quantum over the single BUD ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BudEnvUnit {
+    /// EVM wei (18 decimals, 1 attoBUD).
+    EvmWei,
+    /// SVM lamport (9 decimals, `10^9` attoBUD).
+    SvmLamport,
+    /// Move octa (8 decimals, `10^10` attoBUD).
+    MoveOcta,
+    /// CosmWasm `ubud` (6 decimals, `10^12` attoBUD = 1 atom).
+    WasmUbud,
+    /// BudZero atom (6 decimals, `10^12` attoBUD = 1 atom).
+    BudZeroAtom,
+}
+
+impl BudEnvUnit {
+    /// Maps a catalog execution environment to its BUD unit rule.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL RPC gateways.
+    #[must_use]
+    pub const fn for_ee(ee: budlum_uel_abi::EeId) -> Option<Self> {
+        match ee {
+            budlum_uel_abi::EeId::BUDZERO => Some(Self::BudZeroAtom),
+            budlum_uel_abi::EeId::EVM
+            | budlum_uel_abi::EeId::CAIRO
+            | budlum_uel_abi::EeId::NEAR_WASM
+            | budlum_uel_abi::EeId::POLKAVM
+            | budlum_uel_abi::EeId::TVM
+            | budlum_uel_abi::EeId::PLUTUS
+            | budlum_uel_abi::EeId::RV32 => Some(Self::EvmWei),
+            budlum_uel_abi::EeId::WASM => Some(Self::WasmUbud),
+            budlum_uel_abi::EeId::SVM | budlum_uel_abi::EeId::MOVE_SUI => Some(Self::SvmLamport),
+            budlum_uel_abi::EeId::MOVE | budlum_uel_abi::EeId::UTXO => Some(Self::MoveOcta),
+            _ => None,
+        }
+    }
+
+    /// Smallest attoBUD amount this environment may transfer.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL unit checks.
+    #[must_use]
+    pub const fn quantum_attos(self) -> u128 {
+        match self {
+            Self::EvmWei => 1,
+            Self::SvmLamport => ATTOS_PER_LAMPORT,
+            Self::MoveOcta => ATTOS_PER_OCTA,
+            Self::WasmUbud | Self::BudZeroAtom => ATTOS_PER_ATOM as u128,
+        }
+    }
+
+    /// Projects an account's exact attoBUD value into the environment's native unit.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL RPC gateways.
+    #[must_use]
+    pub const fn visible_balance(self, balance: u64, frac_attos: u64) -> u128 {
+        let clamped_frac = if frac_attos < ATTOS_PER_ATOM {
+            frac_attos
+        } else {
+            ATTOS_PER_ATOM - 1
+        };
+        let total = (balance as u128) * (ATTOS_PER_ATOM as u128) + (clamped_frac as u128);
+        match self {
+            Self::EvmWei => total,
+            Self::SvmLamport => total / ATTOS_PER_LAMPORT,
+            Self::MoveOcta => total / ATTOS_PER_OCTA,
+            Self::WasmUbud | Self::BudZeroAtom => balance as u128,
+        }
+    }
+
+    /// Checks that `attos` is an exact multiple of this environment's unit quantum.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL transfer doors.
+    pub fn check_transfer_quantum(self, attos: u128) -> Result<(), String> {
+        let q = self.quantum_attos();
+        if !attos.is_multiple_of(q) {
+            return Err(format!(
+                "transfer amount {attos} attoBUD is not divisible by environment quantum {q}"
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub public_key: Address,
     pub balance: u64,
     pub nonce: u64,
+    /// Sub-atom balance in attoBUD (`0 <= frac_attos < 10^12`).
+    #[serde(default)]
+    pub frac_attos: u64,
 }
 /// Stand-in bytes hashed when a state-root input cannot be serialized.
 ///
@@ -80,31 +180,76 @@ pub struct Account {
 const STATE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/account-state";
 
 impl Account {
-    pub fn new(public_key: Address) -> Self {
-        Account {
+    #[must_use]
+    pub const fn new(public_key: Address) -> Self {
+        Self {
             public_key,
             balance: 0,
             nonce: 0,
+            frac_attos: 0,
         }
     }
-    pub fn with_balance(public_key: Address, balance: u64) -> Self {
-        Account {
+    #[must_use]
+    pub const fn with_balance(public_key: Address, balance: u64) -> Self {
+        Self {
             public_key,
             balance,
             nonce: 0,
+            frac_attos: 0,
         }
+    }
+
+    /// Full account value in attoBUD (`balance * 10^12 + frac_attos`).
+    ///
+    /// Refuses an out-of-range `frac_attos` (`>= 10^12`) rather than folding
+    /// corrupt deserialized data into a consensus arithmetic step.
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and economy invariants.
+    pub fn checked_total_attos(&self) -> Result<u128, String> {
+        if self.frac_attos >= ATTOS_PER_ATOM {
+            return Err(format!(
+                "account frac_attos {} exceeds ceiling {}",
+                self.frac_attos, ATTOS_PER_ATOM
+            ));
+        }
+        u128::from(self.balance)
+            .checked_mul(u128::from(ATTOS_PER_ATOM))
+            .and_then(|atoms| atoms.checked_add(u128::from(self.frac_attos)))
+            .ok_or_else(|| String::from("account attoBUD total overflow"))
+    }
+
+    /// Decomposes an attoBUD total into normalized `(balance, frac_attos)`
+    /// with `frac_attos < 10^12`.
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and economy invariants.
+    pub fn set_from_total_attos(&mut self, total_attos: u128) -> Result<(), String> {
+        let q = u128::from(ATTOS_PER_ATOM);
+        let atoms_u128 = total_attos / q;
+        let rem_u128 = total_attos % q;
+        let balance = u64::try_from(atoms_u128)
+            .map_err(|_| String::from("account atom balance overflow from attoBUD total"))?;
+        let frac_attos = u64::try_from(rem_u128)
+            .map_err(|_| String::from("account frac_attos conversion overflow"))?;
+        self.balance = balance;
+        self.frac_attos = frac_attos;
+        Ok(())
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Validator {
     pub address: Address,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub stake: u64,
     pub active: bool,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub slashed: bool,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub jailed: bool,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub jail_until: u64,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub last_proposed_block: Option<u64>,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub votes_for: u64,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub votes_against: u64,
     #[serde(default)]
     pub vrf_public_key: Vec<u8>,
@@ -117,11 +262,13 @@ pub struct Validator {
     /// Mikoriza restaked weight: written only by
     /// `settlement::shared_security::apply_restaked_weights` at the epoch
     /// boundary, already capped. Zero for a validator with no allocation.
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     #[serde(default)]
     pub restaked_weight: u64,
     /// Filiz Chain leader-election commitment: written by the
     /// `RegisterFiliz` door and advanced by each canonical block the
     /// validator produced. `None` until the validator registers a chain.
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     #[serde(default)]
     pub filiz: Option<crate::consensus::filiz::FilizRegistration>,
     /// Multi-role architecture: tracks which roles this validator has bonded for.
@@ -131,6 +278,7 @@ pub struct Validator {
     /// - AI_OPERATOR (RoleId 8): AI inference layer AI compute provider
     ///
     /// Cross-role slashing: slashing any role jails ALL roles.
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     #[serde(default)]
     pub roles: BTreeSet<RoleId>,
 }
@@ -431,8 +579,8 @@ pub struct AccountState {
     /// NOT included in `calculate_state_root` - this is an audit log, not
     /// Consensus state. Overwritten each block (not appended).
     pub fee_distributions: Vec<crate::chain::fee_market::FeeDistribution>,
-    dirty_accounts: HashSet<Address>,
-    keys_dirty: bool,
+    pub(crate) dirty_accounts: HashSet<Address>,
+    pub(crate) keys_dirty: bool,
     cached_leaves: Vec<[u8; 32]>,
     cached_keys: Vec<Address>,
     cached_tree: Vec<Vec<[u8; 32]>>,
@@ -477,6 +625,15 @@ pub struct AccountState {
     /// freeze, travel-rule) in consensus state - rooted and snapshotted
     /// with everything else that decides writes.
     pub poa_compliance: crate::registry::PoaComplianceRegistry,
+    /// The validator directory: class, operator key, quota and the
+    /// bond of every mobile validator. Rooted and snapshotted.
+    pub validator_directory: crate::validators::ValidatorDirectory,
+    /// The B.U.D. 3.0 registry: objects, references, shares and audits.
+    /// Rooted and snapshotted.
+    pub bud3_registry: crate::storage::bud3::registry::Bud3Registry,
+    /// Universal Execution Layer state: per-environment namespaces, alias table,
+    /// asset registry, deploy freeze flags and UEL base fee.
+    pub execution_state: crate::execution::coordinator::state::ExecutionState,
     /// Governance-queued compliance freezes/unfreezes awaiting
     /// application (see [`PendingPoaCompliance`]).
     pub pending_poa_freezes: Vec<PendingPoaCompliance>,
@@ -536,6 +693,16 @@ pub(crate) fn enforce_classical_message_intake(
     Ok(())
 }
 
+/// Who vouches for the sender of a transaction that is being validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxAuthority {
+    /// The transaction carries its own witness; it is verified here.
+    Inline,
+    /// The claim that stands for the witness was checked by the caller: the
+    /// claim frame of the block, or the object behind the claim.
+    ClaimChecked,
+}
+
 impl AccountState {
     pub fn new() -> Self {
         AccountState {
@@ -591,6 +758,9 @@ impl AccountState {
             pending_domain_unfreezes: Vec::new(),
             pending_domain_tip_resets: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            validator_directory: crate::validators::ValidatorDirectory::new(),
+            bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -655,6 +825,9 @@ impl AccountState {
             pending_domain_unfreezes: Vec::new(),
             pending_domain_tip_resets: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            validator_directory: crate::validators::ValidatorDirectory::new(),
+            bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -728,6 +901,9 @@ impl AccountState {
             pending_domain_unfreezes: Vec::new(),
             pending_domain_tip_resets: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            validator_directory: crate::validators::ValidatorDirectory::new(),
+            bud3_registry: crate::storage::bud3::registry::Bud3Registry::default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -765,6 +941,28 @@ impl AccountState {
         };
         let mut tokenomics = snapshot.tokenomics;
         tokenomics.block_reward = snapshot.block_reward;
+        let bridge_state = snapshot.bridge_state.clone().unwrap_or_default();
+        let message_registry = snapshot.message_registry.clone().unwrap_or_default();
+        // Derive bridge/message roots from the restored registries instead of
+        // copying untrusted root fields from the snapshot file: a doctored
+        // snapshot carrying honest roots and forged registry entries then fails
+        // the startup state-root check instead of silently entering consensus.
+        // Pre-block-1 genesis snapshots carry `[0u8; 32]` with empty registries;
+        // any non-empty registry or non-zero snapshot root always derives from
+        // the restored registry contents.
+        let bridge_root = if bridge_state.root()
+            == crate::cross_domain::BridgeState::default().root()
+            && snapshot.bridge_root == [0u8; 32]
+        {
+            [0u8; 32]
+        } else {
+            bridge_state.root()
+        };
+        let message_root = if message_registry.is_empty() && snapshot.message_root == [0u8; 32] {
+            [0u8; 32]
+        } else {
+            message_registry.root()
+        };
 
         AccountState {
             accounts,
@@ -775,13 +973,13 @@ impl AccountState {
             storage_registry: snapshot.storage_registry.clone().unwrap_or_default(),
             ai_registry: snapshot.ai_registry.clone().unwrap_or_default(),
             note_registry: snapshot.note_registry.clone().unwrap_or_default(),
-            bridge_state: snapshot.bridge_state.clone().unwrap_or_default(),
+            bridge_state,
             poa_onboarding: snapshot.poa_onboarding.clone().unwrap_or_default(),
             // Derived, not restored: recomputed from the records above at the
             // next block close. Restoring it would let a doctored snapshot
             // ship an admitted set its own records do not support.
             poa_admitted: BTreeMap::new(),
-            message_registry: snapshot.message_registry.clone().unwrap_or_default(),
+            message_registry,
             team_vesting,
             // A snapshot taken before the flag existed means what that chain
             // did: the network profile's answer. Absent on a testnet snapshot
@@ -796,7 +994,15 @@ impl AccountState {
             current_block_unix_secs: 0,
             current_block_entropy: [0u8; 32],
             last_epoch_time: snapshot.last_epoch_time,
-            bns_registry: snapshot.bns_registry.clone().unwrap_or_default(),
+            bns_registry: {
+                // B13: the expiry index is derived state and serde skips it, so
+                // a registry restored from a snapshot arrives with an empty
+                // index. Rebuilding here is what keeps the reclaim path from
+                // refusing registrations at the ceiling forever.
+                let mut registry = snapshot.bns_registry.clone().unwrap_or_default();
+                registry.rebuild_expiry_index();
+                registry
+            },
             nft_registry: snapshot.nft_registry.clone().unwrap_or_default(),
             identity: snapshot.identity.clone().unwrap_or_default(),
             vault: snapshot.vault.clone().unwrap_or_default(),
@@ -821,8 +1027,8 @@ impl AccountState {
             cached_leaves: Vec::new(),
             cached_keys: Vec::new(),
             cached_tree: Vec::new(),
-            bridge_root: snapshot.bridge_root,
-            message_root: snapshot.message_root,
+            bridge_root,
+            message_root,
             settlement_root: snapshot.settlement_root,
             global_header_summary: snapshot.global_header_summary,
             // Restore permissionless registry + liveness + invalid-vote
@@ -844,6 +1050,9 @@ impl AccountState {
             pending_domain_unfreezes: Vec::new(),
             pending_domain_tip_resets: Vec::new(),
             poa_compliance: snapshot.poa_compliance.clone().unwrap_or_default(),
+            validator_directory: snapshot.validator_directory.clone().unwrap_or_default(),
+            bud3_registry: snapshot.bud3_registry.clone().unwrap_or_default(),
+            execution_state: crate::execution::coordinator::state::ExecutionState::new(),
             burned_total: snapshot.burned_total,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
@@ -1035,6 +1244,16 @@ impl AccountState {
         // refused redelegation leaves no half-moved position behind.
         self.registry
             .move_delegation(*delegator, *from, *to, amount)?;
+        // Trim the source validator's snapshotted governance vote weight on open
+        // proposals down to its remaining aggregate stake, so redelegated stake
+        // cannot stay counted on the source validator while also leaving it.
+        for proposal in &mut self.governance.proposals {
+            if proposal.status == crate::core::governance::ProposalStatus::Active {
+                let snapshot = proposal.vote_weight_of(from);
+                proposal
+                    .reduce_vote_weight(from, snapshot.saturating_sub(snapshot.min(source_stake)));
+            }
+        }
         if let Some(entry) = self.validators.get_mut(from) {
             entry.stake = source_stake;
         }
@@ -1092,6 +1311,20 @@ impl AccountState {
             amount,
             self.epoch_index,
         )?;
+        // Trim snapshotted governance vote weight on open proposals down to the
+        // stake the validator still holds. Delegated stake can arrive after the
+        // vote snapshot and exit again; clamping to `snapshot.min(new_stake)`
+        // ensures a post-vote delegation exit cannot erase vote weight it was
+        // never part of, while pre-vote exits still trim the shortfall.
+        for proposal in &mut self.governance.proposals {
+            if proposal.status == crate::core::governance::ProposalStatus::Active {
+                let snapshot = proposal.vote_weight_of(validator);
+                proposal.reduce_vote_weight(
+                    validator,
+                    snapshot.saturating_sub(snapshot.min(new_stake)),
+                );
+            }
+        }
         if let Some(entry) = self.validators.get_mut(validator) {
             entry.stake = new_stake;
         }
@@ -1158,7 +1391,7 @@ impl AccountState {
                 provided: 0,
             });
         }
-        let balance = self.get_balance(address);
+        let balance = self.spendable_balance(address);
         if balance < amount {
             return Err(RegistryError::InsufficientStake {
                 required: amount,
@@ -1323,7 +1556,7 @@ impl AccountState {
     }
 
     /// Bond `amount` into the STORAGE_OPERATOR role (permissionless).
-    /// Used for B.U.D. operator reward eligibility and `bud_storageActiveOperators`.
+    /// Used for B.U.D. operator reward eligibility and the removed legacy active-operators query.
     pub fn bond_storage_operator(
         &mut self,
         address: &Address,
@@ -1389,12 +1622,12 @@ impl AccountState {
             // `PermissionlessRegistry::withdraw` deletes the registration, and
             // both intent expiry doors skip the liveness slash when `get`
             // returns nothing. Releasing the bond while this account is the
-            // awarded solver of a live Graft intent, or the awarded bidder of
+            // awarded solver of a live AppBinding intent, or the awarded bidder of
             // an unsettled relayer intent, would let it walk away from the
             // penalty for work it was awarded and never honoured.
-            let awarded_graft = self
+            let awarded_app_binding = self
                 .settlement
-                .graft
+                .app_binding
                 .intents
                 .values()
                 .any(|intent| intent.awarded_solver == Some(*address));
@@ -1411,7 +1644,7 @@ impl AccountState {
                                 .intents
                                 .contains_key(intent_id)
                     });
-            if awarded_graft || live_relayer_award {
+            if awarded_app_binding || live_relayer_award {
                 return Err(
                     "a relayer bond backing a live awarded intent cannot be withdrawn".to_string(),
                 );
@@ -1534,6 +1767,13 @@ impl AccountState {
         role: crate::registry::role::RoleId,
         amount: u64,
     ) -> Result<u64, crate::registry::RegistryError> {
+        // STORAGE_OPERATOR (5) and CONTENT_VALIDATOR (9) are reserved ids: the
+        // validator who stores content is the validator .
+        if role == crate::registry::role::roles::STORAGE_OPERATOR
+            || role == crate::registry::role::roles::CONTENT_VALIDATOR
+        {
+            return Err(crate::registry::RegistryError::UnsupportedRole { role });
+        }
         let required = self.registry.params().min_stake;
         let available = self.spendable_balance(address);
         if amount < required || available < amount {
@@ -1554,10 +1794,6 @@ impl AccountState {
             }
             roles::ATTESTER => {
                 self.registry.register_attester(*address, amount, epoch)?;
-            }
-            roles::CONTENT_VALIDATOR => {
-                self.registry
-                    .register_content_validator(*address, amount, epoch)?;
             }
             // DeEd participant roles: permissionless
             // seats at the same floor; the artifact bytes live in B.U.D.
@@ -1603,6 +1839,16 @@ impl AccountState {
             .get(address, roles::AI_OPERATOR)
             .map(|registration| registration.stake)
             .ok_or_else(|| "AI inference layer operator is not registered".to_string())?;
+        if self
+            .spendable_balance(address)
+            .checked_add(stake)
+            .is_none_or(|available| available < fee)
+        {
+            return Err(
+                "AI inference layer withdrawal fee exceeds spendable balance plus matured bond"
+                    .to_string(),
+            );
+        }
         let final_balance = self
             .get_balance(address)
             .checked_add(stake)
@@ -1621,20 +1867,98 @@ impl AccountState {
         Ok(withdrawn)
     }
 
+    /// The effective Full-validator bond floor for `chain_id`.
+    ///
+    /// The permissionless registry parameter is a governance lower bound. A
+    /// network profile may require a larger bond, so every eligibility path
+    /// uses the maximum of both values. Keeping the calculation here prevents
+    /// stake, resume, and duty-lane admission from drifting apart.
+    #[must_use]
+    pub(crate) fn full_validator_stake_floor(&self, chain_id: u64) -> u64 {
+        let registry_floor = self.registry.params().min_stake.max(1);
+        crate::core::chain_config::Network::from_chain_id(chain_id)
+            .map_or(registry_floor, |network| {
+                registry_floor.max(network.min_stake_full())
+            })
+            .max(1)
+    }
+
+    /// The accounts whose duty batches the pool's free lane admits.
+    ///
+    /// The lane is free because a validator's bond stands behind it, so the
+    /// set is the validators that still have one and may still do duty:
+    ///
+    /// - a consensus validator that is active, unslashed and unjailed;
+    /// - a directory record of a seat class (Full) on that same test of its
+    ///   consensus entry, and out when it has none;
+    /// - a directory record of a class without a seat (a phone) while its own
+    ///   bond is above zero and its owner is neither slashed nor jailed.
+    ///
+    /// A record stays in the directory after a penalty, for resume and
+    /// unbonding. Listing every record owner therefore kept a slashed, jailed
+    /// or unbonded owner in the free lane.
+    #[must_use]
+    pub fn duty_lane_signers(&self) -> std::collections::BTreeSet<Address> {
+        self.duty_lane_signers_for_chain(crate::core::transaction::DEFAULT_CHAIN_ID)
+    }
+
+    /// Active validator addresses holding at least their class bond floor on
+    /// `chain_id` and eligible for the zero-fee validator duty lane.
+    #[must_use]
+    pub fn duty_lane_signers_for_chain(
+        &self,
+        chain_id: u64,
+    ) -> std::collections::BTreeSet<Address> {
+        let network = crate::core::chain_config::Network::from_chain_id(chain_id);
+        let registry_floor = self.registry.params().min_stake.max(1);
+        let floor = self.full_validator_stake_floor(chain_id);
+        let mobile_floor = network
+            .map_or_else(|| (registry_floor / 100).max(1), |n| n.min_stake_mobile())
+            .max(1);
+        let mut signers = std::collections::BTreeSet::new();
+        for (address, validator) in &self.validators {
+            if validator.active
+                && !validator.slashed
+                && !validator.jailed
+                && validator.stake >= floor
+            {
+                signers.insert(*address);
+            }
+        }
+        for record in self.validator_directory.iter() {
+            let consensus = self.validators.get(&record.owner);
+            if consensus.is_some_and(|validator| validator.slashed || validator.jailed) {
+                signers.remove(&record.owner);
+                continue;
+            }
+            let admitted = if record.class.holds_seat() {
+                consensus.is_some_and(|validator| validator.active && validator.stake >= floor)
+            } else {
+                record.stake >= mobile_floor
+            };
+            if admitted {
+                signers.insert(record.owner);
+            } else {
+                signers.remove(&record.owner);
+            }
+        }
+        signers
+    }
+
     /// Run one epoch's liveness check on the state-level
-    /// `LivenessTracker`. Returns the canonical `SlashingReport`s produced
-    /// This epoch. `participated` is the set of validators that showed the
-    /// Expected participation; everyone else in `validators` is treated as
-    /// An absentee.
+    /// `LivenessTracker`. Returns the validators newly **suspended** this
+    /// Epoch (V-4: absence suspends, it never slashes). `participated` is
+    /// The set of validators that showed the expected participation;
+    /// Everyone else in `validators` is treated as an absentee.
     pub fn record_liveness_epoch(
         &mut self,
         epoch: u64,
         participated: &std::collections::HashSet<Address>,
-    ) -> Vec<crate::registry::evidence::SlashingReport> {
+    ) -> Vec<Address> {
         let params = *self.registry.params();
-        // Only members the registry still considers active. A slashed or
-        // Jailed validator remains in `self.validators` - that map holds
-        // `jail_until` - while `registry.is_active` has already gone false.
+        // Only validators eligible for new duty. A suspended, slashed or
+        // jailed validator remains in `self.validators` for resume/unbonding,
+        // but cannot accrue further absence for duty it may not perform.
         // Counting it absent accrues downtime for blocks it is barred from
         // Signing (Cosmos SDK #1867). `Blockchain::apply_epoch_close_liveness`
         // Has always filtered this way; the other two paths did not.
@@ -1642,7 +1966,10 @@ impl AccountState {
             .validators
             .keys()
             .filter(|addr| {
-                self.registry
+                self.validators.get(*addr).is_some_and(|validator| {
+                    validator.active && !validator.slashed && !validator.jailed
+                }) && self
+                    .registry
                     .is_active(addr, crate::registry::role::roles::VALIDATOR)
             })
             .copied()
@@ -1772,18 +2099,13 @@ impl AccountState {
         self.dirty_accounts.len()
     }
 
-    pub fn required_governance_proposal_fee(&self, proposer: &Address) -> u64 {
-        self.base_fee.saturating_mul(
-            self.governance
-                .proposal_fee_multiplier(proposer, self.epoch_index),
-        )
-    }
-
-    /// Return the live admission floor for the complete transaction. A transfer
-    /// pays the governed proportional rate; a governance proposal also pays
-    /// the sender's escalating proposal fee. The RPC must quote both rather
-    /// than signing a transaction that the chain immediately rejects.
-    pub(crate) fn required_transaction_fee(&self, tx: &Transaction) -> u64 {
+    /// The smallest fee `tx` can carry and still pass the fee rules of
+    /// [`Self::validate_transaction`]: the flat floor, plus the proportional
+    /// cut on a value transfer, and the escalating proposal fee on a
+    /// governance proposal. `bud_estimateGas` answers with this, so
+    /// the estimate and the admission rule are one function.
+    #[must_use]
+    pub fn required_fee(&self, tx: &Transaction) -> u64 {
         match tx.tx_type {
             TransactionType::Transfer => self
                 .registry
@@ -1796,6 +2118,13 @@ impl AccountState {
         }
     }
 
+    pub fn required_governance_proposal_fee(&self, proposer: &Address) -> u64 {
+        self.base_fee.saturating_mul(
+            self.governance
+                .proposal_fee_multiplier(proposer, self.epoch_index),
+        )
+    }
+
     pub fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
         // The context argument is a spendable balance, so it has to be the
         // vesting-gated one; `get_balance` would let this entry point admit a
@@ -1804,6 +2133,7 @@ impl AccountState {
             tx,
             self.get_nonce(&tx.from),
             self.spendable_balance(&tx.from),
+            TxAuthority::Inline,
         )
     }
 
@@ -1884,15 +2214,36 @@ impl AccountState {
         }
     }
 
+    /// Validate a claimed transaction of a block whose claim frame was
+    /// checked: the frame proves that the signature behind the claim was
+    /// verified, so the transaction carries none. Everything else (nonce,
+    /// balance, fee, type) is checked exactly as for any transaction.
+    ///
+    /// Only a caller that holds that proof may use this: block validation
+    /// after `aggregation::chain::check_block` accepted the block, or the
+    /// object pool after it verified the object of the transaction.
+    pub fn validate_claimed_transaction(&self, tx: &Transaction) -> Result<(), String> {
+        self.validate_transaction_with_context(
+            tx,
+            self.get_nonce(&tx.from),
+            self.spendable_balance(&tx.from),
+            TxAuthority::ClaimChecked,
+        )
+    }
+
     /// Validate a transaction against the account state: nonce, spendable
     /// balance, fee and type. A zero-address sender is only admissible as the
     /// canonical genesis transaction (security audit, HIGH, CWE-306);
     /// any other zero-address transaction fails here.
+    ///
+    /// `authority` says who vouches for the sender: the witness the
+    /// transaction carries, or a claim frame the caller already checked.
     pub fn validate_transaction_with_context(
         &self,
         tx: &Transaction,
         expected_nonce: u64,
         spendable_balance: u64,
+        authority: TxAuthority,
     ) -> Result<(), String> {
         if tx.from == Address::zero() {
             if tx.verify_in(&self.scheme_registry) {
@@ -1952,7 +2303,7 @@ impl AccountState {
                 .registry
                 .params()
                 .required_transfer_fee(tx.amount, self.base_fee),
-            _ => self.required_transaction_fee(tx),
+            _ => self.required_fee(tx),
         };
         if tx.fee < required_fee {
             return Err(format!(
@@ -1960,32 +2311,33 @@ impl AccountState {
                 tx.fee, required_fee, self.base_fee, tx.amount
             ));
         }
-        // Overflow guard (security): reject amount+fee > u64::MAX explicitly
-        // for transaction types that actually debit the signed amount. An
-        // undelegation/withdrawal moves already-locked value and only debits
-        // its fee, so its amount must not be treated as liquid cost.
-        let debits_amount = !matches!(
-            &tx.tx_type,
-            TransactionType::Undelegate { .. }
-                | TransactionType::WithdrawDelegation { .. }
-                | TransactionType::SetValidatorCommission { .. }
-        );
-        if debits_amount && tx.amount.checked_add(tx.fee).is_none() {
-            return Err("Transaction amount + fee overflows u64".into());
-        }
-        let total_cost = if debits_amount {
-            tx.total_cost()
-        } else {
-            tx.fee
-        };
+        // One cost classification for admission, pending-balance projection
+        // and execution. Fee-only doors do not debit their signed amount a
+        // second time; amount-bearing doors reject overflow rather than
+        // charging a saturated estimate.
+        let total_cost = tx
+            .checked_liquid_cost()
+            .ok_or_else(|| "Transaction amount + fee overflows u64".to_string())?;
         if spendable_balance < total_cost {
             return Err(format!(
                 "Insufficient balance: {} < {} (amount: {}, fee: {})",
                 spendable_balance, total_cost, tx.amount, tx.fee
             ));
         }
-        if !tx.verify_in(&self.scheme_registry) {
-            return Err("Invalid signature".into());
+        // A claimed transaction has no signature to verify here; its caller
+        // checked the frame that stands for it. Every other transaction
+        // carries its own authority.
+        match authority {
+            TxAuthority::ClaimChecked => {
+                if !tx.claimed_shape_is_canonical() {
+                    return Err("claimed transaction carries a witness or a wrong id".into());
+                }
+            }
+            TxAuthority::Inline => {
+                if !tx.verify_in(&self.scheme_registry) {
+                    return Err("Invalid signature".into());
+                }
+            }
         }
         self.check_validator_v7_binding(tx)?;
 
@@ -2067,14 +2419,181 @@ impl AccountState {
                     return Err("Validator is not active".into());
                 }
             }
+            TransactionType::BnsCreateOffer => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS create offer requires zero amount and recipient".into());
+                }
+                let req: crate::bns::CreateNameOffer =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS create offer data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&req.name) {
+                    return Err(
+                        "Invalid BNS name: expected <label>.bud with 3..=32 characters".into(),
+                    );
+                }
+                if req.price_atoms == 0 {
+                    return Err("BNS offer price_atoms must be greater than zero".into());
+                }
+                if req.expires_at_epoch <= self.epoch_index {
+                    return Err("BNS offer expires_at_epoch must be in the future".into());
+                }
+                match req.kind {
+                    crate::bns::OfferKind::Primary => {
+                        if !crate::bns::BnsRegistry::is_valid_duration(req.duration)
+                            || self.epoch_index.checked_add(req.duration).is_none()
+                        {
+                            return Err(format!(
+                                "Primary BNS offer duration must be in {}..={} and non-overflowing",
+                                crate::bns::MIN_DURATION,
+                                crate::bns::MAX_DURATION
+                            ));
+                        }
+                        if !self.bns_registry.is_primary_seller(&tx.from) {
+                            if self.bns_registry.is_reserved_name(&req.name) {
+                                return Err(
+                                    "Reserved .bud label can only be listed by a BNS primary seller"
+                                        .into(),
+                                );
+                            }
+                            return Err(
+                                "Only authorized BNS primary sellers can open Primary offers"
+                                    .into(),
+                            );
+                        }
+                        if !self
+                            .bns_registry
+                            .is_available_for_primary(&req.name, self.epoch_index)
+                        {
+                            return Err(
+                                "Name is already live or in grace and cannot be listed as Primary"
+                                    .into(),
+                            );
+                        }
+                    }
+                    crate::bns::OfferKind::Resale => {
+                        if !self.bns_registry.is_live_owned_by(
+                            &req.name,
+                            &tx.from,
+                            self.epoch_index,
+                        ) {
+                            return Err(
+                                "Resale BNS offer requires a live name owned by the seller".into(),
+                            );
+                        }
+                    }
+                }
+            }
+            TransactionType::BnsCancelOffer => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS cancel offer requires zero amount and recipient".into());
+                }
+                let offer_id: u64 = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS cancel offer data: {e}"))?;
+                let offer = self
+                    .marketplace
+                    .get_name_offer(offer_id)
+                    .ok_or_else(|| "BNS offer not found".to_string())?;
+                if !offer.active {
+                    return Err("BNS offer is already closed".into());
+                }
+                if offer.seller != tx.from {
+                    return Err("Only the offer seller can cancel this BNS offer".into());
+                }
+            }
+            TransactionType::BnsBuyName => {
+                if tx.amount == 0 || tx.to != Address::zero() {
+                    return Err(
+                        "BNS buy name requires a positive payment and zero header recipient".into(),
+                    );
+                }
+                let offer_id: u64 = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS buy name data: {e}"))?;
+                let offer = self
+                    .marketplace
+                    .get_name_offer(offer_id)
+                    .ok_or_else(|| "BNS offer not found".to_string())?;
+                if !offer.active || self.epoch_index >= offer.expires_at_epoch {
+                    return Err("BNS offer is inactive or expired".into());
+                }
+                if tx.amount != offer.price_atoms {
+                    return Err(format!(
+                        "BNS buy name requires exact offer payment: {} != {}",
+                        tx.amount, offer.price_atoms
+                    ));
+                }
+                match offer.kind {
+                    crate::bns::OfferKind::Primary => {
+                        if !self
+                            .bns_registry
+                            .is_available_for_primary(&offer.name, self.epoch_index)
+                        {
+                            return Err(
+                                "Primary BNS offer target name is no longer available".into()
+                            );
+                        }
+                        let replacing_same_owner_in_grace =
+                            self.bns_registry.names().get(&offer.name).is_some_and(|r| {
+                                r.owner == tx.from
+                                    && self.epoch_index
+                                        < r.expires_at
+                                            .saturating_add(crate::bns::BnsRegistry::GRACE_PERIOD)
+                            });
+                        if !replacing_same_owner_in_grace
+                            && self
+                                .bns_registry
+                                .active_name_count_for_owner(&tx.from, self.epoch_index)
+                                >= crate::bns::MAX_NAMES_PER_OWNER
+                        {
+                            return Err("Owner name limit exceeded".into());
+                        }
+                    }
+                    crate::bns::OfferKind::Resale => {
+                        if !self.bns_registry.is_live_owned_by(
+                            &offer.name,
+                            &offer.seller,
+                            self.epoch_index,
+                        ) {
+                            return Err(
+                                "Resale BNS offer target name is no longer live or owned by seller"
+                                    .into(),
+                            );
+                        }
+                        if tx.from != offer.seller
+                            && self
+                                .bns_registry
+                                .active_name_count_for_owner(&tx.from, self.epoch_index)
+                                >= crate::bns::MAX_NAMES_PER_OWNER
+                        {
+                            return Err("Owner name limit exceeded".into());
+                        }
+                    }
+                }
+            }
             TransactionType::BnsRenew => {
                 if tx.amount == 0 || tx.to != Address::zero() {
                     return Err("BNS renewal requires a positive payment and zero recipient".into());
                 }
-                let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
+                let (name, duration): (String, u64) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS renewal data: {e}"))?;
-                if duration == 0 {
-                    return Err("BNS renewal duration must be greater than zero".into());
+                if !crate::bns::BnsRegistry::is_valid_duration(duration) {
+                    return Err(format!(
+                        "BNS renewal duration must be in {}..={}",
+                        crate::bns::MIN_DURATION,
+                        crate::bns::MAX_DURATION
+                    ));
                 }
                 let cost = self.bns_registry.calculate_cost(&name, duration);
                 if tx.amount != cost {
@@ -2083,16 +2602,269 @@ impl AccountState {
                         tx.amount, cost
                     ));
                 }
+                if !self
+                    .bns_registry
+                    .is_renewable_by(&name, &tx.from, self.epoch_index)
+                {
+                    return Err(
+                        "BNS renewal requires an active or grace-period name owned by the signer"
+                            .into(),
+                    );
+                }
             }
             TransactionType::BnsTransfer => {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS transfer requires zero amount and recipient".into());
                 }
-                let (_name, new_owner): (String, Address) = bincode::deserialize(&tx.data)
+                let (_name, new_owner): (String, Address) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS transfer data: {e}"))?;
                 if new_owner == Address::zero() {
                     return Err("BNS transfer new owner cannot be the zero address".into());
                 }
+                if new_owner != tx.from
+                    && self
+                        .bns_registry
+                        .active_name_count_for_owner(&new_owner, self.epoch_index)
+                        >= crate::bns::MAX_NAMES_PER_OWNER
+                {
+                    return Err("Owner name limit exceeded".into());
+                }
+            }
+            TransactionType::BnsSetAddress => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS set address requires zero amount and recipient".into());
+                }
+                let (name, target, _domain_id): (String, Option<Address>, Option<u32>) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS set address data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                    return Err("Invalid BNS name".into());
+                }
+                if target == Some(Address::zero()) {
+                    return Err("BNS target address cannot be the zero address".into());
+                }
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&name, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS set address requires a live name owned by the signer".into());
+                }
+            }
+            TransactionType::BnsSetPrimary => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS set primary name requires zero amount and recipient".into());
+                }
+                let primary: Option<String> =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS set primary name data: {e}"))?;
+                if let Some(ref name) = primary {
+                    if !crate::bns::BnsRegistry::is_valid_name(name) {
+                        return Err("Invalid BNS name".into());
+                    }
+                    let Some(record) = self.bns_registry.names().get(name) else {
+                        return Err("BNS primary name not found".into());
+                    };
+                    if record.expires_at <= self.epoch_index {
+                        return Err("BNS primary name is expired".into());
+                    }
+                    if record.owner != tx.from && record.address != Some(tx.from) {
+                        return Err(
+                            "BNS primary name must be owned by or routed to the signer".into()
+                        );
+                    }
+                }
+            }
+            TransactionType::BnsSetRecords => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS set records requires zero amount and recipient".into());
+                }
+                let (name, updates): (String, std::collections::BTreeMap<String, Option<String>>) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS set records data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                    return Err("Invalid BNS name".into());
+                }
+                if updates.is_empty() || updates.len() > crate::bns::MAX_RECORDS_PER_NAME {
+                    return Err("BNS record updates must contain 1..=32 entries".into());
+                }
+                for (k, v) in &updates {
+                    if !crate::bns::BnsRegistry::is_valid_record_key(k) {
+                        return Err(format!("Invalid BNS record key `{k}`"));
+                    }
+                    if let Some(val) = v {
+                        if !crate::bns::BnsRegistry::is_safe_record_value(val) {
+                            return Err(format!("Unsafe or oversized BNS record value for `{k}`"));
+                        }
+                    }
+                }
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&name, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS set records requires a live name owned by the signer".into());
+                }
+            }
+            TransactionType::BnsSetContent => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS set content requires zero amount and recipient".into());
+                }
+                let (name, cref): (
+                    String,
+                    Option<crate::storage::bud3::content_ref::ContentRef>,
+                ) = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS set content data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                    return Err("Invalid BNS name".into());
+                }
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&name, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS set content requires a live name owned by the signer".into());
+                }
+                if let Some(cref) = cref {
+                    let checked = crate::storage::bud3::content_ref::ContentRef::new(
+                        cref.content_id,
+                        cref.object_commitment,
+                        cref.nft_id,
+                    )
+                    .map_err(|e| format!("Invalid B.U.D. 3.0 ContentRef: {e:?}"))?;
+                    let obj = self
+                        .bud3_registry
+                        .object(&checked.object_commitment)
+                        .ok_or_else(|| "Unknown B.U.D. 3.0 object commitment".to_string())?;
+                    if obj.record.content_id != checked.content_id {
+                        return Err(
+                            "BNS ContentRef does not match registered object ContentId".into()
+                        );
+                    }
+                    if checked.content_id.kind
+                        == crate::storage::bud3::content_id::ContentIdKind::Sealed
+                        && checked.nft_id.is_none()
+                    {
+                        return Err("Sealed BNS target requires an NFT binding".into());
+                    }
+                }
+            }
+            TransactionType::BnsRegisterSubdomain => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS register subdomain requires zero amount and recipient".into());
+                }
+                let (parent, sub_label, sub_owner): (String, String, Address) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS subdomain data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&parent)
+                    || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
+                    || sub_owner == Address::zero()
+                {
+                    return Err("Invalid BNS parent name, subdomain label, or target".into());
+                }
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&parent, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS subdomain requires a live parent owned by the signer".into());
+                }
+            }
+            TransactionType::BnsRemoveSubdomain => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS remove subdomain requires zero amount and recipient".into());
+                }
+                let (parent, sub_label): (String, String) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS remove subdomain data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&parent)
+                    || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
+                {
+                    return Err("Invalid BNS parent name or subdomain label".into());
+                }
+                let subs = self
+                    .bns_registry
+                    .list_subdomains(&parent, self.epoch_index)
+                    .ok_or_else(|| "BNS parent name is unknown or expired".to_string())?;
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&parent, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS remove subdomain requires parent owner".into());
+                }
+                if !subs.contains_key(&sub_label) {
+                    return Err("BNS subdomain does not exist".into());
+                }
+            }
+            TransactionType::BnsSetSubdomainContent => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err(
+                        "BNS set subdomain content requires zero amount and recipient".into(),
+                    );
+                }
+                let (parent, sub_label, _content): (
+                    String,
+                    String,
+                    Option<crate::storage::bud3::content_ref::ContentRef>,
+                ) = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS set subdomain content data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&parent)
+                    || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
+                {
+                    return Err("Invalid BNS parent name or subdomain label".into());
+                }
+                let owner = self
+                    .bns_registry
+                    .subdomain_owner(&parent, &sub_label, self.epoch_index)
+                    .ok_or_else(|| "BNS subdomain is unknown or its parent expired".to_string())?;
+                if owner != tx.from {
+                    return Err("BNS set subdomain content requires the subdomain owner".into());
+                }
+            }
+            TransactionType::BnsSetStorage => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS set storage requires zero amount and recipient".into());
+                }
+                let (name, _root, _dom_id): (String, [u8; 32], u32) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS set storage data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                    return Err("Invalid BNS name".into());
+                }
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&name, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS set storage requires a live name owned by the signer".into());
+                }
+            }
+            TransactionType::Validator(ref validator_tx) => {
+                self.check_validator_tx(tx, validator_tx)
+                    .map_err(|error| error.to_string())?;
             }
             TransactionType::RegisterConsensusKeys(ref registration) => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
@@ -2242,13 +3014,9 @@ impl AccountState {
                 }
             }
             TransactionType::PrivateTransferSubmit(_) | TransactionType::PrivacyNoteInsert(_) => {
-                if tx.chain_id
-                    == crate::core::chain_config::Network::Mainnet
-                        .chain_id()
-                        .value()
-                {
+                if !crate::core::chain_config::privacy_transfers_enabled(tx.chain_id) {
                     return Err(
-                        "privacy transfers are disabled on mainnet until full proof verification is wired"
+                        "privacy transfers are disabled on this network until full proof verification is wired"
                             .into(),
                     );
                 }
@@ -2657,6 +3425,360 @@ impl AccountState {
 
     /// Record consensus participation for the epoch that just completed and
     /// ... [doc continues]
+    /// The non-mutating checks of a validator transaction. Admission
+    /// (`validate_transaction`) and the executor both call it, so the two
+    /// cannot disagree about what a refusal is.
+    ///
+    /// # Errors
+    ///
+    /// A [`crate::validators::ValidatorError`] naming the refused rule.
+    pub fn check_validator_tx(
+        &self,
+        tx: &Transaction,
+        vtx: &crate::validators::ValidatorTx,
+    ) -> Result<(), crate::validators::ValidatorError> {
+        use crate::validators::{ValidatorError, ValidatorTx};
+        let refuse = |code: &'static str, message: &str| ValidatorError {
+            code,
+            message: message.to_string(),
+        };
+        vtx.validate_shape()?;
+        if tx.to != Address::zero() || !tx.data.is_empty() {
+            return Err(refuse(
+                "validator_tx_shape",
+                "a validator transaction needs a zero recipient and empty data",
+            ));
+        }
+        let network = crate::core::chain_config::Network::from_chain_id(tx.chain_id);
+        match vtx {
+            ValidatorTx::Register(registration) => {
+                if registration.owner != tx.from {
+                    return Err(refuse(
+                        "validator_owner_not_sender",
+                        "the owner of a registration must be the sender",
+                    ));
+                }
+                let floor = network.map_or(1, |n| n.class_floor(registration.class));
+                if tx.amount < floor {
+                    return Err(refuse(
+                        "validator_stake_below_class_floor",
+                        &format!(
+                            "{:?} validators bond at least {floor}, the transaction bonds {}",
+                            registration.class, tx.amount
+                        ),
+                    ));
+                }
+                if self.validator_directory.get(&tx.from).is_some()
+                    || self.validators.contains_key(&tx.from)
+                {
+                    return Err(refuse(
+                        "validator_already_registered",
+                        "the owner already has a validator record",
+                    ));
+                }
+                if self
+                    .validator_directory
+                    .iter()
+                    .any(|r| r.peer_id == registration.peer_id)
+                    || self
+                        .validator_directory
+                        .operator_key_in_use(&registration.operator_key)
+                {
+                    return Err(refuse(
+                        "validator_peer_or_operator_key_in_use",
+                        "the peer id or the operator key belongs to another validator",
+                    ));
+                }
+                let entry = crate::chain::finality::ValidatorEntry {
+                    address: registration.owner,
+                    stake: 0,
+                    bls_public_key: registration.bls_key.clone(),
+                    pop_signature: registration.bls_pop.clone(),
+                    pq_public_key: Vec::new(),
+                };
+                if !crate::chain::finality::verify_pop(&entry, tx.chain_id) {
+                    return Err(refuse(
+                        "validator_bls_pop_invalid",
+                        "the BLS key or its proof of possession is invalid",
+                    ));
+                }
+                if let Some(seat) = &registration.seat {
+                    Self::check_seat_keys(
+                        &registration.owner,
+                        &registration.bls_key,
+                        &registration.bls_pop,
+                        seat,
+                        tx.chain_id,
+                    )?;
+                }
+            }
+            ValidatorTx::ChangeClass { new_class, seat } => {
+                if tx.amount != 0 {
+                    return Err(refuse(
+                        "validator_tx_shape",
+                        "this validator transaction moves no value",
+                    ));
+                }
+                let Some(record) = self.validator_directory.get(&tx.from) else {
+                    return Err(refuse(
+                        "validator_not_registered",
+                        "only the owner account of a validator may send this",
+                    ));
+                };
+                if new_class.holds_seat() {
+                    if self.validators.contains_key(&tx.from) {
+                        return Err(refuse(
+                            "validator_already_registered",
+                            "the owner is already in the consensus set",
+                        ));
+                    }
+                    if let Some(seat) = seat {
+                        Self::check_seat_keys(
+                            &tx.from,
+                            &record.bls_key,
+                            &record.bls_pop,
+                            seat,
+                            tx.chain_id,
+                        )?;
+                    }
+                }
+            }
+            ValidatorTx::RotateOperatorKey { new_operator_key } => {
+                if tx.amount != 0 {
+                    return Err(refuse(
+                        "validator_tx_shape",
+                        "this validator transaction moves no value",
+                    ));
+                }
+                if self.validator_directory.get(&tx.from).is_none() {
+                    return Err(refuse(
+                        "validator_not_registered",
+                        "only the owner account of a validator may send this",
+                    ));
+                }
+                if self
+                    .validator_directory
+                    .operator_key_in_use(new_operator_key)
+                {
+                    return Err(refuse(
+                        "validator_peer_or_operator_key_in_use",
+                        "the operator key belongs to a validator already",
+                    ));
+                }
+            }
+            ValidatorTx::Resume => {
+                if tx.amount != 0 {
+                    return Err(refuse(
+                        "validator_tx_shape",
+                        "this validator transaction moves no value",
+                    ));
+                }
+                if self.validator_directory.get(&tx.from).is_none() {
+                    return Err(refuse(
+                        "validator_not_registered",
+                        "only the owner account of a validator may send this",
+                    ));
+                }
+                if !self.liveness.is_suspended(&tx.from) {
+                    return Err(refuse(
+                        "validator_not_suspended",
+                        "only a suspended validator may request resume",
+                    ));
+                }
+            }
+            ValidatorTx::UpdateCustodyQuota {
+                owner,
+                new_quota_bytes,
+                seq,
+                operator_signature,
+            } => {
+                if tx.amount != 0 {
+                    return Err(refuse(
+                        "validator_tx_shape",
+                        "this validator transaction moves no value",
+                    ));
+                }
+                let record = self.validator_directory.get(owner).ok_or_else(|| {
+                    refuse(
+                        "validator_not_registered",
+                        "the owner has no validator record",
+                    )
+                })?;
+                if record.pending_operator_key.is_some() {
+                    return Err(refuse(
+                        "validator_rotation_pending",
+                        "quota updates are frozen while an operator key rotation is pending",
+                    ));
+                }
+                let message = crate::validators::quota_update_message(
+                    tx.chain_id,
+                    owner,
+                    *new_quota_bytes,
+                    *seq,
+                );
+                crate::crypto::pq::verify_in(
+                    &self.scheme_registry,
+                    crate::crypto::scheme::SchemeId::ML_DSA_65,
+                    &record.operator_key,
+                    &message,
+                    crate::crypto::ctx::VALIDATOR_V1,
+                    operator_signature,
+                )
+                .map_err(|_| {
+                    refuse(
+                        "validator_operator_signature_invalid",
+                        "the operator signature does not verify under the operator key",
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_seat_keys(
+        owner: &Address,
+        bls_key: &[u8],
+        bls_pop: &[u8],
+        seat: &crate::validators::SeatFields,
+        chain_id: u64,
+    ) -> Result<(), crate::validators::ValidatorError> {
+        crate::core::transaction::ConsensusKeyRegistration {
+            scheme_id: crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
+            vrf_public_key: seat.vrf_key.clone(),
+            bls_public_key: bls_key.to_vec(),
+            pop_signature: bls_pop.to_vec(),
+            pq_public_key: seat.pq_vote_key.clone(),
+        }
+        .validate(*owner, chain_id)
+        .map_err(|message| crate::validators::ValidatorError {
+            code: "validator_seat_keys_invalid",
+            message,
+        })
+    }
+
+    /// Put a Full validator into the consensus set: keys, stake, readiness and
+    /// the leader commitment. The caller has already moved `stake` out of the
+    /// balance (registration) or out of the directory record (class change).
+    ///
+    /// # Errors
+    ///
+    /// A message when the seat keys fail, the leader commitment is refused, or
+    /// the owner is already in the consensus set.
+    pub fn install_full_validator(
+        &mut self,
+        owner: Address,
+        stake: u64,
+        bls_key: &[u8],
+        bls_pop: &[u8],
+        seat: &crate::validators::SeatFields,
+        chain_id: u64,
+    ) -> Result<(), String> {
+        if self.validators.contains_key(&owner) {
+            return Err("the owner is already in the consensus set".into());
+        }
+        Self::check_seat_keys(&owner, bls_key, bls_pop, seat, chain_id).map_err(|e| e.message)?;
+        let epoch = self.epoch_index;
+        if epoch.checked_add(1).is_none()
+            || seat.leader_commitment.length == 0
+            || seat.leader_commitment.length > 100_000
+        {
+            return Err("leader commitment epoch or chain length out of range".into());
+        }
+        let mut leader_reg = crate::consensus::filiz::FilizRegistration::default();
+        leader_reg
+            .register(
+                owner.0,
+                seat.leader_commitment.commitment,
+                seat.leader_commitment.length,
+                epoch,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        let floor = crate::core::chain_config::Network::from_chain_id(chain_id)
+            .map_or(1, |n| n.min_stake_full());
+        self.add_validator_with_floor(owner, stake, floor);
+        let validator = self
+            .validators
+            .get_mut(&owner)
+            .ok_or_else(|| "the validator was not created".to_string())?;
+        validator.vrf_public_key = seat.vrf_key.clone();
+        validator.bls_public_key = bls_key.to_vec();
+        validator.pop_signature = bls_pop.to_vec();
+        validator.pq_public_key = seat.pq_vote_key.clone();
+        validator.active = validator.stake >= floor
+            && validator.is_consensus_ready()
+            && validator.verify_pop_is_valid(chain_id)
+            && !validator.jailed;
+        validator.filiz = Some(leader_reg);
+        self.sync_validator_registration_with_floor(&owner, floor);
+        self.keys_dirty = true;
+        Ok(())
+    }
+
+    /// The B.U.D. 3.0 epoch step, at the epoch boundary after the index
+    /// moved: expire unpaid objects, close the audit windows that ended,
+    /// settle repairs whose new shares all hold, then draw this epoch's
+    /// audits. The audit seed binds the block entropy and the epoch, so no
+    /// holder knows its audit before the epoch opens.
+    fn advance_bud3_epoch(&mut self) {
+        let epoch = self.epoch_index;
+        let registry = &mut self.bud3_registry;
+        if registry.is_empty() {
+            return;
+        }
+        registry.expire(epoch);
+        registry.close_windows(epoch);
+        registry.retire_unacknowledged_repairs(epoch);
+        registry.settle_repairs();
+        let seed = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_BUD3_AUDIT_SEED_V1",
+            &self.current_block_entropy,
+            &epoch.to_le_bytes(),
+        ]);
+        registry.open_audits(
+            &seed,
+            epoch,
+            &crate::storage::bud3::registry::AuditParams::TESTNET_DEFAULT,
+        );
+    }
+
+    /// Carry out the validator directory changes whose epoch has come. Called
+    /// at the epoch boundary, after the epoch index moved.
+    fn activate_validator_changes(&mut self, chain_id: u64) {
+        let due = self.validator_directory.activate_due(self.epoch_index);
+        let network = crate::core::chain_config::Network::from_chain_id(chain_id);
+        for (owner, class, seat) in due {
+            if !class.holds_seat() {
+                self.validator_directory
+                    .finish_class_change(&owner, class, 0);
+                continue;
+            }
+            let (Some(seat), Some(record)) = (seat, self.validator_directory.get(&owner).cloned())
+            else {
+                continue;
+            };
+            let floor = network.map_or(1, |n| n.class_floor(class));
+            if record.stake < floor {
+                tracing::warn!(owner = %owner, "class change to Full dropped: the bond is below the Full floor");
+                continue;
+            }
+            match self.install_full_validator(
+                owner,
+                record.stake,
+                &record.bls_key,
+                &record.bls_pop,
+                &seat,
+                chain_id,
+            ) {
+                Ok(()) => self
+                    .validator_directory
+                    .finish_class_change(&owner, class, record.stake),
+                Err(error) => {
+                    tracing::warn!(owner = %owner, %error, "class change to Full dropped");
+                }
+            }
+        }
+    }
+
     pub fn advance_epoch(&mut self, current_timestamp: u128, chain_id: u64) {
         let total_stake = self.get_total_stake();
         let quorum_pct = 33; // 33% stake required for quorum
@@ -2690,6 +3812,37 @@ impl AccountState {
 
         self.process_unbonding();
 
+        // Validator directory changes requested an epoch ago take effect here.
+        self.activate_validator_changes(chain_id);
+        self.advance_bud3_epoch();
+
+        // B13: drop the names whose grace window closed at or before this
+        // epoch, before anything below reads the registry. The epoch boundary
+        // is the one point every node reaches with the same epoch value, so the
+        // deletion is as deterministic as the index it walks; doing it lazily
+        // when the registry happened to be full would make the state root
+        // depend on which unrelated registration arrived first.
+        let pruned = self.bns_registry.prune_expired(self.epoch_index);
+        if pruned > 0 {
+            tracing::info!(
+                "BNS expiry index pruned {pruned} names at epoch {}",
+                self.epoch_index
+            );
+        }
+
+        // ResumeValidator requests whose epoch has come lift the suspension
+        // (section 7.8.7); the validator re-enters the active set only if it
+        // still carries at least the registry and network minimum stake floor.
+        // Absence itself never slashed (V-4).
+        let resume_floor = self.full_validator_stake_floor(chain_id);
+        for resumed in self.liveness.activate_due_resumes(self.epoch_index) {
+            if let Some(v) = self.validators.get_mut(&resumed) {
+                if !v.slashed && !v.jailed && v.stake >= resume_floor {
+                    v.active = true;
+                }
+            }
+        }
+
         // Mikoriza weights move only here, at the boundary.
         let shared_security = crate::core::chain_config::shared_security_for_chain_id(chain_id);
         crate::settlement::shared_security::apply_restaked_weights(self, &shared_security);
@@ -2702,14 +3855,50 @@ impl AccountState {
         // credit, because this is the deterministic account-state transition
         // every node runs at the same epoch boundary. A creator can also use
         // the RefundExpired settlement door between boundaries.
-        let expired_refunds = self.proof_market.refund_expired_tasks(self.epoch_index);
-        for (creator, amount) in &expired_refunds {
-            self.add_balance(creator, *amount);
+        // Credit only refunds that fit in the creator account. Defensive
+        // replay of restored state must not assume the supply-cap invariant is
+        // intact: saturating a full account after removing the task would
+        // silently destroy the reserved reward. Any refund that cannot fit
+        // remains active for `close_epoch`
+        // below, whose checked pruning moves it into withdrawable market
+        // escrow instead. If neither destination can represent the value, the
+        // task remains rooted rather than losing funds.
+        let expired_task_ids: Vec<[u8; 32]> = self
+            .proof_market
+            .active_tasks
+            .iter()
+            .filter(|task| task.is_active() && task.deadline_epoch < self.epoch_index)
+            .map(|task| task.task_id)
+            .collect();
+        for task_id in expired_task_ids {
+            let Some((creator, reward)) = self
+                .proof_market
+                .active_tasks
+                .iter()
+                .find(|task| task.task_id == task_id)
+                .map(|task| (task.creator, task.reward))
+            else {
+                continue;
+            };
+            if self.get_balance(&creator).checked_add(reward).is_none() {
+                continue;
+            }
+            if let Ok((rooted_creator, refunded)) =
+                self.proof_market.refund_expired(task_id, self.epoch_index)
+            {
+                debug_assert_eq!(rooted_creator, creator);
+                debug_assert_eq!(refunded, reward);
+                // The checked preflight above and this single-threaded state
+                // transition make the saturating branch unreachable.
+                self.add_balance(&rooted_creator, refunded);
+            }
         }
         // Swept before the timed burn below so an epoch that both expires
         // tasks and burns reserve leaves the market consistent with the root
         // taken at the end of this function.
         let (expired, receipts_pruned) = self.proof_market.close_epoch(self.epoch_index);
+        self.execution_state
+            .prune_expired_pending_evm_migrations(self.epoch_index);
         if expired > 0 || receipts_pruned > 0 {
             tracing::info!(
                 epoch = self.epoch_index,
@@ -2774,7 +3963,7 @@ impl AccountState {
         }
     }
 
-    fn execute_proposal(&mut self, proposal: &crate::core::governance::Proposal) {
+    pub(crate) fn execute_proposal(&mut self, proposal: &crate::core::governance::Proposal) {
         use crate::core::governance::ProposalType;
         match &proposal.p_type {
             ProposalType::ChangeBaseFee(new_fee) => {
@@ -2857,36 +4046,39 @@ impl AccountState {
                     );
                 } else {
                     self.governance.consumed_slash_evidence.insert(slash_digest);
+                    let committed_before = self.total_bud_committed();
                     if let Some(v) = self.validators.get_mut(address) {
+                        let stake_before = v.stake;
                         v.slashed = true;
                         v.active = false;
                         v.jailed = true;
                         v.jail_until = self.epoch_index.saturating_add(7);
                         let slashed_active = v.stake.min(matched_remaining_stake);
                         v.stake = v.stake.saturating_sub(slashed_active);
-                        let mut destroyed = u128::from(slashed_active);
-                        // A full governance slash also takes the stake that is
-                        // still waiting to unbond. Otherwise unstake before the
-                        // vote would keep it whole.
-                        destroyed += self
-                            .unbonding_queue
-                            .iter()
-                            .filter(|entry| entry.address == *address)
-                            .map(|entry| u128::from(entry.amount))
-                            .sum::<u128>();
                         self.unbonding_queue
                             .retain(|entry| entry.address != *address);
-                        // The destroyed stake was issued once. Counting it as
-                        // burned keeps it from reopening mint headroom.
-                        self.record_destroyed(destroyed);
-                        // Same tally rule as the report path: the stake this arm
-                        // just removed from the eligible set has to leave the
-                        // numerator too, or a vote cast before the slash keeps
-                        // weighing against a denominator it is no longer part of.
-                        for proposal in self.governance.proposals.iter_mut() {
-                            if proposal.status == crate::core::governance::ProposalStatus::Active {
-                                proposal.reduce_vote_weight(address, u64::MAX);
-                            }
+                        let _ = self.registry.slash(
+                            *address,
+                            crate::registry::role::roles::VALIDATOR,
+                            crate::registry::permissionless::SlashingCondition::DoubleSign,
+                            crate::core::chain_config::FIXED_POINT_SCALE,
+                        );
+                        self.registry.reduce_delegated_for_slash(
+                            address,
+                            stake_before,
+                            slashed_active,
+                        );
+                        let _ = self.registry.slash_delegation_unbonding(
+                            address,
+                            crate::core::chain_config::FIXED_POINT_SCALE,
+                        );
+                    }
+                    // Measure exact drop across validator stake, unbonding queue,
+                    // and delegation records so burned supply is booked once.
+                    self.record_destroyed_since(committed_before);
+                    for proposal in self.governance.proposals.iter_mut() {
+                        if proposal.status == crate::core::governance::ProposalStatus::Active {
+                            proposal.reduce_vote_weight(address, u64::MAX);
                         }
                         tracing::info!(
                             "Executing Governance: Slashed validator {address} (evidence-verified)"
@@ -3081,6 +4273,26 @@ impl AccountState {
                     "Executing Governance: ResetConsensusDomainTip {domain_id} queued for Blockchain registry"
                 );
             }
+            ProposalType::BnsSetPrimarySellers { sellers } => {
+                match self
+                    .bns_registry
+                    .set_primary_sellers(sellers.iter().copied())
+                {
+                    Ok(()) => tracing::info!(
+                        "Executing Governance: BNS primary sellers updated ({} entries)",
+                        sellers.len()
+                    ),
+                    Err(e) => tracing::warn!("Rejecting BnsSetPrimarySellers: {e}"),
+                }
+            }
+            ProposalType::BnsSetBaseCost { base_cost } => {
+                match self.bns_registry.set_base_cost(*base_cost) {
+                    Ok(()) => {
+                        tracing::info!("Executing Governance: BNS base cost updated to {base_cost}")
+                    }
+                    Err(e) => tracing::warn!("Rejecting BnsSetBaseCost: {e}"),
+                }
+            }
         }
     }
 
@@ -3103,6 +4315,7 @@ impl AccountState {
                     .poa_compliance
                     .freeze_suspicious(
                         crate::registry::ComplianceDomainKind::PoA,
+                        req.domain_id,
                         req.admin,
                         req.target,
                         req.reason_hash,
@@ -3122,6 +4335,7 @@ impl AccountState {
                     .poa_compliance
                     .unfreeze(
                         crate::registry::ComplianceDomainKind::PoA,
+                        req.domain_id,
                         req.admin,
                         req.target,
                         req.reason_hash,
@@ -3370,15 +4584,183 @@ impl AccountState {
         balance
     }
 
-    /// Total $BUD in liquid account balances.
+    /// Total $BUD in liquid account balances, rounded up across fractional
+    /// attoBUD sub-units so splitting an atom across accounts never reopens
+    /// false minting headroom.
     ///
     /// Validator stake and unbonding entries are bonded separately and are not
     /// Part of `accounts`, so supply-cap checks must use [`Self::total_bud_committed`]
     /// Instead of this helper alone.
     pub fn circulating_supply(&self) -> u128 {
-        self.accounts
-            .values()
-            .fold(0u128, |acc, a| acc + u128::from(a.balance))
+        let attos = self.circulating_supply_attos();
+        let q = u128::from(ATTOS_PER_ATOM);
+        if attos == 0 {
+            0
+        } else {
+            attos.saturating_add(q - 1) / q
+        }
+    }
+
+    /// Exact liquid supply in attoBUD: `sum(balance * 10^12 + frac_attos)`.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and economy invariants.
+    #[must_use]
+    pub fn circulating_supply_attos(&self) -> u128 {
+        let q = u128::from(ATTOS_PER_ATOM);
+        self.accounts.values().fold(0u128, |acc, a| {
+            let item = u128::from(a.balance)
+                .saturating_mul(q)
+                .saturating_add(u128::from(a.frac_attos));
+            acc.saturating_add(item)
+        })
+    }
+
+    /// Exact total committed supply in attoBUD across liquid accounts and all
+    /// bonded/escrowed atom pools.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and economy invariants.
+    #[must_use]
+    pub fn total_bud_committed_attos(&self) -> u128 {
+        let q = u128::from(ATTOS_PER_ATOM);
+        self.circulating_supply_attos()
+            .saturating_add(self.non_liquid_committed_atoms().saturating_mul(q))
+    }
+
+    /// Exact attoBUD balance of `address` (`balance * 10^12 + frac_attos`).
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL `HostRead`.
+    #[must_use]
+    pub fn get_attos_balance(&self, address: &Address) -> u128 {
+        self.accounts.get(address).map_or(0, |a| {
+            u128::from(a.balance)
+                .saturating_mul(u128::from(ATTOS_PER_ATOM))
+                .saturating_add(u128::from(a.frac_attos))
+        })
+    }
+
+    /// Spendable attoBUD balance of `address`, respecting burn-reserve freeze
+    /// and team vesting locks.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL `HostApi`.
+    #[must_use]
+    pub fn spendable_attos(&self, address: &Address) -> u128 {
+        if self.burn_reserve_address == Some(*address) {
+            return 0;
+        }
+        let Some(acct) = self.accounts.get(address) else {
+            return 0;
+        };
+        let spendable_atoms = self.spendable_balance(address);
+        let frac = if spendable_atoms == acct.balance {
+            acct.frac_attos
+        } else {
+            // If `spendable_balance` is capped below `acct.balance`, locked
+            // atoms sit below the spendable ceiling and all `frac_attos` are
+            // above the locked atom floor too.
+            acct.frac_attos
+        };
+        if spendable_atoms == 0 && acct.balance > 0 {
+            // Every whole atom is locked by vesting; sub-atom dust above the
+            // locked floor is spendable only if `acct.balance >= locked`.
+            let locked = self
+                .team_vesting
+                .as_ref()
+                .filter(|(team, _)| team == address)
+                .map_or(0, |(_, schedule)| schedule.locked_at(self.epoch_index));
+            if acct.balance < locked {
+                return 0;
+            }
+        }
+        u128::from(spendable_atoms)
+            .saturating_mul(u128::from(ATTOS_PER_ATOM))
+            .saturating_add(u128::from(frac))
+    }
+
+    /// Atomically transfers `attos` attoBUD from `from` to `to` under `unit`'s
+    /// divisibility rule, preserving `0 <= frac_attos < 10^12` and exact supply
+    /// conservation without creating or destroying a single attoBUD.
+    ///
+    /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL `HostApi`.
+    pub fn transfer_attos_in_unit(
+        &mut self,
+        from: &Address,
+        to: &Address,
+        attos: u128,
+        unit: BudEnvUnit,
+    ) -> Result<(), String> {
+        unit.check_transfer_quantum(attos)?;
+        if attos == 0 || from == to {
+            let avail = self.spendable_attos(from);
+            if avail < attos {
+                return Err(format!(
+                    "insufficient spendable attoBUD: have {avail}, need {attos}"
+                ));
+            }
+            return Ok(());
+        }
+        let spendable = self.spendable_attos(from);
+        if spendable < attos {
+            return Err(format!(
+                "insufficient spendable attoBUD: have {spendable}, need {attos}"
+            ));
+        }
+        let sender_total = self
+            .accounts
+            .get(from)
+            .ok_or_else(|| String::from("sender account does not exist"))?
+            .checked_total_attos()?;
+        let new_sender_total = sender_total
+            .checked_sub(attos)
+            .ok_or_else(|| String::from("sender attoBUD underflow"))?;
+        let recipient_existed = self.accounts.contains_key(to);
+        let recipient_total = match self.accounts.get(to) {
+            Some(acct) => acct.checked_total_attos()?,
+            None => 0,
+        };
+        let new_recipient_total = recipient_total
+            .checked_add(attos)
+            .ok_or_else(|| String::from("recipient attoBUD overflow"))?;
+
+        // Validate both normalized endpoints before mutating either account.
+        let mut updated_sender = self
+            .accounts
+            .get(from)
+            .cloned()
+            .ok_or_else(|| String::from("sender account missing"))?;
+        updated_sender.set_from_total_attos(new_sender_total)?;
+
+        let mut updated_recipient = self
+            .accounts
+            .get(to)
+            .cloned()
+            .unwrap_or_else(|| Account::new(*to));
+        updated_recipient.set_from_total_attos(new_recipient_total)?;
+
+        self.accounts.insert(*from, updated_sender);
+        self.dirty_accounts.insert(*from);
+        self.accounts.insert(*to, updated_recipient);
+        self.dirty_accounts.insert(*to);
+        if !recipient_existed {
+            self.keys_dirty = true;
+        }
+        Ok(())
+    }
+
+    /// Executes a batch of UEL transactions against this `AccountState` through
+    /// `coordinator`, committing the resulting `ExecutionState` and fee splits.
+    ///
+    /// exposed for: block execution ( slice 2/2).
+    pub fn execute_uel_block(
+        &mut self,
+        coordinator: &mut crate::execution::coordinator::ExecutionCoordinator,
+        ctx: budlum_uel_abi::BlockContext,
+        proposer: Address,
+        txs: &[crate::execution::coordinator::UelTx],
+    ) -> Result<
+        Vec<crate::execution::coordinator::UelReceipt>,
+        crate::execution::coordinator::CoordinatorError,
+    > {
+        coordinator.execute_block(self, ctx, proposer, txs)
     }
 
     /// Total $BUD locked in validator stake, including inactive/jailed validators.
@@ -3413,19 +4795,33 @@ impl AccountState {
     /// Validator unbonding entries, and independently debited role bonds such as
     /// AI_OPERATOR. Excluding role bonds would make a bond look like a supply
     /// Burn and reopen false minting headroom. Delegation exits, proof-market
-    /// escrow, relayer-intent escrow and Graft intent escrow are counted for the
+    /// escrow, relayer-intent escrow and AppBinding intent escrow are counted for the
     /// same reason.
+    fn non_liquid_committed_atoms(&self) -> u128 {
+        let total = self
+            .total_staked_supply()
+            .checked_add(self.total_unbonding_supply())
+            .and_then(|v| v.checked_add(self.total_registry_role_bonded_supply()))
+            .and_then(|v| v.checked_add(self.registry.total_delegation_unbonding_supply()))
+            .and_then(|v| v.checked_add(self.total_external_bonded_supply()))
+            .and_then(|v| v.checked_add(self.proof_market.total_locked_supply()))
+            .and_then(|v| v.checked_add(self.settlement.relayer_policy.total_escrowed_supply()))
+            .and_then(|v| v.checked_add(self.settlement.app_binding.total_escrowed_supply()))
+            .and_then(|v| v.checked_add(self.total_storage_escrowed_supply()));
+        match total {
+            Some(total) => total,
+            None => panic!("committed supply arithmetic overflowed u128"),
+        }
+    }
+
     pub fn total_bud_committed(&self) -> u128 {
-        self.circulating_supply()
-            .saturating_add(self.total_staked_supply())
-            .saturating_add(self.total_unbonding_supply())
-            .saturating_add(self.total_registry_role_bonded_supply())
-            .saturating_add(self.registry.total_delegation_unbonding_supply())
-            .saturating_add(self.total_external_bonded_supply())
-            .saturating_add(self.proof_market.total_locked_supply())
-            .saturating_add(self.settlement.relayer_policy.total_escrowed_supply())
-            .saturating_add(self.settlement.graft.total_escrowed_supply())
-            .saturating_add(self.total_storage_escrowed_supply())
+        match self
+            .circulating_supply()
+            .checked_add(self.non_liquid_committed_atoms())
+        {
+            Some(total) => total,
+            None => panic!("total committed supply overflowed u128"),
+        }
     }
 
     /// Total $BUD held in storage-deal escrow: the operator bond and the part
@@ -3505,10 +4901,14 @@ impl AccountState {
         if amount == 0 {
             return Err("a zero bond escrows nothing".to_string());
         }
+        // The spendable balance gates the bond: the locked part of a vesting
+        // account is not collateral. The raw balance is what the
+        // debit below reads.
         let balance = self.get_balance(poster);
-        if balance < amount {
+        let spendable = self.spendable_balance(poster);
+        if spendable < amount {
             return Err(format!(
-                "bond of {amount} exceeds the poster's balance of {balance}"
+                "bond of {amount} exceeds the poster's spendable balance of {spendable}"
             ));
         }
         let account = self.get_or_create(poster);
@@ -3571,10 +4971,15 @@ impl AccountState {
                 "slash of {taken} exceeds the {held} escrowed for this prover"
             ));
         }
-        // Credit before debiting the escrow: the credit is the only
-        // fallible step left, and taking the escrow first would leave the
-        // penalty nowhere if it refused.
+        // Check every arithmetic boundary before moving value. A candidate
+        // rollback is not an excuse for a transient partial slash inside this
+        // operation, and clamping the burn counter would reopen mint headroom.
+        let burned = taken - reward;
+        let next_burned = self.checked_burned_total(burned);
         if reward > 0 {
+            self.get_balance(challenger)
+                .checked_add(reward)
+                .ok_or_else(|| "the challenger reward would overflow its balance".to_string())?;
             self.try_add_balance(challenger, reward)?;
         }
         if held == taken {
@@ -3585,19 +4990,31 @@ impl AccountState {
         // The remainder is destroyed, and destroyed supply is recorded:
         // leaving it out of `burned_total` would reopen the same amount
         // as minting headroom under the cap.
-        let burned = taken - reward;
-        self.burned_total = self.burned_total.saturating_add(burned);
+        self.burned_total = next_burned;
         Ok(burned)
+    }
+
+    /// The exact next destroyed-supply counter, or a deterministic refusal
+    /// before any value movement. Saturating would record less destruction
+    /// than occurred and reopen issuance headroom.
+    fn checked_burned_total(&self, amount: u64) -> u64 {
+        match self.burned_total.checked_add(amount) {
+            Some(total) => total,
+            None => panic!("burned-supply counter overflowed u64"),
+        }
     }
 
     /// Records destroyed BUD in `burned_total`. BUD was issued once;
     /// supply that leaves committed state without entering this counter
     /// would reopen the same amount as mint headroom under the cap. The
-    /// counter saturates rather than wraps: an overstated burn only closes
-    /// headroom, it never opens it.
+    /// counter is checked: corrupt arithmetic halts loudly rather than
+    /// wrapping or silently clamping the supply ledger.
     pub fn record_destroyed(&mut self, amount: u128) {
-        let total = u128::from(self.burned_total).saturating_add(amount);
-        self.burned_total = u64::try_from(total).unwrap_or(u64::MAX);
+        let amount = match u64::try_from(amount) {
+            Ok(amount) => amount,
+            Err(_) => panic!("burned-supply debit overflowed u64"),
+        };
+        self.burned_total = self.checked_burned_total(amount);
     }
 
     /// Records the drop in committed supply since `committed_before` as
@@ -3649,8 +5066,10 @@ impl AccountState {
         if amount == 0 {
             return 0;
         }
-        let account = self.get_or_create(address);
-        let burned = amount.min(account.balance);
+        // Compute the clip and counter boundary before taking a mutable account
+        // borrow or moving value.
+        let burned = amount.min(self.get_balance(address));
+        let next_burned = self.checked_burned_total(burned);
         // Warn when burn is clipped - indicates a potential
         // Accounting error upstream (caller expected to burn more than available).
         if burned < amount {
@@ -3662,8 +5081,9 @@ impl AccountState {
                 amount - burned,
             );
         }
+        let account = self.get_or_create(address);
         account.balance -= burned;
-        self.burned_total = self.burned_total.saturating_add(burned);
+        self.burned_total = next_burned;
         self.dirty_accounts.insert(*address);
         burned
     }
@@ -3707,14 +5127,27 @@ impl AccountState {
         // Burn one increment per outstanding year (bounded by remaining reserve).
         let outstanding = due - self.timed_burn.years_burned;
         for _ in 0..outstanding {
+            // Preflight all three counters before this increment moves value.
+            // `burn_from` independently checks the global destroyed-supply
+            // counter against the same clipped amount.
+            let expected_burn = per_year.min(self.get_balance(reserve_addr));
+            let next_total = match total.checked_add(expected_burn) {
+                Some(next) => next,
+                None => panic!("timed-burn total overflowed u64"),
+            };
+            let next_timed_total = match self.timed_burn.total_burned.checked_add(expected_burn) {
+                Some(next) => next,
+                None => panic!("timed-burn counter overflowed u64"),
+            };
             let burned = self.burn_from(reserve_addr, per_year);
             if burned == 0 {
                 // Reserve exhausted; stop but still advance the year counter so
                 // We don't loop forever on future calls.
                 break;
             }
-            total = total.saturating_add(burned);
-            self.timed_burn.total_burned = self.timed_burn.total_burned.saturating_add(burned);
+            debug_assert_eq!(burned, expected_burn);
+            total = next_total;
+            self.timed_burn.total_burned = next_timed_total;
         }
         self.timed_burn.years_burned = due;
         total
@@ -3939,6 +5372,9 @@ impl AccountState {
                         h.update(pubkey.0);
                         h.update(account.balance.to_le_bytes());
                         h.update(account.nonce.to_le_bytes());
+                        if account.frac_attos != 0 {
+                            h.update(account.frac_attos.to_le_bytes());
+                        }
                         h.finalize().into()
                     })
                     .collect();
@@ -3954,6 +5390,9 @@ impl AccountState {
                         h.update(pubkey.0);
                         h.update(account.balance.to_le_bytes());
                         h.update(account.nonce.to_le_bytes());
+                        if account.frac_attos != 0 {
+                            h.update(account.frac_attos.to_le_bytes());
+                        }
                         h.finalize().into()
                     })
                     .collect();
@@ -4005,6 +5444,9 @@ impl AccountState {
                         h.update(dirty_key.0);
                         h.update(account.balance.to_le_bytes());
                         h.update(account.nonce.to_le_bytes());
+                        if account.frac_attos != 0 {
+                            h.update(account.frac_attos.to_le_bytes());
+                        }
                         self.cached_leaves[pos] = h.finalize().into();
                         affected_indices.insert(pos);
                     }
@@ -4239,6 +5681,24 @@ impl AccountState {
             final_hasher.update(b"poa_compliance_v1");
             final_hasher.update(poa_compliance_root);
         }
+        // The validator directory folds in once it holds a record, so a chain
+        // that never registered one keeps its pinned roots.
+        if !self.validator_directory.is_empty() {
+            final_hasher.update(b"validator_directory_v1");
+            final_hasher.update(self.validator_directory.root());
+        }
+        // The B.U.D. 3.0 registry folds in once it holds anything, so a chain
+        // that never stored an object keeps its pinned roots.
+        if !self.bud3_registry.is_empty() {
+            final_hasher.update(b"bud3_registry_v1");
+            final_hasher.update(self.bud3_registry.state_root());
+        }
+        // UEL execution state folds in once non-empty so pre-UEL chains keep
+        // their pinned genesis and block state roots.
+        if !self.execution_state.is_empty() {
+            final_hasher.update(b"uel_execution_v1");
+            final_hasher.update(self.execution_state.execution_root());
+        }
         if !self.external_roots.is_empty() {
             final_hasher.update(b"external_roots_v1");
             final_hasher.update(
@@ -4410,7 +5870,7 @@ mod tests {
         // transaction must be rejected rather than bypassed.
         let tx = Transaction::new(Address::zero(), Address::zero(), 0, Vec::new());
         let err = state
-            .validate_transaction_with_context(&tx, 0, 0)
+            .validate_transaction_with_context(&tx, 0, 0, TxAuthority::Inline)
             .unwrap_err();
         assert!(
             err.contains("zero-address sender is only valid for the canonical genesis transaction"),
@@ -4804,6 +6264,75 @@ mod tests {
         assert!(!kept.active);
     }
 
+    fn expiring_proof_task(
+        creator: Address,
+        reward: u64,
+    ) -> crate::settlement::proof_market::ProofTask {
+        crate::settlement::proof_market::ProofTask::new(
+            crate::settlement::proof_market::ProofTaskKind::DomainCommitment {
+                domain_id: 1,
+                domain_height: 1,
+                sequence: 1,
+            },
+            creator,
+            0,
+            1,
+            reward,
+            [7u8; 32],
+            0,
+        )
+    }
+
+    #[test]
+    fn proof_market_epoch_refund_conserves_account_and_locked_supply() {
+        let creator = test_addr_from_byte(31);
+        let mut state = AccountState::new();
+        state.get_or_create(&creator).balance = 500;
+        state.proof_market.fund_escrow(creator, 500).unwrap();
+        state
+            .proof_market
+            .add_task(expiring_proof_task(creator, 500), 0)
+            .unwrap();
+        let committed_before =
+            u128::from(state.get_balance(&creator)) + state.proof_market.total_locked_supply();
+        assert_eq!(committed_before, 1_000);
+
+        state.advance_epoch(0, crate::core::transaction::DEFAULT_CHAIN_ID);
+        assert_eq!(state.proof_market.active_tasks.len(), 1);
+        state.advance_epoch(0, crate::core::transaction::DEFAULT_CHAIN_ID);
+
+        assert!(state.proof_market.active_tasks.is_empty());
+        assert_eq!(state.proof_market.total_locked_supply(), 0);
+        assert_eq!(state.get_balance(&creator), 1_000);
+        let committed_after =
+            u128::from(state.get_balance(&creator)) + state.proof_market.total_locked_supply();
+        assert_eq!(committed_after, committed_before);
+    }
+
+    #[test]
+    fn proof_market_epoch_refund_uses_escrow_when_account_credit_would_overflow() {
+        let creator = test_addr_from_byte(32);
+        let mut state = AccountState::new();
+        state.get_or_create(&creator).balance = u64::MAX;
+        state.proof_market.fund_escrow(creator, 1).unwrap();
+        state
+            .proof_market
+            .add_task(expiring_proof_task(creator, 1), 0)
+            .unwrap();
+        let committed_before =
+            u128::from(state.get_balance(&creator)) + state.proof_market.total_locked_supply();
+
+        state.advance_epoch(0, crate::core::transaction::DEFAULT_CHAIN_ID);
+        state.advance_epoch(0, crate::core::transaction::DEFAULT_CHAIN_ID);
+
+        assert_eq!(state.get_balance(&creator), u64::MAX);
+        assert!(state.proof_market.active_tasks.is_empty());
+        assert_eq!(state.proof_market.escrow_balance(&creator), 1);
+        let committed_after =
+            u128::from(state.get_balance(&creator)) + state.proof_market.total_locked_supply();
+        assert_eq!(committed_after, committed_before);
+    }
+
     #[test]
     fn test_slashing_sets_jail_and_releases_by_epoch() {
         let validator = test_addr_from_byte(7u8);
@@ -5045,6 +6574,67 @@ mod tests {
         assert_eq!(state.burn_from(&a, 400), 400);
         assert_eq!(state.supply_capacity_remaining(), before);
         assert_eq!(state.burned_total, 400);
+    }
+
+    #[test]
+    fn destroyed_supply_never_clamps_to_a_smaller_counter() {
+        let mut state = AccountState::new();
+        state.burned_total = u64::MAX;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.record_destroyed(1);
+        }));
+        assert!(result.is_err());
+        assert_eq!(state.burned_total, u64::MAX);
+    }
+
+    #[test]
+    fn balance_burn_does_not_move_value_when_its_counter_overflows() {
+        let address = test_addr_from_byte(21u8);
+        let mut state = AccountState::new();
+        state.add_balance(&address, 10);
+        state.burned_total = u64::MAX;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.burn_from(&address, 1);
+        }));
+        assert!(result.is_err());
+        assert_eq!(state.get_balance(&address), 10);
+        assert_eq!(state.burned_total, u64::MAX);
+    }
+
+    #[test]
+    fn external_slash_checks_its_burn_counter_before_moving_value() {
+        let poster = test_addr_from_byte(21u8);
+        let challenger = test_addr_from_byte(22u8);
+        let mut state = AccountState::new();
+        state.add_balance(&poster, 100);
+        state.lock_external_bond(&poster, 80).expect("bond");
+        state.burned_total = u64::MAX;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.slash_external_bond(&poster, 50, 20, &challenger)
+        }));
+        assert!(result.is_err());
+        assert_eq!(state.get_balance(&poster), 20);
+        assert_eq!(state.get_balance(&challenger), 0);
+        assert_eq!(state.external_bond_escrow.get(&poster), Some(&80));
+        assert_eq!(state.burned_total, u64::MAX);
+    }
+
+    #[test]
+    fn external_slash_checks_challenger_overflow_before_moving_value() {
+        let poster = test_addr_from_byte(21u8);
+        let challenger = test_addr_from_byte(22u8);
+        let mut state = AccountState::new();
+        state.add_balance(&poster, 100);
+        state.add_balance(&challenger, u64::MAX);
+        state.lock_external_bond(&poster, 80).expect("bond");
+        let error = state
+            .slash_external_bond(&poster, 50, 20, &challenger)
+            .expect_err("the challenger cannot receive another atom");
+        assert!(error.contains("overflow"), "{error}");
+        assert_eq!(state.get_balance(&poster), 20);
+        assert_eq!(state.get_balance(&challenger), u64::MAX);
+        assert_eq!(state.external_bond_escrow.get(&poster), Some(&80));
+        assert_eq!(state.burned_total, 0);
     }
 
     #[test]
@@ -5414,7 +7004,7 @@ mod tests {
             },
             None,
         );
-        assert!(state.slash_from_report(&liveness_report).unwrap().is_some());
+        assert!(state.slash_from_report(&liveness_report).unwrap().is_none());
         let liveness_bytes = bincode::serialize(&liveness_report).unwrap();
         let liveness_hash: [u8; 32] = sha2::Sha256::digest(&liveness_bytes).into();
         let stake_after_liveness = state.get_validator(&who).unwrap().stake;
@@ -5574,6 +7164,37 @@ mod tests {
         assert_eq!(state.registry.params().unbonding_epochs, old_u);
     }
 
+    /// `full_validator_stake_floor` is the larger of two contracts: the
+    /// governance parameter (a *registration* floor, 1,000 atoms by default)
+    /// and the network profile's bond (10^9 atoms on testnet). The suite
+    /// pins the direction where the network floor is the stricter one;
+    /// `testnet_unstake_below_full_floor_deactivates_and_loses_duty_lane`.
+    /// This pins the other: governance raises its floor above the network's,
+    /// and the parameter has to bind. A helper returning either side alone
+    /// passes the first test and fails this one.
+    #[test]
+    fn full_validator_stake_floor_is_the_max_of_the_two_contracts() {
+        let mut state = AccountState::new();
+        let network = crate::core::chain_config::Network::Testnet;
+        let chain = network.chain_id().0;
+        let network_floor = network.min_stake_full();
+        let registry_floor = state.registry.params().min_stake.max(1);
+        assert!(
+            registry_floor < network_floor,
+            "the default registry floor sits above the network floor; this test would prove nothing"
+        );
+        assert_eq!(state.full_validator_stake_floor(chain), network_floor);
+
+        let mut params = *state.registry.params();
+        params.min_stake = network_floor.saturating_add(1);
+        state.registry.set_params(params);
+        assert_eq!(
+            state.full_validator_stake_floor(chain),
+            network_floor.saturating_add(1),
+            "a governance raise above the network floor must bind"
+        );
+    }
+
     #[test]
     fn governance_cannot_enable_block_emission() {
         use crate::core::governance::{Proposal, ProposalType};
@@ -5636,6 +7257,7 @@ mod tests {
         st.poa_compliance
             .freeze_suspicious(
                 crate::registry::ComplianceDomainKind::PoA,
+                0,
                 Address::from([1u8; 32]),
                 Address::from([2u8; 32]),
                 [7u8; 32],
@@ -6372,5 +7994,256 @@ mod validator_v7_binding_tests {
         let forged_tx = signed(&forged, TransactionType::Unstake);
         assert_eq!(forged_tx.from, tx.from);
         assert!(state.check_validator_v7_binding(&forged_tx).is_err());
+    }
+
+    #[test]
+    fn frac_attos_stays_below_1e12() {
+        let alice = Address::from([0xA1; 32]);
+        let bob = Address::from([0xB2; 32]);
+        let mut state = AccountState::new();
+        state
+            .accounts
+            .insert(alice, Account::with_balance(alice, 5));
+        state.keys_dirty = true;
+
+        // Transfer 1 wei (`1` attoBUD) out of 5 whole atoms: borrows 1 atom into
+        // `999_999_999_999` frac_attos on Alice and `1` frac_attos on Bob.
+        state
+            .transfer_attos_in_unit(&alice, &bob, 1, BudEnvUnit::EvmWei)
+            .expect("1 wei transfer");
+        let a = state.accounts.get(&alice).expect("alice");
+        let b = state.accounts.get(&bob).expect("bob");
+        assert_eq!(a.balance, 4);
+        assert_eq!(a.frac_attos, ATTOS_PER_ATOM - 1);
+        assert!(a.frac_attos < ATTOS_PER_ATOM);
+        assert_eq!(b.balance, 0);
+        assert_eq!(b.frac_attos, 1);
+        assert!(b.frac_attos < ATTOS_PER_ATOM);
+
+        // Transferring `ATTOS_PER_ATOM - 1` more to Bob carries Bob cleanly to
+        // `(balance = 1, frac_attos = 0)` and Alice to `(balance = 4, frac_attos = 0)`.
+        let carry = u128::from(ATTOS_PER_ATOM - 1);
+        state
+            .transfer_attos_in_unit(&alice, &bob, carry, BudEnvUnit::EvmWei)
+            .expect("carry transfer");
+        let a = state.accounts.get(&alice).expect("alice");
+        let b = state.accounts.get(&bob).expect("bob");
+        assert_eq!((a.balance, a.frac_attos), (4, 0));
+        assert_eq!((b.balance, b.frac_attos), (1, 0));
+
+        // Corrupt out-of-range `frac_attos >= 10^12` is refused fail-closed.
+        let mut corrupt = Account::with_balance(alice, 1);
+        corrupt.frac_attos = ATTOS_PER_ATOM;
+        assert!(corrupt.checked_total_attos().is_err());
+
+        // Non-divisible transfers are refused without mutating state.
+        let root_before = state.calculate_state_root();
+        assert!(state
+            .transfer_attos_in_unit(&bob, &alice, 500, BudEnvUnit::SvmLamport)
+            .is_err());
+        assert_eq!(state.calculate_state_root(), root_before);
+    }
+
+    #[test]
+    fn uel_bud_conservation() {
+        let addrs: Vec<Address> = (1u8..=6).map(|i| Address::from([i; 32])).collect();
+        let mut state = AccountState::new();
+        for (idx, addr) in addrs.iter().enumerate() {
+            state.accounts.insert(
+                *addr,
+                Account::with_balance(*addr, (idx as u64 + 1) * 1_000),
+            );
+        }
+        state.keys_dirty = true;
+        let initial_attos = state.total_bud_committed_attos();
+        let initial_ceiling_atoms = state.circulating_supply();
+
+        let units = [
+            BudEnvUnit::EvmWei,
+            BudEnvUnit::SvmLamport,
+            BudEnvUnit::MoveOcta,
+            BudEnvUnit::WasmUbud,
+            BudEnvUnit::BudZeroAtom,
+        ];
+        // Deterministic LCG exercising cross-unit transfers, sub-atom splits,
+        // carries, borrows and refusals across 250 steps.
+        let mut seed: u64 = 0x5EED_CAFE_2026_0026;
+        for step in 0..250usize {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let from = addrs[(seed as usize) % addrs.len()];
+            let to = addrs[((seed >> 16) as usize) % addrs.len()];
+            let unit = units[step % units.len()];
+            let q = unit.quantum_attos();
+            let mult = u128::from((seed >> 32) % 2_500_000 + 1);
+            let amount = q.saturating_mul(mult);
+            let _ = state.transfer_attos_in_unit(&from, &to, amount, unit);
+
+            assert_eq!(
+                state.total_bud_committed_attos(),
+                initial_attos,
+                "attoBUD conservation violated at step {step}"
+            );
+            for acct in state.accounts.values() {
+                assert!(
+                    acct.frac_attos < ATTOS_PER_ATOM,
+                    "frac_attos ceiling violated at step {step}: {}",
+                    acct.frac_attos
+                );
+            }
+            // Splitting atoms across accounts must never undercount `circulating_supply`
+            // below the true whole-atom ceiling.
+            assert!(state.circulating_supply() >= initial_ceiling_atoms);
+        }
+    }
+
+    #[test]
+    fn snapshot_v2_derives_bridge_and_message_roots_from_restored_registries() {
+        use crate::chain::snapshot::{StateSnapshotV2, StateSnapshotV2Params};
+        let mut original = AccountState::new();
+        original.bridge_root = original.bridge_state.root();
+        original.message_root = original.message_registry.root();
+        let mut snap = StateSnapshotV2::from_state(
+            &original,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "00".repeat(32),
+                genesis_hash: "00".repeat(32),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "00".repeat(32),
+                finality_certificates: Vec::new(),
+            },
+        );
+        // Tamper the serialized root fields so they disagree with the restored
+        // empty registries.
+        snap.bridge_root = [0xAB; 32];
+        snap.message_root = [0xCD; 32];
+
+        let mut restored = AccountState::from_snapshot_v2(&snap);
+        assert_eq!(restored.bridge_root, restored.bridge_state.root());
+        assert_eq!(restored.message_root, restored.message_registry.root());
+        assert_ne!(restored.bridge_root, [0xAB; 32]);
+        assert_ne!(restored.message_root, [0xCD; 32]);
+        assert_eq!(
+            restored.calculate_state_root(),
+            original.calculate_state_root()
+        );
+    }
+
+    #[test]
+    fn delegation_unbonding_trims_active_governance_vote_weight() {
+        use crate::core::governance::{Proposal, ProposalType};
+        let mut state = AccountState::new();
+        let validator = Address::from([0xC1; 32]);
+        let delegator = Address::from([0xC2; 32]);
+        state.add_validator(validator, 1_000);
+        state.add_balance(&delegator, 5_000);
+        state
+            .delegate_to_validator(&delegator, &validator, 3_000)
+            .expect("delegate");
+        assert_eq!(state.get_validator(&validator).unwrap().stake, 4_000);
+
+        let mut proposal = Proposal::new(1, validator, ProposalType::ChangeBaseFee(20), 0, 10);
+        proposal.add_vote(validator, 4_000, true, 0).unwrap();
+        state.governance.proposals.push(proposal);
+
+        state
+            .begin_delegation_unbonding(&delegator, &validator, 3_000)
+            .expect("begin delegation unbonding");
+        let p = state.governance.proposals.first().unwrap();
+        assert_eq!(
+            p.vote_weight_of(&validator),
+            1_000,
+            "delegation exit must trim the validator's snapshotted governance vote weight"
+        );
+        assert_eq!(p.votes_for, 1_000);
+    }
+
+    #[test]
+    fn post_vote_delegation_unbonding_preserves_snapshotted_vote_weight() {
+        use crate::core::governance::{Proposal, ProposalType};
+        let mut state = AccountState::new();
+        let validator = Address::from([0xC3; 32]);
+        let late_delegator = Address::from([0xC4; 32]);
+        state.add_validator(validator, 1_000);
+        state.add_balance(&late_delegator, 5_000);
+
+        let mut proposal = Proposal::new(2, validator, ProposalType::ChangeBaseFee(25), 0, 10);
+        proposal.add_vote(validator, 1_000, true, 0).unwrap();
+        state.governance.proposals.push(proposal);
+
+        // Delegation arrives after the vote snapshot and immediately unbonds.
+        state
+            .delegate_to_validator(&late_delegator, &validator, 3_000)
+            .expect("late delegate");
+        assert_eq!(state.get_validator(&validator).unwrap().stake, 4_000);
+        state
+            .begin_delegation_unbonding(&late_delegator, &validator, 3_000)
+            .expect("late unbond");
+
+        let p = state.governance.proposals.first().unwrap();
+        assert_eq!(
+            p.vote_weight_of(&validator),
+            1_000,
+            "post-vote delegation exit must not erase snapshotted vote weight"
+        );
+        assert_eq!(p.votes_for, 1_000);
+    }
+
+    #[test]
+    fn redelegation_trims_source_validator_governance_vote_weight_without_erasing_post_vote_stake()
+    {
+        use crate::core::governance::{Proposal, ProposalType};
+        let mut state = AccountState::new();
+        let src = Address::from([0xC5; 32]);
+        let dst = Address::from([0xC6; 32]);
+        let pre_del = Address::from([0xC7; 32]);
+        let post_del = Address::from([0xC8; 32]);
+        state.add_validator(src, 1_000);
+        state.add_validator(dst, 1_000);
+        state.add_balance(&pre_del, 5_000);
+        state.add_balance(&post_del, 5_000);
+
+        state
+            .delegate_to_validator(&pre_del, &src, 2_000)
+            .expect("pre-vote delegate");
+        assert_eq!(state.get_validator(&src).unwrap().stake, 3_000);
+
+        let mut proposal = Proposal::new(3, src, ProposalType::ChangeBaseFee(30), 0, 10);
+        proposal.add_vote(src, 3_000, true, 0).unwrap();
+        state.governance.proposals.push(proposal);
+
+        // Post-vote delegation redelegating out leaves the 3_000 snapshot intact.
+        state
+            .delegate_to_validator(&post_del, &src, 4_000)
+            .expect("post-vote delegate");
+        state
+            .redelegate_to_validator(&post_del, &src, &dst, 4_000)
+            .expect("post-vote redelegate");
+        assert_eq!(
+            state.governance.proposals[0].vote_weight_of(&src),
+            3_000,
+            "post-vote redelegation must not erase snapshotted vote weight"
+        );
+
+        // Pre-vote delegation redelegating out trims source vote weight down to remaining 1_000.
+        state
+            .redelegate_to_validator(&pre_del, &src, &dst, 2_000)
+            .expect("pre-vote redelegate");
+        assert_eq!(
+            state.governance.proposals[0].vote_weight_of(&src),
+            1_000,
+            "pre-vote redelegation must trim source validator vote weight to remaining stake"
+        );
+        assert_eq!(state.governance.proposals[0].votes_for, 1_000);
+    }
+}
+
+#[cfg(test)]
+impl AccountState {
+    pub fn credit_account(&mut self, address: &Address, amount: u64) {
+        self.add_balance(address, amount);
     }
 }

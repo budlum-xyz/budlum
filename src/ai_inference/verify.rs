@@ -1,4 +1,10 @@
+//! WIRING: unwired - these AI helpers are deliberately outside the consensus path until BLG-059..062 close and VL-1 is enabled.
+//!
 //! STARK verification and proof-production helpers (bud-proof `DefaultAdapter`).
+//!
+//! WIRING: unwired - these bincode-based helper verifiers are deliberately
+//! not called by consensus; the transaction verifier uses postcard and checks
+//! the registered model through `ai::execution::verify_execution_proof_full`.
 //!
 //! **This module is NOT the production path, but saying "verification is not
 //! wired" is no longer true either.** On-chain inference verification does not
@@ -53,13 +59,20 @@ use bud_vm::Vm;
 use sha3::{Digest, Keccak256};
 
 /// Verifies an AI inference layer inference proof with a real plonky3 STARK (verify only).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_inference_stark(
     proof_bytes: &[u8],
     expected_inputs: &ExecutionPublicInputs,
     program: &[u64],
 ) -> Result<(), String> {
-    let envelope: ProofEnvelope = bincode::deserialize(proof_bytes)
-        .map_err(|e| format!("AI inference layer STARK: ProofEnvelope deserialize failed: {e}"))?;
+    let envelope: ProofEnvelope = crate::network::bounded_bincode::decode_bounded_bincode(
+        proof_bytes,
+        crate::execution::proof_verifier::MAX_PROOF_BYTES,
+    )
+    .map_err(|e| format!("AI inference layer STARK: ProofEnvelope deserialize failed: {e}"))?;
     DefaultAdapter::verify(&envelope, expected_inputs, program)
         .map_err(|e| format!("AI inference layer STARK: verification failed: {e:?}"))
 }
@@ -93,6 +106,10 @@ fn build_public_inputs(vm: &Vm, program: &[u64], chain_id: u64) -> ExecutionPubl
 ///
 /// Runs `program` on `vm`, produces a STARK proof from the trace, then verifies
 /// that proof. Returns a `ProofEnvelope`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn generate_and_verify_proof(
     vm: &mut Vm,
     program: &[u64],

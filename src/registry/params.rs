@@ -7,6 +7,7 @@
 //! Are deliberately aligned with the existing consensus constants (see the
 //! `Default` impl) so introducing the registry does not change current
 //! Economic behaviour.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::chain::fee_market::PPM_DENOMINATOR;
 use crate::core::chain_config::FIXED_POINT_SCALE;
@@ -27,6 +28,60 @@ use serde::{Deserialize, Serialize};
 /// gives the two slashing sites one place to read it from without touching a
 /// consensus-critical layout.
 pub const LIVENESS_JAIL_EPOCHS: u64 = 7;
+
+/// Reserved `.bud` labels and `budlum.xyz` infrastructure subdomains.
+///
+/// Shared between BNS consensus validation and the HTTP gateway: none of these
+/// labels may be registered directly or resolved through BNS on the gateway,
+/// and only authorized `BNS_PRIMARY_SELLERS` may list them as `Primary` offers.
+pub const RESERVED_LABELS: &[&str] = &[
+    "bud",
+    "www",
+    "app",
+    "api",
+    "rpc",
+    "docs",
+    "mail",
+    "explorer",
+    "faucet",
+    "status",
+    "testnet",
+    "mainnet",
+    "devnet",
+    "seed",
+    "seed-1",
+    "root",
+    "admin",
+    "bns",
+    "budlum",
+    "validator",
+    "node",
+    "gateway",
+];
+
+/// Minimum `.bud` registration or renewal duration in epochs (rejects 1-epoch squatting).
+pub const MIN_DURATION: u64 = 10;
+
+/// Maximum `.bud` registration or post-renewal remaining duration in epochs
+/// (10 years at ~100 epochs/day).
+pub const MAX_DURATION: u64 = 365_000;
+
+/// Renewal grace period in epochs (~30 days at ~100 epochs/day) during which
+/// resolution and mutations fail closed, third-party registration is blocked,
+/// and only the existing owner may rescue the `.bud` name via `BnsRenew`.
+pub const GRACE_PERIOD: u64 = 3_000;
+
+/// Maximum live or grace-period `.bud` names a single address may hold at once.
+pub const MAX_NAMES_PER_OWNER: usize = 64;
+
+/// Maximum key-value text/profile/multi-chain records stored on one `.bud` name.
+pub const MAX_RECORDS_PER_NAME: usize = 32;
+
+/// Maximum ASCII byte length of a `.bud` record key (e.g. `avatar`, `com.github`, `addr.eth`).
+pub const MAX_RECORD_KEY_LEN: usize = 64;
+
+/// Maximum UTF-8 byte length of a `.bud` record value.
+pub const MAX_RECORD_VALUE_BYTES: usize = 512;
 
 /// Economic / timing parameters that gate participation and slashing.
 ///
@@ -105,18 +160,9 @@ pub struct RegistryParams {
     /// True, which made a passed proposal fail at execution with "governance
     /// Parameter is not whitelisted".
     pub max_invalid_votes_per_epoch: u64,
-    /// Whether the live epoch-close hook actually slashes validators for
-    /// Liveness (downtime) faults.
-    ///
-    /// DEFAULT: `false` (observe-only). Turning liveness slashing on is a
-    /// Deliberate, hard-to-reverse economic action: the underlying `slash`
-    /// Jails a validator on ANY offence, so even a light (1%) liveness penalty
-    /// Fully jails the offender. Per decision ("observe first,
-    /// Validate on live/testnet, then activate"), this stays OFF until
-    /// governance explicitly enables it - the mechanism is fully wired and
-    /// tested, but never auto-activates. Governance-settable: in
-    /// `GOVERNANCE_PARAMETER_WHITELIST`, applied by
-    /// `apply_registry_parameter_update` from the strings `true` / `false`.
+    /// Deprecated compatibility flag. Absence is suspension-only under V-4;
+    /// setting this never enables liveness slashing. It remains in the
+    /// snapshot/governance schema so historical parameter updates decode.
     pub liveness_slashing_enabled: bool,
     /// Relayer's cut of an inbound bridge transfer, in parts-per-million of the
     /// arriving amount.
@@ -175,14 +221,14 @@ pub struct RegistryParams {
     /// change it as the application fee policy evolves.
     pub app_fee_share_ppm: u64,
     /// Fixed fee charged in addition to the base transaction fee when an
-    /// account registers a Graft application. A non-zero fee keeps application
+    /// account registers an AppBinding application. A non-zero fee keeps application
     /// identity rows from being a free state-growth vector; the testnet
     /// profile uses one base unit.
-    pub graft_registration_fee: u64,
-    /// Number of blocks used when a Graft intent leaves its deadline at zero.
+    pub app_binding_registration_fee: u64,
+    /// Number of blocks used when an AppBinding intent leaves its deadline at zero.
     /// The testnet profile fixes this default at 600 blocks; an explicit
     /// deadline can still be chosen by the intent owner within policy.
-    pub graft_default_intent_deadline_blocks: u64,
+    pub app_binding_default_intent_deadline_blocks: u64,
     /// Highest commission a validator may take from its delegators' rewards,
     /// in parts-per-million. TESTNET-DEFAULT: 200,000 (20 percent).
     pub max_validator_commission_ppm: u64,
@@ -341,14 +387,26 @@ impl RegistryParams {
         if self.ai_model_register_fee > MAX_PARAM_AMOUNT {
             return Err("ai_model_register_fee exceeds the maximum parameter amount".into());
         }
-        if self.graft_registration_fee > MAX_PARAM_AMOUNT {
-            return Err("graft_registration_fee exceeds the maximum parameter amount".into());
+        if self.app_binding_registration_fee > MAX_PARAM_AMOUNT {
+            return Err("app_binding_registration_fee exceeds the maximum parameter amount".into());
         }
-        if self.graft_default_intent_deadline_blocks == 0
-            || self.graft_default_intent_deadline_blocks > 100_000
+        if self.slashing_report_fee > MAX_PARAM_AMOUNT {
+            return Err("slashing_report_fee exceeds the maximum parameter amount".into());
+        }
+        if self.proof_submission_fee > MAX_PARAM_AMOUNT {
+            return Err("proof_submission_fee exceeds the maximum parameter amount".into());
+        }
+        if self.prover_reward > MAX_PARAM_AMOUNT {
+            return Err("prover_reward exceeds the maximum parameter amount".into());
+        }
+        if self.liveness_max_missed_epochs == 0 || self.liveness_max_missed_epochs > 100_000 {
+            return Err("liveness_max_missed_epochs must be between 1 and 100,000".into());
+        }
+        if self.app_binding_default_intent_deadline_blocks == 0
+            || self.app_binding_default_intent_deadline_blocks > 100_000
         {
             return Err(
-                "graft_default_intent_deadline_blocks must be between 1 and 100,000".into(),
+                "app_binding_default_intent_deadline_blocks must be between 1 and 100,000".into(),
             );
         }
         if self.delegation_unbonding_epochs == 0 || self.delegation_unbonding_epochs > 100_000 {
@@ -378,6 +436,12 @@ impl RegistryParams {
         }
         if self.unbonding_epochs == 0 || self.unbonding_epochs > 100_000 {
             return Err("unbonding_epochs must be between 1 and 100,000".into());
+        }
+        if self.double_sign_slash_ratio_fixed == 0 {
+            return Err("double_sign_slash_ratio_fixed must be > 0".into());
+        }
+        if self.malicious_slash_ratio_fixed == 0 {
+            return Err("malicious_slash_ratio_fixed must be > 0".into());
         }
         if self.double_sign_slash_ratio_fixed > FIXED_POINT_SCALE {
             return Err("double_sign_slash_ratio_fixed cannot exceed FIXED_POINT_SCALE".into());
@@ -491,11 +555,11 @@ impl Default for RegistryParams {
             // generic default at zero avoids silently repricing non-testnet
             // chains; testnet genesis opts into explicitly.
             app_fee_share_ppm: 0,
-            // One base unit makes Graft registration cheap for real apps while
+            // One base unit makes AppBinding registration cheap for real apps while
             // ensuring an unbounded registration flood is not free.
-            graft_registration_fee: 1,
-            // Ten-minute-at-testnet-slot-scale default from the Graft profile.
-            graft_default_intent_deadline_blocks: 600,
+            app_binding_registration_fee: 1,
+            // Ten-minute-at-testnet-slot-scale default from the AppBinding profile.
+            app_binding_default_intent_deadline_blocks: 600,
             // TESTNET-DEFAULT. The self-bond floor is `min_stake`.
             max_validator_commission_ppm: 200_000,
             max_commission_change_ppm_per_epoch: 10_000,
@@ -511,6 +575,40 @@ impl Default for RegistryParams {
         }
     }
 }
+
+/// B12: the floor a governance `BnsSetBaseCost` action may set.
+///
+/// A base cost of zero sells every `.bud` name for nothing, and the renewal
+/// fee is the only BNS revenue that is burned, so a zero is a subsidy with no
+/// way back (each governance step is bounded).
+pub const MIN_BNS_BASE_COST: u64 = 1;
+
+/// B12: the ceiling a governance `BnsSetBaseCost` action may set.
+///
+/// The 3-character tier pays 100x this value per epoch, so the ceiling keeps
+/// the most expensive name inside what a `MAX_DURATION` registration can pay
+/// without saturating: `MIN_BNS_BASE_COST` through this value is the whole
+/// range, and both ends are checked before any state is written.
+pub const MAX_BNS_BASE_COST: u64 = 1_000_000;
+
+/// B12: the largest factor one `BnsSetBaseCost` action may move the price by.
+///
+/// Governance is not a rubber stamp: a single vote may not multiply the price
+/// by more than this (or divide it by more than this), so a compromised or
+/// mistaken proposal cannot reprice the whole namespace in one step. Ten is the
+/// directive's bound; a larger move needs a second proposal, which is a second
+/// chance to see it.
+pub const BNS_BASE_COST_MAX_STEP_FACTOR: u64 = 10;
+
+/// B13: the default ceiling on how many `.bud` names the registry holds.
+///
+/// A parameter rather than a constant inside [`crate::bns::BnsRegistry`] because
+/// the number is a capacity decision, not a rule: 100K names with subdomains
+/// bounded state growth to roughly 50MB, and the ceiling that appears in a
+/// snapshot must be readable by operators who tune it. The registry keeps the
+/// genesis value in its own field so an old snapshot still deserializes to the
+/// ceiling it was written with.
+pub const DEFAULT_MAX_NAMES: usize = 1_000_000;
 
 #[cfg(test)]
 mod tests {
@@ -759,8 +857,8 @@ mod tests {
         assert_eq!(p.swap_fee_ppm, 400);
         assert_eq!(p.bridge_fee_ppm, 800);
         assert_eq!(p.app_fee_share_ppm, 400_000);
-        assert_eq!(p.graft_registration_fee, 1);
-        assert_eq!(p.graft_default_intent_deadline_blocks, 600);
+        assert_eq!(p.app_binding_registration_fee, 1);
+        assert_eq!(p.app_binding_default_intent_deadline_blocks, 600);
         assert!(p.validate().is_ok());
     }
 
@@ -964,5 +1062,37 @@ mod tests {
         assert!(p.validate().is_err());
         // The documented defaults still validate.
         assert!(RegistryParams::default().validate().is_ok());
+    }
+
+    #[test]
+    fn zero_malicious_slash_and_unbounded_fee_params_rejected() {
+        for bad in [
+            RegistryParams {
+                double_sign_slash_ratio_fixed: 0,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                malicious_slash_ratio_fixed: 0,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                slashing_report_fee: u64::MAX,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                proof_submission_fee: u64::MAX,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                prover_reward: u64::MAX,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                liveness_max_missed_epochs: 0,
+                ..RegistryParams::default()
+            },
+        ] {
+            assert!(bad.validate().is_err());
+        }
     }
 }

@@ -1,4 +1,3 @@
-//! WIRING: unwired - verify_execution_proof_structural is blocked on the MainnetActivation zkVM audit (verify_merkle_enabled: false); wiring it before the audit would put an unaudited prover on the acceptance path.
 //! Structural + cryptographic verification of AI execution proofs.
 
 use crate::ai::execution::stark::verify_execution_proof_stark;
@@ -40,9 +39,9 @@ impl ExecutionVerifyReport {
             && self.weights_bound
     }
 
-    /// Structural + STARK (when attempted).
+    /// Structural + STARK: requires `stark_ok == Some(true)`.
     pub fn is_fully_valid(&self) -> bool {
-        self.is_structurally_valid() && self.stark_ok != Some(false)
+        self.is_structurally_valid() && self.stark_ok == Some(true)
     }
 }
 
@@ -91,7 +90,7 @@ pub fn verify_execution_proof_structural_with_model(
 
 /// Deserialize postcard `bud_proof::ProofEnvelope` and STARK-verify against
 /// `program` words. Public inputs are taken from the envelope hash check via
-/// Adapter (expected_inputs must match what was proven).
+/// Adapter (`expected_inputs` must match what was proven).
 /// Re-derive `initial_state_root` for a fixed-point MLP inference.
 ///
 /// The AIR's initial-memory commitment is meaningful because the
@@ -108,6 +107,10 @@ pub fn verify_execution_proof_structural_with_model(
 /// the memory image, replay the reads and compute the commitment itself. A
 /// proof whose public input disagrees is rejected before the STARK is even
 /// checked.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn expected_initial_state_root(
     spec: &crate::ai::execution::FixedPointMlpSpec,
     input: &[i32],
@@ -142,7 +145,12 @@ pub fn verify_execution_proof_full(
     model: Option<&AiModelSpec>,
     program_and_pi: Option<(&[u64], &ExecutionPublicInputs)>,
 ) -> ExecutionVerifyReport {
-    let mut rep = verify_execution_proof_structural_with_model(proof, request, result, model);
+    let mut rep = match model {
+        Some(model) => {
+            verify_execution_proof_structural_with_model(proof, request, result, Some(model))
+        }
+        None => verify_execution_proof_structural(proof, request, result),
+    };
     if let Some((program, pi)) = program_and_pi {
         match verify_execution_proof_stark(proof, program, pi) {
             Ok(()) => rep.stark_ok = Some(true),
@@ -836,5 +844,28 @@ mod stark_path_e2e {
             build_matmul_guest_program(&a).unwrap(),
             "rebuilding from dims must reproduce the proved program"
         );
+    }
+
+    #[test]
+    fn is_fully_valid_requires_stark_ok_true_and_clean_exit() {
+        let mut rep = ExecutionVerifyReport {
+            commitments_ok: true,
+            model_bound: true,
+            has_proof_bytes: true,
+            program_hash_nonzero: true,
+            program_hash_matches_model: true,
+            weights_bound: true,
+            stark_ok: None,
+            stark_error: None,
+        };
+        assert!(rep.is_structurally_valid());
+        assert!(
+            !rep.is_fully_valid(),
+            "unverified STARK must not count as full"
+        );
+        rep.stark_ok = Some(false);
+        assert!(!rep.is_fully_valid());
+        rep.stark_ok = Some(true);
+        assert!(rep.is_fully_valid());
     }
 }

@@ -1,8 +1,8 @@
 //! Sovereign Domain Kit primitives.
 //!
-//! The kit helps CBDC, public-sector, enterprise PoA and consortium domains
+//! The kit helps CBDC, public-sector, enterprise `PoA` and consortium domains
 //! Describe lifecycle and compliance evidence without leaking private KYC data
-//! Or merging PoA rules into the permissionless core registry.
+//! Or merging `PoA` rules into the permissionless core registry.
 //!
 //! # Where it is called from
 //!
@@ -48,6 +48,11 @@ pub enum SovereignDomainClass {
 }
 
 impl SovereignDomainClass {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if let SovereignDomainClass::Custom(label) = self {
             validate_label("SovereignDomainClass::Custom", label)?;
@@ -105,6 +110,11 @@ pub struct ComplianceEvidence {
 }
 
 impl ComplianceEvidence {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if !nonzero_hash(&self.policy_hash) {
             return Err("ComplianceEvidence policy_hash cannot be zero".into());
@@ -187,6 +197,11 @@ impl SovereignDomainTemplate {
         self.template_id == self.calculate_id()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.domain_id == 0 {
             return Err("SovereignDomainTemplate domain_id must be non-zero".into());
@@ -213,6 +228,11 @@ impl SovereignDomainTemplate {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transition_to(&mut self, next: DomainLifecycleState) -> Result<(), String> {
         if !self.lifecycle.can_transition_to(&next) {
             return Err("SovereignDomainTemplate lifecycle transition invalid".into());
@@ -234,6 +254,11 @@ pub struct AuditExportBundle {
 }
 
 impl AuditExportBundle {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_against_template(
         &self,
         template: &SovereignDomainTemplate,
@@ -276,7 +301,7 @@ impl SovereignDomainRegistry {
     /// # Why this is a separate entry point
     ///
     /// [`register_template`](Self::register_template) verifies that a template
-    /// is consistent **within itself**: PoA requires KYC, and the identity is
+    /// is consistent **within itself**: `PoA` requires KYC, and the identity is
     /// recomputed from the fields. It does not look at which domain the
     /// `domain_id` actually points to, which left two of the template's claims
     /// unchecked.
@@ -320,6 +345,11 @@ impl SovereignDomainRegistry {
         self.register_template(template)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_template(&mut self, template: SovereignDomainTemplate) -> Result<(), String> {
         template.validate()?;
         if self.templates.len() >= MAX_SOVEREIGN_DOMAIN_TEMPLATES
@@ -357,19 +387,24 @@ impl SovereignDomainRegistry {
         bundle.validate_against_template(template)
     }
 
-    /// The registered template's operator.
+    /// The registered template's domain id and operator.
     ///
-    /// Compliance gates read the identity from here: an identity coming from
-    /// inside the bundle would let a frozen operator write somebody else's
-    /// name.
+    /// Compliance gates read both the domain scope and the operator identity
+    /// from here: reading either from inside the bundle would let a frozen
+    /// operator spoof an un-frozen operator or domain.
     #[must_use]
-    pub fn template_operator(&self, template_id: Hash32) -> Option<Address> {
+    pub fn template_domain_and_operator(&self, template_id: Hash32) -> Option<(DomainId, Address)> {
         self.templates
             .values()
             .find(|t| t.template_id == template_id)
-            .map(|t| t.operator)
+            .map(|t| (t.domain_id, t.operator))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transition_lifecycle(
         &mut self,
         domain_id: DomainId,

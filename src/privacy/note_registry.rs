@@ -1,4 +1,5 @@
 //! On-chain note registry: live commitments + spent nullifiers.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,11 @@ pub type NoteHash = budlum_note_packing::NoteHash;
 /// Maximum live commitments to prevent unbounded state growth.
 /// At 65536 entries × 32 bytes = 2MB - well within node memory limits.
 pub const MAX_LIVE_COMMITMENTS: usize = 65_536;
+
+/// Maximum live commitments owned by any single account so one funded
+/// depositor cannot saturate `MAX_LIVE_COMMITMENTS` and refuse all other
+/// accounts' deposits.
+pub const MAX_LIVE_COMMITMENTS_PER_OWNER: usize = 1_024;
 
 /// Maximum spent nullifiers before fail-closed rejection.
 /// At 262144 entries × 32 bytes = 8MB - bounded memory for consensus replay protection.
@@ -72,7 +78,9 @@ impl L1NoteRegistry {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.live_commitments.is_empty() && self.spent_nullifiers.is_empty()
+        self.live_commitments.is_empty()
+            && self.spent_nullifiers.is_empty()
+            && self.spent_commitments.is_empty()
     }
 
     pub fn live_count(&self) -> usize {
@@ -108,7 +116,7 @@ impl L1NoteRegistry {
     }
 
     /// Genesis / faucet helper: insert a note without spending (internal + unit tests).
-    fn insert_note(&mut self, commitment: NoteHash) -> Result<(), String> {
+    pub(crate) fn insert_note(&mut self, commitment: NoteHash) -> Result<(), String> {
         if self.live_commitments.contains(&commitment) {
             return Err("note commitment already live".into());
         }
@@ -136,11 +144,25 @@ impl L1NoteRegistry {
 
     /// Insert a live note commitment bound to `owner`, so only `owner` may
     /// authorize spending it via `PrivateTransferSubmit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn insert_note_for_owner(
         &mut self,
         commitment: NoteHash,
         owner: Address,
     ) -> Result<(), String> {
+        let owner_live = self
+            .note_owners
+            .values()
+            .filter(|recorded| **recorded == owner)
+            .count();
+        if owner_live >= MAX_LIVE_COMMITMENTS_PER_OWNER {
+            return Err(format!(
+                "owner live commitment limit reached ({owner_live}/{MAX_LIVE_COMMITMENTS_PER_OWNER})"
+            ));
+        }
         self.insert_note(commitment)?;
         self.note_owners.insert(hex::encode(commitment), owner);
         Ok(())
@@ -148,8 +170,11 @@ impl L1NoteRegistry {
 
     /// Apply a confidential transfer authorized by `spender`, enforcing both
     /// per-input note ownership and 1-for-1 note count conservation (preventing
-    /// unbacked note creation while value-carrying confidential pools remain
-    /// closed outside devnet).
+    /// unbacked note creation across active testnet and devnet privacy pools).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn apply_transfer_for_owner(
         &mut self,
         spender: &Address,
@@ -201,7 +226,11 @@ impl L1NoteRegistry {
 
     /// Apply transfer with nullifier derivation proofs.
     /// Each `proof[i]` must satisfy: `nullifier[i] == derive_nullifier(commitment[i], proof[i])`, a domain-separated SHA-256.
-    fn apply_transfer_with_proofs(
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn apply_transfer_with_proofs(
         &mut self,
         spent_commitments: &[NoteHash],
         nullifiers: &[NoteHash],
@@ -237,7 +266,7 @@ impl L1NoteRegistry {
                 return Err("duplicate nullifier in transfer".into());
             }
         }
-        // Pre-check outputs unique + not already live
+        // Pre-check outputs unique + not already live, spent, or colliding with nullifiers
         let mut seen_out = BTreeSet::new();
         for c in output_commitments {
             if !seen_out.insert(*c) {
@@ -246,7 +275,10 @@ impl L1NoteRegistry {
             if self.live_commitments.contains(c) {
                 return Err("output commitment already live".into());
             }
-            if self.spent_nullifiers.contains(c) {
+            if self.spent_commitments.contains(c) {
+                return Err("output commitment already spent".into());
+            }
+            if self.spent_nullifiers.contains(c) || seen_nullifiers.contains(c) {
                 return Err("output commitment collides with a spent nullifier".into());
             }
         }
@@ -291,7 +323,11 @@ impl L1NoteRegistry {
         // rather than one input at a time: a transfer that would cross the
         // ceiling partway through must be refused before it starts, not after
         // it has consumed the inputs it had room for.
-        if self.spent_nullifiers.len().saturating_add(nullifiers.len()) > MAX_SPENT_NULLIFIERS {
+        let cur_spent = self.spent_commitments.len();
+        let spent_comm_after = cur_spent.saturating_add(spent_commitments.len());
+        if self.spent_nullifiers.len().saturating_add(nullifiers.len()) > MAX_SPENT_NULLIFIERS
+            || spent_comm_after > MAX_SPENT_NULLIFIERS
+        {
             return Err(format!(
                 "spent nullifier set full ({}/{}) - chain must compact before more private transfers",
                 self.spent_nullifiers.len(),
@@ -397,12 +433,12 @@ impl L1NoteRegistry {
 
     /// Enforce bounded storage via hard caps.
     /// Spent nullifiers are consensus replay protection, they cannot be deleted
-    /// Without breaking double-spend resistance. Instead, MAX_SPENT_NULLIFIERS
+    /// Without breaking double-spend resistance. Instead, `MAX_SPENT_NULLIFIERS`
     /// Enforces a hard ceiling (fail-closed): once the cap is reached, no new
     /// Private transfers are accepted until the chain performs a state migration
     /// To a non-deleting accumulator design (e.g., Bloom filter + Merkle mountain
     /// Range). This method is retained for API compatibility but pruning is now
-    /// Bounded by the MAX_SPENT_NULLIFIERS constant enforced at insertion time.
+    /// Bounded by the `MAX_SPENT_NULLIFIERS` constant enforced at insertion time.
     pub fn prune_spent_nullifiers(&mut self, _keep_count: usize) {
         // Intentional no-op: nullifiers are bounded by MAX_SPENT_NULLIFIERS
         // Enforced at insertion in apply_transfer_with_proofs. Deleting any
@@ -780,5 +816,68 @@ mod h3_tests {
         r.insert_note(note_hash(2)).unwrap();
         let root3 = r.state_root();
         assert_ne!(root1, root3, "state_root must change after mutation");
+    }
+
+    #[test]
+    fn spent_commitments_keep_registry_non_empty() {
+        let mut r = L1NoteRegistry::new();
+        assert!(r.is_empty());
+        let c = budlum_note_packing::hash_from_field(77);
+        r.spent_commitments.insert(c);
+        assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn per_owner_live_note_cap_blocks_single_account_exhaustion() {
+        let mut r = L1NoteRegistry::new();
+        let alice = Address::from([0x11; 32]);
+        let bob = Address::from([0x22; 32]);
+        for i in 0..MAX_LIVE_COMMITMENTS_PER_OWNER {
+            let c = budlum_note_packing::hash_from_field(1000 + i as u64);
+            r.insert_note_for_owner(c, alice).unwrap();
+        }
+        let overflow = budlum_note_packing::hash_from_field(999_999);
+        let err = r.insert_note_for_owner(overflow, alice).unwrap_err();
+        assert!(
+            err.contains("owner live commitment limit reached"),
+            "unexpected error: {err}"
+        );
+        // Another owner can still deposit unaffected.
+        r.insert_note_for_owner(overflow, bob).unwrap();
+    }
+
+    #[test]
+    fn transfer_cannot_resurrect_spent_commitment_or_collide_with_transfer_nullifier() {
+        let mut r = L1NoteRegistry::new();
+        let c1 = budlum_note_packing::hash_from_field(101);
+        let c2 = budlum_note_packing::hash_from_field(102);
+        let p1 = budlum_note_packing::hash_from_field(201);
+        let p2 = budlum_note_packing::hash_from_field(202);
+        let n1 = L1NoteRegistry::derive_nullifier(&c1, &p1);
+        let n2 = L1NoteRegistry::derive_nullifier(&c2, &p2);
+
+        r.insert_note(c1).unwrap();
+        r.apply_transfer_with_proofs(&[c1], &[n1], &[c2], &[p1])
+            .unwrap();
+        assert!(r.is_commitment_spent(&c1));
+        assert!(!r.contains_commitment(&c1));
+
+        // Emitting already-spent c1 as an output must be refused so live and
+        // spent commitment sets stay disjoint and unspendable zombie notes
+        // cannot be created.
+        let err = r
+            .apply_transfer_with_proofs(&[c2], &[n2], &[c1], &[p2])
+            .unwrap_err();
+        assert!(err.contains("already spent"), "unexpected error: {err}");
+        assert!(!r.contains_commitment(&c1));
+        assert!(r.contains_commitment(&c2));
+
+        // Emitting a commitment equal to this transfer's own nullifier must
+        // also be refused.
+        let err = r
+            .apply_transfer_with_proofs(&[c2], &[n2], &[n2], &[p2])
+            .unwrap_err();
+        assert!(err.contains("nullifier"), "unexpected error: {err}");
+        assert!(r.contains_commitment(&c2));
     }
 }
