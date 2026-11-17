@@ -1506,7 +1506,6 @@ impl Blockchain {
 
     /// Canonical in-block domain commitments together with verified
     /// commitments for this node's local Garden domains.
-    #[cfg(test)]
     pub fn domain_commitments_with_garden(&self) -> Vec<DomainCommitment> {
         let mut out = self
             .state

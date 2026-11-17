@@ -291,13 +291,27 @@ impl Node {
         )
     }
 
-    /// The Garden domain as this node's Budlum chain records it.
+    /// The Garden domain as this node's Budlum chain records it on the
+    /// operator listener. Also asserts that the public RPC listener never
+    /// discloses this node-local Garden domain.
     fn budlum_domain(&self, chain_id: u64) -> Result<Value, String> {
-        let domains = call(self.public_port, "bud_getConsensusDomains", &json!([]))?;
+        let wanted = json!(format!("0x{chain_id:x}"));
+        let public_domains = call(self.public_port, "bud_getConsensusDomains", &json!([]))?;
+        let leaked = public_domains.as_array().is_some_and(|list| {
+            list.iter()
+                .any(|domain| domain.get("domainChainId") == Some(&wanted))
+        });
+        ensure(
+            !leaked,
+            format!(
+                "[{}] public RPC disclosed node-local Garden chain {chain_id:x}",
+                self.name
+            ),
+        )?;
+        let domains = self.rpc("bud_getConsensusDomains", &json!([]))?;
         domains
             .as_array()
             .and_then(|list| {
-                let wanted = json!(format!("0x{chain_id:x}"));
                 list.iter()
                     .find(|domain| domain.get("domainChainId") == Some(&wanted))
             })
@@ -311,10 +325,22 @@ impl Node {
     }
 
     /// True when this node's Budlum chain holds the commitment of the
-    /// Garden block `hash` at `height` for `domain`.
+    /// Garden block `hash` at `height` for `domain` on the operator listener.
+    /// Also asserts that the public RPC listener never discloses it.
     fn budlum_holds_block(&self, domain: &Value, height: u64, hash: &str) -> Result<bool, String> {
-        let commitments = call(self.public_port, "bud_getDomainCommitments", &json!([]))?;
         let id = domain.get("domainId").cloned().unwrap_or(Value::Null);
+        let public_commitments = call(self.public_port, "bud_getDomainCommitments", &json!([]))?;
+        let leaked = public_commitments
+            .as_array()
+            .is_some_and(|list| list.iter().any(|c| c.get("domainId") == Some(&id)));
+        ensure(
+            !leaked,
+            format!(
+                "[{}] public RPC disclosed node-local Garden commitments for {id}",
+                self.name
+            ),
+        )?;
+        let commitments = self.rpc("bud_getDomainCommitments", &json!([]))?;
         let wanted_height = json!(format!("0x{height:x}"));
         let wanted_hash = json!(format!("0x{hash}"));
         Ok(commitments.as_array().is_some_and(|list| {
