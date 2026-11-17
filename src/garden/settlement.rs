@@ -115,6 +115,7 @@ fn verified_commitment(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GardenDomainView {
     pub domain_id: DomainId,
+    pub config_hash: Hash32,
     pub status: DomainStatus,
     pub last_committed_height: u64,
     pub last_committed_hash: Hash32,
@@ -193,15 +194,45 @@ impl GardenBudlumLink {
     }
 
     /// The Garden domain as this node's Budlum chain records it.
+    ///
+    /// Matches on the full Garden identity (`domain_chain_id`, `PoA` kind,
+    /// bridgeless flag and Garden finality adapter), never the 31-bit derived
+    /// `domain_id` alone, so a hash collision with another Garden cannot adopt
+    /// or quarantine the wrong local record.
     pub async fn view(&self, chain_id: u64) -> Option<GardenDomainView> {
+        self.view_matching(chain_id, None).await
+    }
+
+    /// Like [`Self::view`], additionally binding `config_hash` to `genesis_hash`.
+    pub async fn view_for_genesis(
+        &self,
+        chain_id: u64,
+        genesis_hash: Hash32,
+    ) -> Option<GardenDomainView> {
+        self.view_matching(chain_id, Some(genesis_hash)).await
+    }
+
+    async fn view_matching(
+        &self,
+        chain_id: u64,
+        genesis_hash: Option<Hash32>,
+    ) -> Option<GardenDomainView> {
         let domain_id = garden_domain_id(chain_id);
         self.chain
             .get_consensus_domains_with_garden()
             .await
             .into_iter()
-            .find(|domain| domain.id == domain_id)
+            .find(|domain| {
+                domain.id == domain_id
+                    && domain.domain_chain_id == chain_id
+                    && domain.kind == ConsensusKind::PoA
+                    && !domain.bridge_enabled
+                    && domain.finality_adapter == GARDEN_FINALITY_ADAPTER
+                    && genesis_hash.is_none_or(|expected| domain.config_hash == expected)
+            })
             .map(|domain| GardenDomainView {
                 domain_id,
+                config_hash: domain.config_hash,
                 status: domain.status,
                 last_committed_height: domain.last_committed_height,
                 last_committed_hash: domain.last_committed_hash,
@@ -508,5 +539,58 @@ mod tests {
             .transition_bridgeless_poa_domain_status(domain_id, host, DomainStatus::Retired)
             .unwrap();
         assert_eq!(chain.garden_commitments.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn garden_budlum_link_view_rejects_colliding_chain_or_genesis_record() {
+        use crate::chain::chain_actor::ChainActor;
+
+        let net = Net::new();
+        let chain_id = net.ledger.state.chain_id();
+        let domain_id = garden_domain_id(chain_id);
+        let mut bc = budlum();
+        // Plant a colliding local Garden record under the same 31-bit
+        // `domain_id` but a different 64-bit `domain_chain_id`.
+        let mut foreign = domain_record(
+            &net.ledger.state.genesis,
+            net.host,
+            authority_set_hash(chain_id, &net.ledger.state.active()).unwrap(),
+        );
+        foreign.id = domain_id;
+        foreign.domain_chain_id = chain_id.wrapping_add(1);
+        bc.register_garden_domain(foreign).unwrap();
+        let (actor, handle) = ChainActor::new(bc);
+        tokio::spawn(async move {
+            actor.run().await;
+        });
+        let link = GardenBudlumLink::new(handle);
+        assert!(
+            link.view(chain_id).await.is_none(),
+            "view() must refuse a domain record whose domain_chain_id differs"
+        );
+
+        // Matching chain_id succeeds for view(), and view_for_genesis() also
+        // checks `config_hash == genesis.hash()`.
+        let (actor2, handle2) = ChainActor::new(budlum());
+        tokio::spawn(async move {
+            actor2.run().await;
+        });
+        let link2 = GardenBudlumLink::new(handle2);
+        link2
+            .register(&net.ledger.state.genesis, net.host)
+            .await
+            .unwrap();
+        assert!(link2.view(chain_id).await.is_some());
+        assert!(link2
+            .view_for_genesis(chain_id, net.ledger.state.genesis.hash())
+            .await
+            .is_some());
+        assert!(
+            link2
+                .view_for_genesis(chain_id, [0xabu8; 32])
+                .await
+                .is_none(),
+            "view_for_genesis() must refuse a record with another genesis hash"
+        );
     }
 }

@@ -53,6 +53,11 @@ pub struct DomainCharter {
     pub silence_window: u64,
     pub data_policy: DataPolicy,
     pub status: CharterStatus,
+    /// Optional domain operator bound when the charter is registered so direct
+    /// [`crate::object_layer::ObjectLayerRegistry::register_class_verified`]
+    /// calls refuse unrelated accounts claiming a contract's class.
+    #[serde(default)]
+    pub operator: Option<crate::core::address::Address>,
 }
 
 impl DomainCharter {
@@ -72,6 +77,10 @@ impl DomainCharter {
         let mut b = other.clone();
         a.status = CharterStatus::Active;
         b.status = CharterStatus::Active;
+        if a.operator.is_none() || b.operator.is_none() {
+            a.operator = None;
+            b.operator = None;
+        }
         a == b
     }
 }

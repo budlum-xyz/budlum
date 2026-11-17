@@ -60,8 +60,8 @@ fn matrix_string<'a>(
 
 fn load_matrix(root: &Path) -> Result<Vec<MatrixFeature>, String> {
     let path = root.join(MATRIX_PATH);
-    let text = fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let text =
+        fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let parsed: toml::Value =
         toml::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
     let table = parsed

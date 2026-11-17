@@ -339,16 +339,300 @@ where
     }
 }
 
+/// Maximum simultaneous live TCP connections any single non-loopback client IP
+/// (or IPv6 `/64` prefix) may hold against one RPC listener. Keeps one slowloris
+/// or stalled-TLS source from starving the listener's global `max_connections`
+/// semaphore.
+const MAX_CONNECTIONS_PER_SOURCE: usize = 32;
+
+/// Maximum simultaneous JSON-RPC subscriptions on a single WebSocket
+/// connection so one client cannot exhaust the node-wide subscription feed pool.
+const MAX_SUBSCRIPTIONS_PER_CONNECTION: u32 = 16;
+
+/// Canonical rate-limit and connection-budget key for a client address.
+///
+/// IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) collapse to their underlying
+/// IPv4 address so dual-stack callers cannot claim a second bucket, and global
+/// IPv6 addresses collapse to their `/64` routing prefix so rotating host
+/// suffixes within one standard allocation share a single quota.
+fn rate_limit_bucket_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return IpAddr::V4(mapped);
+            }
+            if v6.is_loopback() || v6.is_unspecified() {
+                return IpAddr::V6(v6);
+            }
+            let seg = v6.segments();
+            IpAddr::V6(std::net::Ipv6Addr::new(
+                seg[0], seg[1], seg[2], seg[3], 0, 0, 0, 0,
+            ))
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ListenerConnectionLimiter {
+    total: Arc<tokio::sync::Semaphore>,
+    per_source: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    max_per_source: usize,
+}
+
+struct ListenerConnectionPermit {
+    _total: tokio::sync::OwnedSemaphorePermit,
+    source_bucket: Option<IpAddr>,
+    per_source: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+impl Drop for ListenerConnectionPermit {
+    fn drop(&mut self) {
+        if let Some(bucket) = self.source_bucket {
+            if let Ok(mut counts) = self.per_source.lock() {
+                if let Some(count) = counts.get_mut(&bucket) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        counts.remove(&bucket);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl ListenerConnectionLimiter {
+    fn new(max_total: usize, max_per_source: usize) -> Self {
+        Self {
+            total: Arc::new(tokio::sync::Semaphore::new(max_total)),
+            per_source: Arc::new(Mutex::new(HashMap::new())),
+            max_per_source: max_per_source.max(1),
+        }
+    }
+
+    fn try_acquire(&self, remote_ip: IpAddr) -> Option<ListenerConnectionPermit> {
+        let total = self.total.clone().try_acquire_owned().ok()?;
+        let normalized = rate_limit_bucket_key(remote_ip);
+        if normalized.is_loopback() {
+            return Some(ListenerConnectionPermit {
+                _total: total,
+                source_bucket: None,
+                per_source: self.per_source.clone(),
+            });
+        }
+        let mut counts = self.per_source.lock().ok()?;
+        let current = counts.get(&normalized).copied().unwrap_or(0);
+        if current >= self.max_per_source {
+            return None;
+        }
+        counts.insert(normalized, current.saturating_add(1));
+        drop(counts);
+        Some(ListenerConnectionPermit {
+            _total: total,
+            source_bucket: Some(normalized),
+            per_source: self.per_source.clone(),
+        })
+    }
+}
+
+const MAX_WS_FRAME_BURST: u32 = 32;
+const MAX_WS_FRAMES_PER_MINUTE: usize = 2_048;
+
+/// AsyncRead/AsyncWrite wrapper that paces client WebSocket frames BEFORE
+/// `soketto` yields them to `jsonrpsee`'s per-message `tokio::spawn` loop.
+struct WsFrameGateStream<IO> {
+    inner: IO,
+    upgraded: bool,
+    hdr_buf: [u8; 14],
+    hdr_len: usize,
+    frame_payload_left: u64,
+    burst_tokens: f64,
+    last_refill: Instant,
+    window: VecDeque<Instant>,
+    pace_sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl<IO> WsFrameGateStream<IO> {
+    fn new(inner: IO) -> Self {
+        Self {
+            inner,
+            upgraded: false,
+            hdr_buf: [0u8; 14],
+            hdr_len: 0,
+            frame_payload_left: 0,
+            burst_tokens: f64::from(MAX_WS_FRAME_BURST),
+            last_refill: Instant::now(),
+            window: VecDeque::new(),
+            pace_sleep: None,
+        }
+    }
+
+    fn expected_header_len(&self) -> usize {
+        if self.hdr_len < 2 {
+            return 2;
+        }
+        let len7 = self.hdr_buf[1] & 0x7f;
+        let ext = match len7 {
+            126 => 2,
+            127 => 8,
+            _ => 0,
+        };
+        let mask = if (self.hdr_buf[1] & 0x80) != 0 { 4 } else { 0 };
+        2 + ext + mask
+    }
+
+    fn parsed_payload_len(&self) -> u64 {
+        let len7 = self.hdr_buf[1] & 0x7f;
+        match len7 {
+            126 => u64::from(u16::from_be_bytes([self.hdr_buf[2], self.hdr_buf[3]])),
+            127 => u64::from_be_bytes([
+                self.hdr_buf[2],
+                self.hdr_buf[3],
+                self.hdr_buf[4],
+                self.hdr_buf[5],
+                self.hdr_buf[6],
+                self.hdr_buf[7],
+                self.hdr_buf[8],
+                self.hdr_buf[9],
+            ]),
+            n => u64::from(n),
+        }
+    }
+}
+
+impl<IO: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for WsFrameGateStream<IO> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = &mut *self;
+        if !this.upgraded || buf.remaining() == 0 {
+            return std::pin::Pin::new(&mut this.inner).poll_read(cx, buf);
+        }
+        if let Some(sleep) = this.pace_sleep.as_mut() {
+            match std::future::Future::poll(sleep.as_mut(), cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(()) => {
+                    this.pace_sleep = None;
+                }
+            }
+        }
+        if this.frame_payload_left > 0 {
+            let cap = buf
+                .remaining()
+                .min(usize::try_from(this.frame_payload_left).unwrap_or(usize::MAX));
+            let unfilled = buf.initialize_unfilled_to(cap);
+            let mut sub = tokio::io::ReadBuf::new(unfilled);
+            match std::pin::Pin::new(&mut this.inner).poll_read(cx, &mut sub) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => {
+                    let n = sub.filled().len();
+                    buf.advance(n);
+                    this.frame_payload_left = this.frame_payload_left.saturating_sub(n as u64);
+                    return Poll::Ready(Ok(()));
+                }
+            }
+        }
+        // At a frame boundary: pace and cap frame admission BEFORE delivering
+        // the frame header to soketto/jsonrpsee.
+        let now = Instant::now();
+        let cutoff = now.checked_sub(Duration::from_secs(60)).unwrap_or(now);
+        while this.window.front().is_some_and(|t| *t < cutoff) {
+            this.window.pop_front();
+        }
+        if this.window.len() >= MAX_WS_FRAMES_PER_MINUTE {
+            return Poll::Ready(Err(std::io::Error::other(
+                "WebSocket frame rate ceiling exceeded",
+            )));
+        }
+        let elapsed = now.duration_since(this.last_refill).as_secs_f64();
+        this.burst_tokens =
+            (this.burst_tokens + elapsed * 320.0).min(f64::from(MAX_WS_FRAME_BURST));
+        this.last_refill = now;
+        if this.burst_tokens < 1.0 {
+            let mut sleep = Box::pin(tokio::time::sleep(Duration::from_millis(4)));
+            let _ = std::future::Future::poll(sleep.as_mut(), cx);
+            this.pace_sleep = Some(sleep);
+            return Poll::Pending;
+        }
+        loop {
+            let target = this.expected_header_len();
+            if this.hdr_len >= target {
+                break;
+            }
+            if buf.remaining() < target {
+                return std::pin::Pin::new(&mut this.inner).poll_read(cx, buf);
+            }
+            let mut sub = tokio::io::ReadBuf::new(&mut this.hdr_buf[this.hdr_len..target]);
+            match std::pin::Pin::new(&mut this.inner).poll_read(cx, &mut sub) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => {
+                    let n = sub.filled().len();
+                    if n == 0 {
+                        if this.hdr_len > 0 {
+                            buf.put_slice(&this.hdr_buf[..this.hdr_len]);
+                            this.hdr_len = 0;
+                        }
+                        return Poll::Ready(Ok(()));
+                    }
+                    this.hdr_len += n;
+                    if this.hdr_len < target {
+                        continue;
+                    }
+                }
+            }
+        }
+        let hdr_total = this.hdr_len;
+        this.frame_payload_left = this.parsed_payload_len();
+        this.hdr_len = 0;
+        this.burst_tokens -= 1.0;
+        this.window.push_back(now);
+        buf.put_slice(&this.hdr_buf[..hdr_total]);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<IO: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for WsFrameGateStream<IO> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if !self.upgraded && buf.starts_with(b"HTTP/1.1 101 ") {
+            self.upgraded = true;
+        }
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
 /// Completes the TLS handshake inside the connection task, so one slow client
 /// cannot hold up the accept loop, then serves the connection like a plain one.
-async fn serve_tls_connection<S, B>(
+async fn serve_tls_connection<S, B, P>(
     acceptor: tokio_rustls::TlsAcceptor,
     socket: tokio::net::TcpStream,
     remote_addr: SocketAddr,
     service: S,
     stopped: impl std::future::Future<Output = ()>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: P,
 ) where
+    P: Send + 'static,
     S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
         + Clone
         + Send
@@ -362,7 +646,8 @@ async fn serve_tls_connection<S, B>(
     let handshake = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(socket));
     match handshake.await {
         Ok(Ok(stream)) => {
-            let _ = jsonrpsee::server::serve_with_graceful_shutdown(stream, service, stopped).await;
+            let gated = WsFrameGateStream::new(stream);
+            let _ = jsonrpsee::server::serve_with_graceful_shutdown(gated, service, stopped).await;
         }
         Ok(Err(error)) => {
             tracing::debug!("RPC TLS handshake from {remote_addr} failed: {error}");
@@ -376,12 +661,13 @@ async fn serve_tls_connection<S, B>(
 /// Serves a plain-HTTP connection while holding `_permit` for the connection's
 /// full lifetime so `max_connections` applies symmetrically to plain and TLS
 /// listeners.
-async fn serve_plain_connection<S, B>(
+async fn serve_plain_connection<S, B, P>(
     socket: tokio::net::TcpStream,
     service: S,
     stopped: impl std::future::Future<Output = ()>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: P,
 ) where
+    P: Send + 'static,
     S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
         + Clone
         + Send
@@ -392,7 +678,8 @@ async fn serve_plain_connection<S, B>(
     B: hyper::body::Body<Data = hyper::body::Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    let _ = jsonrpsee::server::serve_with_graceful_shutdown(socket, service, stopped).await;
+    let gated = WsFrameGateStream::new(socket);
+    let _ = jsonrpsee::server::serve_with_graceful_shutdown(gated, service, stopped).await;
 }
 
 pub struct RpcServer {
@@ -429,18 +716,16 @@ pub struct RpcServer {
 }
 
 const MAX_CONSUMED_PAID_VIEWS: usize = 65_536;
+const MAX_IN_FLIGHT_PAID_VIEWS: usize = 4_096;
 
 #[derive(Default)]
 struct ConsumedPaidViews {
     seen: std::collections::BTreeSet<[u8; 32]>,
+    in_flight: std::collections::BTreeSet<[u8; 32]>,
     order: VecDeque<[u8; 32]>,
 }
 
 impl ConsumedPaidViews {
-    fn contains(&self, receipt_id: &[u8; 32]) -> bool {
-        self.seen.contains(receipt_id)
-    }
-
     fn record(&mut self, receipt_id: [u8; 32]) {
         if !self.seen.insert(receipt_id) {
             return;
@@ -449,6 +734,66 @@ impl ConsumedPaidViews {
         while self.order.len() > MAX_CONSUMED_PAID_VIEWS {
             if let Some(evicted) = self.order.pop_front() {
                 self.seen.remove(&evicted);
+            }
+        }
+    }
+}
+
+/// RAII reservation preventing concurrent `bud_storageGetContent` replay of the
+/// same `receipt_id` across `.await` points. On error or task cancellation the
+/// reservation releases the in-flight slot without burning an unserved receipt.
+struct PaidViewReservation {
+    cache: Arc<Mutex<ConsumedPaidViews>>,
+    receipt_id: Option<[u8; 32]>,
+}
+
+impl PaidViewReservation {
+    fn acquire(
+        cache: &Arc<Mutex<ConsumedPaidViews>>,
+        receipt_id: [u8; 32],
+    ) -> Result<Self, ErrorObjectOwned> {
+        let mut guard = cache.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
+        })?;
+        if guard.seen.contains(&receipt_id) || guard.in_flight.contains(&receipt_id) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "paid view receipt already consumed on this node",
+                None::<()>,
+            ));
+        }
+        if guard.in_flight.len() >= MAX_IN_FLIGHT_PAID_VIEWS {
+            return Err(ErrorObjectOwned::owned(
+                -32005,
+                "too many in-flight paid view requests",
+                None::<()>,
+            ));
+        }
+        guard.in_flight.insert(receipt_id);
+        Ok(Self {
+            cache: Arc::clone(cache),
+            receipt_id: Some(receipt_id),
+        })
+    }
+
+    fn commit(mut self) -> Result<(), ErrorObjectOwned> {
+        let Some(receipt_id) = self.receipt_id.take() else {
+            return Ok(());
+        };
+        let mut guard = self.cache.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
+        })?;
+        guard.in_flight.remove(&receipt_id);
+        guard.record(receipt_id);
+        Ok(())
+    }
+}
+
+impl Drop for PaidViewReservation {
+    fn drop(&mut self) {
+        if let Some(receipt_id) = self.receipt_id.take() {
+            if let Ok(mut guard) = self.cache.lock() {
+                guard.in_flight.remove(&receipt_id);
             }
         }
     }
@@ -467,15 +812,14 @@ struct AptosListener {
 
 impl AptosListener {
     async fn start(self) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
-        use jsonrpsee::server::serve_with_graceful_shutdown;
-
         let listener = tokio::net::TcpListener::bind(self.addr.clone()).await?;
         let local_addr = listener.local_addr()?;
         let connection_limit = self
             .security
             .max_connections
             .unwrap_or(RPC_CONNECTION_LIMIT_CEILING) as usize;
-        let connections = Arc::new(tokio::sync::Semaphore::new(connection_limit));
+        let connections =
+            ListenerConnectionLimiter::new(connection_limit, MAX_CONNECTIONS_PER_SOURCE);
         let security = RpcSecurityLayer::new(self.security, self.metrics, RpcMode::Public);
         let tls = self.tls;
         let gateway = self.gateway;
@@ -495,9 +839,11 @@ impl AptosListener {
                         continue;
                     }
                 };
-                let permit = match connections.clone().acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(_) => break,
+                let Some(permit) = connections.try_acquire(remote_addr.ip()) else {
+                    tracing::debug!(
+                        "Aptos REST connection from {remote_addr} dropped: connection budget reached"
+                    );
+                    continue;
                 };
                 let gateway_for_service = gateway.clone();
                 let service =
@@ -526,15 +872,12 @@ impl AptosListener {
                         ));
                     }
                     None => {
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            let _ = serve_with_graceful_shutdown(
-                                socket,
-                                service,
-                                std::future::pending::<()>(),
-                            )
-                            .await;
-                        });
+                        tokio::spawn(serve_plain_connection(
+                            socket,
+                            service,
+                            std::future::pending::<()>(),
+                            permit,
+                        ));
                     }
                 }
             }
@@ -569,6 +912,8 @@ impl SolanaListener {
         let config = ServerConfig::builder()
             .max_request_body_size(body_limit)
             .max_connections(connection_limit as u32)
+            .max_subscriptions_per_connection(MAX_SUBSCRIPTIONS_PER_CONNECTION)
+            .set_message_buffer_capacity(64)
             .set_batch_request_config(BatchRequestConfig::Limit(100))
             .build();
         let builder = ServerBuilder::default()
@@ -579,7 +924,8 @@ impl SolanaListener {
             .to_service_builder();
         let listener = tokio::net::TcpListener::bind(self.addr).await?;
         let local_addr = listener.local_addr()?;
-        let connections = Arc::new(tokio::sync::Semaphore::new(connection_limit));
+        let connections =
+            ListenerConnectionLimiter::new(connection_limit, MAX_CONNECTIONS_PER_SOURCE);
         let security = RpcSecurityLayer::new(self.security, self.metrics, RpcMode::Public);
         let (stop_handle, server_handle) = stop_channel();
         let methods = self.methods;
@@ -603,9 +949,11 @@ impl SolanaListener {
                     },
                     _ = stop_handle.clone().shutdown() => break,
                 };
-                let permit = match connections.clone().acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(_) => break,
+                let Some(permit) = connections.try_acquire(remote_addr.ip()) else {
+                    tracing::debug!(
+                        "Solana RPC connection from {remote_addr} dropped: connection budget reached"
+                    );
+                    continue;
                 };
                 let builder_for_service = builder.clone();
                 let methods_for_service = methods.clone();
@@ -797,7 +1145,10 @@ impl RpcServer {
         // legitimate client pattern while keeping amplification bounded;
         // oversized batches are rejected wholesale instead of partially
         // executed (jsonrpsee drops the whole batch at `Limit`).
-        config = config.set_batch_request_config(BatchRequestConfig::Limit(100));
+        config = config
+            .max_subscriptions_per_connection(MAX_SUBSCRIPTIONS_PER_CONNECTION)
+            .set_message_buffer_capacity(64)
+            .set_batch_request_config(BatchRequestConfig::Limit(100));
         let builder = ServerBuilder::default()
             .set_rpc_middleware(jsonrpsee::core::middleware::RpcServiceBuilder::new().layer(
                 RpcCallRateLimitLayer::new(self.security.clone(), self.metrics.clone()),
@@ -885,7 +1236,8 @@ impl RpcServer {
         } else {
             None
         };
-        let connection_permits = Arc::new(tokio::sync::Semaphore::new(connection_cap));
+        let connection_permits =
+            ListenerConnectionLimiter::new(connection_cap, MAX_CONNECTIONS_PER_SOURCE);
         let svc_builder = builder.to_service_builder();
         let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
         let (stop_handle, server_handle) = stop_channel();
@@ -910,9 +1262,9 @@ impl RpcServer {
                     _ = stop_handle.clone().shutdown() => break,
                 };
 
-                let Ok(permit) = connection_permits.clone().try_acquire_owned() else {
+                let Some(permit) = connection_permits.try_acquire(remote_addr.ip()) else {
                     tracing::debug!(
-                        "RPC connection from {remote_addr} dropped: max_connections reached"
+                        "RPC connection from {remote_addr} dropped: connection budget reached"
                     );
                     continue;
                 };
@@ -1846,6 +2198,33 @@ fn cap_list_response<T>(mut items: Vec<T>) -> Vec<T> {
     items
 }
 
+fn page_list_response<T>(
+    mut items: Vec<T>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<Vec<T>, ErrorObjectOwned> {
+    let take = match limit {
+        None => MAX_LIST_RESPONSE_ITEMS,
+        Some(0) => {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid page limit 0: expected 1..={MAX_LIST_RESPONSE_ITEMS}"),
+                None::<()>,
+            ));
+        }
+        Some(n) if n > MAX_LIST_RESPONSE_ITEMS => {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid page limit {n}: exceeds maximum {MAX_LIST_RESPONSE_ITEMS}"),
+                None::<()>,
+            ));
+        }
+        Some(n) => n,
+    };
+    let skip = offset.unwrap_or(0).min(items.len());
+    Ok(items.drain(skip..).take(take).collect())
+}
+
 fn is_per_ip_rate_limited(
     config: &RpcSecurityConfig,
     per_ip_rates: &Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
@@ -1859,7 +2238,7 @@ fn is_per_ip_rate_limited(
     }
 
     let ip = match client_ip {
-        Some(ip) => ip,
+        Some(ip) => rate_limit_bucket_key(ip),
         None => return false,
     };
 
@@ -5462,6 +5841,8 @@ impl BudlumApiServer for RpcServer {
     async fn bns_list_offers(
         &self,
         kind: Option<String>,
+        offset: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let parsed_kind = match kind.as_deref() {
             None => None,
@@ -5475,7 +5856,8 @@ impl BudlumApiServer for RpcServer {
                 ));
             }
         };
-        let offers = cap_list_response(self.chain.bns_list_offers(parsed_kind).await);
+        let offers =
+            page_list_response(self.chain.bns_list_offers(parsed_kind).await, offset, limit)?;
         serde_json::to_value(offers).map_err(|e| {
             ErrorObjectOwned::owned(-32603, format!("Serialization error: {e}"), None::<()>)
         })
@@ -6239,14 +6621,23 @@ impl BudlumApiServer for RpcServer {
     async fn social_get_profile(
         &self,
         address: String,
+        offset: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
         let addr = Address::from_hex(clean_addr).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
+        let mut nfts = self.chain.nft_get_by_owner(addr).await;
+        nfts.sort_by_key(|nft| {
+            (
+                std::cmp::Reverse(nft.minted_at_epoch),
+                std::cmp::Reverse(nft.id),
+            )
+        });
+        let page = page_list_response(nfts, offset, limit)?;
         let author_bud_name = self.chain.bns_reverse_resolve(addr).await;
-        let nfts = self.chain.nft_get_by_owner(addr).await;
-        let bud3_nft_ids: Vec<[u8; 32]> = nfts
+        let bud3_nft_ids: Vec<[u8; 32]> = page
             .iter()
             .map(|nft| crate::socialfi::nft_folders::derive_bud3_nft_id(nft.id))
             .collect();
@@ -6255,7 +6646,7 @@ impl BudlumApiServer for RpcServer {
             .bud3_nfts(bud3_nft_ids.clone())
             .await
             .unwrap_or_else(|_| vec![serde_json::Value::Null; bud3_nft_ids.len()]);
-        let list: Vec<_> = nfts
+        let list: Vec<_> = page
             .into_iter()
             .zip(bud3_nft_ids)
             .zip(bud3_bindings)
@@ -6465,8 +6856,19 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
-    async fn market_get_offers(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let offers = cap_list_response(self.chain.market_get_offers().await);
+    async fn market_get_offers(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let active: Vec<_> = self
+            .chain
+            .market_get_offers()
+            .await
+            .into_iter()
+            .filter(|offer| offer.active)
+            .collect();
+        let offers = page_list_response(active, offset, limit)?;
         Ok(serde_json::json!(offers))
     }
 
@@ -6571,23 +6973,48 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
-    async fn pollen_get_data_assets(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let assets = cap_list_response(self.chain.pollen_get_data_assets().await);
+    async fn pollen_get_data_assets(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let assets = page_list_response(self.chain.pollen_get_data_assets().await, offset, limit)?;
         Ok(serde_json::json!(assets))
     }
 
-    async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let grants = cap_list_response(self.chain.pollen_get_access_grants().await);
+    async fn pollen_get_access_grants(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let grants =
+            page_list_response(self.chain.pollen_get_access_grants().await, offset, limit)?;
         Ok(serde_json::json!(grants))
     }
 
-    async fn pollen_get_sale_authorizations(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let authorizations = cap_list_response(self.chain.pollen_get_sale_authorizations().await);
+    async fn pollen_get_sale_authorizations(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let authorizations = page_list_response(
+            self.chain.pollen_get_sale_authorizations().await,
+            offset,
+            limit,
+        )?;
         Ok(serde_json::json!(authorizations))
     }
 
-    async fn pollen_get_purchase_receipts(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let receipts = cap_list_response(self.chain.pollen_get_purchase_receipts().await);
+    async fn pollen_get_purchase_receipts(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let receipts = page_list_response(
+            self.chain.pollen_get_purchase_receipts().await,
+            offset,
+            limit,
+        )?;
         Ok(serde_json::json!(receipts))
     }
 
@@ -6793,13 +7220,25 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
-    async fn budlumxyz_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let apps = cap_list_response(self.chain.budlumxyz_get_apps().await);
+    async fn budlumxyz_get_apps(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let apps = page_list_response(self.chain.budlumxyz_get_apps().await, offset, limit)?;
         Ok(serde_json::json!(apps))
     }
 
-    async fn budlumxyz_get_app_binding_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let apps = cap_list_response(self.chain.budlumxyz_get_app_binding_apps().await);
+    async fn budlumxyz_get_app_binding_apps(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let apps = page_list_response(
+            self.chain.budlumxyz_get_app_binding_apps().await,
+            offset,
+            limit,
+        )?;
         Ok(serde_json::json!(apps))
     }
 
@@ -8349,18 +8788,7 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        {
-            let guard = self.consumed_paid_views.lock().map_err(|_| {
-                ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
-            })?;
-            if guard.contains(&receipt_id) {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    "paid view receipt already consumed on this node",
-                    None::<()>,
-                ));
-            }
-        }
+        let reservation = PaidViewReservation::acquire(&self.consumed_paid_views, receipt_id)?;
         let receipt = crate::storage::bud3::view::PaidViewReceipt {
             payer,
             object,
@@ -8400,12 +8828,7 @@ impl BudlumApiServer for RpcServer {
                     None::<()>,
                 ),
             })?;
-        {
-            let mut guard = self.consumed_paid_views.lock().map_err(|_| {
-                ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
-            })?;
-            guard.record(receipt_id);
-        }
+        reservation.commit()?;
         Ok(serde_json::json!({
             "object": hex::encode(object),
             "content_hex": hex::encode(&bytes),
@@ -8665,9 +9088,15 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
-    async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let history: Vec<crate::registry::permissionless::SlashingRecord> =
-            cap_list_response(self.chain.get_slashing_history().await);
+    async fn get_slashing_history(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let mut all = self.chain.get_slashing_history().await;
+        let total = all.len();
+        all.reverse();
+        let history = page_list_response(all, offset, limit)?;
         let entries: Vec<serde_json::Value> = history
             .into_iter()
             .map(|entry| {
@@ -8685,6 +9114,7 @@ impl BudlumApiServer for RpcServer {
         Ok(serde_json::json!({
             "history": entries,
             "count": entries.len(),
+            "total": total,
         }))
     }
 
@@ -10100,6 +10530,14 @@ mod tests {
     }
 
     #[test]
+    fn page_list_response_paginates_and_rejects_invalid_limits() {
+        let page = page_list_response(vec![10u32, 20, 30, 40], Some(1), Some(2)).unwrap();
+        assert_eq!(page, vec![20, 30]);
+        assert!(page_list_response(vec![1u8], None, Some(0)).is_err());
+        assert!(page_list_response(vec![1u8], None, Some(MAX_LIST_RESPONSE_ITEMS + 1)).is_err());
+    }
+
+    #[test]
     fn test_per_ip_rate_limiting() {
         let config = RpcSecurityConfig {
             rate_limit_per_minute: Some(2),
@@ -10996,5 +11434,115 @@ mod view_claim_tests {
         assert!(verify_view_claim(&future, &content, &key, &owner, &packed, NOW).is_err());
         let edge = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max);
         assert!(verify_view_claim(&edge, &content, &key, &owner, &packed, NOW).is_ok());
+    }
+
+    #[test]
+    fn ipv6_slash64_and_v4_mapped_addresses_share_one_rate_bucket() {
+        use super::*;
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(2),
+            ..RpcSecurityConfig::default()
+        };
+        let rates = Arc::new(Mutex::new(HashMap::new()));
+        let host_a: IpAddr = "2001:db8:cafe:beef::1".parse().unwrap();
+        let host_b: IpAddr = "2001:db8:cafe:beef:dead:1234:5678:9abc".parse().unwrap();
+        let host_c: IpAddr = "2001:db8:cafe:beef::ffff".parse().unwrap();
+        let other_prefix: IpAddr = "2001:db8:cafe:feed::1".parse().unwrap();
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(host_a)));
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(host_b)));
+        assert!(
+            !is_per_ip_rate_limited(&config, &rates, Some(host_c)),
+            "rotating host suffixes within one IPv6 /64 must not mint fresh quota"
+        );
+        assert!(
+            is_per_ip_rate_limited(&config, &rates, Some(other_prefix)),
+            "a distinct IPv6 /64 keeps its own quota"
+        );
+
+        let v4: IpAddr = "198.51.100.42".parse().unwrap();
+        let v4_mapped: IpAddr = "::ffff:198.51.100.42".parse().unwrap();
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(v4)));
+        assert!(is_per_ip_rate_limited(&config, &rates, Some(v4_mapped)));
+        assert!(
+            !is_per_ip_rate_limited(&config, &rates, Some(v4_mapped)),
+            "IPv4-mapped IPv6 must share the underlying IPv4 bucket"
+        );
+    }
+
+    #[test]
+    fn per_source_connection_limiter_isolates_prefix_flood_and_releases_on_drop() {
+        use super::*;
+        let limiter = ListenerConnectionLimiter::new(10, 2);
+        let a1: IpAddr = "2001:db8:1:2::10".parse().unwrap();
+        let a2: IpAddr = "2001:db8:1:2::20".parse().unwrap();
+        let a3: IpAddr = "2001:db8:1:2::30".parse().unwrap();
+        let honest: IpAddr = "203.0.113.9".parse().unwrap();
+
+        let p1 = limiter.try_acquire(a1).expect("first connection admitted");
+        let p2 = limiter
+            .try_acquire(a2)
+            .expect("second connection in /64 admitted");
+        assert!(
+            limiter.try_acquire(a3).is_none(),
+            "third simultaneous connection from the same /64 must be refused"
+        );
+        let honest_permit = limiter
+            .try_acquire(honest)
+            .expect("independent client still admitted while attacker is capped");
+        drop(p1);
+        let p3 = limiter
+            .try_acquire(a3)
+            .expect("dropping a connection releases one per-source slot");
+        drop(p2);
+        drop(p3);
+        drop(honest_permit);
+        assert!(
+            limiter.per_source.lock().unwrap().is_empty(),
+            "released sources must leave zero residual entries"
+        );
+    }
+}
+
+#[cfg(test)]
+mod paid_view_reservation_tests {
+    use super::{ConsumedPaidViews, PaidViewReservation};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn paid_view_reservation_blocks_concurrent_replay_and_rolls_back_on_drop() {
+        let cache = Arc::new(Mutex::new(ConsumedPaidViews::default()));
+        let receipt_id = [0x42u8; 32];
+
+        // First caller reserves the receipt before awaiting backend decode.
+        let first = PaidViewReservation::acquire(&cache, receipt_id)
+            .expect("initial reservation must succeed");
+
+        // A concurrent caller presenting the same receipt_id must be rejected
+        // before the first request completes.
+        let dup_err = PaidViewReservation::acquire(&cache, receipt_id)
+            .err()
+            .expect("concurrent duplicate receipt_id must fail closed");
+        assert!(
+            dup_err.message().contains("already consumed"),
+            "unexpected concurrent error: {}",
+            dup_err.message()
+        );
+
+        // If the first call errors or is cancelled, dropping releases in-flight
+        // without burning the unserved receipt.
+        drop(first);
+        let retry = PaidViewReservation::acquire(&cache, receipt_id)
+            .expect("cancelled/errored reservation must roll back cleanly");
+        retry.commit().expect("commit must mark receipt consumed");
+
+        // Once committed, subsequent replay is permanently refused.
+        let replay_err = PaidViewReservation::acquire(&cache, receipt_id)
+            .err()
+            .expect("committed receipt_id must be rejected on replay");
+        assert!(
+            replay_err.message().contains("already consumed"),
+            "unexpected replay error: {}",
+            replay_err.message()
+        );
     }
 }

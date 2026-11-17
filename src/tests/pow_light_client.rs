@@ -367,3 +367,117 @@ fn permissionless_pow_domain_does_not_anchor_external_root() {
         "permissionless PoW domain outside the canonical set must never write external_roots"
     );
 }
+
+#[test]
+fn bitcoin_spv_commitment_finalizes_through_settlement_without_zero_root_anchor() {
+    use crate::domain::producer::{
+        build_bitcoin_spv_commitment, BitcoinBlockContent, BitcoinSpvChainSpec,
+    };
+    use crate::domain::BITCOIN_SPV_ADAPTER;
+
+    let mut chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let mut source = default_domain(3, ConsensusKind::PoW, 0, BITCOIN_SPV_ADAPTER, 2);
+    source.operator = Some(address(3));
+    source.bridge_enabled = false;
+    source.pow_parameters = Some(PoWDomainParameters {
+        min_difficulty_bits: 1,
+        max_difficulty_bits: 16,
+        min_cumulative_work: 4,
+        max_headers: 8,
+    });
+    chain
+        .register_consensus_domain(source.clone())
+        .expect("bitcoin-spv domain registration");
+
+    let built = build_bitcoin_spv_commitment(&BitcoinSpvChainSpec {
+        domain: source.clone(),
+        parent_hash: [0u8; 32],
+        height: 1,
+        sequence: 0,
+        producer: None,
+        blocks: vec![
+            BitcoinBlockContent {
+                version: 1,
+                merkle_root: [0xA1; 32],
+                timestamp: 1_700_000_000,
+                bits: 0x207f_ffff,
+            },
+            BitcoinBlockContent {
+                version: 1,
+                merkle_root: [0xA2; 32],
+                timestamp: 1_700_000_600,
+                bits: 0x207f_ffff,
+            },
+        ],
+    })
+    .expect("bitcoin spv build");
+
+    if let FinalityProof::BitcoinSpv { headers } = &built.proof {
+        assert_eq!(headers[0].block_hash(), built.commitment.domain_block_hash);
+    } else {
+        panic!("expected FinalityProof::BitcoinSpv");
+    }
+
+    chain
+        .submit_verified_domain_commitment(built.commitment.clone(), built.proof.clone())
+        .expect("bitcoin-spv commitment advances domain without zero-state-root contradiction");
+    let dom = chain
+        .state
+        .settlement
+        .domains
+        .get(source.id)
+        .expect("domain kept");
+    assert_eq!(dom.last_committed_height, 1);
+    assert_eq!(dom.last_committed_hash, built.commitment.domain_block_hash);
+    assert!(
+        !chain.state.external_roots.contains_key(&source.id),
+        "bitcoin-spv commits tx_root only and must never write zero to external_roots"
+    );
+}
+
+#[test]
+fn bitcoin_spv_non_zero_state_root_and_bridge_relay_are_rejected() {
+    use crate::domain::producer::{
+        build_bitcoin_spv_commitment, BitcoinBlockContent, BitcoinSpvChainSpec,
+    };
+    use crate::domain::BITCOIN_SPV_ADAPTER;
+    use crate::settlement::domains::CommitmentAttestation;
+
+    let mut chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let mut source = default_domain(51, ConsensusKind::PoW, 51_001, BITCOIN_SPV_ADAPTER, 1);
+    source.operator = Some(address(51));
+    source.pow_parameters = Some(PoWDomainParameters {
+        min_difficulty_bits: 1,
+        max_difficulty_bits: 16,
+        min_cumulative_work: 2,
+        max_headers: 8,
+    });
+    chain.register_consensus_domain(source.clone()).unwrap();
+
+    let att = CommitmentAttestation::for_domain(&source);
+    assert!(!att.state_root && !att.event_root && att.tx_root && att.parent);
+
+    let mut built = build_bitcoin_spv_commitment(&BitcoinSpvChainSpec {
+        domain: source,
+        parent_hash: [0u8; 32],
+        height: 1,
+        sequence: 0,
+        producer: None,
+        blocks: vec![BitcoinBlockContent {
+            version: 1,
+            merkle_root: [0xB1; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x207f_ffff,
+        }],
+    })
+    .unwrap();
+    built.commitment.state_root = [0x99; 32];
+    built.commitment.finality_proof_hash = hash_finality_proof(&built.proof).unwrap();
+    let err = chain
+        .submit_verified_domain_commitment(built.commitment, built.proof)
+        .expect_err("non-zero state_root must be rejected by bitcoin-spv-v1");
+    assert!(
+        err.contains("state root") || err.contains("Rejected"),
+        "unexpected error: {err}"
+    );
+}

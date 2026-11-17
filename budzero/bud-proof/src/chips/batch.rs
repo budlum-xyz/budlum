@@ -19,7 +19,6 @@
 //! of accepting one it cannot bind - a verifier that says yes to whatever it is
 //! handed is worse than one that says nothing. Both gaps are the remaining
 //! work, and the refusal is lifted with the binding.
-//! WIRING: unwired - the AIR-shape helpers here are the proof-side surface a later caller wires up; no production module calls them yet (the prover paths consume the concrete columns directly until that wiring lands).
 
 use crate::chips::keccak::{
     prove_bound_keccak_f, prove_keccak_f, verify_bound_keccak_f, verify_keccak_f, BoundKeccakProof,
@@ -222,6 +221,7 @@ pub fn verify_batch(proof: &BatchProof) -> Result<(), KeccakChipError> {
 /// permutation's output state, and the [`BoundKeccakProof`] certifying that
 /// every absorbed state maps to its output under `Keccak-f[1600]`.
 #[derive(Clone)]
+/// WIRING: called by Phase 3 recursive batch proving and verification.
 pub struct BoundBatchProof {
     pub statements: Vec<BatchStatement>,
     pub outputs: Vec<[u64; 25]>,
@@ -234,6 +234,7 @@ pub struct BoundBatchProof {
 /// # Errors
 ///
 /// Refuses an empty batch or a chip-proving failure.
+/// WIRING: called by Phase 3 recursive batch proving and verification.
 pub fn prove_bound_batch(
     statements: Vec<BatchStatement>,
 ) -> Result<BoundBatchProof, KeccakChipError> {
@@ -258,6 +259,7 @@ pub fn prove_bound_batch(
 ///
 /// Refuses empty batches, mismatched output counts, replayed proofs for other
 /// statements, tampered intermediate states, or invalid STARK proofs.
+/// WIRING: called by Phase 3 recursive batch proving and verification.
 pub fn verify_bound_batch(proof: &BoundBatchProof) -> Result<[u8; 32], KeccakChipError> {
     if proof.statements.is_empty() {
         return Err(KeccakChipError::Empty);
