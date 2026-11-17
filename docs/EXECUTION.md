@@ -218,5 +218,6 @@ STARK proving on every call.
  `0x0B` Plutus remain closed at public-testnet launch. The launch verdicts are
  pinned by `near_wasm_is_closed_on_testnet`, `polkavm_is_closed_on_testnet`,
  `tvm_is_closed_on_testnet`, `utxo_is_closed_on_testnet`, and
- `plutus_is_closed_on_testnet`. Conformance tests use explicit activation
- fixtures and do not alter worker defaults.
+ `plutus_is_closed_on_testnet`. The in-process coordinator adapters and their
+ query path are also devnet-only (`expansion_coordinator_is_closed_on_testnet`).
+ Conformance tests use explicit activation fixtures and do not alter worker defaults.
