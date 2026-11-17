@@ -105,7 +105,7 @@ pub enum CanonicalValue {
 impl CanonicalValue {
     /// Deterministic byte size used for bundle memory accounting.
     #[must_use]
-    pub fn byte_len(&self) -> usize {
+    pub const fn byte_len(&self) -> usize {
         match self {
             Self::Bool(_) => 1,
             Self::U64(_) => 8,
@@ -136,7 +136,7 @@ impl CanonicalValue {
     }
 }
 
-/// Normalized cross-VM event capturing EVM logs, CosmWasm attributes, SVM
+/// Normalized cross-VM event capturing EVM logs, `CosmWasm` attributes, SVM
 /// program logs, Move events, Cairo events, and UTXO `OP_RETURN` records.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalizedEvent {
@@ -203,7 +203,7 @@ pub struct NormalizedStateEffect {
 
 impl NormalizedStateEffect {
     #[must_use]
-    fn byte_len(&self) -> usize {
+    const fn byte_len(&self) -> usize {
         self.namespace
             .len()
             .saturating_add(self.key.len())
@@ -237,6 +237,8 @@ pub struct NormalizedMachineOutput {
 
 impl NormalizedMachineOutput {
     /// Normalizes a native EVM execution result (`EeId::EVM`, Solidity/Vyper).
+    ///
+    /// Convenience: exposed for VM execution adapters normalizing EVM outputs.
     ///
     /// # Errors
     ///
@@ -278,7 +280,9 @@ impl NormalizedMachineOutput {
         Ok(out)
     }
 
-    /// Normalizes a native WASM / CosmWasm execution result (`EeId::WASM`).
+    /// Normalizes a native WASM / `CosmWasm` execution result (`EeId::WASM`).
+    ///
+    /// Convenience: exposed for VM execution adapters normalizing WASM outputs.
     ///
     /// # Errors
     ///
@@ -376,6 +380,8 @@ impl NormalizedMachineOutput {
     }
 
     /// Normalizes a native UTXO / Bitcoin Script execution artifact (`EeId::UTXO`).
+    ///
+    /// Convenience: exposed for VM execution adapters normalizing UTXO outputs.
     ///
     /// # Errors
     ///
@@ -718,33 +724,23 @@ impl OutputComposer {
         }
 
         let steps_merkle_root = unification_merkle_root(b"BDLM_UNIFIED_STEPS_V1", &step_hashes);
-        let binding_hashes: Vec<Hash32> = resolved_bindings
-            .iter()
-            .map(|b| {
-                hash_domain_fields(
-                    b"BDLM_RESOLVED_BINDING_V1",
-                    &[
-                        b.from_step.as_bytes(),
-                        b.to_step.as_bytes(),
-                        b.target_input.as_bytes(),
-                        &b.value_hash,
-                    ],
-                )
-            })
-            .collect();
-        let bindings_root = unification_merkle_root(b"BDLM_UNIFIED_BINDINGS_V1", &binding_hashes);
+        let order_root = compute_execution_order_root(&execution_order);
+        let bindings_root = compute_bindings_root(&resolved_bindings);
+        let outputs_root = compute_unified_outputs_root(&unified_outputs);
         let gas_bytes = total_gas_bgu.to_le_bytes();
         let bundle_root = hash_domain_fields(
             b"BDLM_UNIFIED_OUTPUT_V1",
             &[
                 plan.plan_id.as_bytes(),
+                &order_root,
                 &steps_merkle_root,
                 &bindings_root,
+                &outputs_root,
                 &gas_bytes,
             ],
         );
 
-        Ok(UnifiedOutputBundle {
+        let bundle = UnifiedOutputBundle {
             plan_id: plan.plan_id.clone(),
             execution_order,
             step_hashes,
@@ -753,18 +749,46 @@ impl OutputComposer {
             unified_outputs,
             steps_merkle_root,
             bundle_root,
-        })
+        };
+
+        // Self-verify every composed step's Merkle inclusion proof before
+        // returning the bundle so downstream verifiers receive a proven root.
+        let step_count = bundle.execution_order.len();
+        for (idx, step_id) in bundle.execution_order.iter().enumerate() {
+            let step = by_id
+                .get(step_id.as_str())
+                .ok_or_else(|| CompositionError::UnknownStep(step_id.clone()))?;
+            let proof = bundle.proof_for_step(idx).ok_or_else(|| {
+                CompositionError::BundleVerificationFailed(format!(
+                    "failed to build inclusion proof for step `{step_id}`"
+                ))
+            })?;
+            if !UnifiedOutputBundle::verify_step_proof(
+                &bundle.steps_merkle_root,
+                idx,
+                step_count,
+                step,
+                &proof,
+            ) {
+                return Err(CompositionError::BundleVerificationFailed(format!(
+                    "self-check failed for step `{step_id}` inclusion proof"
+                )));
+            }
+        }
+
+        Ok(bundle)
     }
 
     /// Independently verifies that a [`UnifiedOutputBundle`]'s topological
-    /// ordering, binding value commitments, `steps_merkle_root`, and
-    /// `bundle_root` are all cryptographically consistent.
+    /// ordering, binding value commitments, `unified_outputs`,
+    /// `steps_merkle_root`, and `bundle_root` are all cryptographically
+    /// consistent.
     ///
     /// # Errors
     ///
     /// Returns [`CompositionError`] if any bound is violated, any binding
-    /// reverses execution order, or either Merkle root disagrees with the
-    /// bundle contents.
+    /// reverses execution order, or any Merkle root disagrees with the bundle
+    /// contents.
     pub fn verify_bundle(bundle: &UnifiedOutputBundle) -> Result<(), CompositionError> {
         validate_safe_label("plan_id", &bundle.plan_id, 64)
             .map_err(CompositionError::InvalidInput)?;
@@ -784,6 +808,14 @@ impl OutputComposer {
                 "resolved_bindings exceeds MAX_COMPOSITION_BINDINGS",
             )));
         }
+        let max_unified_outputs = MAX_COMPOSITION_STEPS
+            .saturating_mul(MAX_OUTPUT_TYPED_VALUES)
+            .saturating_add(MAX_COMPOSITION_BINDINGS);
+        if bundle.unified_outputs.len() > max_unified_outputs {
+            return Err(CompositionError::BundleVerificationFailed(String::from(
+                "unified_outputs exceeds bundle ceiling",
+            )));
+        }
         let mut step_positions = BTreeMap::new();
         for (idx, step_id) in bundle.execution_order.iter().enumerate() {
             validate_safe_label("step_id", step_id, 64).map_err(CompositionError::InvalidInput)?;
@@ -791,7 +823,10 @@ impl OutputComposer {
                 return Err(CompositionError::DuplicateStep(step_id.clone()));
             }
         }
+        let mut total_bytes: usize = 0;
         for binding in &bundle.resolved_bindings {
+            validate_safe_label("target_input", &binding.target_input, 64)
+                .map_err(CompositionError::InvalidInput)?;
             let Some(&from_pos) = step_positions.get(binding.from_step.as_str()) else {
                 return Err(CompositionError::UnknownStep(binding.from_step.clone()));
             };
@@ -801,11 +836,23 @@ impl OutputComposer {
             if from_pos >= to_pos {
                 return Err(CompositionError::CycleDetected);
             }
+            total_bytes = total_bytes.saturating_add(binding.value.byte_len());
+            if total_bytes > MAX_COMPOSITION_BUNDLE_BYTES {
+                return Err(CompositionError::BundleTooLarge);
+            }
             if binding.value.commitment_hash() != binding.value_hash {
                 return Err(CompositionError::BundleVerificationFailed(format!(
                     "binding value commitment mismatch for `{}.{}`",
                     binding.to_step, binding.target_input
                 )));
+            }
+        }
+        for (key, value) in &bundle.unified_outputs {
+            validate_safe_label("unified_output_key", key, 129)
+                .map_err(CompositionError::InvalidInput)?;
+            total_bytes = total_bytes.saturating_add(key.len().saturating_add(value.byte_len()));
+            if total_bytes > MAX_COMPOSITION_BUNDLE_BYTES {
+                return Err(CompositionError::BundleTooLarge);
             }
         }
 
@@ -816,29 +863,18 @@ impl OutputComposer {
                 "steps_merkle_root mismatch",
             )));
         }
-        let binding_hashes: Vec<Hash32> = bundle
-            .resolved_bindings
-            .iter()
-            .map(|b| {
-                hash_domain_fields(
-                    b"BDLM_RESOLVED_BINDING_V1",
-                    &[
-                        b.from_step.as_bytes(),
-                        b.to_step.as_bytes(),
-                        b.target_input.as_bytes(),
-                        &b.value_hash,
-                    ],
-                )
-            })
-            .collect();
-        let bindings_root = unification_merkle_root(b"BDLM_UNIFIED_BINDINGS_V1", &binding_hashes);
+        let order_root = compute_execution_order_root(&bundle.execution_order);
+        let bindings_root = compute_bindings_root(&bundle.resolved_bindings);
+        let outputs_root = compute_unified_outputs_root(&bundle.unified_outputs);
         let gas_bytes = bundle.total_gas_bgu.to_le_bytes();
         let expected_bundle_root = hash_domain_fields(
             b"BDLM_UNIFIED_OUTPUT_V1",
             &[
                 bundle.plan_id.as_bytes(),
+                &order_root,
                 &expected_steps_root,
                 &bindings_root,
+                &outputs_root,
                 &gas_bytes,
             ],
         );
@@ -849,6 +885,43 @@ impl OutputComposer {
         }
         Ok(())
     }
+}
+
+fn compute_execution_order_root(execution_order: &[String]) -> Hash32 {
+    let hashes: Vec<Hash32> = execution_order
+        .iter()
+        .map(|step_id| hash_domain_fields(b"BDLM_ORDER_STEP_V1", &[step_id.as_bytes()]))
+        .collect();
+    unification_merkle_root(b"BDLM_UNIFIED_ORDER_V1", &hashes)
+}
+
+fn compute_bindings_root(resolved_bindings: &[ResolvedBinding]) -> Hash32 {
+    let binding_hashes: Vec<Hash32> = resolved_bindings
+        .iter()
+        .map(|b| {
+            hash_domain_fields(
+                b"BDLM_RESOLVED_BINDING_V1",
+                &[
+                    b.from_step.as_bytes(),
+                    b.to_step.as_bytes(),
+                    b.target_input.as_bytes(),
+                    &b.value_hash,
+                ],
+            )
+        })
+        .collect();
+    unification_merkle_root(b"BDLM_UNIFIED_BINDINGS_V1", &binding_hashes)
+}
+
+fn compute_unified_outputs_root(unified_outputs: &BTreeMap<String, CanonicalValue>) -> Hash32 {
+    let output_hashes: Vec<Hash32> = unified_outputs
+        .iter()
+        .map(|(k, v)| {
+            let val_hash = v.commitment_hash();
+            hash_domain_fields(b"BDLM_OUTPUT_ENTRY_V1", &[k.as_bytes(), &val_hash])
+        })
+        .collect();
+    unification_merkle_root(b"BDLM_UNIFIED_KV_V1", &output_hashes)
 }
 
 fn topological_order(
@@ -1225,11 +1298,63 @@ mod tests {
             Err(CompositionError::BundleVerificationFailed(_))
         ));
 
-        let mut reversed_order = bundle;
+        let mut reversed_order = bundle.clone();
         reversed_order.execution_order.reverse();
         assert_eq!(
             OutputComposer::verify_bundle(&reversed_order),
             Err(CompositionError::CycleDetected)
         );
+    }
+
+    #[test]
+    fn verify_bundle_rejects_forged_unified_outputs_and_renamed_steps() {
+        let mut a_vals = BTreeMap::new();
+        a_vals.insert(String::from("settled"), CanonicalValue::U128(500));
+        let a = NormalizedMachineOutput::from_svm(
+            "step_svm",
+            4,
+            true,
+            10_000,
+            vec![1, 2],
+            Vec::new(),
+            a_vals,
+        )
+        .unwrap();
+        let b = NormalizedMachineOutput::from_utxo(
+            "step_btc",
+            2,
+            true,
+            800,
+            vec![3, 4],
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let plan = OutputCompositionPlan {
+            plan_id: String::from("tamper-outputs-test"),
+            steps: vec![a, b],
+            bindings: Vec::new(),
+        };
+        let bundle = OutputComposer::compose(&plan).expect("compose succeeds");
+        OutputComposer::verify_bundle(&bundle).expect("original bundle verifies");
+
+        // Mutating unified_outputs must fail bundle_root verification.
+        let mut forged_outputs = bundle.clone();
+        forged_outputs.unified_outputs.insert(
+            String::from("step_svm.settled"),
+            CanonicalValue::U128(999_999),
+        );
+        assert!(matches!(
+            OutputComposer::verify_bundle(&forged_outputs),
+            Err(CompositionError::BundleVerificationFailed(_))
+        ));
+
+        // Renaming an unbound step in execution_order must fail bundle_root verification.
+        let mut renamed_step = bundle;
+        renamed_step.execution_order[1] = String::from("step_spoofed");
+        assert!(matches!(
+            OutputComposer::verify_bundle(&renamed_step),
+            Err(CompositionError::BundleVerificationFailed(_))
+        ));
     }
 }
