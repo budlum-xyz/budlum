@@ -1,6 +1,6 @@
 //! B.U.D. 2.0 - FastCDC Content-Defined Chunking (F55) (2026-08-16)
 //!
-//! USENIX ATC16 finding: FastCDC is 10x faster than Rabin-CDC and 3x faster than
+//! USENIX ATC16 benchmark: FastCDC is 10x faster than Rabin-CDC and 3x faster than
 //! Gear/AE, at the same dedup ratio.
 //! Instead of fixed 16KB chunks, CONTENT-DEFINED boundaries (a rolling hash) ->
 //! when a file changes only the changed chunk gets a new cid (dedup/tax

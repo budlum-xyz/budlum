@@ -37,8 +37,8 @@ mod single_definition_tests {
     /// lowercase hex, 64 characters, no prefix, and a refusal on a short string.
     ///
     /// The accepted *input* spellings are deliberately not pinned here. #43 owns
-    /// `from_hex`'s input contract under  (it makes `"0"`/`"0x0"` errors
-    /// and adds `0X`); a move must not decide that finding either way.
+    /// `from_hex`'s input contract under (it makes `"0"`/`"0x0"` errors
+    /// and adds `0X`); address parsing remains identical.
     #[test]
     fn address_wire_shape_survives_the_move() {
         assert_eq!(Address::zero().to_hex(), "0".repeat(64));

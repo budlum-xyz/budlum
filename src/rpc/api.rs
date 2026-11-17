@@ -626,6 +626,19 @@ pub trait BudlumApi {
     #[method(name = "bud_adminListBannedPeers")]
     async fn admin_list_banned_peers(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Operator-only: atomically replace a shielded validator's sentry peer
+    /// list at runtime without restarting or exporting validator keys.
+    #[method(name = "bud_adminUpdateSentries")]
+    async fn admin_update_sentries(
+        &self,
+        sentries: Vec<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Operator-only: inspect sentry-architecture role, discovery status, and
+    /// active sentry/private-validator connection counts.
+    #[method(name = "bud_adminSentryStatus")]
+    async fn admin_sentry_status(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     // === B.U.D. Storage RPC surface ============================
     // This temporary surface exposes grant and reveal operations. The legacy
     // B.U.D. 1.0 and 2.0 endpoints stay removed until their B.U.D. 3.0 doors

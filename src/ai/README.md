@@ -49,7 +49,7 @@ The root `README.md` is only a dashboard; maturity and risk warnings live here.
   (request/result expiry -> reject).
 - **Equivocation detection:** conflicting commitments from the same verifier
   raise a dispute flag.
-- **Fee escrow reclaim:** the fee is returned on timeout (findings 4-5, P5).
+- **Fee escrow reclaim:** the fee is returned on timeout (P5 specification).
 - **Soft incentive:** a minority verifier is NOT slashed, it is only left out
   of the reward.
 

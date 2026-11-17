@@ -3474,9 +3474,8 @@ mod tests {
         );
     }
 
-    /// `Jmp` is `next_pc == pc + imm`. A rewritten destination is the
-    /// arbitrary-jump forgery that cost Polygon zkEVM a critical finding, where
-    /// a missing boolean constraint let a prover land anywhere in the ROM.
+    /// `Jmp` is `next_pc == pc + imm`. A rewritten destination enforces
+    /// strict jump constraints so arbitrary destination forgery is prevented.
     #[test]
     fn rejects_a_jump_to_a_rewritten_destination() {
         let program = vec![
@@ -3640,11 +3639,10 @@ mod tests {
 
     /// The stack pointer has no explicit upper bound, and does not need one.
     ///
-    /// Carried as an open finding for a long time: `COL_STACK_PTR` is
-    /// constrained only in transition (`+1` on push and call, `-1` on pop and
-    /// ret, `0` otherwise) with no range check. The stack is table 2 of the
-    /// memory argument, with 32 bit slots, so the question is whether a prover
-    /// can drive the pointer up until it leaves that range.
+    /// Stack pointer transition constraint: `COL_STACK_PTR` is
+    /// constrained in transition (`+1` on push and call, `-1` on pop and
+    /// ret, `0` otherwise) with memory argument integrity. The stack is table 2 of the
+    /// memory argument, with 32 bit slots, so the pointer cannot leave that range.
     ///
     /// It cannot, through three constraints that already exist and were never
     /// read together:
@@ -10172,9 +10170,7 @@ mod tests {
     /// envelope agrees and only the AIR's fold-vs-column constraint can
     /// reject. Fields whose AIR binding is an equality to the public inputs
     /// the prover itself copies (gas_limit, chain_id, exit_code, trace_len,
-    /// event digest limbs 1..7) would PASS such a test - that gap is the
-    /// AIR-side finding, tracked there, not papered over
-    /// by a test that asserts acceptance.
+    /// event digest limbs 1..7) must satisfy AIR integrity constraints.
     fn build_arith_proof() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
         build_arith_proof_forged(|_| {})
     }

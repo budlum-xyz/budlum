@@ -1362,7 +1362,7 @@ mod tests {
 
     /// The byte budget refuses a flood the entry count would admit.
     ///
-    /// This is the finding the budget exists for: every transaction here is
+    /// Memory bounded admission invariant: every transaction here is
     /// individually legal - correctly signed, under the transport's 100 KiB
     /// ceiling, above the fee floor, a fresh nonce - and the pool is nowhere
     /// near `max_size`. Without the budget the pool grows to the product of

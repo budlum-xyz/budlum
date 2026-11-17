@@ -5338,8 +5338,8 @@ mod tests {
         state.add_balance(&who, 10);
         state.add_validator(who, 1_000);
         // The gate reads the jail's *remaining* term, not the bare flag: a
-        // jail whose term has run out is not a life sentence for the bond
-        // (that was the permanent-freeze finding). Arm a live term here.
+        // jail whose term has run out is not a permanent freeze for the bond.
+        // Arm a live term here.
         let live_until = state.epoch_index.saturating_add(1);
         if let Some(validator) = state.get_validator_mut(&who) {
             validator.jailed = true;
@@ -6657,7 +6657,7 @@ mod tests {
         let chain_id = network.chain_id().value();
         let net_floor = network.min_stake();
         let gov_floor = net_floor + 500;
-        let mut params = state.registry.params().clone();
+        let mut params = *state.registry.params();
         params.min_stake = gov_floor;
         state.registry.set_params(params);
 

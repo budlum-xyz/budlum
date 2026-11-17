@@ -196,8 +196,8 @@ pub fn cli_storage_view<N: NetworkSymbolSource>(
     content_key: Option<&ContentKey>,
     paid_receipt: Option<&PaidViewReceipt>,
 ) -> Result<Vec<u8>, CliBud3Error> {
-    let entry = bud3
-        .object(object_commitment)
+    let (_, entry) = bud3
+        .resolve_live_object(object_commitment)
         .ok_or(CliBud3Error::Registry(RegistryError::UnknownObject))?;
     let cref = ContentRef::new(entry.record.content_id, *object_commitment, nft_id)
         .map_err(CliBud3Error::InvalidContentRef)?;

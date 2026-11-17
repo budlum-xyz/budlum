@@ -1185,6 +1185,16 @@ mod rpc_tests {
             .await
             .expect_err("public listener must refuse the operator-only method");
         assert_eq!(refused.code(), -32004);
+        let refused_rotate = public_server
+            .admin_update_sentries(vec![])
+            .await
+            .expect_err("public listener must refuse bud_adminUpdateSentries");
+        assert_eq!(refused_rotate.code(), -32004);
+        let refused_status = public_server
+            .admin_sentry_status()
+            .await
+            .expect_err("public listener must refuse bud_adminSentryStatus");
+        assert_eq!(refused_status.code(), -32004);
     }
 
     /// Every operator-gated mutating method answers -32004 on a public
@@ -2918,13 +2928,13 @@ mod rpc_tests {
     }
 
     /// the estimate is the fee the chain will actually enforce for
-    /// this transaction, not the base fee. The finding is that
-    /// `bud_estimateGas` quoted `base_fee` while admission charged
+    /// this transaction, not the base fee. Invariant:
+    /// `bud_estimateGas` must not quote `base_fee` alone while admission charges
     /// `required_fee`, which bills the proportional cut on a transfer
     /// (`transfer_fee_ppm` of the amount, on top of the base fee) and a
     /// multiplied base fee for a governance proposal. A wallet sized its
-    /// transaction from the quote and was then refused for the fee the RPC had
-    /// just suggested.
+    /// transaction from the quote and was previously refused for the fee the RPC had
+    /// suggested without proportional accounting.
     ///
     /// Canary: restore `Ok(Self::to_hex(base_fee))` in `estimate_gas` and this
     /// fails: the proportional cut alone is 1% of the amount.
@@ -2971,7 +2981,7 @@ mod rpc_tests {
         );
         assert_ne!(
             estimate, base_fee,
-            "quoting only the base fee is the finding"
+            "estimate must include proportional fee in addition to base fee"
         );
     }
 
