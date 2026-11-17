@@ -1595,22 +1595,33 @@ mod tests {
 
     #[test]
     fn forged_length_prefix_garden_frames_are_rejected_without_allocating() {
-        // Variant tag 0 (`GardenRequest::Hello` / `GardenResponse::Refused`) followed by
+        // Variant tags for collection-bearing variants (`GardenRequest::Gossip` = 1,
+        // `GardenResponse::Commits` = 2, `GardenResponse::Refused` = 4) followed by
         // a forged 8-byte collection length claiming 281 TB in a 16-byte buffer.
-        let mut forged = Vec::with_capacity(16);
-        forged.extend_from_slice(&0u32.to_le_bytes());
-        forged.extend_from_slice(&0x0000_FFFF_FFFF_FFFFu64.to_le_bytes());
-        forged.extend_from_slice(&[0u8; 4]);
+        let forged_frame = |variant: u32| {
+            let mut buf = Vec::with_capacity(16);
+            buf.extend_from_slice(&variant.to_le_bytes());
+            buf.extend_from_slice(&0x0000_FFFF_FFFF_FFFFu64.to_le_bytes());
+            buf.extend_from_slice(&[0u8; 4]);
+            buf
+        };
         assert!(
             crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(
-                &forged,
+                &forged_frame(1),
                 MAX_UNADMITTED_REQUEST_BYTES,
             )
             .is_err()
         );
         assert!(
             crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
-                &forged,
+                &forged_frame(2),
+                MAX_RESPONSE_BYTES,
+            )
+            .is_err()
+        );
+        assert!(
+            crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
+                &forged_frame(4),
                 MAX_RESPONSE_BYTES,
             )
             .is_err()
