@@ -16,39 +16,41 @@ pub enum BudlumError {
 pub type BudlumResult<T> = Result<T, BudlumError>;
 
 impl BudlumError {
-    pub fn code(&self) -> &'static str {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
         match self {
-            BudlumError::Storage { code, .. }
-            | BudlumError::Consensus { code, .. }
-            | BudlumError::Settlement { code, .. }
-            | BudlumError::Bridge { code, .. }
-            | BudlumError::Network { code, .. }
-            | BudlumError::Rpc { code, .. }
-            | BudlumError::Validation { code, .. } => code,
+            Self::Storage { code, .. }
+            | Self::Consensus { code, .. }
+            | Self::Settlement { code, .. }
+            | Self::Bridge { code, .. }
+            | Self::Network { code, .. }
+            | Self::Rpc { code, .. }
+            | Self::Validation { code, .. } => code,
         }
     }
 
+    #[must_use]
     pub fn message(&self) -> &str {
         match self {
-            BudlumError::Storage { message, .. }
-            | BudlumError::Consensus { message, .. }
-            | BudlumError::Settlement { message, .. }
-            | BudlumError::Bridge { message, .. }
-            | BudlumError::Network { message, .. }
-            | BudlumError::Rpc { message, .. }
-            | BudlumError::Validation { message, .. } => message,
+            Self::Storage { message, .. }
+            | Self::Consensus { message, .. }
+            | Self::Settlement { message, .. }
+            | Self::Bridge { message, .. }
+            | Self::Network { message, .. }
+            | Self::Rpc { message, .. }
+            | Self::Validation { message, .. } => message,
         }
     }
 
     pub fn settlement(code: &'static str, message: impl Into<String>) -> Self {
-        BudlumError::Settlement {
+        Self::Settlement {
             code,
             message: message.into(),
         }
     }
 
     pub fn validation(code: &'static str, message: impl Into<String>) -> Self {
-        BudlumError::Validation {
+        Self::Validation {
             code,
             message: message.into(),
         }
@@ -65,7 +67,7 @@ impl std::error::Error for BudlumError {}
 
 impl From<std::io::Error> for BudlumError {
     fn from(value: std::io::Error) -> Self {
-        BudlumError::Storage {
+        Self::Storage {
             code: "storage_error",
             message: value.to_string(),
         }
@@ -74,7 +76,7 @@ impl From<std::io::Error> for BudlumError {
 
 impl From<BridgeError> for BudlumError {
     fn from(value: BridgeError) -> Self {
-        BudlumError::Bridge {
+        Self::Bridge {
             code: "bridge_error",
             message: value.to_string(),
         }
@@ -83,7 +85,7 @@ impl From<BridgeError> for BudlumError {
 
 impl From<DomainError> for BudlumError {
     fn from(value: DomainError) -> Self {
-        BudlumError::Settlement {
+        Self::Settlement {
             code: "domain_error",
             message: value.to_string(),
         }

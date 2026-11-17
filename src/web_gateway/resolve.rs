@@ -140,17 +140,17 @@ pub enum GatewayError {
 impl GatewayError {
     /// The status a caller answers with.
     #[must_use]
-    pub fn status(&self) -> u16 {
+    pub const fn status(&self) -> u16 {
         match self {
             Self::NotFound | Self::Expired | Self::NoContent | Self::NoSuchSubdomain(_) => 404,
-            Self::ProofFailed(_) | Self::NoProverAnswered | Self::ProversDisagree => {
-                PROOF_FAILED_STATUS
-            }
-            Self::UnknownHeight(_) => PROOF_FAILED_STATUS,
+            Self::ProofFailed(_)
+            | Self::NoProverAnswered
+            | Self::ProversDisagree
+            | Self::UnknownHeight(_)
+            | Self::ContentUnavailable(_) => PROOF_FAILED_STATUS,
             Self::Site(RouteError::Malformed) => 400,
             Self::Site(RouteError::DisallowedMime) => 415,
             Self::Site(_) => 404,
-            Self::ContentUnavailable(_) => PROOF_FAILED_STATUS,
         }
     }
 }
@@ -314,10 +314,10 @@ fn subdomain_content_ref_of(branch: &BnsMerkleBranch, label: &str) -> Option<Con
 /// one was asked for, the content of the name otherwise.
 #[must_use]
 pub fn served_content_of(branch: &BnsMerkleBranch, sub: Option<&str>) -> Option<ContentRef> {
-    match sub {
-        Some(label) => subdomain_content_ref_of(branch, label),
-        None => content_ref_of(branch),
-    }
+    sub.map_or_else(
+        || content_ref_of(branch),
+        |label| subdomain_content_ref_of(branch, label),
+    )
 }
 
 fn public_only(content: ContentRef) -> Option<ContentRef> {
