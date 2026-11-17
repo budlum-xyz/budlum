@@ -11,9 +11,10 @@
 //!    server-side decoding ONLY for `ContentIdKind::Public` when accompanied by
 //!    a valid [`PaidViewReceipt`]; sealed objects are unconditionally refused.
 
+use super::content_id::{ContentIdKind, ContentKey};
 use super::content_ref::ContentRef;
 use super::fountain::Symbol;
-use super::pipeline::ObjectRecord;
+use super::pipeline::{view_public, view_sealed, ObjectRecord};
 use super::registry::Bud3Registry;
 use super::symbol_protocol::{
     verify_symbol_range_response, LinkMetering, MobileServePolicy, SymbolPeerLimiter,
@@ -54,12 +55,46 @@ impl Bud3ContentGateway {
         content_ref: &ContentRef,
         network: &N,
     ) -> Result<GatewaySymbolBundle, ViewBud3Error> {
+        if let Some(nft) = content_ref.nft_id {
+            let Some((bound_key, _)) = registry.nft_binding(&nft) else {
+                return Err(ViewBud3Error::AccessDenied);
+            };
+            if bound_key != content_ref.object_commitment {
+                return Err(ViewBud3Error::AccessDenied);
+            }
+        }
         let (record, symbols) =
             collect_symbols_full_then_mobile(registry, &content_ref.object_commitment, network)?;
         if record.content_id != content_ref.content_id {
             return Err(ViewBud3Error::AccessDenied);
         }
         Ok(GatewaySymbolBundle { record, symbols })
+    }
+
+    /// Decode and verify content from an already-fetched [`GatewaySymbolBundle`]
+    /// without repeating network symbol fetches.
+    ///
+    /// # Errors
+    ///
+    /// [`ViewBud3Error`] if a sealed object lacks `grant_key` or object/content
+    /// verification fails.
+    pub fn decode_symbol_bundle(
+        bundle: &GatewaySymbolBundle,
+        grant_key: Option<&ContentKey>,
+    ) -> Result<Vec<u8>, ViewBud3Error> {
+        match bundle.record.content_id.kind {
+            ContentIdKind::Public => {
+                Ok(view_public(&bundle.record, bundle.symbols.iter().cloned())?)
+            }
+            ContentIdKind::Sealed => {
+                let key = grant_key.ok_or(ViewBud3Error::AccessDenied)?;
+                Ok(view_sealed(
+                    &bundle.record,
+                    key,
+                    bundle.symbols.iter().cloned(),
+                )?)
+            }
+        }
     }
 
     /// G8 Validator Fallback Decode: decode and return public content bytes on

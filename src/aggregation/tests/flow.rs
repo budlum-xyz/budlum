@@ -61,10 +61,7 @@ fn backend() -> NativeBackend {
 }
 
 fn ctx(aggregator: u8) -> TickCtx {
-    TickCtx {
-        domain: DOMAIN,
-        aggregator: Address::from([aggregator; 32]),
-    }
+    TickCtx::from_seed(DOMAIN, zeroize::Zeroizing::new([aggregator; 32])).expect("valid seed")
 }
 
 fn tx_hash(n: u16) -> Hash32 {
@@ -558,8 +555,8 @@ fn frames_of_two_aggregators_merge_into_one_valid_frame() {
     let (mut first, frame_a) = ticked(&mut txs, 0xA1, 0, 3);
     let (_, frame_b) = ticked(&mut txs, 0xA2, 10, 2);
 
-    assert_eq!(first.on_frame(frame_b.clone()), Ok(true));
-    assert_eq!(first.on_frame(frame_b), Ok(false));
+    assert_eq!(first.on_frame(frame_b.clone(), &registry()), Ok(true));
+    assert_eq!(first.on_frame(frame_b, &registry()), Ok(false));
     let outcome = first.on_tick(&txs, &registry());
     assert_eq!(outcome.publish.len(), 1);
     let merged = &outcome.publish[0];
@@ -573,10 +570,10 @@ fn frames_of_two_aggregators_merge_into_one_valid_frame() {
     let owners: BTreeSet<Address> = merged.segments.iter().map(|s| s.aggregator).collect();
     assert_eq!(
         owners,
-        BTreeSet::from([Address::from([0xA1; 32]), Address::from([0xA2; 32])])
+        BTreeSet::from([ctx(0xA1).aggregator, ctx(0xA2).aggregator])
     );
     // Frames that share a claim do not merge, and nothing is merged twice.
-    assert_eq!(first.on_frame(frame_a), Ok(false));
+    assert_eq!(first.on_frame(frame_a, &registry()), Ok(false));
     let outcome = first.on_tick(&txs, &registry());
     assert!(outcome.publish.is_empty());
     assert_eq!(first.frame_count(), 3);
@@ -587,7 +584,7 @@ fn a_block_that_carries_one_part_leaves_the_other_part_usable() {
     let mut txs = Txs::default();
     let (mut first, frame_a) = ticked(&mut txs, 0xA1, 0, 3);
     let (_, frame_b) = ticked(&mut txs, 0xA2, 10, 2);
-    assert_eq!(first.on_frame(frame_b.clone()), Ok(true));
+    assert_eq!(first.on_frame(frame_b.clone(), &registry()), Ok(true));
     assert_eq!(first.on_tick(&txs, &registry()).publish.len(), 1);
 
     // A producer that only knew the first three transactions carried the
@@ -608,23 +605,73 @@ fn an_invalid_frame_from_the_network_is_dropped() {
 
     let mut truncated = frame.clone();
     truncated.proof.truncate(truncated.proof.len() - 1);
-    assert_eq!(first.on_frame(truncated), Err(AggError::MalformedProof));
+    assert_eq!(
+        first.on_frame(truncated, &registry()),
+        Err(AggError::MalformedProof)
+    );
 
     let mut forged = frame.clone();
     let last = forged.proof.len() - 1;
     forged.proof[last] ^= 0x40;
     assert_eq!(
-        first.on_frame(forged),
+        first.on_frame(forged, &registry()),
         Err(AggError::Object(ObjectError::Invalid))
     );
 
     let mut reordered = frame;
     reordered.claims.swap(0, 1);
     assert_eq!(
-        first.on_frame(reordered),
+        first.on_frame(reordered, &registry()),
         Err(AggError::Frame(FrameError::ClaimsRootMismatch(0)))
     );
     assert_eq!(first.frame_count(), 1);
+}
+
+#[test]
+fn duplicate_claim_sets_collapse_and_peer_frames_cannot_evict_local_ticks() {
+    let mut txs = Txs::default();
+    // Prove a local 1-claim frame on `local_agg`.
+    let (mut local_agg, local_tick) = ticked(&mut txs, 0xA1, 0, 1);
+    let local_bytes = local_tick.encode().len();
+
+    // Same signer cannot re-submit an already-known claim, so build an identical-claim
+    // tick frame from another aggregator over the same claim (e.g. a peer racing on the same tx).
+    let signer0 = Signer::new(0);
+    let env0 = signer0.envelope(DOMAIN, tx_hash(0));
+    let item0 = PoolItem {
+        claim: claim_of(&signer0, 0),
+        envelope: env0,
+    };
+    let peer_same_claims = backend()
+        .prove_tick(&ctx(0xA2), &[item0])
+        .expect("peer frame over same claim");
+    assert_eq!(peer_same_claims.claims, local_tick.claims);
+
+    // Peer frame covering the exact same claim set collapses against the existing local frame
+    // and never displaces it (`Ok(false)`).
+    assert_eq!(local_agg.on_frame(peer_same_claims, &registry()), Ok(false));
+    assert_eq!(local_agg.frame_count(), 1);
+    assert_eq!(
+        local_agg
+            .block_frame(&BTreeSet::from([local_tick.claims[0].digest(DOMAIN)]))
+            .map(|f| f.segments[0].aggregator),
+        Some(ctx(0xA1).aggregator)
+    );
+
+    // Now tighten frame store limits to fit just 1 frame (`local_bytes`), and verify a
+    // larger peer frame over distinct claims (2 claims) CANNOT evict the local 1-claim tick.
+    let mut bounded =
+        Aggregator::new(backend(), ctx(0xB1), params()).with_frame_limits(1, local_bytes * 2);
+    let e_local = signed(&mut txs, &Signer::new(9), 90);
+    assert!(bounded.on_object(e_local, &txs, &registry()).is_ok());
+    let local_out = bounded.on_tick(&txs, &registry());
+    assert_eq!(local_out.publish.len(), 1);
+    let local_digest = local_out.publish[0].claims[0].digest(DOMAIN);
+
+    let (_, peer_2_claims) = ticked(&mut txs, 0xA3, 100, 2);
+    assert_eq!(bounded.on_frame(peer_2_claims, &registry()), Ok(false));
+    assert_eq!(bounded.frame_count(), 1);
+    assert!(bounded.tracks_claim(&local_digest));
 }
 
 // ---- the block rules --------------------------------------------------------
@@ -643,7 +690,7 @@ impl Block {
         let mut txs = Txs::default();
         let (mut first, _) = ticked(&mut txs, 0xA1, 0, 3);
         let (_, other) = ticked(&mut txs, 0xA2, 10, 2);
-        assert_eq!(first.on_frame(other), Ok(true));
+        assert_eq!(first.on_frame(other, &registry()), Ok(true));
         let frame = first.on_tick(&txs, &registry()).publish.remove(0);
         let header = frame.hash(DOMAIN).expect("hash");
         // Transactions in another order than the claims.
@@ -689,6 +736,7 @@ impl Block {
             Some(&self.header),
             Some(&self.frame),
             txs,
+            &registry(),
             &backend(),
         )
         .map(|claims| claims.payers)
@@ -707,7 +755,16 @@ fn a_block_whose_transactions_and_frame_agree_is_valid() {
         quantum_safe: false,
         claim_refs: &[],
     }];
-    assert!(check_block_claims(&params(), DOMAIN, None, None, &plain, &backend()).is_ok());
+    assert!(check_block_claims(
+        &params(),
+        DOMAIN,
+        None,
+        None,
+        &plain,
+        &registry(),
+        &backend()
+    )
+    .is_ok());
 }
 
 #[test]
@@ -722,7 +779,15 @@ fn a_block_may_not_use_the_layer_unless_the_mode_is_on() {
         // A claimed transaction alone, with no frame, is refused too: nobody
         // verified it.
         assert_eq!(
-            check_block_claims(&off, DOMAIN, None, None, &block.txs(), &backend()),
+            check_block_claims(
+                &off,
+                DOMAIN,
+                None,
+                None,
+                &block.txs(),
+                &registry(),
+                &backend()
+            ),
             Err(BlockClaimError::AggregationOff)
         );
         let refs = [[9u8; 32]];
@@ -733,7 +798,15 @@ fn a_block_may_not_use_the_layer_unless_the_mode_is_on() {
             claim_refs: &refs,
         }];
         assert_eq!(
-            check_block_claims(&off, DOMAIN, None, None, &with_refs, &backend()),
+            check_block_claims(
+                &off,
+                DOMAIN,
+                None,
+                None,
+                &with_refs,
+                &registry(),
+                &backend()
+            ),
             Err(BlockClaimError::AggregationOff)
         );
         // An inline quantum-safe transaction is the normal case here.
@@ -743,7 +816,9 @@ fn a_block_may_not_use_the_layer_unless_the_mode_is_on() {
             quantum_safe: true,
             claim_refs: &[],
         }];
-        assert!(check_block_claims(&off, DOMAIN, None, None, &inline, &backend()).is_ok());
+        assert!(
+            check_block_claims(&off, DOMAIN, None, None, &inline, &registry(), &backend()).is_ok()
+        );
     }
 }
 
@@ -802,7 +877,15 @@ fn transactions_and_claims_must_refer_to_each_other() {
     );
     // Rule 7 with no frame at all.
     assert_eq!(
-        check_block_claims(&params(), DOMAIN, None, None, &block.txs(), &backend()),
+        check_block_claims(
+            &params(),
+            DOMAIN,
+            None,
+            None,
+            &block.txs(),
+            &registry(),
+            &backend()
+        ),
         Err(BlockClaimError::MissingClaim(0))
     );
 
@@ -829,6 +912,7 @@ fn the_header_must_carry_the_hash_of_the_frame() {
             None,
             Some(&block.frame),
             &block.txs(),
+            &registry(),
             &backend()
         ),
         Err(BlockClaimError::FramePresence)
@@ -840,6 +924,7 @@ fn the_header_must_carry_the_hash_of_the_frame() {
             Some(&block.header),
             None,
             &block.txs(),
+            &registry(),
             &backend()
         ),
         Err(BlockClaimError::FramePresence)
@@ -913,25 +998,44 @@ fn every_mutation_of_the_frame_makes_the_block_invalid() {
             Some(&block.header),
             Some(&block.frame),
             &block.txs(),
+            &registry(),
             &backend()
         ),
         Err(BlockClaimError::Frame(FrameError::ClaimsRootMismatch(0)))
     );
 }
 
-/// The native backend carries the objects and nothing binds them to the
-/// aggregator of a segment, so a frame with a replaced aggregator still
-/// verifies as a frame. This is the limit of the native backend, and the
-/// reason it is not compiled into a production build: only a proof whose
-/// public input is `master_pi` binds the aggregator. The frame hash changes,
-/// so a block cannot be altered this way after it is sealed.
+/// Segment ownership attestations bind every `tick_pi` to its aggregator's
+/// ML-DSA-87 keypair: mutating `segment.aggregator` or corrupting the
+/// signature is refused by `NativeBackend::verify`, `Aggregator::on_frame`,
+/// and `check_block_claims`, even if the attacker recomputes `frame_hash`.
 #[test]
-fn the_native_backend_does_not_bind_the_aggregator() {
+fn segment_attestations_bind_every_segment_to_its_aggregator() {
     let block = Block::new();
     let mut stolen = block.frame.clone();
     stolen.segments[0].aggregator = Address::from([0x99; 32]);
-    assert_eq!(backend().verify(&stolen, DOMAIN), Ok(()));
+    assert_eq!(
+        backend().verify(&stolen, DOMAIN),
+        Err(AggError::InvalidSegmentAttestation(0))
+    );
     assert_ne!(stolen.hash(DOMAIN), block.frame.hash(DOMAIN));
+
+    let mut bad_sig = block.frame.clone();
+    bad_sig.segments[1].attestation.signature[0] ^= 0x01;
+    assert_eq!(
+        backend().verify(&bad_sig, DOMAIN),
+        Err(AggError::InvalidSegmentAttestation(1))
+    );
+
+    let mut resealed = Block::new();
+    resealed.frame.segments[0].aggregator = Address::from([0x99; 32]);
+    resealed.reseal();
+    assert_eq!(
+        resealed.check(),
+        Err(BlockClaimError::Proof(AggError::InvalidSegmentAttestation(
+            0
+        )))
+    );
 }
 
 /// Section 11: the proof of another parameter set, a truncated proof, an
@@ -948,6 +1052,7 @@ fn a_wrong_proof_makes_the_block_invalid() {
             Some(&block.header),
             Some(&block.frame),
             &block.txs(),
+            &registry(),
             &other_set
         ),
         Err(BlockClaimError::Proof(AggError::WrongParameterSet))
@@ -1233,7 +1338,7 @@ fn four_aggregators_and_a_producer_carry_1024_claims_in_one_block() {
     }
     let mut producer = Aggregator::new(backend(), ctx(0xB0), params());
     for frame in frames {
-        assert_eq!(producer.on_frame(frame), Ok(true));
+        assert_eq!(producer.on_frame(frame, &registry()), Ok(true));
     }
     let merged = producer.on_tick(&txs, &registry()).publish;
     assert_eq!(merged.len(), 3);
@@ -1260,6 +1365,7 @@ fn four_aggregators_and_a_producer_carry_1024_claims_in_one_block() {
             .check_structure(DOMAIN, &FrameLimits::from(&params()))
             .expect("valid")
             .master_pi,
+        &frame.segments,
         &frame.proof,
     );
     let block_txs: Vec<TxClaims<'_>> = wanted
@@ -1277,6 +1383,7 @@ fn four_aggregators_and_a_producer_carry_1024_claims_in_one_block() {
         Some(&header),
         Some(&frame),
         &block_txs,
+        &registry(),
         &backend(),
     )
     .expect("a valid block");
