@@ -1006,11 +1006,25 @@ enum OutboundSyncKind {
 
 impl OutboundSyncKind {
     /// Only an active chain-sync round or an explicit finality cert/QC fetch
-    /// accrues unanswered-sync strikes. Handshakes share `/sync`, and a
-    /// connection closed during admission churn (such as a full `/24` subnet
-    /// table or simultaneous dial deduplication) must not ban an honest peer.
+    /// that stalls on an open connection (`Timeout`) or lacks `/sync` support
+    /// (`UnsupportedProtocols`) accrues unanswered-sync strikes. Handshakes
+    /// share `/sync`, and transient `ConnectionClosed`, `DialFailure`, or `Io`
+    /// errors during `/24` subnet-cap admission churn, simultaneous dial
+    /// deduplication, or peer restarts must not ban an honest validator.
     const fn counts_as_sync_strike(self) -> bool {
         !matches!(self, Self::Handshake)
+    }
+
+    const fn counts_as_sync_strike_for_error(
+        self,
+        error: &request_response::OutboundFailure,
+    ) -> bool {
+        self.counts_as_sync_strike()
+            && matches!(
+                error,
+                request_response::OutboundFailure::Timeout
+                    | request_response::OutboundFailure::UnsupportedProtocols
+            )
     }
 }
 
@@ -1539,6 +1553,13 @@ impl Node {
         expected_height: u64,
         response: &[u8],
     ) {
+        if response.is_empty() {
+            // A rate-limited or not-yet-handshaked responder closes the `/sync`
+            // request channel with an empty payload; treat it as an unanswered
+            // poll rather than a malformed certificate so load bursts do not
+            // trigger mutual `report_bad_behavior` bans.
+            return;
+        }
         match NetworkMessage::from_bytes_validated(response) {
             Ok(NetworkMessage::FinalityCertResponse { found: false, .. }) => {
                 let chain_id = self.chain.get_chain_id().await;
@@ -1594,7 +1615,7 @@ impl Node {
                 };
                 match self.chain.handle_finality_cert(cert).await {
                     Ok(()) => {
-                        self.peer_manager_lock().report_good_behavior(&peer);
+                        self.peer_manager_lock().report_sync_success(&peer);
                         let interval =
                             crate::core::chain_config::finality_checkpoint_interval_for_chain_id(
                                 cert_chain_id,
@@ -1662,6 +1683,18 @@ impl Node {
         };
         all_peers.sort_by_key(|p| p.to_bytes());
         sync_peers.sort_by_key(|p| p.to_bytes());
+        if all_peers.is_empty()
+            && !self.bootstrap_peers.is_empty()
+            && self.stale_tip_ticks >= 3
+            && self.stale_tip_ticks.is_multiple_of(3)
+        {
+            for addr in self.bootstrap_peers.clone() {
+                if let Err(e) = self.bootstrap(&addr) {
+                    tracing::debug!("Starvation bootstrap retry failed for {addr}: {e}");
+                }
+            }
+            return;
+        }
         if !all_peers.is_empty() {
             let peer = all_peers[self.sync_poll_cursor % all_peers.len()];
             self.sync_poll_cursor = self.sync_poll_cursor.wrapping_add(1);
@@ -3174,6 +3207,9 @@ impl Node {
             Some(libp2p::multiaddr::Protocol::P2p(peer_id)) => peer_id,
             _ => return Err("Bootstrap address must contain /p2p/<ID>".into()),
         };
+        if self.peer_manager_lock().is_banned(&peer_id) {
+            return Ok(());
+        }
         info!("Bootstrapping via {addr}");
         self.swarm
             .behaviour_mut()
@@ -3547,10 +3583,14 @@ impl Node {
                     // once - the same bytes are a duplicate to gossipsub - so
                     // a dropped vote is a vote the author cannot re-send, and
                     // the round it belonged to is short a validator forever.
+                    self.deferred_votes
+                        .prune_through(self.chain.get_finalized_height().await);
                     if agg_state.active {
-                        let due = self
-                            .deferred_votes
-                            .take_for(agg_state.epoch, agg_state.checkpoint_height);
+                        let due = self.deferred_votes.take_for_round(
+                            agg_state.epoch,
+                            agg_state.checkpoint_height,
+                            &agg_state.checkpoint_hash,
+                        );
                         if !due.is_empty() {
                             info!(
                                 "Finality: replaying {} vote(s) held for checkpoint height {} (epoch {})",
@@ -4534,7 +4574,12 @@ impl Node {
                                 }
                             }
 
-                            if !self.peer_manager_lock().check_rate_limit(&peer_id) {
+                            let gossip_authored =
+                                handshake_origin_matches_peer(peer_id, message.source);
+                            if !self
+                                .peer_manager_lock()
+                                .check_rate_limit_from(&peer_id, gossip_authored)
+                            {
                                 warn!("Rate limit exceeded or lock error for peer {peer_id}");
                                 self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                 continue;
@@ -4555,9 +4600,9 @@ impl Node {
                                 });
                                 match dedup.check_and_record(&message.data, &peer_id) {
                                     DedupResult::New => None,
-                                    DedupResult::Duplicate => {
-                                        Some(dedup.peer_should_be_banned(&peer_id))
-                                    }
+                                    DedupResult::Duplicate => Some(
+                                        dedup.peer_should_be_banned_from(&peer_id, gossip_authored),
+                                    ),
                                 }
                             };
                             if let Some(should_ban) = duplicate_action {
@@ -5312,6 +5357,14 @@ impl Node {
                                                             crate::network::deferred_votes::DeferredVote::Prevote(prevote),
                                                         );
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
                                                     } else {
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
@@ -5343,11 +5396,36 @@ impl Node {
                                                         );
                                                         continue;
                                                     }
-                                                    self.report_gossip(
-                                                        &id,
-                                                        &peer_id,
-                                                        gossipsub::MessageAcceptance::Ignore,
-                                                    );
+                                                    if e.contains("checkpoint hash mismatch") {
+                                                        // Hold authenticated votes for a competing
+                                                        // branch at this height so a subsequent
+                                                        // reorg replays them instead of losing the
+                                                        // author's single gossip delivery.
+                                                        self.deferred_votes.push(
+                                                            prevote.epoch,
+                                                            prevote.checkpoint_height,
+                                                            crate::network::deferred_votes::DeferredVote::Prevote(prevote),
+                                                        );
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Accept,
+                                                        );
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
+                                                    } else {
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Ignore,
+                                                        );
+                                                    }
                                                     self.trigger_fork_sync(peer_id).await;
                                                     continue;
                                                 }
@@ -5468,6 +5546,14 @@ impl Node {
                                                             crate::network::deferred_votes::DeferredVote::Precommit(precommit),
                                                         );
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
                                                     } else {
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
@@ -5499,11 +5585,32 @@ impl Node {
                                                         );
                                                         continue;
                                                     }
-                                                    self.report_gossip(
-                                                        &id,
-                                                        &peer_id,
-                                                        gossipsub::MessageAcceptance::Ignore,
-                                                    );
+                                                    if e.contains("checkpoint hash mismatch") {
+                                                        self.deferred_votes.push(
+                                                            precommit.epoch,
+                                                            precommit.checkpoint_height,
+                                                            crate::network::deferred_votes::DeferredVote::Precommit(precommit),
+                                                        );
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Accept,
+                                                        );
+                                                        if let Ok(now) = std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                        {
+                                                            self.gossip_dedup
+                                                                .lock()
+                                                                .unwrap_or_else(|p| p.into_inner())
+                                                                .record_valid(&peer_id, now.as_millis() as u64);
+                                                        }
+                                                    } else {
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Ignore,
+                                                        );
+                                                    }
                                                     self.trigger_fork_sync(peer_id).await;
                                                     continue;
                                                 }
@@ -6613,7 +6720,7 @@ impl Node {
                                         OutboundSyncKind::Handshake
                                     };
                                     warn!("Outbound sync failure to {}: {:?}", peer, error);
-                                    if kind.counts_as_sync_strike() {
+                                    if kind.counts_as_sync_strike_for_error(&error) {
                                         let mut pm = self.peer_manager_lock();
                                         pm.report_unanswered_request(&peer);
                                     }
@@ -8029,10 +8136,24 @@ mod finality_publish_tests {
 
     #[test]
     fn outbound_handshake_failure_does_not_accrue_sync_strikes() {
+        use libp2p::request_response::OutboundFailure;
         assert!(!super::OutboundSyncKind::Handshake.counts_as_sync_strike());
         assert!(super::OutboundSyncKind::ActiveSync.counts_as_sync_strike());
         assert!(super::OutboundSyncKind::CertFetch.counts_as_sync_strike());
         assert!(super::OutboundSyncKind::QcFetch.counts_as_sync_strike());
+
+        assert!(!super::OutboundSyncKind::Handshake
+            .counts_as_sync_strike_for_error(&OutboundFailure::Timeout));
+        for kind in [
+            super::OutboundSyncKind::ActiveSync,
+            super::OutboundSyncKind::CertFetch,
+            super::OutboundSyncKind::QcFetch,
+        ] {
+            assert!(kind.counts_as_sync_strike_for_error(&OutboundFailure::Timeout));
+            assert!(kind.counts_as_sync_strike_for_error(&OutboundFailure::UnsupportedProtocols));
+            assert!(!kind.counts_as_sync_strike_for_error(&OutboundFailure::ConnectionClosed));
+            assert!(!kind.counts_as_sync_strike_for_error(&OutboundFailure::DialFailure));
+        }
     }
 
     #[test]
