@@ -10,7 +10,13 @@ pub const RATE_LIMIT_PENALTY: i32 = -3;
 /// design: the ask was this node's own choice, so an unanswerable one costs
 /// the peer its place in the sync order, not an hour of silence.
 const UNANSWERED_REQUEST_PENALTY: i32 = -5;
+/// Unanswered sync requests in a row after which a peer is set aside as a
+/// sync source for a while. It is not banned: see `report_unanswered_request`.
 const MAX_UNANSWERED_SYNC_STRIKES: u32 = 4;
+/// How long a peer is set aside as a sync source the first time it reaches
+/// [`MAX_UNANSWERED_SYNC_STRIKES`]. Every further run of strikes doubles the
+/// rest, up to one ban-length; delivered sync data clears it.
+const SYNC_REST_BASE: Duration = Duration::from_secs(60);
 /// A batch that does not join this chain: a fork signal, priced like an
 /// unanswered request and, like it, floored above the ban threshold.
 const UNJOINED_BLOCK_PENALTY: i32 = -5;
@@ -54,6 +60,13 @@ pub struct PeerScore {
     pub blob_tokens: f64,
     pub handshaked: bool,
     pub unanswered_sync_strikes: u32,
+    /// Until when this peer is not asked for sync data. Only the choice of
+    /// a sync source reads it: the peer stays connected, and its blocks and
+    /// votes are taken as before.
+    pub sync_rest_until: Option<Instant>,
+    /// How many times in a row the peer was set aside without delivering
+    /// sync data in between; the next rest is that much longer.
+    pub sync_rests: u32,
 }
 impl Default for PeerScore {
     fn default() -> Self {
@@ -72,6 +85,8 @@ impl Default for PeerScore {
             blob_tokens: 5.0,
             handshaked: false,
             unanswered_sync_strikes: 0,
+            sync_rest_until: None,
+            sync_rests: 0,
         }
     }
 }
@@ -707,6 +722,8 @@ impl PeerManager {
         };
         score.valid_contributions += 1;
         score.unanswered_sync_strikes = 0;
+        score.sync_rest_until = None;
+        score.sync_rests = 0;
         score.score = (score.score + GOOD_BEHAVIOR_REWARD).min(MAX_SCORE);
         score.last_seen = Some(Instant::now());
     }
@@ -791,43 +808,75 @@ impl PeerManager {
             .map(|(id, _)| *id)
             .collect()
     }
+    /// A sync round with this peer ran into its timeout.
+    ///
+    /// Slowness is not an offence. The node that waited may be the slow one
+    /// (a loaded host, a debug build, a cold disk), and the peer it waited
+    /// for is one of the validators whose votes it needs. The score moves,
+    /// so a faster peer is asked first, and stops one point above the ban
+    /// threshold.
     pub fn report_slow_sync(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
-        score.score = (score.score + SLOW_SYNC_PENALTY).max(MIN_SCORE);
+        score.score = score
+            .score
+            .saturating_add(SLOW_SYNC_PENALTY)
+            .max(MIN_SCORE.saturating_add(1));
         score.last_seen = Some(Instant::now());
-        if score.score <= BAN_THRESHOLD {
-            self.ban_peer(peer_id);
-        }
     }
     /// A request this node sent came back unanswered.
     ///
     /// Asking a peer for a header batch or a block range is this node's own
     /// decision, and the answer can fail for reasons that say nothing about
     /// the peer: a connection that churned mid-flight, a peer busy importing
-    /// the blocks it already has, a request the transport dropped. The score
-    /// still moves - a peer that never answers sinks in `get_best_peers` and
-    /// stops being chosen as a sync source - but it does not reach the ban
-    /// threshold, because a ban is one hour of silence and a four-validator
-    /// mesh that bans one of its own on a dropped request can no longer reach
-    /// a finality quorum. Refusals that prove malice keep their own paths:
-    /// an invalid block, a forged vote, an oversized message.
+    /// the blocks it already has, a request the transport dropped, or this
+    /// node itself being too slow to read the answer in time. The score
+    /// moves - a peer that never answers sinks in `get_best_peers` - and
+    /// stops one point above the ban threshold.
+    ///
+    /// A peer that leaves [`MAX_UNANSWERED_SYNC_STRIKES`] requests in a row
+    /// unanswered is set aside as a sync source ([`Self::is_sync_resting`]):
+    /// it is not asked again for a while, so it cannot hold the one sync
+    /// round of this node by staying silent. It is not banned. A ban is an
+    /// hour in which the peer's blocks and votes are refused too, and it is
+    /// written to disk: a validator that fell behind on a busy host banned
+    /// the peers it was syncing from, restarted, read the bans back and
+    /// stayed alone (testnet rehearsal, validator loss and rejoin). On a
+    /// mesh of a few validators one such ban is also one vote less in every
+    /// finality round. Refusals that prove malice keep their own paths: an
+    /// invalid block, a forged vote, an oversized message.
     pub fn report_unanswered_request(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
         score.unanswered_sync_strikes = score.unanswered_sync_strikes.saturating_add(1);
         score.last_seen = Some(Instant::now());
+        score.score = score
+            .score
+            .saturating_add(UNANSWERED_REQUEST_PENALTY)
+            .max(MIN_SCORE.saturating_add(1));
         if score.unanswered_sync_strikes >= MAX_UNANSWERED_SYNC_STRIKES {
-            score.score = BAN_THRESHOLD;
-            self.ban_peer(peer_id);
-        } else {
-            score.score = score
-                .score
-                .saturating_add(UNANSWERED_REQUEST_PENALTY)
-                .max(MIN_SCORE.saturating_add(1));
+            score.unanswered_sync_strikes = 0;
+            score.sync_rests = score.sync_rests.saturating_add(1);
+            // 1, 2, 4, ... times the base, capped at one ban-length.
+            let doublings = score.sync_rests.saturating_sub(1).min(16);
+            let rest = SYNC_REST_BASE
+                .saturating_mul(1u32.checked_shl(doublings).unwrap_or(u32::MAX))
+                .min(BAN_DURATION);
+            score.sync_rest_until = Some(Instant::now() + rest);
+            warn!(
+                "Peer {} left {} sync requests in a row unanswered: not asked for sync data for {:?}",
+                peer_id, MAX_UNANSWERED_SYNC_STRIKES, rest
+            );
         }
+    }
+    /// Whether the peer is set aside as a sync source right now.
+    pub fn is_sync_resting(&self, peer_id: &PeerId) -> bool {
+        self.peers
+            .get(peer_id)
+            .and_then(|score| score.sync_rest_until)
+            .is_some_and(|until| Instant::now() < until)
     }
     /// A block or a sync batch that does not continue this chain.
     ///
@@ -2101,44 +2150,70 @@ mod tests {
     }
 
     #[test]
-    fn repeated_unanswered_sync_strikes_ban_after_grace_window() {
+    fn unanswered_sync_requests_set_a_peer_aside_and_never_ban_it() {
         let mut pm = PeerManager::new();
-        let handshaker = test_peer_id();
+        let quiet = test_peer_id();
         let flaky = test_peer_id();
         let staller = test_peer_id();
 
-        pm.report_unanswered_request(&handshaker);
-        pm.report_unanswered_request(&handshaker);
+        // Below the run of strikes nothing happens but the score.
+        pm.report_unanswered_request(&quiet);
+        pm.report_unanswered_request(&quiet);
+        assert!(!pm.is_sync_resting(&quiet));
+        // Good behaviour that is not sync data (a handshake, gossip) does
+        // not clear the strikes.
+        pm.report_good_behavior(&quiet);
+        pm.report_unanswered_request(&quiet);
+        pm.report_unanswered_request(&quiet);
         assert!(
-            !pm.is_banned(&handshaker),
-            "isolated unanswered sync requests must only demote, not ban"
+            pm.is_sync_resting(&quiet),
+            "a run of unanswered sync requests sets the peer aside as a sync source"
         );
-        // Non-sync good behavior (e.g. handshakes or gossip) must NOT clear
-        // unanswered sync strikes.
-        pm.report_good_behavior(&handshaker);
-        pm.report_unanswered_request(&handshaker);
-        pm.report_unanswered_request(&handshaker);
         assert!(
-            pm.is_banned(&handshaker),
-            "non-sync good behavior must not prevent banning after MAX_UNANSWERED_SYNC_STRIKES"
+            !pm.is_banned(&quiet),
+            "a peer that did not answer is not banned: its blocks and votes are still wanted"
         );
 
+        // Delivered sync data resets the run.
         pm.report_unanswered_request(&flaky);
         pm.report_unanswered_request(&flaky);
         pm.report_sync_success(&flaky);
         pm.report_unanswered_request(&flaky);
         pm.report_unanswered_request(&flaky);
-        assert!(
-            !pm.is_banned(&flaky),
-            "actual sync data delivery must reset consecutive unanswered sync strikes"
-        );
+        assert!(!pm.is_sync_resting(&flaky));
 
-        for _ in 0..MAX_UNANSWERED_SYNC_STRIKES {
-            pm.report_unanswered_request(&staller);
+        // However long a peer stays silent, and however slow its rounds
+        // are, it is never banned for it, and every further run of strikes
+        // makes the rest longer, up to one ban-length.
+        let mut rests = Vec::new();
+        for _ in 0..12 {
+            for _ in 0..MAX_UNANSWERED_SYNC_STRIKES {
+                pm.report_unanswered_request(&staller);
+                pm.report_slow_sync(&staller);
+            }
+            let until = pm
+                .get_peer_info(&staller)
+                .and_then(|score| score.sync_rest_until)
+                .expect("resting");
+            rests.push(until.saturating_duration_since(Instant::now()));
         }
-        assert!(
-            pm.is_banned(&staller),
-            "peer that persistently leaves sync requests unanswered must be banned"
+        assert!(!pm.is_banned(&staller));
+        assert!(pm.get_score(&staller) > BAN_THRESHOLD);
+        // Never shorter than the one before (a second of slack for the
+        // clock between the two readings once the cap is reached).
+        assert!(rests
+            .windows(2)
+            .all(|pair| pair[0] <= pair[1] + Duration::from_secs(1)));
+        assert!(rests[1] > rests[0] + SYNC_REST_BASE / 2);
+        assert!(rests[11] <= BAN_DURATION);
+        assert!(rests[11] > BAN_DURATION - Duration::from_secs(5));
+        assert!(pm.get_persisted_banned_peers().is_empty());
+        // Sync data from it ends the rest and the escalation.
+        pm.report_sync_success(&staller);
+        assert!(!pm.is_sync_resting(&staller));
+        assert_eq!(
+            pm.get_peer_info(&staller).map(|score| score.sync_rests),
+            Some(0)
         );
     }
 }
