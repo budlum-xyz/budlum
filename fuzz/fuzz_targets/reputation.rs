@@ -21,7 +21,11 @@ fuzz_target!(|data: &[u8]| {
     let steps = (take(data, &mut i) as usize) % 32;
     for _ in 0..steps {
         let subnet = if take(data, &mut i) & 1 == 1 {
-            Some(SubnetKey::from([take(data, &mut i), take(data, &mut i), take(data, &mut i)]))
+            Some(SubnetKey::from([
+                take(data, &mut i),
+                take(data, &mut i),
+                take(data, &mut i),
+            ]))
         } else {
             None
         };
