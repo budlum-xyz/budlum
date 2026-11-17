@@ -44,10 +44,10 @@ use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::cross_domain::external::BlsVerifier;
 use crate::domain::{
-    hash_finality_proof, BftFinalityAdapter, ConsensusDomain, ConsensusKind, DomainCommitment,
-    DomainFinalityAdapter, DomainId, DomainStatus, FinalityProof, FinalityStatus, Hash32,
-    PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
-    AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
+    hash_finality_proof, BftFinalityAdapter, BitcoinSpvFinalityAdapter, ConsensusDomain,
+    ConsensusKind, DomainCommitment, DomainFinalityAdapter, DomainId, DomainStatus, FinalityProof,
+    FinalityStatus, Hash32, PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter,
+    ZkFinalityAdapter, AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
 };
 use crate::domain::{SovereignDomainTemplate, VerifiedDomainCommitment};
 use crate::prover::{
@@ -326,7 +326,10 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     }
 
     let adapter_valid = match &domain.kind {
-        ConsensusKind::PoW => domain.finality_adapter == POW_HEADER_CHAIN_ADAPTER,
+        ConsensusKind::PoW => {
+            domain.finality_adapter == POW_HEADER_CHAIN_ADAPTER
+                || domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER
+        }
         ConsensusKind::PoS => domain.finality_adapter == "pos-qc-finality",
         ConsensusKind::PoA => domain.finality_adapter == "poa-authority-quorum",
         ConsensusKind::Bft => domain.finality_adapter == "bft-quorum-commit",
@@ -378,6 +381,31 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     Ok(())
 }
 
+/// Ingest-only reservation check for bit-31 Garden domain identifiers.
+///
+/// Enforced on transaction admission, precheck, aggregation pool intake and
+/// block assembly rather than unconditionally inside committed-block replay, so
+/// upgrading a chain whose committed history already contains a bit-31
+/// `RegisterDomain` never rejects history or splits upgraded from un-upgraded
+/// nodes. `Blockchain::register_garden_domain` separately refuses any id
+/// already present in `state.settlement.domains`.
+pub fn check_ingest_garden_domain_reservation(
+    tx: &crate::core::transaction::Transaction,
+) -> Result<(), String> {
+    if let crate::core::transaction::TransactionType::Settlement(SettlementTx::RegisterDomain(
+        domain,
+    )) = &tx.tx_type
+    {
+        if crate::garden::is_garden_domain_id(domain.id) {
+            return Err(format!(
+                "Domain {} lies in the reserved Garden domain id range",
+                domain.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Register a consensus domain in the settlement registry.
 ///
 /// # Errors
@@ -386,12 +414,6 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
 /// refusal (duplicate id, bond, lifecycle, ceiling).
 pub fn register_domain(state: &mut AccountState, domain: ConsensusDomain) -> Result<(), String> {
     validate_domain_registration(&domain)?;
-    if crate::garden::is_garden_domain_id(domain.id) {
-        return Err(format!(
-            "Domain {} lies in the reserved Garden domain id range",
-            domain.id
-        ));
-    }
     // The other half of the admission gate in `AccountState::execute_proposal`:
     // a domain that already carries PoA admins must be a PoA domain.
     if state.poa_is_permissioned(domain.id) && domain.kind != ConsensusKind::PoA {
@@ -584,9 +606,21 @@ pub fn verify_commitment_finality_observed(
 
     let status = match domain.kind {
         ConsensusKind::PoW => {
-            let adapter = PoWHeaderChainFinalityAdapter;
-            ensure_adapter_name(domain, adapter.adapter_name())?;
-            adapter.verify_finality(domain, commitment, proof)
+            if domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER {
+                // Bitcoin SPV domains are judged by Bitcoin's own consensus
+                // data (SHA256d, compact bits, chainwork); every other PoW
+                // domain keeps the bounded leading-zero header chain. Each
+                // adapter refuses a proof built for the other, and
+                // `ensure_adapter_name` refuses a domain registered under a
+                // third name.
+                let adapter = BitcoinSpvFinalityAdapter;
+                ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            } else {
+                let adapter = PoWHeaderChainFinalityAdapter;
+                ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            }
         }
         ConsensusKind::PoS => {
             let adapter = PoSFinalityAdapter;
@@ -895,6 +929,28 @@ impl CommitmentAttestation {
             },
         }
     }
+
+    /// What the finality adapter configured for `domain` actually attests.
+    ///
+    /// A `bitcoin-spv-v1` header commits only to its `prev_hash` (`parent`) and
+    /// `merkle_root` (`tx_root`); it has no state root or event root, so settlement
+    /// advances the domain's tip and tx-root window without demanding a non-zero
+    /// `state_root` or treating an `event_root` as proven.
+    #[must_use]
+    pub fn for_domain(domain: &ConsensusDomain) -> Self {
+        if domain.kind == ConsensusKind::PoW
+            && domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER
+        {
+            Self {
+                state_root: false,
+                tx_root: true,
+                event_root: false,
+                parent: true,
+            }
+        } else {
+            Self::for_kind(&domain.kind)
+        }
+    }
 }
 
 /// Freeze a domain for contradicting its committed history. A pending
@@ -993,7 +1049,7 @@ pub fn accept_commitment(
         // next height with any parent it likes; storing that commitment would
         // make the honest one a same-height conflict and freeze the domain.
         // Refused before the store is touched.
-        if !CommitmentAttestation::for_kind(&commitment.consensus_kind).parent
+        if !CommitmentAttestation::for_domain(&domain).parent
             && domain.last_committed_hash != [0u8; 32]
             && commitment.parent_domain_block_hash != domain.last_committed_hash
         {
@@ -1022,13 +1078,17 @@ fn apply_pending_commitments(
 ) -> Result<CommitmentOutcome, String> {
     let mut advanced = false;
     loop {
-        let (last_height, last_hash) = {
+        let (last_height, last_hash, attest_parent) = {
             let domain = state
                 .settlement
                 .domains
                 .get(domain_id)
                 .ok_or_else(|| format!("Domain {domain_id} not found"))?;
-            (domain.last_committed_height, domain.last_committed_hash)
+            (
+                domain.last_committed_height,
+                domain.last_committed_hash,
+                CommitmentAttestation::for_domain(domain).parent,
+            )
         };
         let next_height = last_height.saturating_add(1);
         let Some(com) = state
@@ -1043,7 +1103,7 @@ fn apply_pending_commitments(
                 .settlement
                 .commitments
                 .remove(domain_id, next_height, com.sequence);
-            if CommitmentAttestation::for_kind(&com.consensus_kind).parent {
+            if attest_parent {
                 return Ok(freeze_domain(
                     state,
                     domain_id,
@@ -1141,16 +1201,21 @@ pub fn accept_verified_commitment(
     let domain_id = commitment.domain_id;
     let domain_height = commitment.domain_height;
     let state_root = commitment.state_root;
-    if !CommitmentAttestation::for_kind(&commitment.consensus_kind).state_root {
-        let outcome = accept_commitment(state, commitment)?;
-        return Ok(outcome);
-    }
-    let height_before = state
+    let (height_before, attests_state_root) = state
         .settlement
         .domains
         .get(domain_id)
-        .map(|domain| domain.last_committed_height)
+        .map(|domain| {
+            (
+                domain.last_committed_height,
+                CommitmentAttestation::for_domain(domain).state_root,
+            )
+        })
         .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+    if !attests_state_root {
+        let outcome = accept_commitment(state, commitment)?;
+        return Ok(outcome);
+    }
     // A zero state root anchors nothing; refused before anything
     // moves (fail-closed).
     if state_root == [0u8; 32] {
@@ -1574,12 +1639,6 @@ pub fn execute_settlement_tx(
                     domain.id, chain
                 )));
             }
-            if crate::garden::is_garden_domain_id(domain.id) {
-                return Err(SettlementTxError::Refused(format!(
-                    "domain {} lies in the reserved Garden domain id range",
-                    domain.id
-                )));
-            }
             let balance = state.spendable_balance(&ctx.sender);
             let needed = domain.operator_bond.checked_add(ctx.fee).ok_or_else(|| {
                 SettlementTxError::Refused("domain bond plus fee overflows".into())
@@ -1744,7 +1803,7 @@ fn execute_object_layer_tx(
                     && commitment.validator_set_hash != domain.validator_set_hash)
                 || commitment.domain_block_hash != proof.home_block_hash
                 || commitment.event_root == [0u8; 32]
-                || !CommitmentAttestation::for_kind(&commitment.consensus_kind).event_root
+                || !CommitmentAttestation::for_domain(domain).event_root
             {
                 return false;
             }
@@ -1783,6 +1842,34 @@ fn execute_object_layer_tx(
             ));
         }
     }
+    if let crate::object_layer::ObjectLayerTx::RegisterClass(reg) = tx {
+        let dom = state
+            .settlement
+            .domains
+            .get(reg.home_domain)
+            .ok_or_else(|| {
+                SettlementTxError::Refused("object_layer_class_domain_missing".into())
+            })?;
+        if !dom.is_active() {
+            return Err(SettlementTxError::Refused(
+                "object_layer_class_domain_inactive".into(),
+            ));
+        }
+        // Registering a class chooses its `registrant` (the sole account
+        // authorized to call `RefreshClass` and freeze it on an authority
+        // mismatch) and pins the class's initial slice/rule forever, so only
+        // the home domain's operator may register classes for its domain.
+        if dom.operator != Some(ctx.sender) {
+            return Err(SettlementTxError::Refused(
+                "object_layer_class_requires_domain_operator".into(),
+            ));
+        }
+        if !domain_has_bound_authority(dom) {
+            return Err(SettlementTxError::Refused(
+                "object_layer_class_domain_authority_unbound".into(),
+            ));
+        }
+    }
     let domain_registry = state.settlement.domains.clone();
     let commitment_registry = state.settlement.commitments.clone();
     let finality = IntakeFinality {
@@ -1810,7 +1897,7 @@ fn execute_object_layer_tx(
                 c.domain_id == id
                     && c.state_root != [0u8; 32]
                     && c.consensus_kind == domain.kind
-                    && CommitmentAttestation::for_kind(&c.consensus_kind).state_root
+                    && CommitmentAttestation::for_domain(domain).state_root
                     && (domain.validator_set_hash == [0u8; 32]
                         || c.validator_set_hash == domain.validator_set_hash)
             })
@@ -5195,6 +5282,7 @@ mod tests {
                 silence_window: 100,
                 data_policy: DataPolicy::Public,
                 status: CharterStatus::Active,
+                operator: None,
             },
             proof: CodeProof {
                 endpoint_code_hash: [0x33; 32],
@@ -5303,28 +5391,105 @@ mod tests {
     }
 
     #[test]
-    fn permissionless_register_domain_refuses_reserved_garden_domain_ids() {
+    fn object_layer_register_class_requires_bound_domain_operator() {
+        use crate::object_layer::registry::ClassRegistration;
         let mut state = AccountState::new();
+        let op = Address([0x51; 32]);
+        let squatter = Address([0x52; 32]);
+        let mut dom = default_domain(91, ConsensusKind::PoA, 45262, "poa-authority-quorum", 1);
+        dom.operator = Some(op);
+        dom.validator_set_hash = [0xAA; 32];
+        state.add_balance(&op, dom.operator_bond + FEE);
+        state.add_balance(&squatter, 10_000_000);
+        register_domain(&mut state, dom).unwrap();
+
+        let reg = ClassRegistration {
+            home_domain: 91,
+            kind: crate::object_layer::AssetKind::Fungible,
+            contract: vec![0x11; 20],
+            rule: crate::object_layer::ClassRule::Template {
+                id: crate::object_layer::TemplateId::FungibleV1,
+                params: crate::object_layer::rule::TemplateParams::default(),
+            },
+            slice: crate::object_layer::rule::ClassSlice::default(),
+            slice_source: crate::object_layer::family::SliceSource::AccountAndStorageProof,
+            samples: Vec::new(),
+            bond: 1_000_000,
+            state_proof: None,
+        };
+        let err = execute_settlement_tx(
+            &mut state,
+            &ctx(squatter),
+            &SettlementTx::ObjectLayer(Box::new(
+                crate::object_layer::ObjectLayerTx::RegisterClass(reg),
+            )),
+        )
+        .expect_err("non-operator must not register object class on another operator's domain");
+        assert!(
+            format!("{err:?}").contains("object_layer_class_requires_domain_operator"),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn permissionless_register_domain_refuses_reserved_garden_domain_ids_at_ingest_without_breaking_replay(
+    ) {
         let garden_id = crate::garden::garden_domain_id(42);
         let mut domain = pow(garden_id);
         domain.domain_chain_id = 9_999;
         let op = operator(&domain);
-        state.add_balance(&op, MIN_DOMAIN_OPERATOR_BOND + FEE);
-        let err = execute_settlement_tx(
-            &mut state,
-            &ctx(op),
-            &SettlementTx::RegisterDomain(Box::new(domain.clone())),
-        )
-        .unwrap_err();
-        assert!(
-            format!("{err:?}").contains("reserved Garden domain id"),
-            "got: {err:?}"
+        let ingest_tx = crate::core::transaction::Transaction::new_with_chain_id(
+            op,
+            Address::zero(),
+            0,
+            FEE,
+            0,
+            Vec::new(),
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            crate::core::transaction::TransactionType::Settlement(SettlementTx::RegisterDomain(
+                Box::new(domain.clone()),
+            )),
         );
-        assert!(state.settlement.domains.get(garden_id).is_none());
-        let direct_err = register_domain(&mut state, domain).unwrap_err();
+        let ingest_err = check_ingest_garden_domain_reservation(&ingest_tx).unwrap_err();
         assert!(
-            direct_err.contains("reserved Garden domain id"),
-            "{direct_err}"
+            ingest_err.contains("reserved Garden domain id"),
+            "{ingest_err}"
+        );
+
+        // Historical block replay must still apply a pre-upgrade committed
+        // bit-31 registration cleanly, and local Garden registration refuses
+        // the colliding slot instead of corrupting it.
+        let mut chain = crate::chain::blockchain::Blockchain::new(
+            std::sync::Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            None,
+        );
+        chain
+            .state
+            .add_balance(&op, MIN_DOMAIN_OPERATOR_BOND + FEE * 2);
+        execute_settlement_tx(
+            &mut chain.state,
+            &ctx(op),
+            &SettlementTx::RegisterDomain(Box::new(domain)),
+        )
+        .expect("committed pre-upgrade registration replays cleanly");
+        assert!(chain.state.settlement.domains.get(garden_id).is_some());
+
+        let mut local_garden = crate::domain::plugin::default_domain(
+            garden_id,
+            ConsensusKind::PoA,
+            42,
+            "poa-authority-quorum",
+            1,
+        );
+        local_garden.bridge_enabled = false;
+        local_garden.operator = Some(op);
+        local_garden.operator_bond = 0;
+        local_garden.validator_set_hash = [7u8; 32];
+        assert!(
+            chain.register_garden_domain(local_garden).is_err(),
+            "local Garden registration must refuse an already-occupied settlement domain id"
         );
     }
 

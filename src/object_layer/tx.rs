@@ -238,9 +238,15 @@ impl ObjectLayerTx {
                 charter,
                 proof,
             } => {
+                let mut charter = charter.clone();
+                if charter.operator.is_none() {
+                    charter.operator = Some(ctx.signer);
+                } else if charter.operator != Some(ctx.signer) {
+                    return Err(TxRefusal::Refused(Refusal::NotAuthorized));
+                }
                 registry.charter_verified(
                     *domain,
-                    charter.clone(),
+                    charter,
                     proof,
                     (ctx.domain_active)(*domain),
                     state_root_for(*domain),

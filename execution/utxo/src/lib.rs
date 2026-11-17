@@ -572,10 +572,7 @@ mod tests {
         let mut closed = UtxoScriptWorker::new();
         assert!(!closed.is_active(&ctx(0)));
         for chain_id in [45_260, 99_999] {
-            assert!(!closed.is_active(&BlockContext {
-                chain_id,
-                ..ctx(0)
-            }));
+            assert!(!closed.is_active(&BlockContext { chain_id, ..ctx(0) }));
         }
         assert!(closed.is_active(&BlockContext {
             chain_id: 45_262,

@@ -22,7 +22,7 @@
 //! - `poseidon(poseidon(sk_j, msg_lo), msg_hi) == sig_j`
 //! - `SWrite[0..8] = msg_hash`, `SWrite[8..16] = AUTH_OK`.
 //!
-//! WIRING: wallet provers construct a `HiddenMultisigPolicy`, commit its
+//! WIRING: unwired - wallet provers construct a `HiddenMultisigPolicy`, commit its
 //! `program_hash` into `Account.auth_program_hash`, and submit the resulting
 //! `StarkProofObject` via `claim_program_auth` onto `agg/object`.
 

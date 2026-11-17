@@ -532,6 +532,9 @@ impl ObjectLayerRegistry {
         require_home_proof: bool,
     ) -> Result<AssetClassId, Refusal> {
         let charter = self.active_charter(reg.home_domain)?;
+        if charter.operator.is_some_and(|op| op != registrant) {
+            return Err(Refusal::NotAuthorized);
+        }
         let family = profile_for(charter.vm_family);
         family.validate_address(&reg.contract)?;
         if !reg.rule.is_open() {
