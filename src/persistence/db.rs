@@ -354,6 +354,11 @@ impl Storage {
         Ok(first)
     }
 
+    /// Writes a compressed snapshot of the sled database to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if snapshot serialization or file writing fails.
     pub fn create_snapshot<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
         use std::io::Write;
 
@@ -844,6 +849,11 @@ impl Storage {
             .is_some())
     }
 
+    /// Deletes the stored block at `height` and its index entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if deleting from the database fails.
     pub fn delete_block(&self, height: u64) -> std::io::Result<()> {
         let key = format!("HEIGHT:{height}");
         if let Some(hash_val) = self.db.get(key.as_bytes())? {
@@ -1146,6 +1156,11 @@ impl Storage {
         Ok((epoch, trusted, verified))
     }
 
+    /// Persists a finalized epoch certificate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if serialization or database writes fail.
     pub fn save_finality_cert(
         &self,
         height: u64,
@@ -1389,6 +1404,11 @@ impl Storage {
         Ok(out)
     }
 
+    /// Loads the stored global block header at `height`, if present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if reading or deserializing the header fails.
     pub fn get_global_header(&self, height: u64) -> std::io::Result<Option<GlobalBlockHeader>> {
         let key = format!("GLOBAL_HEADER:{height}");
         if let Some(val) = self.db.get(key.as_bytes())? {
@@ -1646,6 +1666,11 @@ impl Storage {
             .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Persists the storage economics state snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if serialization or database writes fail.
     pub fn save_storage_economics_state(
         &self,
         snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
