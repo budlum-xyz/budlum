@@ -1895,7 +1895,7 @@ mod tests {
         let (leaver, quiet) = (candidates[0], candidates[1]);
 
         let leave = net.tx(&leaver, GardenTxKind::Leave);
-        let pool = vec![leave];
+        let pool = [leave];
         let (txs, _dead) =
             net.ledger
                 .state
