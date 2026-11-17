@@ -180,16 +180,18 @@ pub struct Account {
 const STATE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/account-state";
 
 impl Account {
-    pub fn new(public_key: Address) -> Self {
-        Account {
+    #[must_use]
+    pub const fn new(public_key: Address) -> Self {
+        Self {
             public_key,
             balance: 0,
             nonce: 0,
             frac_attos: 0,
         }
     }
-    pub fn with_balance(public_key: Address, balance: u64) -> Self {
-        Account {
+    #[must_use]
+    pub const fn with_balance(public_key: Address, balance: u64) -> Self {
+        Self {
             public_key,
             balance,
             nonce: 0,
