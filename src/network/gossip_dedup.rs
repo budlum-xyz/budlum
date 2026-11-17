@@ -277,20 +277,16 @@ impl GossipDedup {
         self.peer_scores.get(peer)
     }
 
-    /// Returns `true` if the peer must be auto-banned: its score has dropped to
-    /// Or below `MIN_PEER_SCORE` **or** it has sent more than
+    /// Returns `true` if an authoring peer must be auto-banned: its score has
+    /// dropped to or below `MIN_PEER_SCORE` **or** it has sent more than
     /// `MAX_DUPLICATE_COUNT` duplicate messages (a replay/duplicate flood).
-    ///
-    /// A peer producing an excessive message rate must be auto-banned, not
-    /// merely scored. This engine only *decides* the ban; the caller (swarm /
-    /// peer-manager) is responsible for enforcing the disconnect so the `DoS`
-    /// primitive stays self-contained and testable.
-    pub fn peer_should_be_banned(&self, peer: &libp2p::PeerId) -> bool {
+    #[cfg(test)]
+    fn peer_should_be_banned(&self, peer: &libp2p::PeerId) -> bool {
         self.peer_should_be_banned_from(peer, true)
     }
 
-    /// Variant of [`Self::peer_should_be_banned`] that accounts for whether the
-    /// duplicate frame was authored by `peer` or forwarded through the
+    /// Returns `true` if `peer` must be auto-banned, accounting for whether
+    /// the duplicate frame was authored by `peer` or forwarded through the
     /// gossipsub mesh. An honest mesh relayer routinely delivers redundant
     /// copies of third-party transactions and finality votes before `IDONTWANT`
     /// converges; only a sustained replay flood (`MAX_DUPLICATE_COUNT`) or
