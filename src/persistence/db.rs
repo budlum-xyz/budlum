@@ -2277,7 +2277,7 @@ impl Storage {
         for item in items {
             let key = Self::bud3_symbol_key(object, holder, segment, item.symbol.esi);
             let encoded = encode(item)?;
-            batch.insert(&key, encoded);
+            batch.insert(key.as_slice(), encoded);
         }
         self.db.apply_batch(batch)?;
         self.db.flush()?;
