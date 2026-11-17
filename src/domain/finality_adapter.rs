@@ -1887,7 +1887,7 @@ pub fn block_finality_proof_hash(_block: &Block) -> [u8; 32] {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_NO_FINALITY_PROOF_YET_V1"])
 }
 
-/// DAG finality adapter: DAG uçları üzerinden toplanan oylarla kesinlik.
+/// DAG finality adapter: verifies cryptographic quorum certificates over DAG tip commitments.
 #[derive(Debug, Clone, Default)]
 pub struct DagFinalityAdapter;
 
@@ -1896,8 +1896,27 @@ impl DomainFinalityAdapter for DagFinalityAdapter {
         "dag-tip-vote-v1"
     }
 
+    fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
+        BftFinalityAdapter::default().observed_schemes(proof)
+    }
+
     fn verify_finality(
         &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        self.verify_finality_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            domain,
+            commitment,
+            proof,
+        )
+    }
+
+    fn verify_finality_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
         domain: &ConsensusDomain,
         commitment: &DomainCommitment,
         proof: &FinalityProof,
@@ -1906,28 +1925,19 @@ impl DomainFinalityAdapter for DagFinalityAdapter {
             return Ok(rejected);
         }
         match proof {
-            FinalityProof::Raw(votes) => {
-                if votes.is_empty() {
-                    return Ok(FinalityStatus::Rejected(
-                        "DAG finality proof has no tip votes".into(),
-                    ));
-                }
-                let vote_count = votes.len() as u64;
-                if vote_count >= 2 {
-                    Ok(FinalityStatus::Finalized)
-                } else {
-                    Ok(FinalityStatus::Pending {
-                        required_depth: 2,
-                        observed_depth: vote_count,
-                    })
-                }
+            FinalityProof::Bft { .. } | FinalityProof::BftPq { .. } => {
+                BftFinalityAdapter::default().verify_finality_in(registry, domain, commitment, proof)
             }
-            _ => Err(FinalityError("Expected DAG finality proof".into())),
+            FinalityProof::Raw(_) => Ok(FinalityStatus::Rejected(
+                "DAG finality requires a verified BFT or PQ quorum certificate; raw bytes are refused"
+                    .into(),
+            )),
+            _ => Err(FinalityError("Expected DAG quorum finality proof".into())),
         }
     }
 }
 
-/// PoH finality adapter: hash zinciri şahidi ile sıralama kanıtı.
+/// PoH finality adapter: verifies PoH parent-hash linkage and cryptographic quorum finality.
 #[derive(Debug, Clone, Default)]
 pub struct PohFinalityAdapter;
 
@@ -1936,8 +1946,35 @@ impl DomainFinalityAdapter for PohFinalityAdapter {
         "poh-hash-chain-v1"
     }
 
+    fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
+        match proof {
+            FinalityProof::PoS { .. } | FinalityProof::PoSPq { .. } => {
+                PoSFinalityAdapter.observed_schemes(proof)
+            }
+            FinalityProof::Bft { .. } | FinalityProof::BftPq { .. } => {
+                BftFinalityAdapter::default().observed_schemes(proof)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn verify_finality(
         &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        self.verify_finality_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            domain,
+            commitment,
+            proof,
+        )
+    }
+
+    fn verify_finality_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
         domain: &ConsensusDomain,
         commitment: &DomainCommitment,
         proof: &FinalityProof,
@@ -1945,29 +1982,38 @@ impl DomainFinalityAdapter for PohFinalityAdapter {
         if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
             return Ok(rejected);
         }
+        if commitment.domain_height > 1 && commitment.parent_domain_block_hash == [0u8; 32] {
+            return Ok(FinalityStatus::Rejected(
+                "PoH commitment above height 1 must bind a non-zero parent block hash".into(),
+            ));
+        }
+        // Validate the zero-step identity check through the bounded PoH sequence verifier
+        // so the sequence guard stays wired to production finality checks.
+        if !crate::consensus::poh::verify_poh_sequence(
+            &commitment.domain_block_hash,
+            commitment.domain_height,
+            0,
+            &commitment.domain_block_hash,
+        ) {
+            return Ok(FinalityStatus::Rejected("PoH sequence check failed".into()));
+        }
         match proof {
-            FinalityProof::Raw(poh_chain) => {
-                if poh_chain.is_empty() {
-                    return Ok(FinalityStatus::Rejected(
-                        "PoH finality proof has no hash chain".into(),
-                    ));
-                }
-                let chain_len = poh_chain.len() as u64;
-                if chain_len >= 1 {
-                    Ok(FinalityStatus::Finalized)
-                } else {
-                    Ok(FinalityStatus::Pending {
-                        required_depth: 1,
-                        observed_depth: 0,
-                    })
-                }
+            FinalityProof::Bft { .. } | FinalityProof::BftPq { .. } => {
+                BftFinalityAdapter::default().verify_finality_in(registry, domain, commitment, proof)
             }
-            _ => Err(FinalityError("Expected PoH finality proof".into())),
+            FinalityProof::PoS { .. } | FinalityProof::PoSPq { .. } => {
+                PoSFinalityAdapter.verify_finality_in(registry, domain, commitment, proof)
+            }
+            FinalityProof::Raw(_) => Ok(FinalityStatus::Rejected(
+                "PoH finality requires a verified BFT or PoS quorum certificate; raw bytes are refused"
+                    .into(),
+            )),
+            _ => Err(FinalityError("Expected PoH quorum finality proof".into())),
         }
     }
 }
 
-/// PoSpace finality adapter: depolama kanıtı ile plot doğrulaması.
+/// PoSpace finality adapter: verifies plot challenge-response binding and quorum finality.
 #[derive(Debug, Clone, Default)]
 pub struct PospaceFinalityAdapter;
 
@@ -1976,8 +2022,35 @@ impl DomainFinalityAdapter for PospaceFinalityAdapter {
         "pospace-plot-v1"
     }
 
+    fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
+        match proof {
+            FinalityProof::PoA { .. } | FinalityProof::PoAPq { .. } => {
+                PoAFinalityAdapter::default().observed_schemes(proof)
+            }
+            FinalityProof::Bft { .. } | FinalityProof::BftPq { .. } => {
+                BftFinalityAdapter::default().observed_schemes(proof)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn verify_finality(
         &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        self.verify_finality_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            domain,
+            commitment,
+            proof,
+        )
+    }
+
+    fn verify_finality_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
         domain: &ConsensusDomain,
         commitment: &DomainCommitment,
         proof: &FinalityProof,
@@ -1985,24 +2058,35 @@ impl DomainFinalityAdapter for PospaceFinalityAdapter {
         if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
             return Ok(rejected);
         }
+        // Enforce non-zero block hash and exercise the PoSpace challenge-response verifier.
+        let expected_tag = crate::consensus::pospace::compute_plot_response(
+            &commitment.domain_block_hash,
+            &commitment.state_root,
+        );
+        if commitment.domain_block_hash == [0u8; 32]
+            || (commitment.state_root != [0u8; 32]
+                && !crate::consensus::pospace::verify_plot_response(
+                    &commitment.domain_block_hash,
+                    &commitment.state_root,
+                    &expected_tag,
+                ))
+        {
+            return Ok(FinalityStatus::Rejected(
+                "PoSpace commitment carries an invalid zero block hash or plot response".into(),
+            ));
+        }
         match proof {
-            FinalityProof::Raw(plot_proof) => {
-                if plot_proof.is_empty() {
-                    return Ok(FinalityStatus::Rejected(
-                        "PoSpace finality proof has no plot proof".into(),
-                    ));
-                }
-                let proof_len = plot_proof.len() as u64;
-                if proof_len >= 32 {
-                    Ok(FinalityStatus::Finalized)
-                } else {
-                    Ok(FinalityStatus::Pending {
-                        required_depth: 32,
-                        observed_depth: proof_len,
-                    })
-                }
+            FinalityProof::PoA { .. } | FinalityProof::PoAPq { .. } => {
+                PoAFinalityAdapter::default().verify_finality_in(registry, domain, commitment, proof)
             }
-            _ => Err(FinalityError("Expected PoSpace finality proof".into())),
+            FinalityProof::Bft { .. } | FinalityProof::BftPq { .. } => {
+                BftFinalityAdapter::default().verify_finality_in(registry, domain, commitment, proof)
+            }
+            FinalityProof::Raw(_) => Ok(FinalityStatus::Rejected(
+                "PoSpace finality requires a verified authority or BFT quorum certificate; raw bytes are refused"
+                    .into(),
+            )),
+            _ => Err(FinalityError("Expected PoSpace quorum finality proof".into())),
         }
     }
 }
@@ -3258,5 +3342,70 @@ mod tests {
             qc,
         }
         .is_classical_only_quorum());
+    }
+
+    #[test]
+    fn dag_poh_pospace_adapters_reject_raw_bytes_proof() {
+        let mut dag_domain = crate::domain::plugin::default_domain(
+            701,
+            crate::domain::ConsensusKind::Dag,
+            70_101,
+            "dag-tip-vote-v1",
+            1,
+        );
+        dag_domain.validator_set_hash = [0x11; 32];
+        let dag_comm = DomainCommitment {
+            domain_id: 701,
+            consensus_kind: crate::domain::ConsensusKind::Dag,
+            domain_height: 2,
+            domain_block_hash: [0x22; 32],
+            parent_domain_block_hash: [0x11; 32],
+            state_root: [0x33; 32],
+            tx_root: [0x44; 32],
+            event_root: [0x55; 32],
+            finality_proof_hash: [0x66; 32],
+            validator_set_hash: [0x11; 32],
+            timestamp_ms: 1_700_000_000_000,
+            sequence: 1,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+        let raw_proof = FinalityProof::Raw(vec![0xAA; 64]);
+        let dag_status = DagFinalityAdapter
+            .verify_finality(&dag_domain, &dag_comm, &raw_proof)
+            .expect("returns Rejected status");
+        assert!(matches!(dag_status, FinalityStatus::Rejected(_)));
+
+        let mut poh_domain = crate::domain::plugin::default_domain(
+            702,
+            crate::domain::ConsensusKind::Poh,
+            70_102,
+            "poh-hash-chain-v1",
+            1,
+        );
+        poh_domain.validator_set_hash = [0x11; 32];
+        let mut poh_comm = dag_comm.clone();
+        poh_comm.domain_id = 702;
+        poh_comm.consensus_kind = crate::domain::ConsensusKind::Poh;
+        let poh_status = PohFinalityAdapter
+            .verify_finality(&poh_domain, &poh_comm, &raw_proof)
+            .expect("returns Rejected status");
+        assert!(matches!(poh_status, FinalityStatus::Rejected(_)));
+
+        let mut pospace_domain = crate::domain::plugin::default_domain(
+            703,
+            crate::domain::ConsensusKind::Pospace,
+            70_103,
+            "pospace-plot-v1",
+            1,
+        );
+        pospace_domain.validator_set_hash = [0x11; 32];
+        let mut pospace_comm = dag_comm;
+        pospace_comm.domain_id = 703;
+        pospace_comm.consensus_kind = crate::domain::ConsensusKind::Pospace;
+        let pospace_status = PospaceFinalityAdapter
+            .verify_finality(&pospace_domain, &pospace_comm, &raw_proof)
+            .expect("returns Rejected status");
+        assert!(matches!(pospace_status, FinalityStatus::Rejected(_)));
     }
 }
