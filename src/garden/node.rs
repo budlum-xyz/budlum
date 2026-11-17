@@ -1453,6 +1453,32 @@ impl Node {
         let _ = self.net.send(NetCommand::Disconnect(victim)).await;
     }
 
+    fn record_verified_peer(&mut self, key: GardenKey) {
+        if self.verified_peers.contains(&key) {
+            return;
+        }
+        let cap = usize::try_from(self.ledger.state.genesis.limits.max_validators)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(2)
+            .max(16);
+        if self.verified_peers.len() >= cap {
+            let evict = self
+                .verified_peers
+                .iter()
+                .find(|k| !self.ledger.state.validators.contains_key(*k))
+                .copied();
+            let Some(victim) = evict else {
+                if !self.ledger.state.validators.contains_key(&key) {
+                    return;
+                }
+                self.verified_peers.insert(key);
+                return;
+            };
+            self.verified_peers.remove(&victim);
+        }
+        self.verified_peers.insert(key);
+    }
+
     /// True when `key` is the peer's own key and the invite key signed it.
     fn holds_invite(&self, peer: PeerId, key: &GardenKey, signature: &[u8]) -> bool {
         peer_id_of(key).is_ok_and(|id| id == peer)
@@ -1568,7 +1594,7 @@ impl Node {
                     .entry(peer)
                     .or_insert_with(Instant::now);
                 self.unadmitted.remove(&peer);
-                self.verified_peers.insert(*key);
+                self.record_verified_peer(*key);
                 self.dial_failures.retain(|(k, _), _| k != key);
                 self.dials.retain(|(k, _), _| k != key);
                 let _ = self.net.send(NetCommand::Admit(peer)).await;
@@ -1934,7 +1960,7 @@ impl Node {
                             .entry(peer)
                             .or_insert_with(Instant::now);
                         self.unadmitted.remove(&peer);
-                        self.verified_peers.insert(key);
+                        self.record_verified_peer(key);
                         self.dial_failures.retain(|(k, _), _| *k != key);
                         self.dials.retain(|(k, _), _| *k != key);
                         let _ = self.net.send(NetCommand::Admit(peer)).await;
@@ -2552,7 +2578,11 @@ impl Node {
             return false;
         }
         self.first_sight(Seen::Commit(commit.block.hash()));
-        if from.is_some() {
+        if from.is_some_and(|peer| {
+            self.peers
+                .get(&peer)
+                .is_some_and(|key| self.ledger.state.is_active(key))
+        }) {
             self.held_elsewhere = self.held_elsewhere.max(commit.block.header.height);
         }
         self.proposals.clear();
