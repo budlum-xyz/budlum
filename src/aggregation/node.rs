@@ -421,120 +421,123 @@ impl AggNode {
     }
 }
 
-#[cfg(all(test, feature = "wallet-ml-dsa"))]
+#[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::aggregation::chain::claim_signature;
+    #[cfg(feature = "wallet-ml-dsa")]
+    mod pending_store {
+        use super::super::*;
+        use crate::aggregation::chain::claim_signature;
 
-    fn sample_node(params: AggParams) -> AggNode {
-        AggNode::new(
-            &params,
-            45_262,
-            Zeroizing::new([0xA6; 32]),
-            &SchemeStatusRegistry::genesis(),
-        )
-        .expect("aggregation enabled")
-    }
-
-    #[test]
-    fn pending_byte_limit_enforces_store_full_and_orphan_pruning_reclaims_space() {
-        let registry = SchemeStatusRegistry::genesis();
-        let params = AggParams {
-            mode: AggMode::On,
-            ..AggParams::default()
-        };
-        let mut node = sample_node(params);
-        let recipient = Address::from([0x44; 32]);
-        let sender_a = crate::crypto::primitives::WalletKeyPair::from_seed(&[1u8; 32]);
-        let sender_b = crate::crypto::primitives::WalletKeyPair::from_seed(&[2u8; 32]);
-
-        let mut tx_a = Transaction::new_with_fee(
-            sender_a.address(),
-            recipient,
-            10,
-            100_000,
-            0,
-            vec![0xAB; 2048],
-        );
-        tx_a.chain_id = 45_262;
-        tx_a.sign_v5(&sender_a);
-        let (claimed_a, env_a) = claim_signature(&tx_a).expect("v5 claim");
-        let bytes_a = charged_bytes(&claimed_a);
-
-        let mut tx_b = Transaction::new_with_fee(
-            sender_b.address(),
-            recipient,
-            10,
-            100_000,
-            0,
-            vec![0xCD; 2048],
-        );
-        tx_b.chain_id = 45_262;
-        tx_b.sign_v5(&sender_b);
-        let (claimed_b, env_b) = claim_signature(&tx_b).expect("v5 claim");
-
-        node.max_pending_bytes = bytes_a + 10;
-        assert_eq!(
-            node.aggregator_address(),
-            crate::aggregation::frame::aggregator_address_from_seed(&[0xA6; 32])
-                .expect("valid seed")
-        );
-        assert_eq!(
-            node.admit(env_a.clone(), claimed_a.clone(), &registry),
-            Ok(true)
-        );
-        assert_eq!(node.pending_bytes, bytes_a);
-        assert_eq!(
-            node.admit(env_b.clone(), claimed_b.clone(), &registry),
-            Err(ObjectRefusal::StoreFull)
-        );
-
-        // Removing the object from the pool leaves `claimed_a` as an orphan;
-        // `prune_orphans` reclaims its bytes so `claimed_b` can enter.
-        if let Some(digest_a) = claimed_a.auth_claim {
-            node.aggregator.forget_claim(&digest_a);
+        fn sample_node(params: AggParams) -> AggNode {
+            AggNode::new(
+                &params,
+                45_262,
+                Zeroizing::new([0xA6; 32]),
+                &SchemeStatusRegistry::genesis(),
+            )
+            .expect("aggregation enabled")
         }
-        assert_eq!(node.admit(env_b, claimed_b.clone(), &registry), Ok(true));
-        assert!(!node.holds(&claimed_a.signing_hash()));
-        assert!(node.holds(&claimed_b.signing_hash()));
-        assert_eq!(node.pending_bytes, charged_bytes(&claimed_b));
-    }
 
-    #[test]
-    fn pool_eviction_during_admit_prunes_orphaned_transaction() {
-        let registry = SchemeStatusRegistry::genesis();
-        let params = AggParams {
-            mode: AggMode::On,
-            pool_max_bytes: 8_000, // holds one 7.2 KB envelope at a time
-            ..AggParams::default()
-        };
-        let mut node = sample_node(params);
-        let recipient = Address::from([0x44; 32]);
-        let sender_low = crate::crypto::primitives::WalletKeyPair::from_seed(&[3u8; 32]);
-        let sender_high = crate::crypto::primitives::WalletKeyPair::from_seed(&[4u8; 32]);
+        #[test]
+        fn pending_byte_limit_enforces_store_full_and_orphan_pruning_reclaims_space() {
+            let registry = SchemeStatusRegistry::genesis();
+            let params = AggParams {
+                mode: AggMode::On,
+                ..AggParams::default()
+            };
+            let mut node = sample_node(params);
+            let recipient = Address::from([0x44; 32]);
+            let sender_a = crate::crypto::primitives::WalletKeyPair::from_seed(&[1u8; 32]);
+            let sender_b = crate::crypto::primitives::WalletKeyPair::from_seed(&[2u8; 32]);
 
-        let mut tx_low =
-            Transaction::new_with_fee(sender_low.address(), recipient, 10, 10_000, 0, vec![]);
-        tx_low.chain_id = 45_262;
-        tx_low.sign_v5(&sender_low);
-        let (claimed_low, env_low) = claim_signature(&tx_low).expect("v5 claim");
+            let mut tx_a = Transaction::new_with_fee(
+                sender_a.address(),
+                recipient,
+                10,
+                100_000,
+                0,
+                vec![0xAB; 2048],
+            );
+            tx_a.chain_id = 45_262;
+            tx_a.sign_v5(&sender_a);
+            let (claimed_a, env_a) = claim_signature(&tx_a).expect("v5 claim");
+            let bytes_a = charged_bytes(&claimed_a);
 
-        let mut tx_high =
-            Transaction::new_with_fee(sender_high.address(), recipient, 10, 50_000, 0, vec![]);
-        tx_high.chain_id = 45_262;
-        tx_high.sign_v5(&sender_high);
-        let (claimed_high, env_high) = claim_signature(&tx_high).expect("v5 claim");
+            let mut tx_b = Transaction::new_with_fee(
+                sender_b.address(),
+                recipient,
+                10,
+                100_000,
+                0,
+                vec![0xCD; 2048],
+            );
+            tx_b.chain_id = 45_262;
+            tx_b.sign_v5(&sender_b);
+            let (claimed_b, env_b) = claim_signature(&tx_b).expect("v5 claim");
 
-        assert_eq!(
-            node.admit(env_low, claimed_low.clone(), &registry),
-            Ok(true)
-        );
-        assert_eq!(
-            node.admit(env_high, claimed_high.clone(), &registry),
-            Ok(true)
-        );
-        assert!(!node.holds(&claimed_low.signing_hash()));
-        assert!(node.holds(&claimed_high.signing_hash()));
-        assert_eq!(node.pending_bytes, charged_bytes(&claimed_high));
+            node.max_pending_bytes = bytes_a + 10;
+            assert_eq!(
+                node.aggregator_address(),
+                crate::aggregation::frame::aggregator_address_from_seed(&[0xA6; 32])
+                    .expect("valid seed")
+            );
+            assert_eq!(
+                node.admit(env_a.clone(), claimed_a.clone(), &registry),
+                Ok(true)
+            );
+            assert_eq!(node.pending_bytes, bytes_a);
+            assert_eq!(
+                node.admit(env_b.clone(), claimed_b.clone(), &registry),
+                Err(ObjectRefusal::StoreFull)
+            );
+
+            // Removing the object from the pool leaves `claimed_a` as an orphan;
+            // `prune_orphans` reclaims its bytes so `claimed_b` can enter.
+            if let Some(digest_a) = claimed_a.auth_claim {
+                node.aggregator.forget_claim(&digest_a);
+            }
+            assert_eq!(node.admit(env_b, claimed_b.clone(), &registry), Ok(true));
+            assert!(!node.holds(&claimed_a.signing_hash()));
+            assert!(node.holds(&claimed_b.signing_hash()));
+            assert_eq!(node.pending_bytes, charged_bytes(&claimed_b));
+        }
+
+        #[test]
+        fn pool_eviction_during_admit_prunes_orphaned_transaction() {
+            let registry = SchemeStatusRegistry::genesis();
+            let params = AggParams {
+                mode: AggMode::On,
+                pool_max_bytes: 8_000, // holds one 7.2 KB envelope at a time
+                ..AggParams::default()
+            };
+            let mut node = sample_node(params);
+            let recipient = Address::from([0x44; 32]);
+            let sender_low = crate::crypto::primitives::WalletKeyPair::from_seed(&[3u8; 32]);
+            let sender_high = crate::crypto::primitives::WalletKeyPair::from_seed(&[4u8; 32]);
+
+            let mut tx_low =
+                Transaction::new_with_fee(sender_low.address(), recipient, 10, 10_000, 0, vec![]);
+            tx_low.chain_id = 45_262;
+            tx_low.sign_v5(&sender_low);
+            let (claimed_low, env_low) = claim_signature(&tx_low).expect("v5 claim");
+
+            let mut tx_high =
+                Transaction::new_with_fee(sender_high.address(), recipient, 10, 50_000, 0, vec![]);
+            tx_high.chain_id = 45_262;
+            tx_high.sign_v5(&sender_high);
+            let (claimed_high, env_high) = claim_signature(&tx_high).expect("v5 claim");
+
+            assert_eq!(
+                node.admit(env_low, claimed_low.clone(), &registry),
+                Ok(true)
+            );
+            assert_eq!(
+                node.admit(env_high, claimed_high.clone(), &registry),
+                Ok(true)
+            );
+            assert!(!node.holds(&claimed_low.signing_hash()));
+            assert!(node.holds(&claimed_high.signing_hash()));
+            assert_eq!(node.pending_bytes, charged_bytes(&claimed_high));
+        }
     }
 }
