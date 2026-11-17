@@ -177,6 +177,7 @@ rayon = "1.10"
 bud-isa = { path = "budzero/bud-isa" }
 bud-vm = { path = "budzero/bud-vm" }
 bud-proof = { path = "budzero/bud-proof" }
+bud-pul = { path = "budzero/bud-pul" }
 bud-node = { path = "budzero/bud-node" }
 # The node indexes commitments and nullifiers by the bytes the wallet packed.
 # That packing had three independent copies, one here, one in the wallet and
