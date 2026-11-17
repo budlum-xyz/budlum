@@ -5,6 +5,8 @@
 //!    and negative forgery/replay/wrong-domain/wrong-program/bit-flip checks.
 //! 4. `ShadowAuditor` 10,000-block parity against native ML-DSA-87 verification.
 
+use zeroize::Zeroizing;
+
 use crate::aggregation::backend::{AggBackend, AggError, TickCtx};
 use crate::aggregation::frame::{merge_pi, ClaimFrame, FrameError, FrameLimits};
 use crate::aggregation::object::derive_claim;
@@ -205,10 +207,7 @@ fn stark_backend_proves_merges_and_rejects_forgery() {
 
     let tick_left = backend
         .prove_tick(
-            &TickCtx {
-                domain: DOMAIN,
-                aggregator: Address::from([0xAA; 32]),
-            },
+            &TickCtx::from_seed(DOMAIN, Zeroizing::new([0xAA; 32])).expect("tick_left ctx"),
             &[
                 pool_item_from_tx(&tx1, &registry),
                 pool_item_from_tx(&tx2, &registry),
@@ -221,10 +220,7 @@ fn stark_backend_proves_merges_and_rejects_forgery() {
 
     let tick_right = backend
         .prove_tick(
-            &TickCtx {
-                domain: DOMAIN,
-                aggregator: Address::from([0xBB; 32]),
-            },
+            &TickCtx::from_seed(DOMAIN, Zeroizing::new([0xBB; 32])).expect("tick_right ctx"),
             &[
                 pool_item_from_tx(&tx3, &registry),
                 pool_item_from_tx(&tx4, &registry),
@@ -268,10 +264,7 @@ fn stark_backend_proves_merges_and_rejects_forgery() {
     let claim_other = derive_claim(&registry, &env_other).expect("other claim");
     let other_domain_tick = backend
         .prove_tick(
-            &TickCtx {
-                domain: DOMAIN + 1,
-                aggregator: Address::from([0xCC; 32]),
-            },
+            &TickCtx::from_seed(DOMAIN + 1, Zeroizing::new([0xCC; 32])).expect("other ctx"),
             &[PoolItem {
                 envelope: env_other,
                 claim: claim_other,
@@ -343,10 +336,7 @@ fn stark_backend_proves_merges_and_rejects_forgery() {
         }
         let frame = backend
             .prove_tick(
-                &TickCtx {
-                    domain: DOMAIN,
-                    aggregator: Address::from([0xA0 + agg_idx; 32]),
-                },
+                &TickCtx::from_seed(DOMAIN, Zeroizing::new([0xA0 + agg_idx; 32])).expect("agg ctx"),
                 &items,
             )
             .expect("256-claim tick proves");
