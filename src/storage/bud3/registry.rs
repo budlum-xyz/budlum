@@ -278,6 +278,8 @@ pub enum Bud3Query {
     Custody(Address),
     /// One unlinkable view grant by `grant_tag`.
     Grant([u8; 32]),
+    /// One unlinkable view grant by `grant_tag` evaluated at `current_epoch`.
+    GrantAt([u8; 32], u64),
     /// Resolve an NFT binding (`NftId`) to its live/replaced object metadata.
     Nft(NftId),
 }
@@ -2687,6 +2689,27 @@ impl Bud3Registry {
                     serde_json::Value::Null
                 }
             }
+            Bud3Query::GrantAt(tag, current_epoch) => {
+                if let Some(row) = self.grants.get(tag) {
+                    let expired = row.expires_at_epoch <= *current_epoch;
+                    serde_json::json!({
+                        "grant_tag": hex::encode(row.grant_tag),
+                        "status": if expired { "expired" } else { "active" },
+                        "current_epoch": current_epoch,
+                        "one_time_pk": hex::encode(&row.one_time_pk),
+                        "sealed_key_package": hex::encode(&row.sealed_key_package),
+                        "expires_at_epoch": row.expires_at_epoch,
+                    })
+                } else if self.revoked_grants.contains(tag) {
+                    serde_json::json!({
+                        "grant_tag": hex::encode(tag),
+                        "status": "revoked",
+                        "current_epoch": current_epoch,
+                    })
+                } else {
+                    serde_json::Value::Null
+                }
+            }
             Bud3Query::Nft(nft) => {
                 let Some((key, owner)) = self.nfts.get(nft) else {
                     return serde_json::Value::Null;
@@ -4304,5 +4327,47 @@ mod tests {
             r.query_json(&Bud3Query::Placement(old_key))["status"],
             "replaced"
         );
+    }
+
+    #[test]
+    fn query_json_grant_at_distinguishes_active_expired_and_revoked_grants() {
+        use super::super::content_id::ContentKey;
+        use super::super::grants::{build_grant_row, grant_revoke_digest};
+        use super::super::keys::{
+            derive_grant_one_time_keypair, seal_key_package, sign_with_grant_one_time_key,
+        };
+        use crate::crypto::hpke::HpkeKeyPair;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(1);
+        let (up, shares) = upload(b"sealed grant status payload");
+        let obj = up.record.commitment;
+        r.register_object(owner, up.record, shares, 0, 20).unwrap();
+        let nft = [0x91u8; 32];
+        r.bind_nft(nft, owner, Some(owner), &obj).unwrap();
+
+        let seed = [0x44u8; 32];
+        let nonce = [0x55u8; 32];
+        let (otk_seed, otk_pk) = derive_grant_one_time_keypair(&seed, &nft, &nonce).unwrap();
+        let grantee = HpkeKeyPair::from_seed(&[0x66u8; 32]).unwrap();
+        let tag = super::super::grants::compute_grant_tag(&nft, &nonce);
+        let pkg =
+            seal_key_package(grantee.public_key(), &tag, &obj, &ContentKey([0x77u8; 32])).unwrap();
+        let row = build_grant_row(&nft, &nonce, otk_pk, pkg, 15, 0).unwrap();
+        r.issue_view_grant(&nft, &nonce, &owner, row, 0).unwrap();
+
+        let active = r.query_json(&Bud3Query::GrantAt(tag, 14));
+        assert_eq!(active["status"], "active");
+        assert_eq!(active["current_epoch"], 14);
+
+        let expired = r.query_json(&Bud3Query::GrantAt(tag, 15));
+        assert_eq!(expired["status"], "expired");
+        assert_eq!(expired["expires_at_epoch"], 15);
+
+        let sig = sign_with_grant_one_time_key(&otk_seed, &grant_revoke_digest(&tag)).unwrap();
+        r.revoke_view_grant(&tag, &sig).unwrap();
+        let revoked = r.query_json(&Bud3Query::GrantAt(tag, 16));
+        assert_eq!(revoked["status"], "revoked");
+        assert!(r.query_json(&Bud3Query::GrantAt([0xAA; 32], 16)).is_null());
     }
 }
