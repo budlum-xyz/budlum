@@ -52,6 +52,29 @@ pub fn meets_difficulty(hash: &[u8; 32], difficulty_bits: u8) -> bool {
     true
 }
 
+const MAX_FAUCET_RESPONSE_BYTES: usize = 64 * 1024;
+
+async fn read_faucet_json(mut response: reqwest::Response) -> Result<serde_json::Value, String> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_FAUCET_RESPONSE_BYTES as u64)
+    {
+        return Err(format!(
+            "faucet response exceeds {MAX_FAUCET_RESPONSE_BYTES}-byte limit"
+        ));
+    }
+    let mut raw = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if raw.len().saturating_add(chunk.len()) > MAX_FAUCET_RESPONSE_BYTES {
+            return Err(format!(
+                "faucet response exceeds {MAX_FAUCET_RESPONSE_BYTES}-byte limit"
+            ));
+        }
+        raw.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&raw).map_err(|e| e.to_string())
+}
+
 pub async fn request_funds(url: &str, address: &str) -> Result<(), String> {
     let to = parse_address(address)?;
     let base = reqwest::Url::parse(url).map_err(|e| format!("faucet URL: {e}"))?;
@@ -67,6 +90,7 @@ pub async fn request_funds(url: &str, address: &str) -> Result<(), String> {
     }
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| format!("HTTP client: {e}"))?;
@@ -85,7 +109,7 @@ pub async fn request_funds(url: &str, address: &str) -> Result<(), String> {
             response.status()
         ));
     }
-    let challenge: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    let challenge = read_faucet_json(response).await?;
     let token_hex = challenge
         .get("challenge")
         .and_then(|v| v.as_str())
@@ -129,8 +153,7 @@ pub async fn request_funds(url: &str, address: &str) -> Result<(), String> {
             response.status()
         ));
     }
-    let receipt: serde_json::Value = response
-        .json()
+    let receipt = read_faucet_json(response)
         .await
         .map_err(|e| format!("invalid receipt: {e}"))?;
     let returned_to = receipt

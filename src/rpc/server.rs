@@ -4773,6 +4773,116 @@ impl BudlumApiServer for RpcServer {
             .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
     }
 
+    async fn get_universal_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let catalog = crate::unification::UniversalDomainCatalog::with_canonical_ecosystems();
+        let domains = catalog.list();
+        let root = hex::encode(catalog.catalog_root());
+        Ok(serde_json::json!({
+            "count": catalog.len(),
+            "catalog_root": format!("0x{root}"),
+            "domains": domains,
+        }))
+    }
+
+    async fn quote_universal_payment(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        #[derive(serde::Deserialize)]
+        struct QuotePaymentRpcRequest {
+            intent: crate::unification::UniversalPaymentIntent,
+            balances: Vec<crate::unification::DomainTokenBalance>,
+            quotes: Vec<crate::unification::LiquidityQuote>,
+            now_unix_secs: u64,
+        }
+
+        let req: QuotePaymentRpcRequest = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid universal payment quote request: {e}"),
+                None::<()>,
+            )
+        })?;
+        let receipt = crate::unification::UniversalPaymentRouter::quote_payment(
+            &req.intent,
+            &req.balances,
+            &req.quotes,
+            req.now_unix_secs,
+        )
+        .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        serde_json::to_value(receipt)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn compose_execution_outputs(
+        &self,
+        plan: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let parsed: crate::unification::OutputCompositionPlan = serde_json::from_value(plan)
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid output composition plan: {e}"),
+                    None::<()>,
+                )
+            })?;
+        let bundle = crate::unification::OutputComposer::compose(&parsed)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        serde_json::to_value(bundle)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn resolve_unified_storage(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        #[derive(serde::Deserialize)]
+        struct ResolveStorageRpcRequest {
+            uri: String,
+            objects: Vec<crate::unification::UnifiedContentRecord>,
+            #[serde(default)]
+            bns_bindings: std::collections::BTreeMap<String, [u8; 32]>,
+            #[serde(default = "default_rpc_storage_strength")]
+            min_strength: crate::unification::VerificationStrength,
+        }
+        const fn default_rpc_storage_strength() -> crate::unification::VerificationStrength {
+            crate::unification::VerificationStrength::AttestedDeal
+        }
+
+        let req: ResolveStorageRpcRequest = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid unified storage resolve request: {e}"),
+                None::<()>,
+            )
+        })?;
+        // Keep one RPC call strictly bounded so a single request cannot seed
+        // thousands of transient records.
+        if req.objects.len() > 64 || req.bns_bindings.len() > 64 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request exceeds 64-entry object or BNS binding limit",
+                None::<()>,
+            ));
+        }
+        let mut fabric = crate::unification::UnifiedStorageFabric::new();
+        for obj in req.objects {
+            fabric
+                .register_object(obj)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        }
+        for (name, digest) in req.bns_bindings {
+            fabric
+                .bind_bns_name(&name, digest)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        }
+        let resolved = fabric
+            .resolve(&req.uri, req.min_strength)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        serde_json::to_value(resolved)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
     async fn subscribe(
         &self,
         pending: jsonrpsee::PendingSubscriptionSink,
