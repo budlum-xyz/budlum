@@ -4480,12 +4480,10 @@ impl Node {
                                             .behaviour_mut()
                                             .gossipsub
                                             .add_explicit_peer(added_id);
-                                        if !self.swarm.is_connected(added_id) {
-                                            if let Err(e) = self.swarm.dial(addr.clone()) {
-                                                warn!(
-                                                    "Live sentry rotation failed to dial {added_id} at {addr}: {e}"
-                                                );
-                                            }
+                                        if let Err(e) = self.swarm.dial(addr.clone()) {
+                                            warn!(
+                                                "Live sentry rotation failed to dial {added_id} at {addr}: {e}"
+                                            );
                                         }
                                     }
                                     info!(
@@ -4697,10 +4695,17 @@ impl Node {
                                                 && !self.sentry_policy.is_unconditional(cand)
                                         });
                                     if let Some(victim) = evict {
-                                        warn!(
-                                            "Max peers reached ({}/{}): evicting public peer {} to protect unconditional peer {}",
-                                            count, self.max_peers, victim, peer_id
-                                        );
+                                        if self.sentry_policy.is_private_peer(&peer_id) {
+                                            warn!(
+                                                "Max peers reached ({}/{}): evicting public peer {} to protect hidden shielded validator",
+                                                count, self.max_peers, victim
+                                            );
+                                        } else {
+                                            warn!(
+                                                "Max peers reached ({}/{}): evicting public peer {} to protect unconditional peer {}",
+                                                count, self.max_peers, victim, peer_id
+                                            );
+                                        }
                                         let _ = self.swarm.disconnect_peer_id(victim);
                                     }
                                 } else {
@@ -6333,16 +6338,21 @@ impl Node {
                                 // enter the peer's addresses into Kademlia.
                                 continue;
                             }
-                            let allow_private = self.sentry_policy.accept_private_addr_from(
+                            let allow_private_direct = self.sentry_policy.accept_private_addr_from(
                                 &identified,
                                 self.accept_private_peer_addresses,
                             );
+                            // Never insert private VPC/RFC1918 addresses into
+                            // public Kademlia even for unconditional peers;
+                            // public DHT tables are queried by untrusted peers.
+                            let allow_private_in_dht =
+                                allow_private_direct && self.accept_private_peer_addresses;
                             for addr in info.listen_addrs {
                                 // Kademlia poisoning: an advertisement
                                 // is taken on the advertiser's word, so a
                                 // private address is only believable on a
                                 // private network.
-                                if !advertised_address_is_allowed(&addr, allow_private) {
+                                if !advertised_address_is_allowed(&addr, allow_private_in_dht) {
                                     warn!("Refusing private address {addr} from {identified}");
                                     continue;
                                 }

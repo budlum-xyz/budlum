@@ -47,6 +47,24 @@ pub enum SentryRole {
     Sentry,
 }
 
+/// Maximum number of sentry addresses accepted in config or live rotation.
+/// Bounds unconditional/explicit gossipsub peer sets against accidental bloat.
+const MAX_SENTRY_PEERS: usize = 64;
+
+/// Normalizes IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) produced by
+/// dual-stack sockets into plain IPv4 so CIDR and private-network checks
+/// enforce identical rules on IPv4 and dual-stack IPv6 listeners.
+#[must_use]
+const fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+    }
+}
+
 /// IPv4 or IPv6 CIDR prefix (`address/prefix_len`) used to constrain private
 /// validator <-> sentry links to a VPC or VPN address range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -97,6 +115,7 @@ impl IpCidr {
     /// Returns `true` when `ip` falls inside this CIDR prefix.
     #[must_use]
     fn contains(&self, ip: IpAddr) -> bool {
+        let ip = normalize_ip(ip);
         match (self.network, ip) {
             (IpAddr::V4(net), IpAddr::V4(cand)) => {
                 let mask = ipv4_mask(self.prefix_len);
@@ -149,7 +168,7 @@ fn mask_ip(ip: IpAddr, prefix_len: u8) -> IpAddr {
 /// range and is therefore non-routable on the public internet.
 #[must_use]
 const fn is_private_or_vpn_ip(ip: IpAddr) -> bool {
-    match ip {
+    match normalize_ip(ip) {
         IpAddr::V4(v4) => {
             let [a, b, _, _] = v4.octets();
             v4.is_private()
@@ -419,6 +438,11 @@ impl SentryPolicy {
             }
         };
 
+        if cfg.sentry_peers.len() > MAX_SENTRY_PEERS {
+            return Err(SentryConfigError::SafetyInvariantViolation(
+                "sentry_peers exceeds maximum allowed count (64)",
+            ));
+        }
         let mut sentry_peers: BTreeMap<PeerId, Vec<Multiaddr>> = BTreeMap::new();
         for raw in &cfg.sentry_peers {
             let (id, ma) =
@@ -539,10 +563,10 @@ impl SentryPolicy {
             }
             SentryRole::Sentry => {
                 if self.private_peers.contains(peer_id)
-                    && !self.allowed_private_cidrs.is_empty()
+                    && (self.strict_private_network || !self.allowed_private_cidrs.is_empty())
                     && !ip_permitted_by_private_policy(
                         extract_ip(remote),
-                        false,
+                        self.strict_private_network,
                         &self.allowed_private_cidrs,
                     )
                 {
@@ -626,6 +650,11 @@ impl SentryPolicy {
                 "cannot replace sentry_peers with an empty list",
             ));
         }
+        if new_addrs.len() > MAX_SENTRY_PEERS {
+            return Err(SentryConfigError::SafetyInvariantViolation(
+                "sentry_peers exceeds maximum allowed count (64)",
+            ));
+        }
 
         let mut next: BTreeMap<PeerId, Vec<Multiaddr>> = BTreeMap::new();
         for raw in new_addrs {
@@ -643,10 +672,19 @@ impl SentryPolicy {
             .filter(|id| !next.contains_key(id))
             .copied()
             .collect();
+        // Include both newly added PeerIds and newly rotated multiaddrs for
+        // an existing sentry PeerId (for example, same node key moved to a new
+        // VPC IP during live failover).
         let added: Vec<(PeerId, Multiaddr)> = next
             .iter()
-            .filter(|(id, _)| !self.sentry_peers.contains_key(id))
-            .flat_map(|(id, addrs)| addrs.iter().cloned().map(|ma| (*id, ma)))
+            .flat_map(|(id, addrs)| {
+                let existing = self.sentry_peers.get(id);
+                addrs
+                    .iter()
+                    .filter(move |ma| !existing.is_some_and(|prev| prev.contains(ma)))
+                    .cloned()
+                    .map(|ma| (*id, ma))
+            })
             .collect();
 
         for old_id in &removed {
@@ -1038,5 +1076,92 @@ mod tests {
         h_sa.abort();
         h_sb.abort();
         h_att.abort();
+    }
+
+    #[test]
+    fn sentry_strict_private_network_refuses_public_ip_for_private_validator() {
+        let validator = random_peer();
+        let public_peer = random_peer();
+        let cfg = SentryConfig {
+            role: "sentry".to_string(),
+            private_peers: vec![validator.to_string()],
+            strict_private_network: Some(true),
+            ..Default::default()
+        };
+        let policy = SentryPolicy::from_config(&cfg).expect("valid strict sentry");
+        assert!(policy
+            .check_connection(&public_peer, &ma("/ip4/198.51.100.7/tcp/30333"))
+            .is_ok());
+        assert!(policy
+            .check_connection(&validator, &ma("/ip4/10.10.0.5/tcp/30333"))
+            .is_ok());
+        assert_eq!(
+            policy.check_connection(&validator, &ma("/ip4/203.0.113.9/tcp/30333")),
+            Err(ConnectionRefusal::DisallowedAddress)
+        );
+    }
+
+    #[test]
+    fn dual_stack_ipv4_mapped_ipv6_obeys_private_and_cidr_policy() {
+        let sentry_a = random_peer();
+        let cfg = SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![format!("/ip4/10.10.0.11/tcp/30333/p2p/{sentry_a}")],
+            allowed_private_cidrs: vec!["10.10.0.0/16".to_string()],
+            ..Default::default()
+        };
+        let policy = SentryPolicy::from_config(&cfg).expect("valid policy");
+        assert!(policy
+            .check_connection(&sentry_a, &ma("/ip6/::ffff:10.10.0.11/tcp/30333"))
+            .is_ok());
+        assert_eq!(
+            policy.check_connection(&sentry_a, &ma("/ip6/::ffff:203.0.113.11/tcp/30333")),
+            Err(ConnectionRefusal::DisallowedAddress)
+        );
+        let strict = SentryPolicy::from_config(&SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![format!("/ip4/100.64.1.2/tcp/30333/p2p/{sentry_a}")],
+            ..Default::default()
+        })
+        .expect("strict policy");
+        assert!(strict
+            .check_connection(&sentry_a, &ma("/ip6/::ffff:100.64.1.2/tcp/30333"))
+            .is_ok());
+        assert_eq!(
+            strict.check_connection(&sentry_a, &ma("/ip6/::ffff:198.51.100.2/tcp/30333")),
+            Err(ConnectionRefusal::DisallowedAddress)
+        );
+    }
+
+    #[test]
+    fn live_sentry_rotation_redials_same_peer_id_on_new_ip_and_caps_count() {
+        let sentry_a = random_peer();
+        let cfg = SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![format!("/ip4/10.10.0.11/tcp/30333/p2p/{sentry_a}")],
+            ..Default::default()
+        };
+        let mut policy = SentryPolicy::from_config(&cfg).expect("init");
+
+        let new_addr = format!("/ip4/10.20.0.11/tcp/30333/p2p/{sentry_a}");
+        let diff = policy
+            .update_sentries(std::slice::from_ref(&new_addr))
+            .expect("same-peer IP rotation");
+        assert!(diff.removed.is_empty());
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].0, sentry_a);
+        assert_eq!(diff.added[0].1, ma(&new_addr));
+
+        let oversized: Vec<String> = (0..=MAX_SENTRY_PEERS)
+            .map(|i| {
+                format!(
+                    "/ip4/10.10.0.{}/tcp/30333/p2p/{}",
+                    (i % 250) + 1,
+                    random_peer()
+                )
+            })
+            .collect();
+        assert!(policy.update_sentries(&oversized).is_err());
+        assert_eq!(policy.sentry_addrs().len(), 1);
     }
 }
