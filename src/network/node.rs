@@ -966,6 +966,24 @@ struct SyncRangeCursor {
     staged_suffix: Vec<crate::core::block::Block>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboundSyncKind {
+    ActiveSync,
+    CertFetch,
+    QcFetch,
+    Handshake,
+}
+
+impl OutboundSyncKind {
+    /// Only an active chain-sync round or an explicit finality cert/QC fetch
+    /// accrues unanswered-sync strikes. Handshakes share `/sync`, and a
+    /// connection closed during admission churn (such as a full `/24` subnet
+    /// table or simultaneous dial deduplication) must not ban an honest peer.
+    const fn counts_as_sync_strike(self) -> bool {
+        !matches!(self, Self::Handshake)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum SyncHeaderPlan {
     NothingNew,
@@ -6475,27 +6493,33 @@ impl Node {
                                     }
                                 }
                                 request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
-                                    self.cert_fetches.remove(&request_id);
-                                    if let Some(fetch) = self.qc_fetches.remove(&request_id) {
+                                    let was_cert_fetch = self.cert_fetches.remove(&request_id).is_some();
+                                    let removed_qc = self.qc_fetches.remove(&request_id);
+                                    let was_qc_fetch = removed_qc.is_some();
+                                    if let Some(fetch) = removed_qc {
                                         self.qc_assemblies.remove(&(fetch.peer, fetch.epoch, fetch.height));
                                         self.retry_qc_fetch(&fetch);
                                         self.drain_qc_fetches();
                                     }
+                                    let was_active_sync = self.active_sync_request == Some(request_id);
+                                    let kind = if was_active_sync {
+                                        OutboundSyncKind::ActiveSync
+                                    } else if was_cert_fetch {
+                                        OutboundSyncKind::CertFetch
+                                    } else if was_qc_fetch {
+                                        OutboundSyncKind::QcFetch
+                                    } else {
+                                        OutboundSyncKind::Handshake
+                                    };
                                     warn!("Outbound sync failure to {}: {:?}", peer, error);
-                                    {
-                                        // A request this node chose to send
-                                        // that came back unanswered costs the
-                                        // peer its place in the sync order,
-                                        // not an hour of silence: the devnet
-                                        // lost its own validators to that ban
-                                        // and then could not finalize.
+                                    if kind.counts_as_sync_strike() {
                                         let mut pm = self.peer_manager_lock();
                                         pm.report_unanswered_request(&peer);
                                     }
                                     // Handshake requests share `/sync` with chain sync.
                                     // Only the request that owns the active round may
                                     // close it; an unrelated failure must leave it alone.
-                                    if self.active_sync_request == Some(request_id) {
+                                    if was_active_sync {
                                         self.last_stalled_sync_peer = Some(peer);
                                         self.clear_sync_round();
                                     }
@@ -7899,6 +7923,14 @@ mod finality_publish_tests {
             super::plan_sync_headers(&headers, headers.len(), 47),
             super::SyncHeaderPlan::NothingNew
         );
+    }
+
+    #[test]
+    fn outbound_handshake_failure_does_not_accrue_sync_strikes() {
+        assert!(!super::OutboundSyncKind::Handshake.counts_as_sync_strike());
+        assert!(super::OutboundSyncKind::ActiveSync.counts_as_sync_strike());
+        assert!(super::OutboundSyncKind::CertFetch.counts_as_sync_strike());
+        assert!(super::OutboundSyncKind::QcFetch.counts_as_sync_strike());
     }
 
     fn production_source() -> &'static str {
