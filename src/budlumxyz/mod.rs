@@ -569,11 +569,12 @@ mod tests {
     /// 32 bytes hash differently, and the counts are committed on their own.
     #[test]
     fn root_separates_apps_from_governors() {
-        let mut only_governor = BudlumxyzRegistry::new();
+        let empty = BudlumxyzRegistry::new();
+        let mut only_governor = empty.clone();
         only_governor
             .authorized_governors
             .insert(Address::from([8u8; 32]));
-        let mut only_app = BudlumxyzRegistry::new();
+        let mut only_app = empty;
         only_app
             .register_app(
                 "app".into(),
@@ -810,12 +811,13 @@ mod tests {
 
     #[test]
     fn authorized_governors_serialize_in_canonical_order() {
-        let mut a = BudlumxyzRegistry::new();
+        let empty = BudlumxyzRegistry::new();
+        let mut a = empty.clone();
         a.authorized_governors.insert(Address::from([9u8; 32]));
         a.authorized_governors.insert(Address::from([1u8; 32]));
         a.authorized_governors.insert(Address::from([5u8; 32]));
 
-        let mut b = BudlumxyzRegistry::new();
+        let mut b = empty;
         b.authorized_governors.insert(Address::from([1u8; 32]));
         b.authorized_governors.insert(Address::from([5u8; 32]));
         b.authorized_governors.insert(Address::from([9u8; 32]));
