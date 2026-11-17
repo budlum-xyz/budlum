@@ -178,15 +178,11 @@ mod tests {
     use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 
     #[test]
-    fn sui_rpc_is_open_on_testnet_at_launch_and_reads_mist() {
+    fn sui_rpc_is_closed_on_testnet_at_launch_and_reads_mist_after_activation() {
         let mut state = AccountState::new();
         let closed = handle_sui_rpc(
             &state,
-            SuiActivationPolicy {
-                chain_id: BUDLUM_TESTNET_CHAIN_ID,
-                block_height: 0,
-                activation_height: None,
-            },
+            SuiActivationPolicy::default(),
             SuiRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: json!(1),
@@ -202,7 +198,11 @@ mod tests {
 
         let bal = handle_sui_rpc(
             &state,
-            SuiActivationPolicy::default(),
+            SuiActivationPolicy {
+                chain_id: BUDLUM_TESTNET_CHAIN_ID,
+                block_height: 100,
+                activation_height: Some(100),
+            },
             SuiRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: json!(2),

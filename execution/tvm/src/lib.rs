@@ -565,11 +565,12 @@ mod tests {
     }
 
     #[test]
-    fn tvm_is_open_on_testnet() {
-        let open = TvmWorker::new();
-        assert!(open.is_active(&ctx()));
-        let mut closed = TvmWorker::with_activation_height(None);
+    fn tvm_is_closed_on_testnet() {
+        let mut closed = TvmWorker::new();
         assert!(!closed.is_active(&ctx()));
+        let activated = TvmWorker::with_activation_height(Some(10));
+        assert!(!activated.is_active(&ctx()));
+        assert!(activated.is_active(&BlockContext { height: 10, ..ctx() }));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::TVM, vec![0x09; 32]) else {
             panic!("caller");

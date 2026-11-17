@@ -802,15 +802,18 @@ mod tests {
         }
     }
 
-    /// Testnet `45261` activation posture: open at launch (`PROPOSED_CAIRO_ACTIVATION_HEIGHT = 0`),
-    /// while `with_activation_height(None)` retains closed override refusal.
+    /// Testnet `45261` launch posture is closed until an explicit activation height.
     #[test]
-    fn cairo_is_open_on_testnet() {
+    fn cairo_is_closed_on_testnet() {
         assert_eq!(AUDITED_CAIRO_ENGINE_SPDX, "Apache-2.0");
-        let open_worker = CairoWorker::new();
-        assert!(open_worker.is_active(&launch_ctx()));
-        let mut closed_worker = CairoWorker::with_activation_height(None);
+        let mut closed_worker = CairoWorker::new();
         assert!(!closed_worker.is_active(&launch_ctx()));
+        let activated_worker = CairoWorker::with_activation_height(Some(10));
+        assert!(!activated_worker.is_active(&BlockContext {
+            height: 9,
+            ..launch_ctx()
+        }));
+        assert!(activated_worker.is_active(&launch_ctx()));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::CAIRO, vec![0xAB; 32]) else {
             panic!("caller");

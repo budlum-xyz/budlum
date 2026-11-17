@@ -599,9 +599,12 @@ mod tests {
     }
 
     #[test]
-    fn bud3_live_is_open_on_testnet() {
-        assert_eq!(ACTIVATION.height, Some(0));
-        assert!(LiveStream::begin(ORIGINATOR, NONCE, LiveContext::testnet(0)).is_ok());
+    fn bud3_live_is_closed_on_testnet() {
+        assert_eq!(ACTIVATION.height, None);
+        assert_eq!(
+            LiveStream::begin(ORIGINATOR, NONCE, LiveContext::testnet(0)).map(|_| ()),
+            Err(LiveError::Closed)
+        );
         assert_eq!(
             LiveStream::begin(ORIGINATOR, NONCE, LiveContext::closed()).map(|_| ()),
             Err(LiveError::Closed)

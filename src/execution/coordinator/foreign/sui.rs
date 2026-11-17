@@ -429,16 +429,11 @@ mod tests {
         );
     }
 
-    /// Testnet `45261` activation posture: open from block zero by default,
-    /// while explicit `activation_height: None` returns `ClosedOnTestnet`.
+    /// Testnet `45261` launch posture is closed until an explicit activation height.
     #[test]
-    fn foreign_sui_is_open_on_testnet() {
-        assert!(SuiActivationPolicy::default().is_active());
-        let closed = SuiActivationPolicy {
-            chain_id: BUDLUM_TESTNET_CHAIN_ID,
-            block_height: 0,
-            activation_height: None,
-        };
+    fn foreign_sui_is_closed_on_testnet() {
+        let closed = SuiActivationPolicy::default();
+        assert!(!closed.is_active());
         assert_eq!(
             decode_and_recover_sui_tx(b"{}", closed),
             Err(SuiEnvelopeError::ClosedOnTestnet {

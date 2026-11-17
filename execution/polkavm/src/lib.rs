@@ -536,15 +536,18 @@ mod tests {
     use budlum_uel_abi::{BudAmount, OutcomeStatus};
 
     #[test]
-    fn polkavm_is_open_on_testnet() {
+    fn polkavm_is_closed_on_testnet() {
         const { assert!(!POLKAVM_JIT_ENABLED) };
-        let open_worker = PolkaVmWorker::new();
-        assert!(open_worker.is_active(&BlockContext {
+        let mut closed_worker = PolkaVmWorker::new();
+        let launch = BlockContext {
             chain_id: BUDLUM_TESTNET_CHAIN_ID,
             height: 0,
             timestamp_ms: 1_793_923_200_000,
-        }));
-        let mut closed_worker = PolkaVmWorker::with_activation_height(None);
+        };
+        assert!(!closed_worker.is_active(&launch));
+        let activated = PolkaVmWorker::with_activation_height(Some(10));
+        assert!(!activated.is_active(&launch));
+        assert!(activated.is_active(&BlockContext { height: 10, ..launch }));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::POLKAVM, vec![0xAA; 32]) else {
             panic!("caller");

@@ -664,9 +664,9 @@ mod tests {
     }
 
     #[test]
-    fn compression_context_is_open_on_testnet() {
-        assert!(ACTIVATION.is_active(0));
-        assert!(ACTIVATION.is_active(1_000_000));
+    fn compression_context_is_closed_on_testnet() {
+        assert!(!ACTIVATION.is_active(0));
+        assert!(!ACTIVATION.is_active(1_000_000));
         let opened = ContextActivation { height: Some(500) };
         assert!(!opened.is_active(499));
         assert!(opened.is_active(500));
