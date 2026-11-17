@@ -177,6 +177,8 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_adminBanPeer", Operator, LocalAdmin),
     row("bud_adminUnbanPeer", Operator, LocalAdmin),
     row("bud_adminListBannedPeers", Operator, Read),
+    row("bud_adminUpdateSentries", Operator, LocalAdmin),
+    row("bud_adminSentryStatus", Operator, Read),
     // Refused on every chain until grants ride a block transaction.
     row("bud_storageIssueViewGrant", Public, Refused),
     row("bud_storageRevokeViewGrant", Public, Refused),

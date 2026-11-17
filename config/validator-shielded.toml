@@ -1,0 +1,80 @@
+# Budlum Shielded Validator Configuration Template
+#
+# A shielded validator NEVER connects to the public internet and NEVER runs
+# peer discovery (Kademlia/mDNS/DNS/public bootnodes are forced off). It
+# communicates exclusively with its configured `sentry_peers` over a private
+# VPC or WireGuard/Tailscale VPN.
+#
+# Live Failover Under Attack:
+#   If Sentry A is DDoS'd or compromised, spin up a replacement Sentry D and
+#   call the authenticated operator RPC `bud_adminUpdateSentries` on
+#   `127.0.0.1:8546`. The validator atomically disconnects Sentry A and dials
+#   Sentry D without restarting or exporting validator signing keys.
+#
+# Deployment checklist:
+#   1. Bind `p2p.listen_addr` to the private VPC/VPN interface (never 0.0.0.0).
+#   2. Populate `p2p.sentry_peers` with 2-3 private sentry multiaddrs:
+#        "/ip4/10.10.0.11/tcp/30334/p2p/<SENTRY_A_PEER_ID>"
+#   3. Configure firewall rules allowing P2P traffic ONLY from `sentry_peers`.
+#   4. Keep signing keys inside a hardware PKCS#11 HSM on this private host.
+
+[network]
+profile = "testnet"
+chain_id = 45261
+
+[node]
+mode = "full"
+role = "validator"
+
+[storage]
+data_dir = "./data/validator/budlum.db"
+snapshot_dir = "./data/validator/snapshots"
+backup_dir = "./data/validator/backups"
+backups_enabled = true
+backup_interval_secs = 3600
+backup_retention_count = 24
+
+[p2p]
+identity_file = "./secrets/validator-node-id.key"
+# Bind ONLY the private VPC/VPN interface so the validator has no public socket.
+listen_addr = "10.10.0.5"
+bootnodes = []
+archive_bootnodes = []
+max_peers = 16
+banned_peer_db = "./data/validator/banned-peers.json"
+vote_history_db = "./data/validator/vote-history.json"
+mdns_enabled = false
+disable_peer_discovery = true
+strict_private_network = true
+allowed_private_cidrs = ["10.10.0.0/16", "100.64.0.0/10"]
+# Populate with your private sentry multiaddrs (Sentry A, B, C):
+# sentry_peers = [
+#   "/ip4/10.10.0.11/tcp/30334/p2p/<SENTRY_A_PEER_ID>",
+#   "/ip4/10.10.0.12/tcp/30334/p2p/<SENTRY_B_PEER_ID>",
+#   "/ip4/10.10.0.13/tcp/30334/p2p/<SENTRY_C_PEER_ID>",
+# ]
+sentry_peers = []
+
+[rpc]
+# Keep RPC bound strictly to loopback on the private validator host.
+public_listener = "127.0.0.1:8545"
+operator_listener = "127.0.0.1:8546"
+trusted_proxies = ["127.0.0.1"]
+enabled = true
+auth_required = true
+api_key_env = "BUDLUM_RPC_API_KEY"
+allowed_ips = ["127.0.0.1"]
+rate_limit_per_minute = 120
+
+[metrics]
+listener = "127.0.0.1:9090"
+
+[validator]
+backend = "pkcs11"
+
+[validator.signer]
+backend = "pkcs11"
+
+[features]
+pruning = false
+verify_merkle = false

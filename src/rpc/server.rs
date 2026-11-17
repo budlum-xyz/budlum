@@ -4502,6 +4502,38 @@ impl BudlumApiServer for RpcServer {
         Ok(serde_json::json!({ "bannedPeers": banned }))
     }
 
+    async fn admin_update_sentries(
+        &self,
+        sentries: Vec<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminUpdateSentries")?;
+        let diff = self
+            .node
+            .admin_update_sentries(sentries)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({
+            "added": diff.added.iter().map(|(id, addr)| serde_json::json!({
+                "peerId": id.to_string(),
+                "addr": addr.to_string(),
+            })).collect::<Vec<_>>(),
+            "removed": diff.removed.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "activeSentries": diff.active_sentries,
+        }))
+    }
+
+    async fn admin_sentry_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminSentryStatus")?;
+        let status = self
+            .node
+            .admin_sentry_status()
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
+        serde_json::to_value(status).map_err(|e| {
+            ErrorObjectOwned::owned(-32000, format!("serialize status: {e}"), None::<()>)
+        })
+    }
+
     // === B.U.D. Storage RPC implementations ====================
     // This surface keeps temporary grant and reveal operations. Legacy
     // manifest, deal, challenge, and encoding RPCs are not registered.

@@ -1185,6 +1185,16 @@ mod rpc_tests {
             .await
             .expect_err("public listener must refuse the operator-only method");
         assert_eq!(refused.code(), -32004);
+        let refused_rotate = public_server
+            .admin_update_sentries(vec![])
+            .await
+            .expect_err("public listener must refuse bud_adminUpdateSentries");
+        assert_eq!(refused_rotate.code(), -32004);
+        let refused_status = public_server
+            .admin_sentry_status()
+            .await
+            .expect_err("public listener must refuse bud_adminSentryStatus");
+        assert_eq!(refused_status.code(), -32004);
     }
 
     /// Every operator-gated mutating method answers -32004 on a public
