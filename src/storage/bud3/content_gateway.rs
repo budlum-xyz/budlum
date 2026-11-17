@@ -122,6 +122,10 @@ impl Bud3ContentGateway {
     /// Enforce peer symbol-request rate limits, Mobile Wi-Fi/cellular link policy,
     /// and Merkle range verification on `/budlum/bud3/symbols/1`.
     /// Convenience: exposed for symbol request-response handler and RPC symbol serving.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SymbolExchangeError`] if rate limits, link policy, or Merkle verification fail.
     pub fn serve_verified_symbol_exchange(
         limiter: &mut SymbolPeerLimiter,
         mobile_policy: &mut MobileServePolicy,
