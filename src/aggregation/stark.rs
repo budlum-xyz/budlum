@@ -210,9 +210,13 @@ fn compute_shape_digest(domain: DomainId, segments: &[Segment], shape: &[u8]) ->
     let mut buf =
         Vec::with_capacity(4 + 4 + shape.len() + 4 + segments.len().saturating_mul(32 + 4 + 32));
     buf.extend_from_slice(&domain.to_be_bytes());
-    buf.extend_from_slice(&(shape.len() as u32).to_be_bytes());
+    buf.extend_from_slice(&u32::try_from(shape.len()).unwrap_or(u32::MAX).to_be_bytes());
     buf.extend_from_slice(shape);
-    buf.extend_from_slice(&(segments.len() as u32).to_be_bytes());
+    buf.extend_from_slice(
+        &u32::try_from(segments.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
     for seg in segments {
         buf.extend_from_slice(&seg.claims_root);
         buf.extend_from_slice(&seg.count.to_be_bytes());
