@@ -515,6 +515,44 @@ impl Bud3Registry {
         self.objects.get(key)
     }
 
+    /// Whether `nft` authorizes reads of `object`, accounting for finalized and
+    /// pending Section 6.14 `ReplaceObject` redirects (`old -> new` moves
+    /// `nfts[nft]` at proposal time while `old` stays live until `new` ACKs).
+    #[must_use]
+    pub fn nft_matches_object(&self, nft: &NftId, object: &ObjectKey) -> bool {
+        let Some((bound_key, _)) = self.nfts.get(nft).copied() else {
+            return false;
+        };
+        if bound_key == *object {
+            return true;
+        }
+        let Some((resolved_key, _)) = self.resolve_live_object(object) else {
+            return false;
+        };
+        if bound_key == resolved_key {
+            return true;
+        }
+        // During a pending (unfinalized) Section 6.14 replacement `old -> new`,
+        // `replace_object` moves `nfts[nft]` to `new` immediately while `old`
+        // remains live until `new` is ACKed. Walk pending replacement targets
+        // so NFT holders keep read access throughout the handover window.
+        let mut cur = resolved_key;
+        let mut seen = BTreeSet::new();
+        for _ in 0..16 {
+            if !seen.insert(cur) {
+                break;
+            }
+            let Some(rep) = self.replacements.get(&cur) else {
+                break;
+            };
+            if rep.new == bound_key {
+                return true;
+            }
+            cur = rep.new;
+        }
+        false
+    }
+
     /// Look up the `(object_key, holder_address)` binding for a bound `NftId`.
     #[must_use]
     pub fn nft_binding(&self, nft: &NftId) -> Option<(ObjectKey, Address)> {
@@ -2782,6 +2820,14 @@ impl Bud3Registry {
                         "nft_owner".to_string(),
                         serde_json::json!(hex::encode(owner)),
                     );
+                    if let Some((live_key, _)) = self.resolve_live_object(key) {
+                        if live_key != *key {
+                            map.insert(
+                                "resolved_commitment".to_string(),
+                                serde_json::json!(hex::encode(live_key)),
+                            );
+                        }
+                    }
                 } else {
                     obj = serde_json::json!({
                         "nft_id": hex::encode(nft),

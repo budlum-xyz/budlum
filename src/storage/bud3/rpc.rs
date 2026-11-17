@@ -207,12 +207,18 @@ impl Bud3RpcService {
                 let key: ObjectKey = parse_hex32(params.get("object"), "object")?;
                 let mut val = registry.query_json(&Bud3Query::Object(key));
                 if method == "bud_storageGetPlacement" {
-                    if let Some(entry) = registry.object(&key) {
+                    if let Some((live_key, entry)) = registry.resolve_live_object(&key) {
                         let total_src =
                             Segmentation::new(entry.record.object_len, &entry.record.profile)
                                 .map_or(0, |s| s.total_source_symbols());
                         let k_seg = u32::try_from(total_src).unwrap_or(1).max(1);
                         if let Some(map) = val.as_object_mut() {
+                            if live_key != key {
+                                map.insert(
+                                    "resolved_commitment".to_owned(),
+                                    json!(hex::encode(live_key)),
+                                );
+                            }
                             map.insert(
                                 "mobile_share_milli".to_owned(),
                                 json!(placement_row.mobile_share_milli()),
@@ -419,8 +425,8 @@ impl Bud3RpcService {
             }
             "bud_storageFetchBundle" => {
                 let object: ObjectKey = parse_hex32(params.get("object"), "object")?;
-                let entry = registry
-                    .object(&object)
+                let (_, entry) = registry
+                    .resolve_live_object(&object)
                     .ok_or_else(|| String::from("unknown object"))?;
                 let cref = ContentRef::new(entry.record.content_id, object, None)
                     .map_err(|e| format!("{e:?}"))?;
@@ -669,5 +675,153 @@ mod upload_delivery_tests {
             )
             .unwrap_err();
         assert!(replay.contains("already consumed"), "{replay}");
+    }
+
+    #[test]
+    fn bud_storage_get_placement_and_fetch_bundle_follow_replace_redirect() {
+        use super::super::bof1::Object;
+        use super::super::custody::{symbol_leaf, symbol_root};
+        use super::super::fountain::SegmentEncoder;
+        use super::super::pipeline::ObjectRecord;
+        use super::super::replace::sign_replace_attestation;
+        use super::super::segment::commit_object;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+        use std::collections::BTreeMap;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload = b"rpc redirect test payload for placement and fetch ".repeat(4);
+        let up_old = prepare_public_upload(&payload, &profile, &Bud3Limits::default(), 16).unwrap();
+        let old_key = up_old.record.commitment;
+
+        let raw_obj = Object::raw_public(&payload);
+        let raw_bytes = raw_obj.encode();
+        let new_commit = commit_object(&raw_bytes, &profile).unwrap();
+        let enc_raw = SegmentEncoder::new(0, &raw_bytes, &profile).unwrap();
+        let k_raw = enc_raw.k();
+        let mut syms_new = enc_raw.source_symbols();
+        syms_new.extend(enc_raw.repair_symbols(0, 16 - k_raw).unwrap());
+        let leaves_new: Vec<(u32, [u8; 32])> = syms_new
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let new_record = ObjectRecord {
+            content_id: up_old.record.content_id,
+            object_len: raw_bytes.len() as u64,
+            commitment: new_commit,
+            profile,
+            codec: raw_obj.header.codec,
+            symbols_per_segment: 16,
+            symbol_roots: vec![symbol_root(&leaves_new)],
+        };
+
+        let validators = [[71u8; 32], [72u8; 32], [73u8; 32]];
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: validators[0],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[1],
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[2],
+                    class: Class::Full,
+                    first_esi: 12,
+                    symbols: 4,
+                },
+            ),
+        ];
+
+        let mut registry = Bud3Registry::default();
+        registry
+            .register_object([1; 32], up_old.record, shares.clone(), 0, 40)
+            .unwrap();
+        for v in &validators {
+            registry.ack(&old_key, v).unwrap();
+        }
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [71u8, 72, 73]
+            .into_iter()
+            .map(|v| {
+                (
+                    [v; 32],
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let attestations: Vec<_> = [71u8, 72, 73]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation([v; 32], &[v; 32], &old_key, &new_record, &shares).unwrap()
+            })
+            .collect();
+        let new_key = registry
+            .replace_object(
+                (validators[0], 10_000),
+                &old_key,
+                new_record,
+                shares,
+                &attestations,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for v in &validators {
+            registry.ack(&new_key, v).unwrap();
+        }
+
+        let mut net = MemorySymbolNetwork::default();
+        net.store_holder_share(validators[0], new_key, 0, syms_new[0..6].to_vec());
+        net.store_holder_share(validators[1], new_key, 0, syms_new[6..12].to_vec());
+        net.store_holder_share(validators[2], new_key, 0, syms_new[12..16].to_vec());
+
+        let mut rpc = Bud3RpcService::default();
+        let (row, candidates) = placement();
+        let placement_reply = rpc
+            .handle(
+                "bud_storageGetPlacement",
+                &json!({ "object": hex::encode(old_key) }),
+                &registry,
+                &net,
+                (&row, &candidates, 20),
+            )
+            .unwrap();
+        assert_eq!(placement_reply["status"], "replaced");
+        assert_eq!(placement_reply["resolved_commitment"], hex::encode(new_key));
+        assert!(placement_reply["total_physical_bytes"].as_u64().unwrap() > 0);
+
+        let bundle_reply = rpc
+            .handle(
+                "bud_storageFetchBundle",
+                &json!({ "object": hex::encode(old_key) }),
+                &registry,
+                &net,
+                (&row, &candidates, 21),
+            )
+            .unwrap();
+        assert_eq!(bundle_reply["object"], hex::encode(new_key));
+        assert_eq!(bundle_reply["symbol_count"], 16);
     }
 }

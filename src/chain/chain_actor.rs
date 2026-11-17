@@ -219,6 +219,7 @@ pub enum ChainCommand {
         receipt: crate::storage::bud3::view::PaidViewReceipt,
         reply: oneshot::Sender<Result<Vec<u8>, crate::storage::bud3::view::ViewBud3Error>>,
     },
+    ValidatorPeerId([u8; 32], oneshot::Sender<Option<[u8; 32]>>),
     GetValidatorAddress(oneshot::Sender<Option<Address>>),
     GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
@@ -1683,6 +1684,24 @@ impl ChainHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ChainCommand::Bud3GetContent { receipt, reply })
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// Resolve a registered validator's 32-byte Ed25519 transport peer key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the chain actor channel is closed or the reply is dropped.
+    pub async fn validator_peer_id(
+        &self,
+        owner: [u8; 32],
+    ) -> Result<Option<[u8; 32]>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::ValidatorPeerId(owner, reply))
             .await
             .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
         rx.await
@@ -3552,6 +3571,10 @@ impl ChainActor {
                 ChainCommand::Bud3GetContent { receipt, reply } => {
                     let res = self.blockchain.decode_bud3_paid_content(&receipt);
                     let _ = reply.send(res);
+                }
+                ChainCommand::ValidatorPeerId(owner, reply) => {
+                    let record = self.blockchain.state.validator_directory.get(&owner);
+                    let _ = reply.send(record.map(|r| r.peer_id));
                 }
                 ChainCommand::GetValidatorDirectory(query, tx) => {
                     let state = &self.blockchain.state;
