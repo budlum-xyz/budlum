@@ -9,6 +9,26 @@
 - `S-126-01..12` kodda dogrulandi (asagida satir bazinda kanit). Durumlari `cozuldu` yazildi; her biri icin yesil CI run numarasi geldiginde satira eklenecek.
 - `garden` (aeb2fbc2) uzerinde bu turda kapatilan iki kalinti: `assemble` artik blok tarafindan zaten cikarilan validator icin rapor yazmaz, `qr_encode` icindeki gereksiz `isize` cast'i kaldirildi (`trivial_numeric_casts` deny).
 
+## Denetim PR'i
+
+- Denetim kayitlari `main` uzerinden ayri bir PR ile tasinir: PR #196, dal
+  `audit-notes-2026-11`, commit `2d103cd8`. Govde olarak `report.md` kullanilir.
+- Kod duzeltmeleri kendi PR'larinda kalir. Bu PR yalnizca `audit-notes/`
+  altindaki kayitlari tasir.
+
+## CI Anlik Gorunumu (2026-11-17)
+
+| PR | Bas SHA | Basarili | Beklemede | Devam | Hata |
+|---|---|---|---|---|---|
+| #126 | `eae0f009`/`32d10b4e` | 31 | 57 | 9 | 0 |
+| #164 | `aeb2fbc2`/`6e392bd6` | 15 | 67 | 8 | 0 |
+| #183 | `462d7d5d` | 0 | 89 | 0 | 0 |
+| #196 | `2d103cd8` | 0 | 99 | 1 | 0 |
+
+Bekleme nedeni is yapilandirmasi degil: isler `ubuntu-latest` etiketiyle
+kuyrukta ve hesap duzeyinde kosucu sinirina takiliyor. `#183` icin 28 is akisi
+tetiklendi, 11'i kosulmadi, kalan 89 is kuyrukta.
+
 ## Toplu Duzeltme B-0012..B-0026
 
 - B-0012 [Critical] `src/network/{peer_manager,gossip_dedup,node}.rs` - relay hop'u yazar sayilmaz. Durum: cozuldu, `595bf1cd`.
