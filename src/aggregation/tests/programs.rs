@@ -69,8 +69,23 @@ fn write_bytes(memory: &mut [u8], cell: u64, bytes: &[u8]) {
 /// Run a program on the VM. The trace is thrown away as it grows: a run of
 /// millions of steps does not fit in memory with it.
 fn run(program: &Program, init: impl FnOnce(&mut [u8])) -> Run {
+    run_from(program, false, init)
+}
+
+/// Run a program. With `dirty`, every register and every memory cell holds
+/// a value of no meaning before the input is written: a program that reads
+/// something it did not write, or was not given, shows it here.
+fn run_from(program: &Program, dirty: bool, init: impl FnOnce(&mut [u8])) -> Run {
     let bytes = usize::try_from(program.memory_cells * 8).expect("memory");
     let mut vm = Vm::with_gas_limit(bytes, u64::MAX);
+    if dirty {
+        for (i, register) in (0u64..).zip(vm.registers.iter_mut()).skip(1) {
+            *register = 0x0123_4567_89AB_CDEF ^ (i << 40);
+        }
+        for (i, cell) in (0u64..).zip(vm.memory.chunks_exact_mut(8)) {
+            cell.copy_from_slice(&(0x00C0_FFEE_0000_0000u64 + i).to_le_bytes());
+        }
+    }
     init(&mut vm.memory);
     let mut per_pc = vec![0u64; program.code.len()];
     let mut steps = 0u64;
@@ -170,6 +185,200 @@ fn the_sponge_program_equals_sha3_keccak_and_shake() {
             );
         }
     }
+}
+
+/// Keccak-f[1600] round by round (FIPS 202, section 3.2): the reference
+/// of a single round.
+fn reference_rounds(state: &mut [u64; 25], first: usize, count: usize) {
+    const RC: [u64; 24] = [
+        0x0000_0000_0000_0001,
+        0x0000_0000_0000_8082,
+        0x8000_0000_0000_808A,
+        0x8000_0000_8000_8000,
+        0x0000_0000_0000_808B,
+        0x0000_0000_8000_0001,
+        0x8000_0000_8000_8081,
+        0x8000_0000_0000_8009,
+        0x0000_0000_0000_008A,
+        0x0000_0000_0000_0088,
+        0x0000_0000_8000_8009,
+        0x0000_0000_8000_000A,
+        0x0000_0000_8000_808B,
+        0x8000_0000_0000_008B,
+        0x8000_0000_0000_8089,
+        0x8000_0000_0000_8003,
+        0x8000_0000_0000_8002,
+        0x8000_0000_0000_0080,
+        0x0000_0000_0000_800A,
+        0x8000_0000_8000_000A,
+        0x8000_0000_8000_8081,
+        0x8000_0000_0000_8080,
+        0x0000_0000_8000_0001,
+        0x8000_0000_8000_8008,
+    ];
+    const ROT: [u32; 25] = [
+        0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56,
+        14,
+    ];
+    for rc in &RC[first..first + count] {
+        let mut c = [0u64; 5];
+        for x in 0..5 {
+            c[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
+        }
+        let mut b = [0u64; 25];
+        for x in 0..5 {
+            let d = c[(x + 4) % 5] ^ c[(x + 1) % 5].rotate_left(1);
+            for y in 0..5 {
+                let lane = x + 5 * y;
+                b[y + 5 * ((2 * x + 3 * y) % 5)] = (state[lane] ^ d).rotate_left(ROT[lane]);
+            }
+        }
+        for y in 0..5 {
+            for x in 0..5 {
+                state[x + 5 * y] =
+                    b[x + 5 * y] ^ (!b[(x + 1) % 5 + 5 * y] & b[(x + 2) % 5 + 5 * y]);
+            }
+        }
+        state[0] ^= rc;
+    }
+}
+
+/// Keccak-256 of a message shorter than one block, through the reference
+/// rounds: what ties them to the standard.
+fn reference_keccak256(message: &[u8]) -> [u8; 32] {
+    let mut block = [0u8; 136];
+    block[..message.len()].copy_from_slice(message);
+    block[message.len()] ^= 0x01;
+    block[135] ^= 0x80;
+    let mut state = [0u64; 25];
+    for (lane, bytes) in state.iter_mut().zip(block.chunks(8)) {
+        *lane = u64::from_le_bytes(bytes.try_into().expect("eight bytes"));
+    }
+    reference_rounds(&mut state, 0, 24);
+    let mut out = [0u8; 32];
+    for (bytes, lane) in out.chunks_mut(8).zip(state) {
+        bytes.copy_from_slice(&lane.to_le_bytes());
+    }
+    out
+}
+
+fn limbs(state: &[u64; 25]) -> Vec<u64> {
+    state
+        .iter()
+        .flat_map(|lane| [lane & 0xFFFF_FFFF, lane >> 32])
+        .collect()
+}
+
+/// The digest a proof of the machine carries for the storage writes of a
+/// run: a Poseidon chain over `(slot, value)` in order.
+fn storage_writes_digest(writes: &[(u64, u64)]) -> [u8; 32] {
+    let mut acc = [0u64; 4];
+    for (slot, value) in writes {
+        let mut state = [0u64; bud_vm::POSEIDON_WIDTH];
+        state[0] = *slot;
+        state[1] = *value;
+        state[2..6].copy_from_slice(&acc);
+        acc.copy_from_slice(&bud_vm::poseidon_full_state(state)[..4]);
+    }
+    let mut digest = [0u8; 32];
+    for (bytes, word) in digest.chunks_mut(8).zip(acc) {
+        bytes.copy_from_slice(&word.to_le_bytes());
+    }
+    digest
+}
+
+#[test]
+fn one_round_of_generated_code_is_proven_and_verified_by_the_machine() {
+    use bud_proof::ProverAdapter as _;
+    use sha3::Digest;
+    // The reference rounds are the standard: 24 of them hash like Keccak-256.
+    assert_eq!(
+        reference_keccak256(b"budlum").to_vec(),
+        sha3::Keccak256::digest(b"budlum").to_vec()
+    );
+
+    // One round of the permutation, then four limbs of the result are
+    // published: the first lane and the last.
+    let build = |round: u64| {
+        let mut asm = Asm::new();
+        let keccak = Keccak::new(&mut asm);
+        keccak.emit_init(&mut asm);
+        keccak.emit_rounds(&mut asm, round, 1);
+        for (slot, limb) in [(0u32, 0u64), (1, 1), (2, 48), (3, 49)] {
+            asm.load_abs(R[1], keccak.state() + limb);
+            asm.swrite(slot, R[1]);
+        }
+        asm.halt();
+        (asm.finish().expect("assembles"), keccak.state())
+    };
+    let (program, state_at) = build(0);
+    let input: [u64; 25] =
+        core::array::from_fn(|i| 0x0123_4567_89AB_CDEFu64.rotate_left(i as u32) ^ i as u64);
+    let write = |memory: &mut [u8]| {
+        for (i, limb) in (0u64..).zip(limbs(&input)) {
+            write_cell(memory, state_at + i, limb);
+        }
+    };
+
+    // On the VM: every limb of the state is the reference round.
+    let executed = run(&program, write);
+    assert_eq!(executed.error, None);
+    let mut expected = input;
+    reference_rounds(&mut expected, 0, 1);
+    let got: Vec<u64> = (0..50).map(|i| executed.cell(state_at + i)).collect();
+    assert_eq!(got, limbs(&expected));
+    let want = limbs(&expected);
+    let published = vec![(0, want[0]), (1, want[1]), (2, want[48]), (3, want[49])];
+    assert_eq!(executed.writes, published);
+
+    // Through the prover of the machine: a real proof, verified.
+    let bytecode: Vec<u8> = program.code.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let started = std::time::Instant::now();
+    let (proof, inputs, decoded) =
+        crate::execution::zkvm::prove_bytecode_with_memory(&bytecode, 10_000_000, |memory| {
+            write(memory);
+            Ok(())
+        })
+        .expect("the machine proves and verifies the generated code");
+    let elapsed = started.elapsed();
+    assert_eq!(decoded, program.code);
+    assert_eq!(inputs.trace_len, executed.steps);
+    // What the proof says: this program published these four limbs.
+    assert_eq!(
+        inputs.state_writes_digest,
+        storage_writes_digest(&published)
+    );
+    println!(
+        "one Keccak round: {} steps, {} rows, proof {} bytes, {elapsed:?} to prove and verify",
+        executed.steps,
+        1u64 << proof.degree_bits,
+        proof.proof_bytes.len()
+    );
+
+    // Another result, or another program, is not what was proven.
+    let mut other_result = inputs.clone();
+    other_result.state_writes_digest[0] ^= 1;
+    other_result.final_state_root = other_result.state_writes_digest;
+    assert!(bud_proof::DefaultAdapter::verify(&proof, &other_result, &decoded).is_err());
+    let (other_program, _) = build(1);
+    let mut other_inputs = inputs.clone();
+    other_inputs.program_hash = crate::execution::zkvm::prove_bytecode_with_memory(
+        &other_program
+            .code
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<u8>>(),
+        10_000_000,
+        |memory| {
+            write(memory);
+            Ok(())
+        },
+    )
+    .expect("the other round is proven too")
+    .1
+    .program_hash;
+    assert_ne!(other_inputs.program_hash, inputs.program_hash);
+    assert!(bud_proof::DefaultAdapter::verify(&proof, &other_inputs, &other_program.code).is_err());
 }
 
 // ---- the transform ----------------------------------------------------------
@@ -820,6 +1029,46 @@ fn the_tick_program_publishes_the_tick_pi_of_the_native_backend() {
         assert_eq!(run.error, Some(VmError::AssertionFailed), "count {count}");
         assert_eq!(run.failed_in, Some("init"));
     }
+}
+
+#[test]
+fn the_programs_read_nothing_they_were_not_given() {
+    // Registers and memory start with values of no meaning. The result of
+    // a run does not move: a proof of the machine commits to the starting
+    // state, and the verifier of a tick, who does not know the objects,
+    // then has nothing to check about it.
+    let built = verify_sig(&chain_rules().object).expect("assembles");
+    let object = Object::signed(4, [0x77; 32]);
+    let write = |memory: &mut [u8]| {
+        write_bytes(memory, built.signer, &object.signer);
+        write_bytes(memory, built.message, &object.message);
+        write_bytes(memory, built.public_key, &object.public_key);
+        write_bytes(memory, built.signature, &object.signature);
+    };
+    let clean = run_from(&built.program, false, write);
+    let dirty = run_from(&built.program, true, write);
+    assert_eq!(clean.error, None);
+    assert_eq!(dirty.error, None);
+    assert_eq!(dirty.steps, clean.steps);
+
+    let aggregator = Address::from([0xA6; 32]);
+    let tick = agg_tick(&chain_rules(), 2).expect("assembles");
+    let objects = [Object::signed(5, [0x78; 32]), Object::signed(6, [0x79; 32])];
+    let (expected, ordered) = native_tick(DOMAIN, aggregator, &objects);
+    let dirty = run_from(&tick.program, true, |memory| {
+        write_bytes(memory, tick.domain, &DOMAIN.to_be_bytes());
+        write_bytes(memory, tick.aggregator, aggregator.as_bytes());
+        write_cell(memory, tick.count, 2);
+        for (i, object) in (0u64..).zip(&ordered) {
+            let at = tick.objects + OBJECT_CELLS * i;
+            write_bytes(memory, at, &object.signer);
+            write_bytes(memory, at + 32, &object.message);
+            write_bytes(memory, at + 64, &object.public_key);
+            write_bytes(memory, at + 64 + 2592, &object.signature);
+        }
+    });
+    assert_eq!(dirty.error, None);
+    assert_eq!(dirty.writes, published(&expected));
 }
 
 #[test]

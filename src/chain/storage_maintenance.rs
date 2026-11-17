@@ -157,6 +157,10 @@ pub(crate) fn issue_challenges(
     epoch: u64,
     vrf_output: &[u8],
 ) -> u32 {
+    // Sample the full small shard, then one sixty-fourth of a larger one,
+    // between 4 KiB and 64 KiB.
+    const MIN_CHALLENGE_RANGE_BYTES: u64 = 4 * 1024;
+    const MAX_CHALLENGE_RANGE_BYTES: u64 = 64 * 1024;
     if vrf_output.is_empty() {
         return 0;
     }
@@ -184,10 +188,6 @@ pub(crate) fn issue_challenges(
         })
         .collect();
 
-    // Sample the full small shard, then one sixty-fourth of a larger one,
-    // between 4 KiB and 64 KiB.
-    const MIN_CHALLENGE_RANGE_BYTES: u64 = 4 * 1024;
-    const MAX_CHALLENGE_RANGE_BYTES: u64 = 64 * 1024;
     let mut issued = 0u32;
     for (deal_id, start_epoch, end_epoch, deal_shard_bytes, manifest_id, shard_id) in active {
         let elapsed = epoch.saturating_sub(start_epoch);
@@ -347,20 +347,14 @@ pub(crate) fn apply_bond_slash(
     // delivered, so the unserved fee returns to the account that escrowed
     // it, which turns the escrow back into a balance and keeps the
     // committed total level.
-    let refund = match state.storage_registry.get_deal(deal_id) {
-        Some(deal) => {
-            let duration = deal.duration_epochs();
-            let served = epoch.saturating_sub(deal.deal_start_epoch).min(duration);
-            let unearned = deal
-                .total_fee(duration)
-                .saturating_sub(deal.total_fee(served));
-            match deal.payer {
-                Some(payer) if unearned > 0 => Some((payer, unearned)),
-                _ => None,
-            }
-        }
-        None => None,
-    };
+    let refund = state.storage_registry.get_deal(deal_id).and_then(|deal| {
+        let duration = deal.duration_epochs();
+        let served = epoch.saturating_sub(deal.deal_start_epoch).min(duration);
+        let unearned = deal
+            .total_fee(duration)
+            .saturating_sub(deal.total_fee(served));
+        deal.payer.filter(|_| unearned > 0).map(|p| (p, unearned))
+    });
     if let Some((payer, unearned)) = refund {
         state
             .try_add_balance(&payer, unearned)
