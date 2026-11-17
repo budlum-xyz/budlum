@@ -655,14 +655,15 @@ mod tests {
         let mut mgr = UploadSessionManager::new(Bud3Limits::default());
         let acc = [1u8; 32];
 
-        // Both LIVE (bit1) and HAS_CONTEXT (bit3) are open on testnet; unknown high
-        // bits (0x10+) remain refused.
-        assert!(mgr
-            .open_session((acc, [1; 16]), 16, Flags::LIVE, 10, false, 100)
-            .is_ok());
-        assert!(mgr
-            .open_session((acc, [2; 16]), 16, CLOSED_FLAG_BIT3, 10, false, 100)
-            .is_ok());
+        // LIVE (bit1), HAS_CONTEXT (bit3), and unknown high bits are closed on testnet.
+        assert_eq!(
+            mgr.open_session((acc, [1; 16]), 16, Flags::LIVE, 10, false, 100),
+            Err(UploadError::ClosedFeatureFlag(Flags::LIVE))
+        );
+        assert_eq!(
+            mgr.open_session((acc, [2; 16]), 16, CLOSED_FLAG_BIT3, 10, false, 100),
+            Err(UploadError::ClosedFeatureFlag(CLOSED_FLAG_BIT3))
+        );
         assert!(matches!(
             mgr.open_session((acc, [1; 16]), 16, 0x10, 10, false, 100),
             Err(UploadError::ClosedFeatureFlag(0x10))

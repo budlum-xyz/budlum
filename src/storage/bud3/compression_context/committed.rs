@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn bud3_context_codec_vectors() {
-        const { assert!(TESTNET_CONTEXT_ENABLED_BY_DEFAULT) };
+        const { assert!(!TESTNET_CONTEXT_ENABLED_BY_DEFAULT) };
         let engine =
             SharedContextEngine::new(true, "json-records".to_owned(), sample_corpus(), 10).unwrap();
         assert!(engine.manifest.verify_id());

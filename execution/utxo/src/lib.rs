@@ -565,11 +565,12 @@ mod tests {
     }
 
     #[test]
-    fn utxo_is_open_on_testnet() {
-        let open = UtxoScriptWorker::new();
-        assert!(open.is_active(&ctx(0)));
-        let mut closed = UtxoScriptWorker::with_activation_height(None);
+    fn utxo_is_closed_on_testnet() {
+        let mut closed = UtxoScriptWorker::new();
         assert!(!closed.is_active(&ctx(0)));
+        let activated = UtxoScriptWorker::with_activation_height(Some(10));
+        assert!(!activated.is_active(&ctx(9)));
+        assert!(activated.is_active(&ctx(10)));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::UTXO, vec![0x0A; 32]) else {
             panic!("caller");

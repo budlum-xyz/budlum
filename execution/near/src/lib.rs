@@ -567,12 +567,13 @@ mod tests {
     }
 
     #[test]
-    fn near_wasm_is_open_on_testnet() {
+    fn near_wasm_is_closed_on_testnet() {
         const { assert!(!NEAR_JIT_ENABLED) };
-        let open = NearWasmWorker::new();
-        assert!(open.is_active(&ctx()));
-        let mut closed = NearWasmWorker::with_activation_height(None);
+        let mut closed = NearWasmWorker::new();
         assert!(!closed.is_active(&ctx()));
+        let activated = NearWasmWorker::with_activation_height(Some(10));
+        assert!(!activated.is_active(&ctx()));
+        assert!(activated.is_active(&BlockContext { height: 10, ..ctx() }));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::NEAR_WASM, b"alice.budlum".to_vec()) else {
             panic!("caller");

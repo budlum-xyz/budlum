@@ -516,11 +516,12 @@ mod tests {
     }
 
     #[test]
-    fn plutus_is_open_on_testnet() {
-        let open = PlutusWorker::new();
-        assert!(open.is_active(&ctx()));
-        let mut closed = PlutusWorker::with_activation_height(None);
+    fn plutus_is_closed_on_testnet() {
+        let mut closed = PlutusWorker::new();
         assert!(!closed.is_active(&ctx()));
+        let activated = PlutusWorker::with_activation_height(Some(10));
+        assert!(!activated.is_active(&ctx()));
+        assert!(activated.is_active(&BlockContext { height: 10, ..ctx() }));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::PLUTUS, vec![0x0B; 32]) else {
             panic!("caller");
