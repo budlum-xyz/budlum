@@ -1653,12 +1653,19 @@ async fn main() {
         });
     }
 
+    let sentry_policy = config.sentry_policy().unwrap_or_else(|e| {
+        eprintln!("CRITICAL SECURITY FAILURE: {e}");
+        std::process::exit(1);
+    });
+    let mdns_enabled = !sentry_policy.is_discovery_disabled()
+        && config
+            .mdns_enabled
+            .unwrap_or(network.security_config().mdns_enabled);
+
     let mut node = Node::with_key(
         chain.clone(),
         identity_key,
-        config
-            .mdns_enabled
-            .unwrap_or(network.security_config().mdns_enabled),
+        mdns_enabled,
         storage_node,
         sharding_config,
     )
@@ -1666,13 +1673,40 @@ async fn main() {
         eprintln!("Error: could not build the P2P node: {e}");
         std::process::exit(1);
     })
+    .with_sentry_policy(sentry_policy.clone())
     .with_identity(config.p2p_identity_file.clone())
-    .with_dns_seeds(config.dns_seeds.clone(), network.default_port())
+    .with_dns_seeds(
+        if sentry_policy.is_discovery_disabled() {
+            Vec::new()
+        } else {
+            config.dns_seeds.clone()
+        },
+        network.default_port(),
+    )
     .with_banned_peer_db(config.banned_peer_db.clone())
     .with_vote_history_db(config.vote_history_db.clone())
-    .with_bootstrap_peers(bootstraps.clone())
+    .with_bootstrap_peers(if sentry_policy.is_discovery_disabled() {
+        Vec::new()
+    } else {
+        bootstraps.clone()
+    })
     .with_metrics(metrics.clone());
     node.apply_network_security(network);
+    match sentry_policy.role() {
+        budlum_core::network::sentry::SentryRole::ShieldedValidator => {
+            println!(
+                "Sentry architecture: SHIELDED VALIDATOR mode active (discovery disabled, {} sentry peer(s))",
+                sentry_policy.sentry_addrs().len()
+            );
+        }
+        budlum_core::network::sentry::SentryRole::Sentry => {
+            println!(
+                "Sentry architecture: SENTRY SHIELD mode active (protecting {} private validator peer(s))",
+                config.private_peers.len()
+            );
+        }
+        budlum_core::network::sentry::SentryRole::Standard => {}
+    }
     let profile_peer_cap = node.max_peers;
     let effective_max_peers = config.effective_max_peers();
     node.max_peers = effective_max_peers;
@@ -1692,15 +1726,32 @@ async fn main() {
         }
     }
 
-    for addr in &bootstraps {
-        if let Err(e) = node.bootstrap(addr) {
-            eprintln!("Failed to bootstrap from {addr}: {e}");
+    if !sentry_policy.is_discovery_disabled() {
+        for addr in &bootstraps {
+            if let Err(e) = node.bootstrap(addr) {
+                eprintln!("Failed to bootstrap from {addr}: {e}");
+            }
         }
     }
 
-    if let Err(e) = node.listen(port) {
+    if let Some(ref listen_ip_str) = config.p2p_listen_addr {
+        let listen_ip: std::net::IpAddr = listen_ip_str.trim().parse().unwrap_or_else(|e| {
+            eprintln!("Error: invalid p2p.listen_addr '{listen_ip_str}': {e}");
+            std::process::exit(1);
+        });
+        if let Err(e) = node.listen_on(listen_ip, port) {
+            eprintln!("Error: could not listen on {listen_ip}:{port}: {e}");
+            std::process::exit(1);
+        }
+    } else if let Err(e) = node.listen(port) {
         eprintln!("Error: could not listen on port {port}: {e}");
         std::process::exit(1);
+    }
+    if let Some(ref priv_addr) = config.p2p_private_listen_addr {
+        if let Err(e) = node.listen_multiaddr(priv_addr.trim()) {
+            eprintln!("Error: could not listen on private interface {priv_addr}: {e}");
+            std::process::exit(1);
+        }
     }
     if let Some(ref addr) = config.dial {
         if let Err(e) = node.dial(addr) {
