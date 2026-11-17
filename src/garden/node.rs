@@ -749,15 +749,12 @@ pub async fn spawn(
     let mut reported = 0;
     let mut budlum_status = None;
     if let Some(link) = &link {
-        match link.view(chain_id).await {
-            Some(view) => {
-                reported = view.last_committed_height.min(ledger.state.height);
-                budlum_status = Some(view.status);
-            }
-            None => {
-                link.register(&ledger.state.genesis, me).await?;
-                budlum_status = Some(DomainStatus::Active);
-            }
+        if let Some(view) = link.view(chain_id).await {
+            reported = view.last_committed_height.min(ledger.state.height);
+            budlum_status = Some(view.status);
+        } else {
+            link.register(&ledger.state.genesis, me).await?;
+            budlum_status = Some(DomainStatus::Active);
         }
     }
 
@@ -1783,7 +1780,7 @@ impl Node {
     }
 
     /// True when an executable (contiguous-nonce, active-validator) pending
-    /// publication in the mempool names `content_id`. Unapplicable gap-nonce
+    /// publication in the mempool names `content_id`. Inapplicable gap-nonce
     /// transactions cannot pin deposits indefinitely.
     fn is_pending_content(&self, content_id: &Hash32) -> bool {
         self.mempool.values().any(|tx| {
@@ -3656,7 +3653,10 @@ mod tests {
         let limits = GardenLimits::testnet_default();
         let window = millis(limits.suspend_after_ms);
         assert!(!stood_still(millis(limits.presence_interval_ms), &limits));
-        assert!(!stood_still(window / 2 - Duration::from_millis(1), &limits));
+        assert!(!stood_still(
+            (window / 2).checked_sub(Duration::from_millis(1)).unwrap(),
+            &limits
+        ));
         assert!(stood_still(window / 2, &limits));
         assert!(stood_still(window * 4, &limits));
 
@@ -3988,7 +3988,7 @@ mod tests {
                 nodes.push(guest);
             }
             nodes.push(handle);
-            tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::time::timeout(Duration::from_mins(1), async {
                 loop {
                     let mut settled = true;
                     for node in &nodes {
@@ -4305,7 +4305,7 @@ mod tests {
         // The guest is a validator: the host finalizes nothing without its
         // vote, so the test votes for what the host proposes. It also serves
         // the bytes nobody deposited when the host asks for them.
-        let until = tokio::time::Instant::now() + Duration::from_secs(60);
+        let until = tokio::time::Instant::now() + Duration::from_mins(1);
         loop {
             let status = handle.status().await.unwrap();
             if status["objects"] == json!(3) && status["objects_wanted_here"] == json!(0) {
@@ -4435,7 +4435,7 @@ mod tests {
         .unwrap();
         let kept = b"mine until I leave".to_vec();
         let content_id = crate::storage::content_id::ContentId::of(&kept).0;
-        tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::time::timeout(Duration::from_mins(1), async {
             let mut published = false;
             loop {
                 let status = stays.status().await.unwrap();
@@ -4654,6 +4654,7 @@ mod tests {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 held.push(socket);
             }
+            let _kept_open = held.len();
         });
         let join = GardenTx {
             chain_id: invite.chain_id,
