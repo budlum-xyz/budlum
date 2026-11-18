@@ -423,6 +423,77 @@ pub fn build_bft_commitment(
     Ok(VerifiedDomainCommitment { commitment, proof })
 }
 
+/// The block hash a `poh-hash-chain-v1` commitment must carry on its quorum
+/// arm: the PoH digest `parent_hash` advances to over one slot's step budget, at
+/// the step index `spec.height` selects. See
+/// [`crate::consensus::poh::verify_commitment_poh_sequence`], which re-derives
+/// exactly this in the settlement door.
+fn poh_commitment_block_hash(spec: &QuorumBlockSpec, hashes_per_slot: u64) -> Hash32 {
+    crate::consensus::poh::commitment_digest(&spec.parent_hash, spec.height, hashes_per_slot)
+}
+
+/// The block hash a `pospace-plot-v1` commitment must carry on its quorum arm:
+/// the plot response to the challenge `spec.parent_hash` and `spec.height`
+/// derive, over the plot commitment in `spec.state_root`. See
+/// [`crate::consensus::pospace::verify_commitment_plot_response`].
+fn pospace_commitment_block_hash(spec: &QuorumBlockSpec) -> Hash32 {
+    crate::consensus::pospace::commitment_plot_response(
+        &spec.parent_hash,
+        spec.height,
+        &spec.state_root,
+    )
+}
+
+/// Build a PoH commitment whose quorum certificate seals the domain's PoH digest
+/// for this slot.
+///
+/// A `poh-hash-chain-v1` domain also has a structural `FinalityProof::Poh`
+/// ladder (authority-quorum agreement over a full hash chain), which a producer
+/// assembles itself. This builder covers the certificate arm: it derives the
+/// PoH digest from `spec` before signing, so a producer cannot submit a PoH
+/// commitment whose block hash is not a PoH step (the adapter refuses those).
+///
+/// # Errors
+///
+/// Whatever [`build_bft_commitment`] refuses with.
+pub fn build_poh_commitment(
+    spec: &QuorumBlockSpec,
+    hashes_per_slot: u64,
+    chain_id: u64,
+    epoch: u64,
+    round: u64,
+    members: &[BftMember],
+    signers: &[usize],
+) -> Result<VerifiedDomainCommitment, String> {
+    let mut sealed = spec.clone();
+    sealed.block_hash = poh_commitment_block_hash(spec, hashes_per_slot);
+    build_bft_commitment(&sealed, chain_id, epoch, round, members, signers)
+}
+
+/// Build a PoSpace commitment whose quorum certificate seals the plot response
+/// for this slot.
+///
+/// The plot commitment travels in `spec.state_root`, so the response binds the
+/// producer's plot to the block rather than merely asserting one. The
+/// structural `FinalityProof::Pospace` arm is assembled by its producer
+/// separately; this builder covers the certificate arm.
+///
+/// # Errors
+///
+/// Whatever [`build_bft_commitment`] refuses with.
+pub fn build_pospace_commitment(
+    spec: &QuorumBlockSpec,
+    chain_id: u64,
+    epoch: u64,
+    round: u64,
+    members: &[BftMember],
+    signers: &[usize],
+) -> Result<VerifiedDomainCommitment, String> {
+    let mut sealed = spec.clone();
+    sealed.block_hash = pospace_commitment_block_hash(spec);
+    build_bft_commitment(&sealed, chain_id, epoch, round, members, signers)
+}
+
 /// Build a `PoA` commitment with composite authority signatures
 ///. `authorities` is the whole registered
 /// set; `signers` are the key pairs that sign (each must be in the set).
@@ -718,5 +789,111 @@ mod tests {
             .verify_finality(&domain, &built.commitment, &built.proof)
             .expect("adapter runs");
         assert_eq!(status, FinalityStatus::Finalized);
+    }
+    // --- PoH / PoSpace producers (the sealing half of the new binding) ------
+
+    fn poh_spec() -> QuorumBlockSpec {
+        QuorumBlockSpec {
+            domain: crate::domain::plugin::default_domain(
+                9,
+                crate::domain::ConsensusKind::Poh,
+                45_262,
+                "poh-hash-chain-v1",
+                0,
+            ),
+            height: 6,
+            block_hash: [0u8; 32],
+            parent_hash: [0xA1; 32],
+            state_root: [0x22; 32],
+            tx_root: [0x23; 32],
+            event_root: [0x24; 32],
+            timestamp_ms: 5_000,
+            sequence: 1,
+            producer: None,
+        }
+    }
+
+    #[test]
+    fn a_built_poh_commitment_finalizes_and_a_re_pointed_one_does_not() {
+        let mut spec = poh_spec();
+        let members = bft_members(4);
+        let snapshot = crate::chain::finality::ValidatorSetSnapshot::new(
+            1,
+            members.iter().map(|m| m.entry.clone()).collect(),
+        );
+        spec.domain.validator_set_hash = hex::decode(&snapshot.set_hash)
+            .expect("hex")
+            .try_into()
+            .expect("32 bytes");
+        let built = build_poh_commitment(&spec, 4, 45_262, 1, 0, &members, &[0, 1, 2])
+            .expect("the PoH commitment builds");
+        let status = crate::domain::finality_adapter::PohFinalityAdapter
+            .verify_finality(&spec.domain, &built.commitment, &built.proof)
+            .expect("the adapter runs");
+        assert_eq!(status, FinalityStatus::Finalized, "{status:?}");
+
+        // The parent is not signed by the certificate; the PoH step is what
+        // binds it. Re-pointing it must be refused.
+        let mut repointed = built.commitment.clone();
+        repointed.parent_domain_block_hash = [0xA2; 32];
+        let status = crate::domain::finality_adapter::PohFinalityAdapter
+            .verify_finality(&spec.domain, &repointed, &built.proof)
+            .expect("the adapter runs");
+        assert!(
+            matches!(&status, FinalityStatus::Rejected(reason) if reason.contains("continue the parent digest")),
+            "{status:?}"
+        );
+    }
+
+    fn pospace_spec() -> QuorumBlockSpec {
+        QuorumBlockSpec {
+            domain: crate::domain::plugin::default_domain(
+                10,
+                crate::domain::ConsensusKind::Pospace,
+                45_262,
+                "pospace-plot-v1",
+                0,
+            ),
+            height: 4,
+            block_hash: [0u8; 32],
+            parent_hash: [0xB1; 32],
+            // The plot commitment; normalized roots carry it here.
+            state_root: [0xB2; 32],
+            tx_root: [0x23; 32],
+            event_root: [0x24; 32],
+            timestamp_ms: 6_000,
+            sequence: 1,
+            producer: None,
+        }
+    }
+
+    #[test]
+    fn a_built_pospace_commitment_finalizes_and_a_re_pointed_one_does_not() {
+        let mut spec = pospace_spec();
+        let members = bft_members(4);
+        let snapshot = crate::chain::finality::ValidatorSetSnapshot::new(
+            1,
+            members.iter().map(|m| m.entry.clone()).collect(),
+        );
+        spec.domain.validator_set_hash = hex::decode(&snapshot.set_hash)
+            .expect("hex")
+            .try_into()
+            .expect("32 bytes");
+        let built = build_pospace_commitment(&spec, 45_262, 1, 0, &members, &[0, 1, 2])
+            .expect("the PoSpace commitment builds");
+        let status = crate::domain::finality_adapter::PospaceFinalityAdapter
+            .verify_finality(&spec.domain, &built.commitment, &built.proof)
+            .expect("the adapter runs");
+        assert_eq!(status, FinalityStatus::Finalized, "{status:?}");
+
+        let mut replotted = built.commitment.clone();
+        replotted.state_root = [0xB3; 32];
+        let status = crate::domain::finality_adapter::PospaceFinalityAdapter
+            .verify_finality(&spec.domain, &replotted, &built.proof)
+            .expect("the adapter runs");
+        assert!(
+            matches!(&status, FinalityStatus::Rejected(reason) if reason.contains("parent-derived challenge")),
+            "{status:?}"
+        );
     }
 }

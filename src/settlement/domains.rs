@@ -992,11 +992,52 @@ impl CommitmentAttestation {
                 event_root: false,
                 parent: false,
             },
+            // PoH and PoSpace finalize on the same certificate as `PoS` and BFT
+            // - precommits over the checkpoint `(height, hash)` - so this table
+            // says exactly what it says for those kinds: the certificate binds
+            // the block hash and nothing else, and every other field of the
+            // commitment is chosen by whoever submits it.
+            //
+            // What protects the *parent* for these two families is not this
+            // table but the adapter: before the certificate is read,
+            // `PohFinalityAdapter` recomputes the digest that
+            // `parent_domain_block_hash` must advance to over a slot, and
+            // `PospaceFinalityAdapter` recomputes the plot response to the
+            // challenge the parent and height derive, refusing a commitment
+            // whose block hash is any other value. That check is structural and
+            // runs for every proof variant, so a re-pointed parent is already
+            // refused there.
+            //
+            // Claiming `parent: true` here would be a lie in the other
+            // direction: this table is checked against `FinalityProof::shape`
+            // before a commitment anchors, and a BFT certificate's shape binds
+            // no parent, so the claim would make every honest PoH block
+            // unfinalizable. The table describes the proof; the adapter is
+            // where the equation lives.
+            //
+            // `state_root` stays false for PoSpace even though the plot
+            // response equation is computed over that field. What the equation
+            // proves is that the field is a *plot commitment* the block answers
+            // a challenge for; it does not prove it is the domain's state root.
+            // This table is what licenses `external_roots` anchoring
+            // (`accept_verified_commitment`) and event-root trust
+            // (`ProofVerifier`), so a field whose meaning has been repurposed
+            // is exactly the case it must fail closed on.
+            ConsensusKind::Poh => Self {
+                state_root: false,
+                tx_root: false,
+                event_root: false,
+                parent: false,
+            },
+            ConsensusKind::Pospace => Self {
+                state_root: false,
+                tx_root: false,
+                event_root: false,
+                parent: false,
+            },
             ConsensusKind::PoS
             | ConsensusKind::Bft
             | ConsensusKind::Dag
-            | ConsensusKind::Poh
-            | ConsensusKind::Pospace
             | ConsensusKind::Custom(_) => Self {
                 state_root: false,
                 tx_root: false,
@@ -5614,5 +5655,141 @@ mod tests {
             crate::cross_domain::event_tree::MerkleProof,
         )>(&forged, 4 * 1024)
         .is_err());
+    }
+    /// The attestation table is a promise about what a proof proved. Pinning it
+    /// to the adapters is what keeps it from drifting into a claim no adapter
+    /// checks: this is the shape that let `Poh`/`Pospace` advertise all-false
+    /// while their adapters ran `h(x,y) == h(x,y)` and a zero-step identity.
+    ///
+    /// The last arm is the one that matters for safety: a PoSpace equations
+    /// runs over `state_root`, but a plot commitment is not a domain state
+    /// root, so the table must not license anchoring that field.
+    #[test]
+    fn the_attestation_table_matches_what_the_adapters_actually_bind() {
+        // A PoH ladder and a PoSpace plot response both bind the parent, so the
+        // obvious reading of these two rows is `parent: true`. They are not:
+        // the certificate that finalizes them is a BFT one, whose shape binds
+        // only the checkpoint height and hash, and `verify_commitment_finality_observed`
+        // refuses a commitment whose attestation claims a field its proof does
+        // not bind. Claiming the parent here would make every honest PoH or
+        // PoSpace block unfinalizable while proving nothing extra - the parent
+        // equation belongs to the adapter, which runs it for every proof
+        // variant before the certificate is read.
+        for kind in [ConsensusKind::Poh, ConsensusKind::Pospace] {
+            let att = CommitmentAttestation::for_kind(&kind);
+            assert!(
+                !att.parent,
+                "{kind:?} finalizes on a certificate, which signs no parent"
+            );
+            assert!(!att.state_root, "a plot commitment is not a state root");
+            assert!(!att.tx_root);
+            assert!(!att.event_root);
+        }
+
+        // A quorum certificate signs the checkpoint hash alone, so these three
+        // stay all-false: no certificate attests a root or a parent.
+        for kind in [ConsensusKind::PoS, ConsensusKind::Bft, ConsensusKind::Dag] {
+            let att = CommitmentAttestation::for_kind(&kind);
+            assert!(
+                !att.state_root && !att.tx_root && !att.event_root && !att.parent,
+                "{kind:?} must claim nothing a certificate cannot prove"
+            );
+        }
+
+        // And the PoA family, which signs the whole commitment, claims all four.
+        for kind in [ConsensusKind::PoA, ConsensusKind::AiInference] {
+            let att = CommitmentAttestation::for_kind(&kind);
+            assert!(att.state_root && att.tx_root && att.event_root && att.parent);
+        }
+    }
+
+    /// A PoH or PoSpace commitment may not re-point its parent: the parent is
+    /// exactly what the adapter's new equation binds, and the certificate does
+    /// not sign it. This is the settlement-level consequence of the adapter
+    /// fix, exercised through the same door a relayer uses.
+    #[test]
+    fn a_poh_commitment_whose_parent_does_not_advance_is_refused_in_block() {
+        let mut spec = crate::domain::producer::QuorumBlockSpec {
+            domain: default_domain(4_101, ConsensusKind::Poh, 45262, "poh-hash-chain-v1", 0),
+            height: 5,
+            block_hash: [0u8; 32],
+            parent_hash: [0x71; 32],
+            state_root: [0x72; 32],
+            tx_root: [0x73; 32],
+            event_root: [0x74; 32],
+            timestamp_ms: 9_000,
+            sequence: 1,
+            producer: None,
+        };
+        // A PoH domain finalizes on a quorum certificate; give it the same
+        // shape the BFT producer test uses.
+        let members: Vec<crate::domain::producer::BftMember> = (0..4u8)
+            .map(|i| {
+                let mut seed = [0u8; 64];
+                seed[0] = i + 1;
+                let bls = crate::crypto::primitives::BlsKeypair::from_seed(&seed)
+                    .expect("a non-zero test seed");
+                let pq = crate::crypto::primitives::PqKeyPair::generate();
+                let address = Address::from([i + 1; 32]);
+                let pop = crate::chain::finality::sign_bls_pop(
+                    &bls.secret_key,
+                    &crate::chain::finality::pop_signing_message(45_262, &address, &bls.public_key),
+                );
+                crate::domain::producer::BftMember {
+                    entry: crate::chain::finality::ValidatorEntry {
+                        address,
+                        stake: 100,
+                        bls_public_key: bls.public_key.clone(),
+                        pop_signature: pop,
+                        pq_public_key: pq.public_key_bytes().to_vec(),
+                    },
+                    bls,
+                    pq: Some(pq),
+                }
+            })
+            .collect();
+        let snapshot = crate::chain::finality::ValidatorSetSnapshot::new(
+            1,
+            members.iter().map(|m| m.entry.clone()).collect(),
+        );
+        spec.domain.validator_set_hash = hex::decode(&snapshot.set_hash)
+            .expect("hex")
+            .try_into()
+            .expect("32 bytes");
+
+        let built = crate::domain::producer::build_poh_commitment(
+            &spec,
+            4,
+            45_262,
+            1,
+            0,
+            &members,
+            &[0, 1, 2],
+        )
+        .expect("the PoH commitment builds");
+
+        let mut state = AccountState::new();
+        register_domain(&mut state, spec.domain.clone()).expect("the domain registers");
+
+        // Honest: verifies and advances.
+        verify_commitment_finality(
+            &state,
+            &built.commitment,
+            &built.proof,
+            IntakeState::production_bls,
+        )
+        .expect("the honest PoH commitment finalizes");
+
+        // Re-pointed parent: the same certificate, the same block hash.
+        let mut tampered = built.commitment.clone();
+        tampered.parent_domain_block_hash = [0x75; 32];
+        let err = verify_commitment_finality(
+            &state,
+            &tampered,
+            &built.proof,
+            IntakeState::production_bls,
+        )
+        .expect_err("a re-pointed PoH parent must not finalize");
+        assert!(err.contains("continue the parent digest"), "{err}");
     }
 }

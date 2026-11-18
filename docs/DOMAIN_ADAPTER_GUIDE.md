@@ -89,3 +89,41 @@ carry a finality proof the registered adapter checks in the block.
 Equivocation or a parent mismatch freezes the domain in the block; a
 governance unfreeze is applied in a later block. Custom plugin domains that
 cannot be verified in a block are refused.
+
+## 5. What each adapter actually checks
+
+This table is the contract `CommitmentAttestation::for_kind` encodes; the
+settlement layer reads it to decide which commitment fields a proof licenses
+(bridging, event-root trust, external-root anchoring). It is pinned by
+`settlement::domains::tests::the_attestation_table_matches_what_the_adapters_actually_bind`.
+
+| Adapter | Binds parent | Binds `state_root` | Notes |
+|---|---|---|---|
+| `poa-authority-quorum` | yes | yes | authorities sign the whole commitment digest |
+| `pow-header-chain-v1`, `bitcoin-spv-v1` | yes | PoW only / no (SPV) | header carries parent, roots, timestamp |
+| `storage-attestation-v1`, `ai-inference-threshold` | yes | yes | reuse the `PoA` signing message |
+| `zk-proof-verification` | no | yes | the accepted claim binds the state root |
+| `pos-qc-finality`, `bft-quorum-commit` | no | no | the certificate signs `(chain_id, epoch, height, hash)` |
+| `dag-tip-vote-v1` | no | no | same certificate shape |
+| `poh-hash-chain-v1` | yes | no | quorum arm: block hash is the parent digest advanced one slot |
+| `pospace-plot-v1` | yes | no | quorum arm: block hash is the plot response to the parent-derived challenge |
+
+The two last rows exist because those adapters were previously vacuous: PoH
+called `verify_poh_sequence(hash, height, 0, hash)`  -  zero steps from a value
+to itself  -  and PoSpace computed `compute_plot_response(block_hash,
+state_root)` and verified that value against itself. Both are true for every
+input, so any commitment finalized. Each is now a real equation over fields a
+submitter cannot choose independently:
+
+- **PoH.** `block_hash == poh_step^steps(parent_domain_block_hash,
+  height * steps)` with `steps = hashes_per_slot`. A producer builds it with
+  `domain::producer::build_poh_commitment`, which derives the digest before
+  signing; the BFT certificate then seals that digest.
+- **PoSpace.** `block_hash == compute_plot_response(plot_commitment,
+  commitment_challenge(parent_domain_block_hash, height))`, where the plot
+  commitment travels in `state_root`. `build_pospace_commitment` derives it.
+
+`state_root` is deliberately *not* marked as attested for PoSpace: the
+equation proves the field is a plot commitment the block answers a challenge
+for, not that it is the domain's state root, and that flag gates external-root
+anchoring.

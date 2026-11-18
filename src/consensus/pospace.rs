@@ -24,6 +24,12 @@ const MAX_POSPACE_PLOTS: usize = 4_096;
 const MAX_PLOT_SIZE_BYTES: u64 = 1_u64 << 50;
 const POSPACE_WITNESS_MAGIC: &[u8; 8] = b"BDLMSPC1";
 const POSPACE_WITNESS_LEN: usize = 8 + 32 + 32 + 8;
+/// Domain-separation tag of the commitment-level challenge derivation. A
+/// commitment's challenge is bound to its parent root and height; it is a
+/// different domain from the per-block slot challenge
+/// (`BDLM_POSPACE_CHALLENGE_V1`) because it is derived from a normalized root,
+/// not a hex block hash.
+const COMMITMENT_CHALLENGE_TAG: &[u8] = b"BDLM_POSPACE_COMMITMENT_CHALLENGE_V1";
 
 /// PoSpace configuration.
 #[derive(Debug, Clone)]
@@ -51,8 +57,13 @@ struct PlotRecord {
 }
 
 /// Derive the canonical expected challenge response for `(plot_id, challenge)`.
+///
+/// Crate-internal: the doors onto this response are
+/// [`verify_plot_response`] (the engine's per-block check) and
+/// [`commitment_plot_response`] (what a settlement commitment must carry). A
+/// further caller would be another unreviewed way to accept a plot response.
 #[must_use]
-pub fn compute_plot_response(plot_id: &[u8; 32], challenge: &[u8; 32]) -> [u8; 32] {
+fn compute_plot_response(plot_id: &[u8; 32], challenge: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"BDLM_POSPACE_RESPONSE_V1");
     hasher.update(plot_id);
@@ -65,13 +76,74 @@ pub fn compute_plot_response(plot_id: &[u8; 32], challenge: &[u8; 32]) -> [u8; 3
 
 /// Verify a PoSpace challenge response against `(plot_id, challenge)`.
 #[must_use]
-pub fn verify_plot_response(plot_id: &[u8; 32], challenge: &[u8; 32], response: &[u8; 32]) -> bool {
+fn verify_plot_response(plot_id: &[u8; 32], challenge: &[u8; 32], response: &[u8; 32]) -> bool {
     let zero = [0u8; 32];
     if *plot_id == zero || *challenge == zero || *response == zero {
         return false;
     }
     let expected = compute_plot_response(plot_id, challenge);
     bool::from(expected.ct_eq(response))
+}
+
+/// Derive the plot challenge a commitment at `height` answers: a function of
+/// the commitment's parent block hash and its height, so no submitter can pick
+/// the challenge its own plot response satisfies.
+///
+/// This mirrors what [`PoSpaceEngine`] does per block
+/// (`derive_block_challenge(previous_hash, block_index, block_index /
+/// challenge_interval)`), stated over normalized 32-byte roots instead of a
+/// hex parent hash, so a domain commitment can be judged without the engine's
+/// plot registry.
+#[must_use]
+fn commitment_challenge(parent_hash: &[u8; 32], height: u64) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(COMMITMENT_CHALLENGE_TAG);
+    hasher.update(parent_hash);
+    hasher.update(height.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// The plot response a domain commitment must carry: the response to the
+/// challenge its own parent and height derive.
+#[must_use]
+pub fn commitment_plot_response(
+    parent_hash: &[u8; 32],
+    height: u64,
+    plot_commitment: &[u8; 32],
+) -> [u8; 32] {
+    compute_plot_response(plot_commitment, &commitment_challenge(parent_hash, height))
+}
+
+/// Verify that `block_hash` is the plot response for the challenge the
+/// commitment's parent and height derive, over the commitment's own plot
+/// commitment.
+///
+/// This is the check `pospace-plot-v1` finality makes on its quorum arm. It
+/// binds three fields the settlement layer treats as proven - the block hash,
+/// the parent hash and the plot commitment (`state_root`) - into one equation,
+/// so a relayer cannot take a finalized PoSpace block and re-point it at a
+/// different parent or a different plot. The check it replaced computed the
+/// response from `(block_hash, state_root)` and verified it against itself,
+/// which is true by construction and binds nothing.
+#[must_use]
+pub fn verify_commitment_plot_response(
+    parent_hash: &[u8; 32],
+    height: u64,
+    plot_commitment: &[u8; 32],
+    block_hash: &[u8; 32],
+) -> bool {
+    let zero = [0u8; 32];
+    if *parent_hash == zero || *plot_commitment == zero || *block_hash == zero {
+        return false;
+    }
+    if height == 0 {
+        return false;
+    }
+    let expected = commitment_plot_response(parent_hash, height, plot_commitment);
+    bool::from(expected.ct_eq(block_hash))
 }
 
 fn encode_pospace_witness(plot_id: &[u8; 32], challenge: &[u8; 32], size_bytes: u64) -> Vec<u8> {
@@ -614,5 +686,80 @@ mod tests {
         let mut tampered = honest;
         tampered.hash = "f".repeat(64);
         assert_eq!(engine.fork_choice_score(&[tampered]), 0);
+    }
+    // --- commitment-level challenge binding (`pospace-plot-v1` finality) ------
+
+    #[test]
+    fn a_commitment_plot_response_binds_parent_height_and_plot() {
+        let parent = [0x11u8; 32];
+        let plot = [0x22u8; 32];
+        let height = 7u64;
+        let block = commitment_plot_response(&parent, height, &plot);
+
+        assert!(verify_commitment_plot_response(
+            &parent, height, &plot, &block
+        ));
+
+        // Every field the equation binds, refused on its own when changed:
+        // this is what the previous check (h(x,y) == h(x,y)) could not do.
+        assert!(
+            !verify_commitment_plot_response(&[0x12u8; 32], height, &plot, &block),
+            "a re-pointed parent must not carry the same finalized hash"
+        );
+        assert!(
+            !verify_commitment_plot_response(&parent, height + 1, &plot, &block),
+            "a re-pointed height must not carry the same finalized hash"
+        );
+        assert!(
+            !verify_commitment_plot_response(&parent, height, &[0x23u8; 32], &block),
+            "a re-pointed plot commitment must not carry the same finalized hash"
+        );
+        assert!(
+            !verify_commitment_plot_response(&parent, height, &plot, &[0x24u8; 32]),
+            "an arbitrary block hash is not a plot response"
+        );
+    }
+
+    #[test]
+    fn a_zero_root_or_genesis_height_never_verifies() {
+        let plot = [0x22u8; 32];
+        let parent = [0x11u8; 32];
+        let block = commitment_plot_response(&parent, 3, &plot);
+        assert!(!verify_commitment_plot_response(
+            &[0u8; 32], 3, &plot, &block
+        ));
+        assert!(!verify_commitment_plot_response(
+            &parent, 3, &[0u8; 32], &block
+        ));
+        assert!(!verify_commitment_plot_response(
+            &parent, 3, &plot, &[0u8; 32]
+        ));
+        // Height 0 is the genesis slot: it has no parent-derived challenge.
+        assert!(!verify_commitment_plot_response(
+            &parent,
+            0,
+            &plot,
+            &commitment_plot_response(&parent, 0, &plot)
+        ));
+    }
+
+    #[test]
+    fn the_challenge_depends_on_the_parent_and_not_on_the_plot() {
+        let plot = [0x22u8; 32];
+        let a = commitment_challenge(&[0x11u8; 32], 5);
+        let b = commitment_challenge(&[0x12u8; 32], 5);
+        assert_ne!(a, b, "a different parent yields a different challenge");
+        assert_eq!(
+            a,
+            commitment_challenge(&[0x11u8; 32], 5),
+            "the derivation is deterministic"
+        );
+        // The challenge is a function of (parent, height) only; the plot is the
+        // other half of the response, so a plot cannot move the challenge it
+        // must answer.
+        assert_eq!(
+            compute_plot_response(&plot, &a),
+            commitment_plot_response(&[0x11u8; 32], 5, &plot)
+        );
     }
 }
