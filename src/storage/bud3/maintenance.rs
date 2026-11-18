@@ -68,8 +68,9 @@ pub fn prioritize_shrink_repairs(segments: &[SegmentRisk]) -> Vec<SegmentRisk> {
     due
 }
 
-/// Select replacement holders for lost/declined/released shares of `(object, segment)`
-/// via stake-weighted rendezvous hashing, skipping the repairer, existing segment
+/// Select replacement holders for lost/declined/released shares of `(object, segment)`.
+///
+/// Uses stake-weighted rendezvous hashing, skipping the repairer, existing segment
 /// holders, declined validators, and candidates without enough free quota.
 /// Convenience: exposed for repair reassignment scheduler.
 #[must_use]
