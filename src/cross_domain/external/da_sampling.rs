@@ -78,6 +78,9 @@ struct DaNamespaceProof {
     blob_commitment: Hash32,
     nmt_siblings: Vec<NmtSibling>,
     row_root: Hash32,
+    nmt_row_axis_branch: Vec<Hash32>,
+    share_row_root: Hash32,
+    share_to_row_branch: Vec<Hash32>,
     row_axis_branch: Vec<Hash32>,
 }
 
@@ -99,6 +102,7 @@ struct DaHeader {
     height: u64,
     time_secs: u64,
     square_size: u16,
+    nmt_roots_root: Hash32,
     row_roots_root: Hash32,
     col_roots_root: Hash32,
     data_root: Hash32,
@@ -123,15 +127,80 @@ struct DaAvailabilityEvidence {
 #[must_use]
 fn compute_da_data_root(
     square_size: u16,
+    nmt_roots_root: &Hash32,
     row_roots_root: &Hash32,
     col_roots_root: &Hash32,
 ) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[
         b"BDLM_DA_DATA_ROOT_V1",
         &square_size.to_le_bytes(),
+        nmt_roots_root,
         row_roots_root,
         col_roots_root,
     ])
+}
+
+/// Deterministically derive `sample_count` distinct `(row, col)` coordinates
+/// from the committed DA header and namespace statement via Fiat-Shamir so a
+/// withholding producer cannot cherry-pick only unwithheld shares.
+fn derive_das_sample_coordinates(
+    network: &str,
+    data_root: &Hash32,
+    namespace_id: &Hash32,
+    blob_commitment: &Hash32,
+    square_size: u16,
+    sample_count: u16,
+) -> Result<BTreeSet<(u16, u16)>, AdapterError> {
+    let total_cells = usize::from(square_size).saturating_mul(usize::from(square_size));
+    let needed = usize::from(sample_count);
+    if square_size == 0 || needed == 0 || needed > total_cells {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!(
+                "DA min_samples {sample_count} exceeds square cell capacity {total_cells}"
+            ),
+        });
+    }
+    let mask = square_size - 1;
+    let mut coords = BTreeSet::new();
+    let mut nonce = 0u64;
+    while coords.len() < needed {
+        let digest = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_DA_SAMPLE_COORD_V1",
+            network.as_bytes(),
+            data_root,
+            namespace_id,
+            blob_commitment,
+            &nonce.to_le_bytes(),
+        ]);
+        let r_bytes: [u8; 2] = digest
+            .get(0..2)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 2]);
+        let c_bytes: [u8; 2] = digest
+            .get(2..4)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 2]);
+        let r = u16::from_le_bytes(r_bytes) & mask;
+        let c = u16::from_le_bytes(c_bytes) & mask;
+        if coords.insert((r, c)) {
+            nonce = nonce.saturating_add(1);
+            continue;
+        }
+        nonce = nonce.saturating_add(1);
+        if nonce > 65_536 {
+            // Deterministic linear scan fallback guaranteeing termination when
+            // `needed` approaches `total_cells`.
+            for row in 0..square_size {
+                for col in 0..square_size {
+                    coords.insert((row, col));
+                    if coords.len() == needed {
+                        return Ok(coords);
+                    }
+                }
+            }
+        }
+    }
+    Ok(coords)
 }
 
 #[must_use]
@@ -204,6 +273,7 @@ fn da_header_sign_bytes(network: &str, header: &DaHeader, namespace_id: &Hash32)
         &header.height.to_le_bytes(),
         &header.time_secs.to_le_bytes(),
         &header.square_size.to_le_bytes(),
+        &header.nmt_roots_root,
         &header.row_roots_root,
         &header.col_roots_root,
         &header.data_root,
@@ -249,10 +319,19 @@ fn decode_da_evidence(payload: &[u8]) -> Result<DaAvailabilityEvidence, AdapterE
         offset: 8,
         reason: "missing DA payload body".into(),
     })?;
-    bincode::deserialize(body).map_err(|e| AdapterError::Malformed {
-        offset: 8,
-        reason: format!("invalid DA availability evidence: {e}"),
-    })
+    let decoded: DaAvailabilityEvidence =
+        crate::network::bounded_bincode::decode_bounded_bincode(body, MAX_DA_PAYLOAD_BYTES)
+            .map_err(|e| AdapterError::Malformed {
+                offset: 8,
+                reason: format!("invalid DA availability evidence: {e}"),
+            })?;
+    if bincode::serialized_size(&decoded).ok() != u64::try_from(body.len()).ok() {
+        return Err(AdapterError::Malformed {
+            offset: 8,
+            reason: "trailing bytes after canonical DA availability evidence".to_string(),
+        });
+    }
+    Ok(decoded)
 }
 
 /// External finality adapter verifying 2D DAS share openings, NMT inclusion,
@@ -384,16 +463,22 @@ impl DataAvailabilityAdapter {
         let axis_depth = header.square_size.trailing_zeros() as usize;
         let expected_data_root = compute_da_data_root(
             header.square_size,
+            &header.nmt_roots_root,
             &header.row_roots_root,
             &header.col_roots_root,
         );
-        if header.data_root != expected_data_root {
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            header.data_root.as_slice(),
+            expected_data_root.as_slice(),
+        )) {
             return Err(AdapterError::ConsensusRule {
-                rule: "DA header data_root does not match row/column axis commitments".into(),
+                rule: "DA header data_root does not match NMT and row/column axis commitments"
+                    .into(),
             });
         }
 
-        // 2. Verify Namespace Merkle Tree (NMT) monotonic range proof for blob_commitment.
+        // 2. Verify Namespace Merkle Tree (NMT) monotonic range proof for blob_commitment
+        //    and bind the exact NMT leaf digest into the 2D share matrix at (row_index, leaf_index).
         if ns_proof.blob_commitment == [0u8; 32]
             || ns_proof.row_index >= header.square_size
             || ns_proof.leaf_index >= header.square_size
@@ -403,9 +488,10 @@ impl DataAvailabilityAdapter {
                 rule: "DA namespace proof indices, depth, or zero blob_commitment invalid".into(),
             });
         }
+        let nmt_leaf = hash_nmt_leaf(&pinned.namespace_id, &ns_proof.blob_commitment);
         let mut cur_min = pinned.namespace_id;
         let mut cur_max = pinned.namespace_id;
-        let mut cur_hash = hash_nmt_leaf(&pinned.namespace_id, &ns_proof.blob_commitment);
+        let mut cur_hash = nmt_leaf;
         let mut leaf_idx = ns_proof.leaf_index;
         for sib in &ns_proof.nmt_siblings {
             let combined = if leaf_idx & 1 == 0 {
@@ -429,8 +515,10 @@ impl DataAvailabilityAdapter {
             cur_hash = next_hash;
             leaf_idx >>= 1;
         }
-        if cur_hash != ns_proof.row_root
-            || cur_min > pinned.namespace_id
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            cur_hash.as_slice(),
+            ns_proof.row_root.as_slice(),
+        )) || cur_min > pinned.namespace_id
             || cur_max < pinned.namespace_id
         {
             return Err(AdapterError::ConsensusRule {
@@ -441,18 +529,43 @@ impl DataAvailabilityAdapter {
             &ns_proof.row_root,
             ns_proof.row_index,
             axis_depth,
-            &ns_proof.row_axis_branch,
-            &header.row_roots_root,
+            &ns_proof.nmt_row_axis_branch,
+            &header.nmt_roots_root,
         ) {
             return Err(AdapterError::ConsensusRule {
-                rule: "NMT row_root failed inclusion proof against header row_roots_root".into(),
+                rule: "NMT row_root failed inclusion proof against header nmt_roots_root".into(),
+            });
+        }
+        let leaf_bound_to_square = verify_axis_branch(
+            &nmt_leaf,
+            ns_proof.leaf_index,
+            axis_depth,
+            &ns_proof.share_to_row_branch,
+            &ns_proof.share_row_root,
+        ) && verify_axis_branch(
+            &ns_proof.share_row_root,
+            ns_proof.row_index,
+            axis_depth,
+            &ns_proof.row_axis_branch,
+            &header.row_roots_root,
+        );
+        if !leaf_bound_to_square {
+            return Err(AdapterError::ConsensusRule {
+                rule: "NMT leaf failed share-matrix inclusion against header row_roots_root".into(),
             });
         }
 
-        // 3. Verify distinct 2D (row, col) Reed-Solomon axis availability samples.
-        if bundle.samples.len() < usize::from(pinned.min_samples)
-            || bundle.samples.len() > MAX_DA_SAMPLES
-        {
+        // 3. Verify distinct 2D (row, col) Reed-Solomon axis availability samples
+        //    covering every Fiat-Shamir challenge coordinate derived from data_root.
+        let required_coords = derive_das_sample_coordinates(
+            &self.network,
+            &header.data_root,
+            &pinned.namespace_id,
+            &ns_proof.blob_commitment,
+            header.square_size,
+            pinned.min_samples,
+        )?;
+        if bundle.samples.len() < required_coords.len() || bundle.samples.len() > MAX_DA_SAMPLES {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
                     "DA sample count {} outside {}..={MAX_DA_SAMPLES}",
@@ -511,6 +624,11 @@ impl DataAvailabilityAdapter {
                 });
             }
         }
+        if !required_coords.is_subset(&seen_coords) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "DA samples omit required Fiat-Shamir challenge coordinates".into(),
+            });
+        }
 
         // 4. Verify stake-weighted > 2/3 slashable DA committee attestation.
         let mut member_map = BTreeMap::new();
@@ -560,22 +678,24 @@ impl DataAvailabilityAdapter {
             .map_err(|_| AdapterError::Crypto {
                 what: "DA committee Ed25519 signature invalid".into(),
             })?;
-            if !member.pq_pubkey.is_empty() {
-                if sig.pq_sig.is_empty() {
-                    all_pq = false;
-                } else {
-                    crate::crypto::primitives::PqKeyPair::verify(
-                        &member.pq_pubkey,
-                        crate::crypto::ctx::CROSS_DOMAIN_V1,
-                        &vote_bytes,
-                        &sig.pq_sig,
-                    )
-                    .map_err(|_| AdapterError::Crypto {
-                        what: "DA committee ML-DSA-65 co-signature invalid".into(),
-                    })?;
-                }
-            } else {
+            if member.pq_pubkey.is_empty() {
                 all_pq = false;
+            } else {
+                if sig.pq_sig.is_empty() {
+                    return Err(AdapterError::Crypto {
+                        what: "DA committee member requires mandatory ML-DSA-65 co-signature"
+                            .into(),
+                    });
+                }
+                crate::crypto::primitives::PqKeyPair::verify(
+                    &member.pq_pubkey,
+                    crate::crypto::ctx::CROSS_DOMAIN_V1,
+                    &vote_bytes,
+                    &sig.pq_sig,
+                )
+                .map_err(|_| AdapterError::Crypto {
+                    what: "DA committee ML-DSA-65 co-signature invalid".into(),
+                })?;
             }
             signed_stake = signed_stake.saturating_add(u128::from(member.voting_weight));
         }
@@ -727,26 +847,34 @@ mod tests {
             hash_nmt_node((&ns_target, &ns_target, &nmt_l0), (&ns_hi, &ns_hi, &nmt_l1))
                 .expect("ordered nmt");
 
-        // Wait: for uniform 2x2 DAS share openings on row 1 & col 0/1:
-        // s00 = [0x11; 32], s01 = [0x12; 32], s10 = [0x21; 32], s11 = [0x22; 32].
-        // Keep row 0 as the NMT row and build a 4x4? Even simpler: in 2x2, row 1 holds data shares
-        // [s10, s11], and col 0 = [s00, s10], col 1 = [s01, s11] with row 0 = nmt_row0_root!
-        let s10 = [0x21; 32];
-        let s11 = [0x22; 32];
-        let s00 = [0x11; 32];
-        let s01 = [0x12; 32];
-        let row0 = nmt_row0_root;
+        // Consistent 2x2 square where row 0's share digests ARE the NMT leaf
+        // digests `[nmt_l0, nmt_l1]` and row 1 carries parity shares `[nmt_r10, nmt_r11]`,
+        // so every (row, col) opens along both row/column share axes AND NMT roots.
+        let ns_parity = [0x80; 32];
+        let s00 = nmt_l0;
+        let s01 = nmt_l1;
+        let s10 = hash_nmt_leaf(&ns_parity, &[0x21; 32]);
+        let s11 = hash_nmt_leaf(&ns_parity, &[0x22; 32]);
+        let (_, _, nmt_row1_root) = hash_nmt_node(
+            (&ns_parity, &ns_parity, &s10),
+            (&ns_parity, &ns_parity, &s11),
+        )
+        .expect("ordered parity nmt");
+        let nmt_roots_root = hash_da_axis_node(&nmt_row0_root, &nmt_row1_root);
+
+        let row0 = hash_da_axis_node(&s00, &s01);
         let row1 = hash_da_axis_node(&s10, &s11);
         let col0 = hash_da_axis_node(&s00, &s10);
         let col1 = hash_da_axis_node(&s01, &s11);
         let row_roots_root = hash_da_axis_node(&row0, &row1);
         let col_roots_root = hash_da_axis_node(&col0, &col1);
-        let data_root = compute_da_data_root(2, &row_roots_root, &col_roots_root);
+        let data_root = compute_da_data_root(2, &nmt_roots_root, &row_roots_root, &col_roots_root);
 
         let header = DaHeader {
             height: 500,
             time_secs: 1_700_050_000,
             square_size: 2,
+            nmt_roots_root,
             row_roots_root,
             col_roots_root,
             data_root,
@@ -760,33 +888,34 @@ mod tests {
                 max_ns: ns_hi,
                 digest: nmt_l1,
             }],
-            row_root: row0,
+            row_root: nmt_row0_root,
+            nmt_row_axis_branch: vec![nmt_row1_root],
+            share_row_root: row0,
+            share_to_row_branch: vec![s01],
             row_axis_branch: vec![row1],
         };
-        let samples = vec![
+        let grid = [[s00, s01], [s10, s11]];
+        let row_roots = [row0, row1];
+        let col_roots = [col0, col1];
+        let open_cell = |r: u16, c: u16| -> DaShareSample {
+            let ri = usize::from(r);
+            let ci = usize::from(c);
             DaShareSample {
-                row: 1,
-                col: 0,
-                share_digest: s10,
-                row_root: row1,
-                share_to_row_branch: vec![s11],
-                row_to_axis_branch: vec![row0],
-                col_root: col0,
-                share_to_col_branch: vec![s00],
-                col_to_axis_branch: vec![col1],
-            },
-            DaShareSample {
-                row: 1,
-                col: 1,
-                share_digest: s11,
-                row_root: row1,
-                share_to_row_branch: vec![s10],
-                row_to_axis_branch: vec![row0],
-                col_root: col1,
-                share_to_col_branch: vec![s01],
-                col_to_axis_branch: vec![col0],
-            },
-        ];
+                row: r,
+                col: c,
+                share_digest: grid[ri][ci],
+                row_root: row_roots[ri],
+                share_to_row_branch: vec![grid[ri][ci ^ 1]],
+                row_to_axis_branch: vec![row_roots[ri ^ 1]],
+                col_root: col_roots[ci],
+                share_to_col_branch: vec![grid[ri ^ 1][ci]],
+                col_to_axis_branch: vec![col_roots[ci ^ 1]],
+            }
+        };
+        let required =
+            derive_das_sample_coordinates("celestia-mainnet", &data_root, &ns_target, &blob, 2, 2)
+                .expect("derive Fiat-Shamir DAS coordinates");
+        let samples: Vec<DaShareSample> = required.iter().map(|&(r, c)| open_cell(r, c)).collect();
 
         let mut members = Vec::new();
         let mut sigs = Vec::new();
@@ -867,14 +996,78 @@ mod tests {
         ));
 
         // Out-of-order right NMT sibling (`min_ns < target_ns`) must fail monotonicity.
-        let mut bad_nmt = bundle;
+        let mut bad_nmt = bundle.clone();
         bad_nmt.namespace_proof.nmt_siblings[0].min_ns = [0x01; 32];
         bad_nmt.namespace_proof.nmt_siblings[0].max_ns = [0x02; 32];
-        let mut bad_nmt_ev = golden;
+        let mut bad_nmt_ev = golden.clone();
         bad_nmt_ev.payload = encode_da_evidence(&bad_nmt).expect("encode");
         assert!(matches!(
             adapter.verify(&bad_nmt_ev, &policy),
             Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // STRIX-COC-02a forgery: stripping ML-DSA-65 co-signatures from PQ-enrolled
+        // DA committee members must fail closed with a crypto error.
+        let mut stripped_pq = bundle.clone();
+        for sig in &mut stripped_pq.signatures {
+            sig.pq_sig.clear();
+        }
+        let mut stripped_ev = golden.clone();
+        stripped_ev.payload = encode_da_evidence(&stripped_pq).expect("encode");
+        assert!(matches!(
+            adapter.verify(&stripped_ev, &policy),
+            Err(AdapterError::Crypto { .. })
+        ));
+
+        // STRIX-COC-02c forgery: substituting valid dual-axis openings at prover-chosen
+        // coordinates that omit a required Fiat-Shamir challenge coordinate is refused.
+        let required: BTreeSet<(u16, u16)> =
+            bundle.samples.iter().map(|s| (s.row, s.col)).collect();
+        let unchallenged = (0..2u16)
+            .flat_map(|r| (0..2u16).map(move |c| (r, c)))
+            .find(|coord| !required.contains(coord))
+            .expect("2x2 square with 2 samples leaves 2 unchallenged coordinates");
+        // Reconstruct a cryptographically valid dual-axis opening for `unchallenged`.
+        let nmt_l0 = hash_nmt_leaf(&[0x10; 32], &[0xAB; 32]);
+        let nmt_l1 = hash_nmt_leaf(&[0x40; 32], &[0xCD; 32]);
+        let s10 = hash_nmt_leaf(&[0x80; 32], &[0x21; 32]);
+        let s11 = hash_nmt_leaf(&[0x80; 32], &[0x22; 32]);
+        let grid = [[nmt_l0, nmt_l1], [s10, s11]];
+        let row_roots = [
+            hash_da_axis_node(&nmt_l0, &nmt_l1),
+            hash_da_axis_node(&s10, &s11),
+        ];
+        let col_roots = [
+            hash_da_axis_node(&nmt_l0, &s10),
+            hash_da_axis_node(&nmt_l1, &s11),
+        ];
+        let (ur, uc) = unchallenged;
+        let (uri, uci) = (usize::from(ur), usize::from(uc));
+        let mut cherry_picked = bundle;
+        cherry_picked.samples[0] = DaShareSample {
+            row: ur,
+            col: uc,
+            share_digest: grid[uri][uci],
+            row_root: row_roots[uri],
+            share_to_row_branch: vec![grid[uri][uci ^ 1]],
+            row_to_axis_branch: vec![row_roots[uri ^ 1]],
+            col_root: col_roots[uci],
+            share_to_col_branch: vec![grid[uri ^ 1][uci]],
+            col_to_axis_branch: vec![col_roots[uci ^ 1]],
+        };
+        let mut cherry_ev = golden.clone();
+        cherry_ev.payload = encode_da_evidence(&cherry_picked).expect("encode");
+        assert!(matches!(
+            adapter.verify(&cherry_ev, &policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // STRIX-COC-02b: trailing garbage after bounded bincode body is rejected.
+        let mut trailing_ev = golden;
+        trailing_ev.payload.push(0x99);
+        assert!(matches!(
+            adapter.verify(&trailing_ev, &policy),
+            Err(AdapterError::Malformed { .. })
         ));
     }
 }

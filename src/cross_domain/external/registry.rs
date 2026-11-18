@@ -1013,6 +1013,19 @@ impl ExternalDomainRegistry {
             .retain(|_, a| a.evidence_digest != evidence_digest);
         Ok((taken, reward))
     }
+
+    /// Invoked exclusively by [`crate::cross_domain::external::intake::IntakeState::slash_on_contradiction`]
+    /// after full cryptographic adapter verification of a conflicting finality proof.
+    pub(crate) fn slash_verified_contradiction(
+        &mut self,
+        domain: &DomainKey,
+        prover: Address,
+        evidence_digest: [u8; 32],
+        value_atoms: u128,
+        challenger: Address,
+    ) -> Result<(u128, u128), RegistryError> {
+        self.slash(domain, prover, evidence_digest, value_atoms, challenger)
+    }
 }
 
 impl DomainRegistration {

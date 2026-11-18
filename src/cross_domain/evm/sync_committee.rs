@@ -450,6 +450,51 @@ pub fn sync_committee_hash_tree_root(
     sha256_pair(&pubkeys_root, &agg_root)
 }
 
+/// Sum the compressed BLS12-381 G1 member public keys selected by a 512-bit
+/// sync-committee participation bitvector, validating prime-order subgroup
+/// membership and non-identity on every member key and on the resulting sum.
+pub(crate) fn aggregate_sync_committee_subset_g1(
+    member_pubkeys: &[[u8; BLS_PUBKEY_LEN]],
+    participation_bits: &[u8],
+) -> Result<([u8; BLS_PUBKEY_LEN], u64), String> {
+    use bls12_381::G1Projective;
+
+    if member_pubkeys.len() != SYNC_COMMITTEE_SIZE {
+        return Err(format!(
+            "sync committee roster must hold {SYNC_COMMITTEE_SIZE} pubkeys, found {}",
+            member_pubkeys.len()
+        ));
+    }
+    if participation_bits.len() != SYNC_COMMITTEE_SIZE / 8 {
+        return Err(format!(
+            "sync committee participation_bits must be {} bytes, found {}",
+            SYNC_COMMITTEE_SIZE / 8,
+            participation_bits.len()
+        ));
+    }
+    let mut acc = G1Projective::identity();
+    let mut signers = 0u64;
+    for (idx, pk_bytes) in member_pubkeys.iter().enumerate() {
+        let pk = G1Affine::from_compressed(pk_bytes)
+            .into_option()
+            .ok_or_else(|| format!("sync committee member {idx} pubkey is not a valid G1 point"))?;
+        if !bool::from(pk.is_torsion_free()) || bool::from(pk.is_identity()) {
+            return Err(format!(
+                "sync committee member {idx} pubkey is identity or outside prime subgroup"
+            ));
+        }
+        let byte = participation_bits.get(idx / 8).copied().unwrap_or(0);
+        if (byte >> (idx % 8)) & 1 == 1 {
+            acc += G1Projective::from(pk);
+            signers += 1;
+        }
+    }
+    if signers == 0 || bool::from(acc.is_identity()) {
+        return Err("participating sync-committee aggregate key cancels to identity".into());
+    }
+    Ok((G1Affine::from(acc).to_compressed(), signers))
+}
+
 /// SSZ `hash_tree_root` of a fixed list of 32-byte chunks, padded with zero
 /// chunks to the next power of two.
 pub(crate) fn merkleize_chunks(chunks: &[[u8; 32]]) -> [u8; 32] {

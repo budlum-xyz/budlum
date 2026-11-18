@@ -3234,6 +3234,14 @@ impl BudlumApiServer for RpcServer {
         let hub = crate::settlement::FinalityGuarantee::settlement_hub();
         let finality_guarantee =
             crate::settlement::FinalityGuarantee::for_external_spec(&entry.spec);
+        let economic_security = crate::settlement::EconomicSecurityBound::derive(
+            &finality_guarantee,
+            profile.bond_atoms,
+            profile.bond_atoms,
+        );
+        let value_outflow_open = economic_security
+            .check_value_outflow_conservation(0, 1)
+            .is_ok();
         let composed_with_hub: crate::settlement::RouteFinalityBound =
             crate::settlement::compose_cross_domain_route(&finality_guarantee, &hub, &hub);
         let reversibility_kind = match composed_with_hub.bottleneck_reversibility {
@@ -3251,6 +3259,8 @@ impl BudlumApiServer for RpcServer {
             "intakeEntry": to_val("Intake entry", serde_json::to_value(&entry))?,
             "descriptor": to_val("Descriptor", serde_json::to_value(&descriptor))?,
             "universalFinality": to_val("Universal finality", serde_json::to_value(finality_guarantee))?,
+            "economicSecurity": to_val("Economic security", serde_json::to_value(economic_security))?,
+            "valueOutflowOpen": value_outflow_open,
             "settlementComposition": to_val("Settlement composition", serde_json::to_value(composed_with_hub))?,
             "bottleneckReversibilityKind": reversibility_kind,
         }))
@@ -9410,6 +9420,11 @@ impl BudlumApiServer for RpcServer {
                     crate::settlement::FinalityGuarantee::for_domain(&domain, pq_enforced);
                 let route_bound: crate::settlement::RouteFinalityBound =
                     crate::settlement::compose_cross_domain_route(&guarantee, &hub, &hub);
+                let economic_security = crate::settlement::EconomicSecurityBound::derive(
+                    &guarantee,
+                    u128::from(domain.operator_bond),
+                    u128::from(domain.operator_bond),
+                );
                 Ok(serde_json::json!({
                     "domainId": domain.id,
                     "registered": true,
@@ -9427,6 +9442,8 @@ impl BudlumApiServer for RpcServer {
                     "quantumClass": facts["quantumClass"].clone(),
                     "observedSchemes": facts["observedSchemes"].clone(),
                     "universalFinality": serde_json::to_value(guarantee)
+                        .unwrap_or(serde_json::Value::Null),
+                    "economicSecurity": serde_json::to_value(economic_security)
                         .unwrap_or(serde_json::Value::Null),
                     "settlementRouteBound": serde_json::to_value(route_bound)
                         .unwrap_or(serde_json::Value::Null),

@@ -336,6 +336,12 @@ pub enum ChainCommand {
         crate::cross_domain::external::DomainKey,
         oneshot::Sender<Option<(crate::cross_domain::external::DomainRegistration, u64)>>,
     ),
+    ValidateDomainBlock(
+        crate::domain::DomainId,
+        Box<Block>,
+        u64,
+        oneshot::Sender<Result<crate::domain::DomainCommitment, String>>,
+    ),
     GetAiModel(
         crate::ai::types::AiModelId,
         oneshot::Sender<Option<crate::ai::types::AiModelSpec>>,
@@ -2214,6 +2220,34 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// Fail-closed consensus-plugin block validation and commitment extraction
+    /// through `Blockchain::validate_and_extract_domain_block` (`B-0046`).
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown/inactive domains, unregistered plugins, and invalid blocks.
+    ///
+    /// WIRING: Actor handle for domain-local block intake (`plugin_registry`).
+    pub async fn import_domain_block(
+        &self,
+        domain_id: crate::domain::DomainId,
+        block: Block,
+        sequence: u64,
+    ) -> Result<crate::domain::DomainCommitment, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::ValidateDomainBlock(
+                domain_id,
+                Box::new(block),
+                sequence,
+                tx,
+            ))
+            .await
+            .map_err(|_| "Chain actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Chain actor dropped response".to_string())?
+    }
+
     pub async fn get_ai_model(
         &self,
         id: crate::ai::types::AiModelId,
@@ -3792,6 +3826,14 @@ impl ChainActor {
                 }
                 ChainCommand::GetExternalDomainRegistration(key, res_tx) => {
                     let _ = res_tx.send(self.blockchain.external_domain_registration(&key));
+                }
+                ChainCommand::ValidateDomainBlock(domain_id, block, seq, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.validate_and_extract_domain_block(
+                        domain_id,
+                        &block,
+                        &[],
+                        seq,
+                    ));
                 }
                 ChainCommand::GetAiModel(id, res_tx) => {
                     let res = self.blockchain.state.ai_registry.models.get(&id).cloned();
