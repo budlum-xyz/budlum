@@ -476,6 +476,15 @@ enum DomainAction {
         /// every sign byte, so an unpinned adapter would verify any chain.
         #[arg(long = "tm-chain-id")]
         tm_chain_id: Option<String>,
+        /// The pinned `ValidatorSet.Hash()` of the commit's validator set, as
+        /// hex (32 bytes). Required for `--adapter tendermint`: the set the
+        /// evidence carries is not a pin, so a self-test run without this
+        /// flag would report "admitted" for a commit signed by any freshly
+        /// minted key set - which is the exact claim the registration gate
+        /// refuses. Take the value from the chain itself (it is the header's
+        /// `validators_hash`, printed by every explorer).
+        #[arg(long = "tm-pin-set-hash")]
+        tm_pin_set_hash: Option<String>,
         /// The target's current time for the verification policy.
         #[arg(long, default_value_t = 0)]
         now: u64,
@@ -2162,6 +2171,7 @@ fn run_domain_selftest(
     program_hash: Option<&str>,
     chain_id: Option<u64>,
     tm_chain_id: Option<&str>,
+    tm_pin_set_hash: Option<&str>,
     now: u64,
 ) -> Result<(), String> {
     use budlum_core::cross_domain::external::{
@@ -2195,7 +2205,20 @@ fn run_domain_selftest(
             let chain_id = tm_chain_id.ok_or_else(|| {
                 "the tendermint family needs --tm-chain-id (e.g. noble-1)".to_string()
             })?;
-            let adapter = TendermintFinalityAdapter::new(network, chain_id).with_golden(sample);
+            // The unpinned constructor verifies whatever set the evidence
+            // carries, which is the F-T1 hole: the admission report would say
+            // "admitted" for five keys an attacker just minted. The self-test
+            // is the gate an operator reads before registering, so it runs the
+            // pinned adapter and asks for the pin explicitly.
+            let pin = tm_pin_set_hash.ok_or_else(|| {
+                "the tendermint family needs --tm-pin-set-hash (the chain's own ValidatorSet.Hash())"
+                    .to_string()
+            })?;
+            let pin_bytes = hex_bytes(pin, "--tm-pin-set-hash")?;
+            let pin = <[u8; 32]>::try_from(pin_bytes.as_slice())
+                .map_err(|_| "--tm-pin-set-hash must be 32 bytes".to_string())?;
+            let adapter = TendermintFinalityAdapter::new_pinned(network, chain_id, Some(pin))
+                .with_golden(sample);
             admit(&adapter, &VerificationPolicy::strict(now))
         }
         other => {
@@ -4099,6 +4122,7 @@ fn main() {
                 program_hash,
                 chain_id,
                 tm_chain_id,
+                tm_pin_set_hash,
                 now,
             } => run_domain_selftest(
                 adapter,
@@ -4107,6 +4131,7 @@ fn main() {
                 program_hash.as_deref(),
                 *chain_id,
                 tm_chain_id.as_deref(),
+                tm_pin_set_hash.as_deref(),
                 *now,
             ),
         },
