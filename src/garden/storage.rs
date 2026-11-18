@@ -60,18 +60,23 @@ fn scan_disk_bytes(root: &Path) -> u64 {
     if let Ok(entries) = fs::read_dir(root) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() {
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.file_type().is_file() {
                 continue;
             }
-            let valid_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|s| hex::decode(s).ok())
-                .is_some_and(|bytes| bytes.len() == 32);
-            if valid_name {
-                if let Ok(meta) = fs::metadata(&path) {
-                    total = total.saturating_add(charged_bytes(meta.len()));
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if let Some((prefix, _)) = name.split_once(".tmp.") {
+                if hex::decode(prefix).is_ok_and(|bytes| bytes.len() == 32) {
+                    let _ = fs::remove_file(&path);
                 }
+                continue;
+            }
+            if hex::decode(name).is_ok_and(|bytes| bytes.len() == 32) {
+                total = total.saturating_add(charged_bytes(meta.len()));
             }
         }
     }
@@ -228,25 +233,39 @@ impl GardenContentStore {
 
     /// Write `bytes` atomically to `path` on a blocking thread. Returns
     /// `Ok(true)` when a new file was materialized, `Ok(false)` when `path`
-    /// already existed.
+    /// already existed (using atomic `hard_link` so two concurrent writers for
+    /// the same content id never both claim `Ok(true)` and double-charge the
+    /// store's byte ceiling).
     pub fn write_object_file_blocking(path: PathBuf, bytes: Vec<u8>) -> Result<bool, String> {
-        if path.is_file() {
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
             return Ok(false);
         }
         let seq = TEMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp = path.with_extension(format!("tmp.{}.{seq}", std::process::id()));
-        let write_res = (|| -> std::io::Result<()> {
+        let write_res = (|| -> std::io::Result<bool> {
             let mut file = fs::File::create(&tmp)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
-            fs::rename(&tmp, &path)?;
-            Ok(())
+            drop(file);
+            match fs::hard_link(&tmp, &path) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&tmp);
+                    Ok(true)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(&tmp);
+                    Ok(false)
+                }
+                Err(e) => Err(e),
+            }
         })();
-        if let Err(e) = write_res {
-            let _ = fs::remove_file(&tmp);
-            return Err(format!("garden object cannot be written: {e}"));
+        match write_res {
+            Ok(created) => Ok(created),
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                Err(format!("garden object cannot be written: {e}"))
+            }
         }
-        Ok(true)
     }
 
     /// Store bytes received from a peer, but only under the id they hash to.
@@ -463,6 +482,27 @@ mod tests {
         let err = store.put(&[2u8; 12]).unwrap_err();
         assert!(err.contains("local storage limit"), "{err}");
         assert_eq!(store.total_bytes(), floor);
+        // Atomic `write_object_file_blocking` claims `Ok(true)` once and `Ok(false)` on duplicate,
+        // and stale `<64hex>.tmp.*` files are purged on reopen without inflating quota.
+        let dup_id = ContentId::of(&[9u8; 12]).0;
+        let dup_path = root.join(hex::encode(dup_id));
+        assert!(
+            GardenContentStore::write_object_file_blocking(dup_path.clone(), vec![9u8; 12])
+                .unwrap()
+        );
+        assert!(
+            !GardenContentStore::write_object_file_blocking(dup_path.clone(), vec![9u8; 12])
+                .unwrap()
+        );
+        let stale = root.join(format!("{}.tmp.99999.0", hex::encode([0xABu8; 32])));
+        fs::write(&stale, b"partial").unwrap();
+        let reopened = GardenContentStore::open_with_limit(Some(&root), 16, floor * 4).unwrap();
+        assert!(
+            !stale.exists(),
+            "orphan .tmp.* file must be cleaned on open"
+        );
+        assert_eq!(reopened.total_bytes(), floor * 2);
+        fs::remove_file(&dup_path).unwrap();
         // Removing `a` reclaims the full floor charge so the new object fits.
         store.remove(&a);
         assert_eq!(store.total_bytes(), 0);

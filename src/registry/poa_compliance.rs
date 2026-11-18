@@ -95,8 +95,8 @@ pub struct ComplianceAuditEvent {
     pub admin: Address,
 }
 
-pub const MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN: usize = 4_096;
-pub const MAX_POA_COMPLIANCE_ENTRIES_GLOBAL: usize = 65_536;
+const MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN: usize = 4_096;
+const MAX_POA_COMPLIANCE_ENTRIES_GLOBAL: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoaComplianceError {
