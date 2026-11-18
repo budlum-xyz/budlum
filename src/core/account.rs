@@ -4569,46 +4569,90 @@ impl AccountState {
     /// Authority is verified purely against `self.poa_onboarding` so block
     /// producers, validators, startup replay, reorg rebuilds and snapshot
     /// rebuilds all derive the exact same `poa_compliance` state root.
+    /// The garden PoA-isolation authority rule, restored after the garden
+    /// re-merge (`dc909274`) resolved account.rs to the stack side and dropped
+    /// it, leaving `blockchain.rs` calling a method that did not exist.
+    ///
+    /// The domain kind is read from the domain record - never from the
+    /// caller's claim - and the compliance screen applies only to PoA
+    /// domains. Permissionless requests fail closed through
+    /// `ensure_poa`. On a PoA domain, authority is the named onboarding
+    /// admin or the domain operator, nothing else.
+    pub fn apply_poa_compliance_request(
+        &mut self,
+        domain_id: u32,
+        admin: Address,
+        address: Address,
+        reason_hash: [u8; 32],
+        unfreeze: bool,
+        height: u64,
+    ) -> Result<(), String> {
+        let domain = self
+            .settlement
+            .domains
+            .get(domain_id)
+            .ok_or_else(|| format!("unknown domain {domain_id}"))?;
+        let kind = if matches!(domain.kind, crate::domain::ConsensusKind::PoA) {
+            crate::registry::ComplianceDomainKind::PoA
+        } else {
+            crate::registry::ComplianceDomainKind::Permissionless
+        };
+        if kind == crate::registry::ComplianceDomainKind::PoA {
+            let admin_is_admin = self.poa_onboarding.registry().is_admin(domain_id, &admin);
+            let admin_is_operator = domain.operator == Some(admin);
+            if !admin_is_admin && !admin_is_operator {
+                return Err(format!(
+                    "admin {} holds no authority on domain {domain_id}",
+                    admin.to_hex()
+                ));
+            }
+        }
+        let result = if unfreeze {
+            self.poa_compliance
+                .unfreeze(kind, domain_id, admin, address, reason_hash, height)
+        } else {
+            self.poa_compliance.freeze_suspicious(
+                kind,
+                domain_id,
+                admin,
+                address,
+                reason_hash,
+                height,
+            )
+        };
+        result.map_err(|e| format!("{e:?}"))
+    }
+
     pub fn drain_pending_poa_compliance(&mut self, height: u64) -> usize {
         let freezes = std::mem::take(&mut self.pending_poa_freezes);
         let unfreezes = std::mem::take(&mut self.pending_poa_unfreezes);
         let mut applied = 0;
         for req in freezes {
             if self
-                .poa_onboarding
-                .registry()
-                .is_admin(req.domain_id, &req.admin)
-                && self
-                    .poa_compliance
-                    .freeze_suspicious(
-                        crate::registry::ComplianceDomainKind::PoA,
-                        req.domain_id,
-                        req.admin,
-                        req.target,
-                        req.reason_hash,
-                        height,
-                    )
-                    .is_ok()
+                .apply_poa_compliance_request(
+                    req.domain_id,
+                    req.admin,
+                    req.target,
+                    req.reason_hash,
+                    false,
+                    height,
+                )
+                .is_ok()
             {
                 applied += 1;
             }
         }
         for req in unfreezes {
             if self
-                .poa_onboarding
-                .registry()
-                .is_admin(req.domain_id, &req.admin)
-                && self
-                    .poa_compliance
-                    .unfreeze(
-                        crate::registry::ComplianceDomainKind::PoA,
-                        req.domain_id,
-                        req.admin,
-                        req.target,
-                        req.reason_hash,
-                        height,
-                    )
-                    .is_ok()
+                .apply_poa_compliance_request(
+                    req.domain_id,
+                    req.admin,
+                    req.target,
+                    req.reason_hash,
+                    true,
+                    height,
+                )
+                .is_ok()
             {
                 applied += 1;
             }

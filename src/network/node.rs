@@ -3101,7 +3101,7 @@ impl Node {
         let mut kad_config = KademliaConfig::new(libp2p::StreamProtocol::new("/budlum/kad/1.0.0"));
         if mobile_mode {
             kad_config.set_parallelism(std::num::NonZeroUsize::MIN);
-            kad_config.set_publication_interval(Some(Duration::from_hours(24)));
+            kad_config.set_publication_interval(Some(Duration::from_secs(24 * 3600)));
         }
 
         let kademlia = Kademlia::with_config(key.public().to_peer_id(), kad_store, kad_config);
@@ -3143,6 +3143,20 @@ impl Node {
                 StreamProtocol::new(crate::network::witness_protocol::WITNESS_PROTOCOL),
                 request_response::ProtocolSupport::Full,
             )],
+            req_cfg.clone(),
+        );
+        let bud3_symbols = request_response::Behaviour::new(
+            [(
+                StreamProtocol::new(crate::storage::bud3::symbol_protocol::SYMBOLS_PROTOCOL_ID),
+                request_response::ProtocolSupport::Full,
+            )],
+            req_cfg.clone(),
+        );
+        let bud3_custody = request_response::Behaviour::new(
+            [(
+                StreamProtocol::new(crate::storage::bud3::symbol_protocol::CUSTODY_PROTOCOL_ID),
+                request_response::ProtocolSupport::Full,
+            )],
             req_cfg,
         );
 
@@ -3162,6 +3176,8 @@ impl Node {
             sync,
             bitswap,
             witness,
+            bud3_symbols,
+            bud3_custody,
             limits: libp2p::connection_limits::Behaviour::new(
                 libp2p::connection_limits::ConnectionLimits::default()
                     .with_max_established(Some(
@@ -3277,113 +3293,65 @@ impl Node {
             return Ok((finish_swarm!(builder, gossipsub), false));
         }
 
-                    let kademlia =
-                        Kademlia::with_config(key.public().to_peer_id(), kad_store, kad_config);
-                    let identify = identify::Behaviour::new(identify::Config::new(
-                        "/budlum/1.0.0".to_string(),
-                        key.public(),
-                    ));
-                    // Request/response timeouts: without one, a peer that opens a
-                    // request stream and never answers holds the request slot
-                    // (and the outbound queue budget) indefinitely - a slowloris
-                    // style resource-retention DoS against sync and bitswap
-                    // (hardening research #58, #60). 30s bounds the wait while
-                    // leaving plenty of headroom for large block batches.
-                    //
-                    // The stream cap bounds memory per connection: each inbound
-                    // stream may buffer up to the codec ceiling until the timeout.
-                    let req_cfg = request_response::Config::default()
-                        .with_request_timeout(Duration::from_secs(30))
-                        .with_max_concurrent_streams(MAX_SYNC_CONCURRENT_STREAMS);
-                    let sync_cfg = req_cfg
-                        .clone()
-                        .with_request_timeout(Duration::from_secs(SYNC_TIMEOUT_SECS));
-                    let sync = request_response::Behaviour::new(
-                        [(
-                            StreamProtocol::new("/budlum/sync/1.0.0"),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        sync_cfg,
-                    );
-                    let bitswap = request_response::Behaviour::new(
-                        [(
-                            StreamProtocol::new(bud_node::BITSWAP_PROTOCOL_NAME),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        req_cfg.clone(),
-                    );
-                    let witness = request_response::Behaviour::new(
-                        [(
-                            StreamProtocol::new(crate::network::witness_protocol::WITNESS_PROTOCOL),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        req_cfg.clone(),
-                    );
-                    let bud3_symbols = request_response::Behaviour::new(
-                        [(
-                            StreamProtocol::new(
-                                crate::storage::bud3::symbol_protocol::SYMBOLS_PROTOCOL_ID,
-                            ),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        req_cfg.clone(),
-                    );
-                    let bud3_custody = request_response::Behaviour::new(
-                        [(
-                            StreamProtocol::new(
-                                crate::storage::bud3::symbol_protocol::CUSTODY_PROTOCOL_ID,
-                            ),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        req_cfg,
-                    );
+        let gossipsub = Self::build_gossipsub(&local_key, mobile_mode)?;
+        let builder = libp2p::SwarmBuilder::with_existing_identity(local_key.clone())
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default(),
+                (tls::Config::new, noise::Config::new),
+                yamux_config,
+            )?
+            .with_quic();
+        match builder.with_dns() {
+            Ok(dns_builder) => Ok((finish_swarm!(dns_builder, gossipsub), true)),
+            Err(dns_err) => {
+                warn!(
+                    error = %dns_err,
+                    "System DNS resolver unavailable; continuing with IP-only TCP (TLS 1.3 + Noise + Yamux) and QUIC transports (/dns* peers require a configured resolver)"
+                );
+                let gossipsub = Self::build_gossipsub(&local_key, mobile_mode)?;
+                let fallback_builder = libp2p::SwarmBuilder::with_existing_identity(local_key)
+                    .with_tokio()
+                    .with_tcp(
+                        tcp::Config::default(),
+                        (tls::Config::new, noise::Config::new),
+                        yamux_config,
+                    )?
+                    .with_quic();
+                Ok((finish_swarm!(fallback_builder, gossipsub), false))
+            }
+        }
+    }
 
-                    Ok::<BudlumBehaviour, Box<dyn std::error::Error + Send + Sync>>(
-                        BudlumBehaviour {
-                            sentry_gate: crate::network::sentry::SentryGateBehaviour::new(
-                                MAX_PEERS,
-                                (MAX_PEERS * 2 / 3).max(1),
-                            ),
-                            ping: ping::Behaviour::new(
-                                ping::Config::new().with_interval(Duration::from_secs(15)),
-                            ),
-                            identify,
-                            #[cfg(feature = "p2p-mdns")]
-                            mdns,
-                            gossipsub,
-                            kad: kademlia,
-                            sync,
-                            bitswap,
-                            witness,
-                            bud3_symbols,
-                            bud3_custody,
-                            limits: libp2p::connection_limits::Behaviour::new(
-                                libp2p::connection_limits::ConnectionLimits::default()
-                                    .with_max_established(Some(
-                                        u32::try_from(MAX_PEERS.saturating_add(
-                                            crate::network::sentry::RESERVED_SHIELD_SLOTS,
-                                        ))
-                                        .unwrap_or(u32::MAX),
-                                    ))
-                                    .with_max_established_incoming(Some(
-                                        u32::try_from((MAX_PEERS * 2 / 3).saturating_add(
-                                            crate::network::sentry::RESERVED_SHIELD_SLOTS,
-                                        ))
-                                        .unwrap_or(u32::MAX),
-                                    ))
-                                    .with_max_established_per_peer(Some(2))
-                                    .with_max_pending_incoming(Some(
-                                        u32::try_from((MAX_PEERS / 2).saturating_add(
-                                            crate::network::sentry::RESERVED_SHIELD_SLOTS,
-                                        ))
-                                        .unwrap_or(u32::MAX),
-                                    )),
-                            ),
-                        },
-                    )
-                })?
-                .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
-                .build();
+    fn with_key_and_dns_probe(
+        chain: ChainHandle,
+        local_key: identity::Keypair,
+        mdns_enabled: bool,
+        storage_node: Option<Arc<bud_node::BudBitswap>>,
+        sharding_config: Option<bud_node::ShardingConfig>,
+        try_system_dns: impl FnOnce() -> Result<(), std::io::Error>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let peer_id = PeerId::from(local_key.public());
+        let mdns_requested = mdns_enabled;
+        let mdns_enabled = mdns_requested && cfg!(feature = "p2p-mdns");
+        if mdns_requested && !mdns_enabled {
+            warn!(
+                "mDNS was requested but this production/default build excludes the p2p-mdns feature; continuing with mDNS disabled"
+            );
+        }
+        let mobile_mode = sharding_config.as_ref().is_some_and(|c| c.mobile_mode);
+
+        let shard_manager =
+            sharding_config.map(|config| Arc::new(bud_node::ShardManager::new(peer_id, config)));
+        info!("Node ID: {peer_id} (mDNS: {mdns_enabled}, Mobile: {mobile_mode})");
+        let (swarm, dns_transport_available) = Self::build_swarm(
+            local_key,
+            mdns_enabled,
+            mobile_mode,
+            storage_node.as_ref(),
+            shard_manager.as_ref(),
+            try_system_dns,
+        )?;
         let (command_tx, command_rx) = mpsc::channel(32);
         let peer_manager = Arc::new(Mutex::new(PeerManager::new()));
         let gossip_dedup = Arc::new(Mutex::new(GossipDedup::default()));
@@ -3391,7 +3359,7 @@ impl Node {
         let sync_state = Arc::new(AtomicUsize::new(0));
         let sync_started_at = Arc::new(AtomicU64::new(0));
         let sync_round_started_at = Arc::new(AtomicU64::new(0));
-        Ok(Self {
+        Ok(Node {
             swarm,
             peer_id,
             command_tx,
@@ -3846,15 +3814,14 @@ impl Node {
     /// or rejected by the swarm.
     pub fn dial(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
         let remote: Multiaddr = addr.parse()?;
-        if let Err(reason) = self.sentry_policy.can_dial(None, &remote) {
-            warn!("Refusing dial to {addr}: {reason}");
-            return Err(Box::new(reason));
-        }
         if !self.dns_transport_available && Self::multiaddr_uses_dns(&remote) {
             return Err(
                 "cannot dial DNS multiaddr because system DNS transport is unavailable".into(),
             );
         }
+        if let Err(reason) = self.sentry_policy.can_dial(None, &remote) {
+            warn!("Refusing dial to {addr}: {reason}");
+            return Err(Box::new(reason));
         }
         let target_peer = crate::network::sentry::peer_id_from_multiaddr(&remote);
         if !self
@@ -10289,7 +10256,6 @@ mod identity_file_tests {
         sentry_task.abort();
         pub_task.abort();
     }
-
     #[tokio::test]
     async fn node_starts_with_ip_transports_when_system_dns_is_unavailable() {
         use crate::chain::blockchain::Blockchain;
