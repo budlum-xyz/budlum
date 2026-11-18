@@ -240,14 +240,31 @@ fn parse_headers(payload: &[u8]) -> Result<Vec<BitcoinHeader>, AdapterError> {
     let mut headers = Vec::with_capacity(count);
     for index in 0..count {
         let base = 4usize.saturating_add(index.saturating_mul(HEADER_LEN));
-        let raw = &payload[base..base + HEADER_LEN];
+        let end = base
+            .checked_add(HEADER_LEN)
+            .ok_or(AdapterError::Malformed {
+                offset: base,
+                reason: "header offset overflows".to_string(),
+            })?;
+        let Some(raw) = payload.get(base..end) else {
+            return Err(AdapterError::Malformed {
+                offset: base,
+                reason: "header is not present".to_string(),
+            });
+        };
+        let version_bytes: [u8; 4] = raw
+            .get(0..4)
+            .ok_or(AdapterError::Malformed {
+                offset: base,
+                reason: "version is not present".to_string(),
+            })?
+            .try_into()
+            .map_err(|_| AdapterError::Malformed {
+                offset: base,
+                reason: "version is not 4 bytes".to_string(),
+            })?;
         headers.push(BitcoinHeader {
-            version: i32::from_le_bytes(raw[0..4].try_into().map_err(|_| {
-                AdapterError::Malformed {
-                    offset: base,
-                    reason: "version is not 4 bytes".to_string(),
-                }
-            })?),
+            version: i32::from_le_bytes(version_bytes),
             parent_hash: fixed(raw, 4, "parent_hash")?,
             merkle_root: fixed(raw, 36, "merkle_root")?,
             timestamp: u32_le(raw, 68, "timestamp")?,
