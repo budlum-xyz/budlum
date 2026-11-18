@@ -14,16 +14,36 @@ An unchecked entry means it still needs full line-by-line review. A path listed 
 
 ## Execution environments
 
-- [ ] Debian 13 x86-64: run all components, CLI journeys, all features, security tools and tests. Partial local tests only.
+Retain every environment from the supplied `PLAN (1).md`. Extra environments do not replace the requested ones. A Debian-built executable run in an Ubuntu chroot is userland execution evidence, not an Ubuntu build or a separately booted Ubuntu kernel.
+
+- [ ] Ubuntu 24.04 LTS x86-64: build, run and test all components on a CI runner and in a container. A checksum-verified Ubuntu Base userland is being prepared for targeted execution.
+- [ ] Ubuntu 24.04 LTS ARM64: build, run and test all components on an ARM64 runner.
+- [ ] Ubuntu 22.04 LTS x86-64: build, run and test all components in a container.
+- [ ] Debian 13 Trixie x86-64: run all components, CLI journeys, all features, security tools and tests. Partial local tests only.
+- [ ] Debian 12 Bookworm x86-64: build, run and test all components in the container and builder image.
+- [ ] Chainguard Wolfi x86-64: run and test the runtime container image.
+- [ ] Alpine Linux musl x86-64: build, run and test all components.
+- [ ] Fedora Linux x86-64: build, run and test all components.
+- [ ] Rocky Linux 9 x86-64: build, run and test all components.
+- [ ] macOS Apple Silicon ARM64: build, run and test all components on a runner.
+- [ ] Windows Server x86-64: build, run and test all components on a runner.
 - [ ] Ubuntu 26.04.1 Base x86-64 userland on the Debian kernel: complete the targeted rerun and user journeys; see `findings/os-ubuntu.md`.
-- [ ] Ubuntu 24.04 x86-64: build, run and test all components.
-- [ ] Ubuntu 24.04 ARM64: build, run and test all components.
-- [ ] Alpine Linux musl: build, run and test all components.
-- [ ] Windows: build, run and test all components.
-- [ ] macOS: build, run and test all components.
 - [ ] Android: build, run and test the mobile application and core.
 - [ ] iOS: build, run and test the mobile application and core.
 - [ ] wasm32: run relevant deterministic and cryptographic checks.
+
+## Supplied inventory reconciliation
+
+The supplied plan contains 1,063 file paths. This newer inventory contains 1,819 paths from the recorded aggregation source revision. Exactly 1,005 supplied paths remain present, and 58 are absent at that newer revision. Absence is not proof of a correct removal. The [inventory drift checklist](testnet/inventory-drift.md) retains those 58 items for rename, deletion and caller-migration review. No supplied path is silently dropped and no file is marked reviewed merely because it was listed.
+
+## Garden verification track
+
+- [ ] Resolve and CI-verify B-0049 / BLG-268 without weakening invite parsing.
+- [ ] Verify the 118 Garden library cases and all 18 separate-process scenario cases on the final source revision.
+- [ ] Verify real-NAT execution, numeric-IP-only startup, main-testnet rejection and all 11 acceptance steps.
+- [ ] Resolve the storage gap B-0050 / BLG-269 under the [main-only dependency report](testnet/garden-main-only.md); a passing raw-file scenario does not satisfy B.U.D. 3.0 acceptance.
+- [ ] Recheck B-0041 through B-0044 on the actual Garden head, not on an upper branch or an uncommitted worktree.
+- [ ] Record final commit SHA and successful CI run id and run number. Local results and queued runs do not close the track.
 
 ## Audit areas
 

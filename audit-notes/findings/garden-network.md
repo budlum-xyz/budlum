@@ -2,6 +2,12 @@
 
 These findings are based on the source tree and dependency versions named below. A local passing test does not replace the required green CI run.
 
+## Live branch placement check
+
+A fresh fetch still places Garden at `3467a0bababb7648c75631173228d460da935485`. Its `net.rs` contains neither `CodecScope` nor `decode_bounded_bincode`. The B-0041 and B-0042 repairs described below exist on upper branch `budlum-stack` (`df970fc98402e0d025b7832ebada47581f8174f6` at this check), not on Garden. A previously staged tree is not a pushed Garden fix. Both findings therefore remain open for PR #164. B-0043 also remains open on Garden: the read helper still returns `Vec<u8>` while its local permit vectors are dropped.
+
+The canonical bounded decoder is absent from main (`1bd93561`). Respect the main-only dependency rule before importing it into a new Garden change. The per-connection ownership repair can be reviewed independently because it does not need that decoder.
+
 ## B-0041: per-connection frame shares are recreated for each substream
 
 - Location: `src/garden/net.rs:259-270` at `garden` commit `c34cc016cf15e512be2861a92be2b8649f4e02ae`.

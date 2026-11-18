@@ -1,0 +1,64 @@
+# Supplied audit inventory drift checklist
+
+The supplied `PLAN (1).md` lists 1,063 paths. Source revision `f45cd034d486ce2643b49de291d393663c862a0a` retains 1,005 and no longer contains the following 58 paths. This is a set comparison only. It does not establish safe deletion, a complete rename, reviewed callers or a passing replacement.
+
+For each item, inspect its history, identify any replacement, verify migrated callers and tests, and record a finding if behavior was lost. Do not mark an absent path complete merely because it is absent. The full current-file inventory remains in [the plan](../plan.md).
+
+- [ ] `crates/budscan/Cargo.lock`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/Cargo.toml`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/README.md`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/browser/README.md`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/browser/l10n/en-US/budscan.ftl`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/browser/l10n/tr-TR/budscan.ftl`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/browser/mozconfig`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/browser/patches.txt`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/browser/patches/address-bar-verification-badge.patch`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/browser/patches/bud-protocol-handler.patch`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/browser/patches/name-bar-punycode.patch`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/browser/settings/budscan.cfg`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/browser/settings/policies.json`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/arweave.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/bin/budscan.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/bns_proof.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/cid.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/content_id.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/ens.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/evidence.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/evm_audit.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/fetch.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/lib.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/light_client.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/name_rule.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/patchset.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/punycode.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/query.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/resolve.rs`: verify removal or rename and caller migration.
+- [ ] `crates/budscan/src/search.rs`: verify removal or rename and caller migration.
+- [ ] `docs/BPQS_INDEPENDENT_REVIEW_CALL.md`: verify removal or rename and caller migration.
+- [ ] `docs/BUD_CONTENT_ENCRYPTION.md`: verify removal or rename and caller migration.
+- [ ] `docs/BUD_STORAGE_ROADMAP.md`: verify removal or rename and caller migration.
+- [ ] `docs/PROVENANCE_NOTES.md`: verify removal or rename and caller migration.
+- [ ] `src/developer_os.rs`: verify removal or rename and caller migration.
+- [ ] `src/domain/regen_health.rs`: verify removal or rename and caller migration.
+- [ ] `src/domain/regeneration_stage.rs`: verify removal or rename and caller migration.
+- [ ] `src/gateway/atlas.rs`: verify removal or rename and caller migration.
+- [ ] `src/gateway/mod.rs`: verify removal or rename and caller migration.
+- [ ] `src/gateway/passport.rs`: verify removal or rename and caller migration.
+- [ ] `src/gateway/service.rs`: verify removal or rename and caller migration.
+- [ ] `src/network/regen_health_tick.rs`: verify removal or rename and caller migration.
+- [ ] `src/storage/db.rs`: verify removal or rename and caller migration.
+- [ ] `src/storage/merkle_trie.rs`: verify removal or rename and caller migration.
+- [ ] `src/storage/pruning.rs`: verify removal or rename and caller migration.
+- [ ] `src/storage/three_regime.rs`: verify removal or rename and caller migration.
+- [ ] `src/storage/traits.rs`: verify removal or rename and caller migration.
+- [ ] `src/tests/audit_findings_locks.rs`: verify removal or rename and caller migration.
+- [ ] `src/tests/audit_p49_locks.rs`: verify removal or rename and caller migration.
+- [ ] `src/tests/f20_priority_findings.rs`: verify removal or rename and caller migration.
+- [ ] `src/tests/p01_consensus_rounds.rs`: verify removal or rename and caller migration.
+- [ ] `src/tests/regeneration_recovery.rs`: verify removal or rename and caller migration.
+- [ ] `src/tests/v95_v98_canaries.rs`: verify removal or rename and caller migration.
+- [ ] `xtask/gates/src/gates/budscan_parity.rs`: verify removal or rename and caller migration.
+- [ ] `xtask/gates/src/gates/budscan_patchset.rs`: verify removal or rename and caller migration.
+- [ ] `xtask/gates/src/gates/regen_health_door.rs`: verify removal or rename and caller migration.
+- [ ] `xtask/gates/src/gates/regeneration.rs`: verify removal or rename and caller migration.
+- [ ] `xtask/gates/src/gates/zkvm_immune_regeneration.rs`: verify removal or rename and caller migration.
