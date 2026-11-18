@@ -5215,4 +5215,258 @@ mod tests {
             FinalityStatus::Finalized
         );
     }
+
+    // ---- DAG / PoH / PoSpace delegation doors (BLG-268/269/270, extended) ----
+    //
+    // The structural-quorum replacements (DAG anchors, PoH ladders, PoSpace
+    // plot qualities) are pinned above. These tests pin what remains around
+    // them: proof families the adapter does not speak error out, foreign
+    // domains and foreign chains are refused, the PoH parent-binding and the
+    // PoSpace zero-hash guards fire before any proof is judged, and the
+    // PoSpace delegation to the PoA quorum verifier finalizes with real
+    // signatures.
+    //
+    fn delegated_quorum_world(
+        id: DomainId,
+        kind: ConsensusKind,
+        adapter: &'static str,
+    ) -> (ConsensusDomain, DomainCommitment) {
+        let mut domain = default_domain(id, kind.clone(), 45262, adapter, 0);
+        domain.bridge_enabled = false;
+        let mut commitment = commitment(kind);
+        commitment.domain_id = domain.id;
+        (domain, commitment)
+    }
+
+    #[test]
+    fn dag_finality_rejects_a_poa_proof() {
+        // A DAG domain takes a BFT certificate only; a PoA proof errors out.
+        let (domain, commitment) =
+            delegated_quorum_world(42, ConsensusKind::Dag, "dag-tip-vote-v1");
+        assert!(DagFinalityAdapter
+            .verify_finality(
+                &domain,
+                &commitment,
+                &FinalityProof::PoA {
+                    authorities: vec![],
+                    signatures: vec![],
+                },
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn dag_finality_rejects_a_commitment_for_another_domain() {
+        let (domain, mut commitment) =
+            delegated_quorum_world(42, ConsensusKind::Dag, "dag-tip-vote-v1");
+        commitment.domain_id = 99;
+        let proof = FinalityProof::Bft {
+            round: 0,
+            commit_hash: commitment.domain_block_hash,
+            cert: FinalityCert {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch: 0,
+                checkpoint_height: commitment.domain_height,
+                checkpoint_hash: hex::encode(commitment.domain_block_hash),
+                agg_sig_bls: vec![],
+                bitmap: vec![],
+                set_hash: String::new(),
+                seat_table_version: 0,
+            },
+            validator_snapshot: ValidatorSetSnapshot::new(0, vec![]),
+        };
+        assert!(matches!(
+            DagFinalityAdapter
+                .verify_finality(&domain, &commitment, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn dag_finality_rejects_a_certificate_for_another_chain_id() {
+        let (domain, commitment) =
+            delegated_quorum_world(42, ConsensusKind::Dag, "dag-tip-vote-v1");
+        let mut snapshot = ValidatorSetSnapshot::new(0, vec![]);
+        snapshot.validators = vec![crate::chain::finality::ValidatorEntry {
+            address: crate::core::address::Address::from([9u8; 32]),
+            stake: 1,
+            bls_public_key: Vec::new(),
+            pop_signature: Vec::new(),
+            pq_public_key: Vec::new(),
+        }];
+        // The certificate was signed under a foreign chain id: the BFT
+        // delegation must refuse it before any quorum math.
+        let cert = FinalityCert {
+            chain_id: 77,
+            epoch: 0,
+            checkpoint_height: commitment.domain_height,
+            checkpoint_hash: hex::encode(commitment.domain_block_hash),
+            agg_sig_bls: vec![],
+            bitmap: vec![],
+            set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
+        };
+        let status = DagFinalityAdapter
+            .verify_finality(
+                &domain,
+                &commitment,
+                &FinalityProof::Bft {
+                    round: 0,
+                    commit_hash: commitment.domain_block_hash,
+                    cert,
+                    validator_snapshot: snapshot,
+                },
+            )
+            .expect("a foreign chain id is a refusal, not an error");
+        assert!(
+            matches!(&status, FinalityStatus::Rejected(reason) if reason.contains("chain id")),
+            "a certificate signed under another chain id was not refused: {status:?}"
+        );
+    }
+
+    #[test]
+    fn poh_finality_rejects_a_zero_parent_above_height_one() {
+        // The harness commitment is at height 10 with a zero parent: a PoH
+        // commitment above height 1 must bind the hash chain it extends.
+        let (domain, commitment) =
+            delegated_quorum_world(43, ConsensusKind::Poh, "poh-hash-chain-v1");
+        assert!(matches!(
+            PohFinalityAdapter
+                .verify_finality(
+                    &domain,
+                    &commitment,
+                    &FinalityProof::Bft {
+                        round: 0,
+                        commit_hash: commitment.domain_block_hash,
+                        cert: FinalityCert {
+                            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                            epoch: 0,
+                            checkpoint_height: commitment.domain_height,
+                            checkpoint_hash: hex::encode(commitment.domain_block_hash),
+                            agg_sig_bls: vec![],
+                            bitmap: vec![],
+                            set_hash: String::new(),
+                            seat_table_version: 0,
+                        },
+                        validator_snapshot: ValidatorSetSnapshot::new(0, vec![]),
+                    },
+                )
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn poh_finality_rejects_a_poa_proof() {
+        // PoH delegates to PoS or BFT quorums; a PoA proof errors out. The
+        // parent must be non-zero so the parent-binding guard lets the proof
+        // reach the variant check.
+        let (domain, mut commitment) =
+            delegated_quorum_world(43, ConsensusKind::Poh, "poh-hash-chain-v1");
+        commitment.parent_domain_block_hash = [0x77u8; 32];
+        assert!(PohFinalityAdapter
+            .verify_finality(
+                &domain,
+                &commitment,
+                &FinalityProof::PoA {
+                    authorities: vec![],
+                    signatures: vec![],
+                },
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn pospace_finality_rejects_a_zero_block_hash() {
+        let (domain, mut commitment) =
+            delegated_quorum_world(44, ConsensusKind::Pospace, "pospace-plot-v1");
+        commitment.domain_block_hash = [0u8; 32];
+        assert!(matches!(
+            PospaceFinalityAdapter
+                .verify_finality(
+                    &domain,
+                    &commitment,
+                    &FinalityProof::PoA {
+                        authorities: vec![],
+                        signatures: vec![],
+                    },
+                )
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn pospace_finality_accepts_a_registered_poa_quorum() {
+        use crate::crypto::primitives::KeyPair;
+        let (mut domain, commitment) =
+            delegated_quorum_world(44, ConsensusKind::Pospace, "pospace-plot-v1");
+        let mut kps = Vec::new();
+        let mut authorities = Vec::new();
+        for i in 0..4u8 {
+            let mut seed = [0u8; 32];
+            seed[0] = 0xC0 + i;
+            let kp = KeyPair::from_seed(&seed).unwrap();
+            authorities.push(crate::core::address::Address::from(kp.public_key_bytes()));
+            kps.push(kp);
+        }
+        domain.validator_set_hash = poa_authority_set_hash(&domain, &authorities).unwrap();
+        let msg = poa_commit_signing_message(domain.domain_chain_id, domain.id, &commitment);
+        let sig = |i: usize| PoAAuthoritySignature {
+            authority: authorities[i],
+            signature: kps[i].sign(&msg).to_vec(),
+        };
+        // 3 of 4 distinct signers meet ceil(4*2/3): the PoSpace adapter's
+        // delegation to the PoA quorum verifier finalizes end to end.
+        let proof = FinalityProof::PoA {
+            authorities: authorities.clone(),
+            signatures: vec![sig(0), sig(1), sig(2)],
+        };
+        assert_eq!(
+            PospaceFinalityAdapter
+                .verify_finality(&domain, &commitment, &proof)
+                .unwrap(),
+            FinalityStatus::Finalized
+        );
+    }
+
+    #[test]
+    fn pospace_finality_rejects_an_unregistered_poa_set() {
+        use crate::crypto::primitives::KeyPair;
+        let (mut domain, commitment) =
+            delegated_quorum_world(44, ConsensusKind::Pospace, "pospace-plot-v1");
+        let mut honest = Vec::new();
+        let mut seed = [0u8; 32];
+        seed[0] = 0xC9;
+        let kp = KeyPair::from_seed(&seed).unwrap();
+        honest.push(crate::core::address::Address::from(kp.public_key_bytes()));
+        domain.validator_set_hash = poa_authority_set_hash(&domain, &honest).unwrap();
+        // An attacker-chosen set that never registered must not choose its
+        // own denominator.
+        let mut attacker_auths = Vec::new();
+        let mut attacker_sigs = Vec::new();
+        let msg = poa_commit_signing_message(domain.domain_chain_id, domain.id, &commitment);
+        for i in 0..3u8 {
+            let mut seed = [0u8; 32];
+            seed[0] = 0xE0 + i;
+            let kp = KeyPair::from_seed(&seed).unwrap();
+            let address = crate::core::address::Address::from(kp.public_key_bytes());
+            attacker_auths.push(address);
+            attacker_sigs.push(PoAAuthoritySignature {
+                authority: address,
+                signature: kp.sign(&msg).to_vec(),
+            });
+        }
+        let proof = FinalityProof::PoA {
+            authorities: attacker_auths,
+            signatures: attacker_sigs,
+        };
+        assert!(matches!(
+            PospaceFinalityAdapter
+                .verify_finality(&domain, &commitment, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+    }
 }
