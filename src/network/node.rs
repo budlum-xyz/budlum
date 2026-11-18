@@ -10041,15 +10041,18 @@ mod identity_file_tests {
             client.subscribe("transactions".to_string()).await;
         }
 
-        /// Whether `pm` has handshaked with `shielded` and is connected to
-        /// `public`, read under one lock and without unwrapping it.
+        /// Read both peers' connection and handshake states under one lock.
         fn handshake_state(
             pm: &Arc<Mutex<PeerManager>>,
             shielded: &PeerId,
             public: &PeerId,
-        ) -> (bool, bool) {
+        ) -> (bool, bool, bool) {
             let guard = pm.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            (guard.is_handshaked(shielded), guard.is_connected(public))
+            (
+                guard.is_handshaked(shielded),
+                guard.is_connected(public),
+                guard.is_handshaked(public),
+            )
         }
 
         // Wait until V<->S and S<->P complete their application handshakes,
@@ -10060,8 +10063,8 @@ mod identity_file_tests {
             // twice per iteration let the peer set change in between, and the
             // second `unwrap()` panicked the whole suite when the first
             // holder of the lock had panicked.
-            let (v_has_s, v_has_p) = handshake_state(&val_pm, &sentry_peer_id, &pub_peer_id);
-            let (s_has_v, s_has_p) = handshake_state(&sentry_pm, &val_peer_id, &pub_peer_id);
+            let (v_has_s, v_has_p, _) = handshake_state(&val_pm, &sentry_peer_id, &pub_peer_id);
+            let (s_has_v, _, s_has_p) = handshake_state(&sentry_pm, &val_peer_id, &pub_peer_id);
             assert!(
                 !v_has_p,
                 "Public peer {pub_peer_id} must NEVER connect directly to shielded validator {val_peer_id}"
@@ -10091,7 +10094,7 @@ mod identity_file_tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while pub_chain.get_height().await < 1 {
             assert!(
-                !peers(&val_pm).1,
+                !handshake_state(&val_pm, &sentry_peer_id, &pub_peer_id).1,
                 "shielded validator must remain invisible to direct public peer connections"
             );
             assert!(
