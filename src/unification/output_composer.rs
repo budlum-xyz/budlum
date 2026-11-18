@@ -991,7 +991,14 @@ fn resolve_bindings(
     by_id: &BTreeMap<&str, &NormalizedMachineOutput>,
 ) -> Result<Vec<ResolvedBinding>, CompositionError> {
     let mut resolved = Vec::with_capacity(bindings.len());
+    let mut seen_targets = std::collections::BTreeSet::new();
     for binding in bindings {
+        if !seen_targets.insert((binding.to_step.as_str(), binding.target_input.as_str())) {
+            return Err(CompositionError::InvalidInput(format!(
+                "duplicate binding targeting `{}.{}`",
+                binding.to_step, binding.target_input
+            )));
+        }
         let upstream = by_id
             .get(binding.from_step.as_str())
             .ok_or_else(|| CompositionError::UnknownStep(binding.from_step.clone()))?;
@@ -1230,7 +1237,7 @@ mod tests {
 
         let mismatch = OutputCompositionPlan {
             plan_id: String::from("mismatch-test"),
-            steps: vec![a, b],
+            steps: vec![a.clone(), b.clone()],
             bindings: vec![OutputBinding {
                 from_step: String::from("svm_a"),
                 selector: OutputSelector::TypedField {
@@ -1244,6 +1251,35 @@ mod tests {
         assert!(matches!(
             OutputComposer::compose(&mismatch),
             Err(CompositionError::BindingMismatch { .. })
+        ));
+
+        // Duplicate bindings targeting the same downstream input must fail closed
+        // instead of silently overwriting the first binding's piped value.
+        let duplicate_target = OutputCompositionPlan {
+            plan_id: String::from("dup-target-test"),
+            steps: vec![a, b],
+            bindings: vec![
+                OutputBinding {
+                    from_step: String::from("svm_a"),
+                    selector: OutputSelector::TypedField {
+                        key: String::from("x"),
+                    },
+                    to_step: String::from("btc_b"),
+                    target_input: String::from("shared_in"),
+                    enforce_match: false,
+                },
+                OutputBinding {
+                    from_step: String::from("svm_a"),
+                    selector: OutputSelector::ReturnData,
+                    to_step: String::from("btc_b"),
+                    target_input: String::from("shared_in"),
+                    enforce_match: false,
+                },
+            ],
+        };
+        assert!(matches!(
+            OutputComposer::compose(&duplicate_target),
+            Err(CompositionError::InvalidInput(_))
         ));
     }
 
