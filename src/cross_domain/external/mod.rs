@@ -80,10 +80,12 @@
 
 pub mod bitcoin_spv;
 pub mod da_sampling;
+pub mod dag_bft;
 pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
 pub mod external_tx;
+pub mod hotstuff;
 pub mod intake;
 pub mod intake_quorum;
 pub mod phase_a_dual;
@@ -101,6 +103,7 @@ pub use bitcoin_spv::{
     sha256d, BitcoinHeader, BitcoinSpvAdapter, PinnedBitcoinAnchor, EVIDENCE_VERSION, HEADER_LEN,
     MAX_FUTURE_SECONDS, MAX_HEADERS, REQUIRED_DEPTH,
 };
+pub use dag_bft::{BullsharkDagAdapter, DagBftValidator, PinnedDagCommittee};
 pub use domain_bridge::{
     decode_external_evidence, encode_external_evidence, ExternalDomainFinalityBridge,
     EXTERNAL_DOMAIN_FINALITY_ADAPTER,
@@ -120,8 +123,12 @@ pub use evm_hybrid::{
 pub use external_tx::{
     execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext, ExternalDomainTxError,
 };
+pub use hotstuff::{HotStuffThreeChainAdapter, HotStuffValidator, PinnedHotStuffCommittee};
 pub(crate) use intake::live_policy_clock;
-pub use intake::{AdapterSpec, IntakeEntry, IntakeError, IntakeState, RegistrationRequest};
+pub use intake::{
+    AdapterSpec, ContradictionSlashOutcome, IntakeEntry, IntakeError, IntakeState,
+    RegistrationRequest,
+};
 pub use intake_quorum::{
     QuorumRound, QuorumRounds, RoundEntry, RoundError, RoundKey, RoundProgress, RoundState,
     ROUND_RETENTION_BLOCKS,
