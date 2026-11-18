@@ -34,8 +34,10 @@ pub const REPAIR_TAG: &[u8] = b"BDLM_BUD3_REPAIR_V1";
 /// Domain tag binding independent Full-validator repair attestations.
 pub const REPAIR_ATTEST_DOMAIN: &[u8] = b"BDLM_BUD3_REPAIR_ATTEST_V1";
 
-/// Minimum independent active Full-validator attestations required when repair
-/// does not carry an inline Merkle-verified symbol witness.
+/// Legacy fixed attestation count retained for wire and tooling compatibility.
+///
+/// Consensus admission refuses attestation-only repairs until the witness
+/// carries a seat- or stake-weighted quorum certificate.
 pub const MIN_REPAIR_ATTESTATIONS: usize = 3;
 
 /// Maximum inline Merkle-verified witness symbols accepted in one `RecordRepair` tx.

@@ -6421,6 +6421,8 @@ impl Blockchain {
             self.finalized_height,
             crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id),
         );
+        self.mempool
+            .sync_duty_validators(self.active_duty_validators());
         self.emit_chain_metrics();
         self.emit_tx_processed(block.transactions.len() as u64);
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
@@ -6430,16 +6432,15 @@ impl Blockchain {
         self.produce_block(miner_address);
     }
     fn active_duty_validators(&self) -> Vec<Address> {
-        let mut set = std::collections::BTreeSet::new();
-        for (addr, v) in &self.state.validators {
-            if v.active && !v.slashed && !v.jailed {
-                set.insert(*addr);
-            }
-        }
-        for rec in self.state.validator_directory.iter() {
-            set.insert(rec.owner);
-        }
-        set.into_iter().collect()
+        self.state
+            .duty_lane_signers_for_chain(self.chain_id)
+            .into_iter()
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn duty_validator_snapshot_for_test(&self) -> std::collections::BTreeSet<Address> {
+        self.active_duty_validators().into_iter().collect()
     }
 
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
