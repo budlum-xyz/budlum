@@ -2574,9 +2574,14 @@ mod tests {
     fn pinned_golden_commit() -> TendermintCommitEvidence {
         // All three sign: two of three is 10 of 15, below the +2/3+1 threshold
         // of 11, so a two-signer golden would be refused for the wrong reason.
-        let mut commit = synthetic_commit(&[5, 5, 5], 3);
-        commit.app_hash = commit.block_hash;
-        commit
+        //
+        // The commit is already sealed: `synthetic_commit` sets `block_hash` to
+        // the header's own hash. It used to be overwritten here with
+        // `commit.app_hash = commit.block_hash`, which was the old (wrong) rule:
+        // `app_hash` is a header field, not the block id, and a payload that
+        // asserts otherwise is a payload whose header does not hash to the block
+        // the validators signed. That is refused now, so the fixture is real.
+        synthetic_commit(&[5, 5, 5], 3)
     }
 
     fn registration_request(set_hash: [u8; 32]) -> RegistrationRequest {
@@ -2591,7 +2596,10 @@ mod tests {
             },
             policy: admission_policy(),
             economics,
-            versions: VersionPolicy::single(adapter.descriptor().id, 1, 0),
+            // The evidence version this adapter reads, not a literal: the
+            // payload carries the header now, so it is version 2 and a policy
+            // that says 1 refuses the golden as an unread format.
+            versions: VersionPolicy::single(adapter.descriptor().id, EVIDENCE_VERSION, 0),
             bond_atoms: economics.required_bond_atoms(),
             poster: Address([9u8; 32]),
             golden,
