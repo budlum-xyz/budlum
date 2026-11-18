@@ -331,15 +331,19 @@ impl SegmentDecoder {
     }
 }
 
-/// The object ceiling check the streamer runs before it reads one byte: the
-/// ceiling is the genesis parameter, not a constant in this module, so a
+/// The object ceiling check the streamer runs before it reads one byte.
+///
+/// The ceiling is the genesis parameter, not a constant in this module, so a
 /// governance change moves the streamer with it (section 6.21.1).
 ///
 /// # Errors
 ///
 /// [`FountainError::ContentTooLarge`] when `object_len` is above
 /// `max_content_bytes`.
-pub fn check_object_ceiling(object_len: u64, max_content_bytes: u64) -> Result<(), FountainError> {
+pub const fn check_object_ceiling(
+    object_len: u64,
+    max_content_bytes: u64,
+) -> Result<(), FountainError> {
     if object_len > max_content_bytes {
         return Err(FountainError::ContentTooLarge {
             len: object_len,
@@ -349,9 +353,10 @@ pub fn check_object_ceiling(object_len: u64, max_content_bytes: u64) -> Result<(
     Ok(())
 }
 
-/// Stream an object through A2: read it segment by segment from `reader`,
-/// hand every source symbol and `repair_per_segment` repair symbols to
-/// `sink`, and return the object commitment. One segment buffer and one
+/// Stream an object through A2 into `sink` and return the object commitment.
+///
+/// Reads segment by segment from `reader` and hands every source symbol plus
+/// `repair_per_segment` repair symbols to `sink`. One segment buffer and one
 /// encoder are alive at a time, so memory is bounded by two segments whatever
 /// the object length.
 ///

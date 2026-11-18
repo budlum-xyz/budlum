@@ -50,6 +50,11 @@ const MAX_CONFIGURED_SHIELD_PEERS: usize = RESERVED_SHIELD_SLOTS;
 /// while a validator runs in sentry-shielded mode.
 const MAX_SHIELD_PENDING_PER_SOURCE: usize = 4;
 
+/// Global cap on concurrent unauthenticated pending inbound handshakes tracked
+/// by [`SentryGateBehaviour`] so spoofed source prefixes cannot grow state
+/// unboundedly.
+const MAX_SHIELD_PENDING_TOTAL: usize = 128;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DialEndpoint {
     peer_id: PeerId,
@@ -354,9 +359,8 @@ impl SentryShieldConfig {
             if !self.sentry_peer_ids.contains(&peer_id) {
                 return false;
             }
-            return addrs.iter().all(|addr| match peer_id_from_multiaddr(addr) {
-                Some(addr_peer) => addr_peer == peer_id,
-                None => true,
+            return addrs.iter().all(|addr| {
+                peer_id_from_multiaddr(addr).is_none_or(|addr_peer| addr_peer == peer_id)
             });
         }
         if addrs.is_empty() {
@@ -424,7 +428,7 @@ enum PendingSourcePrefix {
 }
 
 fn pending_source_prefix(addr: &Multiaddr) -> Option<PendingSourcePrefix> {
-    for proto in addr.iter() {
+    for proto in addr {
         match proto {
             Protocol::Ip4(ip) => {
                 if ip.is_loopback() {
@@ -518,15 +522,15 @@ impl SentryGateBehaviour {
         }
         // Additional connection streams for an already-admitted public peer are
         // bounded by `connection_limits::with_max_established_per_peer`.
-        if distinct_public.contains(&candidate) {
-            return Ok(());
-        }
-        if distinct_public.len() >= self.max_public_peers {
+        if !distinct_public.contains(&candidate) && distinct_public.len() >= self.max_public_peers {
             return Err(ConnectionDenied::new(
                 "public peer limit reached; remaining swarm slots are reserved for sentry shield peers",
             ));
         }
-        if incoming && distinct_public_incoming.len() >= self.max_public_incoming {
+        if incoming
+            && !distinct_public_incoming.contains(&candidate)
+            && distinct_public_incoming.len() >= self.max_public_incoming
+        {
             return Err(ConnectionDenied::new(
                 "public inbound peer limit reached; remaining inbound slots are reserved for sentry shield peers",
             ));
@@ -546,6 +550,11 @@ impl NetworkBehaviour for SentryGateBehaviour {
         remote_addr: &Multiaddr,
     ) -> Result<(), ConnectionDenied> {
         if self.shield.is_validator_shielded() {
+            if self.pending_inbound.len() >= MAX_SHIELD_PENDING_TOTAL {
+                return Err(ConnectionDenied::new(
+                    "too many total concurrent pending handshakes against shielded validator",
+                ));
+            }
             if let Some(prefix) = pending_source_prefix(remote_addr) {
                 let in_flight = self.pending_by_source.get(&prefix).copied().unwrap_or(0);
                 if in_flight >= MAX_SHIELD_PENDING_PER_SOURCE {
@@ -623,6 +632,10 @@ impl NetworkBehaviour for SentryGateBehaviour {
             }
             FromSwarm::ListenFailure(failure) => {
                 self.clear_pending(failure.connection_id);
+                self.established.remove(&failure.connection_id);
+            }
+            FromSwarm::DialFailure(failure) => {
+                self.established.remove(&failure.connection_id);
             }
             _ => {}
         }
@@ -995,6 +1008,89 @@ mod tests {
         assert!(
             sentry_swarm.is_connected(&val_id),
             "protected validator must connect via reserved shield slot even when public slots are full"
+        );
+    }
+
+    #[tokio::test]
+    async fn downstream_behaviour_rejection_does_not_leak_public_peer_slots() {
+        use libp2p::allow_block_list;
+
+        #[derive(NetworkBehaviour)]
+        struct GateBeforeBlockList {
+            gate: SentryGateBehaviour,
+            block_list: allow_block_list::Behaviour<allow_block_list::BlockedPeers>,
+            ping: ping::Behaviour,
+        }
+
+        let sentry_key = identity::Keypair::generate_ed25519();
+        let blocked_key = identity::Keypair::generate_ed25519();
+        let honest_key = identity::Keypair::generate_ed25519();
+        let blocked_id = blocked_key.public().to_peer_id();
+        let honest_id = honest_key.public().to_peer_id();
+
+        let transport = MemoryTransport::default()
+            .upgrade(upgrade::Version::V1)
+            .authenticate(noise::Config::new(&sentry_key).expect("noise"))
+            .multiplex(yamux::Config::default())
+            .boxed();
+        let mut block_list =
+            allow_block_list::Behaviour::<allow_block_list::BlockedPeers>::default();
+        block_list.block_peer(blocked_id);
+        let behaviour = GateBeforeBlockList {
+            gate: SentryGateBehaviour::new(1, 1),
+            block_list,
+            ping: ping::Behaviour::new(ping::Config::new()),
+        };
+        let mut sentry_swarm = Swarm::new(
+            transport,
+            behaviour,
+            sentry_key.public().to_peer_id(),
+            libp2p::swarm::Config::with_tokio_executor()
+                .with_idle_connection_timeout(Duration::from_secs(30)),
+        );
+        let listen_addr: Multiaddr = "/memory/9941".parse().expect("memory addr");
+        sentry_swarm.listen_on(listen_addr.clone()).expect("listen");
+        while !matches!(
+            sentry_swarm.select_next_some().await,
+            SwarmEvent::NewListenAddr { .. }
+        ) {}
+
+        let (mut blocked_swarm, _) =
+            build_memory_swarm(blocked_key, SentryShieldConfig::default(), 4, 4, 9942);
+        let (mut honest_swarm, _) =
+            build_memory_swarm(honest_key, SentryShieldConfig::default(), 4, 4, 9943);
+
+        // `blocked_peer` passes `SentryGateBehaviour::handle_established_inbound_connection`
+        // first, then is denied by `block_list`, firing `FromSwarm::ListenFailure`.
+        blocked_swarm
+            .dial(listen_addr.clone())
+            .expect("blocked dial");
+        let mut denied_seen = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline && !denied_seen {
+            tokio::select! {
+                ev = sentry_swarm.select_next_some() => {
+                    if matches!(ev, SwarmEvent::IncomingConnectionError { .. }) {
+                        denied_seen = true;
+                    }
+                }
+                _ = blocked_swarm.select_next_some() => {}
+            }
+        }
+        assert!(denied_seen && !sentry_swarm.is_connected(&blocked_id));
+
+        // The single public slot (`max_public_peers = 1`) must NOT have leaked.
+        honest_swarm.dial(listen_addr).expect("honest dial");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline && !sentry_swarm.is_connected(&honest_id) {
+            tokio::select! {
+                _ = sentry_swarm.select_next_some() => {}
+                _ = honest_swarm.select_next_some() => {}
+            }
+        }
+        assert!(
+            sentry_swarm.is_connected(&honest_id),
+            "ListenFailure after downstream ConnectionDenied must reclaim the public peer slot"
         );
     }
 }
