@@ -237,7 +237,10 @@ mod tests {
                     prev_state_root: ZERO,
                     claim_digest: ZERO,
                 },
-                BINDS_HEIGHT | BINDS_STATE_ROOT,
+                // The guest recomputes `output_hash` over the whole commitment
+                // inside `BudAir`, so the proof binds every field a header
+                // chain does.
+                EVERY_FIELD,
             ),
             (
                 FinalityProof::DagPq {
@@ -265,6 +268,15 @@ mod tests {
                     prover_signature: Vec::new(),
                     authorities: Vec::new(),
                     signatures: Vec::new(),
+                },
+                EVERY_FIELD,
+            ),
+            (
+                FinalityProof::AggregatedProg {
+                    program_hash: ZERO,
+                    prev_height: 0,
+                    prev_state_root: ZERO,
+                    claim_digest: ZERO,
                 },
                 EVERY_FIELD,
             ),

@@ -194,6 +194,7 @@ pub struct ConsensusTreeLeaf {
     pub balance: u64,
     pub nonce: u64,
     pub frac_attos: u64,
+    pub auth_program_hash: Option<[u8; 32]>,
     pub leaf_hash: [u8; 32],
     /// Sibling hashes from leaf toward root.
     pub siblings: Vec<[u8; 32]>,
@@ -216,6 +217,7 @@ pub struct ConsensusAccountProof {
     pub balance: u64,
     pub nonce: u64,
     pub frac_attos: u64,
+    pub auth_program_hash: Option<[u8; 32]>,
     pub leaf_hash: [u8; 32],
     /// Sibling hashes from leaf toward root (present case).
     pub siblings: Vec<[u8; 32]>,
@@ -228,14 +230,16 @@ pub struct ConsensusAccountProof {
 }
 
 /// The consensus accounts leaf hash: `SHA-256(0x00 || pubkey || balance ||
-/// nonce || frac_attos?)`, with `frac_attos` folded in only when non-zero.
-/// This is the exact preimage the state root tree is built from.
+/// nonce || frac_attos? || (TAG_ACCOUNT_AUTH_PROGRAM || auth_program_hash)?)`,
+/// shared with [`AccountState::hash_account_leaf`] for both key and program
+/// accounts while keeping pre-existing hashes unchanged when `None`.
 #[must_use]
 pub fn consensus_account_leaf(
     address: &Address,
     balance: u64,
     nonce: u64,
     frac_attos: u64,
+    auth_program_hash: Option<[u8; 32]>,
 ) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -245,6 +249,10 @@ pub fn consensus_account_leaf(
     h.update(nonce.to_le_bytes());
     if frac_attos != 0 {
         h.update(frac_attos.to_le_bytes());
+    }
+    if let Some(program_hash) = auth_program_hash {
+        h.update(TAG_ACCOUNT_AUTH_PROGRAM);
+        h.update(program_hash);
     }
     h.finalize().into()
 }
@@ -309,7 +317,13 @@ impl ConsensusTreeLeaf {
     #[must_use]
     pub fn verifies_against(&self, root: &[u8; 32]) -> bool {
         self.leaf_hash
-            == consensus_account_leaf(&self.address, self.balance, self.nonce, self.frac_attos)
+            == consensus_account_leaf(
+                &self.address,
+                self.balance,
+                self.nonce,
+                self.frac_attos,
+                self.auth_program_hash,
+            )
             && consensus_path_verifies(&self.leaf_hash, &self.siblings, &self.directions, root)
     }
 }
@@ -327,7 +341,13 @@ impl ConsensusAccountProof {
                 return false;
             }
             self.leaf_hash
-                == consensus_account_leaf(&self.address, self.balance, self.nonce, self.frac_attos)
+                == consensus_account_leaf(
+                    &self.address,
+                    self.balance,
+                    self.nonce,
+                    self.frac_attos,
+                    self.auth_program_hash,
+                )
                 && consensus_path_verifies(
                     &self.leaf_hash,
                     &self.siblings,
@@ -335,7 +355,11 @@ impl ConsensusAccountProof {
                     &self.root,
                 )
         } else {
-            if self.balance != 0 || self.nonce != 0 || self.frac_attos != 0 {
+            if self.balance != 0
+                || self.nonce != 0
+                || self.frac_attos != 0
+                || self.auth_program_hash.is_some()
+            {
                 return false;
             }
             if self.root == [0u8; 32] {
@@ -2555,6 +2579,9 @@ impl AccountState {
                 }
             }
             TxAuthority::Inline => {
+                if self.auth_program_hash(&tx.from).is_some() {
+                    return Err("Program account requires an aggregated authorization claim".into());
+                }
                 if !tx.verify_in(&self.scheme_registry) {
                     return Err("Invalid signature".into());
                 }
@@ -5749,6 +5776,7 @@ impl AccountState {
                     balance: acct.balance,
                     nonce: acct.nonce,
                     frac_attos: acct.frac_attos,
+                    auth_program_hash: acct.auth_program_hash,
                     leaf_hash: self.cached_leaves[idx],
                     siblings,
                     directions,
@@ -5767,6 +5795,7 @@ impl AccountState {
                     balance: 0,
                     nonce: 0,
                     frac_attos: 0,
+                    auth_program_hash: None,
                     leaf_hash: [0u8; 32],
                     siblings: Vec::new(),
                     directions: Vec::new(),
@@ -5786,6 +5815,7 @@ impl AccountState {
             balance: acct.balance,
             nonce: acct.nonce,
             frac_attos: acct.frac_attos,
+            auth_program_hash: acct.auth_program_hash,
             leaf_hash: self.cached_leaves[idx],
             siblings,
             directions,
