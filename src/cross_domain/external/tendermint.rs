@@ -1979,4 +1979,217 @@ mod tests {
             .expect_err("far-future commit must fail closed under max_age");
         assert!(matches!(err, AdapterError::ConsensusRule { .. }));
     }
+
+    // -------------------------------------------------------------------
+    // Registration, admission, and the bridge
+    // -------------------------------------------------------------------
+    //
+    // The tests above prove the adapter reads a commit correctly. They do not
+    // prove the family is reachable from the production doors: that a
+    // permissionless registrant can register it, that admission runs its probe
+    // suite, that the stored spec rebuilds an adapter which still verifies, and
+    // that the bridge finalizes a commitment whose roots the attestation binds.
+    // The Bitcoin SPV family has that integration; this one did not. These are
+    // it, and the golden sample is the same real `noble-1` commit.
+
+    use crate::cross_domain::external::{
+        decode_external_evidence, encode_external_evidence, AdapterSpec, IntakeState,
+        RegistrationRequest, VersionPolicy, EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+    };
+    use crate::domain::finality_adapter::{DomainFinalityAdapter, FinalityStatus};
+    use crate::domain::types::{
+        ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, RootScheme,
+    };
+
+    /// A commit a consensus-pinned registration can admit: the pinned adapter
+    /// binds the validator-signed `block_hash`, so `app_hash` must equal it.
+    fn pinned_golden_commit() -> TendermintCommitEvidence {
+        // All three sign: two of three is 10 of 15, below the +2/3+1 threshold
+        // of 11, so a two-signer golden would be refused for the wrong reason.
+        let mut commit = synthetic_commit(&[5, 5, 5], 3);
+        commit.app_hash = commit.block_hash;
+        commit
+    }
+
+    fn registration_request(set_hash: [u8; 32]) -> RegistrationRequest {
+        let adapter = adapter();
+        let golden = evidence_for(&adapter, &pinned_golden_commit());
+        let economics = IntakeState::conservative_economics(1_000_000);
+        RegistrationRequest {
+            spec: AdapterSpec::TendermintCommit {
+                network: "noble".to_string(),
+                chain_id: "noble-1".to_string(),
+                validator_set_hash: Some(set_hash),
+            },
+            policy: admission_policy(),
+            economics,
+            versions: VersionPolicy::single(adapter.descriptor().id, 1, 0),
+            bond_atoms: economics.required_bond_atoms(),
+            poster: Address([9u8; 32]),
+            golden,
+        }
+    }
+
+    fn pinned_intake(commit: &TendermintCommitEvidence) -> IntakeState {
+        let mut state = IntakeState::new();
+        state.pin_tendermint_anchor(
+            "noble",
+            PinnedTendermintAnchor {
+                chain_id: commit.chain_id.clone(),
+                validator_set_hash: validator_set_commitment(&commit.validators),
+            },
+        );
+        state
+    }
+
+    /// The clock admission measures freshness against. The golden commit is
+    /// from 2026, so a registration must supply a `now` at or after its
+    /// `commit_time`, exactly as `IntakeState::submit_evidence` does with the
+    /// live clock. A frozen 2026-11-04 would make the golden stale and refuse
+    /// it for the wrong reason.
+    fn admission_policy() -> VerificationPolicy {
+        let mut policy = policy();
+        // Just after the synthetic commit's own `commit_time` (1_700_000_000),
+        // so the golden is neither stale nor in the future.
+        policy.now = 1_700_000_100;
+        policy
+    }
+
+    /// A pinned Tendermint domain registers, passes admission, and the stored
+    /// spec rebuilds an adapter that still verifies the golden.
+    #[test]
+    fn a_tendermint_domain_registers_and_passes_admission() {
+        let commit = pinned_golden_commit();
+        let mut state = pinned_intake(&commit);
+        let key = state
+            .register_domain(
+                registration_request(validator_set_commitment(&commit.validators)),
+                None,
+            )
+            .expect("a pinned Tendermint domain registers end to end");
+        let entry = state.entries.get(&key).expect("entry is stored");
+        assert!(entry.admission.admitted, "report: {:?}", entry.admission);
+        assert!(entry.admission.golden_verified);
+
+        let rebuilt = entry.spec.build(None, Some(entry.golden.clone()));
+        assert!(rebuilt.verify(&entry.golden, &entry.policy).is_ok());
+    }
+
+    /// A registration without a governance-pinned validator set is refused at
+    /// the door: the chain id alone does not stop an attacker self-signing a
+    /// commit with freshly generated keys.
+    #[test]
+    fn an_unpinned_tendermint_validator_set_is_refused_at_registration() {
+        let mut state = IntakeState::new();
+        let commit = pinned_golden_commit();
+        assert!(matches!(
+            state.register_domain(
+                registration_request(validator_set_commitment(&commit.validators)),
+                None,
+            ),
+            Err(crate::cross_domain::external::IntakeError::CommitteeNotPinned)
+        ));
+    }
+
+    /// A registration whose pinned set hash disagrees with the governance
+    /// anchor is refused, so a registrant cannot name its own set.
+    #[test]
+    fn a_tendermint_set_hash_that_disagrees_with_the_anchor_is_refused() {
+        let commit = pinned_golden_commit();
+        let mut state = pinned_intake(&commit);
+        let mut wrong = validator_set_commitment(&commit.validators);
+        wrong[0] ^= 0xff;
+        assert!(matches!(
+            state.register_domain(registration_request(wrong), None),
+            Err(crate::cross_domain::external::IntakeError::CommitteeNotPinned)
+        ));
+    }
+
+    /// The bridge finalizes a commitment built from the attestation's own
+    /// roots, and a corrupted signature does not reach consensus.
+    #[test]
+    fn the_bridge_finalizes_a_tendermint_commitment() {
+        let adapter = adapter();
+        let commit = noble_commit();
+        let evidence = evidence_for(&adapter, &commit);
+        let attestation = adapter
+            .verify(&evidence, &policy())
+            .expect("the real noble commit verifies");
+        let proof = encode_external_evidence(&evidence).expect("evidence encodes");
+
+        let domain = ConsensusDomain {
+            id: 8,
+            kind: ConsensusKind::Custom("tendermint-bft".to_string()),
+            status: DomainStatus::Active,
+            domain_chain_id: 88,
+            operator: Some(Address([4u8; 32])),
+            operator_bond: 1_000_000,
+            config_hash: [0; 32],
+            validator_set_hash: [0; 32],
+            finality_adapter: EXTERNAL_DOMAIN_FINALITY_ADAPTER.to_string(),
+            min_confirmations: 1,
+            bridge_enabled: true,
+            block_hash_scheme: RootScheme::Sha256,
+            state_root_scheme: RootScheme::Sha256,
+            tx_root_scheme: RootScheme::Sha256,
+            last_committed_height: commit.height,
+            last_committed_hash: commit.block_hash,
+            pow_parameters: None,
+            zk_program_allowlist: Vec::new(),
+            plugin_code_hash: None,
+            genesis_state_root: [0; 32],
+        };
+        let commitment = DomainCommitment {
+            domain_id: 8,
+            domain_height: attestation.height,
+            // The attestation's `state_root` is the app hash and its
+            // `attested_block_hash` is the block hash, so each commitment field
+            // takes the value the adapter actually attests.
+            domain_block_hash: attestation
+                .attested_block_hash
+                .unwrap_or(attestation.state_root),
+            parent_domain_block_hash: [0; 32],
+            state_root: attestation.state_root,
+            tx_root: [0; 32],
+            event_root: [0; 32],
+            finality_proof_hash: crate::domain::hash_finality_proof(&proof).expect("hashes"),
+            consensus_kind: domain.kind.clone(),
+            validator_set_hash: [0; 32],
+            timestamp_ms: 0,
+            sequence: 1,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+
+        let decoded = decode_external_evidence(&proof).expect("carrier round trips");
+        assert_eq!(decoded, evidence);
+        let bridge = crate::cross_domain::external::ExternalDomainFinalityBridge::new(
+            Box::new(adapter.clone()),
+            policy(),
+        );
+        assert_eq!(
+            bridge
+                .verify_finality(&domain, &commitment, &proof)
+                .expect("the bridge finalizes the commit"),
+            FinalityStatus::Finalized
+        );
+
+        // A forged signature must not finalize: the bridge reads the same
+        // adapter, so the crypto refusal surfaces as an error rather than a
+        // commitment anchored on a signature nobody made.
+        let mut forged = evidence.clone();
+        let offsets = commit.field_offsets();
+        if let Some(at) = offsets.first_signature_len_at {
+            let start = at + 8;
+            if let Some(byte) = forged.payload.get_mut(start) {
+                *byte ^= 0xff;
+            }
+        }
+        let forged_proof = encode_external_evidence(&forged).expect("forged encodes");
+        let result = bridge.verify_finality(&domain, &commitment, &forged_proof);
+        assert!(
+            result.is_err(),
+            "a forged signature must not finalize: {result:?}"
+        );
+    }
 }
