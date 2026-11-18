@@ -1,6 +1,6 @@
 # B-0045: The PoSpace engine has no production plot registration and weights self-declared capacity
 
-- **Location:** `src/consensus/pospace.rs` on `budlum-consensus-of-consensuses` head `7533b71b4812a20ca078611c77d9d82c1f28ebfc` (PR #194). The engine is constructed for every domain of kind `Pospace` in `src/main.rs:1498` and paired with `PospaceDomainPlugin` in `src/main.rs:1511`.
+- **Location:** `src/consensus/pospace.rs`, reviewed at source revision `7533b71b4812a20ca078611c77d9d82c1f28ebfc` on `budlum-consensus-of-consensuses` (PR #194). That revision is the one quoted below, not the PR head recorded in the snapshot. The finding was not re-checked symbol by symbol on the later head `365e02f297eb1ad96a1b56d6728a1a7bca5e1fce`; its status there is unverified. The engine is constructed for every domain of kind `Pospace` in `src/main.rs:1498` and paired with `PospaceDomainPlugin` in `src/main.rs:1511`, as read at `7533b71b`.
 - **Severity:** medium-high for correctness and for the guarantee the module claims. Latent rather than live: the plugin that would call this engine has no production caller (B-0046), and no domain in the shipped catalog is registered with `ConsensusKind::Pospace` (`src/unification/domain_catalog.rs:160-423` lists PoS, PoW, BFT, ZK, `StorageAttestation`, `AiInference` and two `Custom` kinds, no PoSpace). The defect is reachable by any operator who registers a PoSpace domain through the settlement registration path.
 
 ## Part 1: the plot registry can never be filled in a production build
@@ -48,7 +48,7 @@ pub fn compute_plot_response(plot_id: &[u8; 32], challenge: &[u8; 32]) -> [u8; 3
 }
 ```
 
-`plot_id` is a free 32-byte witness field, the challenge is derived from the parent hash and height (`:128-138`, `:256-260`), and the response is a public hash of both. No value in the proof depends on data the prover must actually store, so anyone can mint a valid `(plot_id, challenge, size, response)` tuple for any capacity up to `MAX_PLOT_SIZE_BYTES = 1 PiB` (`:24`, enforced at `:309-314` and `:415-421`). What would bind capacity to storage is registration, and registration is exactly the piece that the scoring function treats as optional and the production build cannot perform.
+`plot_id` is a free 32-byte witness field, the challenge is derived from the parent hash and height (`:128-138`, `:256-260`), and the response is a public hash of both. The response is not storage dependent: it is a function of public inputs only, so recomputing it needs no stored plot and answers no challenge about data on disk. Anyone can therefore mint a valid `(plot_id, challenge, size, response)` tuple for any capacity up to `MAX_PLOT_SIZE_BYTES = 1 PiB` (`:24`, enforced at `:309-314` and `:415-421`). Registering `(producer, plot_id, size_bytes)` binds the capacity claim to a record; it does not prove that the producer holds those bytes either. A capacity claim is only worth what identification and storage verification make it worth, and neither exists here. What the scoring function does is treat the one piece that would anchor the claim, a registered record, as optional, and the production build cannot write that record at all.
 
 ## Claim mismatch
 

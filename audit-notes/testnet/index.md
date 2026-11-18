@@ -1,6 +1,6 @@
 # Testnet specification index
 
-The specification is kept outside the repository. The source is the uploaded 6,044-line document.
+The specification is kept outside the repository. The source is `THE_BUDLUM_DIREKTIF (1).md`, titled "THE BUDLUM DIREKTIF", revision 2026-11 upload as delivered in this session. It is 6,044 lines, 556,685 bytes, SHA-256 `1c10ae7e4f5ce68736924a5d1f27ea073926a93f08e996ae5ec3c75c50a6327d`. Every source-line pointer below refers to that exact revision; a different revision can shift every line number.
 Every entry below is a source-line pointer and remains unchecked until its requirements, implementation, tests and CI evidence are reviewed.
 The list indexes section boundaries; it does not claim that every individual clause has been verified.
 
