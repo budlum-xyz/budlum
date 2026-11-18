@@ -903,13 +903,18 @@ mod tests {
         let mut reg = Bud3Registry::default();
         let mut net = MemorySymbolNetwork::default();
 
-        // Incompressible 1,536-byte payload => k = 13 > 8 with symbols_per_segment = 20 across
-        // 5 shares of 4 symbols each: recovering requires at least 4 or 3 honest shares (> 2 shares),
-        // so leave-one-out and pairs both fail when 2 holders are Byzantine, and leave-two-out recovers.
+        // Incompressible 1,536-byte payload: the object the segments carry is
+        // longer than the payload (k = 13 at symbol_size 128), so a segment
+        // needs 13 distinct symbols before RaptorQ can rebuild it. Five
+        // holders of five symbols each give 25, and the three honest holders
+        // after two Byzantine ones still hold 15, which is above k. Four
+        // symbols per holder gave only 12 from three holders, below k, so no
+        // arrangement of the surviving shares could ever have recovered and
+        // the test could not have passed for the algorithm's reasons.
         let payload: Vec<u8> = (0u64..48)
             .flat_map(|i| crate::core::hash::hash_fields_bytes(&[b"BYZ5", &i.to_le_bytes()]))
             .collect();
-        let up = prepare_public_upload(&payload, &SMALL, &Bud3Limits::default(), 20).unwrap();
+        let up = prepare_public_upload(&payload, &SMALL, &Bud3Limits::default(), 25).unwrap();
         let key = up.record.commitment;
         let validators = [[40u8; 32], [41u8; 32], [42u8; 32], [43u8; 32], [44u8; 32]];
         let shares: Vec<(u64, Share)> = validators
@@ -921,8 +926,8 @@ mod tests {
                     Share {
                         validator: *v,
                         class: Class::Full,
-                        first_esi: u32::try_from(i).unwrap() * 4,
-                        symbols: 4,
+                        first_esi: u32::try_from(i).unwrap() * 5,
+                        symbols: 5,
                     },
                 )
             })
@@ -930,22 +935,22 @@ mod tests {
         reg.register_object([1; 32], up.record, shares, 0, 20)
             .unwrap();
 
-        let mut bad0 = up.segments[0][0..4].to_vec();
+        let mut bad0 = up.segments[0][0..5].to_vec();
         bad0[0].data[5] ^= 0xAA;
-        let mut bad1 = up.segments[0][4..8].to_vec();
+        let mut bad1 = up.segments[0][5..10].to_vec();
         bad1[1].data[9] ^= 0x55;
         net.store_holder_share(validators[0], key, 0, bad0);
         net.store_holder_share(validators[1], key, 0, bad1);
-        net.store_holder_share(validators[2], key, 0, up.segments[0][8..12].to_vec());
-        net.store_holder_share(validators[3], key, 0, up.segments[0][12..16].to_vec());
-        net.store_holder_share(validators[4], key, 0, up.segments[0][16..20].to_vec());
+        net.store_holder_share(validators[2], key, 0, up.segments[0][10..15].to_vec());
+        net.store_holder_share(validators[3], key, 0, up.segments[0][15..20].to_vec());
+        net.store_holder_share(validators[4], key, 0, up.segments[0][20..25].to_vec());
 
         assert_eq!(view_from_network(&reg, &key, None, &net).unwrap(), payload);
 
         // When all shares are poisoned, collect_symbols_full_then_mobile returns zero
         // unverified symbols rather than leaking Byzantine bytes.
         for (i, v) in validators.iter().enumerate() {
-            let mut poisoned = up.segments[0][(i * 4)..((i + 1) * 4)].to_vec();
+            let mut poisoned = up.segments[0][(i * 5)..((i + 1) * 5)].to_vec();
             poisoned[0].data[0] ^= 0xFF;
             net.store_holder_share(*v, key, 0, poisoned);
         }
