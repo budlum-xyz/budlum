@@ -348,7 +348,7 @@ mod tests {
         let canonical = GardenInvite::new(&g, token, vec![p]).unwrap().to_link();
         let short_chain = canonical.replacen(
             &format!("chain={:016x}", g.chain_id),
-            &format!("chain={:x}", g.chain_id),
+            &format!("chain={:x}", g.chain_id >> 4),
             1,
         );
         assert!(GardenInvite::parse(&short_chain).is_err());
