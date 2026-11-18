@@ -548,7 +548,17 @@ impl UploadSessionManager {
         zeroize_and_release(&mut session.buffer);
 
         let deduplicated_existing = if content_id.kind == super::content_id::ContentIdKind::Public {
-            registry.public_object(&content_id.digest)
+            registry.public_object(&content_id.digest).filter(|key| {
+                registry.object(key).is_some_and(|entry| {
+                    entry.record.content_id == content_id
+                        && entry.custody_confirmed
+                        && !entry.shares.is_empty()
+                        && entry
+                            .shares
+                            .iter()
+                            .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+                })
+            })
         } else {
             None
         };
@@ -1079,20 +1089,32 @@ mod tests {
         let prepared = prepare_public_upload(content, &SMALL, &Bud3Limits::default(), 10).unwrap();
         let key = prepared.record.commitment;
         let mut reg = Bud3Registry::default();
-        let shares = vec![(
-            0,
-            Share {
-                validator: [10; 32],
-                class: Class::Full,
-                first_esi: 0,
-                symbols: 10,
-            },
-        )];
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: [10; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 5,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: [11; 32],
+                    class: Class::Full,
+                    first_esi: 5,
+                    symbols: 5,
+                },
+            ),
+        ];
         assert_eq!(
             reg.register_object([1; 32], prepared.record, shares, 1, 20),
             Ok(Registered::New(key))
         );
         reg.ack(&key, &[10; 32]).unwrap();
+        reg.ack(&key, &[11; 32]).unwrap();
         assert_eq!(reg.mark_unseen(&[10; 32]), 1);
         // Share is now marked lost (`s.lost == true`), so upload must NOT
         // deduplicate with empty shares.

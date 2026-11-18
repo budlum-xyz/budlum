@@ -1883,15 +1883,18 @@ mod tests {
         let _c = net.join("c");
         let leader = net.ledger.state.leader(0).unwrap();
         // Two members that are neither the host nor the leader: one departs in
-        // the pool, the other is only absent.
-        let candidates: Vec<GardenKey> = net
+        // the pool, the other is only absent. The keys are random, so the
+        // host can be the leader; then three members qualify instead of two.
+        // Either way the first two are the leaver and the quiet one.
+        let mut candidates: Vec<GardenKey> = net
             .ledger
             .state
             .active()
             .into_iter()
             .filter(|key| *key != host && *key != leader)
             .collect();
-        assert_eq!(candidates.len(), 2);
+        assert!(candidates.len() >= 2);
+        candidates.truncate(2);
         let (leaver, quiet) = (candidates[0], candidates[1]);
 
         let leave = net.tx(&leaver, GardenTxKind::Leave);
