@@ -51,6 +51,7 @@ pub struct MerkleProof {
 }
 
 impl MerkleProof {
+    #[must_use]
     pub fn verify(&self, expected_root: &[u8; 32]) -> bool {
         if self.siblings.len() != TRIE_DEPTH || self.directions.len() != TRIE_DEPTH {
             return false;
@@ -96,6 +97,7 @@ struct NodeIndex {
 }
 
 impl MerkleTrie {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             leaves: BTreeMap::new(),
@@ -231,6 +233,7 @@ impl AccountProofBundle {
     /// the path from `leaf_hash` to `root` left `present`, `balance` and
     /// `nonce` free, so a bundle could carry a valid path under altered
     /// values, or report a present account as absent.
+    #[must_use]
     pub fn verify_self_consistent(&self) -> bool {
         let expected_leaf = if self.present {
             hash_leaf(&self.proof.address, self.balance, self.nonce)

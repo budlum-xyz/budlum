@@ -98,6 +98,7 @@ impl PrivateTransferSubmit {
     /// Domain-separated digest binding public halves (must match wallet).
     ///
     /// Convenience: exposed for confidential transfer bundle digest callers.
+    #[must_use]
     pub fn compute_public_digest(nullifiers: &[NoteHash], outputs: &[NoteHash]) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut h = Sha3_256::new();
@@ -132,12 +133,13 @@ impl PrivateTransferSubmit {
         h.finalize().into()
     }
 
+    #[must_use]
     pub fn verify_digest_matches(&self) -> bool {
         self.public_digest
             == Self::compute_public_digest(&self.nullifiers, &self.output_commitments)
     }
 
-    /// Generate a `ProofClass::Hiding` BudZero STARK witness proof binding
+    /// Generate a `ProofClass::Hiding` `BudZero` STARK witness proof binding
     /// this private transfer's `public_digest` to a fresh blinding salt.
     ///
     /// # Errors
@@ -249,7 +251,7 @@ impl PrivateTransferSubmit {
     }
 
     /// Generate a complete zero-knowledge bundle combining `ProofClass::Hiding`
-    /// with BudZero universal predicates `YK1..YK4` (ownership, value conservation,
+    /// with `BudZero` universal predicates `YK1..YK4` (ownership, value conservation,
     /// note commitment membership, and nullifier freshness).
     ///
     /// Convenience: exposed for confidential transfer wallet proving callers.

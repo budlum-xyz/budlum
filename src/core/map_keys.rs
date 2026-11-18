@@ -147,7 +147,7 @@ impl MapKey for std::net::IpAddr {
         self.to_string()
     }
     fn from_key_string(s: &str) -> Result<Self, String> {
-        s.parse::<std::net::IpAddr>()
+        s.parse::<Self>()
             .map_err(|e| format!("invalid IP map key `{s}`: {e}"))
     }
 }

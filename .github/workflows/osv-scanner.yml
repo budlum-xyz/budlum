@@ -22,7 +22,7 @@ name: OSV Scanner
 
 on:
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses]
   push:
     branches: [main]
   schedule:

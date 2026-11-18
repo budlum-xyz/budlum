@@ -70,20 +70,23 @@ const MAX_MODEL_VERIFIER_COUNT: u32 = 64;
 pub struct AiModelId(pub [u8; 32]);
 
 impl AiModelId {
+    #[must_use]
     pub fn new(id: [u8; 32]) -> Self {
         Self(id)
     }
 
     /// Compute canonical model id given owner address and model hash/preimage bytes.
+    #[must_use]
     pub fn of(owner: &Address, model_hash: &[u8; 32], version: u32) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_MODEL_V1");
         hasher.update(owner.as_bytes());
         hasher.update(model_hash);
         hasher.update(version.to_le_bytes());
-        AiModelId(hasher.finalize().into())
+        Self(hasher.finalize().into())
     }
 
+    #[must_use]
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
@@ -105,10 +108,12 @@ impl crate::core::map_keys::MapKey for AiModelId {
 pub struct AiRequestId(pub [u8; 32]);
 
 impl AiRequestId {
+    #[must_use]
     pub fn new(id: [u8; 32]) -> Self {
         Self(id)
     }
 
+    #[must_use]
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
@@ -156,18 +161,22 @@ impl BoundedBytes {
         Ok(Self(bytes))
     }
 
+    #[must_use]
     pub fn empty() -> Self {
         Self(Vec::new())
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    #[must_use]
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
@@ -326,6 +335,7 @@ impl AiModelSpec {
         Ok(())
     }
 
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_SPEC_LEAF_V1");
@@ -462,6 +472,7 @@ impl AiInferenceRequest {
     /// The domain tag moves with it. Adding a field under the old tag would
     /// let a V1 id and a V2 id collide across different meanings, which is
     /// the failure the tag exists to prevent.
+    #[must_use]
     pub fn calculate_id(&self) -> AiRequestId {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_REQUEST_ID_V3");
@@ -492,10 +503,12 @@ impl AiInferenceRequest {
         AiRequestId(hasher.finalize().into())
     }
 
+    #[must_use]
     pub fn verify_id(&self) -> bool {
         self.request_id == self.calculate_id()
     }
 
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_REQUEST_LEAF_V1");
@@ -538,6 +551,7 @@ impl AiInferenceResult {
     /// Anyone wiring this into verification must add `chain_id` to the
     /// Preimage first, or the inner signature will be replayable between
     /// Networks in a way the outer one is not.
+    #[must_use]
     pub fn calculate_signing_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_RESULT_SIG_V1");
@@ -550,6 +564,7 @@ impl AiInferenceResult {
         hasher.finalize().into()
     }
 
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_RESULT_LEAF_V1");
@@ -620,7 +635,7 @@ pub struct AiVerifierStakeInfo {
 /// Paradigm shift needed for Agentic Economy.
 ///
 /// The proof binds three things:
-/// 1. **Model identity** - `model_id` is embedded in the ZKVM program_hash
+/// 1. **Model identity** - `model_id` is embedded in the ZKVM `program_hash`
 /// 2. **Input commitment** - `input_commitment` is a public input to the proof
 /// 3. **Output commitment** - `output_commitment` is derived from the proof
 ///
@@ -637,10 +652,10 @@ pub struct AiExecutionProof {
     /// Binding between the proof and the model.
     pub model_id: AiModelId,
     /// The input commitment that was the preimage to this proof.
-    /// This must match the AiInferenceRequest's `input_commitment`.
+    /// This must match the `AiInferenceRequest`'s `input_commitment`.
     pub input_commitment: [u8; 32],
     /// The output commitment derived from the proof execution.
-    /// This must match the AiInferenceResult's `output_commitment`.
+    /// This must match the `AiInferenceResult`'s `output_commitment`.
     pub output_commitment: [u8; 32],
     /// The ZKVM program hash - keccak256 of the model's bytecode.
     /// This binds the proof to a specific model implementation.
@@ -754,7 +769,8 @@ impl AiExecutionPublicInputs {
 impl AiExecutionProof {
     /// Verify that this proof's commitments match the given request and result.
     /// This is a structural check - cryptographic verification happens in
-    /// ZkVmExecutor::verify_proof.
+    /// `ZkVmExecutor::verify_proof`.
+    #[must_use]
     pub fn commitments_match(
         &self,
         request: &AiInferenceRequest,
@@ -766,6 +782,7 @@ impl AiExecutionProof {
     }
 
     /// Calculate domain-separated hash of this proof for state root inclusion.
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_EXEC_PROOF_V2");
@@ -835,6 +852,7 @@ pub struct AiVerifierQos {
 
 impl AiVerifierQos {
     /// Create a new `QoS` record with zero metrics.
+    #[must_use]
     pub fn new(verifier: Address) -> Self {
         Self {
             verifier,
@@ -905,6 +923,7 @@ impl AiVerifierQos {
     /// - Finalization rate (successful / total)
     /// - Equivocation penalty
     /// - Response time efficiency
+    #[must_use]
     pub fn reliability_score(&self) -> f64 {
         if self.total_results_submitted == 0 {
             return 0.0;
@@ -916,6 +935,7 @@ impl AiVerifierQos {
     }
 
     /// Calculate domain-separated hash for state root inclusion.
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_VERIFIER_QOS_V1");
@@ -944,6 +964,7 @@ pub struct AiInferenceOutcome {
 }
 
 impl AiInferenceOutcome {
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_OUTCOME_LEAF_V1");
@@ -1011,6 +1032,7 @@ pub struct AiAgentPayment {
 
 impl AiAgentPayment {
     /// Calculate domain-separated hash for state root inclusion.
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_AGENT_PAYMENT_V1");
@@ -1031,11 +1053,13 @@ impl AiAgentPayment {
     }
 
     /// Check if this payment is escrowed (linked to a request).
+    #[must_use]
     pub fn is_escrowed(&self) -> bool {
         self.request_id.is_some()
     }
 
     /// Check if this payment has expired.
+    #[must_use]
     pub fn is_expired(&self, current_block: u64) -> bool {
         current_block > self.expiry_block
     }
@@ -1075,6 +1099,7 @@ pub struct AiAgentReputation {
 
 impl AiAgentReputation {
     /// Create a new reputation record.
+    #[must_use]
     pub fn new(agent: Address) -> Self {
         Self {
             agent,
@@ -1166,6 +1191,7 @@ impl AiAgentReputation {
     /// [`Self::trust_score_permyriad`]. The state root hashes the integer
     /// counters only. Factors in payment reliability, inference quality, and
     /// equivocation rate.
+    #[must_use]
     pub fn trust_score(&self) -> f64 {
         let total_payments = self
             .payments_completed
@@ -1195,6 +1221,7 @@ impl AiAgentReputation {
     }
 
     /// Calculate domain-separated hash for state root inclusion.
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -1243,6 +1270,7 @@ pub struct AiAgentPaymentSettlement {
 
 impl AiPaymentEscrowStatus {
     /// Stable tag used by state leaves and public settlement receipts.
+    #[must_use]
     pub const fn tag(&self) -> u8 {
         match self {
             Self::Pending => 0,
@@ -1254,6 +1282,7 @@ impl AiPaymentEscrowStatus {
 }
 
 impl AiAgentPaymentSettlement {
+    #[must_use]
     pub fn from_payment(
         payment: &AiAgentPayment,
         settled_at_block: u64,
@@ -1273,6 +1302,7 @@ impl AiAgentPaymentSettlement {
         }
     }
 
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_AGENT_PAYMENT_SETTLEMENT_V1");

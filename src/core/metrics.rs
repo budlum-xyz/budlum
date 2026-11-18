@@ -48,7 +48,7 @@ pub struct Metrics {
     pub transactions_processed: IntCounter,
     pub reorgs_total: IntCounter,
     pub finalized_height: IntGauge,
-    /// Active PoS validators in the rooted validator set.
+    /// Active `PoS` validators in the rooted validator set.
     pub active_validators: IntGauge,
     /// Finality certificates waiting for checkpoint processing.
     pub pending_finality_certificates: IntGauge,
@@ -56,17 +56,17 @@ pub struct Metrics {
     pub liveness_tracked_validators: IntGauge,
     /// Validators with retained invalid-vote tracker state.
     pub invalid_vote_tracked_validators: IntGauge,
-    /// PoA onboarding applications and decisions retained in the audit log.
+    /// `PoA` onboarding applications and decisions retained in the audit log.
     pub poa_onboarding_audit_rows: IntGauge,
-    /// PoA membership records retained in onboarding state.
+    /// `PoA` membership records retained in onboarding state.
     pub poa_onboarding_membership_rows: IntGauge,
-    /// PoA admin records retained in onboarding state.
+    /// `PoA` admin records retained in onboarding state.
     pub poa_onboarding_admin_rows: IntGauge,
     /// Governance domain-unfreeze requests waiting for block-end application.
     pub pending_domain_unfreeze_rows: IntGauge,
-    /// Governance PoA freeze requests waiting for block-end application.
+    /// Governance `PoA` freeze requests waiting for block-end application.
     pub pending_poa_freeze_rows: IntGauge,
-    /// Governance PoA unfreeze requests waiting for block-end application.
+    /// Governance `PoA` unfreeze requests waiting for block-end application.
     pub pending_poa_unfreeze_rows: IntGauge,
     /// B.U.D. boost share waiting for storage-operator distribution.
     pub pending_bud_boost_atoms: IntGauge,
@@ -95,9 +95,9 @@ pub struct Metrics {
     pub settlement_frozen_domains: IntGauge,
     pub settlement_global_headers_sealed: IntCounter,
     pub settlement_equivocations_detected: IntCounter,
-    /// AppBinding settlement-door writes accepted in committed blocks.
+    /// `AppBinding` settlement-door writes accepted in committed blocks.
     pub app_binding_transactions_total: IntCounter,
-    /// BudZKVM contract calls in committed blocks.
+    /// `BudZKVM` contract calls in committed blocks.
     pub contract_calls_total: IntCounter,
     /// Mikoriza restaked validator rows in account state.
     pub restaked_validator_rows: IntGauge,
@@ -163,11 +163,11 @@ pub struct Metrics {
     pub registry_slashing_rows: IntGauge,
     /// Validator commission schedules retained in the permissionless registry.
     pub registry_commission_rows: IntGauge,
-    /// PoA domains with admission records.
+    /// `PoA` domains with admission records.
     pub poa_admission_domains: IntGauge,
-    /// Authorities admitted to PoA domains.
+    /// Authorities admitted to `PoA` domains.
     pub poa_admitted_authorities: IntGauge,
-    /// Accounts frozen by the PoA compliance registry.
+    /// Accounts frozen by the `PoA` compliance registry.
     pub poa_compliance_frozen_accounts: IntGauge,
     /// Rows in the storage reallocation ticket map. Settled tickets leave it
     /// after `REALLOCATION_RECORD_RETENTION_EPOCHS`; a gauge that only ever
@@ -254,7 +254,7 @@ pub struct Metrics {
     pub bns_set_subdomain_content_total: IntCounter,
     /// B15: Storage-pointer writes applied.
     pub bns_set_storage_total: IntCounter,
-    /// Minted SocialFi NFTs retained in account state.
+    /// Minted `SocialFi` NFTs retained in account state.
     pub nft_rows: IntGauge,
     /// Vault folders retained in account state.
     pub vault_folder_rows: IntGauge,
@@ -1083,7 +1083,7 @@ impl Metrics {
         registry.register(Box::new(bud3_audit_latency_seconds.clone()))?;
         registry.register(Box::new(bud3_custody_bytes.clone()))?;
 
-        Ok(Metrics {
+        Ok(Self {
             registry: Arc::new(registry),
             chain_height,
             account_rows,
@@ -1236,6 +1236,7 @@ impl Metrics {
         })
     }
 
+    #[must_use]
     pub fn encode(&self) -> String {
         // The facade counts disagreements in a process-wide atomic; bring the
         // series up to it. `get` and `inc_by` race only with another scrape,

@@ -922,6 +922,23 @@ impl Bud3Registry {
             })
     }
 
+    /// Return whether `receipt_id` is still retained in the on-chain paid-view table.
+    #[must_use]
+    pub fn has_paid_view(&self, receipt_id: &[u8; 32]) -> bool {
+        self.paid_views.contains_key(receipt_id)
+    }
+
+    /// Highest epoch observed across live [`PaidViewRecord`] entries, providing a
+    /// monotonic lower bound against caller-omitted or backdated epoch parameters.
+    #[must_use]
+    pub fn observed_paid_view_epoch(&self) -> u64 {
+        self.paid_views
+            .values()
+            .map(|rec| rec.paid_at_epoch)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Item 6 of section 6.14: every new share of `key` is confirmed, so every
     /// object it replaced releases its shares. The old commitment keeps
     /// answering, as a redirect to `key`.

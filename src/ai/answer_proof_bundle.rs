@@ -4,7 +4,7 @@
 //! - a selective Merkle source opening (`SourceCitation`, gated by owner
 //!   consent so unconsented sources expose existence only and never quote
 //!   bytes),
-//! - a deterministic BudZero VM calculator execution (`CalculatorProof`), or
+//! - a deterministic `BudZero` VM calculator execution (`CalculatorProof`), or
 //! - an explicit `[unverified commentary]` tag (`UnverifiedCommentary`).
 //!
 //! Untyped factual sentences are refused. Verification level upgrades

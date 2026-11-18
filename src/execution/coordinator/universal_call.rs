@@ -4,7 +4,7 @@
 //! - EVM `0x000000000000000000000000000000000000B001` Solidity ABI `call(...)` and
 //!   `staticCall(...)` plus `UniversalCallExecuted(uint8 ee, bytes target, bool ok)` log.
 //! - WASM `BudlumMsg::UniversalCall` and `BudlumQuery::UniversalView`.
-//! - BudZero syscall `UNIVERSAL_CALL` (`0x40`).
+//! - `BudZero` syscall `UNIVERSAL_CALL` (`0x40`).
 //! - Static-call envelope tagging enforced as read-only by `TxOverlay`.
 //!
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
@@ -150,7 +150,7 @@ pub fn decode_uol_precompile_calldata(calldata: &[u8]) -> Result<DecodedUolPreco
     Err(String::from("unknown 0x...B002 UOL precompile selector"))
 }
 
-/// BudZero `UNIVERSAL_CALL` syscall code (section 8.7.2).
+/// `BudZero` `UNIVERSAL_CALL` syscall code (section 8.7.2).
 pub const BUDZERO_SYSCALL_UNIVERSAL_CALL: u8 = 0x40;
 
 /// Envelope prefix marking a read-only (`static = true`) Universal Call over `HostApi`.
@@ -429,7 +429,7 @@ pub fn encode_evm_universal_call_log(target_ee: EeId, target: &[u8], ok: bool) -
     }
 }
 
-/// Custom CosmWasm `CosmosMsg::Custom(BudlumMsg)` message (section 8.7.2 WASM row).
+/// Custom `CosmWasm` `CosmosMsg::Custom(BudlumMsg)` message (section 8.7.2 WASM row).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudlumMsg {
@@ -442,7 +442,7 @@ pub enum BudlumMsg {
     },
 }
 
-/// Custom CosmWasm `QueryRequest::Custom(BudlumQuery)` read-only request (section 8.7.2).
+/// Custom `CosmWasm` `QueryRequest::Custom(BudlumQuery)` read-only request (section 8.7.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudlumQuery {

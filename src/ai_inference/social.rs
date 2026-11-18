@@ -128,7 +128,7 @@ impl FederatedAiOutputEvent {
 
 /// Mint an AI inference layer AI output as an NFT on `SocialFi` (the real
 /// `NftRegistry::mint`). `output` is the bytes of the AI inference layer inference
-/// response; the ContentId is `ContentId::of(output)`.
+/// response; the `ContentId` is `ContentId::of(output)`.
 /// # Errors
 ///
 /// Whatever `NftRegistry::mint` refuses, which today is a duplicate id: the
