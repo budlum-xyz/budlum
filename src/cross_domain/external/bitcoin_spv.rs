@@ -116,6 +116,54 @@ pub fn sha256d(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
+/// Maximum Bitcoin transaction Merkle branch depth (`2^32` transactions).
+const MAX_SPV_MERKLE_DEPTH: usize = 32;
+
+/// Verify a Bitcoin SPV transaction inclusion proof against a finalized
+/// header's `merkle_root` (`SHA256d` in internal byte order).
+///
+/// Rejects zero `txid`/`merkle_root`, oversized branches (`> 32`), leftover
+/// high index bits above the branch depth, and any `left == right` internal
+/// compression (blocking CVE-2012-2459 odd-leaf duplication malleability).
+///
+/// Convenience: exposed for external Bitcoin SPV settlement and bridge callers
+/// verifying payment inclusion against `FinalityAttestation::attested_tx_root`.
+#[must_use]
+pub fn verify_spv_tx_inclusion(
+    txid: &[u8; 32],
+    merkle_root: &[u8; 32],
+    tx_index: u32,
+    branch: &[[u8; 32]],
+) -> bool {
+    if *txid == [0u8; 32] || *merkle_root == [0u8; 32] || branch.len() > MAX_SPV_MERKLE_DEPTH {
+        return false;
+    }
+    if branch.len() < 32 && (tx_index >> branch.len()) != 0 {
+        return false;
+    }
+    let mut acc = *txid;
+    let mut idx = tx_index;
+    let mut pair = Vec::with_capacity(64);
+    for sibling in branch {
+        if acc == *sibling {
+            // CVE-2012-2459: refuse duplicate-child Merkle steps so a forged
+            // trailing-pair duplicate tree can never alias a distinct tx index.
+            return false;
+        }
+        let (left, right) = if idx & 1 == 0 {
+            (&acc, sibling)
+        } else {
+            (sibling, &acc)
+        };
+        pair.clear();
+        pair.extend_from_slice(left);
+        pair.extend_from_slice(right);
+        acc = sha256d(&pair);
+        idx >>= 1;
+    }
+    acc == *merkle_root
+}
+
 /// The 256-bit big-endian target encoded by Bitcoin's compact `nBits`.
 ///
 /// Refuses negative, zero, oversized and sub-3-exponent encodings rather than
@@ -403,6 +451,11 @@ impl ExternalFinalityAdapter for BitcoinSpvAdapter {
             if !first && u64::from(header.timestamp) < previous_timestamp {
                 return Err(AdapterError::ConsensusRule {
                     rule: "Bitcoin header timestamp moves backwards".to_string(),
+                });
+            }
+            if !verify_spv_tx_inclusion(&header.merkle_root, &header.merkle_root, 0, &[]) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "Bitcoin header carries an empty zero merkle_root".to_string(),
                 });
             }
             if !meets_target(&header.hash, &target) {
@@ -707,5 +760,37 @@ mod tests {
         );
         assert_eq!(attestation.time_unit, TimeUnit::UnixSeconds);
         assert_eq!(attestation.evidence_digest, evidence.digest());
+    }
+
+    #[test]
+    fn verify_spv_tx_inclusion_accepts_honest_branch_and_refuses_cve_2012_2459_duplicate() {
+        let pair = |l: [u8; 32], r: [u8; 32]| {
+            let mut buf = [0u8; 64];
+            buf[..32].copy_from_slice(&l);
+            buf[32..].copy_from_slice(&r);
+            sha256d(&buf)
+        };
+        let tx0 = sha256d(b"tx0");
+        let tx1 = sha256d(b"tx1");
+        let tx2 = sha256d(b"tx2");
+        let tx3 = sha256d(b"tx3");
+        let h01 = pair(tx0, tx1);
+        let h23 = pair(tx2, tx3);
+        let root = pair(h01, h23);
+
+        assert!(verify_spv_tx_inclusion(&tx2, &root, 2, &[tx3, h01]));
+        assert!(!verify_spv_tx_inclusion(&tx2, &root, 3, &[tx3, h01]));
+        // High index bits beyond branch depth must be rejected.
+        assert!(!verify_spv_tx_inclusion(
+            &tx2,
+            &root,
+            2 | (1 << 2),
+            &[tx3, h01]
+        ));
+        // CVE-2012-2459 duplicate-sibling Merkle step must fail closed.
+        let dup_root = pair(tx0, tx0);
+        assert!(!verify_spv_tx_inclusion(&tx0, &dup_root, 0, &[tx0]));
+        assert!(!verify_spv_tx_inclusion(&tx0, &dup_root, 1, &[tx0]));
+        assert!(!verify_spv_tx_inclusion(&[0u8; 32], &root, 0, &[tx1, h23]));
     }
 }

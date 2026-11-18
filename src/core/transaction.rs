@@ -5025,10 +5025,46 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
         }
         // Tag 3: appended, never inserted. Tags 0, 1 and 2 keep their bytes so
         // every registration already signed under them stays verifiable.
-        AdapterSpec::TendermintCommit { network, chain_id } => {
+        AdapterSpec::TendermintCommit {
+            network,
+            chain_id,
+            validator_set_hash,
+        } => {
             put_u8(out, 3);
             put_string(out, network);
             put_string(out, chain_id);
+            match validator_set_hash {
+                Some(hash) => {
+                    put_u8(out, 1);
+                    put_fixed(out, hash);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 4: modular 2D DAS + NMT data-availability adapter, appended last.
+        AdapterSpec::DataAvailability { network, committee } => {
+            put_u8(out, 4);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.namespace_id);
+                    put_u64(out, u64::from(pin.min_samples));
+                    put_u64(out, u64::from(pin.min_square_size));
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::da_sampling::DaCommitteeMember {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
         }
     }
 }

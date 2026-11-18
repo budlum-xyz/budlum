@@ -798,7 +798,6 @@ budzero/verifier-registry/src/registry.rs	fn	registrations_as_seq
 budzero/verifier-registry/src/registry.rs	struct	VerifierRegistry
 crates/budlum-explorer/src/arweave.rs	const	MAX_CHUNK_SIZE
 crates/budlum-explorer/src/arweave.rs	const	MIN_CHUNK_SIZE
-crates/budlum-explorer/src/arweave.rs	fn	data_root
 crates/budlum-explorer/src/bns_proof.rs	fn	partial_registry_root
 crates/budlum-explorer/src/bns_proof.rs	struct	RegistryEntry
 crates/budlum-explorer/src/ens.rs	fn	labelhash
