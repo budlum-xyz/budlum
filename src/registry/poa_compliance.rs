@@ -95,11 +95,15 @@ pub struct ComplianceAuditEvent {
     pub admin: Address,
 }
 
+pub const MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN: usize = 4_096;
+pub const MAX_POA_COMPLIANCE_ENTRIES_GLOBAL: usize = 65_536;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoaComplianceError {
     PermissionlessDomainForbidden,
     AdminRequired,
     ZeroEvidenceHash,
+    CapacityExceeded,
 }
 
 impl std::fmt::Display for PoaComplianceError {
@@ -116,6 +120,9 @@ impl std::fmt::Display for PoaComplianceError {
             }
             PoaComplianceError::ZeroEvidenceHash => {
                 write!(f, "compliance evidence hash must be non-zero")
+            }
+            PoaComplianceError::CapacityExceeded => {
+                write!(f, "PoA compliance registry capacity limit exceeded")
             }
         }
     }
@@ -189,6 +196,20 @@ impl PoaComplianceRegistry {
     ) -> Result<(), PoaComplianceError> {
         Self::ensure_poa(domain)?;
         let evidence_hash = Self::ensure_non_zero(oracle_reference_hash)?;
+        let key = (domain_id, address);
+        if !self.screenings.contains_key(&key) {
+            if self.screenings.len() >= MAX_POA_COMPLIANCE_ENTRIES_GLOBAL {
+                return Err(PoaComplianceError::CapacityExceeded);
+            }
+            let domain_count = self
+                .screenings
+                .keys()
+                .filter(|(d, _)| *d == domain_id)
+                .count();
+            if domain_count >= MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN {
+                return Err(PoaComplianceError::CapacityExceeded);
+            }
+        }
         let record = ScreeningRecord {
             domain_id,
             address,
@@ -230,6 +251,16 @@ impl PoaComplianceRegistry {
             return Err(PoaComplianceError::AdminRequired);
         }
         let evidence_hash = Self::ensure_non_zero(reason_hash)?;
+        let key = (domain_id, address);
+        if !self.freezes.contains_key(&key) {
+            if self.freezes.len() >= MAX_POA_COMPLIANCE_ENTRIES_GLOBAL {
+                return Err(PoaComplianceError::CapacityExceeded);
+            }
+            let domain_count = self.freezes.keys().filter(|(d, _)| *d == domain_id).count();
+            if domain_count >= MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN {
+                return Err(PoaComplianceError::CapacityExceeded);
+            }
+        }
         self.freezes.insert(
             (domain_id, address),
             FreezeRecord {
@@ -299,6 +330,11 @@ impl PoaComplianceRegistry {
         Self::ensure_poa(domain)?;
         let tx_hash = Self::ensure_non_zero(tx_hash)?;
         let evidence_hash = Self::ensure_non_zero(metadata_hash)?;
+        if !self.travel_rules.contains_key(&tx_hash)
+            && self.travel_rules.len() >= MAX_POA_COMPLIANCE_ENTRIES_GLOBAL
+        {
+            return Err(PoaComplianceError::CapacityExceeded);
+        }
         self.travel_rules.insert(
             tx_hash,
             TravelRuleRecord {
@@ -747,5 +783,50 @@ mod tests {
         let serialized = serde_json::to_string(&reg).unwrap();
         let restored: PoaComplianceRegistry = serde_json::from_str(&serialized).unwrap();
         assert_eq!(restored.root(), reg.root());
+    }
+
+    #[test]
+    fn poa_compliance_enforces_per_domain_freeze_capacity_cap_and_allows_unfreeze() {
+        let mut reg = PoaComplianceRegistry::new();
+        let domain_id = 77;
+        let admin = addr(1);
+        for i in 0..4_096u32 {
+            let mut bytes = [0u8; 32];
+            bytes[..4].copy_from_slice(&i.to_be_bytes());
+            let subject = Address::from(bytes);
+            reg.freeze_suspicious(
+                ComplianceDomainKind::PoA,
+                domain_id,
+                admin,
+                subject,
+                hash(((i % 255) + 1) as u8),
+                1,
+            )
+            .expect("within per-domain cap");
+        }
+        let overflow_subject = Address::from([0xffu8; 32]);
+        assert!(
+            reg.freeze_suspicious(
+                ComplianceDomainKind::PoA,
+                domain_id,
+                admin,
+                overflow_subject,
+                hash(99),
+                2,
+            )
+            .is_err(),
+            "4097th distinct freeze in one domain must be rejected"
+        );
+        // Unfreezing an existing entry must still succeed even at capacity.
+        let first_subject = Address::from([0u8; 32]);
+        reg.unfreeze(
+            ComplianceDomainKind::PoA,
+            domain_id,
+            admin,
+            first_subject,
+            hash(100),
+            3,
+        )
+        .expect("unfreeze at capacity must succeed");
     }
 }
