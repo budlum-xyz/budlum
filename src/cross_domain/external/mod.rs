@@ -39,11 +39,13 @@
 //! # WIRING STATUS - read this before trusting anything below
 //!
 //! **Wired through [`intake`]** - with the limit spelled out here
-//! The attestation is NOT part of any block or header
-//! yet. `state_digest` is an RPC value a consumer can compare; nothing in
-//! consensus commits it until the `GlobalBlockHeader` root lands. The two
-//! consensus decisions the earlier version of this notice deferred were
-//! made, in writing, in `intake.rs`'s module docs:
+//! The intake is in the state root (two nodes that applied the same blocks
+//! hold the same intake), and the `GlobalBlockHeader` carries its digest as
+//! the presence-tagged `external_intake_root` (set in `blockchain.rs` when
+//! the intake holds any record, hashed into the header by
+//! `global_block.rs`). The two consensus decisions the earlier version of
+//! this notice deferred were made, in writing, in `intake.rs`'s module
+//! docs:
 //!
 //! 1. The registry lives in the account state as
 //!    `settlement.external_intake` ([`IntakeState`]), written only by the
@@ -63,12 +65,11 @@
 //! the transaction. Re-derive before believing, as always:
 //! `grep -rn 'external_intake' src/ --include='*.rs'`.
 //!
-//! **Limit of that claim.** The intake is now in the state root, so two
-//! nodes that applied the same blocks hold the same intake. The
-//! `GlobalBlockHeader` does not carry its digest yet (
-//!). Prover slashing has no door: it needs a proof that an accepted
-//! attestation was false, which is not defined yet, so
-//! `bud_slashExternalProver` is closed.
+//! **Limit of that claim.** The intake is in the state root and its digest
+//! is in the header when the intake holds any record (presence-tagged
+//! `external_intake_root`, commit `fb58775c`). Prover slashing still has no
+//! door: it needs a proof that an accepted attestation was false, which is
+//! not defined yet, so `bud_slashExternalProver` is closed.
 //!
 //! # The rule underneath all six
 //!
