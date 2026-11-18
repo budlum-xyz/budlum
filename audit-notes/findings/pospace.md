@@ -1,7 +1,7 @@
 # B-0045: The PoSpace engine has no production plot registration and weights self-declared capacity
 
 - **Location:** `src/consensus/pospace.rs` on `budlum-consensus-of-consensuses` head `7533b71b4812a20ca078611c77d9d82c1f28ebfc` (PR #194). The engine is constructed for every domain of kind `Pospace` in `src/main.rs:1498` and paired with `PospaceDomainPlugin` in `src/main.rs:1511`.
-- **Severity:** high for correctness and for the guarantee the module claims; no immediate fund loss, because no domain in the shipped catalog is registered with `ConsensusKind::Pospace` (`src/unification/domain_catalog.rs:160-423` lists PoS, PoW, BFT, ZK, `StorageAttestation`, `AiInference` and two `Custom` kinds, no PoSpace). The defect is reachable by any operator who registers a PoSpace domain through the settlement registration path.
+- **Severity:** medium-high for correctness and for the guarantee the module claims. Latent rather than live: the plugin that would call this engine has no production caller (B-0046), and no domain in the shipped catalog is registered with `ConsensusKind::Pospace` (`src/unification/domain_catalog.rs:160-423` lists PoS, PoW, BFT, ZK, `StorageAttestation`, `AiInference` and two `Custom` kinds, no PoSpace). The defect is reachable by any operator who registers a PoSpace domain through the settlement registration path.
 
 ## Part 1: the plot registry can never be filled in a production build
 
@@ -67,6 +67,14 @@ The module documentation states that "PoSpace requires miners to commit verifiab
 3. If real space is intended, make the response depend on stored data (for example a Merkle opening over a plot the prover committed to, with the commitment in state), instead of `Sha256(tag || plot_id || challenge)` over public inputs.
 4. Regressions: a production-shaped engine (no test-only registration) must fail `prepare_block` and `validate_block` with a named error rather than only in tests; an unregistered 1 PiB chain must score `0` and must never win `is_better_chain`; a registered plot presenting a different `size_bytes` must score `0` (already covered at `:600-605`).
 5. Until (1) to (3) land, document PoSpace as not deployable and remove it from the list of consensus families asserted to be production-ready in the plan and README claims.
+
+## Reachability, corrected
+
+The engine is constructed for every domain of kind `Pospace` and stored in `blockchain.plugin_registry` (`src/main.rs:1498, 1514`), but no production path ever asks that registry anything: `DomainPluginRegistry::get` has no non-test caller, and neither `validate_domain_block` nor `extract_commitment` is invoked outside tests. See B-0046.
+
+So the deadlock in Part 1 is **latent, not observable today**. A PoSpace domain currently finalizes or refuses commitments entirely through `PospaceFinalityAdapter` (`src/domain/finality_adapter.rs:2811-2890`), and that adapter does bind the authority set, the prover's membership, the prover's signature, the derived plot id and a recomputed quality before the two-thirds quorum (`:2610-2681`, quorum at `:2416-2476`). The capacity figure in the finality proof is not a space proof either, but it is bound by the authority quorum, so it does not by itself let a single prover finalize anything.
+
+What is wrong today is narrower and still worth a finding: the module documentation and the local architecture plan describe a working space-based consensus family, and the engine that would implement it neither admits registration in a production build nor derives any weight from registered state. The concrete failures above land the moment the plugin path is wired to a real domain block intake.
 
 ## Status
 
