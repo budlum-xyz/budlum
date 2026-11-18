@@ -2736,7 +2736,8 @@ impl Transaction {
                 | crate::cross_domain::external::ExternalDomainTx::Readmit { .. },
             ) => schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8,
             TransactionType::ExternalDomain(
-                crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_),
+                crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_)
+                | crate::cross_domain::external::ExternalDomainTx::ChallengeContradiction(_),
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
             TransactionType::ExternalDomain(_) => schedule.contract_call_gas * 2,
             // Registration validates the domain record and escrows a bond; a
@@ -4973,6 +4974,11 @@ fn encode_external_domain_tx(
                 },
             );
         }
+        // Tag 6: cryptographic contradiction challenge, appended last.
+        ExternalDomainTx::ChallengeContradiction(evidence) => {
+            put_u8(out, 6);
+            encode_raw_evidence(evidence, out);
+        }
     }
 }
 
@@ -5054,6 +5060,52 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                     put_u64(out, pin.members.len() as u64);
                     for member in &pin.members {
                         let crate::cross_domain::external::da_sampling::DaCommitteeMember {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 5: linear chained BFT (HotStuff 3-chain QC) adapter, appended last.
+        AdapterSpec::HotStuffQc { network, committee } => {
+            put_u8(out, 5);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::hotstuff::HotStuffValidator {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 6: stake-weighted round-DAG BFT (Bullshark) adapter, appended last.
+        AdapterSpec::DagCertificate { network, committee } => {
+            put_u8(out, 6);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::dag_bft::DagBftValidator {
                             ed25519_pubkey,
                             voting_weight,
                             pq_pubkey,

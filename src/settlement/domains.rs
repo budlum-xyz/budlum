@@ -1102,10 +1102,18 @@ pub fn accept_commitment(
         .settlement
         .commitments
         .find_by_height(commitment.domain_id, commitment.domain_height);
+    let attested = CommitmentAttestation::for_domain(&domain);
+    let agrees_on_attested = |prev: &DomainCommitment, cand: &DomainCommitment| -> bool {
+        use subtle::ConstantTimeEq;
+        bool::from(prev.domain_block_hash.ct_eq(&cand.domain_block_hash))
+            && (!attested.state_root || bool::from(prev.state_root.ct_eq(&cand.state_root)))
+            && (!attested.tx_root || bool::from(prev.tx_root.ct_eq(&cand.tx_root)))
+            && (!attested.event_root || bool::from(prev.event_root.ct_eq(&cand.event_root)))
+    };
 
     if commitment.domain_height <= domain.last_committed_height {
-        if let Some(existing) = existing {
-            if existing.domain_block_hash == commitment.domain_block_hash {
+        if let Some(ref existing) = existing {
+            if agrees_on_attested(existing, &commitment) {
                 return Ok(CommitmentOutcome::Idempotent);
             }
             return Ok(freeze_domain(
@@ -1128,11 +1136,12 @@ pub fn accept_commitment(
         ));
     }
 
-    if let Some(existing) = existing {
+    if let Some(ref existing) = existing {
         // The same finalized block is not an equivocation merely because a
-        // relayer changed an auxiliary sequence number. Treat it as a replay,
-        // not evidence that the domain finalized conflicting blocks.
-        if existing.domain_block_hash == commitment.domain_block_hash {
+        // relayer changed an auxiliary sequence number or an unattested root.
+        // Divergence on `domain_block_hash` or any finality-attested root
+        // (`state_root`, `tx_root`, `event_root`) is cryptographic equivocation.
+        if agrees_on_attested(existing, &commitment) {
             return Ok(CommitmentOutcome::Idempotent);
         }
         return Ok(freeze_domain(

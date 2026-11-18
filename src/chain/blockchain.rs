@@ -1568,6 +1568,67 @@ impl Blockchain {
         self.garden_domains.register(domain)
     }
 
+    /// Fail-closed domain block validation and commitment extraction through
+    /// [`DomainPluginRegistry`] (`B-0046`): resolves the registered consensus
+    /// plugin for `domain_id`, checks its consensus kind and finality adapter
+    /// binding against the active domain record, runs the engine's structural
+    /// `validate_domain_block`, and derives the canonical [`DomainCommitment`].
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown or inactive domains, domains with no registered plugin,
+    /// plugin/domain kind or adapter mismatches, and invalid domain blocks.
+    ///
+    /// WIRING: Live consensus-plugin validation gate pairing `plugin_registry.get`
+    /// with `validate_domain_block` and `extract_commitment`.
+    pub fn validate_and_extract_domain_block(
+        &self,
+        domain_id: DomainId,
+        block: &Block,
+        domain_chain: &[Block],
+        sequence: u64,
+    ) -> Result<DomainCommitment, String> {
+        let domain = self
+            .state
+            .settlement
+            .domains
+            .get(domain_id)
+            .or_else(|| self.garden_domains.get(domain_id))
+            .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+        if !domain.is_active() {
+            return Err(format!("Consensus domain {domain_id} is not active"));
+        }
+        let plugin = self.plugin_registry.get(domain_id).ok_or_else(|| {
+            format!("No consensus plugin registered for domain {domain_id} (refusing fail-closed)")
+        })?;
+        if plugin.kind() != domain.kind {
+            return Err(format!(
+                "Domain {domain_id} plugin kind {:?} mismatches registered domain kind {:?}",
+                plugin.kind(),
+                domain.kind
+            ));
+        }
+        let runtime_adapter = plugin.finality_adapter().adapter_name();
+        if runtime_adapter != domain.finality_adapter {
+            return Err(format!(
+                "Domain {domain_id} plugin adapter {runtime_adapter:?} mismatches domain record {:?}",
+                domain.finality_adapter
+            ));
+        }
+        let ctx = crate::domain::DomainContext {
+            domain,
+            chain: domain_chain,
+            state: &self.state,
+            sequence,
+        };
+        plugin
+            .validate_domain_block(block, ctx.clone())
+            .map_err(|e| e.to_string())?;
+        plugin
+            .extract_commitment(block, ctx)
+            .map_err(|e| e.to_string())
+    }
+
     /// The local Garden domain `domain_id`, when it is a bridgeless `PoA` domain
     /// operated by `operator`.
     fn bridgeless_poa_domain_operated_by(

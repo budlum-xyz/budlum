@@ -556,7 +556,51 @@ pub struct EthereumSyncAdapter {
     /// admission state (decision C, interim): the adapter refuses every
     /// update until a committee is pinned.
     committee: Option<PinnedCommittee>,
+    /// Optional full 512-member BLS12-381 G1 public-key roster for the pinned
+    /// period. When installed, `verify_observed` reconstructs the exact
+    /// participating subset aggregate key `sum_{i: bit[i] == 1} pk_i` from
+    /// `update.participation_bits`, enabling authentic `< 512` partial-quorum
+    /// updates and refusing any bitvector mask that disagrees with the signers.
+    member_pubkeys: Option<Vec<[u8; 48]>>,
     golden: Option<RawConsensusEvidence>,
+}
+
+/// Reconstruct the compressed BLS12-381 G1 aggregate public key of the exact
+/// sync-committee subset selected by `participation_bits` (with full prime-order
+/// subgroup and non-identity checks on every member key and on the resulting sum).
+///
+/// # Errors
+///
+/// Returns [`AdapterError::ConsensusRule`] or [`AdapterError::Crypto`] if
+/// `member_pubkeys.len() != 512`, `participation_bits.len() != 64`, any key is
+/// outside G1 or identity, no bits are set, or the sum cancels to identity.
+///
+/// WIRING: Subset sync-committee G1 aggregation consumed by [`EthereumSyncAdapter`].
+pub fn aggregate_sync_committee_subset(
+    member_pubkeys: &[[u8; 48]],
+    participation_bits: &[u8],
+) -> Result<([u8; 48], u64), AdapterError> {
+    if member_pubkeys.len() != SYNC_COMMITTEE_SIZE as usize {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!(
+                "sync committee roster must hold {SYNC_COMMITTEE_SIZE} pubkeys, found {}",
+                member_pubkeys.len()
+            ),
+        });
+    }
+    if participation_bits.len() != BITVECTOR_BYTES {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!(
+                "sync committee participation_bits must be {BITVECTOR_BYTES} bytes, found {}",
+                participation_bits.len()
+            ),
+        });
+    }
+    crate::cross_domain::evm::sync_committee::aggregate_sync_committee_subset_g1(
+        member_pubkeys,
+        participation_bits,
+    )
+    .map_err(|what| AdapterError::Crypto { what })
 }
 
 impl EthereumSyncAdapter {
@@ -594,8 +638,59 @@ impl EthereumSyncAdapter {
             },
             verifier,
             committee,
+            member_pubkeys: None,
             golden: None,
         }
+    }
+
+    /// Installs the full 512-member BLS12-381 G1 key roster for the pinned
+    /// committee, verifying immediately that the all-512 aggregate matches the
+    /// pinned committee's aggregate public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] if no committee is pinned, any member key is
+    /// invalid, or the full-roster aggregate does not match `committee.aggregate_pubkey`.
+    ///
+    /// WIRING: Subset-bound Altair/Deneb/Electra sync-committee verification entrypoint.
+    pub fn with_member_pubkeys(
+        mut self,
+        member_pubkeys: Vec<[u8; 48]>,
+    ) -> Result<Self, AdapterError> {
+        let Some(committee) = self.committee.as_ref() else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "cannot attach member_pubkeys without a pinned committee".into(),
+            });
+        };
+        let (full_agg, _) =
+            aggregate_sync_committee_subset(&member_pubkeys, &[0xff; BITVECTOR_BYTES])?;
+        use subtle::ConstantTimeEq;
+        let matches_pin = match committee.aggregate_pubkey.len() {
+            48 => bool::from(
+                committee
+                    .aggregate_pubkey
+                    .as_slice()
+                    .ct_eq(full_agg.as_slice()),
+            ),
+            96 => {
+                committee
+                    .aggregate_pubkey
+                    .get(..48)
+                    .is_some_and(|head| bool::from(head.ct_eq(full_agg.as_slice())))
+                    && committee
+                        .aggregate_pubkey
+                        .get(48..)
+                        .is_some_and(|pad| pad.iter().all(|&b| b == 0))
+            }
+            _ => false,
+        };
+        if !matches_pin {
+            return Err(AdapterError::ConsensusRule {
+                rule: "512-member sync committee aggregate mismatches pinned committee key".into(),
+            });
+        }
+        self.member_pubkeys = Some(member_pubkeys);
+        Ok(self)
     }
 
     /// Rotates the pinned committee.
@@ -630,6 +725,7 @@ impl EthereumSyncAdapter {
             });
         }
         self.committee = Some(next);
+        self.member_pubkeys = None;
         Ok(())
     }
 
@@ -789,11 +885,49 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
                 ),
             });
         }
-        if update.aggregate_pubkey != committee.aggregate_pubkey {
-            return Err(AdapterError::ConsensusRule {
-                rule: "the update's aggregate public key is not the pinned committee's".to_string(),
-            });
-        }
+        // Verify against the exact participating subset G1 sum when the 512
+        // member pubkeys are pinned, or against the full pinned committee key.
+        let verified_key: Vec<u8> = if let Some(roster) = self.member_pubkeys.as_ref() {
+            let (subset_pk, subset_count) =
+                aggregate_sync_committee_subset(roster, &update.participation_bits)?;
+            if subset_count != signers {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "sync committee subset count diverged from participation bitvector"
+                        .into(),
+                });
+            }
+            use subtle::ConstantTimeEq;
+            let update_matches_subset = update
+                .aggregate_pubkey
+                .get(..48)
+                .is_some_and(|head| bool::from(head.ct_eq(subset_pk.as_slice())))
+                && update
+                    .aggregate_pubkey
+                    .get(48..)
+                    .is_some_and(|pad| pad.iter().all(|&b| b == 0));
+            let update_matches_committee = bool::from(
+                update
+                    .aggregate_pubkey
+                    .as_slice()
+                    .ct_eq(committee.aggregate_pubkey.as_slice()),
+            );
+            if !update_matches_subset && !update_matches_committee {
+                return Err(AdapterError::ConsensusRule {
+                    rule:
+                        "update aggregate_pubkey matches neither subset nor full pinned committee"
+                            .into(),
+                });
+            }
+            subset_pk.to_vec()
+        } else {
+            if update.aggregate_pubkey != committee.aggregate_pubkey {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "the update's aggregate public key is not the pinned committee's"
+                        .to_string(),
+                });
+            }
+            committee.aggregate_pubkey.clone()
+        };
 
         // The pairing check. Refused when no verifier is installed - there is
         // no mode in which this adapter accepts an unchecked signature.
@@ -815,7 +949,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
         verifier
             .verify_aggregate(
                 &signing_root_v2(&update),
-                &committee.aggregate_pubkey,
+                &verified_key,
                 &update.signature,
                 signers,
             )
@@ -1234,6 +1368,112 @@ mod slashable_policy_tests {
         assert!(
             matches!(err, AdapterError::ConsensusRule { .. }),
             "got: {err:?}"
+        );
+    }
+
+    /// STRIX-ETH-01 regression: a 512-member BLS12-381 sync committee verifies a
+    /// real partial-quorum (350/512) pairing against the exact participating
+    /// subset G1 sum and refuses any forged participation bitvector mask or
+    /// mismatched signer set.
+    #[test]
+    fn subset_participation_verifies_real_bls_pairing_and_refuses_forged_mask() {
+        use crate::cross_domain::external::intake::PairingBls;
+        use bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
+
+        let mut secrets = Vec::with_capacity(SYNC_COMMITTEE_SIZE as usize);
+        let mut pubkeys = Vec::with_capacity(SYNC_COMMITTEE_SIZE as usize);
+        let mut full_pk = G1Projective::identity();
+        for idx in 0..SYNC_COMMITTEE_SIZE {
+            let sk = Scalar::from(idx + 17);
+            let pk = G1Projective::generator() * sk;
+            full_pk += pk;
+            secrets.push(sk);
+            pubkeys.push(G1Affine::from(pk).to_compressed());
+        }
+        let mut pinned_pk_96 = vec![0u8; 96];
+        pinned_pk_96[..48].copy_from_slice(&G1Affine::from(full_pk).to_compressed());
+        let committee = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: pinned_pk_96,
+            next_committee_root: [0x5Au8; 32],
+        };
+
+        let adapter = EthereumSyncAdapter::new(
+            "mainnet",
+            Some(committee.clone()),
+            Some(Box::new(PairingBls)),
+        )
+        .with_member_pubkeys(pubkeys)
+        .expect("pinned 512-member roster matches full aggregate key");
+
+        // Build an authentic 350-of-512 partial quorum update.
+        let bits_350 = bits_for(350);
+        let state_root = [0xC3u8; 32];
+        let mut payload =
+            build_deneb_update_payload(64, 96, 0, &committee, &[0u8; 96], &bits_350, state_root);
+        let parsed = parse_update(&payload).expect("parse template");
+        let root = signing_root_v2(&parsed);
+        let h_msg = G2Projective::from(crate::chain::finality::hash_to_g2(&root));
+        let mut agg_sig = G2Projective::identity();
+        for sk in secrets.iter().take(350) {
+            agg_sig += h_msg * sk;
+        }
+        let sig_bytes = G2Affine::from(agg_sig).to_compressed();
+        payload[layout::SIGNATURE].copy_from_slice(&sig_bytes);
+
+        let ev = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            network: "mainnet".to_string(),
+            evidence_version: 2,
+            declared_height: 64,
+            declared_root: state_root,
+            payload: payload.clone(),
+            submitter: crate::core::address::Address([0x11; 32]),
+        };
+        let att = adapter
+            .verify(&ev, &VerificationPolicy::strict(200))
+            .expect("real 350/512 BLS12-381 subset pairing verifies");
+        assert_eq!(att.height, 64);
+        assert_eq!(att.state_root, state_root);
+
+        // Forged bitvector claiming 351 signers, even when the attacker re-signs
+        // the new signing root using the 350 keys they actually hold, MUST fail
+        // because the verified G1 sum includes honest member #350's uncompromised key.
+        let mut forged_mask = ev.clone();
+        let bits_351 = bits_for(351);
+        forged_mask.payload[layout::PARTICIPATION_BITS].copy_from_slice(&bits_351);
+        let forged_parsed = parse_update(&forged_mask.payload).expect("parse forged");
+        let forged_h = G2Projective::from(crate::chain::finality::hash_to_g2(&signing_root_v2(
+            &forged_parsed,
+        )));
+        let mut forged_sig = G2Projective::identity();
+        for sk in secrets.iter().take(350) {
+            forged_sig += forged_h * sk;
+        }
+        forged_mask.payload[layout::SIGNATURE]
+            .copy_from_slice(&G2Affine::from(forged_sig).to_compressed());
+        assert!(
+            matches!(
+                adapter.verify(&forged_mask, &VerificationPolicy::strict(200)),
+                Err(AdapterError::Crypto { .. })
+            ),
+            "inflating participation_bits must fail BLS pairing"
+        );
+
+        // Signing with a DIFFERENT 350-member subset (members 1..=350) while claiming 0..350 MUST fail.
+        let mut wrong_subset_sig = G2Projective::identity();
+        for sk in secrets.iter().skip(1).take(350) {
+            wrong_subset_sig += h_msg * sk;
+        }
+        let mut wrong_signers = ev;
+        wrong_signers.payload[layout::SIGNATURE]
+            .copy_from_slice(&G2Affine::from(wrong_subset_sig).to_compressed());
+        assert!(
+            matches!(
+                adapter.verify(&wrong_signers, &VerificationPolicy::strict(200)),
+                Err(AdapterError::Crypto { .. })
+            ),
+            "wrong 350-signer subset must fail BLS pairing against bits[0..350]"
         );
     }
 }
