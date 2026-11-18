@@ -260,8 +260,37 @@ fn prune_database_backups(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() {
+/// Minimum worker thread stack size (8 MiB) enforced on both the Tokio async
+/// runtime and the global Rayon pool so recursive Plonky3 STARK/FRI/Merkle
+/// verification never overflows small platform defaults such as Alpine `musl`
+/// (128 KiB default `pthread` stack).
+const WORKER_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn build_tokio_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_THREAD_STACK_BYTES)
+        .build()
+}
+
+fn main() {
+    // Configure the global Rayon pool with an explicit 8 MiB stack before any
+    // parallel proof or erasure-coding task spawns worker threads.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(WORKER_THREAD_STACK_BYTES)
+        .build_global();
+
+    let runtime = match build_tokio_runtime() {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("Fatal: failed to initialize Tokio runtime: {err}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(async_main());
+}
+
+async fn async_main() {
     // The Semgrep rule `rust.lang.security.args.args` targets using argv[0] -
     // the executable path, which an attacker can set freely - as the basis of a
     // security decision. argv[0] is never read here: subcommand parsing starts
@@ -2555,5 +2584,20 @@ mod tests {
         assert!(reason.contains(path_str));
         assert!(reason.contains("as validator keys"));
         assert!(reason.contains("as key pair"));
+    }
+
+    #[test]
+    fn worker_runtime_enforces_eight_mib_thread_stack() {
+        assert_eq!(super::WORKER_THREAD_STACK_BYTES, 8 * 1024 * 1024);
+        let rt = super::build_tokio_runtime().expect("tokio runtime builds with 8 MiB stack");
+        let out = rt.block_on(async {
+            tokio::spawn(async {
+                let buf = std::hint::black_box([0xA5u8; 512 * 1024]);
+                buf[0]
+            })
+            .await
+            .expect("worker task completes without stack overflow")
+        });
+        assert_eq!(out, 0xA5);
     }
 }

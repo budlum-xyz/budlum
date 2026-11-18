@@ -268,6 +268,19 @@ impl ConsensusDomainPlugin for DagDomainPlugin {
         if block.tx_root != calculated_tx_root {
             return Err(DomainError("DAG block tx_root mismatch".into()));
         }
+        if block.index > 0 {
+            let parents = crate::consensus::dag::parse_parent_hashes(&block.previous_hash);
+            let max_parent = parents
+                .iter()
+                .filter_map(|p| ctx.chain.iter().find(|b| &b.hash == p))
+                .max_by_key(|b| b.timestamp);
+            self.consensus()
+                .validate_timestamp(block, max_parent)
+                .map_err(DomainError::from)?;
+            self.consensus()
+                .validate_block_size(block)
+                .map_err(DomainError::from)?;
+        }
         self.consensus()
             .validate_block(block, ctx.chain, ctx.state)
             .map_err(DomainError::from)
