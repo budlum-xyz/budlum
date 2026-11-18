@@ -408,6 +408,7 @@ fn check_funds(
 fn registry_params(min_operator_bond: u64) -> StorageDomainParams {
     StorageDomainParams {
         min_operator_bond,
+        require_merkle_proof: false,
         ..StorageDomainParams::default()
     }
 }
