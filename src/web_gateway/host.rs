@@ -241,4 +241,12 @@ mod tests {
         // The default suffix no longer matches once it is configured away.
         assert_eq!(parse_host("ayaz.budlum.xyz", "example.test"), None);
     }
+
+    #[test]
+    fn punycode_and_ace_homograph_hosts_are_refused() {
+        assert_eq!(parse("xn--80ak6aa92e.budlum.xyz"), None);
+        assert_eq!(parse("XN--PPLE-43D.budlum.xyz"), None);
+        assert_eq!(parse("xn--80ak6aa92e.ayaz.budlum.xyz"), None);
+        assert_eq!(parse("shop.xn--80ak6aa92e.budlum.xyz"), None);
+    }
 }
