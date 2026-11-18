@@ -58,6 +58,7 @@ A changes-requested review from CodeRabbit remains in the review history of #164
 - [Domain plugin wiring finding B-0046](findings/domain-plugin-wiring.md)
 - [Dead-API gate finding B-0047](findings/dead-pub-api-gate.md)
 - [Account bincode round trip, B-0048](findings/account-bincode-roundtrip.md)
+- [VerifyMerkle gate and the deal-open envelope, B-0054](findings/verify-merkle-gate.md)
 - [Garden invite regression, B-0049 / BLG-268](findings/garden-invite.md)
 - [Garden B.U.D. 3.0 integration gap, B-0050 / BLG-269](findings/garden-storage.md)
 - [Extra-clippy stale baseline, B-0051](findings/clippy-ratchet-baseline.md)
@@ -95,3 +96,4 @@ This is a later local snapshot. It does not turn any queued check in the histori
 - B-0041 and B-0042 code is verified present on `budlum-stack` but absent from the checked Garden head. A staged or upper-branch fix is not a lower-branch closure. B-0043's completed-frame lifetime issue remains open.
 - The supplied 1,063-file plan is reconciled against the 1,819-file newer inventory: 1,005 paths remain and 58 absent paths are retained in the migration/removal checklist. All 11 requested operating-system targets remain in the plan. None is marked complete based only on these partial runs.
 - These changes introduce no suppressions, ignored tests, dependency pins, license changes, force-pushes or protection bypasses. No Strix comment is deleted or closed by this local evidence.
+- B-0054 is fixed in PR #201 at `02de7030` on `fix/verify-merkle-gate`. `open_deal` required a Merkle envelope while every profile set `verify_merkle = false`, so a client that followed the profile was refused with `MerkleProofRequired`. Three tests pin the fix and the negative control reproduces the refusal exactly. CI run number pending.
