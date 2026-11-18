@@ -9,7 +9,7 @@ on:
     branches: [main]
   pull_request:
     # Run on the normal protected bases and on stacked continuation bases.
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
   # A manual run on a snapshot ref (a branch or a tag that names one commit).
   # Its concurrency group is the snapshot ref, so a push to a stacked branch
   # cannot cancel it, and a head gets one complete result.
@@ -1260,7 +1260,8 @@ jobs:
       - name:  named invariant tests
         run: |
           set -euo pipefail
-          cargo test --lib 2>&1 | tee /tmp/economy-invariants.txt
+          readarray -t NAMES < <(cargo run -q --release --manifest-path xtask/gates/Cargo.toml -- economy-invariants --names)
+          cargo test --lib -- "${NAMES[@]}" 2>&1 | tee /tmp/economy-invariants.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- economy-invariants /tmp/economy-invariants.txt
 
   fork-choice-gate:
@@ -1305,7 +1306,8 @@ jobs:
       - name:  fork-choice tests
         run: |
           set -euo pipefail
-          cargo test --lib 2>&1 | tee /tmp/fork-choice-gate.txt
+          readarray -t NAMES < <(cargo run -q --release --manifest-path xtask/gates/Cargo.toml -- fork-choice --names)
+          cargo test --lib -- "${NAMES[@]}" 2>&1 | tee /tmp/fork-choice-gate.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- fork-choice /tmp/fork-choice-gate.txt
 
   storage-provider-gate:
@@ -1356,7 +1358,8 @@ jobs:
       - name:  StorageProvider tests
         run: |
           set -euo pipefail
-          cargo test --lib 2>&1 | tee /tmp/storage-provider-gate.txt
+          readarray -t NAMES < <(cargo run -q --release --manifest-path xtask/gates/Cargo.toml -- storage-provider --names)
+          cargo test --lib -- "${NAMES[@]}" 2>&1 | tee /tmp/storage-provider-gate.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-provider /tmp/storage-provider-gate.txt
 
   node-classification-gate:
@@ -1456,9 +1459,8 @@ jobs:
       - name:  network hardening tests
         run: |
           set -euo pipefail
-          cargo test --lib 2>&1 | tee /tmp/network-hardening-gate.txt
-          cargo test --lib peer_rate_limit_security_profile 2>&1 | tee -a /tmp/network-hardening-gate.txt
-          cargo test --lib h5_ 2>&1 | tee -a /tmp/network-hardening-gate.txt
+          readarray -t NAMES < <(cargo run -q --release --manifest-path xtask/gates/Cargo.toml -- network-hardening --names)
+          cargo test --lib -- "${NAMES[@]}" 2>&1 | tee /tmp/network-hardening-gate.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- network-hardening /tmp/network-hardening-gate.txt
 
 
