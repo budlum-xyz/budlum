@@ -5112,6 +5112,47 @@ impl Executor {
                         hex::encode(justification_hash)
                     );
                 }
+                crate::core::governance::GovernanceAction::PinExternalAnchor {
+                    network,
+                    anchor,
+                    expected_previous,
+                    justification_hash,
+                } => {
+                    // The anchor is inside `external_intake_root`, so this arm is
+                    // the only production writer and every node reaches it with
+                    // the same inputs. A vote that names the anchor it expected
+                    // to find is applied only if that is what is installed: a
+                    // vote taken against one sync committee or checkpoint must
+                    // not land on its successor, which is what an unbound
+                    // "replace whatever is there" would allow.
+                    let observed = state
+                        .settlement
+                        .external_intake
+                        .pinned_anchor_digest(anchor.family(), &network)
+                        .map_err(|e| BudlumError::validation("external_anchor_digest", e))?;
+                    if observed != expected_previous {
+                        return Err(BudlumError::validation(
+                            "external_anchor_retargeted",
+                            format!(
+                                "the {} anchor for network {network} is {} but the vote expected {}",
+                                anchor.family().as_str(),
+                                observed.map_or_else(|| "absent".to_string(), hex::encode),
+                                expected_previous.map_or_else(|| "absent".to_string(), hex::encode)
+                            ),
+                        ));
+                    }
+                    let family = anchor.family();
+                    state
+                        .settlement
+                        .external_intake
+                        .install_pinned_anchor(&network, anchor);
+                    tracing::info!(
+                        "Installed external anchor: family={} network={} justification={}",
+                        family.as_str(),
+                        network,
+                        hex::encode(justification_hash)
+                    );
+                }
                 crate::core::governance::GovernanceAction::BnsSetPrimarySellers { sellers } => {
                     state
                         .bns_registry

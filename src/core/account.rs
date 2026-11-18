@@ -4452,6 +4452,16 @@ impl AccountState {
                     Err(e) => tracing::warn!("Rejecting BnsSetPrimarySellers: {e}"),
                 }
             }
+            ProposalType::PinExternalAnchor { network, .. } => {
+                // Applied by the executor's `GovernanceAction::PinExternalAnchor`
+                // arm, inside block execution, which is where every node sees
+                // the same anchor. A second writer here would install the same
+                // vote twice on two different paths.
+                tracing::warn!(
+                    "PinExternalAnchor for network {network} reached execute_proposal; \
+                     the anchor is installed by the GovernanceAction path"
+                );
+            }
             ProposalType::BnsSetBaseCost { base_cost } => {
                 match self.bns_registry.set_base_cost(*base_cost) {
                     Ok(()) => {
