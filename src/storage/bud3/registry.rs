@@ -1035,7 +1035,10 @@ impl Bud3Registry {
         // A replacement whose new object is deleted leaves no object that
         // carries the content: the references are already gone (this is the
         // burn of the last one, or expiry), so every chained replaced object
-        // goes with it and no orphan redirect stands.
+        // goes with it and no orphan redirect stands. Likewise, deleting an
+        // old object (for example via `dao_delete_public_content`) while a
+        // replacement is still unfinalized removes the pending target too so
+        // confirming its remaining shares cannot resurrect deleted content.
         let mut queue = vec![*key];
         let mut seen = BTreeSet::from([*key]);
         while let Some(target) = queue.pop() {
@@ -1050,6 +1053,18 @@ impl Bud3Registry {
                 self.replacements.remove(&old);
                 if seen.insert(old) {
                     queue.push(old);
+                }
+            }
+            if let Some(next) = self
+                .replacements
+                .get(&target)
+                .filter(|r| !r.finalized)
+                .map(|r| r.new)
+            {
+                self.replacements.remove(&target);
+                self.drop_object(&next, epoch);
+                if seen.insert(next) {
+                    queue.push(next);
                 }
             }
         }
@@ -1167,7 +1182,12 @@ impl Bud3Registry {
         if owner != *signer {
             return Err(RegistryError::NotAuthorized);
         }
-        if self.base_deps.get(key).is_some_and(|d| !d.is_empty()) {
+        let live_leaf = self.pending_replacement_leaf(key);
+        let has_deps = self
+            .pending_replacement_sources(&live_leaf)
+            .into_iter()
+            .any(|k| self.base_deps.get(&k).is_some_and(|d| !d.is_empty()));
+        if has_deps {
             return Err(RegistryError::HasDependents);
         }
         self.delete(key, epoch);
@@ -1534,7 +1554,10 @@ impl Bud3Registry {
             .get(&key)
             .ok_or(RegistryError::UnknownObject)?
             .owner;
-        let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
+        let has_deps = self
+            .pending_replacement_sources(&key)
+            .into_iter()
+            .any(|k| self.base_deps.get(&k).is_some_and(|d| !d.is_empty()));
         let nft_count = self.objects.get(&key).map_or(0, |o| o.references.len());
         if nft_count <= 1 && has_deps {
             return Err(RegistryError::HasDependents);
@@ -1699,7 +1722,10 @@ impl Bud3Registry {
         super::limits::Bud3Limits::TESTNET_DEFAULT
             .admit_content(new_record.object_len)
             .map_err(|_| RegistryError::BadRecord("object length exceeds testnet ceiling"))?;
-        if self.tombstones.contains_key(&new_key) || self.objects.contains_key(&new_key) {
+        if self.tombstones.contains_key(&new_key)
+            || self.objects.contains_key(&new_key)
+            || self.replacements.contains_key(&new_key)
+        {
             return Err(RegistryError::BadReplacement(
                 super::replace::ReplaceError::CommitmentAlreadyLive,
             ));
@@ -1932,10 +1958,16 @@ impl Bud3Registry {
         // (section 6.14, item 6).
         if n > 0 && complete {
             if let Some(digest) = public_digest {
-                let occupied_live = self
-                    .public_index
-                    .get(&digest)
-                    .is_some_and(|existing| existing != key && self.objects.contains_key(existing));
+                let occupied_live = self.public_index.get(&digest).is_some_and(|existing| {
+                    existing != key
+                        && self.objects.get(existing).is_some_and(|e| {
+                            e.custody_confirmed
+                                && !e.shares.is_empty()
+                                && e.shares
+                                    .iter()
+                                    .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+                        })
+                });
                 if !occupied_live {
                     self.public_index.insert(digest, *key);
                 }
@@ -5066,6 +5098,409 @@ mod tests {
         assert_eq!(
             r.resolve_live_object(&old_key).map(|(k, _)| k),
             Some(new_key)
+        );
+    }
+
+    #[test]
+    fn dao_delete_public_content_cleans_unfinalized_replacement_and_blocks_ack_resurrection() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(1);
+        let (up, shares) = upload(b"dao takedown across pending replacement");
+        let old_key = up.record.commitment;
+        let digest = up.record.content_id.digest;
+        r.register_object(owner, up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        let nft = [0xE1; 32];
+        r.bind_nft(nft, owner, Some(owner), &old_key).unwrap();
+        for (_, sh) in &shares {
+            r.ack(&old_key, &sh.validator).unwrap();
+        }
+        assert_eq!(r.public_object(&digest), Some(old_key));
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut new_rec = up.record;
+        new_rec.codec = if new_rec.codec == 0 { 1 } else { 0 };
+        new_rec.object_len = new_rec.object_len.saturating_add(5);
+        new_rec.commitment = [0xE2; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &old_key, &new_rec, &shares).unwrap()
+            })
+            .collect();
+        let new_key = r
+            .replace_object(
+                (addr(10), 10_000),
+                &old_key,
+                new_rec,
+                shares,
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        assert!(r.replacement(&old_key).is_some_and(|rep| !rep.finalized));
+
+        assert_eq!(r.dao_delete_public_content(&digest, 2), Some(old_key));
+        assert!(r.object(&old_key).is_none());
+        assert!(r.object(&new_key).is_none());
+        assert!(r.replacement(&old_key).is_none());
+        assert!(r.nft_binding(&nft).is_none());
+        assert!(r.public_object(&digest).is_none());
+        assert!(r.resolve_live_object(&old_key).is_none());
+        assert!(r.is_tombstoned(&old_key));
+        assert_eq!(
+            r.ack(&new_key, &addr(10)),
+            Err(RegistryError::UnknownObject)
+        );
+        assert!(r.public_object(&digest).is_none());
+    }
+
+    #[test]
+    fn delete_object_rejects_pending_replacement_with_base_dependents() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(4);
+        let (base_up, base_shares) = upload(b"delete_object pending replacement dep guard");
+        let base_old = base_up.record.commitment;
+        r.register_object(owner, base_up.record.clone(), base_shares.clone(), 0, 50)
+            .unwrap();
+        for (_, sh) in &base_shares {
+            r.ack(&base_old, &sh.validator).unwrap();
+        }
+
+        let (dep_up, dep_shares) = upload(b"dependent child blocking delete_object");
+        let dep_key = dep_up.record.commitment;
+        r.register_object(owner, dep_up.record, dep_shares, 0, 50)
+            .unwrap();
+        r.register_dependency(dep_key, base_old).unwrap();
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut new_rec = base_up.record;
+        new_rec.codec = if new_rec.codec == 0 { 1 } else { 0 };
+        new_rec.object_len = new_rec.object_len.saturating_add(4);
+        new_rec.commitment = [0xE6; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &base_old, &new_rec, &base_shares)
+                    .unwrap()
+            })
+            .collect();
+        let base_new = r
+            .replace_object(
+                (addr(10), 10_000),
+                &base_old,
+                new_rec,
+                base_shares,
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            r.delete_object(&base_new, &owner, 2),
+            Err(RegistryError::HasDependents)
+        );
+        assert_eq!(
+            r.delete_object(&base_old, &owner, 2),
+            Err(RegistryError::HasDependents)
+        );
+        assert!(r.object(&base_old).is_some());
+        assert!(r.object(&base_new).is_some());
+
+        r.detach_dependency(&dep_key, &base_old, 2);
+        r.delete_object(&base_new, &owner, 2).unwrap();
+        assert!(r.object(&base_old).is_none());
+        assert!(r.object(&base_new).is_none());
+        assert!(r.replacement(&base_old).is_none());
+    }
+
+    #[test]
+    fn social_delete_checks_pending_replacement_dependents_before_shredding_grants() {
+        use super::super::content_id::ContentKey;
+        use super::super::grants::{build_grant_row, compute_grant_tag, grant_revoke_digest};
+        use super::super::keys::{
+            derive_grant_one_time_keypair, derive_object_content_key, seal_key_package,
+            sign_with_grant_one_time_key,
+        };
+        use super::super::pipeline::prepare_sealed_upload;
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::hpke::HpkeKeyPair;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(2);
+        let ck = derive_object_content_key(&[0x33; 32], 1);
+        let up = prepare_sealed_upload(
+            b"sealed base object with pending replacement",
+            &ck,
+            [0x21; 24],
+            &P,
+            &Bud3Limits::default(),
+            20,
+        )
+        .unwrap();
+        let old_key = up.record.commitment;
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: addr(10),
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(11),
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(12),
+                    class: Class::Full,
+                    first_esi: 12,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(13),
+                    class: Class::Mobile,
+                    first_esi: 16,
+                    symbols: 4,
+                },
+            ),
+        ];
+        r.register_object(owner, up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        let nft = [0xE3; 32];
+        r.bind_nft(nft, owner, Some(owner), &old_key).unwrap();
+        for (_, sh) in &shares {
+            r.ack(&old_key, &sh.validator).unwrap();
+        }
+
+        let seed = [0x44u8; 32];
+        let nonce = [0x55u8; 32];
+        let (otk_seed, otk_pk) = derive_grant_one_time_keypair(&seed, &nft, &nonce).unwrap();
+        let grantee = HpkeKeyPair::from_seed(&[0x66u8; 32]).unwrap();
+        let tag = compute_grant_tag(&nft, &nonce);
+        let pkg = seal_key_package(
+            grantee.public_key(),
+            &tag,
+            &old_key,
+            &ContentKey([0x77u8; 32]),
+        )
+        .unwrap();
+        let row = build_grant_row(&nft, &nonce, otk_pk, pkg, 25, 0).unwrap();
+        r.issue_view_grant(&nft, &nonce, &owner, row, 0).unwrap();
+        let sig = sign_with_grant_one_time_key(&otk_seed, &grant_revoke_digest(&tag)).unwrap();
+        let auth = GrantShredAuth {
+            grant_tag: tag,
+            one_time_signature: sig,
+        };
+
+        let (dep_up, dep_shares) = upload(b"dependent child blocking social delete");
+        let dep_key = dep_up.record.commitment;
+        r.register_object(owner, dep_up.record, dep_shares, 0, 50)
+            .unwrap();
+        r.register_dependency(dep_key, old_key).unwrap();
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut new_rec = up.record;
+        new_rec.codec = if new_rec.codec == 0 { 1 } else { 0 };
+        new_rec.object_len = new_rec.object_len.saturating_add(3);
+        new_rec.commitment = [0xE4; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &old_key, &new_rec, &shares).unwrap()
+            })
+            .collect();
+        r.replace_object(
+            (owner, 10_000),
+            &old_key,
+            new_rec,
+            shares,
+            &atts,
+            (
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                1,
+                &validator_keys,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            r.social_delete(&nft, &owner, &[auth], 2),
+            Err(RegistryError::HasDependents)
+        );
+        assert!(r.grant_row(&tag).is_some());
+        assert!(r.active_grant(&tag, 2).is_some());
+    }
+
+    #[test]
+    fn replace_object_rejects_already_replaced_commitment_preventing_cycles() {
+        use super::super::replace::{sign_replace_attestation, ReplaceError};
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(3);
+        let (up, shares) = upload(b"object for replace cycle prevention test");
+        let a_rec = up.record;
+        let a_key = a_rec.commitment;
+        r.register_object(owner, a_rec.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        for (_, sh) in &shares {
+            r.ack(&a_key, &sh.validator).unwrap();
+        }
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut b_rec = a_rec.clone();
+        b_rec.codec = if b_rec.codec == 0 { 1 } else { 0 };
+        b_rec.object_len = b_rec.object_len.saturating_add(2);
+        b_rec.commitment = [0xE5; 32];
+        let atts_ab: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| sign_replace_attestation(addr(v), &[v; 32], &a_key, &b_rec, &shares).unwrap())
+            .collect();
+        let b_key = r
+            .replace_object(
+                (addr(10), 10_000),
+                &a_key,
+                b_rec,
+                shares.clone(),
+                &atts_ab,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for (_, sh) in &shares {
+            r.ack(&b_key, &sh.validator).unwrap();
+        }
+
+        let atts_ba: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| sign_replace_attestation(addr(v), &[v; 32], &b_key, &a_rec, &shares).unwrap())
+            .collect();
+        assert_eq!(
+            r.replace_object(
+                (addr(10), 10_000),
+                &b_key,
+                a_rec,
+                shares,
+                &atts_ba,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    2,
+                    &validator_keys,
+                ),
+            ),
+            Err(RegistryError::BadReplacement(
+                ReplaceError::CommitmentAlreadyLive
+            ))
+        );
+        assert_eq!(r.resolve_live_object(&a_key).map(|(k, _)| k), Some(b_key));
+    }
+
+    #[test]
+    fn ack_updates_public_index_when_existing_copy_has_lost_share() {
+        let mut r = Bud3Registry::default();
+        let owner1 = addr(1);
+        let owner2 = addr(2);
+        let owner3 = addr(3);
+        let (up, shares) = upload(b"public index heals after indexed copy loses share");
+        let key1 = up.record.commitment;
+        let digest = up.record.content_id.digest;
+
+        assert_eq!(
+            r.register_object(owner1, up.record.clone(), shares.clone(), 0, 50)
+                .unwrap(),
+            Registered::New(key1)
+        );
+        for (_, sh) in &shares {
+            r.ack(&key1, &sh.validator).unwrap();
+        }
+        assert_eq!(r.public_object(&digest), Some(key1));
+
+        assert_eq!(
+            r.release_validator_shares(&key1, &addr(10), None, 0)
+                .unwrap(),
+            1
+        );
+
+        let expected_key2 = Bud3Registry::claimant_scoped_key(&key1, &owner2);
+        assert_eq!(
+            r.register_object(owner2, up.record.clone(), shares.clone(), 1, 50)
+                .unwrap(),
+            Registered::New(expected_key2)
+        );
+        for (_, sh) in &shares {
+            r.ack(&expected_key2, &sh.validator).unwrap();
+        }
+        assert_eq!(r.public_object(&digest), Some(expected_key2));
+        assert_eq!(
+            r.register_object(owner3, up.record, shares, 2, 50).unwrap(),
+            Registered::Deduplicated(expected_key2)
         );
     }
 }
