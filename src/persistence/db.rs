@@ -3080,6 +3080,45 @@ mod tests {
         assert!(storage2.db.get(b"BRIDGE_STATE_AT:2").unwrap().is_none());
     }
 
+    /// An account with no authorization program must survive the exact write
+    /// and read pair the durable commit uses. `bincode` is not self describing,
+    /// so a `skip_serializing_if` on `Account::auth_program_hash` wrote a
+    /// shorter row than the decoder expects and every persisted account failed
+    /// to load with `unexpected end of file`. Reverting the attribute makes this
+    /// test fail at the decode step, not at the assertion.
+    #[test]
+    fn a_program_free_account_survives_the_durable_encode_decode_pair() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let addr = Address::from_hex(&"02".repeat(32)).unwrap();
+        let account = Account::with_balance(addr, 42);
+
+        storage.save_account(&addr, &account).unwrap();
+        let loaded = storage.load_all_accounts().unwrap();
+        let stored = loaded.get(&addr).expect("account row decodes");
+        assert_eq!(stored.balance, 42);
+        assert_eq!(stored.nonce, 0);
+        assert_eq!(stored.frac_attos, 0);
+        assert_eq!(stored.auth_program_hash, None);
+    }
+
+    /// The program-authorized shape round trips through the same path, so the
+    /// fix is not a "drop the field" answer: both `Some` and `None` decode.
+    #[test]
+    fn a_program_authorized_account_survives_the_durable_encode_decode_pair() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let addr = Address::from_hex(&"03".repeat(32)).unwrap();
+        let program = [0x5Au8; 32];
+        let account = Account::with_auth_program(addr, 7, program);
+
+        storage.save_account(&addr, &account).unwrap();
+        let loaded = storage.load_all_accounts().unwrap();
+        let stored = loaded.get(&addr).expect("account row decodes");
+        assert_eq!(stored.balance, 7);
+        assert_eq!(stored.auth_program_hash, Some(program));
+    }
+
     /// A commit that carries no bridge state still leaves a snapshot at its
     /// height, so a rollback from the next height restores the live state
     /// instead of deleting it. Measured before the fix: commit H=1 with

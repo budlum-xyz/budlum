@@ -176,7 +176,14 @@ pub struct Account {
     /// When set, transactions from this account authorize via
     /// `Claim::Prog { program_hash, input_hash: tx.signing_hash(), output_hash: AUTH_OK }`
     /// rather than an inline signature.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Serialized unconditionally. `skip_serializing_if` is load bearing here
+    /// in the wrong direction: `bincode` is not self describing, so omitting a
+    /// `None` field shortens the record and the decoder then hits the end of
+    /// the value while expecting the tag byte. An account persisted through
+    /// `Storage::commit_durable_batch` was written 8 bytes and read back as
+    /// `unexpected end of file`, which took `test_durable_commit_batch_and_recovery`
+    /// down with it. See B-0048.
+    #[serde(default)]
     pub auth_program_hash: Option<[u8; 32]>,
 }
 
