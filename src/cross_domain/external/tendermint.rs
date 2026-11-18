@@ -753,8 +753,24 @@ impl TendermintFinalityAdapter {
     }
 
     /// Attach the known-good evidence sample admission verifies against.
+    ///
+    /// The sample also fixes the profile's committee size. A BFT adapter that
+    /// declares `HonestMajority { set_size: 0 }` is declaring that no party has
+    /// to be honest, which is the one thing this chain never says; the number a
+    /// reader needs is how many validators the pinned set has, and the admitted
+    /// sample is the evidence that says so (it verified against the pin, so its
+    /// set *is* the pinned set). Without a sample the constructor cannot know,
+    /// and the field stays 0 - so a descriptor taken from a sample-less adapter
+    /// is honest about being uninformative rather than guessing.
     #[must_use]
     pub fn with_golden(mut self, golden: RawConsensusEvidence) -> Self {
+        if let Ok(decoded) = TendermintCommitEvidence::decode(&golden.payload) {
+            if decoded.chain_id == self.chain_id {
+                if let Ok(set_size) = u64::try_from(decoded.validators.len()) {
+                    self.descriptor.trust_model = TrustModel::HonestMajority { set_size };
+                }
+            }
+        }
         self.golden = Some(golden);
         self
     }
@@ -1336,6 +1352,127 @@ mod tests {
         assert_eq!(commit.header_hash(), commit.block_hash);
     }
 
+    /// One real block from one real chain: the header fields, and the block id
+    /// the chain's validators signed over them.
+    struct KnownHeader {
+        chain_id: &'static str,
+        height: u64,
+        version_block: u64,
+        commit_time: u64,
+        commit_time_nanos: u32,
+        last_block_hash: &'static str,
+        last_parts_total: u32,
+        last_parts_hash: &'static str,
+        last_commit_hash: &'static str,
+        data_hash: &'static str,
+        validators_hash: &'static str,
+        next_validators_hash: &'static str,
+        consensus_hash: &'static str,
+        app_hash: &'static str,
+        last_results_hash: &'static str,
+        evidence_hash: &'static str,
+        proposer_address: &'static str,
+        block_hash: &'static str,
+    }
+
+    /// Three chains, three eras of header, one rule.
+    ///
+    /// `noble-1` is the small case. `cosmoshub-4` and `osmosis-1` are the
+    /// adversarial ones: a hundred validators rather than seven, a chain id of a
+    /// different length, and sub-second timestamps that are not the noble one.
+    /// An encoder that happened to fit the first chain would not fit these, and
+    /// an encoder that fits all three is the encoder CometBFT has.
+    const KNOWN_HEADERS: &[KnownHeader] = &[
+        KnownHeader {
+            chain_id: "cosmoshub-4",
+            height: 33_936_991,
+            version_block: 11,
+            commit_time: 1_795_016_072,
+            commit_time_nanos: 558_441_864,
+            last_block_hash: "3FDAADF5E8572B7DC7D6C88D6E481922D1772EDE08F3D0C65D0FE3EE7C16E571",
+            last_parts_total: 1,
+            last_parts_hash: "37EEE86227C256297D04EE82472CC8D9647DAE7FF01BFDBF7CA9FCA73820473A",
+            last_commit_hash: "602436BBD52533E93A01AA3195C50CBBE6C004B8DD83B347A5F2944F9155E530",
+            data_hash: "FED88B2A455A8550D5B14A7B6CB10CE260751CEBACE81F1D444A84CEAE88B679",
+            validators_hash: "ADAE13380ABD71F125A337AF16E06270E61B325F5945404A17324E62503B95C9",
+            next_validators_hash: "ADAE13380ABD71F125A337AF16E06270E61B325F5945404A17324E62503B95C9",
+            consensus_hash: "20CA5E3F42E07A0CDB7BD986EFF1947A23FC27FF47204303E082BC44BB348E0B",
+            app_hash: "B40E784CD0CC424FFA157D9C93FEDD47843D0A6D33C7B82515BFADE91444B069",
+            last_results_hash: "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+            evidence_hash: "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+            proposer_address: "2199EAE894CA391FA82F01C2C614BFEB103D056C",
+            block_hash: "F5C757B2219B47E20F0B04FEA489B56891CD43EFB28D21F9937949C89A8CF5E7",
+        },
+        KnownHeader {
+            chain_id: "osmosis-1",
+            height: 75_461_800,
+            version_block: 11,
+            commit_time: 1_795_016_006,
+            commit_time_nanos: 643_242_144,
+            last_block_hash: "3E6B89EE84B3CFA9AED58DDCE4DE89E5533E20DC8B3BA2D595E9FDD2A08F310C",
+            last_parts_total: 1,
+            last_parts_hash: "67DBFA2B599957889E91E720E3B50BB9FB3DD81ED7461F09DF88A6A7FEB7E73F",
+            last_commit_hash: "A64C9820783852B09A3FF14D668FDC1F7DE11DC37C27E2492F15866E5D8EF843",
+            data_hash: "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+            validators_hash: "E01ED3ED9D6434ECB8C36C5013560BF5D691F970C70A62EAFC1B3BBC438ACEF2",
+            next_validators_hash: "E01ED3ED9D6434ECB8C36C5013560BF5D691F970C70A62EAFC1B3BBC438ACEF2",
+            consensus_hash: "2484BBA8B99E531E1A3F6422362E7D3EEB99A8325119968A355F05C09EEDD40B",
+            app_hash: "AF5A1A6496C699BA1AD4A1618DF86A8002CF67B3B4BD82F7E83D1D382D73D4F9",
+            last_results_hash: "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+            evidence_hash: "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+            proposer_address: "66B69666EBF776E7EBCBE197ABA466A712E27076",
+            block_hash: "96F5721360C82B3FB9113584BB55623576C6A5BA63EBF8FA0CD40A2BED3C335C",
+        },
+    ];
+
+    fn header_only(header: &KnownHeader) -> TendermintCommitEvidence {
+        let bytes32 = |text: &str| -> [u8; 32] {
+            let raw = hex::decode(text).expect("32-byte hex");
+            <[u8; 32]>::try_from(raw.as_slice()).expect("32 bytes")
+        };
+        let proposer = hex::decode(header.proposer_address).expect("address hex");
+        TendermintCommitEvidence {
+            chain_id: header.chain_id.to_string(),
+            height: header.height,
+            round: 0,
+            block_hash: bytes32(header.block_hash),
+            parts_total: 1,
+            parts_hash: [0u8; 32],
+            version_block: header.version_block,
+            last_block_hash: bytes32(header.last_block_hash),
+            last_parts_total: header.last_parts_total,
+            last_parts_hash: bytes32(header.last_parts_hash),
+            last_commit_hash: bytes32(header.last_commit_hash),
+            data_hash: bytes32(header.data_hash),
+            validators_hash: bytes32(header.validators_hash),
+            next_validators_hash: bytes32(header.next_validators_hash),
+            consensus_hash: bytes32(header.consensus_hash),
+            app_hash: bytes32(header.app_hash),
+            last_results_hash: bytes32(header.last_results_hash),
+            evidence_hash: bytes32(header.evidence_hash),
+            proposer_address: <[u8; ADDRESS_LEN]>::try_from(proposer.as_slice())
+                .expect("20-byte address"),
+            commit_time: header.commit_time,
+            commit_time_nanos: header.commit_time_nanos,
+            validators: Vec::new(),
+            signatures: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_header_hash_rule_reproduces_three_live_chains_not_one() {
+        for header in KNOWN_HEADERS {
+            let computed = header_only(header).header_hash();
+            assert_eq!(
+                hex::encode_upper(computed),
+                header.block_hash,
+                "{} at {} did not reproduce its own block id",
+                header.chain_id,
+                header.height
+            );
+        }
+    }
+
     #[test]
     fn every_header_field_is_covered_by_the_block_id() {
         let commit = noble_commit();
@@ -1486,6 +1623,33 @@ mod tests {
             TrustModel::HonestMajority { .. }
         ));
         assert!(adapter().is_classical_only_quorum());
+    }
+
+    #[test]
+    fn the_profile_counts_the_pinned_set_instead_of_declaring_zero() {
+        // `HonestMajority { set_size: 0 }` reads as "trust nobody in
+        // particular", which for a commit adapter is meaningless: the number is
+        // the one thing a consumer weighing this domain needs. The admitted
+        // sample verified against the pin, so its seven validators are the
+        // pinned set's seven validators.
+        let unpinned_size = |adapter: &TendermintFinalityAdapter| match adapter.descriptor().trust_model
+        {
+            TrustModel::HonestMajority { set_size } => Some(set_size),
+            _ => None,
+        };
+        assert_eq!(unpinned_size(&adapter()), Some(0));
+
+        let commit = noble_commit();
+        let golden = evidence_for(&adapter(), &commit);
+        let admitted = adapter().with_golden(golden.clone());
+        assert_eq!(unpinned_size(&admitted), Some(7));
+
+        // A sample from another chain does not get to describe this one.
+        let mut other_chain = commit.clone();
+        other_chain.chain_id = "osmosis-1".to_string();
+        other_chain.block_hash = other_chain.header_hash();
+        let foreign = adapter().with_golden(evidence_for(&adapter(), &other_chain));
+        assert_eq!(unpinned_size(&foreign), Some(0));
     }
 
     #[test]
