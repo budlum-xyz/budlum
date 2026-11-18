@@ -165,6 +165,7 @@ fn operator_wide_challenge_limit_is_enforced() {
         max_committed_chunks: 1000,
         challenge_interval: 10,
         min_operator_bond: 1,
+        require_merkle_proof: false,
     };
     let econ = StorageEconomicsParams {
         operator_bond: 5_000_000,

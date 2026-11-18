@@ -995,6 +995,7 @@ mod answer_coding_audit {
                         max_committed_chunks: 1000,
                         challenge_interval: 10,
                         min_operator_bond: 1_000_000,
+                        require_merkle_proof: false,
                     },
                     Some(proof()),
                     Some([0x42u8; 32]),
