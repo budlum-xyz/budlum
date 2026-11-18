@@ -964,16 +964,18 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
                 //    key is how a commit buys a quorum with one signature.
                 if decoded.validators.len() >= 2 {
                     let entry_bytes = ADDRESS_LEN + PUBLIC_KEY_LEN + 8;
-                    let first = &golden.payload[offsets.validators_len_at + 8
-                        ..offsets.validators_len_at + 8 + entry_bytes];
-                    probes.push(FaultProbe {
-                        name: "a duplicated validator entry must be refused".to_string(),
-                        patch: BytePatch::InPayload {
-                            offset: offsets.validators_len_at + 8 + entry_bytes,
-                            bytes: first.to_vec(),
-                        },
-                        expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
-                    });
+                    let first_at = offsets.validators_len_at.saturating_add(8);
+                    let second_at = first_at.saturating_add(entry_bytes);
+                    if let Some(first) = golden.payload.get(first_at..second_at) {
+                        probes.push(FaultProbe {
+                            name: "a duplicated validator entry must be refused".to_string(),
+                            patch: BytePatch::InPayload {
+                                offset: second_at,
+                                bytes: first.to_vec(),
+                            },
+                            expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
+                        });
+                    }
                 }
 
                 // C. The same signature twice. A duplicated precommit must
@@ -984,15 +986,19 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
                         offsets.first_signature_len_at,
                     ) {
                         let first_len = decoded.signatures.first().map_or(0, |s| s.signature.len());
-                        let end = len_at + 8 + first_len;
-                        if end <= golden.payload.len() {
-                            let first = golden.payload[first_at..end].to_vec();
+                        let end = len_at.saturating_add(8).saturating_add(first_len);
+                        // `get` rather than `[]`: a slice that does not fit is
+                        // a probe that cannot be built, and this function
+                        // reports that by not emitting the probe - it must not
+                        // panic on a golden sample whose encoding disagrees
+                        // with the offsets derived from it.
+                        if let Some(first) = golden.payload.get(first_at..end) {
                             let second_entry_bytes = ADDRESS_LEN + 8 + 4 + 8 + first_len;
                             probes.push(FaultProbe {
                                 name: "a duplicated signature must not add power twice".to_string(),
                                 patch: BytePatch::InPayload {
-                                    offset: first_at + second_entry_bytes,
-                                    bytes: first,
+                                    offset: first_at.saturating_add(second_entry_bytes),
+                                    bytes: first.to_vec(),
                                 },
                                 expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
                             });
