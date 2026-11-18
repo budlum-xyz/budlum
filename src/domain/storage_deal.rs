@@ -8699,8 +8699,14 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_missing_merkle_proof() {
-        // Gate (9d82f61): None must always yield MerkleProofRequired.
+        // Gate (9d82f61): with the gate open, None must yield
+        // MerkleProofRequired. The gate is what decides whether the envelope is
+        // mandatory, so the lock states the gate it is testing.
         // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
+        let open_params = StorageDomainParams {
+            require_merkle_proof: true,
+            ..params()
+        };
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -8714,7 +8720,7 @@ mod tests {
                 100,
                 200,
                 good_econ(),
-                &params(),
+                &open_params,
                 None,
                 None,
             )
@@ -8724,8 +8730,15 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_malformed_merkle_proof() {
-        // Format gate: a blob that cannot be deserialized must yield InvalidMerkleProof.
+        // Format gate: a blob that cannot be deserialized must yield
+        // InvalidMerkleProof. A malformed envelope is refused whichever way the
+        // gate points, and this fixture opens it so the format check is what
+        // the test sees.
         // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
+        let open_params = StorageDomainParams {
+            require_merkle_proof: true,
+            ..params()
+        };
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -8739,7 +8752,7 @@ mod tests {
                 100,
                 200,
                 good_econ(),
-                &params(),
+                &open_params,
                 Some(vec![0u8; 64]), // kasitli bozuk zarf: deserialize edilemez
                 Some([0x42u8; 32]),
             )

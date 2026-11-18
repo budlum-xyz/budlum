@@ -985,8 +985,10 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
                     ) {
                         let first_len = decoded.signatures.first().map_or(0, |s| s.signature.len());
                         let end = len_at + 8 + first_len;
-                        if end <= golden.payload.len() {
-                            let first = golden.payload[first_at..end].to_vec();
+                        // `end` was just checked against the payload length, so
+                        // the range names real bytes; `get` says that to the
+                        // indexing ratchet instead of leaving a slice expression.
+                        if let Some(first) = golden.payload.get(first_at..end).map(<[u8]>::to_vec) {
                             let second_entry_bytes = ADDRESS_LEN + 8 + 4 + 8 + first_len;
                             probes.push(FaultProbe {
                                 name: "a duplicated signature must not add power twice".to_string(),
