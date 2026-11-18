@@ -7,7 +7,7 @@ name: Garden NAT
 # whichever of the two long-lived branches the pull request is opened against.
 on:
   pull_request:
-    branches: [main, testnet]
+    branches: [main, testnet, garden, budlum-stack, budlum-consensus-of-consensuses]
     paths:
       - "src/garden/**"
       - "tests/garden/**"
