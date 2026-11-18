@@ -21,6 +21,7 @@
 [network]
 profile = "testnet"
 chain_id = 45261
+genesis_file = "./config/testnet-genesis.json"
 
 [node]
 mode = "full"
@@ -62,6 +63,7 @@ operator_listener = "127.0.0.1:8546"
 trusted_proxies = ["127.0.0.1"]
 enabled = true
 auth_required = true
+operator_auth_required = true
 api_key_env = "BUDLUM_RPC_API_KEY"
 allowed_ips = ["127.0.0.1"]
 rate_limit_per_minute = 120
@@ -74,6 +76,12 @@ backend = "pkcs11"
 
 [validator.signer]
 backend = "pkcs11"
+
+# Configure your HSM module before launching a live shielded validator:
+# [validator.signer.pkcs11]
+# module_path = "/usr/lib/softhsm/libsofthsm2.so"
+# slot_id = 0
+# token_pin_env = "BUDLUM_HSM_PIN"
 
 [features]
 pruning = false

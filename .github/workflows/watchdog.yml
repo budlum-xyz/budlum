@@ -126,7 +126,7 @@ jobs:
           # Hard-coding either name broke the other tree's pulse, so resolve the
           # name this checkout actually declares. `gate-references-are-real` fails
           # the build when a literal gate name drifts out from under a workflow.
-          door="$("$gates" --list | grep -x -e 'state-recovery-door' -e 'regen-health-door' | head -n 1 || true)"
+          door="$("$gates" --list | awk '/^(state-recovery-door|regen-health-door)$/ { print; exit }')"
           if [ -z "$door" ]; then
             echo "neither state-recovery-door nor regen-health-door is declared by this gate binary" >&2
             exit 1
@@ -136,7 +136,7 @@ jobs:
         run: |
           set -euo pipefail
           gates=./xtask/gates/target/release/budlum-gates
-          door="$("$gates" --list | grep -x -e 'state-recovery-door' -e 'regen-health-door' | head -n 1 || true)"
+          door="$("$gates" --list | awk '/^(state-recovery-door|regen-health-door)$/ { print; exit }')"
           if [ -z "$door" ]; then
             echo "neither state-recovery-door nor regen-health-door is declared by this gate binary" >&2
             exit 1

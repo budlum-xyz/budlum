@@ -165,6 +165,7 @@ mod gates {
     pub mod proof_deps_are_exactly_pinned;
     pub mod qr_is_derivative_only;
     pub mod quantum_account;
+    pub mod readme_claims_are_wired;
     pub mod readme_definition_block_is_verbatim;
     pub mod readme_has_no_placeholders;
     pub mod readme_no_deny;
@@ -1644,6 +1645,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::readme_has_no_placeholders::self_test,
+    },
+    Gate {
+        name: "readme-claims-are-wired",
+        replaces: None,
+        run: gates::readme_claims_are_wired::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_claims_are_wired::self_test,
     },
     Gate {
         name: "ee-workers-build-with-unwind",

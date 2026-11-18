@@ -318,7 +318,35 @@ impl ConsensusEngine for PohEngine {
             .ledger
             .read()
             .map_err(|_| ConsensusError("PoH state lock poisoned".into()))?;
-        let _ = self.verify_block_witness_against_ledger(&ledger, block)?;
+        let (start_count, _steps, _end_hash) =
+            self.verify_block_witness_against_ledger(&ledger, block)?;
+
+        // Prevent replaying a historical PoH witness (for example step 0) on child blocks:
+        // when the parent block carries a PoH witness, the child must continue directly
+        // from the parent's exact `(end_count, end_hash)`.
+        if let Some(parent) = chain.last() {
+            if parent.index > 0 {
+                let (parent_start, parent_steps, parent_end_hash) = decode_poh_witness(parent)?;
+                let expected_start = parent_start
+                    .checked_add(parent_steps)
+                    .ok_or_else(|| ConsensusError("Parent PoH hash counter overflow".into()))?;
+                if start_count != expected_start {
+                    return Err(ConsensusError(format!(
+                        "PoH witness start_count {start_count} does not continue parent end_count {expected_start}"
+                    )));
+                }
+                let Some(anchor_hash) = Self::checkpoint_at(&ledger, start_count) else {
+                    return Err(ConsensusError(
+                        "PoH witness anchor missing for parent continuation".into(),
+                    ));
+                };
+                if anchor_hash != parent_end_hash {
+                    return Err(ConsensusError(
+                        "PoH witness anchor hash does not match parent end hash".into(),
+                    ));
+                }
+            }
+        }
 
         Ok(())
     }
@@ -511,5 +539,39 @@ mod tests {
             .record_block(&b1, None)
             .expect("idempotent re-record");
         assert_eq!(producer.state().hash_count, producer.config.hashes_per_slot);
+    }
+
+    #[test]
+    fn poh_rejects_replayed_historical_witness_on_child_block() {
+        let engine = PohEngine::new(PohConfig::default());
+        let zero = "0".repeat(64);
+        let mut b1 = make_block(1, &zero);
+        engine
+            .prepare_block(&mut b1, &AccountState::new())
+            .expect("prepare b1");
+        engine
+            .validate_block(&b1, &[], &AccountState::new())
+            .expect("validate b1");
+        engine.record_block(&b1, None).expect("record b1");
+
+        // Replay b1's step-0 witness into b2 with valid timestamp and parent link: must be refused.
+        let mut replayed = make_block(2, &b1.hash);
+        replayed.timestamp = b1.timestamp.saturating_add(1);
+        replayed.vrf_proof = b1.vrf_proof.clone();
+        replayed.vrf_output = b1.vrf_output.clone();
+        replayed.hash = replayed.calculate_hash();
+        assert!(engine
+            .validate_block(&replayed, &[b1.clone()], &AccountState::new())
+            .is_err());
+
+        // Properly advancing from b1's end_count succeeds.
+        let mut b2 = make_block(2, &b1.hash);
+        b2.timestamp = b1.timestamp.saturating_add(1);
+        engine
+            .prepare_block(&mut b2, &AccountState::new())
+            .expect("prepare b2");
+        assert!(engine
+            .validate_block(&b2, &[b1], &AccountState::new())
+            .is_ok());
     }
 }
