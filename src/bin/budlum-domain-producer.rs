@@ -41,8 +41,22 @@ struct Cli {
     /// JSON file containing a `VerifiedDomainCommitment`.
     #[arg(
         long,
-        required_unless_present_any = ["pow_spec", "bitcoin_spec", "bft_spec", "poa_spec"],
-        conflicts_with_all = ["pow_spec", "bitcoin_spec", "bft_spec", "poa_spec"]
+        required_unless_present_any = [
+            "pow_spec",
+            "bitcoin_spec",
+            "bft_spec",
+            "poa_spec",
+            "poh_spec",
+            "pospace_spec"
+        ],
+        conflicts_with_all = [
+            "pow_spec",
+            "bitcoin_spec",
+            "bft_spec",
+            "poa_spec",
+            "poh_spec",
+            "pospace_spec"
+        ]
     )]
     payload: Option<PathBuf>,
     /// JSON `PowChainSpec`: mine the header chain and build the payload.
@@ -57,6 +71,14 @@ struct Cli {
     /// JSON `PoaJob`: sign the block with the PoA authorities' keys.
     #[arg(long, requires = "quorum_keys")]
     poa_spec: Option<PathBuf>,
+    /// JSON `PohJob`: derive the PoH digest for the slot and sign it with the
+    /// domain validators' keys.
+    #[arg(long, requires = "quorum_keys")]
+    poh_spec: Option<PathBuf>,
+    /// JSON `PospaceJob`: derive the plot response for the slot and sign it
+    /// with the domain validators' keys.
+    #[arg(long, requires = "quorum_keys")]
+    pospace_spec: Option<PathBuf>,
     /// A mode-0600 JSON file with the signing seeds (`QuorumKeys`).
     #[arg(long)]
     quorum_keys: Option<PathBuf>,
@@ -165,6 +187,33 @@ struct PoaJob {
     authorities: Vec<budlum_core::domain::finality_adapter::PoAAuthorityKey>,
 }
 
+/// A PoH slot to seal on the certificate arm: the PoH digest is derived from
+/// `block` (its parent and height) and signed by the domain validators.
+/// `hashes_per_slot` must be the domain's registered step budget.
+#[derive(Debug, serde::Deserialize)]
+struct PohJob {
+    block: budlum_core::domain::producer::QuorumBlockSpec,
+    hashes_per_slot: u64,
+    chain_id: u64,
+    epoch: u64,
+    round: u64,
+    members: Vec<budlum_core::chain::finality::ValidatorEntry>,
+    signers: Vec<usize>,
+}
+
+/// A PoSpace slot to seal on the certificate arm: the plot response is derived
+/// from `block` (its parent hash and height, over the plot commitment in
+/// `block.state_root`).
+#[derive(Debug, serde::Deserialize)]
+struct PospaceJob {
+    block: budlum_core::domain::producer::QuorumBlockSpec,
+    chain_id: u64,
+    epoch: u64,
+    round: u64,
+    members: Vec<budlum_core::chain::finality::ValidatorEntry>,
+    signers: Vec<usize>,
+}
+
 /// The signing seeds, hex. For BFT, `bls_seeds` (64 bytes) and optional
 /// `pq_seeds` (32 bytes) align with the job's members. For PoA, `composite`
 /// holds one `[ml_dsa_65_seed, ed25519_seed]` pair (32 bytes each) per
@@ -216,17 +265,16 @@ fn read_keys(cli: &Cli) -> Result<QuorumKeys, String> {
     read_json(path, "QuorumKeys")
 }
 
-fn build_bft(
+fn bft_members(
     cli: &Cli,
-    path: &PathBuf,
-) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
-    let job: BftJob = read_json(path, "BftJob")?;
+    entries: Vec<budlum_core::chain::finality::ValidatorEntry>,
+) -> Result<Vec<budlum_core::domain::producer::BftMember>, String> {
     let keys = read_keys(cli)?;
-    if keys.bls_seeds.len() != job.members.len() {
+    if keys.bls_seeds.len() != entries.len() {
         return Err("one BLS seed per member is required".into());
     }
-    let mut members = Vec::with_capacity(job.members.len());
-    for (index, entry) in job.members.into_iter().enumerate() {
+    let mut members = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.into_iter().enumerate() {
         let bls = budlum_core::crypto::primitives::BlsKeypair::from_seed(&seed::<64>(
             &keys.bls_seeds[index],
             "a BLS seed",
@@ -249,7 +297,55 @@ fn build_bft(
         };
         members.push(budlum_core::domain::producer::BftMember { entry, bls, pq });
     }
+    Ok(members)
+}
+
+fn build_bft(
+    cli: &Cli,
+    path: &PathBuf,
+) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
+    let job: BftJob = read_json(path, "BftJob")?;
+    let members = bft_members(cli, job.members)?;
     budlum_core::domain::producer::build_bft_commitment(
+        &job.block,
+        job.chain_id,
+        job.epoch,
+        job.round,
+        &members,
+        &job.signers,
+    )
+}
+
+/// Seal a PoH slot. The digest the validators sign is derived here, from the
+/// job's parent and height, so a producer cannot submit a PoH commitment whose
+/// block hash is not a PoH step of its parent.
+fn build_poh(
+    cli: &Cli,
+    path: &PathBuf,
+) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
+    let job: PohJob = read_json(path, "PohJob")?;
+    let members = bft_members(cli, job.members)?;
+    budlum_core::domain::producer::build_poh_commitment(
+        &job.block,
+        job.hashes_per_slot,
+        job.chain_id,
+        job.epoch,
+        job.round,
+        &members,
+        &job.signers,
+    )
+}
+
+/// Seal a PoSpace slot. The response the validators sign is derived from the
+/// job's parent, height and plot commitment, so the block answers a challenge
+/// its producer could not choose.
+fn build_pospace(
+    cli: &Cli,
+    path: &PathBuf,
+) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
+    let job: PospaceJob = read_json(path, "PospaceJob")?;
+    let members = bft_members(cli, job.members)?;
+    budlum_core::domain::producer::build_pospace_commitment(
         &job.block,
         job.chain_id,
         job.epoch,
@@ -285,6 +381,12 @@ fn load_payload(cli: &Cli) -> Result<budlum_core::domain::VerifiedDomainCommitme
     }
     if let Some(path) = &cli.poa_spec {
         return build_poa(cli, path);
+    }
+    if let Some(path) = &cli.poh_spec {
+        return build_poh(cli, path);
+    }
+    if let Some(path) = &cli.pospace_spec {
+        return build_pospace(cli, path);
     }
     if let Some(path) = &cli.pow_spec {
         let spec: budlum_core::domain::producer::PowChainSpec = serde_json::from_slice(
@@ -448,6 +550,8 @@ mod tests {
             bitcoin_spec: None,
             bft_spec: None,
             poa_spec: None,
+            poh_spec: None,
+            pospace_spec: None,
             quorum_keys: Some(path.clone()),
             write_payload: Some(path.clone()),
             key_file: None,
@@ -485,6 +589,8 @@ mod tests {
             bitcoin_spec: None,
             bft_spec: None,
             poa_spec: None,
+            poh_spec: None,
+            pospace_spec: None,
             quorum_keys: None,
             write_payload: None,
             key_file: Some(files.key.clone()),
@@ -560,6 +666,8 @@ mod tests {
             bitcoin_spec: Some(spec_path),
             bft_spec: None,
             poa_spec: None,
+            poh_spec: None,
+            pospace_spec: None,
             quorum_keys: None,
             write_payload: None,
             key_file: None,

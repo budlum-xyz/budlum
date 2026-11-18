@@ -3392,15 +3392,37 @@ impl DomainFinalityAdapter for PohFinalityAdapter {
                 "PoH commitment above height 1 must bind a non-zero parent block hash".into(),
             ));
         }
-        // Validate the zero-step identity check through the bounded PoH sequence verifier
-        // so the sequence guard stays wired to production finality checks.
-        if !crate::consensus::poh::verify_poh_sequence(
-            &commitment.domain_block_hash,
-            commitment.domain_height,
-            0,
-            &commitment.domain_block_hash,
-        ) {
-            return Ok(FinalityStatus::Rejected("PoH sequence check failed".into()));
+        // The quorum arm's PoH half used to call
+        // `verify_poh_sequence(&block_hash, height, 0, &block_hash)`, i.e. zero
+        // steps from the end hash to itself. That is true for every 32-byte
+        // value and checked nothing while reading as if it did.
+        //
+        // What a `poh-hash-chain-v1` adapter owes on this arm is that the
+        // commitment's block hash is the PoH digest its parent's digest
+        // advances to over the domain's slot budget, so a finalized PoH
+        // commitment neither picks its parent after the fact nor claims a slot
+        // that no hash chain produced. The structural `Poh` ladder arm below
+        // does not need this check: it verifies a full hash chain of its own and
+        // binds it to `domain_block_hash` through `poh_ladder_root`.
+        // The guard is scoped to what this proof does not itself bind. A PoH
+        // ladder (`FinalityProof::Poh`) and a PoA quorum over the whole
+        // commitment both sign `parent_domain_block_hash`, so a re-pointed
+        // parent is already refused by them; the parent-derivation check is
+        // for the delegated quorums (BFT, PoS) whose certificate signs only a
+        // height and a hash. The scope comes from `FinalityProof::shape`, the
+        // table settlement holds this same fact to, rather than a hardcoded
+        // variant list that drifts from it.
+        if proof.shape().binds & crate::domain::finality_proof_model::BINDS_PARENT_HASH == 0
+            && !crate::consensus::poh::verify_commitment_poh_sequence(
+                &commitment.parent_domain_block_hash,
+                commitment.domain_height,
+                &commitment.domain_block_hash,
+                crate::consensus::poh::PohConfig::default().hashes_per_slot,
+            )
+        {
+            return Ok(FinalityStatus::Rejected(
+                "PoH commitment does not continue the parent digest over a full slot".into(),
+            ));
         }
         match proof {
             FinalityProof::Bft { .. } | FinalityProof::BftPq { .. } => {
@@ -3478,21 +3500,34 @@ impl DomainFinalityAdapter for PospaceFinalityAdapter {
         if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
             return Ok(rejected);
         }
-        // Enforce non-zero block hash and exercise the PoSpace challenge-response verifier.
-        let expected_tag = crate::consensus::pospace::compute_plot_response(
-            &commitment.domain_block_hash,
-            &commitment.state_root,
-        );
-        if commitment.domain_block_hash == [0u8; 32]
-            || (commitment.state_root != [0u8; 32]
-                && !crate::consensus::pospace::verify_plot_response(
-                    &commitment.domain_block_hash,
-                    &commitment.state_root,
-                    &expected_tag,
-                ))
+        // The quorum arm's plot half used to compute
+        // `compute_plot_response(block_hash, state_root)` and hand that value
+        // back to `verify_plot_response(block_hash, state_root, ..)`, which is
+        // `H(x, y) == H(x, y)` - true for every non-zero pair and therefore no
+        // check at all: any height, any roots, any parent finalized.
+        //
+        // What is checked here is the binding the `pospace-plot-v1` adapter must
+        // make and can check from the commitment alone: the block hash is the
+        // plot response for the challenge the commitment's own parent and
+        // height derive. The structural `Pospace` arm below does not need this
+        // check: it derives its challenge from the commitment, verifies the plot
+        // owner's signature over it, and requires the quality it computes to
+        // reach the registered bit floor.
+        // Scoped the same way as the PoH guard above: a PoSpace plot response
+        // or a PoA quorum over the whole commitment binds the parent hash
+        // already, so only a delegated quorum needs the parent-derived
+        // challenge checked on its behalf.
+        if proof.shape().binds & crate::domain::finality_proof_model::BINDS_PARENT_HASH == 0
+            && !crate::consensus::pospace::verify_commitment_plot_response(
+                &commitment.parent_domain_block_hash,
+                commitment.domain_height,
+                &commitment.state_root,
+                &commitment.domain_block_hash,
+            )
         {
             return Ok(FinalityStatus::Rejected(
-                "PoSpace commitment carries an invalid zero block hash or plot response".into(),
+                "PoSpace commitment does not bind a plot response to its parent-derived challenge"
+                    .into(),
             ));
         }
         match proof {
@@ -6324,6 +6359,169 @@ mod tests {
                 ObservedScheme::Scheme(SchemeId::ED25519),
                 ObservedScheme::Scheme(SchemeId::ML_DSA_65),
             ]
+        );
+    }
+
+    // --- PoH / PoSpace commitment binding (previously tautological) ----------
+
+    /// A PoH commitment that continues its parent over a full slot.
+    fn poh_commitment(parent: [u8; 32], height: u64) -> DomainCommitment {
+        // The digest the adapter accepts is derived through the same public
+        // door the producers use; the slot budget comes from the default config.
+        let steps = crate::consensus::poh::PohConfig::default().hashes_per_slot;
+        let digest = crate::consensus::poh::commitment_digest(&parent, height, steps);
+        DomainCommitment {
+            domain_id: 702,
+            domain_height: height,
+            domain_block_hash: digest,
+            parent_domain_block_hash: parent,
+            state_root: [0x77; 32],
+            tx_root: [0x44; 32],
+            event_root: [0x55; 32],
+            finality_proof_hash: [0x66; 32],
+            consensus_kind: crate::domain::ConsensusKind::Poh,
+            validator_set_hash: [0x11; 32],
+            timestamp_ms: 1_700_000_000_000,
+            sequence: 1,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn poh_domain() -> ConsensusDomain {
+        let mut domain = crate::domain::plugin::default_domain(
+            702,
+            crate::domain::ConsensusKind::Poh,
+            70_102,
+            "poh-hash-chain-v1",
+            1,
+        );
+        domain.validator_set_hash = [0x11; 32];
+        domain
+    }
+
+    #[test]
+    fn a_poh_commitment_that_does_not_continue_its_parent_is_rejected() {
+        let domain = poh_domain();
+        let parent = [0x91; 32];
+        let good = poh_commitment(parent, 5);
+        // The quorum half is reached only after the PoH half passes, so a
+        // proof this adapter would otherwise refuse for its shape is enough to
+        // show which check fired. `Raw` is refused at the match, and the
+        // rejection below happens before it.
+        let raw = FinalityProof::Raw(vec![0xA1; 64]);
+
+        let good_status = PohFinalityAdapter
+            .verify_finality(&domain, &good, &raw)
+            .expect("the adapter runs");
+        assert!(
+            matches!(&good_status, FinalityStatus::Rejected(reason) if reason.contains("raw bytes")),
+            "the PoH half passed and the refusal came from the quorum half: {good_status:?}"
+        );
+
+        // Re-point the commitment at a different parent, keeping the digest.
+        let mut repointed = good.clone();
+        repointed.parent_domain_block_hash = [0x92; 32];
+        let status = PohFinalityAdapter
+            .verify_finality(&domain, &repointed, &raw)
+            .expect("the adapter runs");
+        assert!(
+            matches!(&status, FinalityStatus::Rejected(reason) if reason.contains("continue the parent digest")),
+            "a re-pointed parent must be refused by the PoH half: {status:?}"
+        );
+
+        // Claim a different height, keeping the digest.
+        let mut reheighted = good;
+        reheighted.domain_height = 6;
+        let status = PohFinalityAdapter
+            .verify_finality(&domain, &reheighted, &raw)
+            .expect("the adapter runs");
+        assert!(
+            matches!(&status, FinalityStatus::Rejected(reason) if reason.contains("continue the parent digest")),
+            "a re-pointed height must be refused by the PoH half: {status:?}"
+        );
+    }
+
+    /// A PoSpace commitment that answers its parent-derived challenge.
+    fn pospace_commitment(parent: [u8; 32], height: u64) -> DomainCommitment {
+        let plot = [0x5Au8; 32];
+        DomainCommitment {
+            domain_id: 703,
+            domain_height: height,
+            domain_block_hash: crate::consensus::pospace::commitment_plot_response(
+                &parent, height, &plot,
+            ),
+            parent_domain_block_hash: parent,
+            state_root: plot,
+            tx_root: [0x44; 32],
+            event_root: [0x55; 32],
+            finality_proof_hash: [0x66; 32],
+            consensus_kind: crate::domain::ConsensusKind::Pospace,
+            validator_set_hash: [0x11; 32],
+            timestamp_ms: 1_700_000_000_000,
+            sequence: 1,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn pospace_domain() -> ConsensusDomain {
+        let mut domain = crate::domain::plugin::default_domain(
+            703,
+            crate::domain::ConsensusKind::Pospace,
+            70_103,
+            "pospace-plot-v1",
+            1,
+        );
+        domain.validator_set_hash = [0x11; 32];
+        domain
+    }
+
+    #[test]
+    fn a_pospace_commitment_without_a_parent_challenge_response_is_rejected() {
+        let domain = pospace_domain();
+        let parent = [0x93; 32];
+        let good = pospace_commitment(parent, 4);
+        let raw = FinalityProof::Raw(vec![0xB2; 64]);
+
+        let good_status = PospaceFinalityAdapter
+            .verify_finality(&domain, &good, &raw)
+            .expect("the adapter runs");
+        assert!(
+            matches!(&good_status, FinalityStatus::Rejected(reason) if reason.contains("raw bytes")),
+            "the plot half passed and the refusal came from the quorum half: {good_status:?}"
+        );
+
+        // Every mutation below passed the old check, which computed the
+        // response from the fields it then verified it against.
+        let mut repointed = good.clone();
+        repointed.parent_domain_block_hash = [0x94; 32];
+        let status = PospaceFinalityAdapter
+            .verify_finality(&domain, &repointed, &raw)
+            .expect("the adapter runs");
+        assert!(
+            matches!(&status, FinalityStatus::Rejected(reason) if reason.contains("parent-derived challenge")),
+            "a re-pointed parent must be refused by the plot half: {status:?}"
+        );
+
+        let mut replotted = good.clone();
+        replotted.state_root = [0x5Bu8; 32];
+        let status = PospaceFinalityAdapter
+            .verify_finality(&domain, &replotted, &raw)
+            .expect("the adapter runs");
+        assert!(
+            matches!(&status, FinalityStatus::Rejected(reason) if reason.contains("parent-derived challenge")),
+            "a re-pointed plot commitment must be refused: {status:?}"
+        );
+
+        let mut arbitrary = good;
+        arbitrary.domain_block_hash = [0xCAu8; 32];
+        let status = PospaceFinalityAdapter
+            .verify_finality(&domain, &arbitrary, &raw)
+            .expect("the adapter runs");
+        assert!(
+            matches!(&status, FinalityStatus::Rejected(reason) if reason.contains("parent-derived challenge")),
+            "an arbitrary block hash must be refused: {status:?}"
         );
     }
 }

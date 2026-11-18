@@ -108,8 +108,14 @@ fn decode_poh_witness(block: &Block) -> Result<(u64, u64, [u8; 32]), ConsensusEr
 }
 
 /// Verify a bounded forward PoH hash sequence from `start_hash` at `start_count`.
+///
+/// Crate-internal: the doors onto this chain are
+/// [`verify_commitment_poh_sequence`] (what settlement finality checks), the
+/// `PoH` ladder verifier in `domain::finality_adapter`, and [`PohEngine`]
+/// (what a producing node runs). A further caller outside this module would be
+/// another unreviewed way to accept a PoH witness.
 #[must_use]
-pub fn verify_poh_sequence(
+fn verify_poh_sequence(
     start_hash: &[u8; 32],
     start_count: u64,
     steps: u64,
@@ -123,6 +129,70 @@ pub fn verify_poh_sequence(
         current = poh_step(&current, start_count + offset);
     }
     current == *expected_end_hash
+}
+
+/// The number of PoH steps a commitment at `height` must show: the slot budget
+/// of the domain, so a commitment cannot claim a slot with no hash chain
+/// behind it. The step count is fixed (not carried by the submitter) because
+/// nothing in a `DomainCommitment` selects it.
+#[must_use]
+const fn commitment_step_count(hashes_per_slot: u64) -> u64 {
+    // A slot with no steps proves no work and would make the check below an
+    // identity again, so the floor is one.
+    if hashes_per_slot == 0 {
+        1
+    } else if hashes_per_slot > MAX_POH_VERIFY_STEPS {
+        MAX_POH_VERIFY_STEPS
+    } else {
+        hashes_per_slot
+    }
+}
+
+/// The PoH digest a commitment at `height` must carry: `parent_hash` advanced
+/// over one slot's step budget, starting at the step index the height selects.
+///
+/// This is the derivation [`verify_commitment_poh_sequence`] checks against, so
+/// a producer and the settlement adapter cannot drift apart on it.
+#[must_use]
+pub fn commitment_digest(parent_hash: &[u8; 32], height: u64, hashes_per_slot: u64) -> [u8; 32] {
+    let steps = commitment_step_count(hashes_per_slot);
+    let start_count = height.saturating_mul(steps);
+    let mut current = *parent_hash;
+    for offset in 0..steps {
+        current = poh_step(&current, start_count.saturating_add(offset));
+    }
+    current
+}
+
+/// Verify that `block_hash` is the PoH digest `parent_hash` advances to over
+/// `steps` steps, starting at the step index the commitment's height selects.
+///
+/// This is the check `poh-hash-chain-v1` finality makes on its quorum arm. It
+/// is the same hash chain [`PohEngine`] runs (`poh_step`:
+/// `BDLM_POH_TICK_V1 || prev || step`), stated over the normalized 32-byte
+/// roots a `DomainCommitment` carries. The parent root is itself a PoH digest
+/// in this domain, so the equation binds parent, height and block hash into one
+/// chain step rather than confirming a value against itself.
+#[must_use]
+pub fn verify_commitment_poh_sequence(
+    parent_hash: &[u8; 32],
+    height: u64,
+    block_hash: &[u8; 32],
+    hashes_per_slot: u64,
+) -> bool {
+    if *parent_hash == [0u8; 32] || *block_hash == [0u8; 32] {
+        return false;
+    }
+    // Step 0 of a domain is its genesis and has no parent to continue; a
+    // height-1 commitment is admitted by the non-zero shape check alone.
+    if height <= 1 {
+        return true;
+    }
+    let steps = commitment_step_count(hashes_per_slot);
+    let Some(start_count) = height.checked_mul(steps) else {
+        return false;
+    };
+    verify_poh_sequence(parent_hash, start_count, steps, block_hash)
 }
 
 /// PoH engine: sequential hash chain with bounded checkpoint verification.
@@ -573,5 +643,75 @@ mod tests {
         assert!(engine
             .validate_block(&b2, &[b1], &AccountState::new())
             .is_ok());
+    }
+    // --- commitment-level PoH continuation (`poh-hash-chain-v1` finality) ----
+
+    fn digest_at(parent: &[u8; 32], start_count: u64, steps: u64) -> [u8; 32] {
+        let mut current = *parent;
+        for offset in 0..steps {
+            current = poh_step(&current, start_count + offset);
+        }
+        current
+    }
+
+    #[test]
+    fn a_commitment_continues_its_parent_over_a_full_slot() {
+        let parent = [0x31u8; 32];
+        let steps = 4u64;
+        let height = 5u64;
+        let block = digest_at(&parent, height * steps, steps);
+
+        assert!(verify_commitment_poh_sequence(
+            &parent, height, &block, steps
+        ));
+
+        // The zero-step check this replaced compared the block hash with
+        // itself, so all three of these passed. They must not.
+        assert!(
+            !verify_commitment_poh_sequence(&[0x32u8; 32], height, &block, steps),
+            "a re-pointed parent must not carry the same finalized digest"
+        );
+        assert!(
+            !verify_commitment_poh_sequence(&parent, height + 1, &block, steps),
+            "a re-pointed height must not carry the same finalized digest"
+        );
+        assert!(
+            !verify_commitment_poh_sequence(&parent, height, &[0x33u8; 32], steps),
+            "an arbitrary digest is not the parent's continuation"
+        );
+    }
+
+    #[test]
+    fn a_commitment_cannot_claim_a_partial_slot() {
+        let parent = [0x41u8; 32];
+        let steps = 4u64;
+        let height = 3u64;
+        // One step short of the slot budget.
+        let short = digest_at(&parent, height * steps, steps - 1);
+        assert!(!verify_commitment_poh_sequence(
+            &parent, height, &short, steps
+        ));
+    }
+
+    #[test]
+    fn genesis_and_zero_roots_are_refused() {
+        let parent = [0x51u8; 32];
+        // Height 1 is domain genesis: no parent to continue, admitted by shape.
+        assert!(verify_commitment_poh_sequence(&parent, 1, &[0x52u8; 32], 4));
+        assert!(!verify_commitment_poh_sequence(
+            &[0u8; 32],
+            5,
+            &digest_at(&[0u8; 32], 20, 4),
+            4
+        ));
+        assert!(!verify_commitment_poh_sequence(&parent, 5, &[0u8; 32], 4));
+        // A step budget of zero would make the check an identity again.
+        assert_eq!(commitment_step_count(0), 1);
+        assert_eq!(commitment_step_count(4), 4);
+        assert_eq!(
+            commitment_step_count(u64::MAX),
+            MAX_POH_VERIFY_STEPS,
+            "the verifier's ceiling is the step ceiling"
+        );
     }
 }
