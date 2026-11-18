@@ -1,9 +1,12 @@
-8513
+7186
 # ---------------------------------------------------------------------------
 # G2 pedantic/nursery ratchet baseline.
 # The FIRST bare-number line of this file is the baseline
 # (scripts/check-clippy-extra.sh reads it with `grep -E '^[0-9]+$' | head -1`);
 # below it is the justification.
+#
+# 2026-11-18 - 8513 -> 7186 (B-0051 stale-ratchet lower: measured 7186 on
+#   testnet across all targets after B-0044 primary-swarm no-DNS fallback).
 #
 # 2026-10-20 - 7048 -> 7684 (PR #95 "Consensus Of Consensuses" consensus
 #   rework measured 7318 on the CI run for 8723664; base = 7318 + 5%
