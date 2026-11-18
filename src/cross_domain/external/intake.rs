@@ -35,6 +35,7 @@
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
+use crate::cross_domain::external::bitcoin_spv::{BitcoinSpvAdapter, PinnedBitcoinAnchor};
 use crate::cross_domain::external::ethereum::{BlsVerifier, EthereumSyncAdapter};
 use crate::cross_domain::external::intake_quorum::{
     QuorumRounds, RoundEntry, RoundError, RoundKey, RoundState,
@@ -164,6 +165,16 @@ pub enum AdapterSpec {
         #[serde(default)]
         chain_id: Option<u64>,
     },
+    /// Bitcoin SPV header-chain finality for one network, pinned to one
+    /// trusted checkpoint. APPENDED LAST: this enum is persisted in consensus
+    /// state through bincode, so inserting a variant in the middle would
+    /// reinterpret every stored registration (STRX-194-01). A spec without
+    /// an anchor is the closed admission state: `register_domain` refuses it.
+    BitcoinSpv {
+        network: String,
+        #[serde(default)]
+        anchor: Option<PinnedBitcoinAnchor>,
+    },
 }
 
 impl AdapterSpec {
@@ -172,7 +183,9 @@ impl AdapterSpec {
     #[must_use]
     pub fn network(&self) -> &str {
         match self {
-            Self::EthereumSync { network, .. } | Self::ZkVm { network, .. } => network,
+            Self::EthereumSync { network, .. }
+            | Self::ZkVm { network, .. }
+            | Self::BitcoinSpv { network, .. } => network,
         }
     }
 
@@ -203,6 +216,14 @@ impl AdapterSpec {
                 chain_id,
             } => {
                 let adapter = ZkVmFinalityAdapter::new(network, *program_hash, *chain_id);
+                let adapter = match golden {
+                    Some(g) => adapter.with_golden(g),
+                    None => adapter,
+                };
+                Box::new(adapter)
+            }
+            Self::BitcoinSpv { network, anchor } => {
+                let adapter = BitcoinSpvAdapter::new(network, anchor.clone());
                 let adapter = match golden {
                     Some(g) => adapter.with_golden(g),
                     None => adapter,
@@ -447,6 +468,14 @@ impl IntakeState {
         } = &spec
         {
             if program_hash.is_none() || chain_id.is_none() {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // A Bitcoin SPV domain with no pinned checkpoint would let a
+        // submitter finalise a private low-work chain. Refuse at the door,
+        // exactly as an unpinned sync committee is refused.
+        if let AdapterSpec::BitcoinSpv { anchor, .. } = &spec {
+            if anchor.is_none() {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
