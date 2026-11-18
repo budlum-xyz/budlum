@@ -350,13 +350,12 @@ mod tests {
         // The mutated line has to differ from the canonical one, or the
         // assertion below proves nothing. `chain` is rendered with `{:016x}`
         // and a Garden chain id always carries the `0x4741` prefix, so the id is
-        // at least 2^62 and its canonical form is exactly 16 digits. No shorter
-        // rendering of the same integer exists: `{:x}` of the id is those same
-        // 16 digits, and `{:x}` of the id shifted right by four bits is the
-        // 15-digit prefix alone, which pads back to 16 on the way out and so
-        // differs only in its low bits. Dropping the id's leading (always zero)
-        // digit keeps the field inside the 16-character budget while changing
-        // the text, so a real parse still has to refuse it.
+        // at least 2^62 and its canonical form is exactly 16 digits. Neither
+        // `{:x}` of the id nor `{:x}` of the id shifted right by four bits is
+        // shorter: both are 16-digit values, so `replacen` would find nothing to
+        // rewrite and this test would check a canonical line against a
+        // rejection assertion. Dropping the id's leading (always zero) digit
+        // gives a real 15-character field that a canonical parser has to refuse.
         let digits = format!("{:016x}", g.chain_id);
         let short_chain = canonical.replacen(
             &format!("chain={digits}"),
