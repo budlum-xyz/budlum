@@ -39,6 +39,15 @@ pub struct GardenInvite {
 }
 
 fn parse_hash(label: &str, value: &str) -> Result<Hash32, String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(format!(
+            "invite field '{label}' must be 64 lowercase hex characters"
+        ));
+    }
     let bytes = hex::decode(value).map_err(|_| format!("invite field '{label}' is not hex"))?;
     Hash32::try_from(bytes.as_slice())
         .map_err(|_| format!("invite field '{label}' is not 32 bytes"))
@@ -75,7 +84,11 @@ impl GardenInvite {
                 "invite must carry 1..={MAX_INVITE_PEERS} peer addresses"
             ));
         }
+        let mut seen_peers = std::collections::BTreeSet::new();
         for peer in &self.peers {
+            if !seen_peers.insert(peer.as_str()) {
+                return Err(format!("invite repeats peer address {peer}"));
+            }
             if !is_plain_peer(peer) {
                 return Err("invite carries a peer address that is not a plain multiaddr".into());
             }
@@ -159,6 +172,15 @@ impl GardenInvite {
                 .ok_or_else(|| "invite field has no value".to_string())?;
             match name {
                 "chain" if chain_id.is_none() => {
+                    if value.len() != 16
+                        || !value
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    {
+                        return Err(
+                            "invite field 'chain' must be 16 lowercase hex characters".to_string()
+                        );
+                    }
                     chain_id = Some(
                         u64::from_str_radix(value, 16)
                             .map_err(|_| "invite field 'chain' is not hex".to_string())?,
@@ -314,5 +336,30 @@ mod tests {
                 "expected invite peer {bad} to be refused"
             );
         }
+    }
+
+    #[test]
+    fn garden_invite_refuses_non_canonical_hex_and_duplicate_peers() {
+        let token = [0xabu8; 32];
+        let g = genesis(&token);
+        let p = peer("/ip4/1.2.3.4", 4001);
+        assert!(GardenInvite::new(&g, token, vec![p.clone(), p.clone()]).is_err());
+
+        let canonical = GardenInvite::new(&g, token, vec![p]).unwrap().to_link();
+        let short_chain = canonical.replacen(
+            &format!("chain={:016x}", g.chain_id),
+            &format!("chain={:x}", g.chain_id),
+            1,
+        );
+        assert!(GardenInvite::parse(&short_chain).is_err());
+        let signed_chain = canonical.replacen(
+            &format!("chain={:016x}", g.chain_id),
+            &format!("chain=+{:x}", g.chain_id),
+            1,
+        );
+        assert!(GardenInvite::parse(&signed_chain).is_err());
+        let upper_token =
+            canonical.replacen(&hex::encode(token), &hex::encode(token).to_uppercase(), 1);
+        assert!(GardenInvite::parse(&upper_token).is_err());
     }
 }
