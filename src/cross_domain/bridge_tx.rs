@@ -169,6 +169,19 @@ pub fn verify_domain_event_proof(
     event: DomainEvent,
     proof: &MerkleProof,
 ) -> Result<VerifiedDomainEvent, ProofVerificationError> {
+    // Check adapter-specific attestation (`for_domain`), not only `for_kind`:
+    // a `ConsensusKind::PoW` domain running `bitcoin-spv-v1` attests only
+    // `parent` and `tx_root`, never `event_root`.
+    let Some(domain) = state.settlement.domains.get(domain_id) else {
+        return Err(ProofVerificationError::MissingCommitment {
+            domain_id,
+            domain_height,
+            sequence,
+        });
+    };
+    if !crate::settlement::domains::CommitmentAttestation::for_domain(domain).event_root {
+        return Err(ProofVerificationError::UnattestedEventRoot);
+    }
     SettlementProofVerifier::verify_event_from_registry(
         &state.settlement.commitments,
         domain_id,
@@ -1507,5 +1520,56 @@ mod tests {
             ..base
         };
         assert!(lock(&mut state, owner, &forged_source, FEE, 5).is_err());
+    }
+
+    #[test]
+    fn verify_domain_event_proof_refuses_unattested_bitcoin_spv_event_root() {
+        use crate::cross_domain::event_tree::DomainEventTree;
+        use crate::domain::types::{ConsensusKind, DomainCommitment, BITCOIN_SPV_ADAPTER};
+        use std::collections::BTreeMap;
+
+        let mut state = AccountState::new();
+        let domain_id = 77;
+        let domain = default_domain(domain_id, ConsensusKind::PoW, 8332, BITCOIN_SPV_ADAPTER, 6);
+        state.settlement.domains.register(domain).expect("register");
+
+        let forged_event = DomainEvent {
+            domain_id,
+            domain_height: 1,
+            event_index: 0,
+            emitter: Address::from([0x12; 32]),
+            kind: DomainEventKind::Custom("forged".into()),
+            payload_hash: [0xde; 32],
+            message: None,
+        };
+        let mut tree = DomainEventTree::new();
+        tree.push(forged_event.clone());
+        let proof = tree.proof(0).expect("event proof");
+        let commitment = DomainCommitment {
+            domain_id,
+            domain_height: 1,
+            domain_block_hash: [0x42; 32],
+            parent_domain_block_hash: [0x01; 32],
+            state_root: [0u8; 32],
+            tx_root: [0x55; 32],
+            event_root: tree.root(),
+            finality_proof_hash: [0x66; 32],
+            consensus_kind: ConsensusKind::PoW,
+            validator_set_hash: [0u8; 32],
+            producer: Some(Address::from([0x77; 32])),
+            timestamp_ms: 1,
+            sequence: 1,
+            state_updates: BTreeMap::new(),
+        };
+        state
+            .settlement
+            .commitments
+            .insert_at_height(commitment, 1)
+            .expect("insert commitment");
+
+        let err =
+            verify_domain_event_proof(&state, domain_id, 1, 1, [0x42; 32], forged_event, &proof)
+                .expect_err("bitcoin-spv-v1 headers never bind event_root");
+        assert_eq!(err, ProofVerificationError::UnattestedEventRoot);
     }
 }

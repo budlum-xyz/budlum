@@ -43,13 +43,13 @@ impl SplitCandidate {
     #[must_use]
     pub fn from_chain_tip(chain: &[Block], score: u128) -> Self {
         match chain.last() {
-            Some(block) => SplitCandidate {
+            Some(block) => Self {
                 block_hash: block.calculate_hash_bytes(),
                 proposer: block.producer.as_ref().map_or([0u8; 32], |p| *p.as_bytes()),
                 height: block.index,
                 weight: score,
             },
-            None => SplitCandidate {
+            None => Self {
                 block_hash: [0u8; 32],
                 proposer: [0u8; 32],
                 height: 0,

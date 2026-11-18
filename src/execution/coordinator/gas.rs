@@ -4,7 +4,7 @@
 //! - Block limit: `60_000_000` BGU (TESTNET-DEFAULT).
 //! - Soft per-environment limits: EVM `30_000_000`, WASM `24_000_000`,
 //!   SVM `24_000_000`, Move `24_000_000` (`1 Move unit = 100 BGU`),
-//!   BudZero `MAX_BLOCK_CONTRACT_GAS`.
+//!   `BudZero` `MAX_BLOCK_CONTRACT_GAS`.
 //! - EIP-1559 base fee in attoBUD per BGU: 50% target (`30_000_000` BGU),
 //!   max 12.5% (`1/8`) adjustment per block.
 //! - Base fee split: 10% burned, 90% credited to the Network Security Pool

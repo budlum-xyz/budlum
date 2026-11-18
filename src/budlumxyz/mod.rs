@@ -13,7 +13,7 @@ pub const BUDLUMXYZ_REGISTER_MIN_FEE: u64 = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BudlumxyzRegistry {
-    /// App_id -> record
+    /// `App_id` -> record
     pub apps: BTreeMap<u64, AppRecord>,
     pub next_app_id: u64,
     /// Authorized governors who can mark apps as governance-verified.
@@ -81,6 +81,7 @@ fn new_test_hub() -> BudlumxyzRegistry {
 }
 
 impl BudlumxyzRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -281,16 +282,19 @@ impl BudlumxyzRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn list_apps(&self) -> Vec<AppRecord> {
         self.apps.values().cloned().collect()
     }
 }
 
 impl BudlumxyzRegistry {
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.apps.is_empty() && self.authorized_governors.is_empty() && self.next_app_id == 0
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();

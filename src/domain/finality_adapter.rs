@@ -301,7 +301,9 @@ pub enum FinalityProof {
     },
     /// Aggregation-layer finality (Phase 4): references a verified
     /// `Claim::Prog` inside a finalized block's `MasterProof` (`ClaimFrame`).
-    /// Appended at the end so earlier bincode variant indices stay stable.
+    /// Appended after `Pospace` so the families the consensus branch pinned
+    /// keep their discriminants; the post-quantum DAG-family variants are
+    /// appended after this one for the same reason.
     AggregatedProg {
         /// Registered state-transition program hash for this domain.
         program_hash: Hash32,
@@ -312,17 +314,43 @@ pub enum FinalityProof {
         /// Digest of the verified `Claim::Prog` inside the block's `ClaimFrame`.
         claim_digest: Hash32,
     },
+    /// Post-quantum DAG structural finality: causal-anchor verification plus a
+    /// composite validator-suite (`Ed25519 + ML-DSA-65`) authority quorum bound
+    /// via [`poa_pq_authority_set_hash`]. Appended after `Pospace` so existing
+    /// bincode discriminants `0..=12` stay byte-exact.
+    DagPq {
+        round: u64,
+        anchor: Hash32,
+        parent_anchor: Hash32,
+        authorities: Vec<PoAAuthorityKey>,
+        signatures: Vec<PoAAuthoritySignature>,
+    },
+    /// Post-quantum PoH structural finality: sequential PoH hash-ladder
+    /// verification plus a composite (`Ed25519 + ML-DSA-65`) authority quorum.
+    PohPq {
+        chain: Vec<Hash32>,
+        authorities: Vec<PoAAuthorityKey>,
+        signatures: Vec<PoAAuthoritySignature>,
+    },
+    /// Post-quantum PoSpace structural finality: recomputed plot quality, a
+    /// composite (`Ed25519 + ML-DSA-65`) plot-owner signature bound to
+    /// `prover` (a member of `authorities`), and a composite authority quorum.
+    PospacePq {
+        prover: crate::core::address::Address,
+        plot_id: Hash32,
+        quality_bits: u32,
+        prover_signature: Vec<u8>,
+        authorities: Vec<PoAAuthorityKey>,
+        signatures: Vec<PoAAuthoritySignature>,
+    },
 }
 
 impl FinalityProof {
     /// A quorum proof that carries only classical signatures: the BLS-only
-    /// `PoS` and BFT certificates and the Ed25519-only `PoA` signatures. Mainnet
-    /// refuses these.
-    ///
-    /// The DAG-family proofs are listed as well: their agreement half is an
-    /// Ed25519 authority quorum today, so a mainnet domain must not rest its
-    /// finality on one until the composite (ML-DSA-65) authority path covers
-    /// them.
+    /// `PoS` and BFT certificates, the Ed25519-only `PoA` signatures, and the
+    /// classical Ed25519 `Dag` / `Poh` / `Pospace` proofs. Mainnet refuses
+    /// these and requires their composite ML-DSA-65 peers (`PoSPq`, `BftPq`,
+    /// `PoAPq`, `DagPq`, `PohPq`, `PospacePq`).
     #[must_use]
     pub const fn is_classical_only_quorum(&self) -> bool {
         matches!(
@@ -384,7 +412,12 @@ impl FinalityProof {
             // The DAG family signs the whole commitment (`poa_commit_signing_message`
             // is the tail of every one of its messages), so the structural half
             // and the agreement half both cover every field.
-            Self::Dag { .. } | Self::Poh { .. } | Self::Pospace { .. } => FinalityProofShape {
+            Self::Dag { .. }
+            | Self::DagPq { .. }
+            | Self::Poh { .. }
+            | Self::PohPq { .. }
+            | Self::Pospace { .. }
+            | Self::PospacePq { .. } => FinalityProofShape {
                 binds: BINDS_HEIGHT
                     | BINDS_PARENT_HASH
                     | BINDS_BLOCK_HASH
@@ -2027,8 +2060,38 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
         crate::domain::types::STORAGE_ATTESTATION_ADAPTER
     }
 
+    fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
+        match proof {
+            FinalityProof::PoA { .. } | FinalityProof::PoAPq { .. } => {
+                PoAFinalityAdapter::default().observed_schemes(proof)
+            }
+            FinalityProof::PoS { .. } | FinalityProof::PoSPq { .. } => {
+                PoSFinalityAdapter.observed_schemes(proof)
+            }
+            FinalityProof::Bft { .. } | FinalityProof::BftPq { .. } => {
+                BftFinalityAdapter::default().observed_schemes(proof)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn verify_finality(
         &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        self.verify_finality_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            domain,
+            commitment,
+            proof,
+        )
+    }
+
+    fn verify_finality_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
         domain: &ConsensusDomain,
         commitment: &DomainCommitment,
         proof: &FinalityProof,
@@ -2037,10 +2100,17 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
             return Ok(FinalityStatus::Rejected("Domain ID mismatch".into()));
         }
         match proof {
+            FinalityProof::PoAPq { .. } => PoAFinalityAdapter::default()
+                .verify_finality_in(registry, domain, commitment, proof),
             FinalityProof::PoA {
                 authorities,
                 signatures,
             } => {
+                if !registry.scheme_verifies(crate::crypto::scheme::SchemeId::ED25519) {
+                    return Ok(FinalityStatus::Rejected(
+                        "Storage attestation Ed25519 scheme is retired by registry".into(),
+                    ));
+                }
                 if authorities.is_empty() || signatures.is_empty() {
                     return Ok(FinalityStatus::Rejected(
                         "Empty storage attestation signatures".into(),
@@ -2093,6 +2163,11 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                 cert,
                 validator_snapshot,
             } => {
+                if !registry.scheme_verifies(crate::crypto::scheme::SchemeId::BLS12381_MINSIG) {
+                    return Ok(FinalityStatus::Rejected(
+                        "Storage attestation BLS12-381 scheme is retired by registry".into(),
+                    ));
+                }
                 // Real PoS verification - same checks as
                 // PosFinalityAdapter (lines 470-525). Previously this branch only
                 // Checked agg_sig_bls.is_empty and height/hash match, which
@@ -2176,6 +2251,11 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                 cert,
                 validator_snapshot,
             } => {
+                if !registry.scheme_verifies(crate::crypto::scheme::SchemeId::BLS12381_MINSIG) {
+                    return Ok(FinalityStatus::Rejected(
+                        "Storage attestation BFT BLS12-381 scheme is retired by registry".into(),
+                    ));
+                }
                 // Real BFT verification - same checks as
                 // BftFinalityAdapter (lines 665-730). Previously this branch only
                 // Checked agg_sig_bls.is_empty and height/hash match.
@@ -2303,18 +2383,32 @@ impl DomainFinalityAdapter for AiInferenceFinalityAdapter {
         crate::domain::types::AI_INFERENCE_ADAPTER
     }
 
+    fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
+        StorageAttestationFinalityAdapter.observed_schemes(proof)
+    }
+
     fn verify_finality(
         &self,
         domain: &ConsensusDomain,
         commitment: &DomainCommitment,
         proof: &FinalityProof,
     ) -> Result<FinalityStatus, FinalityError> {
-        // Attestation shape is identical to storage: a set of registered
-        // signers over the commitment binding message, at a count quorum. The
-        // AI-specific agreement threshold is enforced where the outcome is
-        // produced (`AiRegistry`); this layer checks that the commitment
-        // carrying it is attested by the domain's registered set.
-        StorageAttestationFinalityAdapter.verify_finality(domain, commitment, proof)
+        self.verify_finality_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            domain,
+            commitment,
+            proof,
+        )
+    }
+
+    fn verify_finality_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        StorageAttestationFinalityAdapter.verify_finality_in(registry, domain, commitment, proof)
     }
 }
 
@@ -2534,19 +2628,172 @@ pub fn pospace_commit_signing_message(
     msg
 }
 
-/// The agreement half every DAG-family proof shares: distinct registered
+/// Composite (`Ed25519 + ML-DSA-65`) digest a post-quantum DAG authority signs.
+/// WIRING: domain producer signing surface paired with `verify_dag_pq_anchor_finality`.
+#[must_use]
+pub fn dag_pq_commit_digest(
+    chain_id: u64,
+    domain_id: DomainId,
+    round: u64,
+    anchor: Hash32,
+    parent_anchor: Hash32,
+    commitment: &DomainCommitment,
+) -> Hash32 {
+    let body = dag_commit_signing_message(
+        chain_id,
+        domain_id,
+        round,
+        anchor,
+        parent_anchor,
+        commitment,
+    );
+    crate::core::hash::hash_fields_bytes(&[b"BDLM_DAG_PQ_COMMIT_V1", &body])
+}
+
+/// Composite (`Ed25519 + ML-DSA-65`) digest a post-quantum PoH authority signs.
+/// WIRING: domain producer signing surface paired with `verify_poh_pq_ladder_finality`.
+#[must_use]
+pub fn poh_pq_commit_digest(
+    chain_id: u64,
+    domain_id: DomainId,
+    ladder_root: Hash32,
+    first_tick: Hash32,
+    commitment: &DomainCommitment,
+) -> Hash32 {
+    let body = poh_commit_signing_message(chain_id, domain_id, ladder_root, commitment);
+    crate::core::hash::hash_fields_bytes(&[b"BDLM_POH_PQ_COMMIT_V1", &first_tick, &body])
+}
+
+/// Composite (`Ed25519 + ML-DSA-65`) digest signed by both the plot owner and
+/// the authority quorum in [`FinalityProof::PospacePq`], binding `prover` so a
+/// valid plot response cannot be transplanted across authority identities.
+/// WIRING: domain producer signing surface paired with `verify_pospace_pq_quality_finality`.
+#[must_use]
+pub fn pospace_pq_commit_digest(
+    chain_id: u64,
+    domain_id: DomainId,
+    prover: &crate::core::address::Address,
+    plot_id: Hash32,
+    quality_bits: u32,
+    commitment: &DomainCommitment,
+) -> Hash32 {
+    let body =
+        pospace_commit_signing_message(chain_id, domain_id, plot_id, quality_bits, commitment);
+    crate::core::hash::hash_fields_bytes(&[b"BDLM_POSPACE_PQ_COMMIT_V1", prover.as_bytes(), &body])
+}
+
+/// Post-quantum agreement half for `DagPq`, `PohPq`, and `PospacePq`: distinct
+/// validator-suite (`Ed25519 + ML-DSA-65`) authorities matching the domain's
+/// registered [`poa_pq_authority_set_hash`], verified against `registry`.
+fn dag_family_pq_quorum(
+    registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    domain: &ConsensusDomain,
+    commitment: &DomainCommitment,
+    authorities: &[PoAAuthorityKey],
+    signatures: &[PoAAuthoritySignature],
+    digest: &Hash32,
+    label: &str,
+) -> Result<FinalityStatus, FinalityError> {
+    if domain.validator_set_hash == [0u8; 32] {
+        return Ok(FinalityStatus::Rejected(format!(
+            "{label} domain {} has no registered composite authority set hash",
+            domain.id
+        )));
+    }
+    if authorities.is_empty() {
+        return Ok(FinalityStatus::Rejected(format!(
+            "{label} composite authority set is empty"
+        )));
+    }
+    if authorities.len() > DAG_FAMILY_MAX_AUTHORITIES {
+        return Ok(FinalityStatus::Rejected(format!(
+            "{label} composite authority set declares {} members, maximum is {DAG_FAMILY_MAX_AUTHORITIES}",
+            authorities.len()
+        )));
+    }
+    if signatures.is_empty() {
+        return Ok(FinalityStatus::Rejected(format!(
+            "{label} composite signature list is empty"
+        )));
+    }
+    let mut keys: std::collections::BTreeMap<crate::core::address::Address, &[u8]> =
+        std::collections::BTreeMap::new();
+    for entry in authorities {
+        if keys
+            .insert(entry.authority, entry.public_key.as_slice())
+            .is_some()
+        {
+            return Ok(FinalityStatus::Rejected(format!(
+                "{label} composite authority set repeats a member"
+            )));
+        }
+    }
+    let set_hash = poa_pq_authority_set_hash(domain, authorities)?;
+    if set_hash != domain.validator_set_hash {
+        return Ok(FinalityStatus::Rejected(format!(
+            "{label} composite authority set does not match registered domain validator_set_hash"
+        )));
+    }
+    if commitment.validator_set_hash != [0u8; 32] && commitment.validator_set_hash != set_hash {
+        return Ok(FinalityStatus::Rejected(format!(
+            "{label} commitment validator_set_hash disagrees with composite authority set"
+        )));
+    }
+    let mut valid_signers: std::collections::BTreeSet<crate::core::address::Address> =
+        std::collections::BTreeSet::new();
+    for sig in signatures {
+        let Some(public_key) = keys.get(&sig.authority) else {
+            return Ok(FinalityStatus::Rejected(format!(
+                "{label} composite signature from a non-authority"
+            )));
+        };
+        if !valid_signers.insert(sig.authority) {
+            return Ok(FinalityStatus::Rejected(format!(
+                "{label} duplicate composite authority signature"
+            )));
+        }
+        if let Err(err) = crate::consensus::block_signature::verify_poa(
+            registry,
+            sig.authority.as_bytes(),
+            public_key,
+            digest,
+            &sig.signature,
+        ) {
+            return Ok(FinalityStatus::Rejected(format!(
+                "{label} composite signature verification failed: {err:?}"
+            )));
+        }
+    }
+    let required = (keys.len() as u64 * 2).div_ceil(3) as usize;
+    if valid_signers.len() >= required {
+        Ok(FinalityStatus::Finalized)
+    } else {
+        Ok(FinalityStatus::Pending {
+            required_depth: required as u64,
+            observed_depth: valid_signers.len() as u64,
+        })
+    }
+}
+
+/// The agreement half every classical DAG-family proof shares: distinct registered
 /// authorities, real signatures over one message, two thirds of the set.
 ///
 /// Returns a status rather than a boolean so a short quorum is `Pending` (the
 /// commitment is not wrong, it is not yet agreed) while a forged or
 /// unregistered signature is `Rejected`.
 fn dag_family_quorum(
+    registry: &crate::crypto::scheme::SchemeStatusRegistry,
     domain: &ConsensusDomain,
     authorities: &[crate::core::address::Address],
     signatures: &[PoAAuthoritySignature],
     msg: &[u8],
     label: &str,
 ) -> Result<FinalityStatus, FinalityError> {
+    if !registry.scheme_verifies(crate::crypto::scheme::SchemeId::ED25519) {
+        return Ok(FinalityStatus::Rejected(format!(
+            "{label} classical Ed25519 scheme is retired by registry"
+        )));
+    }
     if authorities.is_empty() {
         return Ok(FinalityStatus::Rejected(format!(
             "{label} authority set is empty"
@@ -2609,7 +2856,8 @@ fn dag_family_quorum(
 /// # Errors
 ///
 /// The proof is not a DAG proof, or a registered authority set cannot be read.
-pub fn verify_dag_anchor_finality(
+fn verify_dag_anchor_finality_in(
+    registry: &crate::crypto::scheme::SchemeStatusRegistry,
     domain: &ConsensusDomain,
     commitment: &DomainCommitment,
     proof: &FinalityProof,
@@ -2664,7 +2912,69 @@ pub fn verify_dag_anchor_finality(
         *parent_anchor,
         commitment,
     );
-    dag_family_quorum(domain, authorities, signatures, &msg, "DAG")
+    dag_family_quorum(registry, domain, authorities, signatures, &msg, "DAG")
+}
+
+fn verify_dag_pq_anchor_finality(
+    registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    domain: &ConsensusDomain,
+    commitment: &DomainCommitment,
+    proof: &FinalityProof,
+) -> Result<FinalityStatus, FinalityError> {
+    if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+        return Ok(rejected);
+    }
+    let FinalityProof::DagPq {
+        round,
+        anchor,
+        parent_anchor,
+        authorities,
+        signatures,
+    } = proof
+    else {
+        return Err(FinalityError(
+            "Expected DAG PQ structural finality proof".into(),
+        ));
+    };
+    if *parent_anchor == *anchor {
+        return Ok(FinalityStatus::Rejected(
+            "DAG PQ anchor points at itself".into(),
+        ));
+    }
+    if *parent_anchor != commitment.parent_domain_block_hash {
+        return Ok(FinalityStatus::Rejected(
+            "DAG PQ parent anchor does not match the commitment parent".into(),
+        ));
+    }
+    let derived = dag_anchor_hash(
+        domain.domain_chain_id,
+        domain.id,
+        *round,
+        *parent_anchor,
+        commitment.domain_block_hash,
+    );
+    if derived != *anchor {
+        return Ok(FinalityStatus::Rejected(
+            "DAG PQ anchor is not derived from the committed block".into(),
+        ));
+    }
+    let digest = dag_pq_commit_digest(
+        domain.domain_chain_id,
+        domain.id,
+        *round,
+        *anchor,
+        *parent_anchor,
+        commitment,
+    );
+    dag_family_pq_quorum(
+        registry,
+        domain,
+        commitment,
+        authorities,
+        signatures,
+        &digest,
+        "DAG PQ",
+    )
 }
 
 /// PoH structural finality: a hash ladder recomputed tick by tick, plus a
@@ -2674,7 +2984,8 @@ pub fn verify_dag_anchor_finality(
 /// # Errors
 ///
 /// The proof is not a PoH proof.
-pub fn verify_poh_ladder_finality(
+fn verify_poh_ladder_finality_in(
+    registry: &crate::crypto::scheme::SchemeStatusRegistry,
     domain: &ConsensusDomain,
     commitment: &DomainCommitment,
     proof: &FinalityProof,
@@ -2723,7 +3034,75 @@ pub fn verify_poh_ladder_finality(
         chain.len() as u64,
     );
     let msg = poh_commit_signing_message(domain.domain_chain_id, domain.id, root, commitment);
-    dag_family_quorum(domain, authorities, signatures, &msg, "PoH")
+    dag_family_quorum(registry, domain, authorities, signatures, &msg, "PoH")
+}
+
+fn verify_poh_pq_ladder_finality(
+    registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    domain: &ConsensusDomain,
+    commitment: &DomainCommitment,
+    proof: &FinalityProof,
+) -> Result<FinalityStatus, FinalityError> {
+    if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+        return Ok(rejected);
+    }
+    let FinalityProof::PohPq {
+        chain,
+        authorities,
+        signatures,
+    } = proof
+    else {
+        return Err(FinalityError(
+            "Expected PoH PQ structural finality proof".into(),
+        ));
+    };
+    if chain.len() < 2 {
+        return Ok(FinalityStatus::Rejected(
+            "PoH PQ finality proof carries no hashed steps".into(),
+        ));
+    }
+    if chain.len() > DAG_FAMILY_MAX_POH_TICKS {
+        return Ok(FinalityStatus::Rejected(format!(
+            "PoH PQ finality proof carries {} ticks, maximum is {DAG_FAMILY_MAX_POH_TICKS}",
+            chain.len()
+        )));
+    }
+    if commitment.domain_height > 1 && chain[0] != commitment.parent_domain_block_hash {
+        return Ok(FinalityStatus::Rejected(
+            "PoH PQ ladder seed does not match the commitment parent block hash".into(),
+        ));
+    }
+    for index in 1..chain.len() {
+        if poh_next_tick(&chain[index - 1]) != chain[index] {
+            return Ok(FinalityStatus::Rejected(format!(
+                "PoH PQ ladder broken at tick {index}"
+            )));
+        }
+    }
+    let last = chain[chain.len() - 1];
+    let root = poh_ladder_root(
+        domain.domain_chain_id,
+        domain.id,
+        commitment.domain_block_hash,
+        last,
+        chain.len() as u64,
+    );
+    let digest = poh_pq_commit_digest(
+        domain.domain_chain_id,
+        domain.id,
+        root,
+        chain[0],
+        commitment,
+    );
+    dag_family_pq_quorum(
+        registry,
+        domain,
+        commitment,
+        authorities,
+        signatures,
+        &digest,
+        "PoH PQ",
+    )
 }
 
 /// PoSpace structural finality: a plot quality recomputed from a challenge
@@ -2734,7 +3113,8 @@ pub fn verify_poh_ladder_finality(
 /// # Errors
 ///
 /// The proof is not a PoSpace proof.
-pub fn verify_pospace_quality_finality(
+fn verify_pospace_quality_finality_in(
+    registry: &crate::crypto::scheme::SchemeStatusRegistry,
     domain: &ConsensusDomain,
     commitment: &DomainCommitment,
     proof: &FinalityProof,
@@ -2804,7 +3184,84 @@ pub fn verify_pospace_quality_finality(
         *quality_bits,
         commitment,
     );
-    dag_family_quorum(domain, authorities, signatures, &msg, "PoSpace")
+    dag_family_quorum(registry, domain, authorities, signatures, &msg, "PoSpace")
+}
+
+fn verify_pospace_pq_quality_finality(
+    registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    domain: &ConsensusDomain,
+    commitment: &DomainCommitment,
+    proof: &FinalityProof,
+) -> Result<FinalityStatus, FinalityError> {
+    if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+        return Ok(rejected);
+    }
+    let FinalityProof::PospacePq {
+        prover,
+        plot_id,
+        quality_bits,
+        prover_signature,
+        authorities,
+        signatures,
+    } = proof
+    else {
+        return Err(FinalityError(
+            "Expected PoSpace PQ structural finality proof".into(),
+        ));
+    };
+    let derived_plot = pospace_plot_id(prover, &domain.config_hash);
+    if derived_plot != *plot_id {
+        return Ok(FinalityStatus::Rejected(
+            "PoSpace PQ plot id is not derived from the prover and the domain configuration".into(),
+        ));
+    }
+    let challenge = pospace_challenge(domain, commitment);
+    let quality = pospace_quality(plot_id, &challenge);
+    let observed_bits = leading_zero_bits(&quality);
+    if observed_bits < DAG_FAMILY_QUALITY_BITS {
+        return Ok(FinalityStatus::Pending {
+            required_depth: u64::from(DAG_FAMILY_QUALITY_BITS),
+            observed_depth: u64::from(observed_bits),
+        });
+    }
+    if *quality_bits != observed_bits {
+        return Ok(FinalityStatus::Rejected(format!(
+            "PoSpace PQ proof declares {quality_bits} quality bits but the plot reaches {observed_bits}"
+        )));
+    }
+    let Some(prover_entry) = authorities.iter().find(|entry| entry.authority == *prover) else {
+        return Ok(FinalityStatus::Rejected(
+            "PoSpace PQ prover is not a member of the declared composite authority set".into(),
+        ));
+    };
+    let digest = pospace_pq_commit_digest(
+        domain.domain_chain_id,
+        domain.id,
+        prover,
+        *plot_id,
+        *quality_bits,
+        commitment,
+    );
+    if let Err(err) = crate::consensus::block_signature::verify_poa(
+        registry,
+        prover.as_bytes(),
+        &prover_entry.public_key,
+        &digest,
+        prover_signature,
+    ) {
+        return Ok(FinalityStatus::Rejected(format!(
+            "PoSpace PQ prover composite signature failed: {err:?}"
+        )));
+    }
+    dag_family_pq_quorum(
+        registry,
+        domain,
+        commitment,
+        authorities,
+        signatures,
+        &digest,
+        "PoSpace PQ",
+    )
 }
 
 /// DAG finality adapter: verifies cryptographic quorum certificates over DAG tip commitments.
@@ -2817,7 +3274,18 @@ impl DomainFinalityAdapter for DagFinalityAdapter {
     }
 
     fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
-        BftFinalityAdapter::default().observed_schemes(proof)
+        match proof {
+            FinalityProof::Dag { .. } => {
+                vec![ObservedScheme::Scheme(
+                    crate::crypto::scheme::SchemeId::ED25519,
+                )]
+            }
+            FinalityProof::DagPq { .. } => vec![
+                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ED25519),
+                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ML_DSA_65),
+            ],
+            _ => BftFinalityAdapter::default().observed_schemes(proof),
+        }
     }
 
     fn verify_finality(
@@ -2852,7 +3320,12 @@ impl DomainFinalityAdapter for DagFinalityAdapter {
                 "DAG finality requires a verified BFT or PQ quorum certificate; raw bytes are refused"
                     .into(),
             )),
-            FinalityProof::Dag { .. } => verify_dag_anchor_finality(domain, commitment, proof),
+            FinalityProof::Dag { .. } => {
+                verify_dag_anchor_finality_in(registry, domain, commitment, proof)
+            }
+            FinalityProof::DagPq { .. } => {
+                verify_dag_pq_anchor_finality(registry, domain, commitment, proof)
+            }
             _ => Err(FinalityError("Expected DAG quorum finality proof".into())),
         }
     }
@@ -2875,6 +3348,15 @@ impl DomainFinalityAdapter for PohFinalityAdapter {
             FinalityProof::Bft { .. } | FinalityProof::BftPq { .. } => {
                 BftFinalityAdapter::default().observed_schemes(proof)
             }
+            FinalityProof::Poh { .. } => {
+                vec![ObservedScheme::Scheme(
+                    crate::crypto::scheme::SchemeId::ED25519,
+                )]
+            }
+            FinalityProof::PohPq { .. } => vec![
+                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ED25519),
+                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ML_DSA_65),
+            ],
             _ => Vec::new(),
         }
     }
@@ -2929,7 +3411,12 @@ impl DomainFinalityAdapter for PohFinalityAdapter {
                 "PoH finality requires a verified BFT or PoS quorum certificate; raw bytes are refused"
                     .into(),
             )),
-            FinalityProof::Poh { .. } => verify_poh_ladder_finality(domain, commitment, proof),
+            FinalityProof::Poh { .. } => {
+                verify_poh_ladder_finality_in(registry, domain, commitment, proof)
+            }
+            FinalityProof::PohPq { .. } => {
+                verify_poh_pq_ladder_finality(registry, domain, commitment, proof)
+            }
             _ => Err(FinalityError("Expected PoH quorum finality proof".into())),
         }
     }
@@ -2952,6 +3439,15 @@ impl DomainFinalityAdapter for PospaceFinalityAdapter {
             FinalityProof::Bft { .. } | FinalityProof::BftPq { .. } => {
                 BftFinalityAdapter::default().observed_schemes(proof)
             }
+            FinalityProof::Pospace { .. } => {
+                vec![ObservedScheme::Scheme(
+                    crate::crypto::scheme::SchemeId::ED25519,
+                )]
+            }
+            FinalityProof::PospacePq { .. } => vec![
+                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ED25519),
+                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ML_DSA_65),
+            ],
             _ => Vec::new(),
         }
     }
@@ -3009,7 +3505,10 @@ impl DomainFinalityAdapter for PospaceFinalityAdapter {
                     .into(),
             )),
             FinalityProof::Pospace { .. } => {
-                verify_pospace_quality_finality(domain, commitment, proof)
+                verify_pospace_quality_finality_in(registry, domain, commitment, proof)
+            }
+            FinalityProof::PospacePq { .. } => {
+                verify_pospace_pq_quality_finality(registry, domain, commitment, proof)
             }
             _ => Err(FinalityError("Expected PoSpace quorum finality proof".into())),
         }
@@ -5595,5 +6094,234 @@ mod tests {
                 .unwrap(),
             FinalityStatus::Rejected(_)
         ));
+    }
+
+    #[test]
+    fn dag_poh_pospace_and_attestation_pq_proofs_finalize_observe_ml_dsa_and_refuse_tampering() {
+        use crate::consensus::block_signature::sign_poa;
+        use crate::crypto::composite::CompositeKeypair;
+        use crate::crypto::scheme::{SchemeId, SchemeStatusRegistry, SuiteId};
+
+        let make_pq_set = |domain: &mut ConsensusDomain, seeds: &[[u8; 32]; 4]| {
+            let mut kps = Vec::with_capacity(4);
+            let mut auths = Vec::with_capacity(4);
+            for (idx, ed_seed) in seeds.iter().enumerate() {
+                let kp = CompositeKeypair::from_seeds(
+                    SuiteId::VALIDATOR,
+                    &[(idx as u8) + 0x41; 32],
+                    ed_seed,
+                )
+                .expect("validator composite keypair");
+                let pub_key = kp.public_key().expect("composite pubkey");
+                let pub_enc = pub_key.encode();
+                let addr = crate::core::address::Address::from(pub_key.ed);
+                auths.push(PoAAuthorityKey {
+                    authority: addr,
+                    public_key: pub_enc,
+                });
+                kps.push(kp);
+            }
+            domain.validator_set_hash = poa_pq_authority_set_hash(domain, &auths).expect("pq hash");
+            (kps, auths)
+        };
+        let sign_quorum = |kps: &[CompositeKeypair], auths: &[PoAAuthorityKey], digest: &Hash32| {
+            [0usize, 1, 2]
+                .into_iter()
+                .map(|i| PoAAuthoritySignature {
+                    authority: auths[i].authority,
+                    signature: sign_poa(&kps[i], digest, &[0x5a; 32]).expect("sign_poa"),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let base_seeds = [[0x11; 32], [0x22; 32], [0x33; 32], [0x44; 32]];
+
+        // 1. DagPq
+        let mut dag_domain = default_domain(31, ConsensusKind::Dag, 9001, "dag-tip-vote-v1", 1);
+        let (kps, auths) = make_pq_set(&mut dag_domain, &base_seeds);
+        let mut dag_com = commitment(ConsensusKind::Dag);
+        dag_com.domain_id = dag_domain.id;
+        dag_com.validator_set_hash = dag_domain.validator_set_hash;
+        dag_com.parent_domain_block_hash = [0x09; 32];
+        let anchor = dag_anchor_hash(
+            dag_domain.domain_chain_id,
+            dag_domain.id,
+            7,
+            dag_com.parent_domain_block_hash,
+            dag_com.domain_block_hash,
+        );
+        let dag_digest = dag_pq_commit_digest(
+            dag_domain.domain_chain_id,
+            dag_domain.id,
+            7,
+            anchor,
+            dag_com.parent_domain_block_hash,
+            &dag_com,
+        );
+        let dag_proof = FinalityProof::DagPq {
+            round: 7,
+            anchor,
+            parent_anchor: dag_com.parent_domain_block_hash,
+            authorities: auths.clone(),
+            signatures: sign_quorum(&kps, &auths, &dag_digest),
+        };
+        assert!(!dag_proof.is_classical_only_quorum());
+        assert_eq!(
+            DagFinalityAdapter
+                .verify_finality(&dag_domain, &dag_com, &dag_proof)
+                .expect("dag pq"),
+            FinalityStatus::Finalized
+        );
+        assert_eq!(
+            DagFinalityAdapter.observed_schemes(&dag_proof),
+            vec![
+                ObservedScheme::Scheme(SchemeId::ED25519),
+                ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+            ]
+        );
+        // Flip one byte in the ML-DSA-65 half of signature 0 -> Rejected.
+        let mut bad_dag = dag_proof.clone();
+        if let FinalityProof::DagPq { signatures, .. } = &mut bad_dag {
+            let last = signatures[0].signature.len() - 1;
+            signatures[0].signature[last] ^= 0x01;
+        }
+        assert!(matches!(
+            DagFinalityAdapter
+                .verify_finality(&dag_domain, &dag_com, &bad_dag)
+                .expect("tampered dag pq"),
+            FinalityStatus::Rejected(_)
+        ));
+        assert!(
+            crate::settlement::domains::CommitmentAttestation::for_proof(&dag_domain, &dag_proof)
+                .event_root
+        );
+
+        // 2. PohPq
+        let mut poh_domain = default_domain(32, ConsensusKind::Poh, 9002, "poh-hash-chain-v1", 1);
+        let (kps, auths) = make_pq_set(&mut poh_domain, &base_seeds);
+        let mut poh_com = commitment(ConsensusKind::Poh);
+        poh_com.domain_id = poh_domain.id;
+        poh_com.validator_set_hash = poh_domain.validator_set_hash;
+        poh_com.parent_domain_block_hash = [0x0a; 32];
+        let mut chain = vec![poh_com.parent_domain_block_hash];
+        for _ in 0..4 {
+            let next = poh_next_tick(chain.last().expect("non-empty"));
+            chain.push(next);
+        }
+        let ladder_root = poh_ladder_root(
+            poh_domain.domain_chain_id,
+            poh_domain.id,
+            poh_com.domain_block_hash,
+            *chain.last().expect("last"),
+            chain.len() as u64,
+        );
+        let poh_digest = poh_pq_commit_digest(
+            poh_domain.domain_chain_id,
+            poh_domain.id,
+            ladder_root,
+            chain[0],
+            &poh_com,
+        );
+        let poh_proof = FinalityProof::PohPq {
+            chain,
+            authorities: auths.clone(),
+            signatures: sign_quorum(&kps, &auths, &poh_digest),
+        };
+        assert!(!poh_proof.is_classical_only_quorum());
+        assert_eq!(
+            PohFinalityAdapter
+                .verify_finality(&poh_domain, &poh_com, &poh_proof)
+                .expect("poh pq"),
+            FinalityStatus::Finalized
+        );
+
+        // 3. PospacePq
+        let mut pos_domain = default_domain(33, ConsensusKind::Pospace, 9003, "pospace-plot-v1", 1);
+        pos_domain.config_hash = [0x7c; 32];
+        let mut pos_com = commitment(ConsensusKind::Pospace);
+        pos_com.domain_id = pos_domain.id;
+        // Grind an Ed25519 seed whose derived plot meets DAG_FAMILY_QUALITY_BITS.
+        let mut winning_seed = [0u8; 32];
+        let mut winning_plot = [0u8; 32];
+        let mut winning_bits = 0u32;
+        let challenge = pospace_challenge(&pos_domain, &pos_com);
+        for nonce in 0u64..100_000 {
+            let mut seed = [0x80u8; 32];
+            seed[..8].copy_from_slice(&nonce.to_le_bytes());
+            let ed = crate::crypto::primitives::KeyPair::from_seed(&seed).expect("seed");
+            let addr = crate::core::address::Address::from(ed.public_key_bytes());
+            let plot = pospace_plot_id(&addr, &pos_domain.config_hash);
+            let q = leading_zero_bits(&pospace_quality(&plot, &challenge));
+            if q >= DAG_FAMILY_QUALITY_BITS {
+                winning_seed = seed;
+                winning_plot = plot;
+                winning_bits = q;
+                break;
+            }
+        }
+        let pos_seeds = [winning_seed, [0x22; 32], [0x33; 32], [0x44; 32]];
+        let (kps, auths) = make_pq_set(&mut pos_domain, &pos_seeds);
+        pos_com.validator_set_hash = pos_domain.validator_set_hash;
+        let prover = auths[0].authority;
+        let pos_digest = pospace_pq_commit_digest(
+            pos_domain.domain_chain_id,
+            pos_domain.id,
+            &prover,
+            winning_plot,
+            winning_bits,
+            &pos_com,
+        );
+        let prover_signature = sign_poa(&kps[0], &pos_digest, &[0x3c; 32]).expect("prover pq sig");
+        let pos_proof = FinalityProof::PospacePq {
+            prover,
+            plot_id: winning_plot,
+            quality_bits: winning_bits,
+            prover_signature,
+            authorities: auths.clone(),
+            signatures: sign_quorum(&kps, &auths, &pos_digest),
+        };
+        assert!(!pos_proof.is_classical_only_quorum());
+        assert_eq!(
+            PospaceFinalityAdapter
+                .verify_finality(&pos_domain, &pos_com, &pos_proof)
+                .expect("pospace pq"),
+            FinalityStatus::Finalized
+        );
+
+        // 4. StorageAttestation & AiInference accept composite PoAPq for mainnet finality.
+        let mut ai_domain = default_domain(
+            34,
+            ConsensusKind::AiInference,
+            9004,
+            crate::domain::types::AI_INFERENCE_ADAPTER,
+            1,
+        );
+        let (kps, auths) = make_pq_set(&mut ai_domain, &base_seeds);
+        let mut ai_com = commitment(ConsensusKind::AiInference);
+        ai_com.domain_id = ai_domain.id;
+        ai_com.validator_set_hash = ai_domain.validator_set_hash;
+        let ai_digest = poa_commit_digest(ai_domain.domain_chain_id, ai_domain.id, &ai_com);
+        let ai_proof = FinalityProof::PoAPq {
+            authorities: auths.clone(),
+            signatures: sign_quorum(&kps, &auths, &ai_digest),
+        };
+        assert_eq!(
+            AiInferenceFinalityAdapter
+                .verify_finality_in(
+                    &SchemeStatusRegistry::genesis(),
+                    &ai_domain,
+                    &ai_com,
+                    &ai_proof
+                )
+                .expect("ai pq"),
+            FinalityStatus::Finalized
+        );
+        assert_eq!(
+            AiInferenceFinalityAdapter.observed_schemes(&ai_proof),
+            vec![
+                ObservedScheme::Scheme(SchemeId::ED25519),
+                ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+            ]
+        );
     }
 }

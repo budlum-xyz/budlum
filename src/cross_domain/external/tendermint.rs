@@ -115,6 +115,42 @@ const PRECOMMIT_TYPE: u64 = 2;
 
 const NANOS_PER_SECOND: u32 = 1_000_000_000;
 
+/// Maximum future skew accepted between a commit's timestamp and `policy.now`
+/// when freshness enforcement (`policy.max_age != 0`) is active (2 hours).
+const MAX_FUTURE_SECONDS: u64 = 7_200;
+
+/// Maximum divergence allowed between the envelope's `commit_time` and the
+/// voting-power-weighted median of the verified precommit vote timestamps.
+const MAX_COMMIT_TIME_SKEW_SECONDS: u64 = 600;
+
+/// Governance-pinned Tendermint commit anchor binding both `chain_id` and the
+/// canonical validator-set digest ([`validator_set_commitment`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedTendermintAnchor {
+    pub chain_id: String,
+    pub validator_set_hash: [u8; 32],
+}
+
+/// Canonical domain-separated commitment over a Tendermint validator set,
+/// sorted by validator address so ordering permutations produce one digest.
+#[must_use]
+pub fn validator_set_commitment(validators: &[TendermintValidator]) -> [u8; 32] {
+    let mut ordered = validators.to_vec();
+    ordered.sort_by_key(|v| v.address);
+    let count_le = (ordered.len() as u64).to_le_bytes();
+    let mut flat = Vec::with_capacity(
+        ordered
+            .len()
+            .saturating_mul(ADDRESS_LEN + PUBLIC_KEY_LEN + 8),
+    );
+    for v in &ordered {
+        flat.extend_from_slice(&v.address);
+        flat.extend_from_slice(&v.public_key);
+        flat.extend_from_slice(&v.voting_power.to_le_bytes());
+    }
+    crate::core::hash::hash_fields_bytes(&[b"BDLM_TM_COMMIT_VALSET_V1", &count_le, &flat])
+}
+
 /// One validator of the set the commit is verified against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TendermintValidator {
@@ -260,6 +296,8 @@ impl TendermintCommitEvidence {
                 self.signatures.len()
             )));
         }
+        let mut seen_validators: std::collections::BTreeSet<[u8; ADDRESS_LEN]> =
+            std::collections::BTreeSet::new();
         for (index, validator) in self.validators.iter().enumerate() {
             if validator.voting_power == 0 {
                 return Err(rule(format!(
@@ -273,18 +311,15 @@ impl TendermintCommitEvidence {
                     hex::encode(validator.address)
                 )));
             }
-            if self
-                .validators
-                .iter()
-                .skip(index + 1)
-                .any(|other| other.address == validator.address)
-            {
+            if !seen_validators.insert(validator.address) {
                 return Err(rule(format!(
                     "validator {} appears twice in the set, which would let one key count twice",
                     hex::encode(validator.address)
                 )));
             }
         }
+        let mut seen_signers: std::collections::BTreeSet<[u8; ADDRESS_LEN]> =
+            std::collections::BTreeSet::new();
         for (index, signature) in self.signatures.iter().enumerate() {
             if signature.signature.len() != SIGNATURE_LEN {
                 return Err(rule(format!(
@@ -298,12 +333,7 @@ impl TendermintCommitEvidence {
                     signature.timestamp_nanos
                 )));
             }
-            if self
-                .signatures
-                .iter()
-                .skip(index + 1)
-                .any(|other| other.address == signature.address)
-            {
+            if !seen_signers.insert(signature.address) {
                 return Err(rule(format!(
                     "validator {} signed twice; a duplicated signature must not add power twice",
                     hex::encode(signature.address)
@@ -334,16 +364,15 @@ impl TendermintCommitEvidence {
     /// signed, re-encoded from the header fields.
     #[must_use]
     pub fn canonical_vote_bytes(&self, signature: &TendermintSignature) -> Vec<u8> {
-        vote_sign_bytes(&VoteSignParams {
-            chain_id: &self.chain_id,
-            height: self.height,
-            round: self.round,
-            block_hash: &self.block_hash,
-            parts_total: self.parts_total,
-            parts_hash: &self.parts_hash,
-            seconds: signature.timestamp_seconds,
-            nanos: signature.timestamp_nanos,
-        })
+        vote_sign_bytes(
+            &self.chain_id,
+            self.height,
+            self.round,
+            &self.block_hash,
+            self.parts_total,
+            &self.parts_hash,
+            (signature.timestamp_seconds, signature.timestamp_nanos),
+        )
     }
 }
 
@@ -354,16 +383,16 @@ pub fn quorum_threshold(total_voting_power: u128) -> u128 {
 }
 
 /// `SHA256(public_key)[..20]`, the Tendermint validator address derivation.
+///
+/// Named `validator_address_of` so it does not share a bare identifier with the
+/// tokenomics allocation helper: the dead-API gate counts names rather than
+/// paths, and two same-named functions hide whichever of them is dead.
 #[must_use]
 pub fn validator_address_of(public_key: &[u8; PUBLIC_KEY_LEN]) -> [u8; ADDRESS_LEN] {
     let digest = Sha256::digest(public_key);
     let mut address = [0u8; ADDRESS_LEN];
-    // The digest is 32 bytes and the address is 20; a prefix shorter than the
-    // address cannot happen, and a panic here would stop the node under
-    // `panic = "abort"`, so the slice is taken with `get` and the impossible
-    // short case falls back to the zero-filled address the copy started from.
-    if let Some(prefix) = digest.get(..ADDRESS_LEN) {
-        address.copy_from_slice(prefix);
+    for (dst, src) in address.iter_mut().zip(digest.iter()) {
+        *dst = *src;
     }
     address
 }
@@ -415,54 +444,29 @@ fn put_bytes(out: &mut Vec<u8>, field: u8, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
-/// The fields of one canonical precommit vote, as [`vote_sign_bytes`] needs
-/// them. Bundled so the encoder takes one parameter instead of eight.
-#[derive(Debug, Clone, Copy)]
-pub struct VoteSignParams<'a> {
-    /// The chain the vote belongs to; part of every sign byte.
-    pub chain_id: &'a str,
-    /// The height the vote precommits to.
-    pub height: u64,
-    /// The round the vote was cast in.
-    pub round: i64,
-    /// The block hash being precommitted to.
-    pub block_hash: &'a [u8; 32],
-    /// The total number of parts in the block's part set.
-    pub parts_total: u32,
-    /// The hash of the block's part set header.
-    pub parts_hash: &'a [u8; 32],
-    /// The vote timestamp, whole seconds.
-    pub seconds: i64,
-    /// The vote timestamp, nanoseconds within the second.
-    pub nanos: u32,
-}
-
 /// The sign bytes of one precommit: `MarshalDelimited(CanonicalVote)`.
 ///
 /// Field numbers and types follow CometBFT's
 /// `proto/tendermint/types/canonical.proto`:
 ///
 /// ```text
-/// CanonicalVote          type = 1 (varint), height = 2 (sfixed64),
-///                        round = 3 (sfixed64), block_id = 4, timestamp = 5,
-///                        chain_id, field number 6
+/// CanonicalVote          field 1 type (varint), field 2 height (sfixed64),
+///                        field 3 round (sfixed64), field 4 block_id,
+///                        field 5 timestamp, field 6 chain identifier
 /// CanonicalBlockID       hash = 1, part_set_header = 2
 /// CanonicalPartSetHeader total = 1, hash = 2
 /// Timestamp              seconds = 1, nanos = 2
 /// ```
 #[must_use]
-pub fn vote_sign_bytes(params: &VoteSignParams<'_>) -> Vec<u8> {
-    let VoteSignParams {
-        chain_id,
-        height,
-        round,
-        block_hash,
-        parts_total,
-        parts_hash,
-        seconds,
-        nanos,
-    } = *params;
-
+pub fn vote_sign_bytes(
+    chain_id: &str,
+    height: u64,
+    round: i64,
+    block_hash: &[u8; 32],
+    parts_total: u32,
+    parts_hash: &[u8; 32],
+    (seconds, nanos): (i64, u32),
+) -> Vec<u8> {
     let mut part_set_header = Vec::new();
     put_scalar(&mut part_set_header, 1, u64::from(parts_total));
     put_bytes(&mut part_set_header, 2, parts_hash);
@@ -501,15 +505,18 @@ pub struct TendermintFinalityAdapter {
     descriptor: AdapterDescriptor,
     network: String,
     chain_id: String,
+    /// When constructed through consensus intake (`new_pinned`), requires the
+    /// commit's validator set to hash to this pinned digest and restricts the
+    /// attested root to the validator-signed `block_hash` (preventing unpinned
+    /// validator-set forgery and unsigned `app_hash` substitution).
+    pinned_validator_set: Option<[u8; 32]>,
+    require_pinned_set: bool,
     golden: Option<RawConsensusEvidence>,
 }
 
 impl TendermintFinalityAdapter {
-    /// Pins the adapter to one network label and one chain id.
-    ///
-    /// Both are pins, not hints: the chain id is inside every sign byte, so a
-    /// commit from another chain cannot verify here even if its validator set
-    /// looks familiar, and the network label is what the registry indexes on.
+    /// Pins the adapter to one network label and one chain id (for standalone
+    /// self-test and fixture verification).
     #[must_use]
     pub fn new(network: &str, chain_id: &str) -> Self {
         let name = format!("tendermint-commit-{network}");
@@ -527,8 +534,22 @@ impl TendermintFinalityAdapter {
             },
             network: network.to_string(),
             chain_id: chain_id.to_string(),
+            pinned_validator_set: None,
+            require_pinned_set: false,
             golden: None,
         }
+    }
+
+    /// Consensus-intake constructor: enforces a governance-pinned validator-set
+    /// commitment and requires the attested root to match the signed `block_hash`
+    /// (fails closed with `AdapterError::Unavailable` if `validator_set_hash` is
+    /// absent or zero).
+    #[must_use]
+    pub fn new_pinned(network: &str, chain_id: &str, validator_set_hash: Option<[u8; 32]>) -> Self {
+        let mut adapter = Self::new(network, chain_id);
+        adapter.pinned_validator_set = validator_set_hash.filter(|h| *h != [0u8; 32]);
+        adapter.require_pinned_set = true;
+        adapter
     }
 
     /// The chain id this adapter will only ever attest.
@@ -612,32 +633,62 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
             )));
         }
 
+        // Consensus-admitted domains must verify against a governance-pinned
+        // validator set so a submitter cannot fabricate a private Ed25519 set,
+        // and must bind the attested root to the validator-signed `block_hash`
+        // because CometBFT `CanonicalVote` signs `block_id.hash`, not `app_hash`.
+        let attested_root = if self.require_pinned_set {
+            let Some(expected_set) = self.pinned_validator_set else {
+                return Err(AdapterError::Unavailable {
+                    reason: "no Tendermint validator set is pinned for this domain".to_string(),
+                });
+            };
+            let observed_set = validator_set_commitment(&decoded.validators);
+            if observed_set != expected_set {
+                return Err(rule(
+                    "commit validator set does not match the governance-pinned validator_set_hash",
+                ));
+            }
+            if decoded.app_hash != decoded.block_hash {
+                return Err(rule(
+                    "consensus-pinned single commit binds block_hash only; unproved app_hash refused",
+                ));
+            }
+            decoded.block_hash
+        } else {
+            decoded.app_hash
+        };
+
         if policy.require_declared_match {
             if evidence.declared_height != decoded.height {
                 return Err(AdapterError::DeclarationMismatch { field: "height" });
             }
-            if evidence.declared_root != decoded.app_hash {
+            if evidence.declared_root != attested_root {
                 return Err(AdapterError::DeclarationMismatch {
                     field: "state_root",
                 });
             }
         }
 
+        let validator_map: std::collections::BTreeMap<[u8; ADDRESS_LEN], &TendermintValidator> =
+            decoded.validators.iter().map(|v| (v.address, v)).collect();
         let total = decoded.total_voting_power();
         let required = quorum_threshold(total);
         let mut signed: u128 = 0;
         let mut signers: u64 = 0;
+        let mut signed_times: Vec<(u64, u128)> = Vec::with_capacity(decoded.signatures.len());
         for signature in &decoded.signatures {
-            let validator = decoded
-                .validators
-                .iter()
-                .find(|v| v.address == signature.address)
+            let validator = validator_map
+                .get(&signature.address)
+                .copied()
                 .ok_or_else(|| {
                     rule(format!(
                         "the commit carries a signature from {} which is not in the supplied validator set",
                         hex::encode(signature.address)
                     ))
                 })?;
+            let vote_ts = u64::try_from(signature.timestamp_seconds)
+                .map_err(|_| rule("precommit carries a pre-epoch negative timestamp"))?;
             let sign_bytes = decoded.canonical_vote_bytes(signature);
             verify_signature(&sign_bytes, &signature.signature, &validator.public_key).map_err(
                 |_| AdapterError::Crypto {
@@ -649,13 +700,36 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
                     ),
                 },
             )?;
-            signed += u128::from(validator.voting_power);
+            let power = u128::from(validator.voting_power);
+            signed += power;
             signers += 1;
+            signed_times.push((vote_ts, power));
         }
 
         if signed < required {
             return Err(rule(format!(
                 "signed voting power {signed} is below the two-thirds-plus-one threshold {required} of {total}"
+            )));
+        }
+
+        // Cross-check the unsigned `commit_time` header field against the
+        // stake-weighted median of the verified vote timestamps so an ancient
+        // commit cannot bypass `policy.max_age` by rewriting `commit_time`.
+        signed_times.sort_by_key(|(ts, _)| *ts);
+        let half = signed / 2;
+        let mut acc_power: u128 = 0;
+        let mut median_vote_time = decoded.commit_time;
+        for (ts, power) in &signed_times {
+            acc_power += *power;
+            if acc_power > half {
+                median_vote_time = *ts;
+                break;
+            }
+        }
+        if decoded.commit_time.abs_diff(median_vote_time) > MAX_COMMIT_TIME_SKEW_SECONDS {
+            return Err(rule(format!(
+                "commit_time {} diverges from signed precommit median {} by more than {}s",
+                decoded.commit_time, median_vote_time, MAX_COMMIT_TIME_SKEW_SECONDS
             )));
         }
 
@@ -669,6 +743,12 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
         }
 
         if policy.max_age != 0 {
+            if decoded.commit_time > policy.now.saturating_add(MAX_FUTURE_SECONDS) {
+                return Err(rule(format!(
+                    "commit timestamp {} exceeds policy clock {} by more than {}s",
+                    decoded.commit_time, policy.now, MAX_FUTURE_SECONDS
+                )));
+            }
             let age = policy.now.saturating_sub(decoded.commit_time);
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -682,7 +762,7 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
             adapter: self.descriptor.id,
             domain: DomainKey::from_parts(&self.descriptor.id, &self.network),
             height: decoded.height,
-            state_root: decoded.app_hash,
+            state_root: attested_root,
             finalized_at: decoded.commit_time,
             time_unit: TimeUnit::UnixSeconds,
             security: SecurityBacking::SignatureSet {
@@ -750,37 +830,30 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
         // of hard-coding an offset that a field change would silently move.
         if let Some(golden) = &self.golden {
             if let Ok(decoded) = TendermintCommitEvidence::decode(&golden.payload) {
-                // The signature length is checked, then the eight-byte head is
-                // taken with `get` and the payload searched for it: a slice
-                // cannot panic, and the probe follows the encoding instead of
-                // hard-coding an offset a field change would silently move.
-                let located = decoded
-                    .signatures
-                    .first()
-                    .filter(|first| first.signature.len() == SIGNATURE_LEN)
-                    .and_then(|first| {
-                        let head = first.signature.get(..8)?;
-                        let lead = first.signature.first().copied()?;
-                        Some((head, lead))
-                    })
-                    .and_then(|(head, lead)| {
-                        golden
-                            .payload
-                            .windows(8)
-                            .position(|window| window == head)
-                            .map(|offset| (offset, lead))
-                    });
-                if let Some((offset, lead)) = located {
-                    let replacement = if lead == 0 { 1 } else { 0 };
-                    probes.push(FaultProbe {
-                        name: "one bit of one signature must be refused as a crypto failure"
-                            .to_string(),
-                        patch: BytePatch::InPayload {
-                            offset,
-                            bytes: vec![replacement],
-                        },
-                        expect: ExpectedRefusal::Kind(RefusalKind::Crypto),
-                    });
+                if let Some(first) = decoded.signatures.first() {
+                    if let (Some(prefix), Some(&first_byte)) =
+                        (first.signature.get(..8), first.signature.first())
+                    {
+                        if first.signature.len() == SIGNATURE_LEN {
+                            if let Some(offset) = golden
+                                .payload
+                                .windows(8)
+                                .position(|window| window == prefix)
+                            {
+                                let replacement = if first_byte == 0 { 1 } else { 0 };
+                                probes.push(FaultProbe {
+                                    name:
+                                        "one bit of one signature must be refused as a crypto failure"
+                                            .to_string(),
+                                    patch: BytePatch::InPayload {
+                                        offset,
+                                        bytes: vec![replacement],
+                                    },
+                                    expect: ExpectedRefusal::Kind(RefusalKind::Crypto),
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1518,5 +1591,61 @@ mod tests {
             matches!(error, AdapterError::ConsensusRule { .. }),
             "expected a consensus-rule refusal, got {error:?}"
         );
+    }
+
+    #[test]
+    fn consensus_pinned_tendermint_refuses_self_signed_validator_set_forged_app_hash_and_stale_clock_spoof(
+    ) {
+        // 1. Pinned Noble validator set refuses an attacker's self-signed
+        //    validator set even when `chain_id == "noble-1"` and 3/4 quorum holds.
+        let honest_noble = noble_commit();
+        let pinned_hash = validator_set_commitment(&honest_noble.validators);
+        let pinned = TendermintFinalityAdapter::new_pinned("noble", "noble-1", Some(pinned_hash));
+
+        let attacker_keys = keys(4);
+        let mut forged = synthetic_commit(&[1, 1, 1, 1], 3);
+        forged.chain_id = "noble-1".to_string();
+        forged.app_hash = forged.block_hash;
+        resign(&mut forged, &attacker_keys);
+        let err = pinned
+            .verify(&evidence_for(&pinned, &forged), &policy())
+            .expect_err("self-generated validator set must be refused under consensus pin");
+        assert!(matches!(err, AdapterError::ConsensusRule { .. }));
+
+        // 2. Unsigned `app_hash != block_hash` on a genuine Noble commit is
+        //    refused on the consensus-pinned path, while binding `app_hash` and
+        //    `declared_root` to the validator-signed `block_hash` succeeds.
+        let mut swapped_app = honest_noble.clone();
+        swapped_app.app_hash = [0xde; 32];
+        let err = pinned
+            .verify(&evidence_for(&pinned, &swapped_app), &policy())
+            .expect_err("unsigned app_hash substitution must be refused");
+        assert!(matches!(err, AdapterError::ConsensusRule { .. }));
+
+        let mut block_bound = honest_noble.clone();
+        block_bound.app_hash = block_bound.block_hash;
+        let att = pinned
+            .verify(&evidence_for(&pinned, &block_bound), &policy())
+            .expect("pinned Noble commit bound to signed block_hash verifies");
+        assert_eq!(att.state_root, honest_noble.block_hash);
+
+        // 3. Rewriting `commit_time` far from the signed vote timestamps or
+        //    into the far future (`u64::MAX`) is refused.
+        let mut spoofed_time = honest_noble.clone();
+        spoofed_time.commit_time += 86_400;
+        let err = adapter()
+            .verify(&evidence_for(&adapter(), &spoofed_time), &policy())
+            .expect_err("spoofed commit_time outside signed vote median must fail");
+        assert!(matches!(err, AdapterError::ConsensusRule { .. }));
+
+        let mut future_policy = policy();
+        future_policy.max_age = 300;
+        future_policy.now = honest_noble
+            .commit_time
+            .saturating_sub(MAX_FUTURE_SECONDS + 60);
+        let err = adapter()
+            .verify(&evidence_for(&adapter(), &honest_noble), &future_policy)
+            .expect_err("far-future commit must fail closed under max_age");
+        assert!(matches!(err, AdapterError::ConsensusRule { .. }));
     }
 }

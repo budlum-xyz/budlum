@@ -50,7 +50,7 @@ impl StateSnapshot {
         let balances = account_state.get_all_balances();
         let nonces = account_state.get_all_nonces();
         let validators = account_state.validators.clone().into_iter().collect();
-        let mut snapshot = StateSnapshot {
+        let mut snapshot = Self {
             height,
             block_hash,
             chain_id,
@@ -118,9 +118,11 @@ impl StateSnapshot {
         hasher.update(self.finalized_hash.as_bytes());
         hex::encode(hasher.finalize())
     }
+    #[must_use]
     pub fn verify(&self) -> bool {
         self.snapshot_hash == self.calculate_hash()
     }
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         // Fail-fast instead of silently serializing to empty bytes (a
         // Corrupt persistence blob is worse than a panic). StateSnapshot is a
@@ -160,8 +162,9 @@ pub struct PruningManager {
     pub archive_mode: bool,
 }
 impl PruningManager {
+    #[must_use]
     pub fn new(min_blocks: u64, snapshot_interval: u64, snapshot_dir: String) -> Self {
-        PruningManager {
+        Self {
             min_blocks_to_keep: min_blocks,
             snapshot_interval,
             snapshot_dir,
@@ -172,13 +175,16 @@ impl PruningManager {
     /// Sets archive mode at construction time: with `enabled` the node keeps
     /// full block history and every pruning query returns an empty list
     /// (guarded at the parametrized core, not only in a convenience wrapper).
+    #[must_use]
     pub fn with_archive_mode(mut self, enabled: bool) -> Self {
         self.archive_mode = enabled;
         self
     }
+    #[must_use]
     pub fn should_create_snapshot(&self, height: u64) -> bool {
         height > 0 && height.is_multiple_of(self.snapshot_interval)
     }
+    #[must_use]
     pub fn get_prunable_blocks(
         &self,
         chain_length: u64,
@@ -193,6 +199,7 @@ impl PruningManager {
         )
     }
 
+    #[must_use]
     pub fn get_prunable_blocks_with_retention(
         &self,
         chain_length: u64,
@@ -802,7 +809,7 @@ pub struct StateSnapshotV2 {
     /// `AllowUnsigned` (devnet / legacy-import transition window).
     #[serde(default)]
     pub manifest_signer: Option<[u8; 32]>,
-    /// `sign(calculate_digest)` Ed25519 signature (64 bytes). None = AllowUnsigned.
+    /// `sign(calculate_digest)` Ed25519 signature (64 bytes). None = `AllowUnsigned`.
     #[serde(default)]
     pub manifest_signature: Option<Vec<u8>>,
     /// Trust policy: `AllowUnsigned` (devnet/transition) | `RequireSigned` (production).
@@ -872,27 +879,27 @@ pub enum SnapshotAuthError {
 impl std::fmt::Display for SnapshotAuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SnapshotAuthError::DigestMismatch => write!(f, "snapshot digest mismatch"),
-            SnapshotAuthError::SchemeRegistryInvalid => {
+            Self::DigestMismatch => write!(f, "snapshot digest mismatch"),
+            Self::SchemeRegistryInvalid => {
                 write!(
                     f,
                     "snapshot scheme registry entries are not a valid registry"
                 )
             }
-            SnapshotAuthError::MissingSigner => write!(f, "RequireSigned: manifest_signer missing"),
-            SnapshotAuthError::MissingSignature => {
+            Self::MissingSigner => write!(f, "RequireSigned: manifest_signer missing"),
+            Self::MissingSignature => {
                 write!(f, "RequireSigned: manifest_signature missing")
             }
-            SnapshotAuthError::SignerNotTrusted => write!(f, "manifest signer not in trust list"),
-            SnapshotAuthError::NoTrustList => {
+            Self::SignerNotTrusted => write!(f, "manifest signer not in trust list"),
+            Self::NoTrustList => {
                 write!(
                     f,
                     "RequireSigned: no trust list was supplied to check the signer against"
                 )
             }
-            SnapshotAuthError::InvalidSignerKey => write!(f, "invalid signer pubkey"),
-            SnapshotAuthError::InvalidSignatureLength => write!(f, "invalid signature length"),
-            SnapshotAuthError::SignatureInvalid => write!(f, "signature verification failed"),
+            Self::InvalidSignerKey => write!(f, "invalid signer pubkey"),
+            Self::InvalidSignatureLength => write!(f, "invalid signature length"),
+            Self::SignatureInvalid => write!(f, "signature verification failed"),
         }
     }
 }
@@ -959,7 +966,7 @@ impl StateSnapshotV2 {
             team_vesting: account_state.team_vesting,
         });
 
-        let mut snapshot = StateSnapshotV2 {
+        let mut snapshot = Self {
             schema_version: CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION,
             height: params.height,
             block_hash: params.block_hash,
@@ -1466,7 +1473,7 @@ impl StateSnapshotV2 {
                 crate::core::bounded_read::MAX_SNAPSHOT_BYTES
             ));
         }
-        let mut snapshot: StateSnapshotV2 = serde_json::from_slice(data)
+        let mut snapshot: Self = serde_json::from_slice(data)
             .map_err(|e| format!("Failed to parse snapshot V2: {e}"))?;
         snapshot.migration_report()?;
         if !snapshot.verify() {

@@ -60,8 +60,9 @@ pub enum QuorumClass {
     StakeWeighted,
     /// One authority one vote, with no stake concept.
     AuthorityWeighted,
-    /// No signer quorum at all: the proof carries its own verified claim, and
-    /// what a verifier accepts is the claim registry entry, not a set.
+    /// No signer quorum at all: the proof carries its own verified statement,
+    /// a validity proof or a claim registry entry, and what a verifier accepts
+    /// is that statement rather than a set of signers.
     ProofCarrying,
 }
 
@@ -237,6 +238,35 @@ mod tests {
                     claim_digest: ZERO,
                 },
                 BINDS_HEIGHT | BINDS_STATE_ROOT,
+            ),
+            (
+                FinalityProof::DagPq {
+                    round: 1,
+                    anchor: ZERO,
+                    parent_anchor: ZERO,
+                    authorities: Vec::new(),
+                    signatures: Vec::new(),
+                },
+                EVERY_FIELD,
+            ),
+            (
+                FinalityProof::PohPq {
+                    chain: Vec::new(),
+                    authorities: Vec::new(),
+                    signatures: Vec::new(),
+                },
+                EVERY_FIELD,
+            ),
+            (
+                FinalityProof::PospacePq {
+                    prover: Address::from([3u8; 32]),
+                    plot_id: ZERO,
+                    quality_bits: 1,
+                    prover_signature: Vec::new(),
+                    authorities: Vec::new(),
+                    signatures: Vec::new(),
+                },
+                EVERY_FIELD,
             ),
             (FinalityProof::Raw(Vec::new()), 0),
         ];

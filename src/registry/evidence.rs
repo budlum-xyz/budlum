@@ -529,6 +529,7 @@ impl SlashingReport {
     }
 
     /// The condition this report attests to.
+    #[must_use]
     pub fn condition(&self) -> SlashingCondition {
         self.proof.condition()
     }

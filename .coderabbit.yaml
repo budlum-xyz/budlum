@@ -13,5 +13,11 @@ reviews:
     enabled: true
     auto_incremental_review: false
     drafts: false
+    base_branches:
+      - main
+      - testnet
+      - garden
+      - budlum-stack
+      - budlum-consensus-of-consensuses
 chat:
   auto_reply: true

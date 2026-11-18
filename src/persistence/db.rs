@@ -2361,6 +2361,29 @@ impl Storage {
         }
         Ok(deleted)
     }
+
+    /// Return distinct B.U.D. 3.0 object keys with locally persisted symbols
+    /// in `sled` in `O(distinct_objects)` time via `get_gt` key skips.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `sled` I/O errors.
+    pub fn list_bud3_symbol_objects(&self) -> std::io::Result<Vec<[u8; 32]>> {
+        let mut next_start = b"BUD3_SYM:".to_vec();
+        let mut out = Vec::new();
+        while let Some((k, _)) = self.db.get_gt(&next_start)? {
+            if !k.starts_with(b"BUD3_SYM:") || k.len() < 41 {
+                break;
+            }
+            let mut obj = [0u8; 32];
+            obj.copy_from_slice(&k[9..41]);
+            out.push(obj);
+            let mut end_prefix = Self::bud3_symbol_object_prefix(&obj).to_vec();
+            end_prefix.extend_from_slice(&[0xffu8; 44]);
+            next_start = end_prefix;
+        }
+        Ok(out)
+    }
 }
 
 impl BlockchainStorage for Storage {

@@ -1,15 +1,19 @@
 use sha2::{Digest, Sha256};
+#[must_use]
 pub fn calculate_hash(data: &[u8]) -> String {
     hex::encode(calculate_hash_bytes(data))
 }
+#[must_use]
 pub fn calculate_hash_bytes(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().into()
 }
+#[must_use]
 pub fn hash_fields(fields: &[&[u8]]) -> String {
     hex::encode(hash_fields_bytes(fields))
 }
+#[must_use]
 pub fn hash_fields_bytes(fields: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     for field in fields {
