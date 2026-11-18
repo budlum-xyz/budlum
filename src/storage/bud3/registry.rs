@@ -4607,9 +4607,19 @@ mod tests {
         let placement_view = r.query_json(&Bud3Query::Placement(new_key));
         assert_eq!(placement_view["status"], "live");
         assert_eq!(placement_view["n_full"], 3);
-        assert!(placement_view["shares"]
+        // `upload` seats three `Full` holders and one `Mobile` holder, and the
+        // replacement keeps every share it was given. The view therefore has
+        // four rows, three of them full; the old count of three was written
+        // before the mobile holder was part of the fixture.
+        let shares = placement_view["shares"]
             .as_array()
-            .is_some_and(|s| s.len() == 3));
+            .expect("a live placement lists its shares");
+        assert_eq!(shares.len(), 4, "three full holders and one mobile holder");
+        assert_eq!(
+            shares.iter().filter(|s| s["class"] == "Full").count(),
+            3,
+            "the full class stays at three"
+        );
         assert_eq!(
             r.query_json(&Bud3Query::Placement(old_key))["status"],
             "replaced"
