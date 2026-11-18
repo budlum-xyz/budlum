@@ -43,6 +43,9 @@
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::cross_domain::external::BlsVerifier;
+use crate::domain::finality_proof_model::{
+    BINDS_EVENT_ROOT, BINDS_PARENT_HASH, BINDS_STATE_ROOT, BINDS_TX_ROOT,
+};
 use crate::domain::{
     hash_finality_proof, BftFinalityAdapter, BitcoinSpvFinalityAdapter, ConsensusDomain,
     ConsensusKind, DagFinalityAdapter, DomainCommitment, DomainFinalityAdapter, DomainId,
@@ -855,6 +858,25 @@ pub fn verify_commitment_finality_observed(
             // root (`SettlementProofVerifier`, `submit_relay_proof`). See
             // [`CommitmentAttestation`] for why a PoS or BFT certificate
             // cannot make one trustworthy.
+            //
+            // The attestation table is written per domain kind and the proof
+            // shape per proof family; both encode the same fact from one side
+            // each. They are checked against each other here so a future
+            // adapter cannot anchor a root its own proof does not bind: the
+            // shape is what the signatures actually cover, and it is not
+            // trusted - it is the table this module's tests pin.
+            let attestation = CommitmentAttestation::for_domain(domain);
+            let shape = proof.shape();
+            if attestation.state_root && shape.binds & BINDS_STATE_ROOT == 0
+                || attestation.tx_root && shape.binds & BINDS_TX_ROOT == 0
+                || attestation.event_root && shape.binds & BINDS_EVENT_ROOT == 0
+                || attestation.parent && shape.binds & BINDS_PARENT_HASH == 0
+            {
+                return Err(format!(
+                    "Domain {} proof does not bind a field settlement anchors for it",
+                    commitment.domain_id
+                ));
+            }
             Ok(())
         }
         FinalityStatus::Pending {
