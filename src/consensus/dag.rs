@@ -211,34 +211,32 @@ impl ConsensusEngine for DagEngine {
                 .graph
                 .read()
                 .map_err(|_| ConsensusError("DAG state lock poisoned".into()))?;
-            if !graph.parents.is_empty() || !chain.is_empty() {
-                for parent in &parent_hashes {
-                    if parent == GENESIS_ZERO_HASH {
-                        continue;
-                    }
-                    let known_height = graph
-                        .heights
-                        .get(parent)
-                        .copied()
-                        .or_else(|| {
-                            graph
-                                .tips
-                                .iter()
-                                .find(|t| t.hash == *parent)
-                                .map(|t| t.height)
-                        })
-                        .or_else(|| chain.iter().find(|b| b.hash == *parent).map(|b| b.index));
-                    let Some(parent_height) = known_height else {
-                        return Err(ConsensusError(format!(
-                            "DAG block references unknown parent {parent}"
-                        )));
-                    };
-                    if parent_height >= block.index {
-                        return Err(ConsensusError(format!(
-                            "DAG block height {} must strictly exceed parent height {parent_height}",
-                            block.index
-                        )));
-                    }
+            for parent in &parent_hashes {
+                if parent == GENESIS_ZERO_HASH {
+                    continue;
+                }
+                let known_height = graph
+                    .heights
+                    .get(parent)
+                    .copied()
+                    .or_else(|| {
+                        graph
+                            .tips
+                            .iter()
+                            .find(|t| t.hash == *parent)
+                            .map(|t| t.height)
+                    })
+                    .or_else(|| chain.iter().find(|b| b.hash == *parent).map(|b| b.index));
+                let Some(parent_height) = known_height else {
+                    return Err(ConsensusError(format!(
+                        "DAG block references unknown parent {parent}"
+                    )));
+                };
+                if parent_height >= block.index {
+                    return Err(ConsensusError(format!(
+                        "DAG block height {} must strictly exceed parent height {parent_height}",
+                        block.index
+                    )));
                 }
             }
         }
@@ -399,5 +397,34 @@ mod tests {
         let forged = make_block(1, &stuffed_parents);
         assert_eq!(engine.fork_choice_score(std::slice::from_ref(&forged)), 0);
         assert!(!engine.is_better_chain(&[b1, b2], &[forged]));
+    }
+
+    #[test]
+    fn dag_rejects_orphan_on_empty_graph_and_plugin_enforces_timestamp_bounds() {
+        use crate::domain::plugin::{
+            default_domain, ConsensusDomainPlugin, DagDomainPlugin, DomainContext,
+        };
+        use crate::domain::types::ConsensusKind;
+        use std::sync::Arc;
+
+        let empty_engine = DagEngine::new(DAGConfig::default());
+        let orphan_on_empty = make_block(1, "deadbeef");
+        assert!(empty_engine
+            .validate_block(&orphan_on_empty, &[], &AccountState::new())
+            .is_err());
+
+        let plugin = DagDomainPlugin::new(Arc::new(empty_engine));
+        let domain = default_domain(77, ConsensusKind::Dag, 1, "dag_finality", 1);
+        let state = AccountState::new();
+        let ctx = DomainContext {
+            domain: &domain,
+            chain: &[],
+            state: &state,
+            sequence: 1,
+        };
+        let mut future_block = make_block(1, GENESIS_ZERO_HASH);
+        future_block.timestamp = u128::from(u64::MAX);
+        future_block.hash = future_block.calculate_hash();
+        assert!(plugin.validate_domain_block(&future_block, ctx).is_err());
     }
 }
