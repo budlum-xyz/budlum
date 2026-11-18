@@ -5483,8 +5483,7 @@ mod tests {
         assert_eq!(r.public_object(&digest), Some(key1));
 
         assert_eq!(
-            r.release_validator_shares(&key1, &addr(10), None, 0)
-                .unwrap(),
+            r.release_shares(&addr(10), &key1, None, 0).unwrap(),
             1
         );
 
