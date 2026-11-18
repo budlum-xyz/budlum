@@ -28,6 +28,18 @@
 
 5. What the chain actually verifies about a foreign domain is the relayer-supplied commitment plus its finality proof: `SettlementTx::SubmitCommitment` (`src/settlement/domains.rs:1713-1741`) calls `verify_commitment_finality_observed`, which dispatches to the adapter for the domain's kind (`src/settlement/domains.rs:632-698`). The adapters are wired; the engines are not.
 
+## Complete reachability map
+
+The conclusion is stronger than "the accessor has no caller". Every engine the plugin layer would drive is unreachable in every configuration:
+
+| engine | possible caller | verdict |
+|---|---|---|
+| `PoWEngine`, `PoSEngine`, `PoAEngine` | `Blockchain::consensus` as the main chain engine, chosen by `ConsensusType` (`src/cli/commands.rs:7-15`: only `pow`, `pos`, `poa`) | live, main chain |
+| `DagEngine`, `PohEngine`, `PoSpaceEngine` | main chain: not selectable, `ConsensusType` has no such variant. Domain: plugin never consulted | unreachable outside tests |
+| `BftDomainPlugin`, `ZkDomainPlugin`, `StorageAttestation`, `AiInference`, `Custom` domains | the bootstrap engine match ends in `_ => continue` (`src/main.rs:1499`), so no plugin is ever built or registered for these kinds | unreachable, and the `ConsensusKind::Bft` arm at `src/main.rs:1508` can never execute |
+
+So the answer to "is the DAG/PoH/PoSpace work in #194/#198 enforced anywhere?" is no, not for block ordering. What those heads do enforce is the finality half: `verify_commitment_finality_observed` (`src/settlement/domains.rs:583`) dispatches to `DagFinalityAdapter`, `PohFinalityAdapter`, `PospaceFinalityAdapter` and the rest, and that dispatch is real, is on the settlement path, and is covered by the mainnet classical-only refusal (`src/settlement/domains.rs:126-140`, applied at `:1720` and `:2653` - both production doors, verified).
+
 ## Consequences
 
 - A domain's own block rules are not enforced by the chain. For a `Dag` domain that means multi-parent ordering, the height-strictly-greater rule and parent resolution never run on an imported domain block; for `Pospace` the plot registry never runs; for `Poh` the ladder never runs. Only the finality certificate gates the commitment, so the domain's agreement is as strong as its quorum and no stronger.
