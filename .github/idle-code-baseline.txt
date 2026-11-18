@@ -765,12 +765,10 @@ budzero/bud-proof/src/bud_stark/prover.rs	fn	quotient_values
 budzero/bud-proof/src/bud_stark/sub_builder.rs	struct	SubAirBuilder
 budzero/bud-proof/src/bud_stark/sub_builder.rs	struct	SubSliced
 budzero/bud-proof/src/bud_stark/symbolic.rs	fn	get_log_quotient_degree_extension
-budzero/bud-proof/src/bud_stark/verifier.rs	const	MAX_VERIFIER_DEGREE_BITS
 budzero/bud-proof/src/bud_stark/verifier.rs	enum	VerificationError
 budzero/bud-proof/src/bud_stark/verifier.rs	fn	recompose_quotient_from_chunks
 budzero/bud-proof/src/bud_stark/verifier.rs	fn	verify_constraints
 budzero/bud-proof/src/plonky3_air.rs	const	POSEIDON_HALF_FULL
-budzero/bud-proof/src/plonky3_air.rs	const	PREPROCESSED_WIDTH
 budzero/bud-proof/src/plonky3_prover.rs	fn	to_public_values
 budzero/bud-proof/src/plonky3_prover.rs	fn	trace_matrix
 budzero/bud-state/src/lib.rs	fn	get_empty_hash
@@ -782,13 +780,11 @@ budzero/bud-state/src/note.rs	struct	NoteRegistry
 budzero/bud-state/src/note.rs	struct	PrivacyNote
 budzero/bud-vm/src/lib.rs	const	POSEIDON_ALPHA
 budzero/bud-vm/src/lib.rs	const	POSEIDON_ROUNDS_IN_USE
-budzero/bud-vm/src/lib.rs	enum	VmError
 budzero/bud-vm/src/lib.rs	fn	consume_gas
 budzero/bud-vm/src/lib.rs	fn	field_mul_goldilocks
 budzero/bud-vm/src/lib.rs	fn	poseidon4_hash3
 budzero/bud-vm/src/lib.rs	fn	poseidon4_hash_state
 budzero/bud-vm/src/lib.rs	fn	poseidon_full_hash_state
-budzero/bud-vm/src/lib.rs	fn	poseidon_full_state
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_attester_proof
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_content_validation
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_relay_proof

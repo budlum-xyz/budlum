@@ -60,7 +60,9 @@ pub enum QuorumClass {
     StakeWeighted,
     /// One authority one vote, with no stake concept.
     AuthorityWeighted,
-    /// Validity proof or envelope carrying its own verified statement (no signer quorum).
+    /// No signer quorum at all: the proof carries its own verified statement,
+    /// a validity proof or a claim registry entry, and what a verifier accepts
+    /// is that statement rather than a set of signers.
     ProofCarrying,
 }
 
@@ -103,8 +105,8 @@ mod tests {
     use super::*;
     use crate::chain::finality::{FinalityCert, ValidatorEntry, ValidatorSetSnapshot};
     use crate::core::address::Address;
+    use crate::domain::finality_adapter::FinalityProof;
     use crate::domain::types::Hash32;
-    use crate::domain::FinalityProof;
 
     const ZERO: Hash32 = [0u8; 32];
 
@@ -218,11 +220,27 @@ mod tests {
                 FinalityProof::BitcoinSpv {
                     headers: Vec::new(),
                 },
+                // The header commits to its timestamp as well: the adapter
+                // refuses one that moves backwards, one too far in the future,
+                // and one older than the policy's max age, and it attests the
+                // last header's timestamp as `finalized_at`.
                 BINDS_HEIGHT
                     | BINDS_PARENT_HASH
                     | BINDS_BLOCK_HASH
                     | BINDS_TX_ROOT
                     | BINDS_TIMESTAMP,
+            ),
+            (
+                FinalityProof::AggregatedProg {
+                    program_hash: ZERO,
+                    prev_height: 1,
+                    prev_state_root: ZERO,
+                    claim_digest: ZERO,
+                },
+                // The guest recomputes `output_hash` over the whole commitment
+                // inside `BudAir`, so the proof binds every field a header
+                // chain does.
+                EVERY_FIELD,
             ),
             (
                 FinalityProof::DagPq {
@@ -250,6 +268,15 @@ mod tests {
                     prover_signature: Vec::new(),
                     authorities: Vec::new(),
                     signatures: Vec::new(),
+                },
+                EVERY_FIELD,
+            ),
+            (
+                FinalityProof::AggregatedProg {
+                    program_hash: ZERO,
+                    prev_height: 0,
+                    prev_state_root: ZERO,
+                    claim_digest: ZERO,
                 },
                 EVERY_FIELD,
             ),

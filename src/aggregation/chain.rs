@@ -10,24 +10,34 @@
 //! is where a signed transaction enters the layer: the node splits it into
 //! the object for `agg/object` and the transaction the claim stands for.
 //!
-//! Phase 1 claims ML-DSA-87 signatures of V5 transactions only. The
+//! Phase 1 claims ML-DSA-87 signatures of V5 transactions, and Phase 4 claims
+//! `BudZKVM` authorization programs bound via `Account.auth_program_hash`. The
 //! composite formats (V7, V8) and the V6 multi-signature keep their inline
 //! witness until their schemes are in the scheme table of this layer.
+//!
+//! WIRING: `claim_program_auth`, `account_claim_for`, `check_block`,
+//! `check_block_with_backend`, and `settlement_of` expose the chain-side doors
+//! for wallets, program-account provers, benchmarks, and integration callers.
+
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::air_registry::AirRegistry;
 use super::backend::{AggBackend, AggError, TickCtx};
 use super::block::{check_block_claims, claim_payers, TxClaims};
 use super::claim::Claim;
 use super::envelope::{Envelope, ObjectKind};
 use super::fees::{settle, ClaimSettlement};
 use super::frame::{ClaimFrame, FrameLimits};
-use super::hash::h;
+use super::hash::{auth_ok, h};
 use super::params::{AggMode, AggParams};
 use super::pool::PoolItem;
+use super::programs::prog_claim::StarkProofObject;
+use crate::core::account::AccountState;
 use crate::core::block::Block;
 use crate::core::chain_config::Network;
-use crate::core::transaction::{Transaction, SIGNATURE_VERSION_V5};
+use crate::core::transaction::{Transaction, TransactionType, SIGNATURE_VERSION_V5};
 use crate::crypto::scheme::{SchemeId, SchemeStatusRegistry};
 use crate::domain::types::{DomainId, Hash32};
 
@@ -44,9 +54,17 @@ pub(crate) const WIRE_FRAME_LIMITS: FrameLimits = FrameLimits {
 /// size limit of consensus.
 const MAX_BLOCK_PROOF_BYTES: usize = crate::consensus::MAX_BLOCK_SIZE / 3;
 
-/// The parameter set of the native backend of a chain. A proof made under
-/// another value is refused.
+/// The parameter set of the native devnet/test backend of a chain. A proof
+/// made under another value is refused.
+#[cfg(any(test, feature = "agg-native-backend"))]
 const NATIVE_PARAMETER_SET: u32 = 1;
+
+/// The parameter set active in this build (devnet/test native id 1, production
+/// STARK id 2).
+#[cfg(any(test, feature = "agg-native-backend"))]
+const ACTIVE_PARAMETER_SET: u32 = NATIVE_PARAMETER_SET;
+#[cfg(not(any(test, feature = "agg-native-backend")))]
+const ACTIVE_PARAMETER_SET: u32 = super::stark::STARK_PARAMETER_SET;
 
 /// Tag of the commitment to the consensus parameters of the layer.
 const TAG_AGG_PARAMS: &[u8] = b"BDLM_AGG_PARAMS_V1";
@@ -152,9 +170,12 @@ pub fn claim_domain(chain_id: u64) -> Option<DomainId> {
 }
 
 /// Whether this build can check the proof of a frame.
+///
+/// Production builds use [`super::stark::StarkBackend`] (Phase 3); devnet and
+/// test builds may opt into the native backend via `agg-native-backend`.
 #[must_use]
 const fn backend_available() -> bool {
-    cfg!(any(test, feature = "agg-native-backend"))
+    true
 }
 
 /// Whether the account of a transaction signs with a scheme this layer
@@ -166,6 +187,30 @@ const fn is_claimable(tx: &Transaction) -> bool {
 /// The claim the account rule asks for: `Claim::Sig { scheme of the
 /// account, signer: tx.from, msg_hash: tx.signing_hash() }`. `None` when the
 /// account cannot be authorized by a claim.
+/// Returns the required authorization claim for `tx`.
+///
+/// For a program account (`auth_program_hash == Some(h)`), this is
+/// `Claim::Prog { program_hash: h, input_hash: tx.signing_hash(), output_hash: AUTH_OK }`.
+/// Otherwise for an ML-DSA-87 V5 account, this is
+/// `Claim::Sig { scheme: ML_DSA_87, signer: tx.from, msg_hash: tx.signing_hash() }`.
+///
+/// Returns `None` when the account cannot be authorized by a claim.
+#[must_use]
+pub fn account_claim_for(tx: &Transaction, auth_program_hash: Option<Hash32>) -> Option<Claim> {
+    if let Some(program_hash) = auth_program_hash {
+        return Some(Claim::Prog {
+            program_hash,
+            input_hash: tx.signing_hash(),
+            output_hash: auth_ok(),
+        });
+    }
+    account_claim(tx)
+}
+
+/// Returns the signature authorization claim for a standard V5 account.
+///
+/// Produces `Claim::Sig { scheme: ML_DSA_87, signer: tx.from, msg_hash: tx.signing_hash() }`,
+/// or `None` when the account cannot be authorized by a signature claim.
 #[must_use]
 pub fn account_claim(tx: &Transaction) -> Option<Claim> {
     is_claimable(tx).then(|| Claim::Sig {
@@ -173,6 +218,33 @@ pub fn account_claim(tx: &Transaction) -> Option<Claim> {
         signer: tx.from,
         msg_hash: tx.signing_hash(),
     })
+}
+
+/// Converts a program-account transaction into its claimed form and `agg/object` envelope.
+///
+/// Strips inline signature bytes and binds `auth_claim` to
+/// `Claim::Prog { program_hash, input_hash: tx.signing_hash(), output_hash: AUTH_OK }`.
+/// The hidden authorization logic never appears on chain.
+#[must_use]
+pub fn claim_program_auth(
+    tx: &Transaction,
+    auth_program_hash: Hash32,
+    stark_object: &StarkProofObject,
+) -> Option<(Transaction, Envelope)> {
+    let domain = claim_domain(tx.chain_id)?;
+    if tx.is_claimed() {
+        return None;
+    }
+    let claim = account_claim_for(tx, Some(auth_program_hash))?;
+    let envelope = stark_object.to_envelope(domain, tx.signing_hash()).ok()?;
+    let mut claimed = tx.clone();
+    claimed.signature = None;
+    claimed.signer_public_key = Vec::new();
+    claimed.authorization = None;
+    claimed.signature_version = crate::core::transaction::SIGNATURE_VERSION_V5;
+    claimed.hash = claimed.calculate_hash();
+    claimed.auth_claim = Some(claim.digest(domain));
+    Some((claimed, envelope))
 }
 
 /// Turn a signed V5 transaction into its claimed form and the object that
@@ -212,14 +284,22 @@ struct TxView {
     quantum_safe: bool,
 }
 
-fn views(domain: DomainId, block: &Block) -> Vec<TxView> {
+fn views_with_accounts(
+    domain: DomainId,
+    block: &Block,
+    accounts: Option<&AccountState>,
+) -> Vec<TxView> {
     block
         .transactions
         .iter()
-        .map(|tx| TxView {
-            claimed: tx.auth_claim,
-            account_claim: account_claim(tx).map(|claim| claim.digest(domain)),
-            quantum_safe: is_claimable(tx),
+        .map(|tx| {
+            let auth_program = accounts.and_then(|state| state.auth_program_hash(&tx.from));
+            TxView {
+                claimed: tx.auth_claim,
+                account_claim: account_claim_for(tx, auth_program)
+                    .map(|claim| claim.digest(domain)),
+                quantum_safe: auth_program.is_some() || is_claimable(tx),
+            }
         })
         .collect()
 }
@@ -267,6 +347,15 @@ impl ChainBackend {
             NATIVE_PARAMETER_SET,
         )
     }
+
+    #[cfg(not(any(test, feature = "agg-native-backend")))]
+    fn stark(&self) -> super::stark::StarkBackend {
+        super::stark::StarkBackend::new(
+            self.registry.clone(),
+            FrameLimits::from(&self.params),
+            super::stark::STARK_PARAMETER_SET,
+        )
+    }
 }
 
 impl AggBackend for ChainBackend {
@@ -274,30 +363,21 @@ impl AggBackend for ChainBackend {
         #[cfg(any(test, feature = "agg-native-backend"))]
         return self.native().prove_tick(ctx, items);
         #[cfg(not(any(test, feature = "agg-native-backend")))]
-        {
-            let _ = (ctx, items, &self.params, &self.registry);
-            Err(AggError::Unavailable)
-        }
+        return self.stark().prove_tick(ctx, items);
     }
 
     fn prove_merge(&self, left: &ClaimFrame, right: &ClaimFrame) -> Result<Vec<u8>, AggError> {
         #[cfg(any(test, feature = "agg-native-backend"))]
         return self.native().prove_merge(left, right);
         #[cfg(not(any(test, feature = "agg-native-backend")))]
-        {
-            let _ = (left, right);
-            Err(AggError::Unavailable)
-        }
+        return self.stark().prove_merge(left, right);
     }
 
     fn verify(&self, frame: &ClaimFrame, domain: DomainId) -> Result<(), AggError> {
         #[cfg(any(test, feature = "agg-native-backend"))]
         return self.native().verify(frame, domain);
         #[cfg(not(any(test, feature = "agg-native-backend")))]
-        {
-            let _ = (frame, domain);
-            Err(AggError::Unavailable)
-        }
+        return self.stark().verify(frame, domain);
     }
 }
 
@@ -315,7 +395,7 @@ fn params_commitment(params: &AggParams, domain: DomainId) -> Hash32 {
         &max_proof.to_be_bytes(),
         &params.claim_fee_per_byte.to_be_bytes(),
         &params.agg_share_bps.to_be_bytes(),
-        &NATIVE_PARAMETER_SET.to_be_bytes(),
+        &ACTIVE_PARAMETER_SET.to_be_bytes(),
     ])
 }
 
@@ -402,11 +482,17 @@ pub fn validate_params(params: &AggParams, chain_id: u64) -> Result<(), String> 
 /// A message naming why the transaction cannot be taken.
 pub fn check_pool_transaction(params: &AggParams, tx: &Transaction) -> Result<(), String> {
     if params.mode != AggMode::On {
+        if matches!(tx.tx_type, TransactionType::VerifyStark(_)) {
+            return Err("aggregation is not on: VerifyStark requires aggregation mode On".into());
+        }
         return if tx.uses_claims() {
             Err("aggregation is not on: a transaction may not use claims".into())
         } else {
             Ok(())
         };
+    }
+    if matches!(tx.tx_type, TransactionType::VerifyStark(_)) && tx.claim_refs.is_empty() {
+        return Err("aggregation: VerifyStark must reference its Claim::Poly digest".into());
     }
     if tx.uses_claims() {
         return Err(
@@ -422,19 +508,26 @@ pub fn check_pool_transaction(params: &AggParams, tx: &Transaction) -> Result<()
     Ok(())
 }
 
-/// Check the claims of a block: the ten block rules under `On`, and under
-/// any other mode that the block does not use the layer at all.
+/// Check the claims of a block against a specific [`AggBackend`], optional
+/// [`AccountState`] (resolving `Account.auth_program_hash` in block rule 6),
+/// and an [`AirRegistry`] for Phase 5 `VerifyStark` Stage 2 (`verify_algebra`)
+/// verification.
 ///
-/// The genesis block carries no frame; its `frame_hash` slot must hold the
-/// parameter commitment of the chain.
+/// For every `TransactionType::VerifyStark` transaction in `block`, the chain
+/// re-derives `zeta` locally from commitments and public values, runs
+/// `verify_algebra`, and checks that the resulting `Claim::Poly` digest is
+/// both referenced by `tx.claim_refs` and proven in `block.claim_frame`.
 ///
 /// # Errors
 ///
-/// A message naming the rule the block breaks.
-pub fn check_block(
+/// A message naming the rule or `VerifyStark` check the block breaks.
+pub fn check_block_with_backend_and_airs<B: AggBackend>(
     params: &AggParams,
     registry: &SchemeStatusRegistry,
+    accounts: Option<&AccountState>,
+    air_registry: &AirRegistry,
     block: &Block,
+    backend: &B,
 ) -> Result<(), String> {
     if block.index == 0 {
         let expected = genesis_commitment(params, block.chain_id);
@@ -452,7 +545,21 @@ pub fn check_block(
         }
         (_, None) => 0,
     };
-    let views = views(domain, block);
+    if params.mode != AggMode::On {
+        if let Some(state) = accounts {
+            if block
+                .transactions
+                .iter()
+                .any(|tx| state.auth_program_hash(&tx.from).is_some())
+            {
+                return Err(
+                    "aggregation: program account requires aggregation mode On and a verified auth claim"
+                        .into(),
+                );
+            }
+        }
+    }
+    let views = views_with_accounts(domain, block, accounts);
     let txs = tx_claims(&views, block);
     check_block_claims(
         params,
@@ -461,10 +568,126 @@ pub fn check_block(
         block.claim_frame.as_ref(),
         &txs,
         registry,
+        backend,
+    )
+    .map_err(|e| format!("aggregation: {e}"))?;
+
+    let has_verify_stark = block
+        .transactions
+        .iter()
+        .any(|tx| matches!(tx.tx_type, TransactionType::VerifyStark(_)));
+    if !has_verify_stark {
+        return Ok(());
+    }
+    if params.mode != AggMode::On {
+        return Err("aggregation: VerifyStark requires aggregation mode On".into());
+    }
+    let proven_claims: BTreeSet<Hash32> = block
+        .claim_frame
+        .as_ref()
+        .map(|frame| frame.claims.iter().map(|c| c.digest(domain)).collect())
+        .unwrap_or_default();
+    for tx in &block.transactions {
+        if let TransactionType::VerifyStark(stmt) = &tx.tx_type {
+            air_registry
+                .verify_stark_tx(domain, stmt, &tx.claim_refs, &proven_claims)
+                .map_err(|e| format!("aggregation: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Check the claims of a block against a specific [`AggBackend`] and optional
+/// [`AccountState`] (resolving `Account.auth_program_hash` for program
+/// accounts in block rule 6), using [`AirRegistry::with_builtins`] for
+/// `VerifyStark` transactions.
+///
+/// # Errors
+///
+/// A message naming the rule the block breaks.
+pub fn check_block_with_backend<B: AggBackend>(
+    params: &AggParams,
+    registry: &SchemeStatusRegistry,
+    accounts: Option<&AccountState>,
+    block: &Block,
+    backend: &B,
+) -> Result<(), String> {
+    let air_registry = AirRegistry::with_builtins();
+    check_block_with_backend_and_airs(params, registry, accounts, &air_registry, block, backend)
+}
+
+/// Check the claims of a block using `accounts` to resolve program accounts
+/// (`Account.auth_program_hash`) under block rule 6.
+///
+/// # Errors
+///
+/// A message naming the rule the block breaks.
+pub fn check_block_with_accounts(
+    params: &AggParams,
+    registry: &SchemeStatusRegistry,
+    accounts: &AccountState,
+    block: &Block,
+) -> Result<(), String> {
+    if block.index == 0 {
+        return check_block(params, registry, block);
+    }
+    check_block_with_backend(
+        params,
+        registry,
+        Some(accounts),
+        block,
         &ChainBackend::new(params, registry),
     )
-    .map(|_| ())
-    .map_err(|e| format!("aggregation: {e}"))
+}
+
+/// Check the claims of a block: the ten block rules under `On`, and under
+/// any other mode that the block does not use the layer at all.
+///
+/// The genesis block carries no frame; its `frame_hash` slot must hold the
+/// parameter commitment of the chain.
+///
+/// # Errors
+///
+/// A message naming the rule the block breaks.
+pub fn check_block(
+    params: &AggParams,
+    registry: &SchemeStatusRegistry,
+    block: &Block,
+) -> Result<(), String> {
+    check_block_with_backend(
+        params,
+        registry,
+        None,
+        block,
+        &ChainBackend::new(params, registry),
+    )
+}
+
+/// The claim fees of a block using `accounts` to resolve program accounts
+/// (`Account.auth_program_hash`).
+///
+/// # Errors
+///
+/// A message when the transactions and the frame do not fit each other.
+pub fn settlement_of_with_accounts(
+    params: &AggParams,
+    accounts: Option<&AccountState>,
+    block: &Block,
+) -> Result<ClaimSettlement, String> {
+    let Some(frame) = block.claim_frame.as_ref() else {
+        return Ok(ClaimSettlement::default());
+    };
+    if params.mode != AggMode::On || block.index == 0 {
+        return Ok(ClaimSettlement::default());
+    }
+    let domain = claim_domain(block.chain_id)
+        .ok_or_else(|| "aggregation: the chain has no claim domain".to_string())?;
+    let digests: Vec<Hash32> = frame.claims.iter().map(|c| c.digest(domain)).collect();
+    let views = views_with_accounts(domain, block, accounts);
+    let txs = tx_claims(&views, block);
+    let payers = claim_payers(&digests, &txs).map_err(|e| format!("aggregation: {e}"))?;
+    let fees: Vec<u64> = block.transactions.iter().map(|tx| tx.fee).collect();
+    Ok(settle(params, frame, &payers, &fees))
 }
 
 /// The claim fees of a block: what every paying transaction is charged,
@@ -479,18 +702,5 @@ pub fn check_block(
 /// A message when the transactions and the frame do not fit each other; a
 /// block that passed [`check_block`] never does that.
 pub fn settlement_of(params: &AggParams, block: &Block) -> Result<ClaimSettlement, String> {
-    let Some(frame) = block.claim_frame.as_ref() else {
-        return Ok(ClaimSettlement::default());
-    };
-    if params.mode != AggMode::On || block.index == 0 {
-        return Ok(ClaimSettlement::default());
-    }
-    let domain = claim_domain(block.chain_id)
-        .ok_or_else(|| "aggregation: the chain has no claim domain".to_string())?;
-    let digests: Vec<Hash32> = frame.claims.iter().map(|c| c.digest(domain)).collect();
-    let views = views(domain, block);
-    let txs = tx_claims(&views, block);
-    let payers = claim_payers(&digests, &txs).map_err(|e| format!("aggregation: {e}"))?;
-    let fees: Vec<u64> = block.transactions.iter().map(|tx| tx.fee).collect();
-    Ok(settle(params, frame, &payers, &fees))
+    settlement_of_with_accounts(params, None, block)
 }

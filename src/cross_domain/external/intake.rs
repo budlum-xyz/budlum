@@ -2062,14 +2062,15 @@ mod tests {
     #[test]
     fn tendermint_commit_intake_refuses_unpinned_or_wrong_valset_and_admits_pinned_anchor() {
         use crate::cross_domain::external::tendermint::{
-            address_of, validator_set_commitment, vote_sign_bytes, PinnedTendermintAnchor,
-            TendermintCommitEvidence, TendermintSignature, TendermintValidator,
+            validator_address_of, validator_set_commitment, vote_sign_bytes,
+            PinnedTendermintAnchor, TendermintCommitEvidence, TendermintSignature,
+            TendermintValidator,
         };
         use ed25519_dalek::{Signer, SigningKey};
 
         let sk = SigningKey::from_bytes(&[0x71u8; 32]);
         let pk: [u8; 32] = sk.verifying_key().to_bytes();
-        let val_addr = address_of(&pk);
+        let val_addr = validator_address_of(&pk);
         let validators = vec![TendermintValidator {
             address: val_addr,
             public_key: pk,
