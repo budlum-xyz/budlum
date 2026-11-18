@@ -22,6 +22,7 @@ A changes-requested review from CodeRabbit remains in the review history of #164
 - [Strix review ledger](strix-ledger.md)
 - [Garden network findings B-0041 through B-0043](findings/garden-network.md)
 - [Garden resolver finding B-0044](findings/garden-dns.md)
+- [PoSpace engine finding B-0045](findings/pospace.md)
 - [Review summary follow-up](findings/review-summaries.md)
 - [Debian execution record](findings/os-debian.md)
 - [Ubuntu userland execution record](findings/os-ubuntu.md)
@@ -33,6 +34,7 @@ A changes-requested review from CodeRabbit remains in the review history of #164
 - A complete default library test run is in progress. Passing targeted tests is not equivalent to a green full CI run.
 - An Ubuntu Base userland run on the Debian host kernel found six swarm-start failures when the root filesystem had an empty resolver configuration. A valid-resolver rerun and full Ubuntu user journey remain outstanding; see B-0044 and the Ubuntu execution record.
 - Other operating systems, the complete repository review, all-features tests, full CI/security runs and independent review remain outstanding.
+- Source review of the consensus head `7533b71b` found that the PoSpace engine cannot register a plot outside test builds, so a domain of that kind can neither produce nor validate a block, and that its fork-choice weight comes from an unauthenticated witness field. See B-0045. This is a source-level finding with no reproduction harness of its own.
 - The Garden frame budget has an additional lifetime issue documented as B-0043. An experimental fix exists locally but is not yet project-tested, committed or CI-verified.
 - No new suppressions, ignored tests, forced pushes, protection bypasses or license changes are claimed in this snapshot.
 - Third-party assessment, Strix approval, network-level load tests and the current status of privileged badge-token exposure remain open checks.
