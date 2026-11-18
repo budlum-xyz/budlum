@@ -561,7 +561,7 @@ mod tests {
         replayed.vrf_output = b1.vrf_output.clone();
         replayed.hash = replayed.calculate_hash();
         assert!(engine
-            .validate_block(&replayed, &[b1.clone()], &AccountState::new())
+            .validate_block(&replayed, std::slice::from_ref(&b1), &AccountState::new())
             .is_err());
 
         // Properly advancing from b1's end_count succeeds.
