@@ -3082,154 +3082,164 @@ impl Node {
             cfg.set_max_num_streams(256);
             cfg
         };
-        let swarm =
-            libp2p::SwarmBuilder::with_existing_identity(local_key)
-                .with_tokio()
-                .with_tcp(
-                    tcp::Config::default(),
-                    // TLS 1.3 first, Noise as the fallback the devnet
-                    // still speaks. The security upgrade is negotiated per
-                    // connection, so a TLS-only peer and a Noise-only peer both
-                    // connect to this node.
-                    (tls::Config::new, noise::Config::new),
-                    yamux_config,
-                )?
-                // QUIC carries TLS 1.3 itself.
-                .with_quic()
-                // The raw TCP transport only understands /ip4 and /ip6 multiaddrs;
-                // It answers every /dns4, /dns6 or /dnsaddr dial with
-                // MultiaddrNotSupported. `with_dns` layers the system resolver on
-                // Top so hostname peers (compose services, seed hostnames, the
-                // `--dial=/dns4/...` flag) actually connect instead of failing
-                // Silently into an isolated single-node mesh.
-                .with_dns()?
-                .with_behaviour(|key| {
-                    #[cfg(feature = "p2p-mdns")]
-                    let mdns = if mdns_enabled {
-                        Some(mdns::tokio::Behaviour::new(
-                            mdns::Config::default(),
-                            key.public().to_peer_id(),
-                        )?)
-                        .into()
-                    } else {
-                        None.into()
-                    };
-                    let kad_store = MemoryStore::new(key.public().to_peer_id());
-                    // Lightweight Kademlia for mobile
-                    let mut kad_config =
-                        KademliaConfig::new(libp2p::StreamProtocol::new("/budlum/kad/1.0.0"));
-                    if mobile_mode {
-                        kad_config.set_parallelism(std::num::NonZeroUsize::MIN);
-                        kad_config.set_publication_interval(Some(Duration::from_secs(24 * 3600)));
-                    }
+        let build_behaviour = |key: &identity::Keypair| {
+            #[cfg(feature = "p2p-mdns")]
+            let mdns = if mdns_enabled {
+                Some(mdns::tokio::Behaviour::new(
+                    mdns::Config::default(),
+                    key.public().to_peer_id(),
+                )?)
+                .into()
+            } else {
+                None.into()
+            };
+            let kad_store = MemoryStore::new(key.public().to_peer_id());
+            // Lightweight Kademlia for mobile
+            let mut kad_config =
+                KademliaConfig::new(libp2p::StreamProtocol::new("/budlum/kad/1.0.0"));
+            if mobile_mode {
+                kad_config.set_parallelism(std::num::NonZeroUsize::MIN);
+                kad_config.set_publication_interval(Some(Duration::from_secs(24 * 3600)));
+            }
 
-                    let kademlia =
-                        Kademlia::with_config(key.public().to_peer_id(), kad_store, kad_config);
-                    let identify = identify::Behaviour::new(identify::Config::new(
-                        "/budlum/1.0.0".to_string(),
-                        key.public(),
-                    ));
-                    // Request/response timeouts: without one, a peer that opens a
-                    // request stream and never answers holds the request slot
-                    // (and the outbound queue budget) indefinitely - a slowloris
-                    // style resource-retention DoS against sync and bitswap
-                    // (hardening research #58, #60). 30s bounds the wait while
-                    // leaving plenty of headroom for large block batches.
-                    //
-                    // The stream cap bounds memory per connection: each inbound
-                    // stream may buffer up to the codec ceiling until the timeout.
-                    let req_cfg = request_response::Config::default()
-                        .with_request_timeout(Duration::from_secs(30))
-                        .with_max_concurrent_streams(MAX_SYNC_CONCURRENT_STREAMS);
-                    let sync_cfg = req_cfg
-                        .clone()
-                        .with_request_timeout(Duration::from_secs(SYNC_TIMEOUT_SECS));
-                    let sync = request_response::Behaviour::new(
-                        [(
-                            StreamProtocol::new("/budlum/sync/1.0.0"),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        sync_cfg,
-                    );
-                    let bitswap = request_response::Behaviour::new(
-                        [(
-                            StreamProtocol::new(bud_node::BITSWAP_PROTOCOL_NAME),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        req_cfg.clone(),
-                    );
-                    let witness = request_response::Behaviour::new(
-                        [(
-                            StreamProtocol::new(crate::network::witness_protocol::WITNESS_PROTOCOL),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        req_cfg.clone(),
-                    );
-                    let bud3_symbols = request_response::Behaviour::new(
-                        [(
-                            StreamProtocol::new(
-                                crate::storage::bud3::symbol_protocol::SYMBOLS_PROTOCOL_ID,
-                            ),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        req_cfg.clone(),
-                    );
-                    let bud3_custody = request_response::Behaviour::new(
-                        [(
-                            StreamProtocol::new(
-                                crate::storage::bud3::symbol_protocol::CUSTODY_PROTOCOL_ID,
-                            ),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        req_cfg,
-                    );
+            let kademlia = Kademlia::with_config(key.public().to_peer_id(), kad_store, kad_config);
+            let identify = identify::Behaviour::new(identify::Config::new(
+                "/budlum/1.0.0".to_string(),
+                key.public(),
+            ));
+            // Request/response timeouts: without one, a peer that opens a
+            // request stream and never answers holds the request slot
+            // (and the outbound queue budget) indefinitely - a slowloris
+            // style resource-retention DoS against sync and bitswap
+            // (hardening research #58, #60). 30s bounds the wait while
+            // leaving plenty of headroom for large block batches.
+            //
+            // The stream cap bounds memory per connection: each inbound
+            // stream may buffer up to the codec ceiling until the timeout.
+            let req_cfg = request_response::Config::default()
+                .with_request_timeout(Duration::from_secs(30))
+                .with_max_concurrent_streams(MAX_SYNC_CONCURRENT_STREAMS);
+            let sync_cfg = req_cfg
+                .clone()
+                .with_request_timeout(Duration::from_secs(SYNC_TIMEOUT_SECS));
+            let sync = request_response::Behaviour::new(
+                [(
+                    StreamProtocol::new("/budlum/sync/1.0.0"),
+                    request_response::ProtocolSupport::Full,
+                )],
+                sync_cfg,
+            );
+            let bitswap = request_response::Behaviour::new(
+                [(
+                    StreamProtocol::new(bud_node::BITSWAP_PROTOCOL_NAME),
+                    request_response::ProtocolSupport::Full,
+                )],
+                req_cfg.clone(),
+            );
+            let witness = request_response::Behaviour::new(
+                [(
+                    StreamProtocol::new(crate::network::witness_protocol::WITNESS_PROTOCOL),
+                    request_response::ProtocolSupport::Full,
+                )],
+                req_cfg.clone(),
+            );
+            let bud3_symbols = request_response::Behaviour::new(
+                [(
+                    StreamProtocol::new(crate::storage::bud3::symbol_protocol::SYMBOLS_PROTOCOL_ID),
+                    request_response::ProtocolSupport::Full,
+                )],
+                req_cfg.clone(),
+            );
+            let bud3_custody = request_response::Behaviour::new(
+                [(
+                    StreamProtocol::new(crate::storage::bud3::symbol_protocol::CUSTODY_PROTOCOL_ID),
+                    request_response::ProtocolSupport::Full,
+                )],
+                req_cfg,
+            );
 
-                    Ok::<BudlumBehaviour, Box<dyn std::error::Error + Send + Sync>>(
-                        BudlumBehaviour {
-                            sentry_gate: crate::network::sentry::SentryGateBehaviour::new(
-                                MAX_PEERS,
-                                (MAX_PEERS * 2 / 3).max(1),
-                            ),
-                            ping: ping::Behaviour::new(
-                                ping::Config::new().with_interval(Duration::from_secs(15)),
-                            ),
-                            identify,
-                            #[cfg(feature = "p2p-mdns")]
-                            mdns,
-                            gossipsub,
-                            kad: kademlia,
-                            sync,
-                            bitswap,
-                            witness,
-                            bud3_symbols,
-                            bud3_custody,
-                            limits: libp2p::connection_limits::Behaviour::new(
-                                libp2p::connection_limits::ConnectionLimits::default()
-                                    .with_max_established(Some(
-                                        u32::try_from(MAX_PEERS.saturating_add(
-                                            crate::network::sentry::RESERVED_SHIELD_SLOTS,
-                                        ))
-                                        .unwrap_or(u32::MAX),
-                                    ))
-                                    .with_max_established_incoming(Some(
-                                        u32::try_from((MAX_PEERS * 2 / 3).saturating_add(
-                                            crate::network::sentry::RESERVED_SHIELD_SLOTS,
-                                        ))
-                                        .unwrap_or(u32::MAX),
-                                    ))
-                                    .with_max_established_per_peer(Some(2))
-                                    .with_max_pending_incoming(Some(
-                                        u32::try_from((MAX_PEERS / 2).saturating_add(
-                                            crate::network::sentry::RESERVED_SHIELD_SLOTS,
-                                        ))
-                                        .unwrap_or(u32::MAX),
-                                    )),
-                            ),
-                        },
-                    )
-                })?
+            Ok::<BudlumBehaviour, Box<dyn std::error::Error + Send + Sync>>(BudlumBehaviour {
+                sentry_gate: crate::network::sentry::SentryGateBehaviour::new(
+                    MAX_PEERS,
+                    (MAX_PEERS * 2 / 3).max(1),
+                ),
+                ping: ping::Behaviour::new(
+                    ping::Config::new().with_interval(Duration::from_secs(15)),
+                ),
+                identify,
+                #[cfg(feature = "p2p-mdns")]
+                mdns,
+                gossipsub,
+                kad: kademlia,
+                sync,
+                bitswap,
+                witness,
+                bud3_symbols,
+                bud3_custody,
+                limits: libp2p::connection_limits::Behaviour::new(
+                    libp2p::connection_limits::ConnectionLimits::default()
+                        .with_max_established(Some(
+                            u32::try_from(
+                                MAX_PEERS
+                                    .saturating_add(crate::network::sentry::RESERVED_SHIELD_SLOTS),
+                            )
+                            .unwrap_or(u32::MAX),
+                        ))
+                        .with_max_established_incoming(Some(
+                            u32::try_from(
+                                (MAX_PEERS * 2 / 3)
+                                    .saturating_add(crate::network::sentry::RESERVED_SHIELD_SLOTS),
+                            )
+                            .unwrap_or(u32::MAX),
+                        ))
+                        .with_max_established_per_peer(Some(2))
+                        .with_max_pending_incoming(Some(
+                            u32::try_from(
+                                (MAX_PEERS / 2)
+                                    .saturating_add(crate::network::sentry::RESERVED_SHIELD_SLOTS),
+                            )
+                            .unwrap_or(u32::MAX),
+                        )),
+                ),
+            })
+        };
+        let base_builder = libp2p::SwarmBuilder::with_existing_identity(local_key.clone())
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default(),
+                // TLS 1.3 first, Noise as the fallback the devnet still speaks.
+                (tls::Config::new, noise::Config::new),
+                yamux_config,
+            )?
+            .with_quic();
+        let swarm = match base_builder.with_dns() {
+            Ok(with_dns) => with_dns
+                .with_behaviour(build_behaviour)?
                 .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
-                .build();
+                .build(),
+            Err(err) => {
+                // Air-gapped, container, or mobile hosts without a populated
+                // system resolver still start and dial direct /ip4 and /ip6
+                // multiaddrs instead of aborting node startup (B-0044).
+                tracing::warn!(
+                    error = %err,
+                    "primary P2P system DNS resolver unavailable; falling back to direct IP TCP/QUIC transport"
+                );
+                libp2p::SwarmBuilder::with_existing_identity(local_key)
+                    .with_tokio()
+                    .with_tcp(
+                        tcp::Config::default(),
+                        (tls::Config::new, noise::Config::new),
+                        yamux_config,
+                    )?
+                    .with_quic()
+                    .with_behaviour(build_behaviour)?
+                    .with_swarm_config(|cfg| {
+                        cfg.with_idle_connection_timeout(Duration::from_secs(60))
+                    })
+                    .build()
+            }
+        };
         let (command_tx, command_rx) = mpsc::channel(32);
         let peer_manager = Arc::new(Mutex::new(PeerManager::new()));
         let gossip_dedup = Arc::new(Mutex::new(GossipDedup::default()));

@@ -533,18 +533,29 @@ impl ClaimedDomainFinalityAdapter {
         self.finalized_tips.insert(domain_id, (height, state_root));
     }
 
-    /// Verifies `frame` against `backend` for this adapter's `claim_domain` and
-    /// admits every [`Claim::Prog`] inside the verified `MasterProof`.
+    /// Verifies `frame` against `backend` (and validator bonds in `accounts`
+    /// when `backend.requires_bonded_aggregators()` is true) for this adapter's
+    /// `claim_domain`, then admits every [`Claim::Prog`] inside the verified
+    /// `MasterProof`.
     ///
     /// # Errors
     ///
-    /// Returns [`AggError`] if `backend.verify(frame, self.claim_domain)` rejects
-    /// the frame; no claims are admitted on failure.
+    /// Returns [`AggError`] if any segment aggregator is unbonded/unauthorized
+    /// or if `backend.verify(frame, self.claim_domain)` rejects the frame; no
+    /// claims are admitted on failure.
     pub fn admit_verified_frame<B: AggBackend>(
         &mut self,
+        accounts: &crate::core::account::AccountState,
         backend: &B,
         frame: &ClaimFrame,
     ) -> Result<usize, AggError> {
+        if backend.requires_bonded_aggregators() {
+            super::fraud::verify_bonded_segment_aggregators(
+                accounts,
+                u64::from(self.claim_domain),
+                frame,
+            )?;
+        }
         backend.verify(frame, self.claim_domain)?;
         let mut added = 0usize;
         for claim in &frame.claims {

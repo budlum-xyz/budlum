@@ -190,9 +190,10 @@ impl StarkProofObject {
             }
             _ => return Err(ObjectError::Invalid),
         };
+        let raw_limit = u64::try_from(raw.len()).map_err(|_| ObjectError::Invalid)?;
         let obj: Self = bincode::DefaultOptions::new()
             .with_fixint_encoding()
-            .with_limit(MAX_DECOMPRESSED_STARK_BYTES as u64)
+            .with_limit(raw_limit)
             .reject_trailing_bytes()
             .deserialize(&raw)
             .map_err(|_| ObjectError::Invalid)?;

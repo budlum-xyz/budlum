@@ -3910,10 +3910,24 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
-            TransactionType::VerifyStark(_) => {
+            TransactionType::VerifyStark(stmt) => {
                 // Phase 5 split-STARK verification carries zero transfer amount;
                 // `Claim::Poly` provenance and Stage 2 (`verify_algebra`) are
-                // enforced against `AirRegistry` during block aggregation checks.
+                // enforced against `AirRegistry` during block aggregation checks,
+                // while network eligibility and canonical field/aux bounds are
+                // enforced directly here as defense in depth (`STRIX-AGG-01/02`).
+                if matches!(
+                    crate::core::chain_config::Network::from_chain_id(tx.chain_id),
+                    Some(
+                        crate::core::chain_config::Network::Mainnet
+                            | crate::core::chain_config::Network::Testnet
+                    )
+                ) {
+                    return Err(BudlumError::validation(
+                        "verify_stark_network_disabled",
+                        "VerifyStark is disabled on Mainnet and Testnet while aggregation mode On is closed",
+                    ));
+                }
                 if tx.amount != 0 {
                     return Err(BudlumError::validation(
                         "verify_stark_amount_nonzero",
@@ -3926,6 +3940,9 @@ impl Executor {
                         "a VerifyStark transaction must reference its Claim::Poly digest",
                     ));
                 }
+                crate::aggregation::air_registry::validate_verify_stark_envelope(stmt).map_err(
+                    |err| BudlumError::validation("verify_stark_invalid_envelope", err.to_string()),
+                )?;
                 if state.spendable_balance(&tx.from) < total_cost {
                     return Err(BudlumError::validation(
                         "insufficient_balance",

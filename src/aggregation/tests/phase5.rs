@@ -205,9 +205,18 @@ fn prove_single_bud_domain_proof(
     )
 }
 
+fn bonded_accounts_for_frame(chain_id: u64, frame: &ClaimFrame) -> AccountState {
+    let mut accounts = AccountState::new();
+    let floor = accounts.validator_stake_floor(chain_id);
+    for seg in &frame.segments {
+        accounts.add_validator_with_floor(seg.aggregator, floor, floor);
+    }
+    accounts
+}
+
 #[test]
 fn external_non_budzkvm_air_verifies_end_to_end_via_claim_poly_and_verify_stark() {
-    let chain_id = Network::Testnet.chain_id().value();
+    let chain_id = Network::Devnet.chain_id().value();
     let domain = domain_of(chain_id);
     let params = phase5_params();
     let registry = SchemeStatusRegistry::genesis();
@@ -254,7 +263,7 @@ fn external_non_budzkvm_air_verifies_end_to_end_via_claim_poly_and_verify_stark(
     assert!(frame.proof.len() <= params.max_proof_bytes);
 
     let block = build_block(chain_id, vec![claimed_tx.clone()], frame.clone());
-    let accounts = AccountState::new();
+    let accounts = bonded_accounts_for_frame(chain_id, &frame);
     check_block_with_backend_and_airs(
         &params,
         &registry,
@@ -337,7 +346,7 @@ fn external_non_budzkvm_air_verifies_end_to_end_via_claim_poly_and_verify_stark(
 
 #[test]
 fn bud_air_split_stark_verifies_end_to_end_via_builtin_air_registry() {
-    let chain_id = Network::Testnet.chain_id().value();
+    let chain_id = Network::Devnet.chain_id().value();
     let domain = domain_of(chain_id);
     let params = phase5_params();
     let registry = SchemeStatusRegistry::genesis();
@@ -369,8 +378,8 @@ fn bud_air_split_stark_verifies_end_to_end_via_builtin_air_registry() {
     let ctx = TickCtx::from_seed(domain, Zeroizing::new([0x52u8; 32])).expect("tick ctx");
     let frame = backend.prove_tick(&ctx, &items).expect("prove tick");
 
+    let accounts = bonded_accounts_for_frame(chain_id, &frame);
     let block = build_block(chain_id, vec![claimed_tx], frame);
-    let accounts = AccountState::new();
     check_block_with_backend_and_airs(
         &params,
         &registry,
@@ -686,7 +695,7 @@ fn pcs_object_decode_refuses_bad_magic_and_trailing_bytes() {
 
 #[test]
 fn load_test_4_aggregators_1_producer_1024_claims_in_single_block() {
-    let chain_id = Network::Testnet.chain_id().value();
+    let chain_id = Network::Devnet.chain_id().value();
     let domain = domain_of(chain_id);
     let params = phase5_params();
     let registry = SchemeStatusRegistry::genesis();
@@ -747,8 +756,8 @@ fn load_test_4_aggregators_1_producer_1024_claims_in_single_block() {
         params.max_proof_bytes
     );
 
+    let accounts = bonded_accounts_for_frame(chain_id, &master);
     let block = build_block(chain_id, all_txs, master);
-    let accounts = AccountState::new();
     let air_registry = AirRegistry::with_builtins();
     check_block_with_backend_and_airs(
         &params,
@@ -843,4 +852,375 @@ fn phase5_security_hardening_rejects_deflate_malleability_mainnet_mempool_and_ov
         ..oversized_env
     };
     assert!(extract_bud_envelope_pcs(&tiny_env, &huge_program, &dummy_inputs).is_err());
+}
+
+#[test]
+fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked_or_conflicting_segments(
+) {
+    use crate::aggregation::chain::validate_params;
+    use crate::aggregation::fraud::{
+        is_authorized_segment_aggregator, slash_conflicting_segment_attestation,
+        slash_unbacked_segment, verify_segment_backing, SegmentFraudReason,
+        UnbackedSegmentChallenge,
+    };
+
+    let params = phase5_params();
+    let registry = SchemeStatusRegistry::genesis();
+    let backend = stark_backend(&params);
+    let air_registry = AirRegistry::with_builtins();
+
+    // 1. Mainnet (45260) and public Testnet (45261) reject AggMode::On in both
+    //    startup validation and consensus block checks (`STRIX-AGG-01`).
+    let mainnet_id = Network::Mainnet.chain_id().value();
+    let testnet_id = Network::Testnet.chain_id().value();
+    let devnet_id = Network::Devnet.chain_id().value();
+    assert!(validate_params(&params, mainnet_id).is_err());
+    assert!(validate_params(&params, testnet_id).is_err());
+    assert!(validate_params(&params, devnet_id).is_ok());
+    assert!(validate_params(
+        &AggParams {
+            mode: AggMode::Shadow,
+            ..params
+        },
+        testnet_id
+    )
+    .is_ok());
+
+    let empty_testnet_block = Block::new_with_chain_id(1, "0".repeat(64), Vec::new(), testnet_id);
+    assert!(check_block_with_backend_and_airs(
+        &params,
+        &registry,
+        Some(&AccountState::new()),
+        &air_registry,
+        &empty_testnet_block,
+        &backend,
+    )
+    .is_err());
+
+    // 2. Build a real StarkBackend frame on Devnet: unbonded, missing-state,
+    //    under-floor, jailed, and slashed aggregators MUST all be refused.
+    let domain = domain_of(devnet_id);
+    let sender = WalletKeyPair::generate();
+    let mut raw = Transaction::new(sender.address(), Address::from([0x33; 32]), 10, Vec::new());
+    raw.chain_id = devnet_id;
+    raw.nonce = 0;
+    raw.fee = 20_000;
+    raw.sign_v5(&sender);
+    let (claimed, sig_env) = claim_signature(&raw).expect("claim signature");
+    let sig_claim = derive_claim(&registry, &sig_env).expect("derive claim");
+
+    let agg_seed = Zeroizing::new([0x91u8; 32]);
+    let ctx = TickCtx::from_seed(domain, agg_seed.clone()).expect("agg ctx");
+    let frame = backend
+        .prove_tick(
+            &ctx,
+            &[PoolItem {
+                envelope: sig_env.clone(),
+                claim: sig_claim,
+            }],
+        )
+        .expect("honest tick");
+    let block = build_block(devnet_id, vec![claimed.clone()], frame.clone());
+
+    // Missing AccountState -> rejected.
+    assert!(check_block_with_backend_and_airs(
+        &params,
+        &registry,
+        None,
+        &air_registry,
+        &block,
+        &backend,
+    )
+    .is_err());
+    // Unbonded fresh ML-DSA-87 seed -> rejected (`UnauthorizedSegmentAggregator`).
+    let unbonded_err = check_block_with_backend_and_airs(
+        &params,
+        &registry,
+        Some(&AccountState::new()),
+        &air_registry,
+        &block,
+        &backend,
+    )
+    .expect_err("unbonded segment aggregator must be rejected");
+    assert!(
+        unbonded_err.contains("unbonded or unauthorized"),
+        "{unbonded_err}"
+    );
+
+    // Under-floor bond -> rejected.
+    let mut state = AccountState::new();
+    let floor = state.validator_stake_floor(devnet_id);
+    state.add_validator_with_floor(ctx.aggregator, floor - 1, floor);
+    assert!(!is_authorized_segment_aggregator(
+        &state,
+        devnet_id,
+        &ctx.aggregator
+    ));
+    assert!(check_block_with_backend_and_airs(
+        &params,
+        &registry,
+        Some(&state),
+        &air_registry,
+        &block,
+        &backend,
+    )
+    .is_err());
+
+    // Full floor bond -> accepted, and honest backing cannot be falsely slashed.
+    state.add_validator_with_floor(ctx.aggregator, floor, floor);
+    assert!(is_authorized_segment_aggregator(
+        &state,
+        devnet_id,
+        &ctx.aggregator
+    ));
+    check_block_with_backend_and_airs(
+        &params,
+        &registry,
+        Some(&state),
+        &air_registry,
+        &block,
+        &backend,
+    )
+    .expect("bonded honest validator passes consensus frame check");
+    assert_eq!(
+        verify_segment_backing(&registry, domain, &frame, 0, std::slice::from_ref(&sig_env)),
+        Ok(Ok(()))
+    );
+    let watcher = Address::from([0x77; 32]);
+    assert!(slash_unbacked_segment(
+        &mut state,
+        &registry,
+        &UnbackedSegmentChallenge {
+            chain_id: devnet_id,
+            domain,
+            frame: &frame,
+            segment_index: 0,
+            backing_envelopes: std::slice::from_ref(&sig_env),
+            whistleblower: watcher,
+        },
+    )
+    .is_err());
+
+    // 3. Byzantine bonded aggregator signs a forged `Claim::Sig` for a victim
+    //    account with no backing witness: `slash_unbacked_segment` verifies the
+    //    ML-DSA-87 attestation, slashes 100% of stake, credits 10% reward, and
+    //    immediately revokes aggregator eligibility.
+    let victim = Address::from([0xDE; 32]);
+    let forged_claim = Claim::Sig {
+        scheme: SchemeId::ML_DSA_87,
+        signer: victim,
+        msg_hash: [0xEE; 32],
+    };
+    let forged_frame =
+        ClaimFrame::tick(domain, &agg_seed, vec![forged_claim], Vec::new()).expect("attested tick");
+    // Self-challenge is refused.
+    assert!(slash_unbacked_segment(
+        &mut state,
+        &registry,
+        &UnbackedSegmentChallenge {
+            chain_id: devnet_id,
+            domain,
+            frame: &forged_frame,
+            segment_index: 0,
+            backing_envelopes: &[],
+            whistleblower: ctx.aggregator,
+        },
+    )
+    .is_err());
+    // Wrong envelope (backing a different signer) is caught as DerivedClaimMismatch.
+    assert_eq!(
+        verify_segment_backing(
+            &registry,
+            domain,
+            &forged_frame,
+            0,
+            std::slice::from_ref(&sig_env)
+        ),
+        Ok(Err((0, SegmentFraudReason::DerivedClaimMismatch)))
+    );
+    let report = slash_unbacked_segment(
+        &mut state,
+        &registry,
+        &UnbackedSegmentChallenge {
+            chain_id: devnet_id,
+            domain,
+            frame: &forged_frame,
+            segment_index: 0,
+            backing_envelopes: &[],
+            whistleblower: watcher,
+        },
+    )
+    .expect("unbacked attested segment slashes Byzantine aggregator");
+    assert_eq!(report.aggregator, ctx.aggregator);
+    assert_eq!(report.reason, SegmentFraudReason::MissingBackingEnvelope);
+    assert_eq!(report.slashed_atoms, floor);
+    assert_eq!(
+        report.whistleblower_reward_atoms + report.burned_atoms,
+        report.slashed_atoms
+    );
+    assert_eq!(state.spendable_balance(&watcher), floor / 10);
+    assert!(!is_authorized_segment_aggregator(
+        &state,
+        devnet_id,
+        &ctx.aggregator
+    ));
+    // Subsequent blocks attested by the slashed aggregator are immediately rejected.
+    assert!(check_block_with_backend_and_airs(
+        &params,
+        &registry,
+        Some(&state),
+        &air_registry,
+        &block,
+        &backend,
+    )
+    .is_err());
+
+    // 4. Conflicting dual segment attestation by a second bonded aggregator slashes 100%.
+    let eq_seed = Zeroizing::new([0x92u8; 32]);
+    let eq_ctx = TickCtx::from_seed(domain, eq_seed.clone()).expect("eq ctx");
+    state.add_validator_with_floor(eq_ctx.aggregator, floor, floor);
+    let f1 = ClaimFrame::tick(
+        domain,
+        &eq_seed,
+        vec![Claim::Sig {
+            scheme: SchemeId::ML_DSA_87,
+            signer: victim,
+            msg_hash: [0x01; 32],
+        }],
+        Vec::new(),
+    )
+    .expect("f1");
+    let f2 = ClaimFrame::tick(
+        domain,
+        &eq_seed,
+        vec![Claim::Sig {
+            scheme: SchemeId::ML_DSA_87,
+            signer: victim,
+            msg_hash: [0x02; 32],
+        }],
+        Vec::new(),
+    )
+    .expect("f2");
+    // Identical segment pair is refused.
+    assert!(slash_conflicting_segment_attestation(
+        &mut state,
+        &registry,
+        devnet_id,
+        domain,
+        &f1.segments[0],
+        &f1.segments[0],
+        watcher,
+    )
+    .is_err());
+    let eq_report = slash_conflicting_segment_attestation(
+        &mut state,
+        &registry,
+        devnet_id,
+        domain,
+        &f1.segments[0],
+        &f2.segments[0],
+        watcher,
+    )
+    .expect("conflicting segment attestations slash aggregator");
+    assert_eq!(
+        eq_report.reason,
+        SegmentFraudReason::ConflictingSegmentAttestation
+    );
+    assert_eq!(eq_report.slashed_atoms, floor);
+    assert!(!is_authorized_segment_aggregator(
+        &state,
+        devnet_id,
+        &eq_ctx.aggregator
+    ));
+}
+
+#[test]
+fn strix_agg_02_hardens_bud_air_aux_preallocation_and_executor_verify_stark_bounds() {
+    use crate::aggregation::air_registry::{
+        validate_verify_stark_envelope, AirAlgebraEvaluator, BudAirEvaluator,
+    };
+    use crate::execution::executor::Executor;
+
+    let (fib_proof, pvs, shape) = prove_fibonacci(4, 1, 1).expect("prove fib");
+    let pcs_obj = PcsOpeningObject::from_chip_proof(&fib_proof, shape, &pvs, None).expect("pcs");
+
+    // 1. Short `air_aux_data` carrying a varint `program.len() = u64::MAX / 2`
+    //    must fail fast under the raw-length-clamped deserializer without OOM.
+    let mut bomb = vec![253u8]; // bincode varint u64 tag
+    bomb.extend_from_slice(&130_000u64.to_le_bytes());
+    let bomb_stmt = pcs_obj.to_verify_stark_tx(bud_air_id(), bomb);
+    assert_eq!(
+        BudAirEvaluator.verify_algebra_statement(&bomb_stmt),
+        Err(AirVerifyError::InvalidAuxData)
+    );
+
+    // 2. Empty `BudAirAuxData::program` is rejected before touching BudAir setup.
+    let empty_aux = BudAirAuxData {
+        program: Vec::new(),
+        expected_inputs: bud_proof::adapter::ExecutionPublicInputs {
+            chain_id: Network::Devnet.chain_id().value(),
+            program_hash: [0u8; 32],
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 100,
+            gas_used: 0,
+            exit_code: 0,
+            trace_len: 1,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        },
+    };
+    let empty_bytes = bincode::DefaultOptions::new()
+        .serialize(&empty_aux)
+        .expect("encode empty aux");
+    let empty_stmt = pcs_obj.to_verify_stark_tx(bud_air_id(), empty_bytes);
+    assert_eq!(
+        BudAirEvaluator.verify_algebra_statement(&empty_stmt),
+        Err(AirVerifyError::InvalidAuxData)
+    );
+
+    // 3. Direct Executor execution rejects VerifyStark on Testnet AND rejects
+    //    excessive `degree_bits` / non-canonical Goldilocks elements on Devnet.
+    let valid_stmt = pcs_obj.to_verify_stark_tx(external_fib_air_id(), Vec::new());
+    assert!(validate_verify_stark_envelope(&valid_stmt).is_ok());
+
+    let sender = Address::from([0x45; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&sender, 1_000_000);
+
+    let mut testnet_tx = Transaction::new_with_chain_id(
+        sender,
+        Address::zero(),
+        0,
+        1_000,
+        0,
+        Vec::new(),
+        Network::Testnet.chain_id().value(),
+        TransactionType::VerifyStark(Box::new(valid_stmt.clone())),
+    );
+    testnet_tx.claim_refs.push([0xAA; 32]);
+    assert!(Executor::apply_transaction_checked(&mut state, &testnet_tx).is_err());
+
+    let mut bad_deg = valid_stmt.clone();
+    bad_deg.degree_bits = 31;
+    let mut devnet_bad_tx = Transaction::new_with_chain_id(
+        sender,
+        Address::zero(),
+        0,
+        1_000,
+        0,
+        Vec::new(),
+        Network::Devnet.chain_id().value(),
+        TransactionType::VerifyStark(Box::new(bad_deg)),
+    );
+    devnet_bad_tx.claim_refs.push([0xAA; 32]);
+    assert!(Executor::apply_transaction_checked(&mut state, &devnet_bad_tx).is_err());
+
+    let mut devnet_ok_tx = devnet_bad_tx;
+    devnet_ok_tx.tx_type = TransactionType::VerifyStark(Box::new(valid_stmt));
+    Executor::apply_transaction_checked(&mut state, &devnet_ok_tx)
+        .expect("bounded Devnet VerifyStark passes executor check");
 }

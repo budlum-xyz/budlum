@@ -29,7 +29,13 @@ use super::programs::pcs_claim::{
 use crate::domain::types::{DomainId, Hash32};
 
 /// Maximum serialized size of `BudAirAuxData` inside `VerifyStarkTx::air_aux_data`.
-const MAX_BUD_AIR_AUX_BYTES: u64 = 1024 * 1024;
+pub const MAX_BUD_AIR_AUX_BYTES: u64 = 1024 * 1024;
+/// Maximum `BudVM` instruction words accepted in `BudAirAuxData::program`.
+const MAX_BUD_AIR_PROGRAM_WORDS: usize = 65_536;
+/// Maximum opened extension elements allowed in a single opened trace row or quotient chunk.
+const MAX_OPENED_VECTOR_LEN: usize = 4_096;
+/// Maximum quotient chunks accepted in a single `VerifyStarkTx`.
+const MAX_QUOTIENT_CHUNKS: usize = 256;
 
 /// Canonical 32-byte identifier of a registered AIR inside [`AirRegistry`].
 pub type AirId = Hash32;
@@ -127,13 +133,91 @@ pub trait AirAlgebraEvaluator: Send + Sync {
     ) -> Result<VerifiedAlgebraResult, AirVerifyError>;
 }
 
-fn validate_common_fields(stmt: &VerifyStarkTx) -> Result<(), AirVerifyError> {
+fn validate_opened_slice(slice: &[[u64; 3]]) -> Result<(), AirVerifyError> {
+    if slice.len() > MAX_OPENED_VECTOR_LEN {
+        return Err(AirVerifyError::InvalidAuxData);
+    }
+    if slice
+        .iter()
+        .any(|limbs| limbs.iter().any(|&v| v >= GOLDILOCKS_MODULUS))
+    {
+        return Err(AirVerifyError::InvalidFieldElement);
+    }
+    Ok(())
+}
+
+/// Validates syntactic bounds and canonical Goldilocks field representation of
+/// an on-chain [`VerifyStarkTx`] without allocating beyond the payload size.
+///
+/// Enforced both by every [`AirAlgebraEvaluator`] and directly by
+/// `Executor::apply_transaction_checked` as defense in depth (`STRIX-AGG-02`).
+///
+/// # Errors
+///
+/// Returns [`AirVerifyError`] if `degree_bits`, `air_aux_data`, opened vector
+/// lengths, or any Goldilocks field limb is out of bounds.
+pub fn validate_verify_stark_envelope(stmt: &VerifyStarkTx) -> Result<(), AirVerifyError> {
+    if usize::from(stmt.degree_bits) > bud_proof::bud_stark::MAX_VERIFIER_DEGREE_BITS {
+        return Err(AirVerifyError::InvalidAuxData);
+    }
+    if u64::try_from(stmt.air_aux_data.len()).unwrap_or(u64::MAX) > MAX_BUD_AIR_AUX_BYTES {
+        return Err(AirVerifyError::InvalidAuxData);
+    }
     if stmt.public_values.len() > MAX_PCS_PUBLIC_VALUES
         || stmt.public_values.iter().any(|&v| v >= GOLDILOCKS_MODULUS)
     {
         return Err(AirVerifyError::InvalidFieldElement);
     }
+    let ov = &stmt.opened_values;
+    validate_opened_slice(&ov.trace_local)?;
+    if let Some(next) = &ov.trace_next {
+        validate_opened_slice(next)?;
+    }
+    if let Some(aux_l) = &ov.aux_trace_local {
+        validate_opened_slice(aux_l)?;
+    }
+    if let Some(aux_n) = &ov.aux_trace_next {
+        validate_opened_slice(aux_n)?;
+    }
+    if let Some(pre_l) = &ov.preprocessed_local {
+        validate_opened_slice(pre_l)?;
+    }
+    if let Some(pre_n) = &ov.preprocessed_next {
+        validate_opened_slice(pre_n)?;
+    }
+    if ov.quotient_chunks.len() > MAX_QUOTIENT_CHUNKS {
+        return Err(AirVerifyError::InvalidAuxData);
+    }
+    for chunk in &ov.quotient_chunks {
+        validate_opened_slice(chunk)?;
+    }
+    if let Some(rand) = &ov.random {
+        validate_opened_slice(rand)?;
+    }
     Ok(())
+}
+
+fn validate_common_fields(stmt: &VerifyStarkTx) -> Result<(), AirVerifyError> {
+    validate_verify_stark_envelope(stmt)
+}
+
+/// Decodes [`BudAirAuxData`] with byte and pre-allocation caps clamped strictly
+/// to `bytes.len().min(MAX_BUD_AIR_AUX_BYTES)` so a short payload declaring a
+/// huge `program` length cannot trigger oversized `Vec::with_capacity` allocation.
+fn decode_bud_air_aux(bytes: &[u8]) -> Result<BudAirAuxData, AirVerifyError> {
+    let raw_len = u64::try_from(bytes.len()).map_err(|_| AirVerifyError::InvalidAuxData)?;
+    if bytes.is_empty() || raw_len > MAX_BUD_AIR_AUX_BYTES {
+        return Err(AirVerifyError::InvalidAuxData);
+    }
+    let aux: BudAirAuxData = bincode::DefaultOptions::new()
+        .with_limit(raw_len)
+        .reject_trailing_bytes()
+        .deserialize(bytes)
+        .map_err(|_| AirVerifyError::InvalidAuxData)?;
+    if aux.program.is_empty() || aux.program.len() > MAX_BUD_AIR_PROGRAM_WORDS {
+        return Err(AirVerifyError::InvalidAuxData);
+    }
+    Ok(aux)
 }
 
 /// Built-in evaluator for the `BudZKVM` virtual machine AIR (`BudAir`).
@@ -153,11 +237,7 @@ impl AirAlgebraEvaluator for BudAirEvaluator {
         stmt: &VerifyStarkTx,
     ) -> Result<VerifiedAlgebraResult, AirVerifyError> {
         validate_common_fields(stmt)?;
-        let aux: BudAirAuxData = bincode::DefaultOptions::new()
-            .with_limit(MAX_BUD_AIR_AUX_BYTES)
-            .reject_trailing_bytes()
-            .deserialize(&stmt.air_aux_data)
-            .map_err(|_| AirVerifyError::InvalidAuxData)?;
+        let aux = decode_bud_air_aux(&stmt.air_aux_data)?;
         let commitments = stmt.commitments.to_chip();
         let opened_values = stmt
             .opened_values
