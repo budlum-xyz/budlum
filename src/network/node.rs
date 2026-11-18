@@ -9252,14 +9252,26 @@ mod identity_file_tests {
             client.subscribe("transactions".to_string()).await;
         }
 
+        fn handshake_state(
+            pm: &Arc<Mutex<PeerManager>>,
+            shielded: &PeerId,
+            public: &PeerId,
+        ) -> (bool, bool) {
+            let guard = pm
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (guard.is_handshaked(shielded), guard.is_connected(public))
+        }
+
         // Wait until V<->S and S<->P complete their application handshakes,
         // while asserting P NEVER establishes a connection to shielded V.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let v_has_s = val_pm.lock().unwrap().is_handshaked(&sentry_peer_id);
-            let v_has_p = val_pm.lock().unwrap().is_connected(&pub_peer_id);
-            let s_has_v = sentry_pm.lock().unwrap().is_handshaked(&val_peer_id);
-            let s_has_p = sentry_pm.lock().unwrap().is_handshaked(&pub_peer_id);
+            // One guard per read pair, and a poisoned lock is recovered rather
+            // than unwrapped: `network_event_loop_has_no_bare_lock_unwrap`
+            // reads this file and refuses `.lock().unwrap()`.
+            let (v_has_s, v_has_p) = handshake_state(&val_pm, &sentry_peer_id, &pub_peer_id);
+            let (s_has_v, s_has_p) = handshake_state(&sentry_pm, &val_peer_id, &pub_peer_id);
             assert!(
                 !v_has_p,
                 "Public peer {pub_peer_id} must NEVER connect directly to shielded validator {val_peer_id}"
@@ -9289,7 +9301,7 @@ mod identity_file_tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while pub_chain.get_height().await < 1 {
             assert!(
-                !val_pm.lock().unwrap().is_connected(&pub_peer_id),
+                !handshake_state(&val_pm, &sentry_peer_id, &pub_peer_id).1,
                 "shielded validator must remain invisible to direct public peer connections"
             );
             assert!(
@@ -9305,7 +9317,10 @@ mod identity_file_tests {
             .expect("public follower holds block 1");
         assert_eq!(relayed.hash, expected_hash);
         assert_eq!(
-            val_pm.lock().unwrap().connected_peers(),
+            val_pm
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .connected_peers(),
             vec![sentry_peer_id],
             "shielded validator must speak ONLY with its configured sentry node"
         );
