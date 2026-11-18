@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_against_blob is reached only from the certificate-replay tests in this tree; the quorum path itself verifies the aggregated signature, and this blob comparison is the cross-check the tests pin.
+//! WIRING: unwired - `verify_against_blob` is reached only from the certificate-replay tests in this tree; the quorum path itself verifies the aggregated signature, and this blob comparison is the cross-check the tests pin.
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,7 @@ pub struct QcProofVerdict {
 }
 
 impl QcBlob {
+    #[must_use]
     pub fn new(
         epoch: u64,
         checkpoint_height: u64,
@@ -90,7 +91,7 @@ impl QcBlob {
         pq_signatures: Vec<PqSignatureEntry>,
     ) -> Self {
         let merkle_root = Self::compute_merkle_root(&pq_signatures);
-        QcBlob {
+        Self {
             epoch,
             checkpoint_height,
             checkpoint_hash,
@@ -360,6 +361,7 @@ impl QcBlob {
             .collect())
     }
 
+    #[must_use]
     pub fn is_expired(&self, current_epoch: u64) -> bool {
         current_epoch > self.created_epoch.saturating_add(QC_BLOB_TTL_EPOCHS)
     }
@@ -383,6 +385,7 @@ impl QcBlob {
         Ok(())
     }
 
+    #[must_use]
     pub fn verify_merkle_root(&self) -> bool {
         let computed = Self::compute_merkle_root(&self.pq_signatures);
         computed == self.merkle_root
@@ -559,6 +562,7 @@ impl QcBlob {
         Ok(verified_indices)
     }
 
+    #[must_use]
     pub fn detect_fault_proofs(&self, snapshot: &ValidatorSetSnapshot) -> Vec<QcFaultProof> {
         self.detect_fault_proofs_in(
             &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
@@ -566,6 +570,7 @@ impl QcBlob {
         )
     }
 
+    #[must_use]
     pub fn detect_fault_proofs_in(
         &self,
         registry: &crate::crypto::scheme::SchemeStatusRegistry,
@@ -641,7 +646,7 @@ impl QcFaultProof {
         validator_address: String,
         evidence: InvalidDilithiumEvidence,
     ) -> Self {
-        QcFaultProof {
+        Self {
             version: Self::CURRENT_VERSION,
             epoch,
             checkpoint_height,
@@ -1025,6 +1030,7 @@ impl QcBlobAssembler {
 /// part of the message (INV-02), so an attestation made under one scheme can
 /// not be presented as another. The FIPS 204 context `BDLM/QC/V2` is applied
 /// by the signing call.
+#[must_use]
 pub fn pq_signing_message(
     epoch: u64,
     checkpoint_height: u64,

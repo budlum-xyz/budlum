@@ -99,6 +99,7 @@ pub struct PeerScore {
 }
 
 impl PeerScore {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             score: 0.0,
@@ -125,6 +126,7 @@ impl PeerScore {
         self.last_duplicate_at = Some(now);
     }
 
+    #[must_use]
     pub fn is_below_threshold(&self) -> bool {
         self.score < MIN_PEER_SCORE
     }
@@ -141,7 +143,7 @@ pub struct GossipDedup {
     /// Set of recently seen message hashes for O(1) membership tests.
     ///
     /// Previously this was a `VecDeque` queried with `contains`, which is an
-    /// O(n) linear scan (up to `window_size` = 10_000 entries) on *every*
+    /// O(n) linear scan (up to `window_size` = `10_000` entries) on *every*
     /// Incoming gossip message - itself a CPU-DoS vector under high load.
     /// Membership is now a `HashSet` lookup.
     seen_set: HashSet<[u8; 32]>,
@@ -170,6 +172,7 @@ pub struct GossipDedup {
 }
 
 impl GossipDedup {
+    #[must_use]
     pub fn new(window_size: usize) -> Self {
         // A zero window would never evict: the set would grow without bound and the
         // utilization ratio would divide by zero.
@@ -259,11 +262,13 @@ impl GossipDedup {
     }
 
     /// Get the score for a peer.
+    #[must_use]
     pub fn peer_score(&self, peer: &libp2p::PeerId) -> f64 {
         self.peer_scores.get(peer).map_or(0.0, |s| s.score)
     }
 
     /// Get all peers below the minimum score threshold.
+    #[must_use]
     pub fn peers_below_threshold(&self) -> Vec<libp2p::PeerId> {
         self.peer_scores
             .iter()
@@ -273,6 +278,7 @@ impl GossipDedup {
     }
 
     /// Get detailed score info for a peer.
+    #[must_use]
     pub fn get_peer_score(&self, peer: &libp2p::PeerId) -> Option<&PeerScore> {
         self.peer_scores.get(peer)
     }
@@ -396,16 +402,19 @@ impl GossipDedup {
     }
 
     /// Total messages processed.
+    #[must_use]
     pub fn total_processed(&self) -> u64 {
         self.total_processed
     }
 
     /// Total duplicates rejected.
+    #[must_use]
     pub fn total_duplicates(&self) -> u64 {
         self.total_duplicates
     }
 
     /// Current dedup window utilization.
+    #[must_use]
     pub fn window_utilization(&self) -> f64 {
         self.seen_order.len() as f64 / self.window_size as f64
     }

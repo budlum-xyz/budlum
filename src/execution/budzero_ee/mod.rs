@@ -1,6 +1,6 @@
-//! BudZero execution-environment adapter (`EeId::BUDZERO = 0x00`).
+//! `BudZero` execution-environment adapter (`EeId::BUDZERO = 0x00`).
 //!
-//! Runs BudZero bytecode in execution-only mode against the UEL [`HostApi`]
+//! Runs `BudZero` bytecode in execution-only mode against the UEL [`HostApi`]
 //! (`ee/budzero/program` and `ee/budzero/storage`), populating all four 64-bit
 //! words of `sender_words` (`256-bit` caller identity,  execution leg)
 //! and holding `VerifyMerkle` and `VerifyInference` closed.
@@ -19,7 +19,7 @@ use budlum_uel_abi::{
 use crate::core::hash::calculate_hash_bytes;
 use crate::execution::coordinator::state::{NS_BUDZERO_PROGRAM, NS_BUDZERO_STORAGE};
 
-/// Maximum deployable BudZero bytecode size (`1 MiB`).
+/// Maximum deployable `BudZero` bytecode size (`1 MiB`).
 pub const MAX_BUDZERO_CODE_BYTES: usize = 1024 * 1024;
 const BUDZERO_VM_MEMORY_BYTES: usize = 8192;
 const MAX_CALL_SLOTS: usize = 256;
@@ -145,7 +145,7 @@ fn apply_caller_words(vm: &mut Vm, caller_id: &[u8]) {
     vm.context.set_sender_bytes(&padded);
 }
 
-/// Execution-only BudZero environment implementing [`ExecutionEnvironment`].
+/// Execution-only `BudZero` environment implementing [`ExecutionEnvironment`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BudZeroEe;
 
@@ -388,7 +388,7 @@ impl ExecutionEnvironment for BudZeroEe {
 /// Maximum preprocessed trace bytes accepted in an optional proof setup (`2 MiB`).
 pub const MAX_SETUP_PREPROCESSED_BYTES: usize = 2 * 1024 * 1024;
 
-/// Four-word (`256-bit`) BudZero caller context preserving all 32 bytes of [`crate::core::address::Address`].
+/// Four-word (`256-bit`) `BudZero` caller context preserving all 32 bytes of [`crate::core::address::Address`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BudZeroVmContext {
     pub sender_words: [u64; 4],
@@ -442,7 +442,7 @@ pub struct OptionalProofJobReceipt {
     pub alters_consensus_state: bool,
 }
 
-/// Decode BudZero bytecode under canonical active testnet/mainnet opcode rules
+/// Decode `BudZero` bytecode under canonical active testnet/mainnet opcode rules
 /// (`VerifyMerkle` and `VerifyInference` closed under `MainnetActivation::default()`).
 ///
 /// # Errors

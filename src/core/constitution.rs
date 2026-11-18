@@ -30,28 +30,29 @@ pub enum ConstitutionParameterKey {
 }
 
 impl ConstitutionParameterKey {
+    #[must_use]
     pub fn is_hard_guardrail(self) -> bool {
         matches!(
             self,
-            ConstitutionParameterKey::AiReadRequiresPollenGrant
-                | ConstitutionParameterKey::NoGovernanceReadOverride
-                | ConstitutionParameterKey::PermissionlessCoreNoAdminWhitelist
-                | ConstitutionParameterKey::PoaIslandIsolation
-                | ConstitutionParameterKey::NoPrivateKeyCustody
-                | ConstitutionParameterKey::EvidenceApisNoPlaintext
+            Self::AiReadRequiresPollenGrant
+                | Self::NoGovernanceReadOverride
+                | Self::PermissionlessCoreNoAdminWhitelist
+                | Self::PoaIslandIsolation
+                | Self::NoPrivateKeyCustody
+                | Self::EvidenceApisNoPlaintext
         )
     }
 
     fn tag(self) -> u8 {
         match self {
-            ConstitutionParameterKey::AiReadRequiresPollenGrant => 1,
-            ConstitutionParameterKey::NoGovernanceReadOverride => 2,
-            ConstitutionParameterKey::PermissionlessCoreNoAdminWhitelist => 3,
-            ConstitutionParameterKey::PoaIslandIsolation => 4,
-            ConstitutionParameterKey::NoPrivateKeyCustody => 5,
-            ConstitutionParameterKey::EvidenceApisNoPlaintext => 6,
-            ConstitutionParameterKey::MaxEmergencyHaltEpochs => 7,
-            ConstitutionParameterKey::MinConstitutionProposalEpochs => 8,
+            Self::AiReadRequiresPollenGrant => 1,
+            Self::NoGovernanceReadOverride => 2,
+            Self::PermissionlessCoreNoAdminWhitelist => 3,
+            Self::PoaIslandIsolation => 4,
+            Self::NoPrivateKeyCustody => 5,
+            Self::EvidenceApisNoPlaintext => 6,
+            Self::MaxEmergencyHaltEpochs => 7,
+            Self::MinConstitutionProposalEpochs => 8,
         }
     }
 }
@@ -72,6 +73,7 @@ pub struct ConstitutionParameter {
 }
 
 impl ConstitutionParameter {
+    #[must_use]
     pub fn new(
         key: ConstitutionParameterKey,
         value: ConstitutionValue,
@@ -176,6 +178,7 @@ impl ConstitutionRegistry {
         self.parameters.len()
     }
 
+    #[must_use]
     pub fn new() -> Self {
         let mut parameters = BTreeMap::new();
         for key in [
@@ -220,6 +223,7 @@ impl ConstitutionRegistry {
         self.assert_hard_guardrails()
     }
 
+    #[must_use]
     pub fn get(&self, key: ConstitutionParameterKey) -> Option<&ConstitutionParameter> {
         self.parameters.get(&key)
     }
@@ -227,6 +231,7 @@ impl ConstitutionRegistry {
     /// Minimum voting duration for a constitution amendment, in epochs.
     /// Falls back to the default of 10 when the entry is missing or not a
     /// `U64` (a tampered snapshot), which is never lower than the default.
+    #[must_use]
     pub fn min_proposal_epochs(&self) -> u64 {
         match self
             .parameters
@@ -267,10 +272,12 @@ impl ConstitutionRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn has_non_default_updates(&self) -> bool {
         self != &Self::new()
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_CONSTITUTION_REGISTRY_V1");

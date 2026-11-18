@@ -82,29 +82,29 @@ pub enum AdapterError {
 impl std::fmt::Display for AdapterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AdapterError::UnsupportedChain(chain) => {
+            Self::UnsupportedChain(chain) => {
                 write!(f, "unsupported chain: {chain:?}")
             }
-            AdapterError::ConnectionFailed(msg) => {
+            Self::ConnectionFailed(msg) => {
                 write!(f, "connection failed: {msg}")
             }
-            AdapterError::TransactionNotFound(hash) => {
+            Self::TransactionNotFound(hash) => {
                 write!(f, "transaction not found: {hash}")
             }
-            AdapterError::ProofGenerationFailed(msg) => {
+            Self::ProofGenerationFailed(msg) => {
                 write!(f, "proof generation failed: {msg}")
             }
-            AdapterError::ProofVerificationFailed(msg) => {
+            Self::ProofVerificationFailed(msg) => {
                 write!(f, "proof verification failed: {msg}")
             }
-            AdapterError::SubmissionFailed(msg) => {
+            Self::SubmissionFailed(msg) => {
                 write!(f, "submission failed: {msg}")
             }
-            AdapterError::ConfirmationTimeout => {
+            Self::ConfirmationTimeout => {
                 write!(f, "confirmation timeout")
             }
-            AdapterError::Other(msg) => write!(f, "adapter error: {msg}"),
-            AdapterError::DuplicateChainAdapter(chain) => {
+            Self::Other(msg) => write!(f, "adapter error: {msg}"),
+            Self::DuplicateChainAdapter(chain) => {
                 write!(f, "duplicate adapter for chain: {chain:?}")
             }
         }
@@ -134,7 +134,7 @@ pub trait ChainAdapter: Send + Sync {
     /// Verify a receipt proof against the external chain's state root.
     ///
     /// This is used for on-chain verification when the relayer submits
-    /// A RelayerResult back to Budlum.
+    /// A `RelayerResult` back to Budlum.
     fn verify_receipt_proof(
         &self,
         proof: &MerkleProof,
@@ -250,6 +250,7 @@ pub struct AdapterRegistry {
 }
 
 impl AdapterRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             adapters: Vec::new(),
@@ -289,11 +290,13 @@ impl AdapterRegistry {
     }
 
     /// Check if a chain is supported.
+    #[must_use]
     pub fn supports(&self, chain: &ExternalChain) -> bool {
         self.get(chain).is_some()
     }
 
     /// List all supported chains.
+    #[must_use]
     pub fn supported_chains(&self) -> Vec<ExternalChain> {
         self.adapters.iter().map(|a| a.chain_type()).collect()
     }

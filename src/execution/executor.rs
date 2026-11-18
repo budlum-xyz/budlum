@@ -4027,7 +4027,9 @@ impl Executor {
                     } => {
                         if *extra_epochs == 0 {
                             0
-                        } else if let Some(obj) = state.bud3_registry.object(object) {
+                        } else if let Some((_, obj)) =
+                            state.bud3_registry.resolve_renewal_target(object)
+                        {
                             if obj.endowment.fee_record.user_physical_bytes > 0 {
                                 renewal_fee_epochs(
                                     obj.endowment.fee_record.user_physical_bytes,
@@ -4050,8 +4052,10 @@ impl Executor {
                         && !state.bud3_registry.is_tombstoned(object)
                         && state
                             .bud3_registry
-                            .object(object)
-                            .is_some_and(|o| o.record.content_id.kind == ContentIdKind::Public) =>
+                            .resolve_live_object(object)
+                            .is_some_and(|(_, o)| {
+                                o.record.content_id.kind == ContentIdKind::Public
+                            }) =>
                     {
                         *amount_atoms
                     }

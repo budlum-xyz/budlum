@@ -21,9 +21,9 @@ pub enum DevnetTopology {
 impl DevnetTopology {
     fn tag(self) -> u8 {
         match self {
-            DevnetTopology::SingleNode => 1,
-            DevnetTopology::FourNodeMesh => 2,
-            DevnetTopology::MobileSelfReplica => 3,
+            Self::SingleNode => 1,
+            Self::FourNodeMesh => 2,
+            Self::MobileSelfReplica => 3,
         }
     }
 }
@@ -40,11 +40,11 @@ pub enum SdkFeature {
 impl SdkFeature {
     fn tag(&self) -> u8 {
         match self {
-            SdkFeature::WalletSigningV4 => 1,
-            SdkFeature::PollenGrantFlow => 2,
-            SdkFeature::ProofFixtureRunner => 3,
-            SdkFeature::RelayerPolicyFixture => 4,
-            SdkFeature::MobileSelfProfile => 5,
+            Self::WalletSigningV4 => 1,
+            Self::PollenGrantFlow => 2,
+            Self::ProofFixtureRunner => 3,
+            Self::RelayerPolicyFixture => 4,
+            Self::MobileSelfProfile => 5,
         }
     }
 }
@@ -92,9 +92,9 @@ pub enum ProofFixtureStatus {
 impl ProofFixtureStatus {
     fn tag(self) -> u8 {
         match self {
-            ProofFixtureStatus::Pending => 1,
-            ProofFixtureStatus::Verified => 2,
-            ProofFixtureStatus::Rejected => 3,
+            Self::Pending => 1,
+            Self::Verified => 2,
+            Self::Rejected => 3,
         }
     }
 }
@@ -311,6 +311,7 @@ impl ProjectManifest {
         Ok(())
     }
 
+    #[must_use]
     pub fn project_id(&self) -> DeveloperProjectId {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_DEVELOPER_OS_MANIFEST_V1");
