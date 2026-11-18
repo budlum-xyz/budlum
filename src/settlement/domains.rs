@@ -1798,11 +1798,11 @@ fn domain_has_bound_authority(domain: &ConsensusDomain) -> bool {
         ConsensusKind::PoA
         | ConsensusKind::PoS
         | ConsensusKind::Bft
-        | ConsensusKind::StorageAttestation(_)
-        | ConsensusKind::AiInference
         | ConsensusKind::Dag
         | ConsensusKind::Poh
         | ConsensusKind::Pospace
+        | ConsensusKind::StorageAttestation(_)
+        | ConsensusKind::AiInference
         | ConsensusKind::Custom(_) => domain.validator_set_hash != [0u8; 32],
     }
 }
