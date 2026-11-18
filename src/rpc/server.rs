@@ -1526,25 +1526,46 @@ impl RpcServer {
     }
 
     fn account_proof_to_json(
-        bundle: &crate::persistence::state_trie::AccountProofBundle,
+        bundle: &crate::core::account::ConsensusAccountProof,
+        height: u64,
     ) -> serde_json::Value {
+        let leaf_to_json = |leaf: &crate::core::account::ConsensusTreeLeaf| {
+            serde_json::json!({
+                "address": Self::bytes32_to_0x(leaf.address.0),
+                "balance": Self::to_hex(leaf.balance),
+                "nonce": Self::to_hex(leaf.nonce),
+                "fracAttos": Self::to_hex(leaf.frac_attos),
+                "leafHash": Self::bytes32_to_0x(leaf.leaf_hash),
+                "siblings": leaf
+                    .siblings
+                    .iter()
+                    .map(|s| Self::bytes32_to_0x(*s))
+                    .collect::<Vec<_>>(),
+                "directions": leaf.directions.clone(),
+            })
+        };
         serde_json::json!({
-        // Named `proofRoot`, not `stateRoot`: this commits to the same
-        // accounts as the consensus root but under a different structure,
-        // and a client that conflates them will verify against the wrong
-        // value.
-                   "proofRoot": Self::bytes32_to_0x(bundle.root),
+        // `accountsRoot` is the consensus accounts subtree root: it is
+        // folded into the block state root body, so a light client checks
+        // it against the finalized block at `blockHeight` (via
+        // `bud_getGlobalHeaderProof`'s `stateRootBody` and
+        // `root_from_opening`) and then verifies the proof against it.
+                   "accountsRoot": Self::bytes32_to_0x(bundle.root),
+                   "blockHeight": Self::to_hex(height),
+                   "address": Self::bytes32_to_0x(bundle.address.0),
                    "present": bundle.present,
                    "balance": Self::to_hex(bundle.balance),
                    "nonce": Self::to_hex(bundle.nonce),
-                   "leafHash": Self::bytes32_to_0x(bundle.proof.leaf_hash),
+                   "fracAttos": Self::to_hex(bundle.frac_attos),
+                   "leafHash": Self::bytes32_to_0x(bundle.leaf_hash),
                    "siblings": bundle
-                       .proof
                        .siblings
                        .iter()
                        .map(|s| Self::bytes32_to_0x(*s))
                        .collect::<Vec<_>>(),
-                   "directions": bundle.proof.directions.clone(),
+                   "directions": bundle.directions.clone(),
+                   "predecessor": bundle.predecessor.as_ref().map(leaf_to_json),
+                   "successor": bundle.successor.as_ref().map(leaf_to_json),
                })
     }
 
@@ -2529,7 +2550,7 @@ impl BudlumApiServer for RpcServer {
         // gone). Reported as an error rather than an empty result: a caller
         // must never be able to read "we did not answer" as "the account is
         // absent", because absence here is a positive claim carrying a proof.
-        let bundle = self.chain.get_account_proof(&addr).await.ok_or_else(|| {
+        let (bundle, height) = self.chain.get_account_proof(&addr).await.ok_or_else(|| {
             ErrorObjectOwned::owned(-32603, "Account proof unavailable", None::<()>)
         })?;
         // A bundle that does not verify against its own root is a node bug,
@@ -2542,7 +2563,7 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        Ok(Self::account_proof_to_json(&bundle))
+        Ok(Self::account_proof_to_json(&bundle, height))
     }
 
     async fn send_raw_transaction(&self, tx: Transaction) -> Result<String, ErrorObjectOwned> {
