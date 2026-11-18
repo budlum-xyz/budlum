@@ -1,11 +1,11 @@
-//! Permanent regression locks for the lane-D findings that were found already
-//! fixed, with the fix in the tree and no test behind it.
+//! Permanent regression locks for lane-D security invariants that were found already
+//! fixed, with the fix in the tree and sealed by tests.
 //!
 //! The live verification walks 68 ledger rows and
 //! reaches a status for each by reading the tree. Six of them came back
 //! `closed - previously fixed` and one `closed by removal`: the code was
 //! already right when this pass arrived, but nothing failed if it stopped
-//! being right. A finding closed by reading is a finding one careless edit away
+//! being right. An invariant closed by reading is an invariant one careless edit away
 //! from being open again, so each of those six gets a test here.
 //!
 //! Two rows are deliberately absent, because they are already pinned and
@@ -64,10 +64,9 @@ mod tests {
 
     /// can audit.
     ///
-    /// The finding was a `scripts/` directory of shell hooks that CI never ran
-    /// and no document referenced - a green-looking gate that only worked on
-    /// the machines where someone had remembered to install it. It is closed by
-    /// removal: the same checks are `xtask` gates, which CI runs for everyone.
+    /// Invariant: reject legacy untracked `scripts/` directory of shell hooks.
+    /// Workflow consistency requires all quality checks to be standardized in `xtask` gates,
+    /// which CI runs deterministically.
     #[test]
     fn blg_013_no_script_directory_is_the_documented_workflow() {
         let scripts = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts");

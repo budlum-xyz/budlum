@@ -407,8 +407,8 @@ pub struct NodeConfig {
     // The `--evm-bridge-address` registration
     // is REMOVED. The EVM bridge leg has no live end-to-end route (the
     // off-chain half is a stub that refuses at broadcast), and a registration
-    // surface that reads as "production" while the leg cannot operate was the
-    // finding. Outbound EVM relay stays off until the real receipt flow
+    // surface that reads as "production" while the leg cannot operate is prevented.
+    // Outbound EVM relay stays off until the real receipt flow
     // lands; there is nothing safe to point the adapter at.
 }
 

@@ -79,6 +79,7 @@
 //! needs are in [`profile`].
 
 pub mod bitcoin_spv;
+pub mod da_sampling;
 pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
@@ -92,10 +93,14 @@ pub mod quorum;
 pub mod registry;
 pub mod selftest;
 pub mod spec;
+pub mod tendermint;
 pub mod versioning;
 pub mod zkvm_proof;
 
-pub use bitcoin_spv::{BitcoinSpvAdapter, PinnedBitcoinAnchor};
+pub use bitcoin_spv::{
+    sha256d, BitcoinHeader, BitcoinSpvAdapter, PinnedBitcoinAnchor, EVIDENCE_VERSION, HEADER_LEN,
+    MAX_FUTURE_SECONDS, MAX_HEADERS, REQUIRED_DEPTH,
+};
 pub use domain_bridge::{
     decode_external_evidence, encode_external_evidence, ExternalDomainFinalityBridge,
     EXTERNAL_DOMAIN_FINALITY_ADAPTER,
@@ -139,6 +144,11 @@ pub use spec::{
     AdapterDescriptor, AdapterError, AdapterId, DomainKey, ExternalFinalityAdapter,
     FinalityAttestation, FinalityKind, ProofSystem, RawConsensusEvidence, SecurityBacking,
     TimeUnit, TrustModel, VerificationPolicy,
+};
+pub use tendermint::{
+    quorum_threshold, validator_address_of, validator_set_commitment, vote_sign_bytes,
+    PinnedTendermintAnchor, TendermintCommitEvidence, TendermintFinalityAdapter,
+    TendermintSignature, TendermintValidator,
 };
 pub use versioning::{ForkError, VersionPolicy, VersionWindow};
 pub use zkvm_proof::{

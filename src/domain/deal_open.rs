@@ -674,9 +674,9 @@ mod tests {
         assert_eq!(state.get_balance(&operator()), 5_000_000 - BOND);
     }
 
-    /// The finding: the escrow left balances with no supply-denominator
-    /// counterpart, so every open deal looked like supply destruction and
-    /// opened that much minting headroom under the fixed cap.
+    /// Escrow balance invariant: the escrow must preserve supply-denominator
+    /// counterpart, so open deals never look like supply destruction or
+    /// open artificial minting headroom under the fixed cap.
     #[test]
     fn an_open_deal_moves_supply_into_escrow_without_changing_what_is_committed() {
         let manifest = manifest();

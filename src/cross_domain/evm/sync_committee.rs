@@ -589,9 +589,8 @@ pub fn verify_execution_block_finality(
 ///
 /// A rotation without the branch
 /// that proves `next_sync_committee` to the finalized state is REFUSED. The
-/// previous unconditional swap let any holder of a `SyncCommitteeState`
-/// inject a chosen committee on the next period - the finding's "controlled
-/// committee: always possible". The branch format (decision A) lands with
+/// previous unconditional swap could let an unauthenticated party
+/// inject a chosen committee on the next period. The branch format lands with
 /// the committee work; until then no rotation runs. `state` is taken so the
 /// signature does not pretend rotation is possible without evidence.
 ///

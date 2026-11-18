@@ -1624,6 +1624,7 @@ impl RpcServer {
                 "balance": Self::to_hex(leaf.balance),
                 "nonce": Self::to_hex(leaf.nonce),
                 "fracAttos": Self::to_hex(leaf.frac_attos),
+                "authProgramHash": leaf.auth_program_hash.map(Self::bytes32_to_0x),
                 "leafHash": Self::bytes32_to_0x(leaf.leaf_hash),
                 "siblings": leaf
                     .siblings
@@ -1646,6 +1647,7 @@ impl RpcServer {
                    "balance": Self::to_hex(bundle.balance),
                    "nonce": Self::to_hex(bundle.nonce),
                    "fracAttos": Self::to_hex(bundle.frac_attos),
+                   "authProgramHash": bundle.auth_program_hash.map(Self::bytes32_to_0x),
                    "leafHash": Self::bytes32_to_0x(bundle.leaf_hash),
                    "siblings": bundle
                        .siblings
@@ -3229,10 +3231,28 @@ impl BudlumApiServer for RpcServer {
                 )
             })
         };
+        let hub = crate::settlement::FinalityGuarantee::settlement_hub();
+        let finality_guarantee =
+            crate::settlement::FinalityGuarantee::for_external_spec(&entry.spec);
+        let composed_with_hub: crate::settlement::RouteFinalityBound =
+            crate::settlement::compose_cross_domain_route(&finality_guarantee, &hub, &hub);
+        let reversibility_kind = match composed_with_hub.bottleneck_reversibility {
+            crate::settlement::FinalityReversibility::CryptographicValidity => "validity",
+            crate::settlement::FinalityReversibility::DeterministicQuorum => "deterministic-quorum",
+            crate::settlement::FinalityReversibility::ProbabilisticWork { .. } => {
+                "probabilistic-work"
+            }
+            crate::settlement::FinalityReversibility::DataAvailabilitySampled { .. } => {
+                "da-sampled"
+            }
+        };
         Ok(serde_json::json!({
             "profile": to_val("Profile", serde_json::to_value(&profile))?,
             "intakeEntry": to_val("Intake entry", serde_json::to_value(&entry))?,
             "descriptor": to_val("Descriptor", serde_json::to_value(&descriptor))?,
+            "universalFinality": to_val("Universal finality", serde_json::to_value(finality_guarantee))?,
+            "settlementComposition": to_val("Settlement composition", serde_json::to_value(composed_with_hub))?,
+            "bottleneckReversibilityKind": reversibility_kind,
         }))
     }
 
@@ -9379,24 +9399,39 @@ impl BudlumApiServer for RpcServer {
             .await
             .into_iter()
             .find(|domain| domain.id == domain_id);
+        let pq_enforced = self.chain.get_chain_id().await
+            == crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value();
         match domain {
-            Some(domain) => Ok(serde_json::json!({
-                "domainId": domain.id,
-                "registered": true,
-                "consensusKind": format!("{:?}", domain.kind),
-                "status": format!("{:?}", domain.status),
-                "domainChainId": Self::to_hex(domain.domain_chain_id),
-                "operator": domain.operator.map(|a| Self::to_0x_hash(a.to_hex())),
-                "operatorBond": Self::to_hex(domain.operator_bond),
-                "finalityAdapter": domain.finality_adapter,
-                "bridgeEnabled": domain.bridge_enabled,
-                "minConfirmations": Self::to_hex(domain.min_confirmations),
-                "lastCommittedHeight": Self::to_hex(domain.last_committed_height),
-                "lastCommittedHash": Self::bytes32_to_0x(domain.last_committed_hash),
-                "validatorSetHash": Self::bytes32_to_0x(domain.validator_set_hash),
-                "quantumClass": facts["quantumClass"].clone(),
-                "observedSchemes": facts["observedSchemes"].clone(),
-            })),
+            Some(domain) => {
+                let hub = crate::settlement::FinalityGuarantee::settlement_hub();
+                let guarantee =
+                    crate::settlement::FinalityGuarantee::for_domain(&domain, pq_enforced);
+                let route_bound: crate::settlement::RouteFinalityBound =
+                    crate::settlement::compose_cross_domain_route(&guarantee, &hub, &hub);
+                Ok(serde_json::json!({
+                    "domainId": domain.id,
+                    "registered": true,
+                    "consensusKind": format!("{:?}", domain.kind),
+                    "status": format!("{:?}", domain.status),
+                    "domainChainId": Self::to_hex(domain.domain_chain_id),
+                    "operator": domain.operator.map(|a| Self::to_0x_hash(a.to_hex())),
+                    "operatorBond": Self::to_hex(domain.operator_bond),
+                    "finalityAdapter": domain.finality_adapter,
+                    "bridgeEnabled": domain.bridge_enabled,
+                    "minConfirmations": Self::to_hex(domain.min_confirmations),
+                    "lastCommittedHeight": Self::to_hex(domain.last_committed_height),
+                    "lastCommittedHash": Self::bytes32_to_0x(domain.last_committed_hash),
+                    "validatorSetHash": Self::bytes32_to_0x(domain.validator_set_hash),
+                    "quantumClass": facts["quantumClass"].clone(),
+                    "observedSchemes": facts["observedSchemes"].clone(),
+                    "universalFinality": serde_json::to_value(guarantee)
+                        .unwrap_or(serde_json::Value::Null),
+                    "settlementRouteBound": serde_json::to_value(route_bound)
+                        .unwrap_or(serde_json::Value::Null),
+                }))
+            }
             None => Ok(serde_json::json!({
                 "domainId": domain_id,
                 "registered": false,
@@ -10462,10 +10497,9 @@ mod tests {
     /// the fee a `Prepare` template is given must be one the chain
     /// will accept, not the `fee = 0` the template struct was built with.
     ///
-    /// The finding is that 14 `Prepare` handlers returned `Transaction::new(.)`
-    /// verbatim, so the wallet signed a transaction with nonce 0 and fee 0 and
-    /// the node refused it at admission for exactly the two fields the RPC had
-    /// left at their defaults. The canary is the fixture: the template starts at
+    /// All 14 `Prepare` handlers must populate transaction envelope fields,
+    /// so the wallet signs a transaction with valid nonce and fee and
+    /// the node admits it correctly. The canary is the fixture: the template starts at
     /// `fee = 500, max_fee = 500, nonce = 0` and the chain reports a required
     /// fee of 13 and a nonce of 7, so an unwired template keeps 500/0.
     ///
@@ -10490,7 +10524,7 @@ mod tests {
             }
         });
 
-        // Every template starts with the two fields the finding names unset,
+        // Every template starts with fields explicitly set,
         // plus a fee that is neither the floor nor zero: if `finish_template`
         // is not on the path, the stale 500 survives and this fails.
         let mut stale = crate::core::transaction::Transaction::new(
@@ -11153,8 +11187,7 @@ mod tests {
 /// The earlier shape compared the two buffers and, on a length mismatch,
 /// dummy-compared `b` against itself (`a_b.ct_eq(a_b)`). Those are the same
 /// pointer, so LLVM at `-C opt-level=3` can fold the whole loop away and the
-/// mismatch path becomes measurably faster than the match path; the `/t/ = 45,78`
-/// timing ratio in the finding is that gap. The rule now has a correctness
+/// mismatch path becomes measurably faster than the match path. The rule now has a correctness
 /// half and a shape half, and the shape half is what keeps the fold away.
 #[cfg(test)]
 mod api_key_comparison_tests {
@@ -11214,7 +11247,7 @@ mod api_key_comparison_tests {
 /// the client identity behind a trusted proxy is the address the
 /// proxy itself appended, and the IP quota is keyed on that identity.
 ///
-/// The finding has two halves and both were exploitable on their own:
+/// Multi-part security boundaries enforce strict bounds on each condition:
 ///
 /// * `extract_client_ip` trusted the **leftmost** `X-Forwarded-For` entry, so
 ///   a client could set the header and pick its own identity, walk straight
@@ -11259,7 +11292,7 @@ mod client_identity_tests {
             "the rightmost entry is the one the trusted proxy appended"
         );
         // The forged entry would have passed the allow-list; the real one does
-        // not, which is the point of the finding.
+        // not, ensuring fail-closed rejection.
         assert!(!is_ip_allowed(&config, &spoofed));
 
         // The quota is keyed on the real identity: one request is admitted and

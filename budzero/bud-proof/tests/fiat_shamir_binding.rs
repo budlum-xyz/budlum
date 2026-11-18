@@ -143,8 +143,7 @@ fn both_sides_absorb_the_same_items_before_the_first_challenge() {
     }
 
     // public_values must be the *last* thing absorbed before the challenges.
-    // Anything absorbed after it would be outside the binding that the six-zkVM
-    // findings were all about.
+    // Anything absorbed after it would be outside the cryptographic binding.
     for (name, body) in [("prover", PROVER), ("verifier", VERIFIER)] {
         let lines = code(body);
         let stop = lines
@@ -408,14 +407,42 @@ fn optional_openings_carry_a_local_shape_check() {
 /// `degree_bits` comes out of the proof bytes and is used as a shift amount.
 #[test]
 fn degree_bits_is_bounded_before_it_is_shifted() {
-    let bound = first(VERIFIER, "> MAX_VERIFIER_DEGREE_BITS");
-    let shift = first(VERIFIER, "let degree = 1 << degree_bits");
+    // The split verifier has two independent entry paths that compute a
+    // degree. Check each body separately so a guard in one cannot mask a
+    // missing guard in the other.
+    for (name, end) in [
+        ("pub fn shape_for_air", "fn derive_transcript"),
+        ("fn derive_transcript", "pub fn verify_pcs_openings"),
+    ] {
+        let body = VERIFIER
+            .split_once(name)
+            .expect("verifier function must exist")
+            .1
+            .split_once(end)
+            .expect("next verifier function must exist")
+            .0;
+        let bound = first(body, "if degree_bits > MAX_VERIFIER_DEGREE_BITS");
+        let refusal = first(body, "return Err(VerificationError::InvalidProofShape)");
+        let shift = first(body, "let degree = 1usize << degree_bits");
+        assert!(
+            bound < refusal && refusal < shift,
+            "{name} must reject an excessive degree before shifting it"
+        );
+    }
+    let transcript = VERIFIER
+        .split_once("fn derive_transcript")
+        .expect("transcript derivation must exist")
+        .1
+        .split_once("pub fn verify_pcs_openings")
+        .expect("PCS verifier must exist")
+        .0;
     assert!(
-        bound < shift,
-        "`degree_bits` is shifted at line {} before being bounded at line {}; \
-         a corrupt proof would overflow the shift and abort the node",
-        shift + 1,
-        bound + 1
+        first(transcript, ".saturating_add(shape.log_num_quotient_chunks)")
+            < first(
+                transcript,
+                "1usize << (degree_bits + shape.log_num_quotient_chunks)"
+            ),
+        "the combined degree must be bounded before its shift"
     );
 }
 

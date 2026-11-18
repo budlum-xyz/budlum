@@ -2,8 +2,11 @@ use budlum_core::chain::blockchain::Blockchain;
 use budlum_core::chain::chain_actor::ChainActor;
 use budlum_core::chain::snapshot::PruningManager;
 use budlum_core::cli::{ConsensusType, NodeConfig};
+use budlum_core::consensus::dag::{DAGConfig, DagEngine};
 use budlum_core::consensus::poa::{PoAConfig, PoAEngine};
+use budlum_core::consensus::poh::{PohConfig, PohEngine};
 use budlum_core::consensus::pos::{PoSConfig, PoSEngine};
+use budlum_core::consensus::pospace::{PoSpaceConfig, PoSpaceEngine};
 use budlum_core::consensus::pow::PoWEngine;
 use budlum_core::consensus::ConsensusEngine;
 use budlum_core::core::address::Address;
@@ -11,7 +14,8 @@ use budlum_core::core::transaction::Transaction;
 use budlum_core::crypto::primitives::{KeyPair, ValidatorKeys};
 use budlum_core::crypto::signer::ConsensusSigner;
 use budlum_core::domain::{
-    BftDomainPlugin, ConsensusKind, PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin,
+    BftDomainPlugin, ConsensusKind, DagDomainPlugin, PoADomainPlugin, PoSDomainPlugin,
+    PoWDomainPlugin, PohDomainPlugin, PospaceDomainPlugin,
 };
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
@@ -1489,17 +1493,24 @@ async fn async_main() {
                     ))
                 }
             }
+            ConsensusKind::Dag => Arc::new(DagEngine::new(DAGConfig::default())),
+            ConsensusKind::Poh => Arc::new(PohEngine::new(PohConfig::default())),
+            ConsensusKind::Pospace => Arc::new(PoSpaceEngine::new(PoSpaceConfig::default())),
             _ => continue,
         };
 
-        let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> =
-            match &domain.kind {
-                ConsensusKind::PoW => std::sync::Arc::new(PoWDomainPlugin::new(plugin_engine)),
-                ConsensusKind::PoS => std::sync::Arc::new(PoSDomainPlugin::new(plugin_engine)),
-                ConsensusKind::PoA => std::sync::Arc::new(PoADomainPlugin::new(plugin_engine)),
-                ConsensusKind::Bft => std::sync::Arc::new(BftDomainPlugin::new(plugin_engine)),
-                _ => continue,
-            };
+        let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> = match &domain
+            .kind
+        {
+            ConsensusKind::PoW => std::sync::Arc::new(PoWDomainPlugin::new(plugin_engine)),
+            ConsensusKind::PoS => std::sync::Arc::new(PoSDomainPlugin::new(plugin_engine)),
+            ConsensusKind::PoA => std::sync::Arc::new(PoADomainPlugin::new(plugin_engine)),
+            ConsensusKind::Bft => std::sync::Arc::new(BftDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Dag => std::sync::Arc::new(DagDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Poh => std::sync::Arc::new(PohDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Pospace => std::sync::Arc::new(PospaceDomainPlugin::new(plugin_engine)),
+            _ => continue,
+        };
         if let Err(e) = blockchain.plugin_registry.register(domain.id, plugin) {
             println!("Plugin registration failed (domain {}): {}", domain.id, e);
         }

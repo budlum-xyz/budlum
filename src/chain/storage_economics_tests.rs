@@ -650,7 +650,7 @@ mod tests {
     /// The operator-RPC deal door runs the same authority rule the in-block
     /// path runs: a payer that does not own the manifest cannot place a deal
     /// over it, and the refusal leaves balances and the registry untouched
-    /// (Review 9 / CWE-862 - ownership gate for storage-deal open).
+    /// (ownership gate for storage-deal open).
     #[test]
     fn rpc_deal_open_refuses_a_payer_that_does_not_own_the_manifest() {
         let consensus = Arc::new(PoWEngine::new(0));
