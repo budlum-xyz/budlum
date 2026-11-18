@@ -2076,8 +2076,37 @@ mod tests {
             voting_power: 100,
         }];
         let valset_hash = validator_set_commitment(&validators);
-        let block_hash = [0x5au8; 32];
+        let app_hash = [0x5au8; 32];
         let parts_hash = [0x3cu8; 32];
+        let mut commit = TendermintCommitEvidence {
+            chain_id: "noble-1".to_string(),
+            height: 100,
+            round: 0,
+            block_hash: [0u8; 32],
+            parts_total: 1,
+            parts_hash,
+            version_block: 11,
+            last_block_hash: [0x11u8; 32],
+            last_parts_total: 1,
+            last_parts_hash: [0x22u8; 32],
+            last_commit_hash: [0x33u8; 32],
+            data_hash: [0x44u8; 32],
+            validators_hash: valset_hash,
+            next_validators_hash: valset_hash,
+            consensus_hash: [0x55u8; 32],
+            app_hash,
+            last_results_hash: [0x66u8; 32],
+            evidence_hash: [0x77u8; 32],
+            proposer_address: val_addr,
+            commit_time: 1_700_000_000,
+            commit_time_nanos: 0,
+            validators,
+            signatures: Vec::new(),
+        };
+        // Seal the header first: the block id the validators sign is the
+        // header's own hash, so it cannot be chosen before the header exists.
+        commit.block_hash = commit.header_hash();
+        let block_hash = commit.block_hash;
         let sign_bytes = vote_sign_bytes(
             "noble-1",
             100,
@@ -2088,23 +2117,12 @@ mod tests {
             (1_700_000_000, 0),
         );
         let sig = sk.sign(&sign_bytes);
-        let commit = TendermintCommitEvidence {
-            chain_id: "noble-1".to_string(),
-            height: 100,
-            round: 0,
-            block_hash,
-            parts_total: 1,
-            parts_hash,
-            app_hash: block_hash,
-            commit_time: 1_700_000_000,
-            validators,
-            signatures: vec![TendermintSignature {
-                address: val_addr,
-                timestamp_seconds: 1_700_000_000,
-                timestamp_nanos: 0,
-                signature: sig.to_bytes().to_vec(),
-            }],
-        };
+        commit.signatures = vec![TendermintSignature {
+            address: val_addr,
+            timestamp_seconds: 1_700_000_000,
+            timestamp_nanos: 0,
+            signature: sig.to_bytes().to_vec(),
+        }];
         let payload = bincode::serialize(&commit).expect("encode commit");
         let mk_req = |validator_set_hash: Option<[u8; 32]>| {
             let spec = AdapterSpec::TendermintCommit {
@@ -2116,14 +2134,19 @@ mod tests {
             RegistrationRequest {
                 golden: RawConsensusEvidence {
                     adapter: id,
-                    evidence_version: 1,
+                    evidence_version:
+                        crate::cross_domain::external::tendermint::EVIDENCE_VERSION,
                     network: "noble-testnet".to_string(),
                     payload: payload.clone(),
                     declared_height: 100,
-                    declared_root: block_hash,
+                    declared_root: app_hash,
                     submitter: addr(1),
                 },
-                versions: VersionPolicy::single(id, 1, 0),
+                versions: VersionPolicy::single(
+                    id,
+                    crate::cross_domain::external::tendermint::EVIDENCE_VERSION,
+                    0,
+                ),
                 economics: IntakeState::conservative_economics(1_000_000),
                 policy: VerificationPolicy::strict(1_700_000_010),
                 bond_atoms: economics_bond(),

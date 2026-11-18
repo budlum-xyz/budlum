@@ -43,6 +43,27 @@
 //!   has **no round field at all** in its sign bytes. An encoder that always
 //!   emits `round = 0` produces bytes nobody ever signed.
 //!
+//! # The block hash is recomputed, because the header is what was signed
+//!
+//! A commit signs a `block_id`, not a header. Everything else in the evidence -
+//! `app_hash`, `validators_hash`, `next_validators_hash`, the commit time - is
+//! a field somebody typed into a payload. An adapter that reports `app_hash` as
+//! the attested state root, without tying it to the signed `block_id.hash`, is
+//! reporting an unauthenticated number with a signature's authority.
+//!
+//! So the header travels with the evidence and is rehashed here, with
+//! CometBFT's own rule (`types/block.go`, `Header.Hash()`): a Merkle tree over
+//! fourteen leaves, each leaf being the protobuf encoding of a wrapper -
+//! `StringValue` for the chain id, `Int64Value` for the height, `BytesValue`
+//! for each hash and the proposer address - with the version, the timestamp and
+//! the last block id as their own messages, and the empty-tree/half-split rules
+//! of RFC-6962. The rule reproduces the live `noble-1` block hash
+//! `8B3E0A7F...5583F394` byte for byte, and that is a test here.
+//!
+//! With the header hash equal to the signed `block_id.hash`, `app_hash` and
+//! `validators_hash` stop being claims and become commitments: they are leaves
+//! of the tree the validators signed.
+
 //! # What this adapter does not do
 //!
 //! - No light-client skip. `required_depth` is one: a single verified commit is
@@ -81,7 +102,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// The evidence version this adapter reads.
-pub const EVIDENCE_VERSION: u32 = 1;
+///
+/// Version 2 is the version that carries the header. Version 1 carried a block
+/// hash, an app hash and a validator set and no header at all; that layout
+/// cannot prove what it attested (see the module note on the header hash), so
+/// those payloads are refused as an unread version instead of being
+/// reinterpreted. The layout is a bincode struct, so a v1 payload does not
+/// decode as a v2 one either - both paths fail closed.
+pub const EVIDENCE_VERSION: u32 = 2;
 
 /// A ceiling on the encoded payload, checked before deserialization.
 ///
@@ -131,24 +159,113 @@ pub struct PinnedTendermintAnchor {
     pub validator_set_hash: [u8; 32],
 }
 
-/// Canonical domain-separated commitment over a Tendermint validator set,
-/// sorted by validator address so ordering permutations produce one digest.
+/// CometBFT's `ValidatorSet.Hash()`, recomputed from the set.
+///
+/// The rule, from `types/validator.go` and `crypto/merkle`: each validator is a
+/// `SimpleValidator{pub_key, voting_power}` protobuf, leaves are ordered by
+/// address, and the tree is RFC-6962. Using the chain's own rule rather than a
+/// Budlum-specific digest matters twice over: the value is the one the header
+/// commits to in `validators_hash`, so an operator can pin it straight off any
+/// explorer, and the adapter can check the set against the header instead of
+/// only against its own arithmetic.
+#[must_use]
+pub fn validator_set_hash(validators: &[TendermintValidator]) -> [u8; 32] {
+    let mut ordered: Vec<TendermintValidator> = validators.to_vec();
+    ordered.sort_by_key(|v| v.address);
+    let leaves: Vec<Vec<u8>> = ordered.iter().map(simple_validator_bytes).collect();
+    merkle_root(&leaves)
+}
+
+/// The `SimpleValidator` protobuf bytes one leaf commits to.
+fn simple_validator_bytes(validator: &TendermintValidator) -> Vec<u8> {
+    let mut public_key = Vec::with_capacity(2 + PUBLIC_KEY_LEN);
+    // PublicKey.ed25519 = field 1, wire type 2.
+    public_key.push((1 << 3) | 2);
+    public_key.push(PUBLIC_KEY_LEN as u8);
+    public_key.extend_from_slice(&validator.public_key);
+
+    let mut out = Vec::with_capacity(4 + public_key.len() + 10);
+    out.push((1 << 3) | 2);
+    put_varint(&mut out, public_key.len() as u64);
+    out.extend_from_slice(&public_key);
+    put_scalar(&mut out, 2, validator.voting_power);
+    out
+}
+
+fn merkle_leaf(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update([0u8]);
+    hasher.update(bytes);
+    hasher.finalize().into()
+}
+
+fn merkle_inner(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update([1u8]);
+    hasher.update(left);
+    hasher.update(right);
+    hasher.finalize().into()
+}
+
+fn merkle_root(items: &[Vec<u8>]) -> [u8; 32] {
+    match items.len() {
+        0 => Sha256::digest([]).into(),
+        1 => merkle_leaf(&items[0]),
+        len => {
+            let split = split_point(len);
+            merkle_inner(&merkle_root(&items[..split]), &merkle_root(&items[split..]))
+        }
+    }
+}
+
+/// The largest power of two strictly below `len`, CometBFT's split point.
+fn split_point(len: usize) -> usize {
+    let highest = 1usize << (usize::BITS - 1 - len.leading_zeros());
+    if highest == len {
+        highest >> 1
+    } else {
+        highest
+    }
+}
+
+/// `google.protobuf.StringValue`.
+fn proto_string_value(value: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + value.len());
+    put_bytes(&mut out, 1, value.as_bytes());
+    out
+}
+
+/// `google.protobuf.Int64Value`.
+fn proto_int64_value(value: i64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(11);
+    put_scalar(&mut out, 1, value as u64);
+    out
+}
+
+/// `google.protobuf.BytesValue`, the wrapper `cdcEncode` uses for header hashes.
+fn proto_bytes_value(value: &[u8]) -> Vec<u8> {
+    // `cdcEncode` returns nil for an empty item and proto3 omits an empty
+    // bytes field, so an empty header hash contributes an empty leaf - not a
+    // `0A 00` that would hash to something else.
+    let mut out = Vec::with_capacity(2 + value.len());
+    if !value.is_empty() {
+        put_bytes(&mut out, 1, value);
+    }
+    out
+}
+
+/// Alias of [`validator_set_hash`], kept for the name this module's first cut
+/// used and for the callers that pinned it.
+///
+/// The original implementation was a Budlum-domain-separated digest. That was
+/// the wrong artefact to pin: it could not be read off the chain, and it could
+/// not be checked against the header's own `validators_hash`. A day of history
+/// is the only reason the old name survives; both names now mean "the chain's
+/// `ValidatorSet.Hash()`", and no stored registration exists that pinned the
+/// old bytes.
 #[must_use]
 pub fn validator_set_commitment(validators: &[TendermintValidator]) -> [u8; 32] {
-    let mut ordered = validators.to_vec();
-    ordered.sort_by_key(|v| v.address);
-    let count_le = (ordered.len() as u64).to_le_bytes();
-    let mut flat = Vec::with_capacity(
-        ordered
-            .len()
-            .saturating_mul(ADDRESS_LEN + PUBLIC_KEY_LEN + 8),
-    );
-    for v in &ordered {
-        flat.extend_from_slice(&v.address);
-        flat.extend_from_slice(&v.public_key);
-        flat.extend_from_slice(&v.voting_power.to_le_bytes());
-    }
-    crate::core::hash::hash_fields_bytes(&[b"BDLM_TM_COMMIT_VALSET_V1", &count_le, &flat])
+    validator_set_hash(validators)
 }
 
 /// One validator of the set the commit is verified against.
@@ -196,14 +313,34 @@ pub struct TendermintCommitEvidence {
     pub parts_total: u32,
     /// The part-set hash. Signed, so it must be present and exact.
     pub parts_hash: [u8; 32],
-    /// The application state root committed at this height. This is what the
-    /// attestation hands out as `state_root`.
+    /// The header's version block (the `block` field of `Version`).
+    pub version_block: u64,
+    /// The parent block's id, as the header carries it.
+    pub last_block_hash: [u8; 32],
+    pub last_parts_total: u32,
+    pub last_parts_hash: [u8; 32],
+    /// The remaining header hashes. They are leaves of the header hash, so they
+    /// are as authenticated as the block id itself.
+    pub last_commit_hash: [u8; 32],
+    pub data_hash: [u8; 32],
+    /// The header's validator-set root, `ValidatorSet.Hash()`. Countersigned
+    /// twice over: it is inside the header hash, and it is recomputed from
+    /// `validators` in [`TendermintCommitEvidence::validate_shape`]'s caller.
+    pub validators_hash: [u8; 32],
+    pub next_validators_hash: [u8; 32],
+    pub consensus_hash: [u8; 32],
+    /// The application state root committed at this height. Inside the header
+    /// hash, so this - and only this - is what the attestation may report.
     pub app_hash: [u8; 32],
+    pub last_results_hash: [u8; 32],
+    pub evidence_hash: [u8; 32],
+    pub proposer_address: [u8; ADDRESS_LEN],
     /// The commit time in seconds since the Unix epoch, from the header. Used
-    /// for the attestation's `finalized_at` and for staleness, and never
-    /// compared to the individual vote timestamps: those legitimately spread
-    /// over the round.
+    /// for the attestation's `finalized_at` and for staleness.
     pub commit_time: u64,
+    /// The header time's sub-second part. Signed through the header hash, and
+    /// carried because the hash covers it.
+    pub commit_time_nanos: u32,
     pub validators: Vec<TendermintValidator>,
     pub signatures: Vec<TendermintSignature>,
 }
@@ -318,6 +455,24 @@ impl TendermintCommitEvidence {
                 )));
             }
         }
+        // The set must be the one the header commits to. Deliberately checked
+        // after the per-entry rules: an entry whose address is not its key, or a
+        // doubled entry, is a more precise diagnosis than "the root disagrees",
+        // and both are the same bug seen from two angles.
+        if self.commit_time_nanos >= NANOS_PER_SECOND {
+            return Err(rule(format!(
+                "commit_time carries {} nanoseconds, which is not a timestamp",
+                self.commit_time_nanos
+            )));
+        }
+        let set_hash = validator_set_hash(&self.validators);
+        if set_hash != self.validators_hash {
+            return Err(rule(format!(
+                "the supplied validator set hashes to {} but the header's validator-set root is {}",
+                hex::encode(set_hash),
+                hex::encode(self.validators_hash)
+            )));
+        }
         let mut seen_signers: std::collections::BTreeSet<[u8; ADDRESS_LEN]> =
             std::collections::BTreeSet::new();
         for (index, signature) in self.signatures.iter().enumerate() {
@@ -358,6 +513,48 @@ impl TendermintCommitEvidence {
     #[must_use]
     pub fn quorum_threshold(&self) -> u128 {
         quorum_threshold(self.total_voting_power())
+    }
+
+    /// The block hash implied by the header fields, `Header.Hash()`.
+    ///
+    /// Fourteen leaves, RFC-6962, exactly as CometBFT builds it. Equal to the
+    /// commit's `block_hash` means the header in this payload is the header the
+    /// validators signed - which is what makes `app_hash` and `validators_hash`
+    /// attestable at all.
+    #[must_use]
+    pub fn header_hash(&self) -> [u8; 32] {
+        let mut version = Vec::new();
+        put_scalar(&mut version, 1, self.version_block);
+
+        let mut timestamp = Vec::new();
+        put_scalar(&mut timestamp, 1, self.commit_time);
+        put_scalar(&mut timestamp, 2, u64::from(self.commit_time_nanos));
+
+        let mut last_part_set = Vec::new();
+        put_scalar(&mut last_part_set, 1, u64::from(self.last_parts_total));
+        put_bytes(&mut last_part_set, 2, &self.last_parts_hash);
+
+        let mut last_block_id = Vec::new();
+        put_bytes(&mut last_block_id, 1, &self.last_block_hash);
+        put_bytes(&mut last_block_id, 2, &last_part_set);
+
+        let leaves = vec![
+            version,
+            proto_string_value(&self.chain_id),
+            proto_int64_value(self.height as i64),
+            timestamp,
+            last_block_id,
+            proto_bytes_value(&self.last_commit_hash),
+            proto_bytes_value(&self.data_hash),
+            proto_bytes_value(&self.validators_hash),
+            proto_bytes_value(&self.next_validators_hash),
+            proto_bytes_value(&self.consensus_hash),
+            proto_bytes_value(&self.app_hash),
+            proto_bytes_value(&self.last_results_hash),
+            proto_bytes_value(&self.evidence_hash),
+            proto_bytes_value(&self.proposer_address),
+        ];
+        merkle_root(&leaves)
     }
 
     /// The canonical vote bytes for one signature: exactly what the validator
@@ -536,10 +733,11 @@ impl TendermintFinalityAdapter {
         }
     }
 
-    /// Consensus-intake constructor: enforces a governance-pinned validator-set
-    /// commitment and requires the attested root to match the signed `block_hash`
-    /// (fails closed with `AdapterError::Unavailable` if `validator_set_hash` is
-    /// absent or zero).
+    /// Consensus-intake constructor: enforces a governance-pinned validator
+    /// set, given as the chain's own `ValidatorSet.Hash()` - the value the
+    /// header carries in its `validators_hash` field, so an operator can copy
+    /// it off any explorer rather than computing a Budlum-specific digest.
+    /// Fails closed with [`AdapterError::Unavailable`] when no pin is given.
     #[must_use]
     pub fn new_pinned(network: &str, chain_id: &str, validator_set_hash: Option<[u8; 32]>) -> Self {
         let mut adapter = Self::new(network, chain_id);
@@ -629,28 +827,41 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
             )));
         }
 
-        // Consensus-admitted domains must verify against a governance-pinned
-        // validator set so a submitter cannot fabricate a private Ed25519 set,
-        // and must bind the attested root to the validator-signed `block_hash`
-        // because CometBFT `CanonicalVote` signs `block_id.hash`, not `app_hash`.
+        // The header is what the commit signed, so the header is recomputed.
+        // Without this line every other header field - the app hash, the
+        // validator-set root, the commit time - is a number the submitter typed
+        // next to a real signature.
+        let observed_block_hash = decoded.header_hash();
+        if observed_block_hash != decoded.block_hash {
+            return Err(rule(format!(
+                "the header hashes to {} but the commit signed block id {}: the payload's header is not the header that was signed",
+                hex::encode(observed_block_hash),
+                hex::encode(decoded.block_hash)
+            )));
+        }
+
+        // With the header hash bound, `app_hash` is a leaf of the tree the
+        // validators signed and can be attested directly. Consensus-admitted
+        // domains still must match a governance-pinned validator set, which the
+        // header's own `validators_hash` ties to the set supplied here.
         let attested_root = if self.require_pinned_set {
             let Some(expected_set) = self.pinned_validator_set else {
                 return Err(AdapterError::Unavailable {
                     reason: "no Tendermint validator set is pinned for this domain".to_string(),
                 });
             };
-            let observed_set = validator_set_commitment(&decoded.validators);
+            let observed_set = validator_set_hash(&decoded.validators);
             if observed_set != expected_set {
                 return Err(rule(
-                    "commit validator set does not match the governance-pinned validator_set_hash",
+                    "commit validator set does not match the governance-pinned validator-set root",
                 ));
             }
-            if decoded.app_hash != decoded.block_hash {
+            if decoded.validators_hash != expected_set {
                 return Err(rule(
-                    "consensus-pinned single commit binds block_hash only; unproved app_hash refused",
+                    "the header's validator-set root is not the pinned set, so the commit is not signed by the pinned validators",
                 ));
             }
-            decoded.block_hash
+            decoded.app_hash
         } else {
             decoded.app_hash
         };
@@ -885,7 +1096,7 @@ mod tests {
     /// timestamps, which were e.g. `2026-11-18T07:18:55.949535266Z` for the
     /// first signer. They are carried numerically because the adapter's wire
     /// shape is numeric; nothing here parses calendar text.
-    const NOBLE_COMMIT_JSON: &str = r#"{"chain_id":"noble-1","height":64239414,"round":0,"block_hash":"8B3E0A7F14EF04EC5A3DE98CE214249D9F49711DAACD2BAB433BA9785583F394","parts_total":1,"app_hash":"789D3D6D36565DDA8721303A0CC1067E1D34F5A67800FB941ACB077382F3BED2","commit_time_seconds":1794986334,"validators":[{"address":"417E75EF24DE0207B9BFD235331F4897AD28738A","public_key":"233B590A7507763A0583CE319077EE0AE134F7148091C25B25E814ED5A058D7E","voting_power":1},{"address":"4E4BF0D6B90FCEC903166CA9909EDA38871BC7C5","public_key":"41B7B382A21E603DE1309C95449F2DEA84A1ED7F9649840FE8DA6D0D7447BDDB","voting_power":1},{"address":"7259FA8ABEE6365224E8917262A077D8F21C215E","public_key":"A93CEEDCBB78EFBB56EBBC0962929D9D93F5DFCF0AC8AED7DA922334C1E791D3","voting_power":1},{"address":"913A87C9053EE31DC75DBC0711499841F4FE41D2","public_key":"C3FA937121CB48D92607E2813C9E11E664C5B25D4808C00A2FACA8D77887C279","voting_power":1},{"address":"9814A41D7ADECFC8686C1B551CFE12A5529CCF47","public_key":"EAC07122ADBDDEF6FE94FD95172E3189C30085D499645D9BABA6AD00FF01B4A3","voting_power":1},{"address":"D1AD8B58C084D0E6014ACEADD5B44E9458F11A58","public_key":"BF8F447AF3D9BE00578A370D001F843C89782025F886482751A2832E5320AEFF","voting_power":1},{"address":"F21F8BD8AB575EC5D5B3B691080830CCEC51BD1D","public_key":"49A8CD065495568AE199F166CF8F7F3170D0D036E8E9CEA8A2C869F79F1F3403","voting_power":1}],"signatures":[{"validator_address":"4E4BF0D6B90FCEC903166CA9909EDA38871BC7C5","timestamp":"2026-11-18T07:18:55.949535266Z","signature":"FA5C29908B26F44BEF52173B81F681D08681BE67044D30B7B6EA316B06DB665C82E26C656C275839A15DDBCD137F7430B5529545A75A5DABA4FACB42980DF407","timestamp_seconds":1794986335,"timestamp_nanos":949535266},{"validator_address":"7259FA8ABEE6365224E8917262A077D8F21C215E","timestamp":"2026-11-18T07:18:55.91613621Z","signature":"5CC6DDE372ECD598B1A2919CE182F837ED077F46FFD9729CC4E0E90649EADE070B4CD8E982F9BEEE4FF943AF66F55F4398414FEC0032160E13567A03153FF302","timestamp_seconds":1794986335,"timestamp_nanos":916136210},{"validator_address":"913A87C9053EE31DC75DBC0711499841F4FE41D2","timestamp":"2026-11-18T07:18:55.972621579Z","signature":"0DB93F558994717907001F0CDFFFBB774C09B136A67FCE121D711532DA87D45C4665D6C89011268EE0AE7C125A31893AC28E8B7EE2835C82E50B27166583310D","timestamp_seconds":1794986335,"timestamp_nanos":972621579},{"validator_address":"D1AD8B58C084D0E6014ACEADD5B44E9458F11A58","timestamp":"2026-11-18T07:18:55.975841154Z","signature":"BFC42102253DC47C97B1C3BE0978574C95AE0251B585083EA1B4501FC263A3AF34CA091914DB18FA816AB392CEF15C781E8B45482BA58D79B06C3F5BF596A703","timestamp_seconds":1794986335,"timestamp_nanos":975841154},{"validator_address":"F21F8BD8AB575EC5D5B3B691080830CCEC51BD1D","timestamp":"2026-11-18T07:18:55.920354751Z","signature":"A60C0AD32F60BA0B4D6923A0A39DDD4768AB6127415D601DFF56228CBD606264605B9946272E24ADFFA76DFD4F344EB981308A95925B262926A793160609A503","timestamp_seconds":1794986335,"timestamp_nanos":920354751}],"parts_hash":"8C02B74E3120E2416FD0016D96242719486ED754BF350E378ABD11751ABDB1DC"}"#;
+    const NOBLE_COMMIT_JSON: &str = r#"{"chain_id":"noble-1","height":64239414,"round":0,"block_hash":"8B3E0A7F14EF04EC5A3DE98CE214249D9F49711DAACD2BAB433BA9785583F394","parts_total":1,"app_hash":"789D3D6D36565DDA8721303A0CC1067E1D34F5A67800FB941ACB077382F3BED2","commit_time_seconds":1794986334,"commit_time_nanos":763902047,"version_block":11,"validators_hash":"963D149C5AE6A27D84F5CCC474C87BF7B6692AB343D30498A6AA57B05C4BA9F3","next_validators_hash":"963D149C5AE6A27D84F5CCC474C87BF7B6692AB343D30498A6AA57B05C4BA9F3","consensus_hash":"BF63703F8272504006C3E6DC34173DF3837F2ABA15DB8F50500A36E4AF2EAC0E","last_commit_hash":"11EECF9A418C2B6FDC0F3CB5D123002DB35BE55DF99C93D55917BE5FA87DA90E","data_hash":"E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855","last_results_hash":"098E3F4771A7E13B1A823EAA8C3957D749D63B0B4FAACCAB1B70708FC3A5FF0F","evidence_hash":"E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855","proposer_address":"417E75EF24DE0207B9BFD235331F4897AD28738A","last_block_hash":"84749CA34E94DC82F5E9AFFD2DF8144EF036BAC79732246361B3CCC19C1DB56B","last_parts_total":1,"last_parts_hash":"30BEB5B9E10138A3E46B706C50184D741447BCB0D35519FCDD8E38DD6264FDAC","validators":[{"address":"417E75EF24DE0207B9BFD235331F4897AD28738A","public_key":"233B590A7507763A0583CE319077EE0AE134F7148091C25B25E814ED5A058D7E","voting_power":1},{"address":"4E4BF0D6B90FCEC903166CA9909EDA38871BC7C5","public_key":"41B7B382A21E603DE1309C95449F2DEA84A1ED7F9649840FE8DA6D0D7447BDDB","voting_power":1},{"address":"7259FA8ABEE6365224E8917262A077D8F21C215E","public_key":"A93CEEDCBB78EFBB56EBBC0962929D9D93F5DFCF0AC8AED7DA922334C1E791D3","voting_power":1},{"address":"913A87C9053EE31DC75DBC0711499841F4FE41D2","public_key":"C3FA937121CB48D92607E2813C9E11E664C5B25D4808C00A2FACA8D77887C279","voting_power":1},{"address":"9814A41D7ADECFC8686C1B551CFE12A5529CCF47","public_key":"EAC07122ADBDDEF6FE94FD95172E3189C30085D499645D9BABA6AD00FF01B4A3","voting_power":1},{"address":"D1AD8B58C084D0E6014ACEADD5B44E9458F11A58","public_key":"BF8F447AF3D9BE00578A370D001F843C89782025F886482751A2832E5320AEFF","voting_power":1},{"address":"F21F8BD8AB575EC5D5B3B691080830CCEC51BD1D","public_key":"49A8CD065495568AE199F166CF8F7F3170D0D036E8E9CEA8A2C869F79F1F3403","voting_power":1}],"signatures":[{"validator_address":"4E4BF0D6B90FCEC903166CA9909EDA38871BC7C5","timestamp":"2026-11-18T07:18:55.949535266Z","signature":"FA5C29908B26F44BEF52173B81F681D08681BE67044D30B7B6EA316B06DB665C82E26C656C275839A15DDBCD137F7430B5529545A75A5DABA4FACB42980DF407","timestamp_seconds":1794986335,"timestamp_nanos":949535266},{"validator_address":"7259FA8ABEE6365224E8917262A077D8F21C215E","timestamp":"2026-11-18T07:18:55.91613621Z","signature":"5CC6DDE372ECD598B1A2919CE182F837ED077F46FFD9729CC4E0E90649EADE070B4CD8E982F9BEEE4FF943AF66F55F4398414FEC0032160E13567A03153FF302","timestamp_seconds":1794986335,"timestamp_nanos":916136210},{"validator_address":"913A87C9053EE31DC75DBC0711499841F4FE41D2","timestamp":"2026-11-18T07:18:55.972621579Z","signature":"0DB93F558994717907001F0CDFFFBB774C09B136A67FCE121D711532DA87D45C4665D6C89011268EE0AE7C125A31893AC28E8B7EE2835C82E50B27166583310D","timestamp_seconds":1794986335,"timestamp_nanos":972621579},{"validator_address":"D1AD8B58C084D0E6014ACEADD5B44E9458F11A58","timestamp":"2026-11-18T07:18:55.975841154Z","signature":"BFC42102253DC47C97B1C3BE0978574C95AE0251B585083EA1B4501FC263A3AF34CA091914DB18FA816AB392CEF15C781E8B45482BA58D79B06C3F5BF596A703","timestamp_seconds":1794986335,"timestamp_nanos":975841154},{"validator_address":"F21F8BD8AB575EC5D5B3B691080830CCEC51BD1D","timestamp":"2026-11-18T07:18:55.920354751Z","signature":"A60C0AD32F60BA0B4D6923A0A39DDD4768AB6127415D601DFF56228CBD606264605B9946272E24ADFFA76DFD4F344EB981308A95925B262926A793160609A503","timestamp_seconds":1794986335,"timestamp_nanos":920354751}],"parts_hash":"8C02B74E3120E2416FD0016D96242719486ED754BF350E378ABD11751ABDB1DC"}"#;
 
     /// The canonical precommit sign bytes for the noble commit's first
     /// signature, computed independently and checked against the live
@@ -910,6 +1121,19 @@ mod tests {
         parts_hash: String,
         app_hash: String,
         commit_time_seconds: u64,
+        commit_time_nanos: u32,
+        version_block: u64,
+        validators_hash: String,
+        next_validators_hash: String,
+        consensus_hash: String,
+        last_commit_hash: String,
+        data_hash: String,
+        last_results_hash: String,
+        evidence_hash: String,
+        proposer_address: String,
+        last_block_hash: String,
+        last_parts_total: u32,
+        last_parts_hash: String,
         validators: Vec<FixtureValidator>,
         signatures: Vec<FixtureSignature>,
     }
@@ -947,8 +1171,21 @@ mod tests {
             block_hash: fixed(&fixture.block_hash),
             parts_total: fixture.parts_total,
             parts_hash: fixed(&fixture.parts_hash),
+            version_block: fixture.version_block,
+            last_block_hash: fixed(&fixture.last_block_hash),
+            last_parts_total: fixture.last_parts_total,
+            last_parts_hash: fixed(&fixture.last_parts_hash),
+            last_commit_hash: fixed(&fixture.last_commit_hash),
+            data_hash: fixed(&fixture.data_hash),
+            validators_hash: fixed(&fixture.validators_hash),
+            next_validators_hash: fixed(&fixture.next_validators_hash),
+            consensus_hash: fixed(&fixture.consensus_hash),
             app_hash: fixed(&fixture.app_hash),
+            last_results_hash: fixed(&fixture.last_results_hash),
+            evidence_hash: fixed(&fixture.evidence_hash),
+            proposer_address: fixed(&fixture.proposer_address),
             commit_time: fixture.commit_time_seconds,
+            commit_time_nanos: fixture.commit_time_nanos,
             validators: fixture
                 .validators
                 .iter()
@@ -1053,18 +1290,151 @@ mod tests {
             .collect();
         let mut commit = TendermintCommitEvidence {
             chain_id: "noble-1".to_string(),
-            height: 900,
+            height: 64_239_500,
             round: 1,
-            block_hash: [0x11; 32],
+            block_hash: [0u8; 32],
             parts_total: 3,
             parts_hash: [0x22; 32],
+            version_block: 11,
+            last_block_hash: [0x44; 32],
+            last_parts_total: 1,
+            last_parts_hash: [0x45; 32],
+            last_commit_hash: [0x46; 32],
+            data_hash: [0x47; 32],
+            validators_hash: validator_set_hash(&validators),
+            next_validators_hash: validator_set_hash(&validators),
+            consensus_hash: [0x48; 32],
             app_hash: [0x33; 32],
+            last_results_hash: [0x49; 32],
+            evidence_hash: [0x4A; 32],
+            proposer_address: [0x4B; 20],
             commit_time: 1_700_000_000,
+            commit_time_nanos: 0,
             validators,
             signatures,
         };
+        // Seal the header the way a producer does: the block id is the header's
+        // own hash, so the payload is internally consistent before any negative
+        // test touches one field of it.
+        commit.block_hash = commit.header_hash();
         resign(&mut commit, &keyring);
         commit
+    }
+
+    #[test]
+    fn the_header_hash_reproduces_the_real_noble_block_hash() {
+        // The commit's `block_id.hash` is `Header.Hash()`. The rule here -
+        // fourteen protobuf-wrapped leaves, RFC-6962 - has to produce it from
+        // the header fields alone, or nothing else in this file means anything:
+        // an adapter that cannot rebuild the signed object is verifying a
+        // signature over bytes it invented.
+        let commit = noble_commit();
+        assert_eq!(
+            hex::encode_upper(commit.header_hash()),
+            "8B3E0A7F14EF04EC5A3DE98CE214249D9F49711DAACD2BAB433BA9785583F394"
+        );
+        assert_eq!(commit.header_hash(), commit.block_hash);
+    }
+
+    #[test]
+    fn every_header_field_is_covered_by_the_block_id() {
+        let commit = noble_commit();
+        let original = commit.header_hash();
+        let mutations: Vec<(&str, Box<dyn Fn(&mut TendermintCommitEvidence)>)> = vec![
+            ("chain_id", Box::new(|c: &mut TendermintCommitEvidence| c.chain_id = "noble-2".to_string())),
+            ("height", Box::new(|c: &mut TendermintCommitEvidence| c.height += 1)),
+            ("version", Box::new(|c: &mut TendermintCommitEvidence| c.version_block += 1)),
+            ("commit_time", Box::new(|c: &mut TendermintCommitEvidence| c.commit_time += 1)),
+            (
+                "commit_time_nanos",
+                Box::new(|c: &mut TendermintCommitEvidence| c.commit_time_nanos += 1),
+            ),
+            ("last_block_hash", Box::new(|c: &mut TendermintCommitEvidence| c.last_block_hash = [0xA1; 32])),
+            ("last_parts_total", Box::new(|c: &mut TendermintCommitEvidence| c.last_parts_total += 1)),
+            (
+                "last_parts_hash",
+                Box::new(|c: &mut TendermintCommitEvidence| c.last_parts_hash = [0xA2; 32]),
+            ),
+            (
+                "last_commit_hash",
+                Box::new(|c: &mut TendermintCommitEvidence| c.last_commit_hash = [0xA3; 32]),
+            ),
+            ("data_hash", Box::new(|c: &mut TendermintCommitEvidence| c.data_hash = [0xA4; 32])),
+            (
+                "next_validators_hash",
+                Box::new(|c: &mut TendermintCommitEvidence| c.next_validators_hash = [0xA5; 32]),
+            ),
+            (
+                "consensus_hash",
+                Box::new(|c: &mut TendermintCommitEvidence| c.consensus_hash = [0xA6; 32]),
+            ),
+            ("app_hash", Box::new(|c: &mut TendermintCommitEvidence| c.app_hash = [0xA7; 32])),
+            (
+                "last_results_hash",
+                Box::new(|c: &mut TendermintCommitEvidence| c.last_results_hash = [0xA8; 32]),
+            ),
+            (
+                "evidence_hash",
+                Box::new(|c: &mut TendermintCommitEvidence| c.evidence_hash = [0xA9; 32]),
+            ),
+            (
+                "proposer_address",
+                Box::new(|c: &mut TendermintCommitEvidence| c.proposer_address = [0xAA; 20]),
+            ),
+        ];
+        for (name, mutate) in mutations {
+            let mut tampered = commit.clone();
+            mutate(&mut tampered);
+            assert_ne!(
+                tampered.header_hash(),
+                original,
+                "mutating {name} left the header hash unchanged, so it is not covered"
+            );
+            // And the adapter refuses it: the payload's header is then not the
+            // header the validators signed.
+            let adapter = adapter();
+            let error = adapter
+                .verify(&evidence_for(&adapter, &tampered), &policy())
+                .expect_err("a header that does not hash to the block id is not the signed header");
+            assert!(
+                matches!(error, AdapterError::ConsensusRule { .. }),
+                "{name}: expected a consensus-rule refusal, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_validator_set_that_is_not_the_headers_is_refused() {
+        let adapter = adapter();
+        let mut commit = noble_commit();
+        // A different set with a matching quorum, and a header that still claims
+        // the original root.
+        commit.validators[0].voting_power = 5;
+        let error = adapter
+            .verify(&evidence_for(&adapter, &commit), &policy())
+            .expect_err("a set that does not hash to the header's root is not the set");
+        match error {
+            AdapterError::ConsensusRule { rule } => {
+                assert!(rule.contains("validator-set root"), "{rule}");
+            }
+            other => panic!("expected a consensus-rule refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_pinned_digest_is_the_chains_own_validator_set_root() {
+        // A pin an operator cannot read off the chain is a pin they will get
+        // wrong. `validator_set_commitment` and `validator_set_hash` are the
+        // same function, and its output is the header's `validators_hash`.
+        let commit = noble_commit();
+        assert_eq!(
+            validator_set_hash(&commit.validators),
+            commit.validators_hash
+        );
+        assert_eq!(
+            validator_set_commitment(&commit.validators),
+            commit.validators_hash
+        );
     }
 
     #[test]
@@ -1293,7 +1663,11 @@ mod tests {
     fn the_block_hash_is_part_of_what_was_signed() {
         let adapter = adapter();
         let mut commit = synthetic_commit(&[3, 3, 2, 2], 3);
-        commit.block_hash = [0x44; 32];
+        // A header an attacker can seal but not re-sign: change a header field,
+        // recompute the header hash into `block_hash`, and leave the signatures
+        // where they are. The block id is inside every sign byte, so they fall.
+        commit.app_hash = [0x5A; 32];
+        commit.block_hash = commit.header_hash();
         let error = adapter
             .verify(&evidence_for(&adapter, &commit), &policy())
             .expect_err("changing the block id changes the sign bytes");
@@ -1461,7 +1835,10 @@ mod tests {
         assert!(
             matches!(
                 error,
-                AdapterError::UnsupportedEvidenceVersion { version: 2, .. }
+                AdapterError::UnsupportedEvidenceVersion {
+                    version,
+                    ..
+                } if version == EVIDENCE_VERSION + 1
             ),
             "expected an unsupported-version refusal, got {error:?}"
         );
@@ -1608,30 +1985,40 @@ mod tests {
             .expect_err("self-generated validator set must be refused under consensus pin");
         assert!(matches!(err, AdapterError::ConsensusRule { .. }));
 
-        // 2. Unsigned `app_hash != block_hash` on a genuine Noble commit is
-        //    refused on the consensus-pinned path, while binding `app_hash` and
-        //    `declared_root` to the validator-signed `block_hash` succeeds.
+        // 2. The header is recomputed, so the app hash is no longer an
+        //    unsigned claim: the genuine commit attests it directly.
+        let att = pinned
+            .verify(&evidence_for(&pinned, &honest_noble), &policy())
+            .expect("the genuine pinned Noble commit verifies");
+        assert_eq!(att.state_root, honest_noble.app_hash);
+        assert_eq!(att.attested_block_hash, Some(honest_noble.block_hash));
+
+        // 2b. Swapping the app hash while leaving the rest of the header alone
+        //     breaks the header hash, which no longer matches the block id the
+        //     validators signed. That is the refusal this adapter wants: the
+        //     substitution is not "trusted", it is impossible.
         let mut swapped_app = honest_noble.clone();
         swapped_app.app_hash = [0xde; 32];
         let err = pinned
             .verify(&evidence_for(&pinned, &swapped_app), &policy())
-            .expect_err("unsigned app_hash substitution must be refused");
-        assert!(matches!(err, AdapterError::ConsensusRule { .. }));
+            .expect_err("a swapped app hash must not survive the header hash");
+        match err {
+            AdapterError::ConsensusRule { rule } => {
+                assert!(rule.contains("the header hashes to"), "{rule}");
+            }
+            other => panic!("expected a consensus-rule refusal, got {other:?}"),
+        }
 
-        let mut block_bound = honest_noble.clone();
-        block_bound.app_hash = block_bound.block_hash;
-        let att = pinned
-            .verify(&evidence_for(&pinned, &block_bound), &policy())
-            .expect("pinned Noble commit bound to signed block_hash verifies");
-        assert_eq!(att.state_root, honest_noble.block_hash);
-
-        // 3. Rewriting `commit_time` far from the signed vote timestamps or
-        //    into the far future (`u64::MAX`) is refused.
+        // 3. Rewriting `commit_time` is refused for the same reason: it is a
+        //    leaf of the signed header. The stake-weighted median check below
+        //    stays as belt and braces for a payload that re-seals and re-signs
+        //    an entire header - which is a different block, not a lie about
+        //    this one.
         let mut spoofed_time = honest_noble.clone();
         spoofed_time.commit_time += 86_400;
         let err = adapter()
             .verify(&evidence_for(&adapter(), &spoofed_time), &policy())
-            .expect_err("spoofed commit_time outside signed vote median must fail");
+            .expect_err("spoofed commit_time must fail the header hash");
         assert!(matches!(err, AdapterError::ConsensusRule { .. }));
 
         let mut future_policy = policy();
