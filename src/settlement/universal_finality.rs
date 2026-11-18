@@ -148,6 +148,25 @@ impl FinalityGuarantee {
         proof: &crate::domain::FinalityProof,
         pq_enforced: bool,
     ) -> Self {
+        if matches!(proof, crate::domain::FinalityProof::AggregatedProg { .. }) {
+            let allowlisted = !domain.zk_program_allowlist.is_empty();
+            return Self {
+                reversibility: FinalityReversibility::CryptographicValidity,
+                quantum_posture: QuantumClass::Hash,
+                attestation: CommitmentAttestation {
+                    state_root: allowlisted,
+                    tx_root: allowlisted,
+                    event_root: allowlisted,
+                    parent: allowlisted,
+                },
+                slashable_backing: false,
+                fault_tolerance_bps: if allowlisted {
+                    VALIDITY_PROOF_FAULT_TOLERANCE_BPS
+                } else {
+                    0
+                },
+            };
+        }
         let pq_proof = pq_enforced || !proof.is_classical_only_quorum();
         Self::with_attestation(
             domain,

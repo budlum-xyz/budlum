@@ -385,7 +385,7 @@ impl TendermintCommitEvidence {
                     hex::encode(validator.address)
                 )));
             }
-            if validator.address != address_of(&validator.public_key) {
+            if validator.address != validator_address_of(&validator.public_key) {
                 return Err(rule(format!(
                     "validator entry {index} carries address {} which is not SHA256 of its public key",
                     hex::encode(validator.address)
@@ -463,8 +463,12 @@ pub fn quorum_threshold(total_voting_power: u128) -> u128 {
 }
 
 /// `SHA256(public_key)[..20]`, the Tendermint validator address derivation.
+///
+/// Named `validator_address_of` so it does not share a bare identifier with the
+/// tokenomics allocation helper: the dead-API gate counts names rather than
+/// paths, and two same-named functions hide whichever of them is dead.
 #[must_use]
-pub fn address_of(public_key: &[u8; PUBLIC_KEY_LEN]) -> [u8; ADDRESS_LEN] {
+pub fn validator_address_of(public_key: &[u8; PUBLIC_KEY_LEN]) -> [u8; ADDRESS_LEN] {
     let digest = Sha256::digest(public_key);
     let mut address = [0u8; ADDRESS_LEN];
     for (dst, src) in address.iter_mut().zip(digest.iter()) {
@@ -1151,7 +1155,7 @@ mod tests {
         for (signature, message) in commit.signatures.iter_mut().zip(messages) {
             let key = keys
                 .iter()
-                .find(|key| address_of(&key.public_key_bytes()) == signature.address)
+                .find(|key| validator_address_of(&key.public_key_bytes()) == signature.address)
                 .expect("a key for every signer");
             signature.signature = key.sign(&message).to_vec();
         }
@@ -1180,7 +1184,7 @@ mod tests {
             .iter()
             .zip(powers)
             .map(|(key, power)| TendermintValidator {
-                address: address_of(&key.public_key_bytes()),
+                address: validator_address_of(&key.public_key_bytes()),
                 public_key: key.public_key_bytes(),
                 voting_power: *power,
             })

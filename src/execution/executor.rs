@@ -389,6 +389,14 @@ impl Executor {
                 "Burn reserve is schedule-controlled and cannot originate transactions",
             ));
         }
+        if state.auth_program_hash(&tx.from).is_some()
+            && (tx.auth_claim.is_none() || !tx.claimed_shape_is_canonical())
+        {
+            return Err(BudlumError::validation(
+                "program_account_requires_auth_claim",
+                "Program account requires a canonical aggregated authorization claim",
+            ));
+        }
         // Every arm increments the sender nonce. Refuse exhaustion before any
         // arm can debit funds, touch a registry or escrow value.
         Self::checked_next_nonce(state.get_nonce(&tx.from))?;
@@ -3897,6 +3905,34 @@ impl Executor {
                     ValidatorTx::Resume => {
                         state.liveness.request_resume(&tx.from, epoch);
                     }
+                }
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
+            TransactionType::VerifyStark(_) => {
+                // Phase 5 split-STARK verification carries zero transfer amount;
+                // `Claim::Poly` provenance and Stage 2 (`verify_algebra`) are
+                // enforced against `AirRegistry` during block aggregation checks.
+                if tx.amount != 0 {
+                    return Err(BudlumError::validation(
+                        "verify_stark_amount_nonzero",
+                        "a VerifyStark transaction carries no amount",
+                    ));
+                }
+                if tx.claim_refs.is_empty() {
+                    return Err(BudlumError::validation(
+                        "verify_stark_missing_claim_refs",
+                        "a VerifyStark transaction must reference its Claim::Poly digest",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < total_cost {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance",
+                        format!("the fee exceeds the spendable balance: need {total_cost}"),
+                    ));
                 }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {

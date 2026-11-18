@@ -88,6 +88,349 @@ pub type ChipStarkConfig = MyConfig;
 /// A proof of a chip AIR under [`ChipStarkConfig`].
 pub type ChipProof = crate::bud_stark::Proof<MyConfig>;
 
+/// The cubic Goldilocks extension field used by [`ChipStarkConfig`].
+pub type ChipExtensionField = MyExtensionField;
+
+/// A 32-byte Keccak Merkle polynomial commitment under [`ChipStarkConfig`].
+pub type ChipCommitment = crate::bud_stark::Com<MyConfig>;
+
+/// Matrix commitments carried by a [`ChipProof`].
+pub type ChipCommitments = crate::bud_stark::Commitments<ChipCommitment>;
+
+/// Out-of-domain opened values carried by a [`ChipProof`].
+pub type ChipOpenedValues = crate::bud_stark::OpenedValues<ChipExtensionField>;
+
+/// Heavy FRI + Merkle opening proof carried by a [`ChipProof`].
+pub type ChipPcsProof = crate::bud_stark::PcsProof<MyConfig>;
+
+/// Converts a [`ChipExtensionField`] element to its 3 canonical Goldilocks limbs.
+#[must_use]
+pub fn chip_ext_to_limbs(ext: ChipExtensionField) -> [u64; 3] {
+    use p3_field::BasedVectorSpace;
+    let coeffs: &[Goldilocks] = ext.as_basis_coefficients_slice();
+    [
+        coeffs.first().map_or(0, PrimeField64::as_canonical_u64),
+        coeffs.get(1).map_or(0, PrimeField64::as_canonical_u64),
+        coeffs.get(2).map_or(0, PrimeField64::as_canonical_u64),
+    ]
+}
+
+/// Constructs a [`ChipExtensionField`] element from 3 canonical Goldilocks limbs.
+///
+/// Returns `None` if any limb is `>= Goldilocks::ORDER_U64`.
+#[must_use]
+pub fn chip_ext_from_limbs(limbs: [u64; 3]) -> Option<ChipExtensionField> {
+    use p3_field::BasedVectorSpace;
+    if limbs.iter().any(|&v| v >= Goldilocks::ORDER_U64) {
+        return None;
+    }
+    ChipExtensionField::from_basis_coefficients_slice(&[
+        Goldilocks::new(limbs[0]),
+        Goldilocks::new(limbs[1]),
+        Goldilocks::new(limbs[2]),
+    ])
+}
+
+/// Encodes a cap-height-0 [`ChipCommitment`] as its canonical 32-byte Keccak root.
+#[must_use]
+pub fn chip_commitment_to_bytes(commit: &ChipCommitment) -> Option<[u8; 32]> {
+    let slice = commit.roots();
+    if slice.len() == 1 {
+        slice.first().copied()
+    } else {
+        None
+    }
+}
+
+/// Decodes a 32-byte Keccak root into a cap-height-0 [`ChipCommitment`].
+#[must_use]
+pub fn chip_commitment_from_bytes(bytes: [u8; 32]) -> ChipCommitment {
+    ChipCommitment::from(vec![bytes])
+}
+
+/// Computes the canonical [`crate::bud_stark::PcsOpeningShape`] for `air` under
+/// [`ChipStarkConfig`].
+///
+/// # Errors
+///
+/// Returns an error string if `degree_bits` is out of bounds or `air` requires
+/// an auxiliary trace when `has_aux_trace` is `false`.
+pub fn air_pcs_shape<A>(
+    air: &A,
+    degree_bits: usize,
+    has_aux_trace: bool,
+    preprocessed_width: usize,
+) -> Result<crate::bud_stark::PcsOpeningShape, String>
+where
+    A: p3_air::Air<crate::bud_stark::SymbolicAirBuilder<Goldilocks>>
+        + for<'a> p3_air::Air<crate::bud_stark::VerifierConstraintFolder<'a, MyConfig>>,
+{
+    let config = build_config();
+    crate::bud_stark::shape_for_air(&config, air, degree_bits, has_aux_trace, preprocessed_width)
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Stage 1 under [`ChipStarkConfig`]: verifies the FRI / Merkle PCS opening
+/// proof and returns the Fiat-Shamir out-of-domain point `zeta` as canonical
+/// Goldilocks limbs.
+///
+/// # Errors
+///
+/// Returns an error string if the opening shape or FRI opening argument fails.
+pub fn verify_chip_pcs_openings(
+    stmt: &crate::bud_stark::PcsOpeningStatement<'_, MyConfig>,
+) -> Result<[u64; 3], String> {
+    let config = build_config();
+    let transcript: crate::bud_stark::VerifiedTranscript<_> =
+        crate::bud_stark::verify_pcs_openings(&config, stmt).map_err(|e| format!("{e:?}"))?;
+    Ok(chip_ext_to_limbs(transcript.zeta))
+}
+
+/// Stage 2 under [`ChipStarkConfig`]: re-derives `zeta` from commitments and
+/// public values and evaluates the AIR constraints at `zeta` without running
+/// FRI or Merkle verification.
+///
+/// Returns the re-derived `zeta` as canonical Goldilocks limbs plus the
+/// validated [`crate::bud_stark::PcsOpeningShape`].
+///
+/// # Errors
+///
+/// Returns an error string if shapes, preprocessed VK, quotient recomposition,
+/// or AIR constraints fail.
+pub fn verify_chip_algebra<A>(
+    air: &A,
+    stmt: &crate::bud_stark::AlgebraStatement<'_, MyConfig>,
+) -> Result<([u64; 3], crate::bud_stark::PcsOpeningShape), String>
+where
+    A: p3_air::Air<crate::bud_stark::SymbolicAirBuilder<Goldilocks>>
+        + for<'a> p3_air::Air<crate::bud_stark::VerifierConstraintFolder<'a, MyConfig>>,
+{
+    let config = build_config();
+    let transcript =
+        crate::bud_stark::verify_algebra(&config, air, stmt).map_err(|e| format!("{e:?}"))?;
+    Ok((chip_ext_to_limbs(transcript.zeta), transcript.shape))
+}
+
+/// Converts `ExecutionPublicInputs` into canonical Goldilocks `u64` public
+/// values for `BudAir`.
+#[must_use]
+pub fn bud_air_public_values_u64(pi: &ExecutionPublicInputs) -> Vec<u64> {
+    to_public_values(pi)
+        .into_iter()
+        .map(|f| f.as_canonical_u64())
+        .collect()
+}
+
+/// Stage 1 under [`ChipStarkConfig`] accepting `u64` public values directly so
+/// downstream crates need not depend on `p3-goldilocks`.
+///
+/// # Errors
+///
+/// Returns an error string if any public value is non-canonical or FRI opening
+/// verification fails.
+pub fn verify_chip_pcs_openings_u64(
+    shape: crate::bud_stark::PcsOpeningShape,
+    commitments: &ChipCommitments,
+    opened_values: &ChipOpenedValues,
+    opening_proof: &ChipPcsProof,
+    degree_bits: usize,
+    public_values: &[u64],
+    preprocessed_commit: Option<&ChipCommitment>,
+) -> Result<[u64; 3], String> {
+    if public_values.iter().any(|&v| v >= Goldilocks::ORDER_U64) {
+        return Err("non-canonical Goldilocks public value".into());
+    }
+    let pvs: Vec<Goldilocks> = public_values.iter().copied().map(Goldilocks::new).collect();
+    let stmt = crate::bud_stark::PcsOpeningStatement {
+        shape,
+        commitments,
+        opened_values,
+        opening_proof,
+        degree_bits,
+        public_values: &pvs,
+        preprocessed_commit,
+    };
+    verify_chip_pcs_openings(&stmt)
+}
+
+/// Maximum `BudVM` program length accepted by split-STARK (`VerifyStark`)
+/// Stage 2 verification and `PcsOpeningObject` extraction so an attacker
+/// cannot force unbounded preprocessed trace allocation.
+const MAX_VERIFY_STARK_PROGRAM_WORDS: usize = 65_536;
+
+/// Stage 2 (`verify_algebra`) specialized for the built-in `BudAir`:
+/// verifies `MainnetActivation`, program hash, expected `degree_bits`,
+/// preprocessed VK, re-derives `zeta`, and checks all `BudAir` constraints
+/// without running FRI.
+///
+/// Returns `(zeta_limbs, shape, preprocessed_commit_bytes)`.
+///
+/// # Errors
+///
+/// Returns an error string if activation, program hash, degree, public values,
+/// preprocessed setup, or `verify_algebra` fail.
+pub fn verify_bud_air_algebra_u64(
+    program: &[u64],
+    expected_inputs: &ExecutionPublicInputs,
+    commitments: &ChipCommitments,
+    opened_values: &ChipOpenedValues,
+    degree_bits: usize,
+    public_values: &[u64],
+) -> Result<([u64; 3], crate::bud_stark::PcsOpeningShape, [u8; 32]), String> {
+    if program.len() > MAX_VERIFY_STARK_PROGRAM_WORDS {
+        return Err(format!(
+            "program length {} exceeds VerifyStark limit {MAX_VERIFY_STARK_PROGRAM_WORDS}",
+            program.len()
+        ));
+    }
+    let activation = bud_isa::MainnetActivation::default();
+    for word in program {
+        if let Ok(instruction) = bud_isa::Instruction::decode_any(*word) {
+            if !activation.allows(instruction.opcode) {
+                return Err(format!("opcode {:?} is not activated", instruction.opcode));
+            }
+        }
+    }
+    let mut hasher = Keccak::v256();
+    for &inst in program {
+        hasher.update(&inst.to_le_bytes());
+    }
+    let mut expected_hash = [0u8; 32];
+    hasher.finalize(&mut expected_hash);
+    if expected_hash != expected_inputs.program_hash {
+        return Err("program hash does not match expected_inputs".into());
+    }
+    let expected_pvs = bud_air_public_values_u64(expected_inputs);
+    if public_values != expected_pvs.as_slice() {
+        return Err("public values do not match expected_inputs".into());
+    }
+    let num_rows = usize::try_from(expected_inputs.trace_len)
+        .ok()
+        .and_then(|n| n.checked_mul(3))
+        .and_then(|n| n.checked_add(1))
+        .and_then(usize::checked_next_power_of_two)
+        .map(|n| n.max(16))
+        .ok_or_else(|| "trace length exceeds verifier limit".to_string())?;
+    if num_rows > MAX_PROVER_WITNESS_ROWS {
+        return Err(format!(
+            "trace matrix rows {num_rows} exceed verifier limit {MAX_PROVER_WITNESS_ROWS}"
+        ));
+    }
+    let trace_len = usize::try_from(expected_inputs.trace_len)
+        .map_err(|_| "trace_len overflows usize".to_string())?;
+    let expected_degree_bits = log2_strict_usize(num_rows);
+    if degree_bits != expected_degree_bits {
+        return Err(format!(
+            "degree_bits {degree_bits} disagrees with expected {expected_degree_bits}"
+        ));
+    }
+    let air = BudAir {
+        num_steps: trace_len,
+        program: program.to_vec(),
+    };
+    let config = build_config();
+    let (_pd, vk) = setup_preprocessed(&config, &air, degree_bits)
+        .ok_or_else(|| format!("BudAir preprocessed setup failed for degree_bits={degree_bits}"))?;
+    let pre_bytes = chip_commitment_to_bytes(&vk.commitment)
+        .ok_or_else(|| "BudAir preprocessed commitment has non-unit cap".to_string())?;
+    let pvs = to_public_values(expected_inputs);
+    let stmt = crate::bud_stark::AlgebraStatement {
+        commitments,
+        opened_values,
+        degree_bits,
+        public_values: &pvs,
+        preprocessed_vk: Some(&vk),
+    };
+    let (zeta, shape) = verify_chip_algebra(&air, &stmt)?;
+    Ok((zeta, shape, pre_bytes))
+}
+
+/// Extracts `(ChipProof, PcsOpeningShape, public_values_u64, preprocessed_commit_bytes)`
+/// from a `BudAir` [`ProofEnvelope`] so callers can build a `PcsOpeningObject`
+/// without directly depending on `p3-goldilocks`.
+///
+/// # Errors
+///
+/// Returns an error string if the proof bytes fail strict decoding or
+/// preprocessed setup fails.
+pub fn extract_bud_envelope_pcs(
+    envelope: &ProofEnvelope,
+    program: &[u64],
+    expected_inputs: &ExecutionPublicInputs,
+) -> Result<
+    (
+        ChipProof,
+        crate::bud_stark::PcsOpeningShape,
+        Vec<u64>,
+        [u8; 32],
+    ),
+    String,
+> {
+    if envelope.proof_bytes.len() > crate::adapter::MAX_ENVELOPE_PROOF_BYTES {
+        return Err(format!(
+            "BudAir proof bytes {} exceed cap {}",
+            envelope.proof_bytes.len(),
+            crate::adapter::MAX_ENVELOPE_PROOF_BYTES
+        ));
+    }
+    if program.len() > MAX_VERIFY_STARK_PROGRAM_WORDS {
+        return Err(format!(
+            "program length {} exceeds VerifyStark limit {MAX_VERIFY_STARK_PROGRAM_WORDS}",
+            program.len()
+        ));
+    }
+    let (proof, trailing): (ChipProof, &[u8]) =
+        postcard::take_from_bytes(&envelope.proof_bytes).map_err(|e| e.to_string())?;
+    if !trailing.is_empty() {
+        return Err(format!(
+            "{} trailing bytes after BudAir proof",
+            trailing.len()
+        ));
+    }
+    let num_rows = usize::try_from(expected_inputs.trace_len)
+        .ok()
+        .and_then(|n| n.checked_mul(3))
+        .and_then(|n| n.checked_add(1))
+        .and_then(usize::checked_next_power_of_two)
+        .map(|n| n.max(16))
+        .ok_or_else(|| "trace length exceeds verifier limit".to_string())?;
+    if num_rows > MAX_PROVER_WITNESS_ROWS {
+        return Err(format!(
+            "trace matrix rows {num_rows} exceed verifier limit {MAX_PROVER_WITNESS_ROWS}"
+        ));
+    }
+    let expected_degree_bits = log2_strict_usize(num_rows);
+    if proof.degree_bits != expected_degree_bits {
+        return Err(format!(
+            "proof degree_bits {} disagrees with expected {expected_degree_bits}",
+            proof.degree_bits
+        ));
+    }
+    let trace_len = usize::try_from(expected_inputs.trace_len)
+        .map_err(|_| "trace_len overflows usize".to_string())?;
+    let air = BudAir {
+        num_steps: trace_len,
+        program: program.to_vec(),
+    };
+    let config = build_config();
+    let (_pd, vk) = setup_preprocessed(&config, &air, proof.degree_bits).ok_or_else(|| {
+        format!(
+            "BudAir preprocessed setup failed for degree_bits={}",
+            proof.degree_bits
+        )
+    })?;
+    let pre_bytes = chip_commitment_to_bytes(&vk.commitment)
+        .ok_or_else(|| "BudAir preprocessed commitment has non-unit cap".to_string())?;
+    let shape = air_pcs_shape(
+        &air,
+        proof.degree_bits,
+        proof.commitments.aux_trace.is_some(),
+        PREPROCESSED_WIDTH,
+    )?;
+    let pvs = bud_air_public_values_u64(expected_inputs);
+    Ok((proof, shape, pvs, pre_bytes))
+}
+
 /// Proves a chip AIR with the BudZero parameters.
 #[allow(clippy::multiple_bound_locations, clippy::type_repetition_in_bounds)]
 pub fn prove_chip<
@@ -118,6 +461,76 @@ where
 {
     let config = build_config();
     crate::bud_stark::verify(&config, air, proof, public_values).map_err(|e| format!("{e:?}"))
+}
+
+/// Proves a chip AIR that commits deterministic preprocessed columns under the
+/// canonical BudZero STARK parameters.
+///
+/// # Errors
+///
+/// Returns an error if the trace height is zero, not a power of two, or if
+/// preprocessed setup refuses the AIR's preprocessed trace.
+pub fn prove_chip_with_preprocessed<A>(
+    air: &A,
+    trace: RowMajorMatrix<Goldilocks>,
+    public_values: &[Goldilocks],
+) -> Result<ChipProof, String>
+where
+    A: p3_air::Air<crate::bud_stark::SymbolicAirBuilder<Goldilocks>>
+        + for<'a> p3_air::Air<crate::bud_stark::ProverConstraintFolder<'a, MyConfig>>
+        + for<'a> p3_air::Air<p3_air::DebugConstraintBuilder<'a, Goldilocks>>,
+{
+    let height = trace.height();
+    if height == 0 || !height.is_power_of_two() {
+        return Err(format!(
+            "chip trace height {height} must be a non-zero power of two"
+        ));
+    }
+    let degree_bits = height.trailing_zeros() as usize;
+    let config = build_config();
+    let (prover_data, _vk) = crate::bud_stark::setup_preprocessed(&config, air, degree_bits)
+        .ok_or_else(|| format!("preprocessed setup refused degree_bits={degree_bits}"))?;
+    Ok(crate::bud_stark::prove_with_preprocessed(
+        &config,
+        air,
+        trace,
+        None,
+        public_values,
+        Some(&prover_data),
+    ))
+}
+
+/// Verifies a chip proof against the preprocessed columns produced by `air` at
+/// `expected_degree_bits` under the canonical BudZero STARK parameters.
+///
+/// # Errors
+///
+/// Returns an error if `proof.degree_bits` does not match `expected_degree_bits`,
+/// if preprocessed setup refuses the AIR, or if the STARK proof fails verification.
+pub fn verify_chip_with_preprocessed<A>(
+    air: &A,
+    proof: &ChipProof,
+    expected_degree_bits: usize,
+    public_values: &[Goldilocks],
+) -> Result<(), String>
+where
+    A: p3_air::Air<crate::bud_stark::SymbolicAirBuilder<Goldilocks>>
+        + for<'a> p3_air::Air<crate::bud_stark::ProverConstraintFolder<'a, MyConfig>>
+        + for<'a> p3_air::Air<crate::bud_stark::VerifierConstraintFolder<'a, MyConfig>>,
+{
+    if proof.degree_bits != expected_degree_bits {
+        return Err(format!(
+            "chip proof degree_bits {} does not match expected {}",
+            proof.degree_bits, expected_degree_bits
+        ));
+    }
+    let config = build_config();
+    let (_prover_data, vk) =
+        crate::bud_stark::setup_preprocessed(&config, air, expected_degree_bits).ok_or_else(
+            || format!("preprocessed setup refused degree_bits={expected_degree_bits}"),
+        )?;
+    crate::bud_stark::verify_with_preprocessed(&config, air, proof, public_values, Some(&vk))
+        .map_err(|e| format!("{e:?}"))
 }
 
 /// Build the canonical Goldilocks/Keccak STARK configuration.

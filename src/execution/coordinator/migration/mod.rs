@@ -1860,6 +1860,7 @@ mod tests {
                 balance: 0,
                 nonce: 1,
                 frac_attos: 0,
+                auth_program_hash: None,
             },
         );
         assert!(is_native_contract_account_occupied(
