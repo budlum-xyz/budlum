@@ -273,7 +273,13 @@ impl TendermintCommitEvidence {
                     hex::encode(validator.address)
                 )));
             }
-            if self.validators[index + 1..]
+            // The half-open range is bounded by construction: `index` is the
+            // position this validator was read from, so the remainder exists
+            // and no index expression here can name an absent element.
+            if self
+                .validators
+                .get(index + 1..)
+                .unwrap_or_default()
                 .iter()
                 .any(|other| other.address == validator.address)
             {
@@ -296,7 +302,13 @@ impl TendermintCommitEvidence {
                     signature.timestamp_nanos
                 )));
             }
-            if self.signatures[index + 1..]
+            // `index` is the signature's own position, so the remainder is
+            // bounded; `get(..)` decides what an empty remainder means rather
+            // than indexing past the end.
+            if self
+                .signatures
+                .get(index + 1..)
+                .unwrap_or_default()
                 .iter()
                 .any(|other| other.address == signature.address)
             {
@@ -353,8 +365,10 @@ pub fn quorum_threshold(total_voting_power: u128) -> u128 {
 #[must_use]
 pub fn address_of(public_key: &[u8; PUBLIC_KEY_LEN]) -> [u8; ADDRESS_LEN] {
     let digest = Sha256::digest(public_key);
+    // SHA-256 digests are 32 bytes and an address is the first 20 of them;
+    // the range is a constant, not an index computed from data.
     let mut address = [0u8; ADDRESS_LEN];
-    address.copy_from_slice(&digest[..ADDRESS_LEN]);
+    address.copy_from_slice(digest.get(..ADDRESS_LEN).unwrap_or_else(|| unreachable!()));
     address
 }
 
@@ -413,7 +427,8 @@ fn put_bytes(out: &mut Vec<u8>, field: u8, body: &[u8]) {
 /// ```text
 /// CanonicalVote          type = 1 (varint), height = 2 (sfixed64),
 ///                        round = 3 (sfixed64), block_id = 4, timestamp = 5,
-///                        chain_id = 6
+///                        chain_id = 6   (field number; the chain id is an
+///                                       argument, never a literal here)
 /// CanonicalBlockID       hash = 1, part_set_header = 2
 /// CanonicalPartSetHeader total = 1, hash = 2
 /// Timestamp              seconds = 1, nanos = 2
@@ -721,7 +736,7 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
                         if let Some(offset) = golden
                             .payload
                             .windows(8)
-                            .position(|window| window == &first.signature[..8])
+                            .position(|window| window == first.signature.get(..8).unwrap_or(&[]))
                         {
                             let replacement = if first.signature[0] == 0 { 1 } else { 0 };
                             probes.push(FaultProbe {
