@@ -43,11 +43,15 @@
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::cross_domain::external::BlsVerifier;
+use crate::domain::finality_proof_model::{
+    BINDS_EVENT_ROOT, BINDS_PARENT_HASH, BINDS_STATE_ROOT, BINDS_TX_ROOT,
+};
 use crate::domain::{
     hash_finality_proof, BftFinalityAdapter, BitcoinSpvFinalityAdapter, ConsensusDomain,
-    ConsensusKind, DomainCommitment, DomainFinalityAdapter, DomainId, DomainStatus, FinalityProof,
-    FinalityStatus, Hash32, PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter,
-    ZkFinalityAdapter, AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
+    ConsensusKind, DagFinalityAdapter, DomainCommitment, DomainFinalityAdapter, DomainId,
+    DomainStatus, FinalityProof, FinalityStatus, Hash32, PoAFinalityAdapter, PoSFinalityAdapter,
+    PoWHeaderChainFinalityAdapter, PohFinalityAdapter, PospaceFinalityAdapter, ZkFinalityAdapter,
+    AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
 };
 use crate::domain::{SovereignDomainTemplate, VerifiedDomainCommitment};
 use crate::prover::{
@@ -334,6 +338,9 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
         ConsensusKind::PoA => domain.finality_adapter == "poa-authority-quorum",
         ConsensusKind::Bft => domain.finality_adapter == "bft-quorum-commit",
         ConsensusKind::Zk => domain.finality_adapter == "zk-proof-verification",
+        ConsensusKind::Dag => domain.finality_adapter == "dag-tip-vote-v1",
+        ConsensusKind::Poh => domain.finality_adapter == "poh-hash-chain-v1",
+        ConsensusKind::Pospace => domain.finality_adapter == "pospace-plot-v1",
         ConsensusKind::StorageAttestation(_) => domain.finality_adapter == "storage-attestation-v1",
         ConsensusKind::AiInference => domain.finality_adapter == AI_INFERENCE_ADAPTER,
         ConsensusKind::Custom(name) => {
@@ -659,6 +666,39 @@ pub fn verify_commitment_finality_observed(
                 observer,
             )
         }
+        ConsensusKind::Dag => {
+            let adapter = DagFinalityAdapter;
+            ensure_adapter_name(domain, adapter.adapter_name())?;
+            adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            )
+        }
+        ConsensusKind::Poh => {
+            let adapter = PohFinalityAdapter;
+            ensure_adapter_name(domain, adapter.adapter_name())?;
+            adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            )
+        }
+        ConsensusKind::Pospace => {
+            let adapter = PospaceFinalityAdapter;
+            ensure_adapter_name(domain, adapter.adapter_name())?;
+            adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            )
+        }
         ConsensusKind::Zk => {
             // The claim-bound verifier: a ZK domain finalizes only against
             // the root an accepted proof claim recorded.
@@ -793,14 +833,26 @@ pub fn verify_commitment_finality_observed(
         ConsensusKind::StorageAttestation(_) => {
             let adapter = crate::domain::StorageAttestationFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
-            let status = adapter.verify_finality(domain, commitment, proof);
+            let status = adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            );
             require_active_attester_authorities(state, proof, "Storage attestation")?;
             status
         }
         ConsensusKind::AiInference => {
             let adapter = crate::domain::AiInferenceFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
-            let status = adapter.verify_finality(domain, commitment, proof);
+            let status = adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            );
             require_active_attester_authorities(state, proof, "AI inference")?;
             status
         }
@@ -818,6 +870,25 @@ pub fn verify_commitment_finality_observed(
             // root (`SettlementProofVerifier`, `submit_relay_proof`). See
             // [`CommitmentAttestation`] for why a PoS or BFT certificate
             // cannot make one trustworthy.
+            //
+            // The attestation table is written per domain kind and the proof
+            // shape per proof family; both encode the same fact from one side
+            // each. They are checked against each other here so a future
+            // adapter cannot anchor a root its own proof does not bind: the
+            // shape is what the signatures actually cover, and it is not
+            // trusted - it is the table this module's tests pin.
+            let attestation = CommitmentAttestation::for_domain(domain);
+            let shape = proof.shape();
+            if attestation.state_root && shape.binds & BINDS_STATE_ROOT == 0
+                || attestation.tx_root && shape.binds & BINDS_TX_ROOT == 0
+                || attestation.event_root && shape.binds & BINDS_EVENT_ROOT == 0
+                || attestation.parent && shape.binds & BINDS_PARENT_HASH == 0
+            {
+                return Err(format!(
+                    "Domain {} proof does not bind a field settlement anchors for it",
+                    commitment.domain_id
+                ));
+            }
             Ok(())
         }
         FinalityStatus::Pending {
@@ -882,7 +953,7 @@ fn validate_commitment_state_updates(
 /// `Custom` is treated as the weakest case (a plugin or an external-domain
 /// framework decides its own proof, so this layer cannot claim a binding it
 /// has not checked): fail-closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommitmentAttestation {
     /// The proof binds `state_root`.
     pub state_root: bool,
@@ -921,7 +992,12 @@ impl CommitmentAttestation {
                 event_root: false,
                 parent: false,
             },
-            ConsensusKind::PoS | ConsensusKind::Bft | ConsensusKind::Custom(_) => Self {
+            ConsensusKind::PoS
+            | ConsensusKind::Bft
+            | ConsensusKind::Dag
+            | ConsensusKind::Poh
+            | ConsensusKind::Pospace
+            | ConsensusKind::Custom(_) => Self {
                 state_root: false,
                 tx_root: false,
                 event_root: false,
@@ -949,6 +1025,35 @@ impl CommitmentAttestation {
             }
         } else {
             Self::for_kind(&domain.kind)
+        }
+    }
+
+    /// What a specific verified `proof` binds for `domain`.
+    ///
+    /// Structural DAG-family proofs ([`FinalityProof::Dag`], [`FinalityProof::DagPq`],
+    /// [`FinalityProof::Poh`], [`FinalityProof::PohPq`], [`FinalityProof::Pospace`],
+    /// [`FinalityProof::PospacePq`]) fold [`crate::domain::finality_adapter::poa_commit_signing_message`]
+    /// into every authority signature, binding `state_root`, `tx_root`, `event_root`,
+    /// and `parent_domain_block_hash`; BFT/PoS certificates accepted by those same
+    /// domains bind `domain_block_hash` alone and remain `false`.
+    ///
+    /// Convenience: exposed for proof-level settlement inspection and universal
+    /// finality profile derivation without loosening [`Self::for_domain`].
+    #[must_use]
+    pub fn for_proof(domain: &ConsensusDomain, proof: &FinalityProof) -> Self {
+        match (&domain.kind, proof) {
+            (ConsensusKind::Dag, FinalityProof::Dag { .. } | FinalityProof::DagPq { .. })
+            | (ConsensusKind::Poh, FinalityProof::Poh { .. } | FinalityProof::PohPq { .. })
+            | (
+                ConsensusKind::Pospace,
+                FinalityProof::Pospace { .. } | FinalityProof::PospacePq { .. },
+            ) => Self {
+                state_root: true,
+                tx_root: true,
+                event_root: true,
+                parent: true,
+            },
+            _ => Self::for_domain(domain),
         }
     }
 }
@@ -1756,6 +1861,9 @@ fn domain_has_bound_authority(domain: &ConsensusDomain) -> bool {
         ConsensusKind::PoA
         | ConsensusKind::PoS
         | ConsensusKind::Bft
+        | ConsensusKind::Dag
+        | ConsensusKind::Poh
+        | ConsensusKind::Pospace
         | ConsensusKind::StorageAttestation(_)
         | ConsensusKind::AiInference
         | ConsensusKind::Custom(_) => domain.validator_set_hash != [0u8; 32],

@@ -389,6 +389,14 @@ impl Executor {
                 "Burn reserve is schedule-controlled and cannot originate transactions",
             ));
         }
+        if state.auth_program_hash(&tx.from).is_some()
+            && (tx.auth_claim.is_none() || !tx.claimed_shape_is_canonical())
+        {
+            return Err(BudlumError::validation(
+                "program_account_requires_auth_claim",
+                "Program account requires a canonical aggregated authorization claim",
+            ));
+        }
         // Every arm increments the sender nonce. Refuse exhaustion before any
         // arm can debit funds, touch a registry or escrow value.
         Self::checked_next_nonce(state.get_nonce(&tx.from))?;
@@ -3904,6 +3912,34 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
+            TransactionType::VerifyStark(_) => {
+                // Phase 5 split-STARK verification carries zero transfer amount;
+                // `Claim::Poly` provenance and Stage 2 (`verify_algebra`) are
+                // enforced against `AirRegistry` during block aggregation checks.
+                if tx.amount != 0 {
+                    return Err(BudlumError::validation(
+                        "verify_stark_amount_nonzero",
+                        "a VerifyStark transaction carries no amount",
+                    ));
+                }
+                if tx.claim_refs.is_empty() {
+                    return Err(BudlumError::validation(
+                        "verify_stark_missing_claim_refs",
+                        "a VerifyStark transaction must reference its Claim::Poly digest",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < total_cost {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance",
+                        format!("the fee exceeds the spendable balance: need {total_cost}"),
+                    ));
+                }
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
             TransactionType::StorageV3(storage_tx) => {
                 // StorageTx v3 carries zero explicit transfer amount; RegisterObject
                 // (when not deduplicated) and RenewObject additionally collect the
@@ -5324,8 +5360,8 @@ mod tests {
         state.add_balance(&who, 10);
         state.add_validator(who, 1_000);
         // The gate reads the jail's *remaining* term, not the bare flag: a
-        // jail whose term has run out is not a life sentence for the bond
-        // (that was the permanent-freeze finding). Arm a live term here.
+        // jail whose term has run out is not a permanent freeze for the bond.
+        // Arm a live term here.
         let live_until = state.epoch_index.saturating_add(1);
         if let Some(validator) = state.get_validator_mut(&who) {
             validator.jailed = true;

@@ -1,8 +1,8 @@
-//! Locks for the twenty highest-priority source-code review findings.
+//! Locks for the highest-priority source-code protocol guardrails.
 //!
-//! Several findings were already fail-closed. These tests pin the remaining
-//! holes closed here; names the findings that remain
-//! fail-closed rather than pretending a missing AIR is now live.
+//! Several invariants are fail-closed by design. These tests pin the core
+//! security boundaries closed deterministically; keeping invariants
+//! fail-closed rather than pretending a missing AIR is live.
 
 use crate::ai::types::{AiModelId, AiModelSpec};
 use crate::ai::{AiRegistry, FULL_AI_STARK_VERIFICATION_LIVE};

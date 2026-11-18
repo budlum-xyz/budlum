@@ -171,6 +171,20 @@ pub struct Account {
     /// Sub-atom balance in attoBUD (`0 <= frac_attos < 10^12`).
     #[serde(default)]
     pub frac_attos: u64,
+    /// Optional `BudZKVM` authorization program hash (Phase 4 program accounts).
+    ///
+    /// When set, transactions from this account authorize via
+    /// `Claim::Prog { program_hash, input_hash: tx.signing_hash(), output_hash: AUTH_OK }`
+    /// rather than an inline signature.
+    /// Serialized unconditionally. `skip_serializing_if` is load bearing here
+    /// in the wrong direction: `bincode` is not self describing, so omitting a
+    /// `None` field shortens the record and the decoder then hits the end of
+    /// the value while expecting the tag byte. An account persisted through
+    /// `Storage::commit_durable_batch` was written 8 bytes and read back as
+    /// `unexpected end of file`, which took `test_durable_commit_batch_and_recovery`
+    /// down with it. See B-0048.
+    #[serde(default)]
+    pub auth_program_hash: Option<[u8; 32]>,
 }
 
 /// One leaf of the consensus accounts tree, with its Merkle path to the root.
@@ -180,6 +194,7 @@ pub struct ConsensusTreeLeaf {
     pub balance: u64,
     pub nonce: u64,
     pub frac_attos: u64,
+    pub auth_program_hash: Option<[u8; 32]>,
     pub leaf_hash: [u8; 32],
     /// Sibling hashes from leaf toward root.
     pub siblings: Vec<[u8; 32]>,
@@ -202,6 +217,7 @@ pub struct ConsensusAccountProof {
     pub balance: u64,
     pub nonce: u64,
     pub frac_attos: u64,
+    pub auth_program_hash: Option<[u8; 32]>,
     pub leaf_hash: [u8; 32],
     /// Sibling hashes from leaf toward root (present case).
     pub siblings: Vec<[u8; 32]>,
@@ -214,14 +230,16 @@ pub struct ConsensusAccountProof {
 }
 
 /// The consensus accounts leaf hash: `SHA-256(0x00 || pubkey || balance ||
-/// nonce || frac_attos?)`, with `frac_attos` folded in only when non-zero.
-/// This is the exact preimage the state root tree is built from.
+/// nonce || frac_attos? || (TAG_ACCOUNT_AUTH_PROGRAM || auth_program_hash)?)`,
+/// shared with [`AccountState::hash_account_leaf`] for both key and program
+/// accounts while keeping pre-existing hashes unchanged when `None`.
 #[must_use]
 pub fn consensus_account_leaf(
     address: &Address,
     balance: u64,
     nonce: u64,
     frac_attos: u64,
+    auth_program_hash: Option<[u8; 32]>,
 ) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -231,6 +249,10 @@ pub fn consensus_account_leaf(
     h.update(nonce.to_le_bytes());
     if frac_attos != 0 {
         h.update(frac_attos.to_le_bytes());
+    }
+    if let Some(program_hash) = auth_program_hash {
+        h.update(TAG_ACCOUNT_AUTH_PROGRAM);
+        h.update(program_hash);
     }
     h.finalize().into()
 }
@@ -295,7 +317,13 @@ impl ConsensusTreeLeaf {
     #[must_use]
     pub fn verifies_against(&self, root: &[u8; 32]) -> bool {
         self.leaf_hash
-            == consensus_account_leaf(&self.address, self.balance, self.nonce, self.frac_attos)
+            == consensus_account_leaf(
+                &self.address,
+                self.balance,
+                self.nonce,
+                self.frac_attos,
+                self.auth_program_hash,
+            )
             && consensus_path_verifies(&self.leaf_hash, &self.siblings, &self.directions, root)
     }
 }
@@ -313,7 +341,13 @@ impl ConsensusAccountProof {
                 return false;
             }
             self.leaf_hash
-                == consensus_account_leaf(&self.address, self.balance, self.nonce, self.frac_attos)
+                == consensus_account_leaf(
+                    &self.address,
+                    self.balance,
+                    self.nonce,
+                    self.frac_attos,
+                    self.auth_program_hash,
+                )
                 && consensus_path_verifies(
                     &self.leaf_hash,
                     &self.siblings,
@@ -321,7 +355,11 @@ impl ConsensusAccountProof {
                     &self.root,
                 )
         } else {
-            if self.balance != 0 || self.nonce != 0 || self.frac_attos != 0 {
+            if self.balance != 0
+                || self.nonce != 0
+                || self.frac_attos != 0
+                || self.auth_program_hash.is_some()
+            {
                 return false;
             }
             if self.root == [0u8; 32] {
@@ -346,6 +384,11 @@ impl ConsensusAccountProof {
 /// once, and a fixed marker keeps the root identical across nodes.
 const STATE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/account-state";
 
+/// Domain separator mixed into an account's Merkle leaf only when
+/// `Account.auth_program_hash` is set, preserving existing leaf hashes for
+/// accounts without a program hook.
+const TAG_ACCOUNT_AUTH_PROGRAM: &[u8] = b"BDLM_AUTH_PROG_V1";
+
 impl Account {
     #[must_use]
     pub const fn new(public_key: Address) -> Self {
@@ -354,6 +397,7 @@ impl Account {
             balance: 0,
             nonce: 0,
             frac_attos: 0,
+            auth_program_hash: None,
         }
     }
     #[must_use]
@@ -363,6 +407,24 @@ impl Account {
             balance,
             nonce: 0,
             frac_attos: 0,
+            auth_program_hash: None,
+        }
+    }
+
+    /// Creates a program-authorized account (Phase 4) with `balance` and
+    /// `auth_program_hash`.
+    #[must_use]
+    pub const fn with_auth_program(
+        public_key: Address,
+        balance: u64,
+        auth_program_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            public_key,
+            balance,
+            nonce: 0,
+            frac_attos: 0,
+            auth_program_hash: Some(auth_program_hash),
         }
     }
 
@@ -2233,6 +2295,22 @@ impl AccountState {
     pub fn get_nonce(&self, public_key: &Address) -> u64 {
         self.accounts.get(public_key).map_or(0, |a| a.nonce)
     }
+
+    /// Returns the `BudZKVM` authorization program hash bound to `public_key`,
+    /// or `None` for standard signature-authenticated accounts.
+    #[must_use]
+    pub fn auth_program_hash(&self, public_key: &Address) -> Option<[u8; 32]> {
+        self.accounts
+            .get(public_key)
+            .and_then(|a| a.auth_program_hash)
+    }
+
+    /// Binds or clears the Phase 4 `BudZKVM` authorization program hash on
+    /// `public_key` and marks the account dirty for state-root recomputation.
+    pub fn set_auth_program_hash(&mut self, public_key: &Address, program_hash: Option<[u8; 32]>) {
+        let acct = self.get_or_create(public_key);
+        acct.auth_program_hash = program_hash;
+    }
     pub fn get_or_create(&mut self, public_key: &Address) -> &mut Account {
         if !self.accounts.contains_key(public_key) {
             self.accounts.insert(*public_key, Account::new(*public_key));
@@ -2501,6 +2579,9 @@ impl AccountState {
                 }
             }
             TxAuthority::Inline => {
+                if self.auth_program_hash(&tx.from).is_some() {
+                    return Err("Program account requires an aggregated authorization claim".into());
+                }
                 if !tx.verify_in(&self.scheme_registry) {
                     return Err("Invalid signature".into());
                 }
@@ -5517,12 +5598,29 @@ impl AccountState {
         )
     }
 
+    fn hash_account_leaf(pubkey: &Address, account: &Account) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+
+        let mut h = Sha256::new();
+        h.update([0x00]);
+        h.update(pubkey.0);
+        h.update(account.balance.to_le_bytes());
+        h.update(account.nonce.to_le_bytes());
+        if account.frac_attos != 0 {
+            h.update(account.frac_attos.to_le_bytes());
+        }
+        if let Some(auth_program_hash) = account.auth_program_hash {
+            h.update(TAG_ACCOUNT_AUTH_PROGRAM);
+            h.update(auth_program_hash);
+        }
+        h.finalize().into()
+    }
+
     /// Ensure the cached accounts Merkle tree reflects `self.accounts`.
     ///
     /// This is the exact tree [`Self::state_root_body`] folds into the
-    /// consensus state root: leaves are
-    /// `SHA-256(0x00 || pubkey || balance || nonce || frac_attos?)` over
-    /// the sorted account keys, internal nodes are
+    /// consensus state root: leaves are hashed by [`Self::hash_account_leaf`]
+    /// over the sorted account keys, internal nodes are
     /// `SHA-256(0x01 || left || right)` with the last odd node duplicated.
     /// [`Self::get_account_proof`] reads proofs from this tree, so a proof
     /// verifies against the accounts root a block header commits to.
@@ -5542,17 +5640,7 @@ impl AccountState {
                 self.cached_leaves = self
                     .accounts
                     .par_iter()
-                    .map(|(pubkey, account)| {
-                        let mut h = Sha256::new();
-                        h.update([0x00]);
-                        h.update(pubkey.0);
-                        h.update(account.balance.to_le_bytes());
-                        h.update(account.nonce.to_le_bytes());
-                        if account.frac_attos != 0 {
-                            h.update(account.frac_attos.to_le_bytes());
-                        }
-                        h.finalize().into()
-                    })
+                    .map(|(pubkey, account)| Self::hash_account_leaf(pubkey, account))
                     .collect();
             }
             #[cfg(miri)]
@@ -5560,17 +5648,7 @@ impl AccountState {
                 self.cached_leaves = self
                     .accounts
                     .iter()
-                    .map(|(pubkey, account)| {
-                        let mut h = Sha256::new();
-                        h.update([0x00]);
-                        h.update(pubkey.0);
-                        h.update(account.balance.to_le_bytes());
-                        h.update(account.nonce.to_le_bytes());
-                        if account.frac_attos != 0 {
-                            h.update(account.frac_attos.to_le_bytes());
-                        }
-                        h.finalize().into()
-                    })
+                    .map(|(pubkey, account)| Self::hash_account_leaf(pubkey, account))
                     .collect();
             }
 
@@ -5615,15 +5693,7 @@ impl AccountState {
             for dirty_key in &self.dirty_accounts {
                 if let Ok(pos) = self.cached_keys.binary_search(dirty_key) {
                     if let Some(account) = self.accounts.get(dirty_key) {
-                        let mut h = Sha256::new();
-                        h.update([0x00]);
-                        h.update(dirty_key.0);
-                        h.update(account.balance.to_le_bytes());
-                        h.update(account.nonce.to_le_bytes());
-                        if account.frac_attos != 0 {
-                            h.update(account.frac_attos.to_le_bytes());
-                        }
-                        self.cached_leaves[pos] = h.finalize().into();
+                        self.cached_leaves[pos] = Self::hash_account_leaf(dirty_key, account);
                         affected_indices.insert(pos);
                     }
                 }
@@ -5706,6 +5776,7 @@ impl AccountState {
                     balance: acct.balance,
                     nonce: acct.nonce,
                     frac_attos: acct.frac_attos,
+                    auth_program_hash: acct.auth_program_hash,
                     leaf_hash: self.cached_leaves[idx],
                     siblings,
                     directions,
@@ -5724,6 +5795,7 @@ impl AccountState {
                     balance: 0,
                     nonce: 0,
                     frac_attos: 0,
+                    auth_program_hash: None,
                     leaf_hash: [0u8; 32],
                     siblings: Vec::new(),
                     directions: Vec::new(),
@@ -5743,6 +5815,7 @@ impl AccountState {
             balance: acct.balance,
             nonce: acct.nonce,
             frac_attos: acct.frac_attos,
+            auth_program_hash: acct.auth_program_hash,
             leaf_hash: self.cached_leaves[idx],
             siblings,
             directions,

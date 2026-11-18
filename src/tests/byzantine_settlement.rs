@@ -297,9 +297,9 @@ mod byzantine_settlement_tests {
     #[tokio::test]
     async fn state_update_from_a_non_committer_is_refused() {
         // The freeze-the-victim path. A funded attacker
-        // with no validator seat tries the exact move the finding names -
-        // push the victim's nonce just under the ceiling, which the old
-        // ceiling/monotonicity guards happily waved through.
+        // with no validator seat tries an unauthorized move -
+        // push the victim's nonce just under the ceiling, which previous
+        // ceiling/monotonicity guards waved through.
         let consensus = std::sync::Arc::new(crate::consensus::pow::PoWEngine::new(0));
         let mut node = Blockchain::new(consensus, None, 45262, None);
         let attacker = test_addr_from_byte(0xAD);

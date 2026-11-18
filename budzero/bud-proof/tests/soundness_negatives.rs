@@ -131,10 +131,8 @@ fn a_proof_presented_for_another_program_is_refused() {
 /// If the public input fields are tampered with one by one the proof must be invalid.
 ///
 /// Each field is asserted **separately**: a single bulk `assert` would hide one field
-/// being unbound under the success of the others. This is exactly the class of the
-/// SP1 `committed_value_digest` under-constraint and the Aleo/snarkVM missing
-/// absorb finding - the verifier has to check, in its own code, the areas the
-/// proof system does not constrain.
+/// being unbound under the success of the others. This enforces complete coverage for
+/// public inputs and prevents missing absorb bugs in the verifier.
 #[test]
 fn a_tampered_public_input_is_refused() {
     let (envelope, clean, bytecode) = working_proof();

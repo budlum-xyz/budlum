@@ -765,12 +765,10 @@ budzero/bud-proof/src/bud_stark/prover.rs	fn	quotient_values
 budzero/bud-proof/src/bud_stark/sub_builder.rs	struct	SubAirBuilder
 budzero/bud-proof/src/bud_stark/sub_builder.rs	struct	SubSliced
 budzero/bud-proof/src/bud_stark/symbolic.rs	fn	get_log_quotient_degree_extension
-budzero/bud-proof/src/bud_stark/verifier.rs	const	MAX_VERIFIER_DEGREE_BITS
 budzero/bud-proof/src/bud_stark/verifier.rs	enum	VerificationError
 budzero/bud-proof/src/bud_stark/verifier.rs	fn	recompose_quotient_from_chunks
 budzero/bud-proof/src/bud_stark/verifier.rs	fn	verify_constraints
 budzero/bud-proof/src/plonky3_air.rs	const	POSEIDON_HALF_FULL
-budzero/bud-proof/src/plonky3_air.rs	const	PREPROCESSED_WIDTH
 budzero/bud-proof/src/plonky3_prover.rs	fn	to_public_values
 budzero/bud-proof/src/plonky3_prover.rs	fn	trace_matrix
 budzero/bud-state/src/lib.rs	fn	get_empty_hash
@@ -782,13 +780,11 @@ budzero/bud-state/src/note.rs	struct	NoteRegistry
 budzero/bud-state/src/note.rs	struct	PrivacyNote
 budzero/bud-vm/src/lib.rs	const	POSEIDON_ALPHA
 budzero/bud-vm/src/lib.rs	const	POSEIDON_ROUNDS_IN_USE
-budzero/bud-vm/src/lib.rs	enum	VmError
 budzero/bud-vm/src/lib.rs	fn	consume_gas
 budzero/bud-vm/src/lib.rs	fn	field_mul_goldilocks
 budzero/bud-vm/src/lib.rs	fn	poseidon4_hash3
 budzero/bud-vm/src/lib.rs	fn	poseidon4_hash_state
 budzero/bud-vm/src/lib.rs	fn	poseidon_full_hash_state
-budzero/bud-vm/src/lib.rs	fn	poseidon_full_state
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_attester_proof
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_content_validation
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_relay_proof
@@ -798,7 +794,6 @@ budzero/verifier-registry/src/registry.rs	fn	registrations_as_seq
 budzero/verifier-registry/src/registry.rs	struct	VerifierRegistry
 crates/budlum-explorer/src/arweave.rs	const	MAX_CHUNK_SIZE
 crates/budlum-explorer/src/arweave.rs	const	MIN_CHUNK_SIZE
-crates/budlum-explorer/src/arweave.rs	fn	data_root
 crates/budlum-explorer/src/bns_proof.rs	fn	partial_registry_root
 crates/budlum-explorer/src/bns_proof.rs	struct	RegistryEntry
 crates/budlum-explorer/src/ens.rs	fn	labelhash
@@ -1399,7 +1394,6 @@ src/domain/storage_params.rs	const	MAX_CHUNK_SIZE
 src/domain/storage_params.rs	const	MIN_CHUNK_SIZE
 src/domain/types.rs	fn	is_ai
 src/domain/types.rs	fn	is_storage
-src/domain/types.rs	fn	normalize_hash32
 src/execution/executor.rs	fn	apply_block
 src/execution/proof_verifier.rs	const	GAS_PER_DEGREE_BIT
 src/execution/proof_verifier.rs	const	MIN_PROOF_FORMAT_VERSION
@@ -1678,7 +1672,6 @@ src/storage/living_threshold.rs	const	ACCESS_HALF_LIFE_EPOCHS
 src/storage/living_threshold.rs	const	HYSTERESIS_SIXTEENTHS
 src/storage/living_threshold.rs	const	MAX_CPU_NANOS_PER_BYTE
 src/storage/living_threshold.rs	const	MAX_OBJECT_BYTES
-src/storage/living_threshold.rs	const	NANOS_PER_SECOND
 src/storage/living_threshold.rs	enum	ThresholdError
 src/storage/living_threshold.rs	fn	break_even_rate_scaled
 src/storage/living_threshold.rs	fn	one_reproduction_picodollars

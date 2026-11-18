@@ -22,10 +22,12 @@
 //! program computes.
 
 pub mod aggregator;
+pub mod air_registry;
 pub mod backend;
 pub mod block;
 pub mod chain;
 pub mod claim;
+pub mod domain_finality;
 pub mod envelope;
 pub mod fees;
 pub mod frame;
@@ -39,6 +41,8 @@ pub mod params;
 pub mod pool;
 pub mod programs;
 pub mod schemes;
+pub mod shadow;
+pub mod stark;
 
 #[cfg(test)]
 mod tests;

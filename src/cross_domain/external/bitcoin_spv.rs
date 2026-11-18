@@ -1,5 +1,11 @@
 //! Bitcoin SPV finality: the Nakamoto branch of the consensus-of-consensuses.
 //!
+//! WIRING: `IntakeState::register_domain` constructs `BitcoinSpvAdapter` and the
+//! external-domain bridge is the production consumer. The header parser, hash
+//! helper and consensus limits are deliberately exposed for the pinned-mainnet
+//! test corpus and the canonical spec encoding; those callers do not name every
+//! helper in a production `.rs` file yet.
+//!
 //! # Why this adapter exists
 //!
 //! The external-domain framework declared [`SecurityBacking::Work`] and the
@@ -58,22 +64,20 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Bytes in one Bitcoin block header.
-///
-/// WIRING: fixed 80-byte Bitcoin header wire size shared with `src/tests/bitcoin_spv.rs`.
-pub(crate) const HEADER_LEN: usize = 80;
+pub const HEADER_LEN: usize = 80;
 /// A bounded SPV window: a registration cannot make a node hash an unbounded
 /// chain inside one verification.
-const MAX_HEADERS: usize = 256;
+pub const MAX_HEADERS: usize = 256;
 /// This adapter's evidence format. Only this exact value is accepted.
-const EVIDENCE_VERSION: u32 = 1;
+pub const EVIDENCE_VERSION: u32 = 1;
 /// How many headers the evidence must build on the pinned anchor before the
 /// tip is called final. Declared in the descriptor so a consumer reads the
 /// number before relying on it. This is `required_depth` in the shared model:
 /// distance from the trusted checkpoint, not confirmations mined *above* the
 /// tip (an SPV proof cannot know those).
-const REQUIRED_DEPTH: u64 = 6;
+pub const REQUIRED_DEPTH: u64 = 6;
 /// Maximum seconds a header may be ahead of the policy clock.
-const MAX_FUTURE_SECONDS: u64 = 2 * 60 * 60;
+pub const MAX_FUTURE_SECONDS: u64 = 2 * 60 * 60;
 
 /// The checkpoint the adapter is pinned to. `block_hash` is in Bitcoin's
 /// internal byte order (the raw `SHA256d` output, not the reversed display
@@ -91,27 +95,73 @@ pub struct PinnedBitcoinAnchor {
 
 /// A parsed Bitcoin header in wire order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BitcoinHeader {
-    version: i32,
-    parent_hash: [u8; 32],
-    merkle_root: [u8; 32],
-    timestamp: u32,
-    bits: u32,
-    nonce: u32,
+pub struct BitcoinHeader {
+    pub version: i32,
+    pub parent_hash: [u8; 32],
+    pub merkle_root: [u8; 32],
+    pub timestamp: u32,
+    pub bits: u32,
+    pub nonce: u32,
     /// The header's own `SHA256d` digest, internal byte order.
-    hash: [u8; 32],
+    pub hash: [u8; 32],
 }
 
 /// `SHA256(SHA256(bytes))`, in internal byte order.
-///
-/// WIRING: canonical Bitcoin double-SHA256 helper shared with `src/tests/bitcoin_spv.rs`.
 #[must_use]
-pub(crate) fn sha256d(bytes: &[u8]) -> [u8; 32] {
+pub fn sha256d(bytes: &[u8]) -> [u8; 32] {
     let first = Sha256::digest(bytes);
     let second = Sha256::digest(first);
     let mut out = [0u8; 32];
     out.copy_from_slice(&second);
     out
+}
+
+/// Maximum Bitcoin transaction Merkle branch depth (`2^32` transactions).
+const MAX_SPV_MERKLE_DEPTH: usize = 32;
+
+/// Verify a Bitcoin SPV transaction inclusion proof against a finalized
+/// header's `merkle_root` (`SHA256d` in internal byte order).
+///
+/// Rejects zero `txid`/`merkle_root`, oversized branches (`> 32`), leftover
+/// high index bits above the branch depth, and any `left == right` internal
+/// compression (blocking CVE-2012-2459 odd-leaf duplication malleability).
+///
+/// Convenience: exposed for external Bitcoin SPV settlement and bridge callers
+/// verifying payment inclusion against `FinalityAttestation::attested_tx_root`.
+#[must_use]
+pub fn verify_spv_tx_inclusion(
+    txid: &[u8; 32],
+    merkle_root: &[u8; 32],
+    tx_index: u32,
+    branch: &[[u8; 32]],
+) -> bool {
+    if *txid == [0u8; 32] || *merkle_root == [0u8; 32] || branch.len() > MAX_SPV_MERKLE_DEPTH {
+        return false;
+    }
+    if branch.len() < 32 && (tx_index >> branch.len()) != 0 {
+        return false;
+    }
+    let mut acc = *txid;
+    let mut idx = tx_index;
+    let mut pair = Vec::with_capacity(64);
+    for sibling in branch {
+        if acc == *sibling {
+            // CVE-2012-2459: refuse duplicate-child Merkle steps so a forged
+            // trailing-pair duplicate tree can never alias a distinct tx index.
+            return false;
+        }
+        let (left, right) = if idx & 1 == 0 {
+            (&acc, sibling)
+        } else {
+            (sibling, &acc)
+        };
+        pair.clear();
+        pair.extend_from_slice(left);
+        pair.extend_from_slice(right);
+        acc = sha256d(&pair);
+        idx >>= 1;
+    }
+    acc == *merkle_root
 }
 
 /// The 256-bit big-endian target encoded by Bitcoin's compact `nBits`.
@@ -153,8 +203,12 @@ fn target_from_bits(bits: u32) -> Result<[u8; 32], AdapterError> {
             rule: "nBits target overflows 256 bits".to_string(),
         });
     };
-    let [_, b1, b2, b3] = mantissa_bytes;
-    window.copy_from_slice(&[b1, b2, b3]);
+    let Some(tail) = mantissa_bytes.get(1..4) else {
+        return Err(AdapterError::ConsensusRule {
+            rule: "nBits mantissa is too short".to_string(),
+        });
+    };
+    window.copy_from_slice(tail);
     Ok(out)
 }
 
@@ -234,15 +288,31 @@ fn parse_headers(payload: &[u8]) -> Result<Vec<BitcoinHeader>, AdapterError> {
     let mut headers = Vec::with_capacity(count);
     for index in 0..count {
         let base = 4usize.saturating_add(index.saturating_mul(HEADER_LEN));
-        let end = base.saturating_add(HEADER_LEN);
-        let raw = payload
-            .get(base..end)
-            .ok_or_else(|| AdapterError::Malformed {
+        let end = base
+            .checked_add(HEADER_LEN)
+            .ok_or(AdapterError::Malformed {
                 offset: base,
-                reason: "header slice is not present".to_string(),
+                reason: "header offset overflows".to_string(),
+            })?;
+        let Some(raw) = payload.get(base..end) else {
+            return Err(AdapterError::Malformed {
+                offset: base,
+                reason: "header is not present".to_string(),
+            });
+        };
+        let version_bytes: [u8; 4] = raw
+            .get(0..4)
+            .ok_or(AdapterError::Malformed {
+                offset: base,
+                reason: "version is not present".to_string(),
+            })?
+            .try_into()
+            .map_err(|_| AdapterError::Malformed {
+                offset: base,
+                reason: "version is not 4 bytes".to_string(),
             })?;
         headers.push(BitcoinHeader {
-            version: i32::from_le_bytes(u32_le(raw, 0, "version")?.to_le_bytes()),
+            version: i32::from_le_bytes(version_bytes),
             parent_hash: fixed(raw, 4, "parent_hash")?,
             merkle_root: fixed(raw, 36, "merkle_root")?,
             timestamp: u32_le(raw, 68, "timestamp")?,
@@ -381,6 +451,11 @@ impl ExternalFinalityAdapter for BitcoinSpvAdapter {
             if !first && u64::from(header.timestamp) < previous_timestamp {
                 return Err(AdapterError::ConsensusRule {
                     rule: "Bitcoin header timestamp moves backwards".to_string(),
+                });
+            }
+            if !verify_spv_tx_inclusion(&header.merkle_root, &header.merkle_root, 0, &[]) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "Bitcoin header carries an empty zero merkle_root".to_string(),
                 });
             }
             if !meets_target(&header.hash, &target) {
@@ -685,5 +760,37 @@ mod tests {
         );
         assert_eq!(attestation.time_unit, TimeUnit::UnixSeconds);
         assert_eq!(attestation.evidence_digest, evidence.digest());
+    }
+
+    #[test]
+    fn verify_spv_tx_inclusion_accepts_honest_branch_and_refuses_cve_2012_2459_duplicate() {
+        let pair = |l: [u8; 32], r: [u8; 32]| {
+            let mut buf = [0u8; 64];
+            buf[..32].copy_from_slice(&l);
+            buf[32..].copy_from_slice(&r);
+            sha256d(&buf)
+        };
+        let tx0 = sha256d(b"tx0");
+        let tx1 = sha256d(b"tx1");
+        let tx2 = sha256d(b"tx2");
+        let tx3 = sha256d(b"tx3");
+        let h01 = pair(tx0, tx1);
+        let h23 = pair(tx2, tx3);
+        let root = pair(h01, h23);
+
+        assert!(verify_spv_tx_inclusion(&tx2, &root, 2, &[tx3, h01]));
+        assert!(!verify_spv_tx_inclusion(&tx2, &root, 3, &[tx3, h01]));
+        // High index bits beyond branch depth must be rejected.
+        assert!(!verify_spv_tx_inclusion(
+            &tx2,
+            &root,
+            2 | (1 << 2),
+            &[tx3, h01]
+        ));
+        // CVE-2012-2459 duplicate-sibling Merkle step must fail closed.
+        let dup_root = pair(tx0, tx0);
+        assert!(!verify_spv_tx_inclusion(&tx0, &dup_root, 0, &[tx0]));
+        assert!(!verify_spv_tx_inclusion(&tx0, &dup_root, 1, &[tx0]));
+        assert!(!verify_spv_tx_inclusion(&[0u8; 32], &root, 0, &[tx1, h23]));
     }
 }

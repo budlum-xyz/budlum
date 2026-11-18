@@ -168,8 +168,8 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).expect("read_dir").count(), 1);
     }
 
-    /// rewriting a key file narrows an existing wide mode. This is the
-    /// regression the finding names - a rewrite used to keep `0o644`.
+    /// rewriting a key file narrows an existing wide mode. Invariant:
+    /// a rewrite must strictly enforce private permissions `0o600`.
     #[cfg(unix)]
     #[test]
     fn a_rewrite_narrows_a_wide_mode() {

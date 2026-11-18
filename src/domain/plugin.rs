@@ -3,8 +3,9 @@ use crate::core::account::AccountState;
 use crate::core::block::Block;
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::finality_adapter::{
-    block_finality_proof_hash, empty_event_root, BftFinalityAdapter, DomainFinalityAdapter,
-    PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
+    block_finality_proof_hash, empty_event_root, BftFinalityAdapter, DagFinalityAdapter,
+    DomainFinalityAdapter, PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter,
+    PohFinalityAdapter, PospaceFinalityAdapter, ZkFinalityAdapter,
 };
 use crate::domain::types::{
     ConsensusDomain, ConsensusKind, DomainCommitment, DomainId, DomainStatus, Hash32,
@@ -214,6 +215,159 @@ impl ZkDomainPlugin {
 impl ConsensusDomainPlugin for ZkDomainPlugin {
     fn kind(&self) -> ConsensusKind {
         ConsensusKind::Zk
+    }
+
+    fn consensus(&self) -> &dyn ConsensusEngine {
+        self.consensus.as_ref()
+    }
+
+    fn finality_adapter(&self) -> &dyn DomainFinalityAdapter {
+        &self.finality
+    }
+}
+
+pub struct DagDomainPlugin {
+    consensus: Arc<dyn ConsensusEngine>,
+    finality: DagFinalityAdapter,
+}
+
+impl DagDomainPlugin {
+    pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
+        Self {
+            consensus,
+            finality: DagFinalityAdapter,
+        }
+    }
+}
+
+impl ConsensusDomainPlugin for DagDomainPlugin {
+    fn kind(&self) -> ConsensusKind {
+        ConsensusKind::Dag
+    }
+
+    fn consensus(&self) -> &dyn ConsensusEngine {
+        self.consensus.as_ref()
+    }
+
+    fn finality_adapter(&self) -> &dyn DomainFinalityAdapter {
+        &self.finality
+    }
+
+    fn validate_domain_block(
+        &self,
+        block: &Block,
+        ctx: DomainContext<'_>,
+    ) -> Result<(), DomainError> {
+        if block.chain_id != ctx.domain.domain_chain_id {
+            return Err(DomainError(format!(
+                "DAG block chain_id {} does not match domain chain_id {}",
+                block.chain_id, ctx.domain.domain_chain_id
+            )));
+        }
+        let calculated_tx_root = block.calculate_tx_root();
+        if block.tx_root != calculated_tx_root {
+            return Err(DomainError("DAG block tx_root mismatch".into()));
+        }
+        if block.index > 0 {
+            let parents = crate::consensus::dag::parse_parent_hashes(&block.previous_hash);
+            let max_parent = parents
+                .iter()
+                .filter_map(|p| ctx.chain.iter().find(|b| &b.hash == p))
+                .max_by_key(|b| b.timestamp);
+            self.consensus()
+                .validate_timestamp(block, max_parent)
+                .map_err(DomainError::from)?;
+            self.consensus()
+                .validate_block_size(block)
+                .map_err(DomainError::from)?;
+        }
+        self.consensus()
+            .validate_block(block, ctx.chain, ctx.state)
+            .map_err(DomainError::from)
+    }
+
+    fn extract_commitment(
+        &self,
+        block: &Block,
+        ctx: DomainContext<'_>,
+    ) -> Result<DomainCommitment, DomainError> {
+        if !ctx.domain.is_active() {
+            return Err(DomainError(format!(
+                "Domain {} is not active",
+                ctx.domain.id
+            )));
+        }
+        // `from_block` derives the parent from the block's own parent pointer;
+        // for a DAG block that is its first parent, and the remaining parents
+        // stay in the DAG's own edge set rather than in the commitment.
+        let mut commitment = DomainCommitment::from_block(
+            ctx.domain,
+            block,
+            empty_event_root(),
+            block_finality_proof_hash(block),
+            ctx.sequence,
+        )
+        .map_err(DomainError)?;
+        let parents = crate::consensus::dag::parse_parent_hashes(&block.previous_hash);
+        if let Some(first_parent) = parents.first() {
+            if let Ok(h) = crate::domain::types::normalize_hash32(
+                b"parent_domain_block_hash",
+                ctx.domain.id,
+                &ctx.domain.block_hash_scheme,
+                first_parent.as_bytes(),
+            ) {
+                commitment.parent_domain_block_hash = h;
+            }
+        }
+        Ok(commitment)
+    }
+}
+
+pub struct PohDomainPlugin {
+    consensus: Arc<dyn ConsensusEngine>,
+    finality: PohFinalityAdapter,
+}
+
+impl PohDomainPlugin {
+    pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
+        Self {
+            consensus,
+            finality: PohFinalityAdapter,
+        }
+    }
+}
+
+impl ConsensusDomainPlugin for PohDomainPlugin {
+    fn kind(&self) -> ConsensusKind {
+        ConsensusKind::Poh
+    }
+
+    fn consensus(&self) -> &dyn ConsensusEngine {
+        self.consensus.as_ref()
+    }
+
+    fn finality_adapter(&self) -> &dyn DomainFinalityAdapter {
+        &self.finality
+    }
+}
+
+pub struct PospaceDomainPlugin {
+    consensus: Arc<dyn ConsensusEngine>,
+    finality: PospaceFinalityAdapter,
+}
+
+impl PospaceDomainPlugin {
+    pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
+        Self {
+            consensus,
+            finality: PospaceFinalityAdapter,
+        }
+    }
+}
+
+impl ConsensusDomainPlugin for PospaceDomainPlugin {
+    fn kind(&self) -> ConsensusKind {
+        ConsensusKind::Pospace
     }
 
     fn consensus(&self) -> &dyn ConsensusEngine {

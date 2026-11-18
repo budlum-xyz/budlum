@@ -471,6 +471,11 @@ enum DomainAction {
         /// Chain id the proof must commit to.
         #[arg(long)]
         chain_id: Option<u64>,
+        /// The Tendermint chain id the commit must be from (`--adapter
+        /// tendermint`). Required for that family: the chain id is inside
+        /// every sign byte, so an unpinned adapter would verify any chain.
+        #[arg(long = "tm-chain-id")]
+        tm_chain_id: Option<String>,
         /// The target's current time for the verification policy.
         #[arg(long, default_value_t = 0)]
         now: u64,
@@ -2156,10 +2161,12 @@ fn run_domain_selftest(
     golden: &std::path::Path,
     program_hash: Option<&str>,
     chain_id: Option<u64>,
+    tm_chain_id: Option<&str>,
     now: u64,
 ) -> Result<(), String> {
     use budlum_core::cross_domain::external::{
-        admit, RawConsensusEvidence, VerificationPolicy, ZkVmFinalityAdapter,
+        admit, RawConsensusEvidence, TendermintFinalityAdapter, VerificationPolicy,
+        ZkVmFinalityAdapter,
     };
     let text = std::fs::read_to_string(golden)
         .map_err(|e| format!("cannot read {}: {e}", golden.display()))?;
@@ -2181,7 +2188,21 @@ fn run_domain_selftest(
                 ZkVmFinalityAdapter::new(network, program_hash, chain_id).with_golden(sample);
             admit(&adapter, &VerificationPolicy::proven(now))
         }
-        other => return Err(format!("unknown adapter family: {other} (known: zkvm)")),
+        "tendermint" => {
+            // The chain id is a pin, so it is a required argument rather than
+            // something read out of the sample being tested: a pin the sample
+            // supplies is not a pin.
+            let chain_id = tm_chain_id.ok_or_else(|| {
+                "the tendermint family needs --tm-chain-id (e.g. noble-1)".to_string()
+            })?;
+            let adapter = TendermintFinalityAdapter::new(network, chain_id).with_golden(sample);
+            admit(&adapter, &VerificationPolicy::strict(now))
+        }
+        other => {
+            return Err(format!(
+                "unknown adapter family: {other} (known: zkvm, tendermint)"
+            ))
+        }
     };
     println!(
         "{}",
@@ -4077,6 +4098,7 @@ fn main() {
                 golden,
                 program_hash,
                 chain_id,
+                tm_chain_id,
                 now,
             } => run_domain_selftest(
                 adapter,
@@ -4084,6 +4106,7 @@ fn main() {
                 golden,
                 program_hash.as_deref(),
                 *chain_id,
+                tm_chain_id.as_deref(),
                 *now,
             ),
         },

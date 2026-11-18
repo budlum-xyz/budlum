@@ -53,8 +53,8 @@ pub const MAX_VALIDATOR_SNAPSHOTS: usize = 100;
 /// Upper bound of the slashing evidence pool. The pool is copied into the next
 /// block, so it must stay small.
 /// How long an alarm stays in the ledger.
-/// Orders of magnitude past any honest audit window and still finite -
-/// "never trimmed" was the finding.
+/// Orders of magnitude past any honest audit window and strictly finite
+/// to bound state retention.
 const ALARM_RETENTION_BLOCKS: u64 = 100_000;
 const MAX_PENDING_SLASHING_EVIDENCE: usize = 64;
 #[cfg(test)]
@@ -4388,7 +4388,13 @@ impl Blockchain {
         if tx.from == Address::zero() {
             reasons.push("genesis_transaction_forbidden".to_string());
         }
-        if !tx.verify_in(&self.state.scheme_registry) {
+        if self.state.auth_program_hash(&tx.from).is_some() {
+            if tx.auth_claim.is_none() {
+                reasons.push("program_account_requires_auth_claim".to_string());
+            } else if !tx.claimed_shape_is_canonical() {
+                reasons.push("non_canonical_claimed_tx".to_string());
+            }
+        } else if !tx.verify_in(&self.state.scheme_registry) {
             reasons.push("invalid_signature".to_string());
         }
         if tx.fee < self.state.base_fee {
@@ -5067,6 +5073,18 @@ impl Blockchain {
             .map_err(ObjectRefusal::Transaction)?;
         crate::settlement::domains::check_ingest_garden_domain_reservation(&tx)
             .map_err(ObjectRefusal::Transaction)?;
+        if let Some(program_hash) = self.state.auth_program_hash(&tx.from) {
+            let Some(domain) = crate::aggregation::chain::claim_domain(self.chain_id) else {
+                return Err(ObjectRefusal::NoAggregator);
+            };
+            let expected = crate::aggregation::chain::account_claim_for(&tx, Some(program_hash))
+                .map(|c| c.digest(domain));
+            if tx.auth_claim != expected {
+                return Err(ObjectRefusal::Transaction(
+                    "program account auth_claim does not match registered auth_program_hash".into(),
+                ));
+            }
+        }
         match self.agg_node.as_mut() {
             Some(node) => node.admit(envelope, tx, &self.state.scheme_registry),
             None => Err(ObjectRefusal::NoAggregator),
@@ -5839,7 +5857,11 @@ impl Blockchain {
     ) -> Result<(AccountState, Vec<DomainId>), String> {
         // The claim fees of the block: who pays, which transaction fails and
         // who is paid. Empty for a block without a claim frame.
-        let claim_fees = crate::aggregation::chain::settlement_of(aggregation, block)?;
+        let claim_fees = crate::aggregation::chain::settlement_of_with_accounts(
+            aggregation,
+            Some(base_state),
+            block,
+        )?;
         let burn_cids = Self::collect_nft_burn_cids_from_state(base_state, block);
         let mut next_state = base_state.clone();
         next_state.current_block_height = block.index;
@@ -6087,7 +6109,11 @@ impl Blockchain {
                     self.chain_id,
                 );
                 probe.claim_frame = Some(frame.clone());
-                match crate::aggregation::chain::settlement_of(&self.aggregation_params(), &probe) {
+                match crate::aggregation::chain::settlement_of_with_accounts(
+                    &self.aggregation_params(),
+                    Some(&self.state),
+                    &probe,
+                ) {
                     Ok(fees) if !fees.failed.contains(&true) => true,
                     Ok(_) => {
                         tracing::warn!(
@@ -6143,9 +6169,10 @@ impl Blockchain {
                     return None;
                 }
             }
-            if let Err(error) = crate::aggregation::chain::check_block(
+            if let Err(error) = crate::aggregation::chain::check_block_with_accounts(
                 &self.aggregation_params(),
                 &self.state.scheme_registry,
+                &self.state,
                 &block,
             ) {
                 tracing::warn!("Block frame refused, no block built: {error}");
@@ -6919,8 +6946,17 @@ impl Blockchain {
         // not. A claimed transaction below is accepted only because this
         // check passed: the frame proves its signature was verified.
         let aggregation = self.aggregation_params();
-        crate::aggregation::chain::check_block(&aggregation, &self.state.scheme_registry, &block)?;
-        let claim_fees = crate::aggregation::chain::settlement_of(&aggregation, &block)?;
+        crate::aggregation::chain::check_block_with_accounts(
+            &aggregation,
+            &self.state.scheme_registry,
+            &self.state,
+            &block,
+        )?;
+        let claim_fees = crate::aggregation::chain::settlement_of_with_accounts(
+            &aggregation,
+            Some(&self.state),
+            &block,
+        )?;
 
         if block.index > 0 && block.state_root.is_empty() {
             return Err("Block missing state_root".into());
@@ -7293,10 +7329,19 @@ impl Blockchain {
             Self::check_block_slashing_evidence(block)
                 .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
             // The claims of the candidate block, exactly as on the tip path.
-            crate::aggregation::chain::check_block(&aggregation, &state.scheme_registry, block)
-                .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
-            let claim_fees = crate::aggregation::chain::settlement_of(&aggregation, block)
-                .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
+            crate::aggregation::chain::check_block_with_accounts(
+                &aggregation,
+                &state.scheme_registry,
+                &state,
+                block,
+            )
+            .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
+            let claim_fees = crate::aggregation::chain::settlement_of_with_accounts(
+                &aggregation,
+                Some(&state),
+                block,
+            )
+            .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
 
             let mut projected = state.clone();
             projected.current_block_height = block.index;
@@ -14097,7 +14142,7 @@ mod bond_and_reorg_tests {
         assert!(error.contains("state root mismatch"));
     }
 
-    /// Regression for the HIGH finding: an externally submitted
+    /// Security regression test: an externally submitted
     /// `Unverified` report used to be promoted to `ConsensusVerified` after
     /// checking only that two signatures verify under the offender's key.
     /// That is not an equivocation proof: a validator signs one block per

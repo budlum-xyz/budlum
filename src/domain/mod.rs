@@ -1,6 +1,7 @@
 pub mod commitment_registry;
 pub mod deal_open;
 pub mod finality_adapter;
+pub mod finality_proof_model;
 pub mod fork_choice;
 pub mod plugin;
 pub mod plugin_registry;
@@ -16,17 +17,19 @@ pub mod types;
 pub use commitment_registry::DomainCommitmentRegistry;
 pub use finality_adapter::{
     hash_finality_proof, hash_pow_header, poa_authority_set_hash, AiInferenceFinalityAdapter,
-    BftFinalityAdapter, BitcoinHeader, BitcoinSpvFinalityAdapter, DomainFinalityAdapter,
-    FinalityError, FinalityProof, FinalityStatus, PoAFinalityAdapter, PoSFinalityAdapter,
-    PoWHeader, PoWHeaderChainFinalityAdapter, StorageAttestationFinalityAdapter, ZkFinalityAdapter,
+    BftFinalityAdapter, BitcoinHeader, BitcoinSpvFinalityAdapter, DagFinalityAdapter,
+    DomainFinalityAdapter, FinalityError, FinalityProof, FinalityStatus, PoAFinalityAdapter,
+    PoSFinalityAdapter, PoWHeader, PoWHeaderChainFinalityAdapter, PohFinalityAdapter,
+    PospaceFinalityAdapter, StorageAttestationFinalityAdapter, ZkFinalityAdapter,
 };
 pub use fork_choice::{
     ConsensusDomainForkChoice, DomainFinalityStatus, DomainForkChoice, DomainLifecycleStatus,
     ForkCandidate, ForkChoiceError, ForkChoiceReason, ResolvedHead,
 };
 pub use plugin::{
-    default_domain, BftDomainPlugin, ConsensusDomainPlugin, DomainContext, DomainError,
-    PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin, ZkDomainPlugin,
+    default_domain, BftDomainPlugin, ConsensusDomainPlugin, DagDomainPlugin, DomainContext,
+    DomainError, PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin, PohDomainPlugin,
+    PospaceDomainPlugin, ZkDomainPlugin,
 };
 pub use plugin_registry::DomainPluginRegistry;
 pub use pq_canonical::{PqCanonicalSource, SealId, SealKind, SourceError};
