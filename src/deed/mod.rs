@@ -100,6 +100,7 @@ impl Manifest {
         Ok(())
     }
 
+    #[must_use]
     pub fn id(&self) -> [u8; 32] {
         hash_fields_bytes(&[
             b"BDLM_DEED_MANIFEST_V1",

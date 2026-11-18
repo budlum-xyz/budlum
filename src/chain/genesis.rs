@@ -70,6 +70,7 @@ impl BootstrapDomainConfig {
     /// intended shape of a bridge with no one behind it; the alternative,
     /// letting the proof name its own validator set, would let anyone
     /// finalize a commitment and mint against it.
+    #[must_use]
     pub fn mainnet_defaults() -> Vec<Self> {
         vec![
             Self {
@@ -285,7 +286,7 @@ fn default_bns_reserved_labels() -> Vec<String> {
 
 impl Default for GenesisConfig {
     fn default() -> Self {
-        GenesisConfig {
+        Self {
             chain_id: DEFAULT_CHAIN_ID,
             allocations: vec![],
             validators: vec![],
@@ -309,13 +310,15 @@ impl Default for GenesisConfig {
 }
 
 impl GenesisConfig {
+    #[must_use]
     pub fn new(chain_id: u64) -> Self {
-        GenesisConfig {
+        Self {
             chain_id,
             ..Default::default()
         }
     }
 
+    #[must_use]
     pub fn for_network(network: Network) -> Self {
         match network {
             Network::Mainnet => mainnet_genesis(),
@@ -324,6 +327,7 @@ impl GenesisConfig {
         }
     }
 
+    #[must_use]
     pub fn with_allocation(mut self, address: Address, amount: u64) -> Self {
         self.allocations.push((address, amount));
         self
@@ -333,12 +337,14 @@ impl GenesisConfig {
     /// Accounts are seeded and the burn-reserve address + team vesting are
     /// Configured on the resulting state. Uses reserved tokenomics addresses.
     /// Default genesis is unchanged unless this is explicitly called.
+    #[must_use]
     pub fn with_bud_tokenomics(mut self) -> Self {
         self.bud_tokenomics = Some(crate::tokenomics::TokenomicsParams::default());
         self
     }
 
     /// Enable $BUD tokenomics with explicit parameters.
+    #[must_use]
     pub fn with_bud_tokenomics_params(
         mut self,
         params: crate::tokenomics::TokenomicsParams,
@@ -347,6 +353,7 @@ impl GenesisConfig {
         self
     }
 
+    #[must_use]
     pub fn with_validator(mut self, address: Address) -> Self {
         self.validators.push(address);
         self
@@ -856,6 +863,7 @@ impl GenesisConfig {
         Ok(())
     }
 
+    #[must_use]
     pub fn build_genesis_block(&self) -> Block {
         let genesis_tx = Transaction::genesis();
         let mut genesis_state = self.build_state();
@@ -900,6 +908,7 @@ impl GenesisConfig {
         block
     }
 
+    #[must_use]
     pub fn build_state(&self) -> AccountState {
         let mut state = AccountState::new();
         // TESTNET-DEFAULT: fee rates belong to genesis state, not
@@ -1196,6 +1205,7 @@ fn address(byte: u8) -> Address {
 /// - Block reward: 50 BUD
 /// - Validator APY: 5%
 /// - Metabolic burn: 1% of tx fees
+#[must_use]
 pub fn mainnet_genesis() -> GenesisConfig {
     let tokenomics = mainnet_tokenomics();
     mainnet_genesis_with(tokenomics)
@@ -1204,6 +1214,7 @@ pub fn mainnet_genesis() -> GenesisConfig {
 /// The mainnet economic parameters: the 100M fixed-supply distribution, the
 /// burns, the team schedule and the reward settings on the mainnet calendar.
 /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+#[must_use]
 pub fn mainnet_tokenomics() -> crate::tokenomics::TokenomicsParams {
     use crate::core::chain_config::FIXED_POINT_SCALE;
     use crate::tokenomics::bud;
@@ -1291,6 +1302,7 @@ fn mainnet_genesis_with(tokenomics: crate::tokenomics::TokenomicsParams) -> Gene
 /// testnet-genesis`) fills both from the operators' public records and
 /// writes the launch file. A node refuses the template itself, which has no
 /// validators.
+#[must_use]
 pub fn testnet_genesis() -> GenesisConfig {
     let tokenomics = testnet_tokenomics();
     GenesisConfig {
@@ -1321,6 +1333,7 @@ pub fn testnet_genesis() -> GenesisConfig {
 /// block emission remains disabled; the compatibility field is zero.
 /// TESTNET-DEFAULT: every economic value equals the mainnet template's.
 /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+#[must_use]
 pub fn testnet_tokenomics() -> crate::tokenomics::TokenomicsParams {
     const EPOCHS_PER_YEAR: u64 = 210_240;
     let mut params = mainnet_tokenomics();
@@ -1336,6 +1349,7 @@ pub fn testnet_tokenomics() -> crate::tokenomics::TokenomicsParams {
     params
 }
 
+#[must_use]
 pub fn devnet_genesis() -> GenesisConfig {
     GenesisConfig {
         chain_id: Network::Devnet.chain_id().value(),

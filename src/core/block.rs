@@ -216,8 +216,9 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
 }
 
 impl BlockHeader {
+    #[must_use]
     pub fn from_block(block: &Block) -> Self {
-        BlockHeader {
+        Self {
             index: block.index,
             timestamp: block.timestamp,
             previous_hash: block.previous_hash.clone(),
@@ -243,10 +244,12 @@ impl BlockHeader {
         }
     }
 
+    #[must_use]
     pub fn calculate_hash(&self) -> String {
         hex::encode(self.calculate_hash_bytes())
     }
 
+    #[must_use]
     pub fn calculate_hash_bytes(&self) -> [u8; 32] {
         hash_block_preimage(&BlockPreimage {
             index: self.index,
@@ -272,6 +275,7 @@ impl BlockHeader {
         })
     }
 
+    #[must_use]
     pub fn verify_signature(&self, signature: &[u8]) -> bool {
         let producer_addr = match &self.producer {
             Some(p) => p,
@@ -365,10 +369,12 @@ pub struct Block {
 }
 
 impl Block {
+    #[must_use]
     pub fn new(index: u64, previous_hash: String, transactions: Vec<Transaction>) -> Self {
         Self::new_with_chain_id(index, previous_hash, transactions, DEFAULT_CHAIN_ID)
     }
 
+    #[must_use]
     pub fn new_with_chain_id(
         index: u64,
         previous_hash: String,
@@ -380,7 +386,7 @@ impl Block {
             .unwrap_or_default()
             .as_millis();
 
-        let mut block = Block {
+        let mut block = Self {
             index,
             timestamp,
             previous_hash,
@@ -411,8 +417,9 @@ impl Block {
         block.hash = block.calculate_hash();
         block
     }
+    #[must_use]
     pub fn genesis() -> Self {
-        let mut block = Block::new(0, "0".repeat(64), vec![Transaction::genesis()]);
+        let mut block = Self::new(0, "0".repeat(64), vec![Transaction::genesis()]);
         block.timestamp = 0;
         block.hash = block.calculate_hash();
         block
@@ -478,6 +485,7 @@ impl Block {
         }
     }
 
+    #[must_use]
     pub fn calculate_tx_root(&self) -> String {
         let mut tx_hashes: Vec<[u8; 32]> = self
             .transactions
@@ -565,10 +573,12 @@ impl Block {
         hex::encode(tx_hashes[0])
     }
 
+    #[must_use]
     pub fn calculate_hash(&self) -> String {
         hex::encode(self.calculate_hash_bytes())
     }
 
+    #[must_use]
     pub fn calculate_hash_bytes(&self) -> [u8; 32] {
         hash_block_preimage(&BlockPreimage {
             index: self.index,
@@ -738,6 +748,7 @@ impl Block {
 
     /// Verify under the scheme statuses of a fresh genesis. Consensus calls
     /// [`Self::verify_signature_in`] with the chain-state registry.
+    #[must_use]
     pub fn verify_signature(&self) -> bool {
         self.verify_signature_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
     }

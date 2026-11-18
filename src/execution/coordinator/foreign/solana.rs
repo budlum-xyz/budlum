@@ -487,6 +487,7 @@ pub fn decode_solana_base64(text: &str) -> Result<Vec<u8>, &'static str> {
 }
 
 /// Builds and signs a single-signer Solana transaction (legacy or `v0`).
+#[must_use]
 pub fn sign_solana_tx(
     secret_seed: &[u8; 32],
     is_v0: bool,

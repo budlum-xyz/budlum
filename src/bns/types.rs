@@ -175,6 +175,7 @@ impl NameRecord {
         Ok(Self::new(name, owner, expires_at))
     }
 
+    #[must_use]
     pub fn new(name: String, owner: Address, expires_at: u64) -> Self {
         Self {
             name,
@@ -191,6 +192,7 @@ impl NameRecord {
         }
     }
 
+    #[must_use]
     pub fn with_storage(
         mut self,
         storage_root: [u8; 32],
@@ -203,6 +205,7 @@ impl NameRecord {
         self
     }
 
+    #[must_use]
     pub fn with_address(mut self, address: Address, domain_id: Option<u32>) -> Self {
         self.address = Some(address);
         self.consensus_domain_id = domain_id;
@@ -394,14 +397,14 @@ pub enum BnsError {
 impl fmt::Display for BnsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BnsError::InvalidName => write!(f, "Name too short or long"),
-            BnsError::ReservedName => write!(f, "Name label is reserved"),
-            BnsError::InvalidDuration => write!(f, "Registration duration out of bounds"),
-            BnsError::InvalidRecord => write!(f, "Invalid BNS record key, value, or count"),
-            BnsError::OwnerNameLimitExceeded => write!(f, "Owner name limit exceeded"),
-            BnsError::NameTaken => write!(f, "Name already taken"),
-            BnsError::NotOwner => write!(f, "Not the owner"),
-            BnsError::Expired => write!(f, "Name expired"),
+            Self::InvalidName => write!(f, "Name too short or long"),
+            Self::ReservedName => write!(f, "Name label is reserved"),
+            Self::InvalidDuration => write!(f, "Registration duration out of bounds"),
+            Self::InvalidRecord => write!(f, "Invalid BNS record key, value, or count"),
+            Self::OwnerNameLimitExceeded => write!(f, "Owner name limit exceeded"),
+            Self::NameTaken => write!(f, "Name already taken"),
+            Self::NotOwner => write!(f, "Not the owner"),
+            Self::Expired => write!(f, "Name expired"),
         }
     }
 }

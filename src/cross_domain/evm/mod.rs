@@ -8,9 +8,9 @@
 //! - `mpt` - in-tree Merkle-Patricia trie **verifier** (Appendix D, verify-only;
 //!   the proof itself is produced by the relayer).
 //! - `receipt` - Ethereum receipt RLP schema + receiptsRoot proof.
-//! - `sync_committee` - PoS light-client (BLS12-381, `blst` reuse).
+//! - `sync_committee` - `PoS` light-client (BLS12-381, `blst` reuse).
 //! - `header` - the Ethereum header chain and the finality decision.
-//! - `adapter` - `EvmChainAdapter` (ChainAdapter impl).
+//! - `adapter` - `EvmChainAdapter` (`ChainAdapter` impl).
 //!
 //! **Security invariant:** no function here touches the network. All
 //! verification is deterministic and happens on chain, inside Budlum consensus.

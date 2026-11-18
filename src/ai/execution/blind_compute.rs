@@ -8,7 +8,7 @@
 //! AI execution proof without ever exposing the sealed dataset plaintext.
 //!
 //! WIRING: unwired - no production transaction admits a
-//! ComputeWithoutSeeingBundle. The verifier remains a helper, not an active
+//! `ComputeWithoutSeeingBundle`. The verifier remains a helper, not an active
 //! authorization check, until the confidential inference transaction exists.
 
 use crate::ai::execution::verify::{verify_execution_proof_full, ExecutionVerifyReport};
@@ -55,7 +55,7 @@ pub struct ComputeWithoutSeeingPermit {
 }
 
 /// Complete confidential inference package pairing dataset manifest, blind-compute
-/// permit, inference request/result, and BudZero STARK execution proof.
+/// permit, inference request/result, and `BudZero` STARK execution proof.
 #[derive(Debug, Clone)]
 pub struct ComputeWithoutSeeingBundle {
     /// Sealed object manifest committing to ciphertext, plaintext, and key.
@@ -66,7 +66,7 @@ pub struct ComputeWithoutSeeingBundle {
     pub request: AiInferenceRequest,
     /// Output commitment returned by the compute operator.
     pub result: AiInferenceResult,
-    /// BudZero Plonky3 execution proof over the guest forward pass.
+    /// `BudZero` Plonky3 execution proof over the guest forward pass.
     pub proof: AiExecutionProof,
 }
 

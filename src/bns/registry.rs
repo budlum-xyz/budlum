@@ -217,6 +217,7 @@ impl BnsRegistry {
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     }
 
+    #[must_use]
     pub fn new() -> Self {
         Self {
             names: BTreeMap::new(),

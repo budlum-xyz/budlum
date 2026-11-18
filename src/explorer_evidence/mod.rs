@@ -63,6 +63,7 @@ pub struct AtlasWalletContext {
     pub evidence: Vec<AtlasEvidenceCard>,
 }
 
+#[must_use]
 pub fn build_wallet_context(
     address: Address,
     balance: u64,
@@ -429,6 +430,7 @@ pub struct AtlasQueryEngine {
 }
 
 impl AtlasQueryEngine {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -472,6 +474,7 @@ impl AtlasQueryEngine {
     /// Queries evidence records by domain ID.
     ///
     /// exposed for: explorer evidence query engine.
+    #[must_use]
     pub fn query_evidence_by_domain(&self, domain_id: DomainId) -> Vec<&EvidenceRecord> {
         self.evidence_records
             .iter()
@@ -482,6 +485,7 @@ impl AtlasQueryEngine {
     /// Queries evidence records within a given height range.
     ///
     /// exposed for: explorer evidence query engine.
+    #[must_use]
     pub fn query_evidence_by_height_range(
         &self,
         domain_id: DomainId,
@@ -504,6 +508,7 @@ impl AtlasQueryEngine {
     /// Returns the summary for one domain.
     ///
     /// exposed for: explorer evidence query engine.
+    #[must_use]
     pub fn get_domain_summary(&self, domain_id: DomainId) -> Option<&DomainSummary> {
         self.domain_summaries.get(&domain_id)
     }
@@ -511,6 +516,7 @@ impl AtlasQueryEngine {
     /// Returns every domain summary.
     ///
     /// exposed for: explorer evidence query engine.
+    #[must_use]
     pub fn all_domain_summaries(&self) -> Vec<&DomainSummary> {
         self.domain_summaries.values().collect()
     }

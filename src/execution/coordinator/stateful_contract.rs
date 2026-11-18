@@ -1,6 +1,6 @@
 //! Stateful contract deployment and execution for `TransactionType::ContractCall`.
 //!
-//! Legacy `ContractCall` executed raw BudZKVM bytecode statelessly and generated
+//! Legacy `ContractCall` executed raw `BudZKVM` bytecode statelessly and generated
 //! a full STARK proof inside every validator. When a
 //! `ContractCall` payload begins with [`STATEFUL_CONTRACT_MAGIC`]
 //! (`BDLM_UEL_STATEFUL_V1`), the coordinator decodes a [`StatefulContractEnvelope`]:
@@ -11,7 +11,7 @@
 //!   and registers the sender's alias in `uel/alias`.
 //! * `Call`: loads the deployed program from `ee/budzero/program` through
 //!   `OverlayCore` + [`BlockReadCache`], populates initial storage slots from
-//!   `ee/budzero/storage`, runs BudZero VM in execution-only mode, writes all
+//!   `ee/budzero/storage`, runs `BudZero` VM in execution-only mode, writes all
 //!   `vm.state_writes` back into `ee/budzero/storage`, and commits atomically
 //!   into [`AccountState`].
 //!
@@ -358,7 +358,7 @@ pub fn execute_stateful_contract_tx(
     }
 }
 
-/// Read a persistent `u64` storage slot of a deployed BudZero contract.
+/// Read a persistent `u64` storage slot of a deployed `BudZero` contract.
 ///
 /// Convenience: exposed for RPC queries and stateful contract tests.
 #[must_use]
