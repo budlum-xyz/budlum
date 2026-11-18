@@ -613,6 +613,15 @@ The master reviews may contain findings that have no inline thread. They require
 
 - PR #198: [Strix reports that its included review quota is exhausted](https://github.com/budlum-xyz/budlum/pull/198#issuecomment-6963984783). This is not approval.
 
+## B-0048: Account::auth_program_hash was unreadable after write
+
+- Found by live CI on `agg/phase-5-pcs-claims` head `f45cd034`, not by Strix. Three check runs failed on one test: `Budlum Core library test` (job `134647646918`, `6196 passed; 1 failed`), `Fork-Choice Invariants` (`134647647016`) and `Network Hardening` (`134647646941`); `Coverage` (`134647647057`) died on the same test before nextest cancelled the run.
+- Root cause: `#[serde(default, skip_serializing_if = "Option::is_none")]` on `Account::auth_program_hash` (`src/core/account.rs:179`). `bincode` is not self describing, so the omitted field shortened the account row to 8 bytes where the decoder expects 9. Every persisted account then failed to load with `io error: unexpected end of file`.
+- Measured, not argued: the panic is `src/persistence/db.rs:3008:52` on `storage.load_all_accounts().unwrap()`. A minimal reproduction with the same field shape in this workspace reported `skipped-none len=8` and `roundtrip FAIL: io error: unexpected end of file`, against `kept-none len=9` and `roundtrip OK`.
+- Fix: `834ee878` removes the attribute. `cargo test --lib --no-run` EXIT=0 on the fixed tree, and four targeted tests pass: `test_durable_commit_batch_and_recovery`, `a_program_free_account_survives_the_durable_encode_decode_pair`, `a_program_authorized_account_survives_the_durable_encode_decode_pair`, `a_written_optional_substate_changes_the_snapshot_digest`. Negative control: restoring only the attribute makes the first two fail with `FAILED. 0 passed; 1 failed`.
+- Status: fixed in code, pushed as `834ee878` on `agg/phase-5-pcs-claims`. CI run number pending a green run on a head that contains it.
+- Related: the same attribute family is a digest hazard wherever a type reaches `StateSnapshotV2::calculate_digest`, which hashes with `bincode::serialize`. The reachable cases, and why each is safe or is now pinned by a test, are in `findings/account-bincode-roundtrip.md`.
+
 ## Other review decisions
 
 CodeRabbit changes-requested reviews exist on #164, #183 and #194. Resolved inline threads do not establish that each summary finding is fixed.

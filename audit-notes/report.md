@@ -26,6 +26,7 @@ A changes-requested review from CodeRabbit remains in the review history of #164
 - [PoSpace engine finding B-0045](findings/pospace.md)
 - [Domain plugin wiring finding B-0046](findings/domain-plugin-wiring.md)
 - [Dead-API gate finding B-0047](findings/dead-pub-api-gate.md)
+- [Account bincode round trip, B-0048](findings/account-bincode-roundtrip.md)
 - [Review summary follow-up](findings/review-summaries.md)
 - [Debian execution record](findings/os-debian.md)
 - [Ubuntu userland execution record](findings/os-ubuntu.md)
@@ -42,3 +43,4 @@ A changes-requested review from CodeRabbit remains in the review history of #164
 - The Garden frame budget has an additional lifetime issue documented as B-0043. An experimental fix exists locally but is not yet project-tested, committed or CI-verified.
 - No new suppressions, ignored tests, forced pushes, protection bypasses or license changes are claimed in this snapshot.
 - Third-party assessment, Strix approval, network-level load tests and the current status of privileged badge-token exposure remain open checks.
+- B-0048 is fixed in `834ee878` on `agg/phase-5-pcs-claims`. Four targeted tests pass on that tree and two fail when the defect is restored, so the fix is measured. The full library run that turns the three red jobs green has not completed on that head, so the finding is fixed in code and not yet proven by CI.
