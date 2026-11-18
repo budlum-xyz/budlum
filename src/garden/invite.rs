@@ -346,12 +346,31 @@ mod tests {
         assert!(GardenInvite::new(&g, token, vec![p.clone(), p.clone()]).is_err());
 
         let canonical = GardenInvite::new(&g, token, vec![p]).unwrap().to_link();
+
+        // The mutated line has to differ from the canonical one, or the
+        // assertion below proves nothing. `chain` is rendered with `{:016x}`
+        // and a Garden chain id always carries the `0x4741` prefix, so the id is
+        // at least 2^62 and its canonical form is exactly 16 digits. No shorter
+        // rendering of the same integer exists: `{:x}` of the id is those same
+        // 16 digits, and `{:x}` of the id shifted right by four bits is the
+        // 15-digit prefix alone, which pads back to 16 on the way out and so
+        // differs only in its low bits. Dropping the id's leading (always zero)
+        // digit keeps the field inside the 16-character budget while changing
+        // the text, so a real parse still has to refuse it.
+        let digits = format!("{:016x}", g.chain_id);
         let short_chain = canonical.replacen(
-            &format!("chain={:016x}", g.chain_id),
-            &format!("chain={:x}", g.chain_id >> 4),
+            &format!("chain={digits}"),
+            &format!("chain={}", &digits[1..]),
             1,
         );
-        assert!(GardenInvite::parse(&short_chain).is_err());
+        assert_ne!(
+            canonical, short_chain,
+            "the mutation must change the line, or the assertion below proves nothing"
+        );
+        assert!(
+            GardenInvite::parse(&short_chain).is_err(),
+            "a 15-digit chain id is not canonical"
+        );
         let signed_chain = canonical.replacen(
             &format!("chain={:016x}", g.chain_id),
             &format!("chain=+{:x}", g.chain_id),
