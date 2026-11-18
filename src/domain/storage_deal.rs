@@ -6732,7 +6732,11 @@ mod tests {
             require_merkle_proof: true,
             ..params()
         };
-        let cases: [(&str, Option<Vec<u8>>, Option<Hash32>); 3] = [
+        // A named case type rather than the bare tuple: the tuple's three
+        // nested generics are what `clippy::type_complexity` reads, and the
+        // alias says what the three positions mean without changing them.
+        type OpenGateCase = (&'static str, Option<Vec<u8>>, Option<Hash32>);
+        let cases: [OpenGateCase; 3] = [
             ("no proof and no root", None, None),
             ("a proof without a root", Some(valid_merkle_proof()), None),
             ("a root without a proof", None, Some([0x42u8; 32])),
@@ -8699,14 +8703,8 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_missing_merkle_proof() {
-        // Gate (9d82f61): with the gate open, None must yield
-        // MerkleProofRequired. The gate is what decides whether the envelope is
-        // mandatory, so the lock states the gate it is testing.
+        // Gate (9d82f61): None must always yield MerkleProofRequired.
         // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
-        let open_params = StorageDomainParams {
-            require_merkle_proof: true,
-            ..params()
-        };
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -8720,7 +8718,7 @@ mod tests {
                 100,
                 200,
                 good_econ(),
-                &open_params,
+                &params(),
                 None,
                 None,
             )
@@ -8730,15 +8728,8 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_malformed_merkle_proof() {
-        // Format gate: a blob that cannot be deserialized must yield
-        // InvalidMerkleProof. A malformed envelope is refused whichever way the
-        // gate points, and this fixture opens it so the format check is what
-        // the test sees.
+        // Format gate: a blob that cannot be deserialized must yield InvalidMerkleProof.
         // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
-        let open_params = StorageDomainParams {
-            require_merkle_proof: true,
-            ..params()
-        };
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -8752,7 +8743,7 @@ mod tests {
                 100,
                 200,
                 good_econ(),
-                &open_params,
+                &params(),
                 Some(vec![0u8; 64]), // kasitli bozuk zarf: deserialize edilemez
                 Some([0x42u8; 32]),
             )
