@@ -4615,7 +4615,7 @@ mod rpc_tests {
                 .unwrap();
             bc.state
                 .bns_registry
-                .register("hydra".to_string(), Address(owner), 1, 100)
+                .register("hydra.bud".to_string(), Address(owner), 1, 100)
                 .unwrap();
             let cref = checked_content_ref(
                 &bc.state.bud3_registry,
