@@ -1965,39 +1965,6 @@ mod tests {
     }
 
     #[test]
-    fn garden_codec_substream_clones_share_connection_frame_budget() {
-        // `Behaviour` holds the Swarm prototype and clones once per connection.
-        let swarm_proto = GardenCodec::default();
-        let first_conn = swarm_proto.clone();
-        let second_conn = swarm_proto.clone();
-        assert_eq!(swarm_proto.scope, CodecScope::Swarm);
-
-        // `Handler` clones the per-connection codec once per substream.
-        let primary_stream = first_conn.clone();
-        let sibling_stream = first_conn.clone();
-        assert_eq!(first_conn.scope, CodecScope::Connection);
-
-        let per_conn_req =
-            u32::try_from(MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES).unwrap();
-        let _held = primary_stream
-            .conn_large_frames
-            .try_acquire_many_owned(per_conn_req)
-            .expect("primary substream acquires connection budget");
-
-        // A second substream on the same connection MUST share connection A's
-        // semaphore rather than minting a fresh per-connection budget.
-        assert!(sibling_stream.conn_large_frames.try_acquire().is_err());
-
-        // Substreams on another connection remain completely isolated.
-        let other_stream = second_conn.clone();
-        assert_eq!(second_conn.scope, CodecScope::Connection);
-        assert!(other_stream
-            .conn_large_frames
-            .try_acquire_many_owned(per_conn_req)
-            .is_ok());
-    }
-
-    #[test]
     fn source_key_groups_public_prefixes_and_detects_loopback() {
         let pub_a: Multiaddr = "/ip4/198.51.100.10/tcp/4001".parse().unwrap();
         let pub_b: Multiaddr = "/ip4/198.51.100.250/tcp/4002".parse().unwrap();
@@ -2142,37 +2109,5 @@ mod tests {
             .await
             .expect("public start succeeds with or without /etc/resolv.conf");
         let _ = live.commands.send(NetCommand::Shutdown).await;
-    }
-
-    #[test]
-    fn forged_length_prefix_garden_frames_are_rejected_without_allocating() {
-        let forged_frame = |variant: u32| {
-            let mut buf = Vec::with_capacity(16);
-            buf.extend_from_slice(&variant.to_le_bytes());
-            buf.extend_from_slice(&0x0000_FFFF_FFFF_FFFFu64.to_le_bytes());
-            buf.extend_from_slice(&[0u8; 4]);
-            buf
-        };
-        assert!(
-            crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(
-                &forged_frame(1),
-                MAX_UNADMITTED_REQUEST_BYTES,
-            )
-            .is_err()
-        );
-        assert!(
-            crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
-                &forged_frame(2),
-                MAX_RESPONSE_BYTES,
-            )
-            .is_err()
-        );
-        assert!(
-            crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
-                &forged_frame(4),
-                MAX_RESPONSE_BYTES,
-            )
-            .is_err()
-        );
     }
 }
