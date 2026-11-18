@@ -2,6 +2,10 @@ use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
 use crate::core::block::Block;
 use crate::crypto::facts::{AssumptionClass, CryptoObserver, ObservedScheme};
 use crate::crypto::scheme::SchemeId;
+use crate::domain::finality_proof_model::{
+    DepthClass, FinalityProofShape, QuorumClass, TrustAnchor, BINDS_BLOCK_HASH, BINDS_EVENT_ROOT,
+    BINDS_HEIGHT, BINDS_PARENT_HASH, BINDS_STATE_ROOT, BINDS_TIMESTAMP, BINDS_TX_ROOT,
+};
 use crate::domain::types::{ConsensusDomain, DomainCommitment, DomainId, Hash32};
 use serde::{Deserialize, Serialize};
 
@@ -330,6 +334,116 @@ impl FinalityProof {
                 | Self::Poh { .. }
                 | Self::Pospace { .. }
         )
+    }
+
+    /// The shape of this proof.
+    ///
+    /// This is a table over the enum, not a second verification: an adapter
+    /// that disagrees with its own arm here is a finding about the table, and
+    /// the tests below pin every arm.
+    #[must_use]
+    pub fn shape(&self) -> FinalityProofShape {
+        match self {
+            // A BLS certificate signs `(chain_id, epoch, height, hash)` and
+            // nothing else, so it commits to the checkpoint height and hash it
+            // was aggregated for and to no root. That is why the adapters refuse
+            // a commitment carrying nonce writes under one.
+            Self::PoS { .. } | Self::PoSPq { .. } | Self::Bft { .. } | Self::BftPq { .. } => {
+                FinalityProofShape {
+                    binds: BINDS_HEIGHT | BINDS_BLOCK_HASH,
+                    quorum: QuorumClass::StakeWeighted,
+                    trust_anchor: TrustAnchor::RegisteredSet,
+                    depth: DepthClass::SingleBlock,
+                }
+            }
+            // A PoA authority signs `poa_commit_signing_message`, which covers
+            // the whole commitment, so an authority quorum binds every field a
+            // header chain does. Equal-weight by design: the set is a list of
+            // authorities, not a stake table.
+            Self::PoA { .. } | Self::PoAPq { .. } => FinalityProofShape {
+                binds: BINDS_HEIGHT
+                    | BINDS_PARENT_HASH
+                    | BINDS_BLOCK_HASH
+                    | BINDS_STATE_ROOT
+                    | BINDS_TX_ROOT
+                    | BINDS_EVENT_ROOT
+                    | BINDS_TIMESTAMP,
+                quorum: QuorumClass::AuthorityWeighted,
+                trust_anchor: TrustAnchor::RegisteredSet,
+                depth: DepthClass::SingleBlock,
+            },
+            // A ZK claim binds the state root the accepted claim recorded. No
+            // transaction root and no event root are covered, which is what
+            // `CommitmentAttestation::for_kind` already encodes for Zk.
+            Self::Zk { .. } => FinalityProofShape {
+                binds: BINDS_HEIGHT | BINDS_STATE_ROOT,
+                quorum: QuorumClass::ProofCarrying,
+                trust_anchor: TrustAnchor::ProofCarrying,
+                depth: DepthClass::ProofDelay,
+            },
+            // The DAG family signs the whole commitment (`poa_commit_signing_message`
+            // is the tail of every one of its messages), so the structural half
+            // and the agreement half both cover every field.
+            Self::Dag { .. } | Self::Poh { .. } | Self::Pospace { .. } => FinalityProofShape {
+                binds: BINDS_HEIGHT
+                    | BINDS_PARENT_HASH
+                    | BINDS_BLOCK_HASH
+                    | BINDS_STATE_ROOT
+                    | BINDS_TX_ROOT
+                    | BINDS_EVENT_ROOT
+                    | BINDS_TIMESTAMP,
+                quorum: QuorumClass::AuthorityWeighted,
+                trust_anchor: TrustAnchor::RegisteredSet,
+                depth: DepthClass::SingleBlock,
+            },
+            // A bounded header chain: the target header binds the roots and the
+            // timestamp, the descendants supply the work.
+            Self::PoWHeaderChain { .. } => FinalityProofShape {
+                binds: BINDS_HEIGHT
+                    | BINDS_PARENT_HASH
+                    | BINDS_BLOCK_HASH
+                    | BINDS_STATE_ROOT
+                    | BINDS_TX_ROOT
+                    | BINDS_EVENT_ROOT
+                    | BINDS_TIMESTAMP,
+                quorum: QuorumClass::WorkWeighted,
+                trust_anchor: TrustAnchor::TrustedCheckpoint,
+                depth: DepthClass::Confirmations,
+            },
+            // A Bitcoin header has no state root and no event root to bind: it
+            // commits to its parent, its merkle root and its timestamp, and the
+            // window around it supplies the chainwork.
+            Self::BitcoinSpv { .. } => FinalityProofShape {
+                binds: BINDS_HEIGHT
+                    | BINDS_PARENT_HASH
+                    | BINDS_BLOCK_HASH
+                    | BINDS_TX_ROOT
+                    | BINDS_TIMESTAMP,
+                quorum: QuorumClass::WorkWeighted,
+                trust_anchor: TrustAnchor::TrustedCheckpoint,
+                depth: DepthClass::Confirmations,
+            },
+            // An aggregation-layer proof names a verified `Claim::Prog` in a
+            // finalized block's `ClaimFrame`. What it binds is the predecessor
+            // height and its state root; the program hash and the claim digest
+            // identify the claim rather than a commitment field. It carries no
+            // signer quorum of its own, and it is delayed by construction
+            // behind the claim it names.
+            Self::AggregatedProg { .. } => FinalityProofShape {
+                binds: BINDS_HEIGHT | BINDS_STATE_ROOT,
+                quorum: QuorumClass::ProofCarrying,
+                trust_anchor: TrustAnchor::ProofCarrying,
+                depth: DepthClass::ProofDelay,
+            },
+            // Raw bytes are refused by every adapter. The shape says so rather
+            // than claiming a binding the bytes may not have.
+            Self::Raw(_) => FinalityProofShape {
+                binds: 0,
+                quorum: QuorumClass::ProofCarrying,
+                trust_anchor: TrustAnchor::ProofCarrying,
+                depth: DepthClass::ProofDelay,
+            },
+        }
     }
 }
 
