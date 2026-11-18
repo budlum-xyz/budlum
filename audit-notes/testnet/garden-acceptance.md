@@ -36,7 +36,15 @@ Extra passed cases include `garden_join_behind_nat`, `garden_join_behind_real_na
 
 The same original source fails `cargo test --lib garden::`: 117 passed, 1 failed, 0 ignored. The failed invite test does not produce a short chain id. See [B-0049 / BLG-268](../findings/garden-invite.md).
 
-Test-only fixing commit `c1e9dfda1e7d4c87041b7272c0e7216c3cf9fe94` passes the focused regression (1/1) and the Garden library suite (118/118, 0 ignored) on the local Debian environment. Its scenario and NAT rerun is in progress and it has not yet been pushed at this snapshot. These are not CI results. Neither integration success nor a failure in a test fixture permits claiming a green complete build.
+Test-only fixing commit `c1e9dfda1e7d4c87041b7272c0e7216c3cf9fe94` passes the focused regression (1/1), the Garden library suite (118/118), the real-process scenario (18/18, 121.82 seconds) and the real-NAT test (1/1, 7.92 seconds) on local Debian. No tests are ignored. It has not yet been pushed at this snapshot. These are not CI results. Neither integration success nor a failure in a test fixture permits claiming a green complete build.
+
+## Final local source and cross-userland execution
+
+Final source `2574882aa35d4f3787e53aa1911af7b20df6b760` adds numbered Garden commits 27 (connection budget scope, B-0041) and 28 (dedicated Garden no-DNS fallback, B-0044). With `--test-threads=1`, Debian execution passes 17/17 network tests, 121/121 Garden library tests, all 18 real-process scenarios in 120.92 seconds and the real-NAT test in 7.71 seconds. The named scenario and NAT gate self-tests and log gates, formatting, English-tree and ASCII-dash gates pass. All-target/all-feature `cargo clippy --all-targets --all-features -- -D warnings` also finishes successfully in 10 minutes 55 seconds. All these stage exits are 0. Complete all-features test execution is now running, and CI is outstanding.
+
+The same final Debian-built library executable runs in checksum-verified Ubuntu Base 24.04.5 userland as UID/GID 1000: with empty DNS, network 17/17 and Garden library 121/121 pass; with configured DNS, network 17/17 and all 18 separate-process scenarios pass (121.12 seconds for the scenarios). This is not an Ubuntu-native build or independent kernel validation. Empty-DNS production CLI startup is still blocked by the primary network's unchanged resolver construction, so passing Garden library tests alone do not close B-0044. See the [Ubuntu record](../findings/os-ubuntu.md).
+
+The eleven named acceptance steps in the table above pass again as part of the final-source scenarios on both userlands. The canonical-storage and host-authority limitations are unchanged. Evidence is retained under `/home/user/validation/garden/final-network/` and `/home/user/validation/os/ubuntu-24.04/`, with source/executable digests and complete outputs. No final-SHA CI run is available while these commits remain local.
 
 ## GitHub run references for the original source
 
@@ -48,10 +56,11 @@ At the collected live snapshot, PR #164 still has the original source revision a
 
 ## Open acceptance blockers
 
-1. B-0049's corrected library test needs successful execution and final-commit CI.
+1. B-0049's corrected invite test and B-0041's connection-scope repair have measured local passes, including both userland scenarios, but the final commits are not pushed and have no matching green CI.
 2. [B-0050 / BLG-269](../findings/garden-storage.md) shows that the current content store bypasses B.U.D. 3.0. A passing image or wipe test does not close the storage requirement. The [main-only report](garden-main-only.md) identifies the missing merged dependency and the required integration design.
-3. B-0041 and B-0042 are repaired on an upper branch but absent from this Garden source. B-0043's frame lifetime problem and B-0044's no-DNS startup failure also remain open.
-4. The requested OS matrix, final-source clippy/all-features checks, security controls, independent review and all required CI runs remain incomplete.
-5. Required Strix review has an external quota blocker. Branch protection is not bypassed. Garden is not merged to main during the freeze.
+3. B-0042 is still absent from lower Garden. B-0043's completed-frame lifetime issue and the primary-network part of B-0044's no-DNS startup failure remain open. A separate B-0043 patch is being prepared outside the immutable source tree under test; it has not yet passed a project build.
+4. [B-0052 / BLG-270](../findings/garden-host-authority.md) identifies actual reachable host-only admission authority, contrary to the directive. The existing passing host-approval test demonstrates the conflict rather than validating compliance.
+5. Final-source all-target/all-feature clippy now exits 0. The complete `cargo test --all-features` run is executing, while the requested OS matrix, security controls, independent review and all required CI runs remain incomplete. [B-0051](../findings/clippy-ratchet-baseline.md) separately records an authoritative upper-branch quality-job failure from a stale extra-clippy baseline; its measured number cannot be borrowed for another source.
+6. Required Strix review has an external quota blocker. Branch protection is not bypassed. Garden is not merged to main during the freeze.
 
 Status: not accepted. Record the final SHA, green CI run id and run number only after the blockers are actually resolved.

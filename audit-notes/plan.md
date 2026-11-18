@@ -16,7 +16,7 @@ An unchecked entry means it still needs full line-by-line review. A path listed 
 
 Retain every environment from the supplied `PLAN (1).md`. Extra environments do not replace the requested ones. A Debian-built executable run in an Ubuntu chroot is userland execution evidence, not an Ubuntu build or a separately booted Ubuntu kernel.
 
-- [ ] Ubuntu 24.04 LTS x86-64: build, run and test all components on a CI runner and in a container. A checksum-verified Ubuntu Base userland is being prepared for targeted execution.
+- [ ] Ubuntu 24.04 LTS x86-64: build, run and test all components on a CI runner and in a container. Checksum-verified 24.04.5 userland now passes the final Garden library (121), network (17) and configured-DNS real-process scenarios (18) using Debian-built executables. A native build, independent kernel/full-component journey and empty-resolver primary-node repair remain outstanding.
 - [ ] Ubuntu 24.04 LTS ARM64: build, run and test all components on an ARM64 runner.
 - [ ] Ubuntu 22.04 LTS x86-64: build, run and test all components in a container.
 - [ ] Debian 13 Trixie x86-64: run all components, CLI journeys, all features, security tools and tests. Partial local tests only.
@@ -39,8 +39,9 @@ The supplied plan contains 1,063 file paths. This newer inventory contains 1,819
 ## Garden verification track
 
 - [ ] Resolve and CI-verify B-0049 / BLG-268 without weakening invite parsing.
-- [ ] Verify the 118 Garden library cases and all 18 separate-process scenario cases on the final source revision.
-- [ ] Verify real-NAT execution, numeric-IP-only startup, main-testnet rejection and all 11 acceptance steps.
+- [ ] Verify final-source Garden library and real-process scenarios in CI. Local `2574882a` has 121/121 library and 18/18 scenario passes on Debian and Ubuntu userland, plus Debian NAT 1/1; these do not tick the CI requirement.
+- [ ] Verify real-NAT execution, numeric-IP-only primary startup, main-testnet rejection and all 11 acceptance steps.
+- [ ] Remove the reachable host-only admission authority identified by B-0052 / BLG-270 without weakening invite, capacity or block-validation checks.
 - [ ] Resolve the storage gap B-0050 / BLG-269 under the [main-only dependency report](testnet/garden-main-only.md); a passing raw-file scenario does not satisfy B.U.D. 3.0 acceptance.
 - [ ] Recheck B-0041 through B-0044 on the actual Garden head, not on an upper branch or an uncommitted worktree.
 - [ ] Record final commit SHA and successful CI run id and run number. Local results and queued runs do not close the track.

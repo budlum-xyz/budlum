@@ -1,9 +1,40 @@
 # Budlum audit report
 
+## Current measured continuation evidence
+
+This section supersedes the active/pending wording in the older snapshot below, without rewriting its historical outcomes. No overall CI-green or acceptance claim is made.
+
+- Final local Garden source `2574882aa35d4f3787e53aa1911af7b20df6b760` contains numbered commits 26 through 28. They are still unpushed at this snapshot. Debian: network 17/17, Garden library 121/121, separate-process scenario 18/18 and real-NAT 1/1, all with zero ignored tests and exit 0. Formatting, scenario/NAT gate self-tests and log checks, English-tree and Unicode-dash gates pass. All-target/all-feature `clippy -D warnings` passes in 10m55s.
+- The complete `cargo test --all-features` invocation is now running on the same immutable source, with pre/post-source assertions and separate evidence under `/home/user/validation/garden/final-all-features/`. No outcome is yet observed. Targeted Garden success is not substituted for that suite or CI.
+- Ubuntu Base 24.04.5 userland runs the final Debian-built library: empty DNS network 17/17 and Garden library 121/121; configured DNS network 17/17. Its configured-DNS scenario starts real separate production processes and passes 18/18 in 121.12 seconds. This is not an Ubuntu-native build or separate Ubuntu kernel. Primary P2P startup with empty DNS still exits 1, so the Garden fallback only partially repairs B-0044.
+- B-0041 is locally repaired by `f0fc88e0`, and B-0049's invite regression by `c1e9dfda`; neither is CI-closed. B-0042's canonical decoder remains absent from main. An independent B-0043 owned-frame patch is prepared outside the source tree under test: the exact read helper fails the same retained-frame assertion before the patch (101) and passes after it (0). Its staged network/type module harness passes 31/31, including a real stalled-consumer swarm, but the changed node consumer has not yet had a whole-project build or scenario execution.
+- Main is freshly fetched at `1bd93561f78564f6ab325ec0066dd2da7d5e4a76`. Canonical B.U.D. 3.0 and the bounded decoder are still absent; only dependency-bound work is stopped. The storage requirement remains open as B-0050 / BLG-269.
+- New B-0051 records a real upper-branch quality-job failure: CI 1845 measures 7,223 extra-clippy warnings against stale baseline 8,513. Preserve the gate and use an exact-source authoritative measurement before lowering a baseline; do not borrow another branch's count.
+- New B-0052 / BLG-270 records reachable host-only admission authority, contrary to the Garden directive. The currently passing host-approval scenario proves that extra authority exists; it is not evidence of policy compliance.
+- B-0053 records five audit prose lines rejected by the real Unicode-dash gate. Only punctuation is corrected; audit-sourced English/dash gates and both self-tests, formatting and diff checks now pass locally. A cross-revision English-gate false positive is explicitly excluded; no legitimate localization or baseline is weakened.
+- The review-thread collector now paginates fully (#164: 123 threads/two pages; #126: 394/four pages). PR #198 has 15 new unresolved CodeRabbit threads on `1857ffd36254`, separately inventoried before any comment action. Strix and other reviews are not conflated. No review comment is resolved, deleted or answered as fixed by this evidence.
+
+### Latest collected GitHub heads and checks
+
+Collected at `2026-11-18T13:05:18.653880+00:00`. All six PR head OIDs match their branch targets at collection. This is a time-bound observation; refresh again before a push. Queued, pending, skipped, neutral and cancelled results are not success.
+
+| PR | Head SHA | Check-run states | Unresolved threads, fully paginated | Merge state |
+|---|---|---|---|---|
+| #126 | `56cfddb4fede` | 2 cancelled; 4 in_progress; 1 neutral; 37 queued; 3 skipped; 105 success | 0 | blocked |
+| #164 | `3467a0bababb` | 3 in_progress; 2 neutral; 56 queued; 24 skipped; 50 success | 0 | blocked |
+| #183 | `df970fc98402` | 1 failure; 10 in_progress; 2 neutral; 60 queued; 29 skipped; 37 success | 0 | blocked |
+| #194 | `22860424031a` | 97 queued; 1 skipped | 0 | unstable |
+| #198 | `1857ffd36254` | 96 queued; 1 success | 15 | unstable |
+| #200 | `2754c2c306c3` | 3 cancelled; 103 queued; 1 skipped | 0 | blocked |
+
+Remote Garden's individually successful NAT 121 and Rust Quality 779 checks apply to `3467a0ba`, not to unpushed `2574882a`; CI 1839 remains queued. Audit PR #200 is verified open on `2754c2c3`; its CI 1848 is queued. No protection is bypassed and no main merge is performed during the freeze.
+
+## Historical snapshot
+
 GitHub snapshot: `2026-11-18T11:06Z`. Counts refer to check runs returned for each recorded head, not a claim that every required workflow passed. A queued run is not a passing run, so no row below is evidence of a green build.
 The branch heads and check results can change. Refresh before every push or merge.
 
-## Live snapshot
+### Historical heads and checks
 
 | PR | Head to base | Head SHA | Check-run summary | Unresolved threads | Strix approval | Merge state |
 |---|---|---|---|---|---|---|
@@ -29,6 +60,9 @@ A changes-requested review from CodeRabbit remains in the review history of #164
 - [Account bincode round trip, B-0048](findings/account-bincode-roundtrip.md)
 - [Garden invite regression, B-0049 / BLG-268](findings/garden-invite.md)
 - [Garden B.U.D. 3.0 integration gap, B-0050 / BLG-269](findings/garden-storage.md)
+- [Extra-clippy stale baseline, B-0051](findings/clippy-ratchet-baseline.md)
+- [Garden host-only authority, B-0052 / BLG-270](findings/garden-host-authority.md)
+- [Audit-note punctuation quality, B-0053](findings/audit-note-quality.md)
 - [Garden acceptance step evidence](testnet/garden-acceptance.md)
 - [Garden main-only dependency stop report and design](testnet/garden-main-only.md)
 - [Supplied inventory reconciliation](testnet/inventory-drift.md)

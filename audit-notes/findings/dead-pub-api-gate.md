@@ -27,7 +27,7 @@ The plugin registry of B-0046 exports four read methods with no production calle
 | `len` (`:142`) | 5,394 | 1 | "referenced" → invisible |
 | `is_empty` (`:147`) | 1,742 | 1 | "referenced" → invisible |
 
-The single reference that keeps `get` alive is in its own file: `replace()` calls `self.plugins.get(&domain_id)` (`:110`), a `BTreeMap::get`. One `BTreeMap` accessor of the same name makes the registry accessor unmeasurable, and `domain_ids` — whose name nothing else uses — is the one the ratchet caught.
+The single reference that keeps `get` alive is in its own file: `replace()` calls `self.plugins.get(&domain_id)` (`:110`), a `BTreeMap::get`. One `BTreeMap` accessor of the same name makes the registry accessor unmeasurable, and `domain_ids`, whose name nothing else uses, is the one the ratchet caught.
 
 ## Why this is worth recording
 

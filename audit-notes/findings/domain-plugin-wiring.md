@@ -22,9 +22,9 @@
 3. `get` has no production caller. Every call site of `DomainPluginRegistry::get` is inside `#[cfg(test)]` blocks (`src/domain/plugin_registry.rs:167, 168, 218`). `replace()` (`:110`) calls `self.plugins.get(...)`, which is `BTreeMap::get`, not the registry accessor.
 
 4. Therefore the three trait methods that make a plugin do something have no production caller either:
-   - `validate_domain_block` — declared at `src/domain/plugin.rs:51`, overridden at `:256`; the only call site in the tree is a unit test at `src/consensus/dag.rs:428`.
-   - `extract_commitment` — declared at `src/domain/plugin.rs:66`, overridden at `:289`; no call site at all.
-   - `consensus()` — `src/chain/chain_actor.rs:3264` calls `Blockchain::consensus()` (`src/chain/blockchain.rs:10010`), the main chain's engine, not a plugin's.
+   - `validate_domain_block`: declared at `src/domain/plugin.rs:51`, overridden at `:256`; the only call site in the tree is a unit test at `src/consensus/dag.rs:428`.
+   - `extract_commitment`: declared at `src/domain/plugin.rs:66`, overridden at `:289`; no call site at all.
+   - `consensus()`: `src/chain/chain_actor.rs:3264` calls `Blockchain::consensus()` (`src/chain/blockchain.rs:10010`), the main chain's engine, not a plugin's.
 
 5. What the chain actually verifies about a foreign domain is the relayer-supplied commitment plus its finality proof: `SettlementTx::SubmitCommitment` (`src/settlement/domains.rs:1713-1741`) calls `verify_commitment_finality_observed`, which dispatches to the adapter for the domain's kind (`src/settlement/domains.rs:632-698`). The adapters are wired; the engines are not.
 
@@ -43,7 +43,7 @@ So the answer to "is the DAG/PoH/PoSpace work in #194/#198 enforced anywhere?" i
 ## Consequences
 
 - A domain's own block rules are not enforced by the chain. For a `Dag` domain that means multi-parent ordering, the height-strictly-greater rule and parent resolution never run on an imported domain block; for `Pospace` the plot registry never runs; for `Poh` the ladder never runs. Only the finality certificate gates the commitment, so the domain's agreement is as strong as its quorum and no stronger.
-- The unit tests that "prove" engine behaviour — `src/consensus/dag.rs:319-430`, `src/consensus/pospace.rs:468-616`, the PoH equivalents — assert about code no production path executes. That is not a test defect; it is a reason not to read those files as evidence of protocol behaviour.
+- The unit tests that "prove" engine behaviour (`src/consensus/dag.rs:319-430`, `src/consensus/pospace.rs:468-616` and the PoH equivalents) assert about code no production path executes. That is not a test defect; it is a reason not to read those files as evidence of protocol behaviour.
 - Latent defects inside those engines are unreachable today, which is what keeps B-0045 at "latent" rather than "live". The moment `get()` gains a caller, all of it becomes live at once, unexercised.
 - The local architecture plan says DAG, PoH and PoSpace "run with full `ConsensusDomainPlugin` and `DomainFinalityAdapter` support". The adapter half is true. The plugin half is not: the plugin is constructed, stored and never asked anything.
 

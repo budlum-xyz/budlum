@@ -9,8 +9,8 @@ This stops only the dependency-bound storage replacement. It does not stop the a
 
 ## Checked revisions and evidence
 
-- Main source: `1bd93561`, live-fetched before this report.
-- Garden source under validation: `3467a0bababb7648c75631173228d460da935485` plus the separately recorded invite-test-only patch. The patch does not modify storage.
+- Main source: `1bd93561f78564f6ab325ec0066dd2da7d5e4a76`, live-fetched again after the final network tests. All four missing paths below are rechecked and remain absent.
+- Final Garden source under validation: `2574882aa35d4f3787e53aa1911af7b20df6b760`, three local numbered commits beyond remote `3467a0bababb7648c75631173228d460da935485`. These invite/transport changes do not modify storage or import the unmerged bounded decoder. Open-issue pagination currently returns only the six PRs and no open package issues; absence of a lock issue does not make an unmerged dependency usable.
 - `git cat-file -e origin/main:src/storage/bud3/mod.rs`, `pipeline.rs` and `content_id.rs` fail because these paths are absent on main. The same paths exist on Garden through unmerged upstream work.
 - Main does contain `src/storage/three_pipe.rs`. Its one-shot Three/QR facade is not interchangeable with the canonical B.U.D. 3.0 BOF-1 pipeline.
 - Garden's `src/garden/storage.rs:9-12` explicitly describes a temporary single-chunk seam. `put` at lines 128-177 writes original bytes under the legacy `ContentId::of` hash; `get` reads those bytes back. [B-0050 / BLG-269](../findings/garden-storage.md) records the functional gap.
