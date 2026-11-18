@@ -2135,56 +2135,15 @@ impl Blockchain {
         reason_hash: [u8; 32],
         unfreeze: bool,
     ) -> Result<(), String> {
-        let domain = self
-            .state
-            .settlement
-            .domains
-            .get(domain_id)
-            .ok_or_else(|| format!("unknown domain {domain_id}"))?;
-        // The domain's kind is read from its record, not from the caller: a caller
-        // cannot declare its own domain "PoA" and manufacture freeze authority.
-        let kind = if matches!(domain.kind, crate::domain::ConsensusKind::PoA) {
-            crate::registry::ComplianceDomainKind::PoA
-        } else {
-            crate::registry::ComplianceDomainKind::Permissionless
-        };
-        // The named admin must actually hold authority on this domain: an
-        // admin in the admission registry, or the registered operator while
-        // the domain has no admins yet.
-        //
-        // Only a PoA domain has such authority to check. A permissionless
-        // domain has none to hold, and the compliance ledger refuses it by
-        // KIND - the refusal that says why, rather than a missing admin.
-        if kind == crate::registry::ComplianceDomainKind::PoA {
-            let admin_is_admin = self
-                .state
-                .poa_onboarding
-                .registry()
-                .is_admin(domain_id, &admin);
-            let admin_is_operator = domain.operator == Some(admin);
-            if !admin_is_admin && !admin_is_operator {
-                return Err(format!(
-                    "admin {} holds no authority on domain {domain_id}",
-                    admin.to_hex()
-                ));
-            }
-        }
         let height = self.chain.len() as u64;
-        let result = if unfreeze {
-            self.state
-                .poa_compliance
-                .unfreeze(kind, domain_id, admin, address, reason_hash, height)
-        } else {
-            self.state.poa_compliance.freeze_suspicious(
-                kind,
-                domain_id,
-                admin,
-                address,
-                reason_hash,
-                height,
-            )
-        };
-        result.map_err(|e| format!("{e:?}"))
+        self.state.apply_poa_compliance_request(
+            domain_id,
+            admin,
+            address,
+            reason_hash,
+            unfreeze,
+            height,
+        )
     }
 
     /// Apply the governance-queued PoA compliance requests,
@@ -6604,8 +6563,6 @@ impl Blockchain {
             self.finalized_height,
             crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id),
         );
-        self.mempool
-            .sync_duty_validators(self.active_duty_validators());
         self.emit_chain_metrics();
         self.emit_tx_processed(block.transactions.len() as u64);
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
@@ -6615,15 +6572,16 @@ impl Blockchain {
         self.produce_block(miner_address);
     }
     fn active_duty_validators(&self) -> Vec<Address> {
-        self.state
-            .duty_lane_signers_for_chain(self.chain_id)
-            .into_iter()
-            .collect()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn duty_validator_snapshot_for_test(&self) -> std::collections::BTreeSet<Address> {
-        self.active_duty_validators().into_iter().collect()
+        let mut set = std::collections::BTreeSet::new();
+        for (addr, v) in &self.state.validators {
+            if v.active && !v.slashed && !v.jailed {
+                set.insert(*addr);
+            }
+        }
+        for rec in self.state.validator_directory.iter() {
+            set.insert(rec.owner);
+        }
+        set.into_iter().collect()
     }
 
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
