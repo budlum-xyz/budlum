@@ -166,19 +166,19 @@ pub mod layout {
     /// to. Distinct from the header root above: a consumer that wanted the
     /// header root is reading the wrong field.
     pub const STATE_ROOT: std::ops::Range<usize> = 344..376;
-    /// 8 bytes, little endian: finalized BeaconBlockHeader.proposer_index.
+    /// 8 bytes, little endian: finalized `BeaconBlockHeader.proposer_index`.
     pub const FINALIZED_PROPOSER_INDEX: std::ops::Range<usize> = 376..384;
-    /// 32 bytes: finalized BeaconBlockHeader.parent_root.
+    /// 32 bytes: finalized `BeaconBlockHeader.parent_root`.
     pub const FINALIZED_PARENT_ROOT: std::ops::Range<usize> = 384..416;
-    /// 32 bytes: finalized BeaconBlockHeader.body_root.
+    /// 32 bytes: finalized `BeaconBlockHeader.body_root`.
     pub const FINALIZED_BODY_ROOT: std::ops::Range<usize> = 416..448;
-    /// 8 bytes, little endian: attested BeaconBlockHeader.proposer_index.
+    /// 8 bytes, little endian: attested `BeaconBlockHeader.proposer_index`.
     pub const ATTESTED_PROPOSER_INDEX: std::ops::Range<usize> = 448..456;
-    /// 32 bytes: attested BeaconBlockHeader.parent_root.
+    /// 32 bytes: attested `BeaconBlockHeader.parent_root`.
     pub const ATTESTED_PARENT_ROOT: std::ops::Range<usize> = 456..488;
-    /// 32 bytes: attested BeaconBlockHeader.state_root.
+    /// 32 bytes: attested `BeaconBlockHeader.state_root`.
     pub const ATTESTED_STATE_ROOT: std::ops::Range<usize> = 488..520;
-    /// 32 bytes: attested BeaconBlockHeader.body_root.
+    /// 32 bytes: attested `BeaconBlockHeader.body_root`.
     pub const ATTESTED_BODY_ROOT: std::ops::Range<usize> = 520..552;
     /// 8 bytes, little endian: generalized index of `finalized_checkpoint.root`
     /// (`105` Deneb / `169` Electra).

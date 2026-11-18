@@ -6,7 +6,7 @@
 //! - Contract accounts (`BDLM_CONTRACT_ACCOUNT_V1`, deployed code)
 //! - Deterministic aliases for EVM (`BDLM_EVM_ALIAS_V1`), WASM (`bud1...`),
 //!   SVM (`BDLM_SVM_ALIAS_V1`, guaranteed off the Ed25519 curve), Move
-//!   (`SHA3-256(addr32 || 0xBD)`) and BudZero (`addr32`).
+//!   (`SHA3-256(addr32 || 0xBD)`) and `BudZero` (`addr32`).
 //!
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
@@ -101,19 +101,19 @@ pub fn derive_evm_alias(addr: &Address) -> [u8; 20] {
     tail
 }
 
-/// Deterministic CosmWasm bech32 alias (`bud1...`) of a native 32-byte account.
+/// Deterministic `CosmWasm` bech32 alias (`bud1...`) of a native 32-byte account.
 #[must_use]
 pub fn derive_wasm_alias(addr: &Address) -> String {
     bech32_encode("bud", &addr.0)
 }
 
-/// Deterministic CosmWasm bech32 address (`bud1...`) of a 20-byte Cosmos account.
+/// Deterministic `CosmWasm` bech32 address (`bud1...`) of a 20-byte Cosmos account.
 #[must_use]
 pub fn derive_foreign_cosmos_bech32(addr20: &[u8; 20]) -> String {
     bech32_encode("bud", addr20)
 }
 
-/// Deterministic CosmWasm bech32 contract address (`bud1...`) from a 32-byte digest.
+/// Deterministic `CosmWasm` bech32 contract address (`bud1...`) from a 32-byte digest.
 #[must_use]
 pub fn bech32_contract_addr(digest32: &[u8; 32]) -> String {
     bech32_encode("bud", digest32)
@@ -163,7 +163,7 @@ pub fn derive_move_alias(addr: &Address) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Deterministic 32-byte BudZero alias of an account (`addr32` itself).
+/// Deterministic 32-byte `BudZero` alias of an account (`addr32` itself).
 #[must_use]
 pub const fn derive_budzero_alias(addr: &Address) -> [u8; 32] {
     addr.0

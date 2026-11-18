@@ -1,4 +1,4 @@
-//! WIRING: unwired - the ZK QC fault-proof path stays fail-closed until BudZero STARK verification is integrated.
+//! WIRING: unwired - the ZK QC fault-proof path stays fail-closed until `BudZero` STARK verification is integrated.
 //!
 //! ZK QC fault proof verifier.
 //!
@@ -7,13 +7,13 @@
 //! verifier until a real STARK challenge and a production caller are wired.
 //!
 //! This module is fail-closed on testnet. It refuses every ZK QC fault
-//! proof. A BudZero STARK verifier is not integrated yet. No pairing
+//! proof. A `BudZero` STARK verifier is not integrated yet. No pairing
 //! based SNARK sits on a Budlum verification path.
 
 /// ZK QC fault proof challenge is closed on testnet.
 pub const ZK_QC_FAULT_PROOF_CLOSED_ON_TESTNET: bool = true;
 
-/// Verify a ZK QC fault proof. Always refuses until a BudZero STARK
+/// Verify a ZK QC fault proof. Always refuses until a `BudZero` STARK
 /// verifier is integrated.
 pub fn verify_zk_qc_fault_proof(_proof_bytes: &[u8], _merkle_root: &str) -> Result<(), String> {
     Err("ZK QC fault proof verifier not implemented - ZK domain attestations cannot be challenged until ZK verifier integration. This is fail-closed: no invalid ZK attestation can be finalized via this path.".into())

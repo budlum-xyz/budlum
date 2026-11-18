@@ -191,7 +191,7 @@ pub fn aptos_ed25519_address(pubkey: &[u8; 32]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Derives an Aptos SingleKey secp256k1 account address `SHA3-256(0x01 || pk65 || 0x02)`.
+/// Derives an Aptos `SingleKey` secp256k1 account address `SHA3-256(0x01 || pk65 || 0x02)`.
 #[must_use]
 pub fn aptos_singlekey_secp256k1_address(uncompressed_pk65: &[u8; 65]) -> [u8; 32] {
     let mut h = Sha3_256::new();
@@ -432,6 +432,7 @@ pub fn decode_aptos_tx(
 }
 
 /// Encodes and signs a single-signer Ed25519 Aptos `SignedTransaction`.
+#[must_use]
 pub fn sign_aptos_ed25519_tx(
     secret_seed: &[u8; 32],
     sequence_number: u64,

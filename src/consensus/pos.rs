@@ -34,7 +34,7 @@ impl Default for PoSConfig {
     /// Production paths (`main.rs`) already build the config explicitly from
     /// `network_params.epoch_len`; this only fixes the fallback.
     fn default() -> Self {
-        PoSConfig {
+        Self {
             min_stake: 1000,
             // The reward/penalty/unbonding knobs were never read by
             // any code path and are gone; slashing ratios come from
@@ -60,13 +60,14 @@ pub struct SlashingEvidence {
 }
 
 impl SlashingEvidence {
+    #[must_use]
     pub fn new(
         header1: BlockHeader,
         header2: BlockHeader,
         signature1: Vec<u8>,
         signature2: Vec<u8>,
     ) -> Self {
-        SlashingEvidence {
+        Self {
             header1,
             header2,
             signature1,
@@ -124,8 +125,9 @@ impl PoSEngine {
         Ok(self.config.epoch_length)
     }
 
+    #[must_use]
     pub fn new(config: PoSConfig, validator_keys: Option<ValidatorKeys>) -> Self {
-        PoSEngine {
+        Self {
             config,
             seen_blocks: RwLock::new(HashMap::new()),
             signed_rounds: RwLock::new(HashMap::new()),
@@ -145,7 +147,7 @@ impl PoSEngine {
         validator_keys: Option<ValidatorKeys>,
         signer: Arc<dyn ConsensusSigner>,
     ) -> Self {
-        PoSEngine {
+        Self {
             config,
             seen_blocks: RwLock::new(HashMap::new()),
             signed_rounds: RwLock::new(HashMap::new()),
@@ -756,6 +758,7 @@ impl PoSEngine {
 /// `Blockchain::verify_slashing_evidence` and `PoSEngine::verify_evidence`
 /// used to restate this independently. Two copies of a consensus check drift,
 /// and the drift is invisible until the two disagree about an equivocation.
+#[must_use]
 pub fn slashing_evidence_is_valid(evidence: &SlashingEvidence) -> bool {
     if evidence.header1.index != evidence.header2.index {
         return false;

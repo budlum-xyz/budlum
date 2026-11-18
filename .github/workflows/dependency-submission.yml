@@ -11,7 +11,7 @@ name: Dependency Submission
 
 on:
   push:
-    branches: [main, consensus-of-consensuses, testnet-quantum]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses]
   workflow_dispatch:
 
 concurrency:

@@ -67,6 +67,7 @@ pub struct ReplayNonceStore {
 /// `storage/db.rs` refuses a row the current shape does not decode, and
 /// says why, instead of quietly diverging.
 impl ReplayNonceStore {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             outbound_nonces: BTreeMap::new(),
@@ -87,6 +88,7 @@ impl ReplayNonceStore {
     }
 
     /// Has this direction already processed `nonce` for `sender`?
+    #[must_use]
     pub fn is_processed(
         &self,
         source_domain: DomainId,
@@ -143,10 +145,12 @@ impl ReplayNonceStore {
 
     /// Number of distinct (direction, sender) rows the replay memory holds.
     /// Bounded by the number of distinct bridging senders, never by traffic.
+    #[must_use]
     pub fn processed_count(&self) -> usize {
         self.processed_high_water.len()
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         let mut leaves = Vec::new();
 

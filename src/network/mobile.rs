@@ -62,6 +62,7 @@ pub struct BatteryStatus {
 }
 
 impl BatteryStatus {
+    #[must_use]
     pub fn full() -> Self {
         Self {
             level_pct: 100,
@@ -70,6 +71,7 @@ impl BatteryStatus {
         }
     }
 
+    #[must_use]
     pub fn critical() -> Self {
         Self {
             level_pct: 5,
@@ -79,6 +81,7 @@ impl BatteryStatus {
     }
 
     /// The working mode implied by the battery level.
+    #[must_use]
     pub fn power_mode(&self) -> PowerMode {
         if self.charging {
             PowerMode::Full
@@ -213,11 +216,13 @@ impl StorageStatus {
     }
 
     /// Space available to B.U.D., in bytes.
+    #[must_use]
     pub fn bud_available(&self) -> u64 {
         self.bud_reserved_bytes.min(self.available_bytes)
     }
 
     /// Is there enough storage, meaning at least 1 GB for B.U.D.?
+    #[must_use]
     pub fn is_sufficient_for_bud(&self) -> bool {
         self.bud_available() >= 1_073_741_824 // 1 GB
     }
@@ -232,7 +237,7 @@ impl StorageStatus {
 /// Convenience: Android 15+ 24-hour runtime cap on `dataSync` foreground services (6h).
 pub const ANDROID_15_DATASYNC_LIMIT_MINUTES_PER_24H: u32 = 360;
 
-/// Convenience: WorkManager unmetered fallback period when foreground service stops.
+/// Convenience: `WorkManager` unmetered fallback period when foreground service stops.
 pub const MOBILE_WORKMANAGER_PERIOD_MINUTES: u32 = 15;
 
 /// Convenience: free-space floor (2 GiB, R-34) triggering `ReleaseShares`.
@@ -242,7 +247,7 @@ pub const MOBILE_LOW_SPACE_RELEASE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AndroidForegroundKind {
-    /// Persistent `specialUse` service paired with WorkManager fallback.
+    /// Persistent `specialUse` service paired with `WorkManager` fallback.
     SpecialUse,
     /// Legacy `dataSync` service capped to 6 hours per 24 hours on Android 15+.
     DataSync,
@@ -290,7 +295,7 @@ impl MobileValidatorRuntimePolicy {
         true
     }
 
-    /// Convenience: validates Android 15+ foreground service & WorkManager bounds.
+    /// Convenience: validates Android 15+ foreground service & `WorkManager` bounds.
     ///
     /// # Errors
     ///
@@ -366,6 +371,7 @@ impl ChallengePolicy {
     }
 
     /// Builds a challenge policy from the battery state.
+    #[must_use]
     pub fn from_power_mode(mode: PowerMode) -> Self {
         match mode {
             PowerMode::Full => Self {
@@ -404,6 +410,7 @@ impl ChallengePolicy {
     /// [`BatteryStatus::full`], calls for. Deriving it keeps a new profile
     /// consistent with `validate`, which refuses a policy that disagrees
     /// with the battery mode.
+    #[must_use]
     pub fn default_policy() -> Self {
         Self::from_power_mode(BatteryStatus::full().power_mode())
     }
@@ -452,6 +459,7 @@ impl NatTraversalStatus {
 
 impl MobileNodeProfile {
     /// Creates a new mobile node profile.
+    #[must_use]
     pub fn new(address: Address, device_type: DeviceType) -> Self {
         Self {
             address,
@@ -588,12 +596,14 @@ impl MobileNodeProfile {
     }
 
     /// Can the node take on active tasks?
+    #[must_use]
     pub fn can_accept_tasks(&self) -> bool {
         self.challenge_policy.max_challenges_per_epoch > 0
             || self.challenge_policy.max_proof_tasks > 0
     }
 
     /// Returns a summary of the profile.
+    #[must_use]
     pub fn summary(&self) -> String {
         format!(
             "MobileNode({}{}): battery={}%, mode={:?}, nat={:?}, tasks={}",

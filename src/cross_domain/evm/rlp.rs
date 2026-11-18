@@ -36,7 +36,7 @@ pub enum Item {
     /// it.
     String(Vec<u8>),
     /// Ordered item list.
-    List(Vec<Item>),
+    List(Vec<Self>),
 }
 
 /// An RLP encoding or decoding error, including a canonical-form violation.
@@ -56,7 +56,7 @@ pub enum RlpError {
     /// The item budget was exceeded: one input byte can become
     /// one heap-allocated item, so the total is bounded.
     TooManyItems,
-    /// The list nesting depth was exceeded, a DoS guard; RLP can technically nest
+    /// The list nesting depth was exceeded, a `DoS` guard; RLP can technically nest
     /// arbitrarily deep.
     NestingTooDeep,
 }
@@ -64,19 +64,19 @@ pub enum RlpError {
 impl std::fmt::Display for RlpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RlpError::UnexpectedEof => write!(f, "rlp: unexpected end of input"),
-            RlpError::InvalidLengthPrefix => write!(f, "rlp: invalid length prefix"),
-            RlpError::NonCanonical => write!(f, "rlp: non-canonical encoding"),
-            RlpError::TrailingBytes => write!(f, "rlp: trailing bytes after item"),
-            RlpError::TooManyItems => write!(f, "rlp: too many items"),
-            RlpError::NestingTooDeep => write!(f, "rlp: nesting too deep"),
+            Self::UnexpectedEof => write!(f, "rlp: unexpected end of input"),
+            Self::InvalidLengthPrefix => write!(f, "rlp: invalid length prefix"),
+            Self::NonCanonical => write!(f, "rlp: non-canonical encoding"),
+            Self::TrailingBytes => write!(f, "rlp: trailing bytes after item"),
+            Self::TooManyItems => write!(f, "rlp: too many items"),
+            Self::NestingTooDeep => write!(f, "rlp: nesting too deep"),
         }
     }
 }
 
 impl std::error::Error for RlpError {}
 
-/// The maximum list depth for RLP encoding, a DoS guard against decoding
+/// The maximum list depth for RLP encoding, a `DoS` guard against decoding
 /// endlessly nested lists.
 const MAX_DEPTH: usize = 32;
 
@@ -91,6 +91,7 @@ const MAX_ITEMS: usize = 100_000;
 /// encoded every list into a scratch buffer and copied it into its parent,
 /// so a byte at depth `D` was copied `D` times: `O(D * N)` work and
 /// allocation for an input of `N` bytes.
+#[must_use]
 pub fn encode(item: &Item) -> Vec<u8> {
     let mut list_payloads = Vec::new();
     let total = measure(item, &mut list_payloads);
@@ -383,8 +384,9 @@ pub fn as_bytes(item: &Item) -> Result<&[u8], RlpError> {
 pub struct RlpBytes(pub Vec<u8>);
 
 impl RlpBytes {
+    #[must_use]
     pub fn from_item(item: &Item) -> Self {
-        RlpBytes(encode(item))
+        Self(encode(item))
     }
     pub fn decode(&self) -> Result<Item, RlpError> {
         decode(&self.0)

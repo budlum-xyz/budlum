@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_ml_dsa_single is reached only from the PQ vector tests in this tree; the production path verifies through the batched backend dispatch.
+//! WIRING: unwired - `verify_ml_dsa_single` is reached only from the PQ vector tests in this tree; the production path verifies through the batched backend dispatch.
 //! Post-quantum verification facade.
 //!
 //! One entry point, [`verify`], for every ML-DSA and SLH-DSA signature the node
@@ -11,7 +11,7 @@
 //! # ML-DSA is verified twice
 //!
 //! Consensus verification of an ML-DSA signature needs the acceptance of two
-//! independent implementations: RustCrypto `ml-dsa` and `libcrux-ml-dsa` (the
+//! independent implementations: `RustCrypto` `ml-dsa` and `libcrux-ml-dsa` (the
 //! portable backend only; the SIMD features are off, so the AVX2 advisories
 //! RUSTSEC-2026-0125 and RUSTSEC-2026-0126 have no code path here). Both
 //! libraries shipped a bug in 2026 that accepted an invalid signature
@@ -24,7 +24,7 @@
 //!
 //! # SLH-DSA has one library
 //!
-//! RustCrypto `slh-dsa` is the only implementation. The NIST ACVP vectors in
+//! `RustCrypto` `slh-dsa` is the only implementation. The NIST ACVP vectors in
 //! `tests/vectors/pq` are therefore mandatory (`pq_vectors_*` tests).
 //!
 //! This file has no dependency on the rest of the node. `crates/wallet-core`
@@ -364,7 +364,7 @@ pub fn verify_ml_dsa_single(
 /// One of the two ML-DSA implementations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MlDsaBackend {
-    /// RustCrypto `ml-dsa`.
+    /// `RustCrypto` `ml-dsa`.
     RustCrypto,
     /// `libcrux-ml-dsa`, portable backend.
     Libcrux,

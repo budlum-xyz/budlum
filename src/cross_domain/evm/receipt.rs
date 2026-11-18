@@ -47,9 +47,9 @@ pub enum ReceiptError {
 impl std::fmt::Display for ReceiptError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReceiptError::Rlp(e) => write!(f, "receipt rlp error: {e}"),
-            ReceiptError::InvalidEnvelope => write!(f, "receipt: invalid envelope"),
-            ReceiptError::InvalidLog => write!(f, "receipt: invalid log"),
+            Self::Rlp(e) => write!(f, "receipt rlp error: {e}"),
+            Self::InvalidEnvelope => write!(f, "receipt: invalid envelope"),
+            Self::InvalidLog => write!(f, "receipt: invalid log"),
         }
     }
 }
@@ -58,7 +58,7 @@ impl std::error::Error for ReceiptError {}
 
 impl From<RlpError> for ReceiptError {
     fn from(e: RlpError) -> Self {
-        ReceiptError::Rlp(e)
+        Self::Rlp(e)
     }
 }
 
@@ -175,6 +175,7 @@ impl EthReceipt {
     ///
     /// Convenience: the receipt lookup the EVM adapter's deposit scan
     /// is built on, pub with the rest of this receipt reader.
+    #[must_use]
     pub fn find_log<'a>(&'a self, emitter: &[u8], topic0: &[u8; 32]) -> Option<&'a EthLog> {
         self.logs
             .iter()
@@ -185,6 +186,7 @@ impl EthReceipt {
     /// receipt: `(log_index, log)`. The pair
     /// `(tx, log_index)` is the deposit id a bridge can bind; the bare log
     /// cannot be told apart from a same-shaped sibling later in the list.
+    #[must_use]
     pub fn find_log_indexed<'a>(
         &'a self,
         emitter: &[u8],

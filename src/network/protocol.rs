@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 /// Transport block-size ceiling, measured over the **protobuf** encoding.
 ///
-/// Not the same bound as `consensus::MAX_BLOCK_SIZE` (1_000_000 over JSON),
+/// Not the same bound as `consensus::MAX_BLOCK_SIZE` (`1_000_000` over JSON),
 /// which is stricter in both value and encoding. See that constant for the
 /// comparison and for why this one must stay the looser of the two.
 pub const MAX_BLOCK_SIZE: usize = 1024 * 1024;
@@ -194,6 +194,7 @@ pub const TOPIC_AGG_FRAME: &str = "agg/frame";
 pub const MAX_AGG_OBJECT_BYTES: usize = 64 + crate::aggregation::chain::WIRE_OBJECT_BYTES;
 
 impl NetworkMessage {
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         use prost::Message;
         let proto_msg = crate::network::proto_conversions::pb::ProtoNetworkMessage::from(self);
