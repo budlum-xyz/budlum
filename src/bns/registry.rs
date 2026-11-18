@@ -214,7 +214,7 @@ impl BnsRegistry {
             && !label.ends_with('-')
             // Reject RFC 5891 ACE / Punycode labels (`xn--...` and any `??--...`
             // reserved tag) to prevent homograph spoofing across .bud and gateway hosts.
-            && !(label.len() >= 4 && &label.as_bytes()[2..4] == b"--")
+            && label.as_bytes().get(2..4) != Some(b"--")
             && label
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
