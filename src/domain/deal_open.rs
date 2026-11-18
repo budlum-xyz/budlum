@@ -608,7 +608,9 @@ mod tests {
     fn a_registry_refusal_is_reported_and_writes_nothing() {
         let manifest = manifest();
         let mut t = terms(&manifest, operator());
-        t.merkle_proof = None;
+        // With the VerifyMerkle gate closed by default (B-0049/B-0054), an omitted
+        // envelope is optional; a malformed envelope is refused regardless of gate state.
+        t.merkle_proof = Some(vec![0u8; 8]);
         let err = open_without_write(funded(5_000_000, 5_000_000), &t, payer(), 0, 0).unwrap_err();
         assert!(err.contains("open_deal failed"), "got {err:?}");
     }
