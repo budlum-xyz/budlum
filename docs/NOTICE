@@ -36,8 +36,9 @@ Design references (no code copied)
 The following open-source projects were studied while designing specific
 modules. The in-tree implementations are independent (different language or
 different abstraction level). The entries record the inspiration so a
-reviewer can compare upstream and in-tree; the per-module detail is in
-PROVENANCE_NOTES.md.
+reviewer can compare upstream and in-tree. The per-module detail that was
+kept in PROVENANCE_NOTES.md was retired with that file; what remains
+verifiable in-tree is this listing and the citations in the source headers.
 
 JustVugg/colibri
     https://github.com/JustVugg/colibri
@@ -78,4 +79,6 @@ per-dependency inventory is written to that job's summary on every run.
 
 Provenance observations for non-trivial in-tree algorithms, including the
 cases where an origin could not be established, are recorded in
-PROVENANCE_NOTES.md. That file is a map for reviewers, not a clearance.
+PROVENANCE_NOTES.md, which was retired. This notice is not a clearance, and
+neither is any in-tree document: promotion of a crate or family is gated on
+the audit ledger and independent review.

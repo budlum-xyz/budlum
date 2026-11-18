@@ -5,8 +5,27 @@
 //! Every block carries a hash-covered space proof `(plot_id, challenge,
 //! capacity_bytes, response)` in `vrf_proof` / `vrf_output`; `validate_block`
 //! fails closed unless a valid challenge-bound response is present, and fork
-//! choice scores each candidate chain strictly by the verified plot capacity
-//! committed inside that candidate chain.
+//! choice scores each candidate chain strictly by the capacity committed
+//! inside that candidate chain AND registered in this node's plot registry;
+//! an unregistered witness scores zero.
+//!
+//! # Status: not deployable as a consensus family yet
+//!
+//! The capacity figure remains an unauthenticated claim about
+//! `size_bytes`: `compute_plot_response` is a hash of public inputs only, so
+//! the response neither proves possession of the declared bytes nor binds a
+//! Merkle commitment over a plot. `register_plot` is a production door for
+//! operator/ops startup registration on this node (it is deliberately not a
+//! consensus transaction yet); fork choice and `validate_block` both treat a
+//! producer with no registered, capacity-matched record as zero/refusal.
+//! What is enforced today is identification binding - capacity is credited
+//! only to a registered `(address, plot_id, size_bytes)` record and never
+//! from the witness alone. What is NOT yet done: consensus-state plot
+//! registration transactions, and a response that depends on stored data.
+//! Until those land, PoSpace must not be advertised as a deployable
+//! consensus family, and no domain should rely on it for security. The
+//! finality door (`PospaceFinalityAdapter`) binds an authority quorum, not a
+//! space proof, so it does not rescue single-prover claims either.
 
 use crate::consensus::split_resolver::{resolve_split_tie, SplitCandidate, SplitDecision};
 use crate::consensus::{ConsensusEngine, ConsensusError};
@@ -17,7 +36,8 @@ use std::collections::BTreeMap;
 use std::sync::RwLock;
 use subtle::ConstantTimeEq;
 
-#[cfg(test)]
+/// Maximum registered plots. Production-bound: `register_plot` is the
+/// registration door, so the ceiling applies on every node, not only in tests.
 const MAX_POSPACE_PLOTS: usize = 4_096;
 /// Maximum credible capacity credited to a single plot (1 PiB) so forged
 /// `u64::MAX` witnesses cannot dominate fork choice.
@@ -157,12 +177,19 @@ impl PoSpaceEngine {
 
     /// Register a validator plot within the bounded registry.
     ///
+    /// This is the production registration door for a validator's plot. It is
+    /// fail-closed: an address, plot id, capacity below the consensus minimum,
+    /// a poisoned lock, or a full registry are all refusals. It is not yet
+    /// reachable from a consensus transaction, so today it is driven by the
+    /// operator/ops startup path and by tests; wiring it to a stake-bound
+    /// registration transaction is the remaining mainnet step tracked by the
+    /// audit.
+    ///
     /// # Errors
     ///
     /// Returns an error for empty addresses, zero plot ids, below-minimum capacity,
     /// capacity exhaustion, or a poisoned lock.
-    #[cfg(test)]
-    fn register_plot(
+    pub fn register_plot(
         &self,
         address: &str,
         plot_id: [u8; 32],
@@ -222,9 +249,17 @@ impl PoSpaceEngine {
     }
 
     /// Verify a registered validator's challenge response.
-    #[cfg(test)]
+    ///
+    /// Production door for out-of-band challenge checks (operator tooling,
+    /// slashing evidence). Fails closed on unknown addresses, undersized
+    /// plots, and bad responses.
     #[must_use]
-    fn verify_response(&self, address: &str, challenge: &[u8; 32], response: &[u8; 32]) -> bool {
+    pub fn verify_response(
+        &self,
+        address: &str,
+        challenge: &[u8; 32],
+        response: &[u8; 32],
+    ) -> bool {
         let Ok(plots) = self.plots.read() else {
             return false;
         };
@@ -420,16 +455,19 @@ impl ConsensusEngine for PoSpaceEngine {
                 return 0;
             }
             if let Some(ref plots) = plots_guard {
-                if let Some(producer) = block.producer {
-                    if let Some(reg) = plots.get(&producer.to_hex()) {
-                        if reg.plot_id != plot_id || reg.size_bytes != size_bytes {
-                            return 0;
-                        }
-                    }
-                } else if let Some(reg) = plots.values().find(|r| r.plot_id == plot_id) {
-                    if reg.size_bytes != size_bytes {
-                        return 0;
-                    }
+                // Fail closed on anything but a locally registered plot with
+                // a matching id and capacity: an unregistered witness, or a
+                // registered plot whose advertised size differs, scores zero.
+                // A producer-bound witness must match that producer's record.
+                let matched = match block.producer {
+                    Some(producer) => plots
+                        .get(&producer.to_hex())
+                        .filter(|reg| reg.plot_id == plot_id),
+                    None => plots.values().find(|r| r.plot_id == plot_id),
+                };
+                match matched {
+                    Some(reg) if reg.size_bytes == size_bytes => {}
+                    _ => return 0,
                 }
             }
             proven_capacity = proven_capacity.saturating_add(u128::from(size_bytes));
@@ -544,31 +582,42 @@ mod tests {
     #[test]
     fn pospace_fork_choice_scores_candidate_chain_capacity_deterministically() {
         let zero = "0".repeat(64);
-        let small = PoSpaceEngine::new(PoSpaceConfig::default());
-        small
-            .register_plot("small-miner", [3u8; 32], 2_000_000)
+        // One engine holds both plots: fork choice scores only locally
+        // registered plots, so a cross-engine demonstration must share the
+        // registry (an unregistered witness scores zero, see
+        // `pospace_unregistered_plot_scores_zero_until_registered`).
+        let shared = PoSpaceEngine::new(PoSpaceConfig::default());
+        shared
+            .register_plot(&"03".repeat(32), [3u8; 32], 2_000_000)
             .expect("register small");
+        shared
+            .register_plot(&"04".repeat(32), [4u8; 32], 200_000_000)
+            .expect("register large");
+        // The plot registry is keyed by address hex; the producer binding is
+        // checked against that same key, so the test producers are the
+        // plot addresses themselves.
+        let small_addr =
+            crate::core::address::Address::from_hex(&"03".repeat(32)).expect("small address");
+        let large_addr =
+            crate::core::address::Address::from_hex(&"04".repeat(32)).expect("large address");
         let mut b_small = make_block(1, &zero);
-        small
+        b_small.producer = Some(small_addr);
+        shared
             .prepare_block(&mut b_small, &AccountState::new())
             .expect("prepare small");
-
-        let large = PoSpaceEngine::new(PoSpaceConfig::default());
-        large
-            .register_plot("large-miner", [4u8; 32], 200_000_000)
-            .expect("register large");
         let mut b_large = make_block(1, &zero);
-        large
+        b_large.producer = Some(large_addr);
+        shared
             .prepare_block(&mut b_large, &AccountState::new())
             .expect("prepare large");
 
         let chain_small = vec![b_small];
         let chain_large = vec![b_large];
-        // Higher proven plot capacity wins at equal height regardless of engine state.
-        assert!(small.is_better_chain(&chain_small, &chain_large));
-        assert!(!small.is_better_chain(&chain_large, &chain_small));
+        // (current, candidate): candidate large must displace current small.
+        assert!(shared.is_better_chain(&chain_small, &chain_large));
+        assert!(!shared.is_better_chain(&chain_large, &chain_small));
         // Reflexivity: a chain is never strictly better than itself.
-        assert!(!small.is_better_chain(&chain_small, &chain_small));
+        assert!(!shared.is_better_chain(&chain_small, &chain_small));
     }
 
     #[test]
@@ -614,5 +663,85 @@ mod tests {
         let mut tampered = honest;
         tampered.hash = "f".repeat(64);
         assert_eq!(engine.fork_choice_score(&[tampered]), 0);
+    }
+
+    #[test]
+    fn pospace_unregistered_plot_scores_zero_until_registered() {
+        let zero = "0".repeat(64);
+        // Prepared on an engine that knows the plot; checked by one that does not.
+        let producer = PoSpaceEngine::new(PoSpaceConfig::default());
+        producer
+            .register_plot("ghost-miner", [9u8; 32], 50_000_000)
+            .expect("register plot on producer");
+        let mut block = make_block(1, &zero);
+        producer
+            .prepare_block(&mut block, &AccountState::new())
+            .expect("prepare block");
+
+        let engine = PoSpaceEngine::new(PoSpaceConfig::default());
+        assert_eq!(engine.fork_choice_score(std::slice::from_ref(&block)), 0);
+
+        engine
+            .register_plot("ghost-miner", [9u8; 32], 50_000_000)
+            .expect("register plot here");
+        assert!(engine.fork_choice_score(std::slice::from_ref(&block)) > 0);
+
+        // A producer-bound witness only matches the record filed under THAT
+        // producer's address; another address with the same plot id does not
+        // vouch for it.
+        let mut bound = make_block(1, &zero);
+        bound.producer = Some(crate::core::address::Address::from([0xabu8; 32]));
+        producer
+            .register_plot(&"ab".repeat(32), [0x9cu8; 32], 60_000_000)
+            .expect("register producer-bound plot");
+        producer
+            .prepare_block(&mut bound, &AccountState::new())
+            .expect("prepare bound block");
+        let engine2 = PoSpaceEngine::new(PoSpaceConfig::default());
+        // The plot-id fallback is gone for producer-bound blocks: nothing is
+        // registered here at all.
+        assert_eq!(engine2.fork_choice_score(std::slice::from_ref(&bound)), 0);
+        engine2
+            .register_plot(&"cd".repeat(32), [0x9cu8; 32], 60_000_000)
+            .expect("register same plot id under another address");
+        // Same plot id, wrong producer address: still refused.
+        assert_eq!(engine2.fork_choice_score(std::slice::from_ref(&bound)), 0);
+        engine2
+            .register_plot(&"ab".repeat(32), [0x9cu8; 32], 60_000_000)
+            .expect("register the producer's own plot");
+        assert!(engine2.fork_choice_score(std::slice::from_ref(&bound)) > 0);
+    }
+
+    #[test]
+    fn production_shaped_engine_refuses_blocks_with_named_errors() {
+        // No registration at all: prepare must name why, and a hand-built
+        // but well-formed block must be refused by validate with a named
+        // error, not a panic and not a pass.
+        let zero = "0".repeat(64);
+        let engine = PoSpaceEngine::new(PoSpaceConfig::default());
+
+        let mut block = make_block(1, &zero);
+        let err = engine
+            .prepare_block(&mut block, &AccountState::new())
+            .expect_err("an engine with no registered plots cannot produce");
+        assert!(
+            err.0.contains("no registered plots"),
+            "prepare refusal must name the empty registry, got: {}",
+            err.0
+        );
+
+        let mut forged = make_block(1, &zero);
+        let challenge = engine.expected_challenge_for_block(&forged);
+        forged.vrf_output = compute_plot_response(&[0x11; 32], &challenge).to_vec();
+        forged.vrf_proof = encode_pospace_witness(&[0x11; 32], &challenge, 10_000_000);
+        forged.hash = forged.calculate_hash();
+        let err = engine
+            .validate_block(&forged, &[], &AccountState::new())
+            .expect_err("an unregistered plot must be refused");
+        assert!(
+            err.0.contains("unregistered plot"),
+            "validate refusal must name the registry, got: {}",
+            err.0
+        );
     }
 }

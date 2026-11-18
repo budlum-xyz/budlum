@@ -1894,6 +1894,106 @@ impl Blockchain {
         )
     }
 
+    /// Resolve the node-local plugin registered for `domain_id`.
+    ///
+    /// This is the door every plugin-backed operation goes through, and it is
+    /// fail-closed end to end: the domain must exist (node-local Garden
+    /// domains first, then canonical in-block domains, the same precedence
+    /// the RPC views use), a plugin must be registered for it, and the
+    /// plugin's kind must be the domain's kind. A node that never registered
+    /// a plugin gets a refusal that names the domain, not a silently
+    /// permissive default and never a built-in substitution.
+    ///
+    /// # Errors
+    ///
+    /// The refusal naming what is missing or mismatched.
+    pub fn domain_plugin_for(
+        &self,
+        domain_id: DomainId,
+    ) -> Result<std::sync::Arc<dyn crate::domain::ConsensusDomainPlugin>, String> {
+        let domain = self
+            .consensus_domains_with_garden()
+            .into_iter()
+            .find(|d| d.id == domain_id)
+            .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+        let plugin = self.plugin_registry.get(domain_id).ok_or_else(|| {
+            format!(
+                "Domain {domain_id} has no plugin registered in the plugin registry; \
+                 refusing to run the plugin door for it"
+            )
+        })?;
+        if plugin.kind() != domain.kind {
+            return Err(format!(
+                "Domain {domain_id} is registered as {:?} but its plugin is a {:?} plugin; \
+                 refusing to cross-wire them",
+                domain.kind,
+                plugin.kind()
+            ));
+        }
+        Ok(plugin)
+    }
+
+    /// Validate a domain block through the registered plugin and extract its
+    /// commitment. This is the production door the plugin registry was wired
+    /// for: a node that accepts domain blocks for a local domain validates
+    /// them through the domain's own registered consensus engine and extracts
+    /// the commitment through the plugin, whose finality adapter is the same
+    /// one the settlement layer names in the domain record.
+    ///
+    /// `domain_chain` is the history of THE DOMAIN'S chain, supplied by the
+    /// caller that holds it (this node does not store canonical domain block
+    /// history in-block); the context state is this node's settled state.
+    /// Fail-closed ordering: the domain and plugin must resolve first, the
+    /// plugin's finality adapter must be the one the domain record commits
+    /// to, and only then does the block itself get validated. A mismatch at
+    /// any step is a refusal, never a fallback onto a built-in adapter.
+    ///
+    /// # Errors
+    ///
+    /// The refusal from [`Self::domain_plugin_for`], the adapter mismatch,
+    /// or the plugin's validation/extraction refusal.
+    pub fn validate_domain_block_with_plugin(
+        &self,
+        domain_id: DomainId,
+        block: &Block,
+        domain_chain: &[Block],
+        sequence: u64,
+    ) -> Result<DomainCommitment, String> {
+        let domain = self
+            .consensus_domains_with_garden()
+            .into_iter()
+            .find(|d| d.id == domain_id)
+            .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+        let plugin = self.domain_plugin_for(domain_id)?;
+        // The plugin's finality adapter must be the adapter the domain record
+        // names. Accepting a mismatch here would let a node produce a
+        // commitment that settlement refuses for reasons the producer never
+        // saw, or worse, vouch for finality the registry never admitted.
+        let plugin_adapter = plugin.finality_adapter().adapter_name();
+        if plugin_adapter != domain.finality_adapter {
+            return Err(format!(
+                "Domain {domain_id} names finality adapter '{}', but its registered plugin \
+                 verifies with '{plugin_adapter}'; refusing to emit a commitment under \
+                 mismatched finality",
+                domain.finality_adapter
+            ));
+        }
+        let ctx = crate::domain::DomainContext {
+            domain: &domain,
+            chain: domain_chain,
+            state: &self.state,
+            sequence,
+        };
+        plugin
+            .validate_domain_block(block, ctx.clone())
+            .map_err(|e| {
+                format!("domain {domain_id} block refused by the registered plugin: {e}")
+            })?;
+        plugin.extract_commitment(block, ctx).map_err(|e| {
+            format!("domain {domain_id} commitment refused by the registered plugin: {e}")
+        })
+    }
+
     /// Test harness only: the body of the `SettlementTx::SubmitZkProof`
     /// door at this chain's height. A proof whose STARK does not verify is
     /// reported as an error here; in block it is an accepted transaction
@@ -15707,5 +15807,170 @@ mod bond_and_reorg_tests {
             .list_bud3_symbol_objects()
             .expect("list after restart")
             .is_empty());
+    }
+
+    #[test]
+    fn plugin_door_refuses_a_domain_with_no_registered_plugin() {
+        use crate::domain::plugin::default_domain;
+        use crate::domain::{ConsensusKind, POW_HEADER_CHAIN_ADAPTER};
+
+        let mut bc = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            45262,
+            None,
+        );
+        let domain = default_domain(11, ConsensusKind::PoW, 45262, POW_HEADER_CHAIN_ADAPTER, 1);
+        bc.register_consensus_domain(domain).unwrap();
+
+        let err = bc
+            .domain_plugin_for(11)
+            .expect_err("an unregistered domain must be refused by the plugin door");
+        assert!(
+            err.contains("no plugin registered"),
+            "refusal must name the missing plugin, got: {err}"
+        );
+
+        let block = Block::new_with_chain_id(1, "0".repeat(64), vec![], 45262);
+        let err = bc
+            .validate_domain_block_with_plugin(11, &block, &[], 0)
+            .expect_err("the door refuses before looking at the block");
+        assert!(
+            err.contains("no plugin registered"),
+            "door refusal must name the missing plugin, got: {err}"
+        );
+    }
+
+    #[test]
+    fn plugin_door_refuses_a_plugin_of_the_wrong_kind() {
+        use crate::domain::plugin::{default_domain, DagDomainPlugin};
+        use crate::domain::{ConsensusKind, POW_HEADER_CHAIN_ADAPTER};
+
+        let mut bc = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            45262,
+            None,
+        );
+        let domain = default_domain(12, ConsensusKind::PoW, 45262, POW_HEADER_CHAIN_ADAPTER, 1);
+        bc.register_consensus_domain(domain).unwrap();
+        // A DAG plugin under a PoW domain: kind must be refused, not coerced.
+        bc.plugin_registry
+            .register(
+                12,
+                Arc::new(DagDomainPlugin::new(Arc::new(
+                    crate::consensus::dag::DagEngine::new(
+                        crate::consensus::dag::DAGConfig::default(),
+                    ),
+                ))),
+            )
+            .expect("registration is the audited door");
+
+        let err = bc
+            .domain_plugin_for(12)
+            .expect_err("a plugin of the wrong kind must be refused");
+        assert!(
+            err.contains("cross-wire"),
+            "refusal must name the kind mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn plugin_door_refuses_when_plugin_adapter_is_not_the_domain_adapter() {
+        use crate::domain::plugin::{default_domain, PoWDomainPlugin};
+        use crate::domain::{ConsensusKind, BITCOIN_SPV_ADAPTER};
+
+        let mut bc = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            45262,
+            None,
+        );
+        // Domain committed to Bitcoin SPV finality, plugin backed by the
+        // bounded Budlum header-chain client: the door must refuse before
+        // validating anything.
+        let mut domain = default_domain(13, ConsensusKind::PoW, 45262, BITCOIN_SPV_ADAPTER, 1);
+        domain.pow_parameters = Some(crate::domain::PoWDomainParameters {
+            min_difficulty_bits: 1,
+            max_difficulty_bits: 16,
+            min_cumulative_work: 2,
+            max_headers: 8,
+        });
+        bc.register_consensus_domain(domain).unwrap();
+        bc.plugin_registry
+            .register(
+                13,
+                Arc::new(PoWDomainPlugin::new(Arc::new(
+                    crate::consensus::pow::PoWEngine::new(0),
+                ))),
+            )
+            .expect("registration is the audited door");
+
+        let block = Block::new_with_chain_id(1, "0".repeat(64), vec![], 45262);
+        let err = bc
+            .validate_domain_block_with_plugin(13, &block, &[], 0)
+            .expect_err("mismatched finality must be refused");
+        assert!(
+            err.contains("mismatched finality"),
+            "refusal must name the adapter mismatch, got: {err}"
+        );
+
+        // The plugin the domain commits to passes the door's pre-validation
+        // gates and reaches the engine: an undecodable block is refused by
+        // the plugin, not by the door.
+        bc.plugin_registry
+            .replace(
+                13,
+                Arc::new(PoWDomainPlugin::new_bitcoin_spv(Arc::new(
+                    crate::consensus::pow::PoWEngine::new(0),
+                ))),
+            )
+            .expect("replace is the audited door");
+        let err = bc
+            .validate_domain_block_with_plugin(13, &block, &[], 0)
+            .expect_err("the block itself is not a valid domain block");
+        assert!(
+            err.contains("refused by the registered plugin"),
+            "the door must reach the plugin, got: {err}"
+        );
+    }
+
+    #[test]
+    fn plugin_replace_writes_the_audit_trail() {
+        use crate::domain::plugin::{default_domain, PoWDomainPlugin};
+        use crate::domain::{ConsensusKind, POW_HEADER_CHAIN_ADAPTER};
+
+        let mut bc = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            45262,
+            None,
+        );
+        let domain = default_domain(14, ConsensusKind::PoW, 45262, POW_HEADER_CHAIN_ADAPTER, 1);
+        bc.register_consensus_domain(domain).unwrap();
+        bc.plugin_registry
+            .register(
+                14,
+                Arc::new(PoWDomainPlugin::new(Arc::new(
+                    crate::consensus::pow::PoWEngine::new(0),
+                ))),
+            )
+            .expect("registration is the audited door");
+        let replacement = bc
+            .plugin_registry
+            .replace(
+                14,
+                Arc::new(PoWDomainPlugin::new_bitcoin_spv(Arc::new(
+                    crate::consensus::pow::PoWEngine::new(0),
+                ))),
+            )
+            .expect("replace is the audited door");
+        assert_eq!(replacement.domain_id, 14);
+        assert_eq!(replacement.previous_adapter, POW_HEADER_CHAIN_ADAPTER);
+        assert_eq!(replacement.next_adapter, crate::domain::BITCOIN_SPV_ADAPTER);
+        let audit = bc.plugin_registry.replacements();
+        assert_eq!(audit.len(), 1, "every replace leaves exactly one record");
+        assert_eq!(audit[0].previous_adapter, POW_HEADER_CHAIN_ADAPTER);
+        assert_eq!(audit[0].next_adapter, crate::domain::BITCOIN_SPV_ADAPTER);
     }
 }
