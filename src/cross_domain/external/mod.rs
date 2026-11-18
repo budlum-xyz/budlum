@@ -92,6 +92,7 @@ pub mod quorum;
 pub mod registry;
 pub mod selftest;
 pub mod spec;
+pub mod tendermint;
 pub mod versioning;
 pub mod zkvm_proof;
 
@@ -142,6 +143,10 @@ pub use spec::{
     AdapterDescriptor, AdapterError, AdapterId, DomainKey, ExternalFinalityAdapter,
     FinalityAttestation, FinalityKind, ProofSystem, RawConsensusEvidence, SecurityBacking,
     TimeUnit, TrustModel, VerificationPolicy,
+};
+pub use tendermint::{
+    quorum_threshold, validator_address_of, vote_sign_bytes, TendermintCommitEvidence,
+    TendermintFinalityAdapter, TendermintSignature, TendermintValidator, VoteSignParams,
 };
 pub use versioning::{ForkError, VersionPolicy, VersionWindow};
 pub use zkvm_proof::{
