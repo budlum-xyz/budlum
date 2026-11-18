@@ -15,6 +15,7 @@ An unchecked entry means it still needs full line-by-line review. A path listed 
 ## Execution environments
 
 - [ ] Debian 13 x86-64: run all components, CLI journeys, all features, security tools and tests. Partial local tests only.
+- [ ] Ubuntu 26.04.1 Base x86-64 userland on the Debian kernel: complete the targeted rerun and user journeys; see `findings/os-ubuntu.md`.
 - [ ] Ubuntu 24.04 x86-64: build, run and test all components.
 - [ ] Ubuntu 24.04 ARM64: build, run and test all components.
 - [ ] Alpine Linux musl: build, run and test all components.

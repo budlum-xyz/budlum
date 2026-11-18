@@ -6,7 +6,18 @@ These findings are based on the source tree and dependency versions named below.
 
 - Location: `src/garden/net.rs:259-270` at `garden` commit `c34cc016cf15e512be2861a92be2b8649f4e02ae`.
 - Severity: high, availability.
-- Old code: `Clone::clone` allocates `Arc::new(Semaphore::new(...))` for both connection budgets on every clone.
+- Faulty lines:
+
+  ```rust
+  conn_large_frames: Arc::new(Semaphore::new(
+      MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
+  )),
+  response_frames: Arc::clone(&self.response_frames),
+  conn_response_frames: Arc::new(Semaphore::new(
+      MAX_CONN_RESPONSE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
+  )),
+  ```
+
 - Cause: `libp2p-request-response` 0.30.0 clones its codec at connection creation and again in `handler.rs:132` and `handler.rs:185` for individual substreams. The code assumes only the first clone occurs.
 - Effect: parallel substreams from one connection can each receive a separate connection allowance. One peer can consume much more than its intended share of the shared read budget and crowd out other peers.
 - Repair: create connection-local semaphores when cloning the swarm prototype; share those semaphores when cloning the connection codec. Keep the swarm semaphores shared.
@@ -26,11 +37,22 @@ These findings are based on the source tree and dependency versions named below.
 
 ## B-0043: the read budget is released before a completed frame leaves the queue
 
-- Location: `src/garden/net.rs:319-405`, `src/garden/net.rs:808-813`, and `src/garden/net.rs:938-1087` in the staged Garden tree. `libp2p-request-response` 0.30.0 `src/handler.rs:136-145` sends the returned request to its inbound channel.
+- Location: `src/garden/net.rs:296-375` on `garden` commit `c34cc016cf15e512be2861a92be2b8649f4e02ae`. `libp2p-request-response` 0.30.0 `src/handler.rs:136-145` sends the returned request to its inbound channel.
 - Severity: high, availability. The source-level lifetime violation is established; an end-to-end memory exhaustion measurement remains pending.
-- Code: `read_bounded_budgeted` accumulates `conn_charged` and `swarm_charged` locally, then returns `Ok(buf)`. The permit vectors drop at return while the returned `Vec<u8>` still owns the frame bytes.
+- Faulty lines (noncontiguous excerpts):
+
+  ```rust
+  let mut conn_charged = Vec::new();
+  let mut swarm_charged = Vec::new();
+  ```
+
+  ```rust
+  Ok(buf)
+  ```
+
+  The permit vectors drop at return while the returned `Vec<u8>` still owns the frame bytes.
 - Cause: the semaphore represents only bytes still being read, not bytes retained in a completed request, the handler channel, the 1,024-entry event channel, or the 256-entry backlog. The codec accepts up to 16 concurrent streams per connection.
 - Effect: a peer can start another large read after a previous completed frame has released its permits even if that frame remains queued. The stated connection and swarm byte ceilings do not bound the full lifetime of buffered frames. A stalled consumer and multiple concurrent requests can therefore use substantially more memory than the advertised read budget.
 - Repair plan: return an owned frame containing its byte vector and owned permits; transfer the permits through decoding and the request/response event into the node consumer; release them only after the associated event has been consumed or dropped. Preserve the separate per-connection and swarm budgets and release permits on every error path. Bound or reject decoded allocation amplification separately.
-- Verification plan: first add a regression that holds a completed frame while attempting another read on a sibling substream. The second must fail until the first frame is dropped. Repeat for response frames, separate connections, cancellation, malformed data and a deliberately stalled event consumer. Run the complete Garden tests and CI.
-- Status: open. No fixing commit or green CI run yet.
+- Verification in progress: a standalone harness extracted the exact old `read_bounded_budgeted` from staged tree `d12cd194998aec69f0e091e4a7760e3f128e206a`: holding one completed frame did not prevent a sibling read, and the test failed as expected. The same harness passed with the experimental owned-permit implementation. These are function-level results, not an end-to-end test or a fixing commit. The local repair worktree also has new request/response, cancellation and error tests plus a real queued-event test; their project build and execution are still pending. Test malformed data and an actual stalled consumer as well, then run the complete Garden tests and CI. The wire-byte accounting does not by itself bound decoded allocation amplification or allocator capacity.
+- Status: open; an experimental worktree exists, but no fixing commit or green CI run yet.
