@@ -52,6 +52,7 @@ use crate::cross_domain::external::spec::{
     AdapterDescriptor, DomainKey, ExternalFinalityAdapter, FinalityAttestation,
     RawConsensusEvidence, VerificationPolicy,
 };
+use crate::cross_domain::external::tendermint::TendermintFinalityAdapter;
 use crate::cross_domain::external::versioning::VersionPolicy;
 use crate::cross_domain::external::zkvm_proof::ZkVmFinalityAdapter;
 use serde::{Deserialize, Serialize};
@@ -175,6 +176,14 @@ pub enum AdapterSpec {
         #[serde(default)]
         anchor: Option<PinnedBitcoinAnchor>,
     },
+    /// Tendermint/CometBFT commit finality for one network, pinned to one chain
+    /// id. APPENDED LAST, for the same bincode reason as `BitcoinSpv`: this
+    /// enum is persisted in consensus state, so inserting a variant in the
+    /// middle would reinterpret every stored registration. A spec with an
+    /// empty chain id is the closed admission state: `register_domain`
+    /// refuses it, because a commit's chain id is part of every sign byte and
+    /// an unpinned adapter would verify any chain's commit.
+    TendermintCommit { network: String, chain_id: String },
 }
 
 impl AdapterSpec {
@@ -185,7 +194,8 @@ impl AdapterSpec {
         match self {
             Self::EthereumSync { network, .. }
             | Self::ZkVm { network, .. }
-            | Self::BitcoinSpv { network, .. } => network,
+            | Self::BitcoinSpv { network, .. }
+            | Self::TendermintCommit { network, .. } => network,
         }
     }
 
@@ -224,6 +234,14 @@ impl AdapterSpec {
             }
             Self::BitcoinSpv { network, anchor } => {
                 let adapter = BitcoinSpvAdapter::new(network, anchor.clone());
+                let adapter = match golden {
+                    Some(g) => adapter.with_golden(g),
+                    None => adapter,
+                };
+                Box::new(adapter)
+            }
+            Self::TendermintCommit { network, chain_id } => {
+                let adapter = TendermintFinalityAdapter::new(network, chain_id);
                 let adapter = match golden {
                     Some(g) => adapter.with_golden(g),
                     None => adapter,
@@ -476,6 +494,15 @@ impl IntakeState {
         // exactly as an unpinned sync committee is refused.
         if let AdapterSpec::BitcoinSpv { anchor, .. } = &spec {
             if anchor.is_none() {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // A Tendermint domain with no pinned chain id would verify any chain's
+        // commit: the chain id appears inside every sign byte, but only a pin
+        // makes "the chain id matches" a statement about which chain this
+        // domain attests. Refuse at the door, as an unpinned checkpoint is.
+        if let AdapterSpec::TendermintCommit { chain_id, .. } = &spec {
+            if chain_id.trim().is_empty() {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }

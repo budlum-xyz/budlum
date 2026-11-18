@@ -5080,6 +5080,13 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
+        // Tag 3: appended, never inserted. Tags 0, 1 and 2 keep their bytes so
+        // every registration already signed under them stays verifiable.
+        AdapterSpec::TendermintCommit { network, chain_id } => {
+            put_u8(out, 3);
+            put_string(out, network);
+            put_string(out, chain_id);
+        }
     }
 }
 
