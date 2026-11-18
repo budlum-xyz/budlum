@@ -4005,16 +4005,16 @@ mod tests {
                     &seed,
                 )
                 .expect("ml-dsa pk");
-                let att = super::super::repair::sign_repair_attestation(
-                    attester,
-                    &seed,
-                    &key,
-                    0,
-                    (fresh[0].esi, fresh.len() as u32),
-                    &fab_root,
-                    &orig_root,
-                )
-                .expect("sign attestation");
+                let claim = super::super::repair::RepairClaim {
+                    object: &key,
+                    segment: 0,
+                    first_esi: fresh[0].esi,
+                    count: fresh.len() as u32,
+                    new_root: &fab_root,
+                    original_segment_root: &orig_root,
+                };
+                let att = super::super::repair::sign_repair_attestation(attester, &seed, &claim)
+                    .expect("sign attestation");
                 val_keys.insert(attester, pk);
                 atts.push(att);
             }
@@ -4029,7 +4029,7 @@ mod tests {
                 },
                 Some(&addr(30)),
                 &val_keys,
-                100,
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 100),
             );
             assert_eq!(
                 fabricated_verdict,

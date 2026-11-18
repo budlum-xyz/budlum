@@ -1930,7 +1930,7 @@ impl Blockchain {
                 plugin.kind()
             ));
         }
-        Ok(plugin)
+        Ok(std::sync::Arc::clone(plugin))
     }
 
     /// Validate a domain block through the registered plugin and extract its
@@ -15832,7 +15832,8 @@ mod bond_and_reorg_tests {
 
         let err = bc
             .domain_plugin_for(11)
-            .expect_err("an unregistered domain must be refused by the plugin door");
+            .err()
+            .expect("an unregistered domain must be refused by the plugin door");
         assert!(
             err.contains("no plugin registered"),
             "refusal must name the missing plugin, got: {err}"
@@ -15875,7 +15876,8 @@ mod bond_and_reorg_tests {
 
         let err = bc
             .domain_plugin_for(12)
-            .expect_err("a plugin of the wrong kind must be refused");
+            .err()
+            .expect("a plugin of the wrong kind must be refused");
         assert!(
             err.contains("cross-wire"),
             "refusal must name the kind mismatch, got: {err}"
