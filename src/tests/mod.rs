@@ -266,3 +266,7 @@ pub mod bns_safety;
 
 #[cfg(test)]
 pub mod wallet_safety;
+
+// Bitcoin SPV: the Nakamoto branch end to end (registration -> admission -> bridge).
+#[cfg(test)]
+pub mod bitcoin_spv;
