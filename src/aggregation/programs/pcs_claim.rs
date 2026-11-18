@@ -387,6 +387,10 @@ impl PcsOpeningObject {
         if raw.len() > MAX_DECOMPRESSED_PCS_BYTES {
             return Err(ObjectError::Invalid);
         }
+        // Reject trailing bytes after the deflate stream to prevent ObjectId malleability.
+        if usize::try_from(decoder.total_in()).ok() != Some(payload.len()) {
+            return Err(ObjectError::Invalid);
+        }
         let obj: Self = bincode::DefaultOptions::new()
             .with_limit(MAX_DECOMPRESSED_PCS_BYTES as u64)
             .reject_trailing_bytes()
@@ -394,6 +398,7 @@ impl PcsOpeningObject {
             .map_err(|_| ObjectError::Invalid)?;
         if usize::from(obj.degree_bits) > MAX_VERIFIER_DEGREE_BITS
             || obj.public_values.len() > MAX_PCS_PUBLIC_VALUES
+            || (obj.preprocessed_width > 0) != obj.preprocessed_commit.is_some()
         {
             return Err(ObjectError::Invalid);
         }

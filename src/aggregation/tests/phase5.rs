@@ -20,7 +20,9 @@ use crate::aggregation::air_registry::{
     ExternalFibAirEvaluator,
 };
 use crate::aggregation::backend::{AggBackend, TickCtx};
-use crate::aggregation::chain::{check_block_with_backend_and_airs, claim_signature};
+use crate::aggregation::chain::{
+    check_block_with_backend_and_airs, check_pool_transaction, claim_signature,
+};
 use crate::aggregation::claim::{Claim, Ext, GOLDILOCKS_MODULUS};
 use crate::aggregation::domain_finality::{compile_domain_transition, prove_domain_transition};
 use crate::aggregation::envelope::{Envelope, ObjectKind};
@@ -747,4 +749,88 @@ fn load_test_4_aggregators_1_producer_1024_claims_in_single_block() {
         &backend,
     )
     .expect("1,024-claim 4-aggregator block must verify cleanly");
+}
+
+#[test]
+fn phase5_security_hardening_rejects_deflate_malleability_mainnet_mempool_and_oversized_bud_envelope(
+) {
+    let chain_id = Network::Testnet.chain_id().value();
+    let (proof, pvs, shape) = prove_fibonacci(6, 1, 1).expect("prove fib");
+    let pcs_obj = PcsOpeningObject::from_chip_proof(&proof, shape, &pvs, None).expect("pcs obj");
+    let encoded = pcs_obj.encode().expect("encode BDP5");
+
+    // 1. Trailing bytes appended after the deflate EOF stream must be rejected
+    //    so distinct ObjectIds cannot alias the same PcsOpeningObject.
+    let mut malleable = encoded;
+    malleable.push(0xAA);
+    assert_eq!(
+        PcsOpeningObject::decode(&malleable),
+        Err(ObjectError::Invalid)
+    );
+
+    // 2. Inconsistent preprocessed_width > 0 without preprocessed_commit must be rejected.
+    let mut inconsistent = pcs_obj.clone();
+    inconsistent.preprocessed_width = 4;
+    inconsistent.preprocessed_commit = None;
+    let inconsistent_bytes = inconsistent.encode().expect("encode inconsistent");
+    assert_eq!(
+        PcsOpeningObject::decode(&inconsistent_bytes),
+        Err(ObjectError::Invalid)
+    );
+
+    // 3. TransactionType::VerifyStark with empty claim_refs must be rejected by
+    //    check_pool_transaction on BOTH Mainnet (AggMode::Off) and Testnet (AggMode::On).
+    let stmt = pcs_obj.to_verify_stark_tx(external_fib_air_id(), Vec::new());
+    let mut raw_tx = Transaction::new(
+        Address::from([0x11; 32]),
+        Address::from([0x11; 32]),
+        0,
+        Vec::new(),
+    );
+    raw_tx.chain_id = chain_id;
+    raw_tx.tx_type = TransactionType::VerifyStark(Box::new(stmt));
+    assert!(check_pool_transaction(
+        &AggParams {
+            mode: AggMode::Off,
+            ..phase5_params()
+        },
+        &raw_tx
+    )
+    .is_err());
+    assert!(check_pool_transaction(&phase5_params(), &raw_tx).is_err());
+
+    // 4. Oversized ProofEnvelope (> MAX_ENVELOPE_PROOF_BYTES) and oversized BudVM
+    //    program (> 65_536 words) must be rejected without truncation or OOM.
+    let dummy_inputs = bud_proof::adapter::ExecutionPublicInputs {
+        chain_id,
+        program_hash: [0u8; 32],
+        initial_state_root: [0u8; 32],
+        final_state_root: [0u8; 32],
+        sender: 0,
+        nonce: 0,
+        block_height: 1,
+        gas_limit: 1000,
+        gas_used: 10,
+        exit_code: 0,
+        trace_len: 4,
+        event_digest: [0u8; 32],
+        state_writes_digest: [0u8; 32],
+    };
+    let oversized_env = bud_proof::adapter::ProofEnvelope {
+        proof_format_version: bud_proof::adapter::PROOF_FORMAT_VERSION,
+        backend: String::from("plonky3"),
+        p3_version: String::from("0.8.0"),
+        fri_params_id: String::from("budlum-goldilocks-keccak-v1"),
+        public_inputs_hash: dummy_inputs.hash(),
+        proof_bytes: vec![0u8; bud_proof::adapter::MAX_ENVELOPE_PROOF_BYTES + 1],
+        degree_bits: 4,
+    };
+    assert!(extract_bud_envelope_pcs(&oversized_env, &[0u64], &dummy_inputs).is_err());
+
+    let huge_program = vec![0u64; 65_537];
+    let tiny_env = bud_proof::adapter::ProofEnvelope {
+        proof_bytes: vec![0u8; 16],
+        ..oversized_env
+    };
+    assert!(extract_bud_envelope_pcs(&tiny_env, &huge_program, &dummy_inputs).is_err());
 }
