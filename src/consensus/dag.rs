@@ -397,7 +397,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let forged = make_block(1, &stuffed_parents);
-        assert_eq!(engine.fork_choice_score(&[forged.clone()]), 0);
+        assert_eq!(engine.fork_choice_score(std::slice::from_ref(&forged)), 0);
         assert!(!engine.is_better_chain(&[b1, b2], &[forged]));
     }
 }

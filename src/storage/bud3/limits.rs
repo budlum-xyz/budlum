@@ -68,8 +68,10 @@ impl Profile {
 }
 
 /// P1, the derived optical presentation profile for screen-to-camera transfer
-/// and live display: QR version `25..=30`, ECC L, symbol `550..=900` bytes,
-/// `10..=30` fps. P1 is derived on demand and never written inside BOF-1.
+/// and live display.
+///
+/// Uses QR version `25..=30`, ECC L, symbol `550..=900` bytes, and `10..=30` fps.
+/// P1 is derived on demand and never written inside BOF-1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpticalProfile {
     /// ISO QR version (`25..=30`).
