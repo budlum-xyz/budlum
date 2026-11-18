@@ -2112,27 +2112,32 @@ impl AccountState {
             .max(1)
     }
 
-    /// The accounts whose duty batches the pool's free lane admits.
-    ///
-    /// The lane is free because a validator's bond stands behind it, so the
-    /// set is the validators that still have one and may still do duty:
-    ///
-    /// - a consensus validator that is active, unslashed and unjailed;
-    /// - a directory record of a seat class (Full) on that same test of its
-    ///   consensus entry, and out when it has none;
-    /// - a directory record of a class without a seat (a phone) while its own
-    ///   bond is above zero and its owner is neither slashed nor jailed.
-    ///
-    /// A record stays in the directory after a penalty, for resume and
-    /// unbonding. Listing every record owner therefore kept a slashed, jailed
-    /// or unbonded owner in the free lane.
+    /// Active bond floor for a non-Full consensus validator on `chain_id`: the
+    /// higher of the governance-adjustable registry `min_stake` and the
+    /// network's compile-time `min_stake()`.
+    #[must_use]
+    pub(crate) fn validator_stake_floor(&self, chain_id: u64) -> u64 {
+        let registry_floor = self.registry.params().min_stake.max(1);
+        crate::core::chain_config::Network::from_chain_id(chain_id)
+            .map_or(registry_floor, |network| {
+                registry_floor.max(network.min_stake())
+            })
+            .max(1)
+    }
+
+    /// The accounts whose duty batches the pool's free lane admits on the
+    /// default chain.
     #[must_use]
     pub fn duty_lane_signers(&self) -> std::collections::BTreeSet<Address> {
         self.duty_lane_signers_for_chain(crate::core::transaction::DEFAULT_CHAIN_ID)
     }
 
-    /// Active validator addresses holding at least their class bond floor on
-    /// `chain_id` and eligible for the zero-fee validator duty lane.
+    /// Accounts eligible for the mempool's zero-fee validator duty lane on `chain_id`.
+    ///
+    /// A duty batch pays zero fee only while a live, unslashed, unjailed bond
+    /// at or above the class floor stands behind the signer. Records retained
+    /// in `validator_directory` for resume or unbonding are stripped as soon as
+    /// their consensus seat deactivates, drops below floor, or is penalised.
     #[must_use]
     pub fn duty_lane_signers_for_chain(
         &self,
@@ -2140,16 +2145,22 @@ impl AccountState {
     ) -> std::collections::BTreeSet<Address> {
         let network = crate::core::chain_config::Network::from_chain_id(chain_id);
         let registry_floor = self.registry.params().min_stake.max(1);
-        let floor = self.full_validator_stake_floor(chain_id);
+        let full_floor = self.full_validator_stake_floor(chain_id);
+        let base_floor = self.validator_stake_floor(chain_id);
         let mobile_floor = network
             .map_or_else(|| (registry_floor / 100).max(1), |n| n.min_stake_mobile())
             .max(1);
         let mut signers = std::collections::BTreeSet::new();
         for (address, validator) in &self.validators {
+            let needed = if validator.filiz.is_some() {
+                full_floor
+            } else {
+                base_floor
+            };
             if validator.active
                 && !validator.slashed
                 && !validator.jailed
-                && validator.stake >= floor
+                && validator.stake >= needed
             {
                 signers.insert(*address);
             }
@@ -2161,7 +2172,7 @@ impl AccountState {
                 continue;
             }
             let admitted = if record.class.holds_seat() {
-                consensus.is_some_and(|validator| validator.active && validator.stake >= floor)
+                consensus.is_some_and(|validator| validator.active && validator.stake >= full_floor)
             } else {
                 record.stake >= mobile_floor
             };
