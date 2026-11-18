@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_deposit_observed is reached only from the adapter fixture tests in this tree; the live relayer observation runs the adapter's verify_observation instead.
+//! WIRING: unwired - `verify_deposit_observed` is reached only from the adapter fixture tests in this tree; the live relayer observation runs the adapter's `verify_observation` instead.
 //! F10.4 `EvmChainAdapter` - the `ChainAdapter` impl for the EVM leg. NOT a
 //! fully live path: the off-chain half is a stub that
 //! refuses at broadcast, so the Ethereum-to-Budlum leg has no live end-to-end
@@ -60,7 +60,7 @@ pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 ///
 /// `verify_receipt_proof` is deterministic in Budlum consensus. The off-chain
 /// methods (`generate_receipt_proof`/`submit_transaction`/
-/// `wait_for_confirmation`) are an offline-test stub (the StubAdapter
+/// `wait_for_confirmation`) are an offline-test stub (the `StubAdapter`
 /// pattern) that REFUSES at broadcast - there is no live Ethereum RPC route.
 ///
 /// `Debug` so a caller can `expect` on a `Result` carrying one. All three
@@ -86,6 +86,7 @@ pub struct EvmChainAdapter {
 }
 
 impl EvmChainAdapter {
+    #[must_use]
     pub fn new(bridge_address: Vec<u8>, deposit_topic0: [u8; 32]) -> Self {
         Self {
             bridge_address,
@@ -174,6 +175,7 @@ impl EvmChainAdapter {
     }
 
     /// Default (test/devnet) - placeholder bridge address + topic0.
+    #[must_use]
     pub fn test_default() -> Self {
         Self::new(vec![0u8; 20], DEFAULT_DEPOSIT_TOPIC0)
     }
@@ -220,7 +222,7 @@ impl ChainAdapter for EvmChainAdapter {
     ///
     /// Wire format: `proof.leaf` =
     /// `hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address)`;
-    /// `external_state_root` = header.receiptsRoot; `expected_tx_hash` = tx_hash.
+    /// `external_state_root` = header.receiptsRoot; `expected_tx_hash` = `tx_hash`.
     /// Header chain + sync-committee verification is NOT in this method, it is
     /// inside `verify_evm_receipt`, and only `verify_deposit` goes there.
     ///
@@ -236,7 +238,7 @@ impl ChainAdapter for EvmChainAdapter {
     /// Delegates to the inherent check so there is one definition of "fit",
     /// not two that can drift.
     fn check_fit_for_relay(&self) -> Result<(), AdapterError> {
-        EvmChainAdapter::check_fit_for_relay(self).map_err(AdapterError::ProofVerificationFailed)
+        Self::check_fit_for_relay(self).map_err(AdapterError::ProofVerificationFailed)
     }
 
     /// The observation the relayer signs must carry the full deposit
@@ -392,7 +394,7 @@ impl ChainAdapter for EvmChainAdapter {
 
     /// Off-chain (relayer binary): k confirmation poll → receipt proof.
     ///
-    /// Offline-test stub. Production: eth_getTransactionReceipt + block header
+    /// Offline-test stub. Production: `eth_getTransactionReceipt` + block header
     /// Chain + MPT proof assemble.
     async fn wait_for_confirmation(
         &self,

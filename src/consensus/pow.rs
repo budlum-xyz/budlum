@@ -117,7 +117,7 @@ pub struct PoWConfig {
 }
 impl Default for PoWConfig {
     fn default() -> Self {
-        PoWConfig {
+        Self {
             difficulty: 2,
             target_block_time: 10,
             adjustment_interval: 100,
@@ -130,8 +130,9 @@ pub struct PoWEngine {
     current_difficulty: RwLock<usize>,
 }
 impl PoWEngine {
+    #[must_use]
     pub fn new(difficulty: usize) -> Self {
-        PoWEngine {
+        Self {
             config: PoWConfig {
                 difficulty,
                 ..Default::default()
@@ -173,18 +174,20 @@ impl PoWEngine {
     ///
     /// This constructor equates the target with the production rate, so the
     /// retarget measures real drift rather than a fixed calibration error.
+    #[must_use]
     pub fn calibrated(difficulty: usize, slot_ms: u64) -> Self {
         let target_block_time = (slot_ms / 1000).max(1);
-        PoWEngine::with_config(PoWConfig {
+        Self::with_config(PoWConfig {
             difficulty,
             target_block_time,
             ..Default::default()
         })
     }
 
+    #[must_use]
     pub fn with_config(config: PoWConfig) -> Self {
         let d = config.difficulty;
-        PoWEngine {
+        Self {
             config,
             current_difficulty: RwLock::new(d),
         }

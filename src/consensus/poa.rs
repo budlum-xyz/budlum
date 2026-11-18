@@ -69,7 +69,7 @@ pub struct PoAConfig {
 }
 impl Default for PoAConfig {
     fn default() -> Self {
-        PoAConfig {
+        Self {
             epoch_length: 30000,
             quorum_numerator: 2,
             quorum_denominator: 3,
@@ -99,8 +99,9 @@ pub struct PoAEngine {
 }
 
 impl PoAEngine {
+    #[must_use]
     pub fn new(config: PoAConfig, keypair: Option<KeyPair>) -> Self {
-        PoAEngine {
+        Self {
             config,
             keypair,
             signer: None,
@@ -126,7 +127,7 @@ impl PoAEngine {
         keypair: Option<KeyPair>,
         signer: Arc<dyn ConsensusSigner>,
     ) -> Self {
-        PoAEngine {
+        Self {
             config,
             keypair,
             signer: Some(signer),
@@ -135,12 +136,13 @@ impl PoAEngine {
             round_prices: RoundPriceBook::new(),
         }
     }
+    #[must_use]
     pub fn with_config(
         config: PoAConfig,
         validators: Vec<Address>,
         keypair: Option<KeyPair>,
     ) -> Self {
-        PoAEngine {
+        Self {
             config,
             keypair,
             signer: None,
@@ -280,6 +282,7 @@ impl PoAEngine {
     /// slot's leader. (Reordering an existing transaction set changes the hash
     /// at identical size and gas cost, so size and gas do not price it; the
     /// grandparent seed is what takes the choice away.)
+    #[must_use]
     pub fn leader_slot_with_entropy(
         block_index: u64,
         active_validators: &[&Validator],
@@ -473,7 +476,7 @@ impl PoAEngine {
 }
 
 impl ConsensusEngine for PoAEngine {
-    /// The identity master registry opens writes on the PoA authority's
+    /// The identity master registry opens writes on the `PoA` authority's
     /// chain and nowhere else (identity architecture note). This is that declaration:
     /// the gate reads it from the engine the node itself started with.
     fn domain_kind(&self) -> crate::domain::ConsensusKind {

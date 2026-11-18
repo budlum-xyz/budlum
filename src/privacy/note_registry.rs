@@ -73,20 +73,24 @@ pub struct L1NoteRegistry {
 }
 
 impl L1NoteRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.live_commitments.is_empty()
             && self.spent_nullifiers.is_empty()
             && self.spent_commitments.is_empty()
     }
 
+    #[must_use]
     pub fn live_count(&self) -> usize {
         self.live_commitments.len()
     }
 
+    #[must_use]
     pub fn spent_count(&self) -> usize {
         self.spent_nullifiers.len()
     }
@@ -96,10 +100,12 @@ impl L1NoteRegistry {
         self.spent_commitments.len()
     }
 
+    #[must_use]
     pub fn contains_commitment(&self, c: &NoteHash) -> bool {
         self.live_commitments.contains(c)
     }
 
+    #[must_use]
     pub fn is_nullifier_spent(&self, n: &NoteHash) -> bool {
         self.spent_nullifiers.contains(n)
     }
@@ -111,6 +117,7 @@ impl L1NoteRegistry {
     /// for the spend path's precheck; today the resurrection guard in
     /// `insert_note` is the caller, and the executor asks the nullifier
     /// half beside it.
+    #[must_use]
     pub fn is_commitment_spent(&self, c: &NoteHash) -> bool {
         self.spent_commitments.contains(c)
     }
@@ -368,6 +375,7 @@ impl L1NoteRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn state_root(&self) -> [u8; 32] {
         let mut h = Sha256::new();
         h.update(b"BDLM_L1_NOTE_REGISTRY_V1");
@@ -419,6 +427,7 @@ impl L1NoteRegistry {
     /// would be refused at the transaction boundary. The digest is reduced
     /// modulo `GOLDILOCKS_P` (V2). The earlier V1 form (`SHA-256(tag || c ||
     /// p)` verbatim) is no longer produced.
+    #[must_use]
     pub fn derive_nullifier(commitment: &NoteHash, proof: &NoteHash) -> NoteHash {
         let mut h = Sha256::new();
         h.update(b"BDLM_NULLIFIER_DERIVE_V2");
@@ -446,6 +455,7 @@ impl L1NoteRegistry {
     }
 
     /// Returns the number of spent nullifiers currently stored.
+    #[must_use]
     pub fn spent_nullifier_count(&self) -> usize {
         self.spent_nullifiers.len()
     }
