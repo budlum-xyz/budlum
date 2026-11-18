@@ -29,6 +29,11 @@
 //! refusal, not a silent reinterpretation. A chain that reaches the boundary
 //! needs a new pinned anchor registered through the permissionless intake.
 //!
+//! WIRING: the policy constants (`MAX_HEADERS`, `REQUIRED_DEPTH`,
+//! `MAX_FUTURE_SECONDS`) and `sha256d` are consumed by `BitcoinSpvAdapter`
+//! methods in this module; the adapter is the caller, reached through the
+//! permissionless intake (`intake.rs`).
+//!
 //! Bitcoin has no state root. The `state_root` slot of
 //! [`FinalityAttestation`] is therefore bound to the finalized **block hash**,
 //! the only 32-byte value the header commits to; the transaction Merkle root
