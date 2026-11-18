@@ -239,17 +239,25 @@ pub fn member_dial_address(address: &str, key: &GardenKey) -> Result<Multiaddr, 
     Ok(parsed)
 }
 
+/// Scope of a [`GardenCodec`] instance inside `libp2p::request_response`.
+///
+/// `Behaviour` holds one [`CodecScope::Swarm`] prototype and clones it once per
+/// established connection; `Handler` then clones that per-connection codec once
+/// per substream. Transitioning `Swarm -> Connection` on the first clone mints
+/// one semaphore pair per connection while sharing that pair across every
+/// concurrent substream opened on the same connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodecScope {
+    Swarm,
+    Connection,
+}
+
 /// The codec: one bounded frame per request and per response, with both a
 /// per-connection share and a swarm-wide byte-granular budget for buffered
 /// request and response frames.
-///
-/// `libp2p::request_response` clones the codec once per established connection,
-/// so [`Clone::clone`] shares the swarm semaphores while minting a fresh
-/// per-connection semaphore pair. Each connection acquires its own share before
-/// touching the swarm pool, ensuring a stalled peer holds at most its own share
-/// and never starves other peers' `Gossip` or `PutObject` streams.
 #[derive(Debug)]
 struct GardenCodec {
+    scope: CodecScope,
     large_frames: Arc<Semaphore>,
     conn_large_frames: Arc<Semaphore>,
     response_frames: Arc<Semaphore>,
@@ -258,15 +266,25 @@ struct GardenCodec {
 
 impl Clone for GardenCodec {
     fn clone(&self) -> Self {
-        Self {
-            large_frames: Arc::clone(&self.large_frames),
-            conn_large_frames: Arc::new(Semaphore::new(
-                MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
-            )),
-            response_frames: Arc::clone(&self.response_frames),
-            conn_response_frames: Arc::new(Semaphore::new(
-                MAX_CONN_RESPONSE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
-            )),
+        match self.scope {
+            CodecScope::Swarm => Self {
+                scope: CodecScope::Connection,
+                large_frames: Arc::clone(&self.large_frames),
+                conn_large_frames: Arc::new(Semaphore::new(
+                    MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
+                )),
+                response_frames: Arc::clone(&self.response_frames),
+                conn_response_frames: Arc::new(Semaphore::new(
+                    MAX_CONN_RESPONSE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
+                )),
+            },
+            CodecScope::Connection => Self {
+                scope: CodecScope::Connection,
+                large_frames: Arc::clone(&self.large_frames),
+                conn_large_frames: Arc::clone(&self.conn_large_frames),
+                response_frames: Arc::clone(&self.response_frames),
+                conn_response_frames: Arc::clone(&self.conn_response_frames),
+            },
         }
     }
 }
@@ -274,6 +292,7 @@ impl Clone for GardenCodec {
 impl Default for GardenCodec {
     fn default() -> Self {
         Self {
+            scope: CodecScope::Swarm,
             large_frames: Arc::new(Semaphore::new(
                 MAX_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES,
             )),
@@ -1807,6 +1826,39 @@ mod tests {
         assert!(conn_b
             .conn_response_frames
             .try_acquire_many_owned(per_conn_resp)
+            .is_ok());
+    }
+
+    #[test]
+    fn garden_codec_substream_clones_share_connection_frame_budget() {
+        // `Behaviour` holds the Swarm prototype and clones once per connection.
+        let swarm_proto = GardenCodec::default();
+        let first_conn = swarm_proto.clone();
+        let second_conn = swarm_proto.clone();
+        assert_eq!(swarm_proto.scope, CodecScope::Swarm);
+
+        // `Handler` clones the per-connection codec once per substream.
+        let primary_stream = first_conn.clone();
+        let sibling_stream = first_conn.clone();
+        assert_eq!(first_conn.scope, CodecScope::Connection);
+
+        let per_conn_req =
+            u32::try_from(MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES).unwrap();
+        let _held = primary_stream
+            .conn_large_frames
+            .try_acquire_many_owned(per_conn_req)
+            .expect("primary substream acquires connection budget");
+
+        // A second substream on the same connection MUST share connection A's
+        // semaphore rather than minting a fresh per-connection budget.
+        assert!(sibling_stream.conn_large_frames.try_acquire().is_err());
+
+        // Substreams on another connection remain completely isolated.
+        let other_stream = second_conn.clone();
+        assert_eq!(second_conn.scope, CodecScope::Connection);
+        assert!(other_stream
+            .conn_large_frames
+            .try_acquire_many_owned(per_conn_req)
             .is_ok());
     }
 
