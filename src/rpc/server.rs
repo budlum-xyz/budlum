@@ -1624,6 +1624,7 @@ impl RpcServer {
                 "balance": Self::to_hex(leaf.balance),
                 "nonce": Self::to_hex(leaf.nonce),
                 "fracAttos": Self::to_hex(leaf.frac_attos),
+                "authProgramHash": leaf.auth_program_hash.map(Self::bytes32_to_0x),
                 "leafHash": Self::bytes32_to_0x(leaf.leaf_hash),
                 "siblings": leaf
                     .siblings
@@ -1646,6 +1647,7 @@ impl RpcServer {
                    "balance": Self::to_hex(bundle.balance),
                    "nonce": Self::to_hex(bundle.nonce),
                    "fracAttos": Self::to_hex(bundle.frac_attos),
+                   "authProgramHash": bundle.auth_program_hash.map(Self::bytes32_to_0x),
                    "leafHash": Self::bytes32_to_0x(bundle.leaf_hash),
                    "siblings": bundle
                        .siblings
@@ -3229,10 +3231,28 @@ impl BudlumApiServer for RpcServer {
                 )
             })
         };
+        let hub = crate::settlement::FinalityGuarantee::settlement_hub();
+        let finality_guarantee =
+            crate::settlement::FinalityGuarantee::for_external_spec(&entry.spec);
+        let composed_with_hub: crate::settlement::RouteFinalityBound =
+            crate::settlement::compose_cross_domain_route(&finality_guarantee, &hub, &hub);
+        let reversibility_kind = match composed_with_hub.bottleneck_reversibility {
+            crate::settlement::FinalityReversibility::CryptographicValidity => "validity",
+            crate::settlement::FinalityReversibility::DeterministicQuorum => "deterministic-quorum",
+            crate::settlement::FinalityReversibility::ProbabilisticWork { .. } => {
+                "probabilistic-work"
+            }
+            crate::settlement::FinalityReversibility::DataAvailabilitySampled { .. } => {
+                "da-sampled"
+            }
+        };
         Ok(serde_json::json!({
             "profile": to_val("Profile", serde_json::to_value(&profile))?,
             "intakeEntry": to_val("Intake entry", serde_json::to_value(&entry))?,
             "descriptor": to_val("Descriptor", serde_json::to_value(&descriptor))?,
+            "universalFinality": to_val("Universal finality", serde_json::to_value(finality_guarantee))?,
+            "settlementComposition": to_val("Settlement composition", serde_json::to_value(composed_with_hub))?,
+            "bottleneckReversibilityKind": reversibility_kind,
         }))
     }
 
@@ -9379,24 +9399,39 @@ impl BudlumApiServer for RpcServer {
             .await
             .into_iter()
             .find(|domain| domain.id == domain_id);
+        let pq_enforced = self.chain.get_chain_id().await
+            == crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value();
         match domain {
-            Some(domain) => Ok(serde_json::json!({
-                "domainId": domain.id,
-                "registered": true,
-                "consensusKind": format!("{:?}", domain.kind),
-                "status": format!("{:?}", domain.status),
-                "domainChainId": Self::to_hex(domain.domain_chain_id),
-                "operator": domain.operator.map(|a| Self::to_0x_hash(a.to_hex())),
-                "operatorBond": Self::to_hex(domain.operator_bond),
-                "finalityAdapter": domain.finality_adapter,
-                "bridgeEnabled": domain.bridge_enabled,
-                "minConfirmations": Self::to_hex(domain.min_confirmations),
-                "lastCommittedHeight": Self::to_hex(domain.last_committed_height),
-                "lastCommittedHash": Self::bytes32_to_0x(domain.last_committed_hash),
-                "validatorSetHash": Self::bytes32_to_0x(domain.validator_set_hash),
-                "quantumClass": facts["quantumClass"].clone(),
-                "observedSchemes": facts["observedSchemes"].clone(),
-            })),
+            Some(domain) => {
+                let hub = crate::settlement::FinalityGuarantee::settlement_hub();
+                let guarantee =
+                    crate::settlement::FinalityGuarantee::for_domain(&domain, pq_enforced);
+                let route_bound: crate::settlement::RouteFinalityBound =
+                    crate::settlement::compose_cross_domain_route(&guarantee, &hub, &hub);
+                Ok(serde_json::json!({
+                    "domainId": domain.id,
+                    "registered": true,
+                    "consensusKind": format!("{:?}", domain.kind),
+                    "status": format!("{:?}", domain.status),
+                    "domainChainId": Self::to_hex(domain.domain_chain_id),
+                    "operator": domain.operator.map(|a| Self::to_0x_hash(a.to_hex())),
+                    "operatorBond": Self::to_hex(domain.operator_bond),
+                    "finalityAdapter": domain.finality_adapter,
+                    "bridgeEnabled": domain.bridge_enabled,
+                    "minConfirmations": Self::to_hex(domain.min_confirmations),
+                    "lastCommittedHeight": Self::to_hex(domain.last_committed_height),
+                    "lastCommittedHash": Self::bytes32_to_0x(domain.last_committed_hash),
+                    "validatorSetHash": Self::bytes32_to_0x(domain.validator_set_hash),
+                    "quantumClass": facts["quantumClass"].clone(),
+                    "observedSchemes": facts["observedSchemes"].clone(),
+                    "universalFinality": serde_json::to_value(guarantee)
+                        .unwrap_or(serde_json::Value::Null),
+                    "settlementRouteBound": serde_json::to_value(route_bound)
+                        .unwrap_or(serde_json::Value::Null),
+                }))
+            }
             None => Ok(serde_json::json!({
                 "domainId": domain_id,
                 "registered": false,

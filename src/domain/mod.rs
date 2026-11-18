@@ -1,6 +1,7 @@
 pub mod commitment_registry;
 pub mod deal_open;
 pub mod finality_adapter;
+pub mod finality_proof_model;
 pub mod fork_choice;
 pub mod plugin;
 pub mod plugin_registry;

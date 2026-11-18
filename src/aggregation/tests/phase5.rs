@@ -24,7 +24,9 @@ use crate::aggregation::chain::{
     check_block_with_backend_and_airs, check_pool_transaction, claim_signature,
 };
 use crate::aggregation::claim::{Claim, Ext, GOLDILOCKS_MODULUS};
-use crate::aggregation::domain_finality::{compile_domain_transition, prove_domain_transition};
+use crate::aggregation::domain_finality::{
+    compile_domain_transition, derive_transition_state_root, prove_domain_transition,
+};
 use crate::aggregation::envelope::{Envelope, ObjectKind};
 use crate::aggregation::frame::{ClaimFrame, FrameLimits};
 use crate::aggregation::hash::{
@@ -151,7 +153,14 @@ fn prove_single_bud_domain_proof(
         domain_height: 11,
         domain_block_hash: [0x44; 32],
         parent_domain_block_hash: [0x43; 32],
-        state_root: [0x99; 32],
+        state_root: derive_transition_state_root(
+            consensus_domain.id,
+            consensus_domain.domain_chain_id,
+            10,
+            11,
+            &prev_root,
+            &batch_digest,
+        ),
         tx_root: [0x22; 32],
         event_root: [0x33; 32],
         finality_proof_hash: [0x55; 32],
@@ -637,6 +646,7 @@ fn phase5_domain_tags_are_distinct_and_prefix_free() {
         b"BDLM_AUTH_PROG_V1",
         b"BDLM_DOM_TRANS_IN_V1",
         b"BDLM_DOM_TRANS_OUT_V1",
+        b"BDLM_DOM_TRANS_STEP_V1",
         b"BDLM_AGG_PARAMS_V1",
         b"BDLM_AGG_SEGMENT_AUTH_V1",
     ];

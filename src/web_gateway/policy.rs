@@ -111,24 +111,38 @@ fn csp_is_at_least_as_strict(candidate: &str, baseline: &str) -> bool {
             }
         }
     }
-    candidate
-        .keys()
-        .all(|name| baseline.contains_key(name) || is_narrowing_directive(name))
+    candidate.iter().all(|(name, values)| {
+        baseline.contains_key(name) || is_valid_narrowing_directive(name, values)
+    })
 }
 
-/// Directives that can only restrict behaviour, so a site may add them.
-fn is_narrowing_directive(name: &str) -> bool {
-    matches!(
-        name,
-        "frame-ancestors"
-            | "base-uri"
-            | "form-action"
-            | "sandbox"
-            | "upgrade-insecure-requests"
-            | "block-all-mixed-content"
-            | "require-trusted-types-for"
-            | "trusted-types"
-    )
+/// Extra directives a site may add only when their token list genuinely narrows
+/// origin behaviour (for example `base-uri` and `form-action` may carry only
+/// `'none'` or `'self'`, never external exfiltration origins or `javascript:`).
+fn is_valid_narrowing_directive(name: &str, values: &[String]) -> bool {
+    match name {
+        "frame-ancestors" => values == ["'none'"],
+        "base-uri" | "form-action" => match values {
+            [single] => single == "'none'" || single == "'self'",
+            _ => false,
+        },
+        "upgrade-insecure-requests" | "block-all-mixed-content" => values.is_empty(),
+        "sandbox" => values.iter().all(|token| {
+            matches!(
+                token.as_str(),
+                "allow-downloads"
+                    | "allow-forms"
+                    | "allow-modals"
+                    | "allow-orientation-lock"
+                    | "allow-pointer-lock"
+                    | "allow-presentation"
+                    | "allow-scripts"
+            )
+        }),
+        "require-trusted-types-for" => values == ["'script'"],
+        "trusted-types" => values == ["'none'"],
+        _ => false,
+    }
 }
 
 /// The headers a successful content response carries.
@@ -564,5 +578,31 @@ mod tests {
         let mut zero = RateLimiter::new(0, 60);
         assert_eq!(zero.check("client-a", 0), LimitDecision::Refused);
         assert_eq!(zero.tracked_keys(), 0);
+    }
+
+    #[test]
+    fn csp_narrowing_directives_restrict_base_uri_form_action_and_sandbox() {
+        for good in [
+            "default-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+            "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'",
+            "default-src 'self'; frame-ancestors 'none'; form-action 'self'; sandbox allow-scripts",
+        ] {
+            assert!(
+                csp_is_at_least_as_strict(good, DEFAULT_CSP),
+                "strict narrowing directive must be accepted: {good:?}"
+            );
+        }
+        for bad in [
+            "default-src 'self'; frame-ancestors 'none'; base-uri https://evil.example",
+            "default-src 'self'; frame-ancestors 'none'; form-action https://phish.example",
+            "default-src 'self'; frame-ancestors 'none'; form-action javascript:alert(1)",
+            "default-src 'self'; frame-ancestors 'none'; sandbox allow-scripts allow-same-origin",
+            "default-src 'self'; frame-ancestors 'none'; base-uri 'self' 'none'",
+        ] {
+            assert!(
+                !csp_is_at_least_as_strict(bad, DEFAULT_CSP),
+                "loosening directive value must be refused: {bad:?}"
+            );
+        }
     }
 }

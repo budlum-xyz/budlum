@@ -177,6 +177,15 @@ impl StarkProofObject {
                 if buf.len() > MAX_DECOMPRESSED_STARK_BYTES {
                     return Err(ObjectError::Invalid);
                 }
+                // Reject trailing bytes past the deflate EOF and non-shrinking
+                // deflate payloads so ObjectId = H(TAG_OBJECT || envelope) is
+                // non-malleable.
+                let inner = decoder.into_inner();
+                if usize::try_from(inner.total_in()).ok() != Some(body.len())
+                    || body.len() >= buf.len()
+                {
+                    return Err(ObjectError::Invalid);
+                }
                 buf
             }
             _ => return Err(ObjectError::Invalid),
@@ -184,6 +193,7 @@ impl StarkProofObject {
         let obj: Self = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .with_limit(MAX_DECOMPRESSED_STARK_BYTES as u64)
+            .reject_trailing_bytes()
             .deserialize(&raw)
             .map_err(|_| ObjectError::Invalid)?;
         if obj.program.is_empty() || obj.program.len() > MAX_PROG_WORDS {
