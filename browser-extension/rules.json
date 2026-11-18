@@ -1,0 +1,58 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "regexSubstitution": "chrome-extension://__MSG_@@extension_id__/resolver.html?target=\\0"
+      }
+    },
+    "condition": {
+      "regexFilter": "^https?://([a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?)?)\\.budlum\\.xyz(/.*)?$",
+      "excludedRequestDomains": [
+        "bud.budlum.xyz",
+        "www.budlum.xyz",
+        "app.budlum.xyz",
+        "api.budlum.xyz",
+        "rpc.budlum.xyz",
+        "docs.budlum.xyz",
+        "mail.budlum.xyz",
+        "explorer.budlum.xyz",
+        "faucet.budlum.xyz",
+        "status.budlum.xyz",
+        "testnet.budlum.xyz",
+        "mainnet.budlum.xyz",
+        "devnet.budlum.xyz",
+        "seed.budlum.xyz",
+        "seed-1.budlum.xyz",
+        "root.budlum.xyz",
+        "admin.budlum.xyz",
+        "bns.budlum.xyz",
+        "budlum.budlum.xyz",
+        "validator.budlum.xyz",
+        "node.budlum.xyz",
+        "gateway.budlum.xyz"
+      ],
+      "resourceTypes": [
+        "main_frame"
+      ]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "regexSubstitution": "chrome-extension://__MSG_@@extension_id__/resolver.html?target=\\0"
+      }
+    },
+    "condition": {
+      "regexFilter": "^https?://([a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?)?)\\.bud(/.*)?$",
+      "resourceTypes": [
+        "main_frame"
+      ]
+    }
+  }
+]

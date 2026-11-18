@@ -29,8 +29,10 @@ pub trait BudlumApi {
     /// Inclusion or absence proof for one account.
     ///
     /// `bud_getBalance` returns what this node says; this returns what it can
-    /// prove. The bundle carries its own root, which is the proof-bearing
-    /// trie root and *not* the consensus state root.
+    /// prove. The bundle carries the consensus accounts root (folded into the
+    /// block state root body) and the height it was drawn at, so a light
+    /// client anchors the claim to a finalized block and verifies the proof
+    /// against that root.
     #[method(name = "bud_getAccountProof")]
     async fn get_account_proof(
         &self,
@@ -625,6 +627,19 @@ pub trait BudlumApi {
     /// Operator-only: list currently banned peer IDs.
     #[method(name = "bud_adminListBannedPeers")]
     async fn admin_list_banned_peers(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Operator-only: atomically replace a shielded validator's sentry peer
+    /// list at runtime without restarting or exporting validator keys.
+    #[method(name = "bud_adminUpdateSentries")]
+    async fn admin_update_sentries(
+        &self,
+        sentries: Vec<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Operator-only: inspect sentry-architecture role, discovery status, and
+    /// active sentry/private-validator connection counts.
+    #[method(name = "bud_adminSentryStatus")]
+    async fn admin_sentry_status(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     // === B.U.D. Storage RPC surface ============================
     // This temporary surface exposes grant and reveal operations. The legacy

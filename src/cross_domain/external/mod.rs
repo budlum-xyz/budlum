@@ -78,6 +78,7 @@
 //! with their units attached. The judgement is the reader's, and the numbers it
 //! needs are in [`profile`].
 
+pub mod bitcoin_spv;
 pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
@@ -94,6 +95,10 @@ pub mod spec;
 pub mod versioning;
 pub mod zkvm_proof;
 
+pub use bitcoin_spv::{
+    sha256d, BitcoinHeader, BitcoinSpvAdapter, PinnedBitcoinAnchor, EVIDENCE_VERSION, HEADER_LEN,
+    MAX_FUTURE_SECONDS, MAX_HEADERS, REQUIRED_DEPTH,
+};
 pub use domain_bridge::{
     decode_external_evidence, encode_external_evidence, ExternalDomainFinalityBridge,
     EXTERNAL_DOMAIN_FINALITY_ADAPTER,

@@ -4804,6 +4804,10 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
             put_u8(out, 5);
             put_fixed(out, nft);
         }
+        StorageTxV3::DeleteObject { object } => {
+            put_u8(out, 14);
+            put_fixed(out, object);
+        }
         StorageTxV3::RenewObject {
             object,
             extra_epochs,
@@ -5000,6 +5004,21 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 Some(id) => {
                     put_u8(out, 1);
                     put_u64(out, *id);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 2: appended, never inserted. Tags 0 and 1 keep their bytes so
+        // every registration already signed under them stays verifiable.
+        AdapterSpec::BitcoinSpv { network, anchor } => {
+            put_u8(out, 2);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.height);
+                    put_fixed(out, &pin.block_hash);
+                    put_u32(out, pin.bits);
                 }
                 None => put_u8(out, 0),
             }

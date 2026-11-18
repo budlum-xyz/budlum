@@ -117,14 +117,15 @@ impl UniversalContentUri {
         }
         if raw.contains('\\')
             || raw.contains("..")
+            || raw.contains('%')
             || raw.contains('?')
             || raw.contains('#')
             || raw
                 .bytes()
-                .any(|b| b == 0 || b.is_ascii_control() || b == b' ')
+                .any(|b| !b.is_ascii() || b == 0 || b.is_ascii_control() || b == b' ')
         {
             return Err(StorageFabricError::InvalidUri(String::from(
-                "URI contains forbidden characters or path traversal",
+                "URI contains forbidden characters, non-ASCII bytes, percent-encoding, or path traversal",
             )));
         }
         let Some((scheme_raw, rest)) = raw.split_once("://") else {
@@ -144,9 +145,14 @@ impl UniversalContentUri {
         }
         let (locator_raw, sub_path) = match rest.split_once('/') {
             Some((loc, tail)) => {
-                if tail.is_empty() || tail.contains("//") {
+                if tail.is_empty()
+                    || tail.contains("//")
+                    || tail
+                        .split('/')
+                        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+                {
                     return Err(StorageFabricError::InvalidUri(String::from(
-                        "malformed sub-path",
+                        "malformed or dot-segment sub-path",
                     )));
                 }
                 (loc, Some(String::from(tail)))
@@ -160,11 +166,27 @@ impl UniversalContentUri {
         }
         let locator = if scheme == "bns" {
             let lowered = locator_raw.to_ascii_lowercase();
-            if lowered.strip_suffix(".bud").is_none()
-                || !lowered
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
-            {
+            let Some(prefix) = lowered.strip_suffix(".bud") else {
+                return Err(StorageFabricError::InvalidUri(String::from(
+                    "bns:// locator must end with `.bud`",
+                )));
+            };
+            let is_valid_bns_label = |label: &str, min_len: usize| -> bool {
+                label.len() >= min_len
+                    && label.len() <= 32
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            };
+            let labels: Vec<&str> = prefix.split('.').collect();
+            let valid = match labels.as_slice() {
+                [apex] => is_valid_bns_label(apex, 3),
+                [sub, apex] => is_valid_bns_label(sub, 1) && is_valid_bns_label(apex, 3),
+                _ => false,
+            };
+            if !valid {
                 return Err(StorageFabricError::InvalidUri(String::from(
                     "bns:// locator must be a valid lowercase `.bud` name",
                 )));
@@ -734,7 +756,15 @@ mod tests {
     fn uri_parser_blocks_path_traversal_smuggling_and_unknown_schemes() {
         for bad in [
             "ipfs://bafy123/../etc/passwd",
+            "ipfs://bafy123/%2e%2e/etc/passwd",
+            "ipfs://bafy123/./secret",
+            "ipfs://bafy123/index\u{202e}lmth.exe",
             "bns://evil.com",
+            "bns://.bud",
+            "bns://-bad.bud",
+            "bns://bad-.bud",
+            "bns://ab.bud",
+            "bns://a.b.c.bud",
             "http://169.254.169.254/latest/meta-data",
             "bud://abc\\def",
             "ar://txid?redirect=evil",
