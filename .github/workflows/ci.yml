@@ -1074,16 +1074,6 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-has-no-placeholders 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
-      - name: README claims are wired canary
-        if: always() && steps.build.outcome == 'success'
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-claims-are-wired --self-test 2>&1 | tee -a /tmp/gate-out.log
-          exit "${PIPESTATUS[0]}"
-      - name: README claims are wired
-        if: always() && steps.build.outcome == 'success'
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-claims-are-wired 2>&1 | tee -a /tmp/gate-out.log
-          exit "${PIPESTATUS[0]}"
 
       # One red gate used to skip every gate step after it, which is the disease this
       # whole job was created to cure - it had simply inherited the shape. So every

@@ -46,6 +46,7 @@ pub struct FeeBid {
 
 impl FeeBid {
     /// Backward-compatible migration for legacy `Transaction::fee`.
+    #[must_use]
     pub const fn legacy(fee: u64) -> Self {
         Self {
             max_fee: fee,
@@ -84,6 +85,7 @@ pub enum FeeError {
 /// the per-block change holds only for blocks within that limit; an over-limit
 /// figure, which a block should never carry, would otherwise move the fee by
 /// more than the bound in one step.
+#[must_use]
 pub fn next_base_fee(parent_base_fee: u64, parent_gas_used: u64, params: FeeMarketParams) -> u64 {
     if params.target_gas == 0 || params.base_fee_max_change_denominator == 0 {
         return parent_base_fee.max(params.min_base_fee);
@@ -128,7 +130,7 @@ pub fn effective_fee(bid: FeeBid, block_base_fee: u64) -> Result<EffectiveFee, F
 
 /// Full fee distribution: base fee burn + proposer tip + treasury split.
 ///
-/// `treasury_rate` is a fraction in parts-per-million (ppm): e.g. 10_000 = 1%.
+/// `treasury_rate` is a fraction in parts-per-million (ppm): e.g. `10_000` = 1%.
 /// The treasury takes a cut of the priority fee before the proposer receives
 /// The remainder. This makes the burn/treasury/proposer split explicit and
 /// Auditable.

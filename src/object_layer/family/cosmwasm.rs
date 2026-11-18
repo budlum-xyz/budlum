@@ -4,7 +4,7 @@
 //!   bech32 under the charter's prefix (`wasm`, `osmo`, `neutron`, ...).
 //! * A fungible class is a CW20 contract; a unique class is a CW721
 //!   contract and each asset is its `token_id` string.
-//! * The endpoint is a CosmWasm contract. Its events are `wasm-` events
+//! * The endpoint is a `CosmWasm` contract. Its events are `wasm-` events
 //!   with string attributes; the event type is in `topics[0]`. The parser is
 //!   strict: every attribute is known, none repeats, and
 //!   `_contract_address` (when present) is the emitter.

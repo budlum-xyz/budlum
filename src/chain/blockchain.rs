@@ -237,6 +237,9 @@ pub struct Blockchain {
     /// kept outside consensus `AccountState` and mirrored to `storage` when
     /// persistent.
     pub bud3_symbols: crate::storage::bud3::symbol_protocol::Bud3SymbolStore,
+    /// Epoch index at which persisted `sled` `BUD3_SYM:` keys were last swept
+    /// for expired unconfirmed objects lacking tombstones.
+    last_bud3_disk_prune_epoch: u64,
 }
 
 /// Heights one finality event looks at for witness pruning: finality
@@ -1306,6 +1309,7 @@ impl Blockchain {
             recovery_tracker: crate::validators::handover::RecoveryTracker::new(),
             reorg_anchors: init_reorg_anchors,
             bud3_symbols: crate::storage::bud3::symbol_protocol::Bud3SymbolStore::default(),
+            last_bud3_disk_prune_epoch: 0,
         };
 
         if let Some(first) = bc.chain.first() {
@@ -1336,6 +1340,11 @@ impl Blockchain {
                 Self::block_context_entropy(&last.previous_hash, &last.vrf_output);
             bc.seed_round_price_window();
         }
+
+        if bc.chain.len() > 1 || snapshot_height > 0 {
+            bc.prune_persisted_unregistered_bud3_symbols();
+        }
+        bc.last_bud3_disk_prune_epoch = bc.state.epoch_index;
 
         bc
     }
@@ -10759,6 +10768,23 @@ impl Blockchain {
         })
     }
 
+    /// Purge persisted `sled` symbol keys whose objects are no longer registered
+    /// in `bud3_registry` (covering expired unconfirmed objects without tombstones
+    /// across restarts and epoch transitions).
+    fn prune_persisted_unregistered_bud3_symbols(&self) {
+        if let Some(ref store) = self.storage {
+            if let Ok(disk_objects) = store.list_bud3_symbol_objects() {
+                for obj in disk_objects {
+                    if self.state.bud3_registry.object(&obj).is_none()
+                        || self.state.bud3_registry.is_tombstoned(&obj)
+                    {
+                        let _ = store.delete_bud3_object_symbols(&obj);
+                    }
+                }
+            }
+        }
+    }
+
     /// Purge cached and persisted B.U.D. 3.0 symbols whose objects are no
     /// longer registered or have been tombstoned.
     fn prune_unregistered_bud3_symbols(&mut self) {
@@ -10772,6 +10798,10 @@ impl Blockchain {
             for tomb in self.state.bud3_registry.tombstone_keys() {
                 let _ = store.delete_bud3_object_symbols(tomb);
             }
+        }
+        if self.state.epoch_index != self.last_bud3_disk_prune_epoch {
+            self.prune_persisted_unregistered_bud3_symbols();
+            self.last_bud3_disk_prune_epoch = self.state.epoch_index;
         }
     }
 }
@@ -10890,6 +10920,7 @@ impl Clone for Blockchain {
             recovery_tracker: self.recovery_tracker.clone(),
             reorg_anchors: Vec::new(),
             bud3_symbols: self.bud3_symbols.clone(),
+            last_bud3_disk_prune_epoch: self.last_bud3_disk_prune_epoch,
         }
     }
 }
@@ -15557,5 +15588,122 @@ mod bond_and_reorg_tests {
             .fetch_verified_bud3_symbols(&holder_a, &obj, 0, 0, 4)
             .unwrap_err();
         assert!(err.contains("Merkle verification"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn bud3_persisted_symbols_prune_unconfirmed_expired_objects_on_epoch_and_restart() {
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, SymbolRangeRequest,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().to_str().expect("utf-8");
+        let payload = b"unconfirmed expired object persisted symbols cleanup".repeat(4);
+        let holder_a = [0x61u8; 32];
+        let holder_b = [0x62u8; 32];
+        let p = crate::storage::bud3::limits::Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let up = crate::storage::bud3::pipeline::prepare_public_upload(
+            &payload,
+            &p,
+            &crate::storage::bud3::limits::Bud3Limits::default(),
+            8,
+        )
+        .expect("prepare upload");
+        let obj = up.record.commitment;
+        let shares = vec![
+            (
+                0,
+                crate::storage::bud3::placement::Share {
+                    validator: holder_a,
+                    class: crate::storage::bud3::placement::Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                crate::storage::bud3::placement::Share {
+                    validator: holder_b,
+                    class: crate::storage::bud3::placement::Class::Full,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+        let leaves: Vec<(u32, [u8; 32])> = up.segments[0]
+            .iter()
+            .map(|s| (s.esi, crate::storage::bud3::custody::symbol_leaf(&s.data)))
+            .collect();
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves,
+            &up.segments[0][0..4],
+        )
+        .expect("build range")
+        .items;
+
+        let storage = Storage::new(db_path).expect("open sled");
+        let mut chain = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(storage.clone()),
+            45262,
+            None,
+        );
+        // Produce one real block so persisted chain length > 1 across restart.
+        chain
+            .produce_block(Address::from([0x99u8; 32]))
+            .expect("produce block");
+        // Register unconfirmed object expiring at epoch 1 and store symbols to sled directly
+        // (simulating symbols persisted before a node restart wiped in-memory `bud3_symbols`).
+        chain
+            .state
+            .bud3_registry
+            .register_object([0x07u8; 32], up.record, shares, 0, 1)
+            .expect("register");
+        storage
+            .put_bud3_verified_symbols(&holder_a, &obj, 0, &items_a)
+            .expect("put symbols");
+        assert_eq!(storage.list_bud3_symbol_objects().expect("list"), vec![obj]);
+
+        // 1) Advance past expiry without custody confirmation -> no tombstone is written,
+        // yet epoch advancement triggers persisted sled cleanup.
+        chain.state.bud3_registry.expire(2);
+        assert!(chain.state.bud3_registry.object(&obj).is_none());
+        assert!(!chain.state.bud3_registry.is_tombstoned(&obj));
+        chain.state.epoch_index = 2;
+        chain.prune_unregistered_bud3_symbols();
+        assert!(storage.list_bud3_symbol_objects().expect("list").is_empty());
+
+        // 2) Re-seed stale symbols on disk and verify startup prunes unregistered
+        // objects when reopening a multi-block persisted chain.
+        storage
+            .put_bud3_verified_symbols(&holder_a, &obj, 0, &items_a)
+            .expect("put stale symbols");
+        assert_eq!(storage.list_bud3_symbol_objects().expect("list"), vec![obj]);
+        drop(storage);
+        drop(chain);
+
+        let reopened_storage = Storage::new(db_path).expect("reopen sled");
+        let _reopened = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(reopened_storage.clone()),
+            45262,
+            None,
+        );
+        assert!(reopened_storage
+            .list_bud3_symbol_objects()
+            .expect("list after restart")
+            .is_empty());
     }
 }

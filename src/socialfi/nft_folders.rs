@@ -163,12 +163,21 @@ impl NftFolderRegistry {
         }
 
         let legacy_cid = crate::storage::content_id::ContentId(cid.digest);
+        // Validate every NFT & B.U.D. 3.0 precondition before mutating `nft_reg`
+        // so failed binds never leave orphaned NFTs minted in `nft_reg`.
+        let candidate_id = nft_reg.next_id;
+        let candidate_nft_id = derive_bud3_nft_id(candidate_id);
+        let content_ref = ContentRef::new(cid, live_key, Some(candidate_nft_id))
+            .map_err(SocialFiBud3Error::InvalidContentRef)?;
+        bud3_reg
+            .can_bind_nft(candidate_nft_id, caller.0, Some(caller.0), &live_key)
+            .map_err(SocialFiBud3Error::Registry)?;
+
         let id = nft_reg
             .mint(caller, legacy_cid, epoch, author_name)
             .map_err(|e| SocialFiBud3Error::Nft(e.to_string()))?;
+        debug_assert_eq!(id, candidate_id);
         let nft_id = derive_bud3_nft_id(id);
-        let content_ref = ContentRef::new(cid, live_key, Some(nft_id))
-            .map_err(SocialFiBud3Error::InvalidContentRef)?;
         bud3_reg
             .bind_nft(nft_id, caller.0, Some(caller.0), &live_key)
             .map_err(SocialFiBud3Error::Registry)?;
@@ -604,5 +613,110 @@ mod tests {
             bud3_reg.nft_binding(&minted.nft_id),
             Some((new_key, alice.0))
         );
+    }
+
+    #[test]
+    fn mint_bud3_nft_does_not_mutate_nft_registry_when_bind_fails() {
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::prepare_public_upload;
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::replace::sign_replace_attestation;
+
+        let mut folders = NftFolderRegistry::default();
+        let mut nft_reg = NftRegistry::new();
+        let mut bud3_reg = Bud3Registry::default();
+        let alice = Address([0xA5; 32]);
+        let validators = [[10u8; 32], [11u8; 32], [12u8; 32]];
+
+        let p = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 64,
+        };
+        let up = prepare_public_upload(
+            b"atomic mint_bud3_nft failure leaves nft_registry clean",
+            &p,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
+        let old_key = up.record.commitment;
+        let third = up.record.symbols_per_segment / 3;
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: validators[0],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: third,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[1],
+                    class: Class::Full,
+                    first_esi: third,
+                    symbols: third,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[2],
+                    class: Class::Full,
+                    first_esi: third * 2,
+                    symbols: up.record.symbols_per_segment - third * 2,
+                },
+            ),
+        ];
+        bud3_reg
+            .register_object(alice.0, up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        for v in &validators {
+            bud3_reg.ack(&old_key, v).unwrap();
+        }
+        let mut new_rec = up.record;
+        new_rec.codec = if new_rec.codec == 0 { 1 } else { 0 };
+        new_rec.object_len = new_rec.object_len.saturating_add(1);
+        new_rec.commitment = [0xC9; 32];
+        let vkeys: BTreeMap<[u8; 32], Vec<u8>> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                (
+                    [v; 32],
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation([v; 32], &[v; 32], &old_key, &new_rec, &shares).unwrap()
+            })
+            .collect();
+        bud3_reg
+            .replace_object(
+                (validators[0], 10_000),
+                &old_key,
+                new_rec,
+                shares,
+                &atts,
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 1, &vkeys),
+            )
+            .unwrap();
+
+        let err = folders
+            .mint_bud3_nft(&mut nft_reg, &mut bud3_reg, alice, old_key, 2, None)
+            .unwrap_err();
+        assert!(matches!(err, SocialFiBud3Error::Registry(_)));
+        assert_eq!(nft_reg.next_id, 0);
+        assert!(nft_reg.nfts.is_empty());
+        assert!(folders.commitments.is_empty());
     }
 }

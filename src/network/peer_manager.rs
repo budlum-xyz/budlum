@@ -76,7 +76,7 @@ pub struct PeerScore {
 }
 impl Default for PeerScore {
     fn default() -> Self {
-        PeerScore {
+        Self {
             score: 0,
             banned_until: None,
             ban_expires_unix: None,
@@ -98,9 +98,11 @@ impl Default for PeerScore {
     }
 }
 impl PeerScore {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
+    #[must_use]
     pub fn is_banned(&self) -> bool {
         if let Some(until) = self.banned_until {
             Instant::now() < until
@@ -139,6 +141,7 @@ impl PeerScore {
             false
         }
     }
+    #[must_use]
     pub fn ban_remaining(&self) -> Option<Duration> {
         self.banned_until.and_then(|until| {
             let now = Instant::now();
@@ -280,8 +283,9 @@ impl Default for PeerManager {
 
 impl PeerManager {
     /// Default burst refill (~5 msg/s) with 10k tracked-peer ceiling.
+    #[must_use]
     pub fn new() -> Self {
-        PeerManager {
+        Self {
             peers: HashMap::new(),
             msg_refill_rate: MSG_REFILL_RATE,
             max_tracked_peers: 10_000,
@@ -308,14 +312,17 @@ impl PeerManager {
         self.max_tracked_peers = 10_000;
     }
 
+    #[must_use]
     pub fn msg_refill_rate(&self) -> f64 {
         self.msg_refill_rate
     }
 
+    #[must_use]
     pub fn connected_peers(&self) -> Vec<PeerId> {
         self.connected_peers.iter().copied().collect()
     }
 
+    #[must_use]
     pub fn is_connected(&self, peer_id: &PeerId) -> bool {
         self.connected_peers.contains(peer_id)
     }
@@ -331,6 +338,7 @@ impl PeerManager {
     }
 
     /// Count of live connected peers excluding reserved sentry-shield links.
+    #[must_use]
     pub fn public_connected_count(&self) -> usize {
         self.connected_peers
             .iter()
@@ -338,15 +346,18 @@ impl PeerManager {
             .count()
     }
 
+    #[must_use]
     pub fn tracked_peer_count(&self) -> usize {
         self.peers.len()
     }
 
+    #[must_use]
     pub fn max_tracked_peers(&self) -> usize {
         self.max_tracked_peers
     }
 
     /// Maximum admitted connections sharing the same IPv4 /24.
+    #[must_use]
     pub fn max_peers_per_subnet(&self) -> usize {
         self.max_peers_per_subnet
     }
@@ -356,6 +367,7 @@ impl PeerManager {
     }
 
     /// Outbound subnet diversity bound (0 = no limit).
+    #[must_use]
     pub fn max_outbound_per_subnet(&self) -> usize {
         self.max_outbound_per_subnet
     }
@@ -875,9 +887,11 @@ impl PeerManager {
     pub fn is_banned(&self, peer_id: &PeerId) -> bool {
         self.peers.get(peer_id).is_some_and(PeerScore::is_banned)
     }
+    #[must_use]
     pub fn get_score(&self, peer_id: &PeerId) -> i32 {
         self.peers.get(peer_id).map_or(0, |s| s.score)
     }
+    #[must_use]
     pub fn is_handshaked(&self, peer_id: &PeerId) -> bool {
         self.peers.get(peer_id).is_some_and(|s| s.handshaked)
     }
@@ -887,6 +901,7 @@ impl PeerManager {
         };
         score.handshaked = status;
     }
+    #[must_use]
     pub fn get_peer_info(&self, peer_id: &PeerId) -> Option<&PeerScore> {
         self.peers.get(peer_id)
     }
@@ -923,6 +938,7 @@ impl PeerManager {
             }
         }
     }
+    #[must_use]
     pub fn get_banned_peers(&self) -> Vec<PeerId> {
         self.peers
             .iter()
@@ -1009,6 +1025,7 @@ impl PeerManager {
         }
     }
     /// Whether the peer is set aside as a sync source right now.
+    #[must_use]
     pub fn is_sync_resting(&self, peer_id: &PeerId) -> bool {
         self.peers
             .get(peer_id)
@@ -1056,6 +1073,7 @@ impl PeerManager {
             self.ban_peer(peer_id);
         }
     }
+    #[must_use]
     pub fn get_best_peers(&self, n: usize) -> Vec<PeerId> {
         let mut scored: Vec<_> = self.peers.iter().filter(|(_, s)| !s.is_banned()).collect();
         scored.sort_by_key(|x| std::cmp::Reverse(x.1.score));
@@ -1064,6 +1082,7 @@ impl PeerManager {
 
     /// Snapshot of still-active bans with absolute expiry (unix seconds).
     /// Remaining duration is reconstructed on reload.
+    #[must_use]
     pub fn get_persisted_banned_peers(&self) -> Vec<PersistedBan> {
         let now = Instant::now();
         let now_unix = unix_now_secs();

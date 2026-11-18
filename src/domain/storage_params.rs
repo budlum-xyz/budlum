@@ -10,7 +10,7 @@
 //! The existing `bud_registerConsensusDomain` / `bud_getConsensusDomains`
 //! RPC surface.
 //! No proof, no slashing, no retrieval - those, gated on the
-//! BudZero `VerifyMerkle` gate and BLS/PQ HSM, respectively.
+//! `BudZero` `VerifyMerkle` gate and BLS/PQ HSM, respectively.
 //!
 //! Permissionless / whitelist rule (see README, "Permissionless" section): the
 //! `STORAGE_OPERATOR` role is registered via the **same** permissionless
@@ -66,7 +66,7 @@ pub struct StorageDomainParams {
     /// Active operator. `0` is rejected - challenges must be periodic.
     pub challenge_interval: u64,
     /// Minimum operator bond, in the same `u64` units as
-    /// `ConsensusDomain::operator_bond` (1 token = 1_000_000 fixed-point).
+    /// `ConsensusDomain::operator_bond` (1 token = `1_000_000` fixed-point).
     /// This is the **storage-specific** minimum; the domain still has to
     /// Satisfy the protocol-level `MIN_DOMAIN_OPERATOR_BOND` from
     /// `domain::registry`.
@@ -135,6 +135,7 @@ impl Default for StorageDomainParams {
 ///
 /// Field order is fixed and domain-tagged so it is unambiguous in the
 /// Presence of a future enum-variant addition.
+#[must_use]
 pub fn storage_params_bytes(params: &StorageDomainParams) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + 8 + 8 + 8 + 8);
     out.extend_from_slice(b"BDLM_STORAGE_V1");
