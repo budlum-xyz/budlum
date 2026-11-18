@@ -1764,6 +1764,46 @@ mod tests {
         assert_eq!(get_snapshot_height(path2).unwrap(), 9);
     }
 
+    /// The C3 digest hashes optional sub-states with `hash_serializable`, which
+    /// is `bincode::serialize` under the hood. A `skip_serializing_if` on a
+    /// field of one of those types would drop the field from the preimage, and
+    /// two states that differ only in that field would then digest equal. This
+    /// test pins the property on the settlement registries: a registry that has
+    /// recorded its first quantum-canary commit must not digest equal to one
+    /// that has recorded none.
+    #[test]
+    fn a_written_optional_substate_changes_the_snapshot_digest() {
+        let empty_state = AccountState::new();
+        let mut written_state = AccountState::new();
+        written_state
+            .settlement
+            .quantum
+            .commit(
+                9,
+                Address::from_hex(&"0a".repeat(32)).expect("address"),
+                [0x7Au8; 32],
+            )
+            .expect("first canary commit is accepted");
+        assert!(!written_state.settlement.quantum.is_empty());
+
+        let params = || StateSnapshotV2Params {
+            height: 1,
+            block_hash: "block".into(),
+            genesis_hash: "genesis".into(),
+            chain_id: 45_262,
+            finalized_height: 0,
+            finalized_hash: "genesis".into(),
+            finality_certificates: vec![],
+        };
+        let empty = StateSnapshotV2::from_state(&empty_state, params());
+        let written = StateSnapshotV2::from_state(&written_state, params());
+        assert_ne!(
+            empty.calculate_digest(),
+            written.calculate_digest(),
+            "a canary commit is settlement state and must reach the snapshot digest"
+        );
+    }
+
     #[test]
     fn app_binding_watermarks_require_snapshot_schema_fifteen() {
         let mut account_state = AccountState::new();
