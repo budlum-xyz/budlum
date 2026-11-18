@@ -482,11 +482,17 @@ pub fn validate_params(params: &AggParams, chain_id: u64) -> Result<(), String> 
 /// A message naming why the transaction cannot be taken.
 pub fn check_pool_transaction(params: &AggParams, tx: &Transaction) -> Result<(), String> {
     if params.mode != AggMode::On {
+        if matches!(tx.tx_type, TransactionType::VerifyStark(_)) {
+            return Err("aggregation is not on: VerifyStark requires aggregation mode On".into());
+        }
         return if tx.uses_claims() {
             Err("aggregation is not on: a transaction may not use claims".into())
         } else {
             Ok(())
         };
+    }
+    if matches!(tx.tx_type, TransactionType::VerifyStark(_)) && tx.claim_refs.is_empty() {
+        return Err("aggregation: VerifyStark must reference its Claim::Poly digest".into());
     }
     if tx.uses_claims() {
         return Err(

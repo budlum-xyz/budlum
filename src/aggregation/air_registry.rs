@@ -340,6 +340,14 @@ impl AirRegistry {
         let evaluator = self
             .get(&stmt.air_id)
             .ok_or(AirVerifyError::UnknownAir(stmt.air_id))?;
+        // Fail fast before running Stage 2 algebra or BudAir preprocessed setup
+        // when the transaction has no referenced or proven Claim::Poly digest.
+        if claim_refs.is_empty() {
+            return Err(AirVerifyError::MissingPolyClaimRef);
+        }
+        if !claim_refs.iter().any(|r| proven_claims.contains(r)) {
+            return Err(AirVerifyError::UnprovenPolyClaim);
+        }
         let alg = evaluator.verify_algebra_statement(stmt)?;
         let expected_claim = Claim::Poly {
             poly_hash: alg.poly_hash,

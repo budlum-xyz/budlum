@@ -253,6 +253,11 @@ pub fn verify_chip_pcs_openings_u64(
     verify_chip_pcs_openings(&stmt)
 }
 
+/// Maximum `BudVM` program length accepted by split-STARK (`VerifyStark`)
+/// Stage 2 verification and `PcsOpeningObject` extraction so an attacker
+/// cannot force unbounded preprocessed trace allocation.
+const MAX_VERIFY_STARK_PROGRAM_WORDS: usize = 65_536;
+
 /// Stage 2 (`verify_algebra`) specialized for the built-in `BudAir`:
 /// verifies `MainnetActivation`, program hash, expected `degree_bits`,
 /// preprocessed VK, re-derives `zeta`, and checks all `BudAir` constraints
@@ -272,6 +277,12 @@ pub fn verify_bud_air_algebra_u64(
     degree_bits: usize,
     public_values: &[u64],
 ) -> Result<([u64; 3], crate::bud_stark::PcsOpeningShape, [u8; 32]), String> {
+    if program.len() > MAX_VERIFY_STARK_PROGRAM_WORDS {
+        return Err(format!(
+            "program length {} exceeds VerifyStark limit {MAX_VERIFY_STARK_PROGRAM_WORDS}",
+            program.len()
+        ));
+    }
     let activation = bud_isa::MainnetActivation::default();
     for word in program {
         if let Ok(instruction) = bud_isa::Instruction::decode_any(*word) {
@@ -355,16 +366,44 @@ pub fn extract_bud_envelope_pcs(
     ),
     String,
 > {
-    let bounded = &envelope.proof_bytes[..envelope
-        .proof_bytes
-        .len()
-        .min(crate::adapter::MAX_ENVELOPE_PROOF_BYTES)];
+    if envelope.proof_bytes.len() > crate::adapter::MAX_ENVELOPE_PROOF_BYTES {
+        return Err(format!(
+            "BudAir proof bytes {} exceed cap {}",
+            envelope.proof_bytes.len(),
+            crate::adapter::MAX_ENVELOPE_PROOF_BYTES
+        ));
+    }
+    if program.len() > MAX_VERIFY_STARK_PROGRAM_WORDS {
+        return Err(format!(
+            "program length {} exceeds VerifyStark limit {MAX_VERIFY_STARK_PROGRAM_WORDS}",
+            program.len()
+        ));
+    }
     let (proof, trailing): (ChipProof, &[u8]) =
-        postcard::take_from_bytes(bounded).map_err(|e| e.to_string())?;
+        postcard::take_from_bytes(&envelope.proof_bytes).map_err(|e| e.to_string())?;
     if !trailing.is_empty() {
         return Err(format!(
             "{} trailing bytes after BudAir proof",
             trailing.len()
+        ));
+    }
+    let num_rows = usize::try_from(expected_inputs.trace_len)
+        .ok()
+        .and_then(|n| n.checked_mul(3))
+        .and_then(|n| n.checked_add(1))
+        .and_then(usize::checked_next_power_of_two)
+        .map(|n| n.max(16))
+        .ok_or_else(|| "trace length exceeds verifier limit".to_string())?;
+    if num_rows > MAX_PROVER_WITNESS_ROWS {
+        return Err(format!(
+            "trace matrix rows {num_rows} exceed verifier limit {MAX_PROVER_WITNESS_ROWS}"
+        ));
+    }
+    let expected_degree_bits = log2_strict_usize(num_rows);
+    if proof.degree_bits != expected_degree_bits {
+        return Err(format!(
+            "proof degree_bits {} disagrees with expected {expected_degree_bits}",
+            proof.degree_bits
         ));
     }
     let trace_len = usize::try_from(expected_inputs.trace_len)
