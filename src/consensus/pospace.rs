@@ -583,7 +583,7 @@ mod tests {
         engine
             .prepare_block(&mut honest, &AccountState::new())
             .expect("prepare honest");
-        assert!(engine.fork_choice_score(&[honest.clone()]) > 0);
+        assert!(engine.fork_choice_score(std::slice::from_ref(&honest)) > 0);
 
         // Forged u64::MAX capacity witness must score 0 and never beat honest chain.
         let mut forged_cap = make_block(1, &zero);
@@ -591,8 +591,11 @@ mod tests {
         forged_cap.vrf_output = compute_plot_response(&[0x77; 32], &challenge).to_vec();
         forged_cap.vrf_proof = encode_pospace_witness(&[0x77; 32], &challenge, u64::MAX);
         forged_cap.hash = forged_cap.calculate_hash();
-        assert_eq!(engine.fork_choice_score(&[forged_cap.clone()]), 0);
-        assert!(!engine.is_better_chain(&[honest.clone()], &[forged_cap]));
+        assert_eq!(
+            engine.fork_choice_score(std::slice::from_ref(&forged_cap)),
+            0
+        );
+        assert!(!engine.is_better_chain(std::slice::from_ref(&honest), &[forged_cap]));
 
         // Registered plot lying about its size_bytes must score 0.
         let mut inflated = make_block(1, &zero);
