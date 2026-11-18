@@ -695,8 +695,7 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
                 expect: ExpectedRefusal::Kind(RefusalKind::Malformed),
             },
             FaultProbe {
-                name: "an evidence version the adapter does not read must be refused"
-                    .to_string(),
+                name: "an evidence version the adapter does not read must be refused".to_string(),
                 patch: BytePatch::EvidenceVersion {
                     value: EVIDENCE_VERSION + 1,
                 },
@@ -726,8 +725,9 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
                         {
                             let replacement = if first.signature[0] == 0 { 1 } else { 0 };
                             probes.push(FaultProbe {
-                                name: "one bit of one signature must be refused as a crypto failure"
-                                    .to_string(),
+                                name:
+                                    "one bit of one signature must be refused as a crypto failure"
+                                        .to_string(),
                                 patch: BytePatch::InPayload {
                                     offset,
                                     bytes: vec![replacement],
@@ -756,8 +756,8 @@ pub const BACKING_SLASHABLE: bool = true;
 mod tests {
     use super::*;
     use crate::core::address::Address;
-    use crate::crypto::primitives::KeyPair;
     use crate::cross_domain::external::selftest::{admit, ProbeOutcome};
+    use crate::crypto::primitives::KeyPair;
 
     /// A real `noble-1` commit at height 64239414, captured from a public
     /// CometBFT RPC (`/commit` and `/validators?height=64239414`) and reduced
@@ -993,7 +993,10 @@ mod tests {
         assert_eq!(descriptor.finality_kind, FinalityKind::ProtocolFinality);
         assert_eq!(descriptor.required_depth, 1);
         assert_eq!(descriptor.time_unit, TimeUnit::UnixSeconds);
-        assert_eq!(descriptor.accepted_evidence_versions, vec![EVIDENCE_VERSION]);
+        assert_eq!(
+            descriptor.accepted_evidence_versions,
+            vec![EVIDENCE_VERSION]
+        );
         assert!(matches!(
             descriptor.trust_model,
             TrustModel::HonestMajority { .. }
@@ -1065,7 +1068,10 @@ mod tests {
             .expect_err("four of seven is below two thirds plus one");
         match error {
             AdapterError::ConsensusRule { rule } => {
-                assert!(rule.contains("below the two-thirds-plus-one threshold"), "{rule}");
+                assert!(
+                    rule.contains("below the two-thirds-plus-one threshold"),
+                    "{rule}"
+                );
             }
             other => panic!("expected a consensus-rule refusal, got {other:?}"),
         }
@@ -1208,7 +1214,10 @@ mod tests {
             .expect_err("half the power is not a quorum");
         match error {
             AdapterError::ConsensusRule { rule } => {
-                assert!(rule.contains("below the two-thirds-plus-one threshold"), "{rule}");
+                assert!(
+                    rule.contains("below the two-thirds-plus-one threshold"),
+                    "{rule}"
+                );
             }
             other => panic!("expected a consensus-rule refusal, got {other:?}"),
         }
@@ -1259,10 +1268,7 @@ mod tests {
             .verify(&evidence, &policy())
             .expect_err("the envelope must not claim a height the payload lacks");
         assert!(
-            matches!(
-                error,
-                AdapterError::DeclarationMismatch { field: "height" }
-            ),
+            matches!(error, AdapterError::DeclarationMismatch { field: "height" }),
             "expected a height declaration mismatch, got {error:?}"
         );
     }
@@ -1279,7 +1285,13 @@ mod tests {
             .verify(&evidence, &strict)
             .expect_err("an hour old and a one minute budget");
         assert!(
-            matches!(error, AdapterError::Stale { age: 3_600, max_age: 60 }),
+            matches!(
+                error,
+                AdapterError::Stale {
+                    age: 3_600,
+                    max_age: 60
+                }
+            ),
             "expected a staleness refusal, got {error:?}"
         );
         // The same commit is fresh inside the window.

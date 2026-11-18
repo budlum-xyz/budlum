@@ -100,10 +100,6 @@ pub use bitcoin_spv::{
     sha256d, BitcoinHeader, BitcoinSpvAdapter, PinnedBitcoinAnchor, EVIDENCE_VERSION, HEADER_LEN,
     MAX_FUTURE_SECONDS, MAX_HEADERS, REQUIRED_DEPTH,
 };
-pub use tendermint::{
-    address_of, quorum_threshold, vote_sign_bytes, TendermintCommitEvidence,
-    TendermintFinalityAdapter, TendermintSignature, TendermintValidator,
-};
 pub use domain_bridge::{
     decode_external_evidence, encode_external_evidence, ExternalDomainFinalityBridge,
     EXTERNAL_DOMAIN_FINALITY_ADAPTER,
@@ -147,6 +143,10 @@ pub use spec::{
     AdapterDescriptor, AdapterError, AdapterId, DomainKey, ExternalFinalityAdapter,
     FinalityAttestation, FinalityKind, ProofSystem, RawConsensusEvidence, SecurityBacking,
     TimeUnit, TrustModel, VerificationPolicy,
+};
+pub use tendermint::{
+    address_of, quorum_threshold, vote_sign_bytes, TendermintCommitEvidence,
+    TendermintFinalityAdapter, TendermintSignature, TendermintValidator,
 };
 pub use versioning::{ForkError, VersionPolicy, VersionWindow};
 pub use zkvm_proof::{

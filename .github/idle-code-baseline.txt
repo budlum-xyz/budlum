@@ -1677,7 +1677,6 @@ src/storage/living_threshold.rs	const	ACCESS_HALF_LIFE_EPOCHS
 src/storage/living_threshold.rs	const	HYSTERESIS_SIXTEENTHS
 src/storage/living_threshold.rs	const	MAX_CPU_NANOS_PER_BYTE
 src/storage/living_threshold.rs	const	MAX_OBJECT_BYTES
-src/storage/living_threshold.rs	const	NANOS_PER_SECOND
 src/storage/living_threshold.rs	enum	ThresholdError
 src/storage/living_threshold.rs	fn	break_even_rate_scaled
 src/storage/living_threshold.rs	fn	one_reproduction_picodollars
