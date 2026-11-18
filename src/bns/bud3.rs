@@ -589,7 +589,7 @@ mod tests {
 
         let owner = [0x61; 32];
         let body = b"bns bound content survives finalized object replacement ".repeat(4);
-        let up = prepare_public_upload(&body, &fixtures::P, &Bud3Limits::default(), 12).unwrap();
+        let up = prepare_public_upload(&body, &P, &Bud3Limits::default(), 12).unwrap();
         let old_key = up.record.commitment;
         let mut bud3 = Bud3Registry::default();
         let validators = [[10u8; 32], [11u8; 32], [12u8; 32]];
@@ -632,8 +632,8 @@ mod tests {
 
         let raw_obj = Object::raw_public(&body);
         let raw_bytes = raw_obj.encode();
-        let new_commit = commit_object(&raw_bytes, &fixtures::P).unwrap();
-        let enc_raw = SegmentEncoder::new(0, &raw_bytes, &fixtures::P).unwrap();
+        let new_commit = commit_object(&raw_bytes, &P).unwrap();
+        let enc_raw = SegmentEncoder::new(0, &raw_bytes, &P).unwrap();
         let k_raw = enc_raw.k();
         let mut syms_new = enc_raw.source_symbols();
         syms_new.extend(enc_raw.repair_symbols(0, 12 - k_raw).unwrap());
@@ -645,7 +645,7 @@ mod tests {
             content_id: up.record.content_id,
             object_len: u64::try_from(raw_bytes.len()).unwrap(),
             commitment: new_commit,
-            profile: fixtures::P,
+            profile: P,
             codec: 0,
             symbols_per_segment: 12,
             symbol_roots: vec![symbol_root(&new_leaves)],
@@ -685,7 +685,7 @@ mod tests {
         assert_eq!(validated.object_commitment, old_key);
 
         let mut bns = BnsRegistry::new();
-        bns.register("replaced".to_string(), Address(owner), 1)
+        bns.register("replaced".to_string(), Address(owner), 1, 100)
             .unwrap();
         Bud3BnsResolver::set_bud3_content(
             &mut bns,

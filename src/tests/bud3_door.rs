@@ -2350,9 +2350,8 @@ fn register_object_scoped_claimant_dedup_waives_duplicate_storage_fee() {
     assert!(state.bud3_registry.object(&scoped).is_some());
 
     // Drain `alice` to a single tx fee (`1`) so any non-zero `pre_storage_fee` fails.
-    let alice_bal = state.get_balance(&alice);
-    state.sub_balance(&alice, alice_bal - 1).unwrap();
-    let alice_nonce = state.get_account(&alice).map_or(0, |a| a.nonce);
+    state.accounts.get_mut(&alice).unwrap().balance = 1;
+    let alice_nonce = state.get_nonce(&alice);
     apply(
         &mut state,
         &storage_tx(
