@@ -20,7 +20,7 @@ use crate::unification::{
 };
 use budlum_uel_abi::{EeId, EeLog};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Hard ceiling on steps combined into one [`UnifiedOutputBundle`].
 pub const MAX_COMPOSITION_STEPS: usize = 32;
@@ -445,6 +445,11 @@ impl NormalizedMachineOutput {
     pub fn validate(&self) -> Result<(), CompositionError> {
         validate_safe_label("step_id", &self.step_id, 64)
             .map_err(CompositionError::InvalidInput)?;
+        if self.step_id.contains('.') {
+            return Err(CompositionError::InvalidInput(String::from(
+                "step_id must not contain `.`",
+            )));
+        }
         if self.domain_id == 0 {
             return Err(CompositionError::InvalidInput(String::from(
                 "domain_id must be non-zero",
@@ -819,14 +824,26 @@ impl OutputComposer {
         let mut step_positions = BTreeMap::new();
         for (idx, step_id) in bundle.execution_order.iter().enumerate() {
             validate_safe_label("step_id", step_id, 64).map_err(CompositionError::InvalidInput)?;
+            if step_id.contains('.') {
+                return Err(CompositionError::InvalidInput(String::from(
+                    "step_id must not contain `.`",
+                )));
+            }
             if step_positions.insert(step_id.as_str(), idx).is_some() {
                 return Err(CompositionError::DuplicateStep(step_id.clone()));
             }
         }
         let mut total_bytes: usize = 0;
+        let mut seen_targets: BTreeSet<(&str, &str)> = BTreeSet::new();
         for binding in &bundle.resolved_bindings {
             validate_safe_label("target_input", &binding.target_input, 64)
                 .map_err(CompositionError::InvalidInput)?;
+            if !seen_targets.insert((binding.to_step.as_str(), binding.target_input.as_str())) {
+                return Err(CompositionError::InvalidInput(format!(
+                    "duplicate binding targeting `{}.{}`",
+                    binding.to_step, binding.target_input
+                )));
+            }
             let Some(&from_pos) = step_positions.get(binding.from_step.as_str()) else {
                 return Err(CompositionError::UnknownStep(binding.from_step.clone()));
             };
@@ -1391,6 +1408,72 @@ mod tests {
         assert!(matches!(
             OutputComposer::verify_bundle(&renamed_step),
             Err(CompositionError::BundleVerificationFailed(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_dotted_step_ids_and_duplicate_resolved_targets_in_bundle() {
+        assert!(matches!(
+            NormalizedMachineOutput::from_svm(
+                "step.evil",
+                4,
+                true,
+                1_000,
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+            ),
+            Err(CompositionError::InvalidInput(_))
+        ));
+
+        let a = NormalizedMachineOutput::from_svm(
+            "step_a",
+            1,
+            true,
+            1_000,
+            vec![1],
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let b = NormalizedMachineOutput::from_svm(
+            "step_b",
+            2,
+            true,
+            1_000,
+            vec![2],
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let c = NormalizedMachineOutput::from_utxo(
+            "step_c",
+            3,
+            true,
+            500,
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let plan = OutputCompositionPlan {
+            plan_id: String::from("verify-dup-target"),
+            steps: vec![a, b, c],
+            bindings: vec![OutputBinding {
+                from_step: String::from("step_a"),
+                selector: OutputSelector::ReturnData,
+                to_step: String::from("step_c"),
+                target_input: String::from("in0"),
+                enforce_match: false,
+            }],
+        };
+        let mut bundle = OutputComposer::compose(&plan).unwrap();
+        let mut dup_binding = bundle.resolved_bindings[0].clone();
+        dup_binding.from_step = String::from("step_b");
+        bundle.resolved_bindings.push(dup_binding);
+        assert!(matches!(
+            OutputComposer::verify_bundle(&bundle),
+            Err(CompositionError::InvalidInput(_))
         ));
     }
 }

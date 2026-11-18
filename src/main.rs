@@ -2,8 +2,11 @@ use budlum_core::chain::blockchain::Blockchain;
 use budlum_core::chain::chain_actor::ChainActor;
 use budlum_core::chain::snapshot::PruningManager;
 use budlum_core::cli::{ConsensusType, NodeConfig};
+use budlum_core::consensus::dag::{DAGConfig, DagEngine};
 use budlum_core::consensus::poa::{PoAConfig, PoAEngine};
+use budlum_core::consensus::poh::{PohConfig, PohEngine};
 use budlum_core::consensus::pos::{PoSConfig, PoSEngine};
+use budlum_core::consensus::pospace::{PoSpaceConfig, PoSpaceEngine};
 use budlum_core::consensus::pow::PoWEngine;
 use budlum_core::consensus::ConsensusEngine;
 use budlum_core::core::address::Address;
@@ -11,7 +14,8 @@ use budlum_core::core::transaction::Transaction;
 use budlum_core::crypto::primitives::{KeyPair, ValidatorKeys};
 use budlum_core::crypto::signer::ConsensusSigner;
 use budlum_core::domain::{
-    BftDomainPlugin, ConsensusKind, PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin,
+    BftDomainPlugin, ConsensusKind, DagDomainPlugin, PoADomainPlugin, PoSDomainPlugin,
+    PoWDomainPlugin, PohDomainPlugin, PospaceDomainPlugin,
 };
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
@@ -256,8 +260,37 @@ fn prune_database_backups(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() {
+/// Minimum worker thread stack size (8 MiB) enforced on both the Tokio async
+/// runtime and the global Rayon pool so recursive Plonky3 STARK/FRI/Merkle
+/// verification never overflows small platform defaults such as Alpine `musl`
+/// (128 KiB default `pthread` stack).
+const WORKER_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn build_tokio_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_THREAD_STACK_BYTES)
+        .build()
+}
+
+fn main() {
+    // Configure the global Rayon pool with an explicit 8 MiB stack before any
+    // parallel proof or erasure-coding task spawns worker threads.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(WORKER_THREAD_STACK_BYTES)
+        .build_global();
+
+    let runtime = match build_tokio_runtime() {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("Fatal: failed to initialize Tokio runtime: {err}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(async_main());
+}
+
+async fn async_main() {
     // The Semgrep rule `rust.lang.security.args.args` targets using argv[0] -
     // the executable path, which an attacker can set freely - as the basis of a
     // security decision. argv[0] is never read here: subcommand parsing starts
@@ -1460,17 +1493,24 @@ async fn main() {
                     ))
                 }
             }
+            ConsensusKind::Dag => Arc::new(DagEngine::new(DAGConfig::default())),
+            ConsensusKind::Poh => Arc::new(PohEngine::new(PohConfig::default())),
+            ConsensusKind::Pospace => Arc::new(PoSpaceEngine::new(PoSpaceConfig::default())),
             _ => continue,
         };
 
-        let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> =
-            match &domain.kind {
-                ConsensusKind::PoW => std::sync::Arc::new(PoWDomainPlugin::new(plugin_engine)),
-                ConsensusKind::PoS => std::sync::Arc::new(PoSDomainPlugin::new(plugin_engine)),
-                ConsensusKind::PoA => std::sync::Arc::new(PoADomainPlugin::new(plugin_engine)),
-                ConsensusKind::Bft => std::sync::Arc::new(BftDomainPlugin::new(plugin_engine)),
-                _ => continue,
-            };
+        let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> = match &domain
+            .kind
+        {
+            ConsensusKind::PoW => std::sync::Arc::new(PoWDomainPlugin::new(plugin_engine)),
+            ConsensusKind::PoS => std::sync::Arc::new(PoSDomainPlugin::new(plugin_engine)),
+            ConsensusKind::PoA => std::sync::Arc::new(PoADomainPlugin::new(plugin_engine)),
+            ConsensusKind::Bft => std::sync::Arc::new(BftDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Dag => std::sync::Arc::new(DagDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Poh => std::sync::Arc::new(PohDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Pospace => std::sync::Arc::new(PospaceDomainPlugin::new(plugin_engine)),
+            _ => continue,
+        };
         if let Err(e) = blockchain.plugin_registry.register(domain.id, plugin) {
             println!("Plugin registration failed (domain {}): {}", domain.id, e);
         }
@@ -2544,5 +2584,20 @@ mod tests {
         assert!(reason.contains(path_str));
         assert!(reason.contains("as validator keys"));
         assert!(reason.contains("as key pair"));
+    }
+
+    #[test]
+    fn worker_runtime_enforces_eight_mib_thread_stack() {
+        assert_eq!(super::WORKER_THREAD_STACK_BYTES, 8 * 1024 * 1024);
+        let rt = super::build_tokio_runtime().expect("tokio runtime builds with 8 MiB stack");
+        let out = rt.block_on(async {
+            tokio::spawn(async {
+                let buf = std::hint::black_box([0xA5u8; 512 * 1024]);
+                buf[0]
+            })
+            .await
+            .expect("worker task completes without stack overflow")
+        });
+        assert_eq!(out, 0xA5);
     }
 }

@@ -26,6 +26,9 @@ pub const MAX_REPLICAS_PER_OBJECT: usize = 16;
 /// Maximum unified objects tracked in one in-memory fabric snapshot.
 pub const MAX_FABRIC_OBJECTS: usize = 4_096;
 
+/// Maximum BNS `.bud` domain bindings tracked in one in-memory fabric snapshot.
+const MAX_BNS_BINDINGS: usize = 4_096;
+
 /// Decentralized storage network family integrated as a Budlum domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -459,8 +462,18 @@ impl UnifiedStorageFabric {
         digest: Hash32,
     ) -> Result<(), StorageFabricError> {
         let uri = UniversalContentUri::parse(&format!("bns://{bns_name}"))?;
+        if uri.sub_path.is_some() {
+            return Err(StorageFabricError::InvalidUri(String::from(
+                "BNS name binding must not include a sub-path",
+            )));
+        }
         if !self.objects.contains_key(&digest) {
             return Err(StorageFabricError::NotFound(hex::encode(digest)));
+        }
+        if !self.bns_bindings.contains_key(&uri.locator)
+            && self.bns_bindings.len() >= MAX_BNS_BINDINGS
+        {
+            return Err(StorageFabricError::FabricFull);
         }
         self.bns_bindings.insert(uri.locator, digest);
         Ok(())
@@ -919,5 +932,35 @@ mod tests {
             fabric.register_object(zero_rec),
             Err(StorageFabricError::InvalidMetadata(_))
         ));
+    }
+
+    #[test]
+    fn bind_bns_rejects_subpaths_and_enforces_binding_capacity() {
+        let mut fabric = UnifiedStorageFabric::new();
+        let mut rec = UnifiedContentRecord::from_bytes(b"budlum-site", "text/html");
+        let digest = rec.sha3_256_digest;
+        rec.replicas.push(StorageReplica {
+            network: StorageNetworkKind::Bud3,
+            domain_id: StorageNetworkKind::Bud3.default_domain_id(),
+            native_locator: hex::encode(digest),
+            verification: VerificationStrength::ErasureVerified,
+            available: true,
+            latency_ms: 4,
+        });
+        fabric.register_object(rec).unwrap();
+        assert!(fabric
+            .bind_bns_name("portal.bud/index.html", digest)
+            .is_err());
+
+        for idx in 0..MAX_BNS_BINDINGS {
+            fabric
+                .bind_bns_name(&format!("site{idx:04}.bud"), digest)
+                .unwrap();
+        }
+        assert!(matches!(
+            fabric.bind_bns_name("overflow.bud", digest),
+            Err(StorageFabricError::FabricFull)
+        ));
+        assert!(fabric.bind_bns_name("site0000.bud", digest).is_ok());
     }
 }

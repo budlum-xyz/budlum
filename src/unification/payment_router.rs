@@ -366,7 +366,8 @@ impl UniversalPaymentRouter {
 
         let mut remaining = intent.target_amount;
         let mut legs = Vec::new();
-        let mut used_balance_indices = BTreeSet::new();
+        let mut remaining_balances: Vec<u128> =
+            balances.iter().map(|b| b.available_amount).collect();
 
         // Pass 1: consume direct same-domain, same-asset liquidity first (zero spread).
         for (idx, bal) in balances.iter().enumerate() {
@@ -380,6 +381,9 @@ impl UniversalPaymentRouter {
                 continue;
             }
             let take = bal.available_amount.min(remaining);
+            if let Some(rem_bal) = remaining_balances.get_mut(idx) {
+                *rem_bal = rem_bal.saturating_sub(take);
+            }
             legs.push(SplitTenderLeg {
                 source_domain: bal.domain_id,
                 source_asset_id: bal.asset_id,
@@ -390,60 +394,93 @@ impl UniversalPaymentRouter {
                 direct_same_domain: true,
                 quote_id: None,
             });
-            used_balance_indices.insert(idx);
             remaining = remaining.saturating_sub(take);
         }
 
-        // Pass 2: draw across any other domains/tokens simultaneously via best valid quotes.
-        for (idx, bal) in balances.iter().enumerate() {
-            if remaining == 0 {
+        // Pass 2: canonical, caller-slice-order-independent greedy selection across all
+        // remaining balances and valid quotes (lowest `fee_bps` first, deterministic
+        // `(domain_id, asset_id, quote_id)` tie-breaker, allowing one balance to span
+        // multiple quotes up to `MAX_SPLIT_TENDER_LEGS`).
+        while remaining > 0 && legs.len() < MAX_SPLIT_TENDER_LEGS {
+            let mut best_step: Option<(usize, &DomainTokenBalance, &LiquidityQuote, u128, u128)> =
+                None;
+            for (idx, bal) in balances.iter().enumerate() {
+                if bal.domain_id == intent.target_domain && bal.asset_id == intent.target_asset_id {
+                    continue;
+                }
+                let rem_bal = remaining_balances.get(idx).copied().unwrap_or(0);
+                if rem_bal == 0 {
+                    continue;
+                }
+                let Some(best_quote) = select_best_quote(
+                    intent,
+                    bal,
+                    quotes,
+                    &remaining_quote_liquidity,
+                    now_unix_secs,
+                ) else {
+                    continue;
+                };
+                let quote_cap = remaining_quote_liquidity
+                    .get(&best_quote.quote_id)
+                    .copied()
+                    .unwrap_or(0);
+                let max_deliverable =
+                    max_target_from_source(rem_bal, best_quote.rate_scaled, best_quote.fee_bps)?
+                        .min(quote_cap);
+                if max_deliverable == 0 {
+                    continue;
+                }
+                let deliver = max_deliverable.min(remaining);
+                // Ceiling math guarantees a non-zero target delivery ALWAYS charges
+                // at least 1 base unit of source token (blocks rounding-to-zero drain).
+                let required_source = required_source_for_target(
+                    deliver,
+                    best_quote.rate_scaled,
+                    best_quote.fee_bps,
+                )?;
+                if required_source == 0 || required_source > rem_bal {
+                    continue;
+                }
+                let replace = match best_step {
+                    None => true,
+                    Some((_, cur_bal, cur_quote, _, _)) => {
+                        (
+                            best_quote.fee_bps,
+                            bal.domain_id,
+                            bal.asset_id,
+                            best_quote.quote_id,
+                        ) < (
+                            cur_quote.fee_bps,
+                            cur_bal.domain_id,
+                            cur_bal.asset_id,
+                            cur_quote.quote_id,
+                        )
+                    }
+                };
+                if replace {
+                    best_step = Some((idx, bal, best_quote, deliver, required_source));
+                }
+            }
+
+            let Some((win_idx, win_bal, win_quote, deliver, required_source)) = best_step else {
                 break;
-            }
-            if used_balance_indices.contains(&idx) || bal.available_amount == 0 {
-                continue;
-            }
-            let Some(best_quote) = select_best_quote(
-                intent,
-                bal,
-                quotes,
-                &remaining_quote_liquidity,
-                now_unix_secs,
-            ) else {
-                continue;
             };
-            let quote_cap = remaining_quote_liquidity
-                .get(&best_quote.quote_id)
-                .copied()
-                .unwrap_or(0);
-            let max_deliverable = max_target_from_source(
-                bal.available_amount,
-                best_quote.rate_scaled,
-                best_quote.fee_bps,
-            )?
-            .min(quote_cap);
-            if max_deliverable == 0 {
-                continue;
+            if let Some(rem_bal) = remaining_balances.get_mut(win_idx) {
+                *rem_bal = rem_bal.saturating_sub(required_source);
             }
-            let deliver = max_deliverable.min(remaining);
-            // Ceiling math guarantees a non-zero target delivery ALWAYS charges
-            // at least 1 base unit of source token (blocks rounding-to-zero drain).
-            let required_source =
-                required_source_for_target(deliver, best_quote.rate_scaled, best_quote.fee_bps)?;
-            if required_source == 0 || required_source > bal.available_amount {
-                continue;
-            }
-            if let Some(rem_cap) = remaining_quote_liquidity.get_mut(&best_quote.quote_id) {
+            if let Some(rem_cap) = remaining_quote_liquidity.get_mut(&win_quote.quote_id) {
                 *rem_cap = rem_cap.saturating_sub(deliver);
             }
             legs.push(SplitTenderLeg {
-                source_domain: bal.domain_id,
-                source_asset_id: bal.asset_id,
-                source_symbol: bal.symbol.clone(),
+                source_domain: win_bal.domain_id,
+                source_asset_id: win_bal.asset_id,
+                source_symbol: win_bal.symbol.clone(),
                 source_debited: required_source,
                 target_delivered: deliver,
-                fee_bps: best_quote.fee_bps,
+                fee_bps: win_quote.fee_bps,
                 direct_same_domain: false,
-                quote_id: Some(best_quote.quote_id),
+                quote_id: Some(win_quote.quote_id),
             });
             remaining = remaining.saturating_sub(deliver);
         }
@@ -517,19 +554,28 @@ impl UniversalPaymentRouter {
             return Err(PaymentError::InputLimitExceeded);
         }
         let receipt = Self::quote_payment(intent, balances, quotes, now_unix_secs)?;
-        // Pre-validate every debit into a provisional plan before mutating any balance.
-        let mut provisional: Vec<(usize, u128)> = Vec::with_capacity(receipt.legs.len());
+        // Pre-validate cumulative debits per balance index before mutating any balance
+        // (supports multiple legs drawing from the same source balance across quotes).
+        let mut cumulative_debits: BTreeMap<usize, u128> = BTreeMap::new();
         for leg in &receipt.legs {
-            let (idx, bal) = balances
+            let (idx, _) = balances
                 .iter()
                 .enumerate()
                 .find(|(_, b)| {
                     b.domain_id == leg.source_domain && b.asset_id == leg.source_asset_id
                 })
                 .ok_or(PaymentError::ArithmeticOverflow)?;
+            let entry = cumulative_debits.entry(idx).or_insert(0);
+            *entry = entry
+                .checked_add(leg.source_debited)
+                .ok_or(PaymentError::ArithmeticOverflow)?;
+        }
+        let mut provisional: Vec<(usize, u128)> = Vec::with_capacity(cumulative_debits.len());
+        for (idx, total_debited) in cumulative_debits {
+            let bal = balances.get(idx).ok_or(PaymentError::ArithmeticOverflow)?;
             let next_amount = bal
                 .available_amount
-                .checked_sub(leg.source_debited)
+                .checked_sub(total_debited)
                 .ok_or(PaymentError::ArithmeticOverflow)?;
             provisional.push((idx, next_amount));
         }
@@ -641,6 +687,15 @@ impl CrossDomainPosition {
     /// Returns [`LiquidationError`] if any oracle price is stale, zero, or
     /// overflows 256-bit intermediate math.
     pub fn health_factor_bps(&self, now_unix_secs: u64) -> Result<u128, LiquidationError> {
+        if self.debt_domain == 0 || self.collateral.len() > MAX_SPLIT_TENDER_LEGS {
+            return Err(LiquidationError::InvalidOraclePrice);
+        }
+        let mut seen_collateral: BTreeSet<(DomainId, Hash32)> = BTreeSet::new();
+        for col in &self.collateral {
+            if col.domain_id == 0 || !seen_collateral.insert((col.domain_id, col.asset_id)) {
+                return Err(LiquidationError::InvalidOraclePrice);
+            }
+        }
         if self.debt_amount == 0 {
             return Ok(u128::MAX);
         }
@@ -805,16 +860,21 @@ impl UniversalLiquidationCoordinator {
             if take_units == 0 {
                 continue;
             }
+            let actual_seized_usd = mul_div_floor(take_units, col.price_usd_scaled, RATE_SCALE)
+                .ok_or(LiquidationError::ArithmeticOverflow)?;
+            if actual_seized_usd == 0 {
+                continue;
+            }
             plan.push((
                 idx,
                 SeizedCollateralLeg {
                     domain_id: col.domain_id,
                     asset_id: col.asset_id,
                     amount_seized: take_units,
-                    value_usd_scaled: take_usd,
+                    value_usd_scaled: actual_seized_usd,
                 },
             ));
-            remaining_seize_usd = remaining_seize_usd.saturating_sub(take_usd);
+            remaining_seize_usd = remaining_seize_usd.saturating_sub(actual_seized_usd);
         }
 
         if remaining_seize_usd > 0 {
@@ -1179,5 +1239,154 @@ mod tests {
         ));
         assert_eq!(pos.debt_amount, 100_000);
         assert_eq!(pos.collateral[0].amount, 10_000);
+    }
+
+    #[test]
+    fn routing_is_order_independent_and_splits_single_balance_across_quotes() {
+        let usdc = [0x01; 32];
+        let bud = [0x02; 32];
+        let sol = [0x03; 32];
+        let intent = UniversalPaymentIntent {
+            payer_id: [0xA1; 32],
+            merchant_id: [0xB2; 32],
+            nonce: 42,
+            target_domain: 3,
+            target_asset_id: usdc,
+            target_amount: 100,
+            max_slippage_bps: 100,
+            deadline_unix_secs: 2_000,
+            invoice_hash: [0x77; 32],
+            rail: PaymentRail::OnChain,
+        };
+
+        // Reversing balance order must pick the exact same lower-fee route first.
+        let bal_ab = vec![
+            DomainTokenBalance {
+                domain_id: 1,
+                asset_id: bud,
+                symbol: String::from("BUD"),
+                available_amount: 100,
+            },
+            DomainTokenBalance {
+                domain_id: 4,
+                asset_id: sol,
+                symbol: String::from("SOL"),
+                available_amount: 100,
+            },
+        ];
+        let mut bal_ba = bal_ab.clone();
+        bal_ba.reverse();
+        let quotes = vec![
+            LiquidityQuote {
+                quote_id: [0x10; 32],
+                source_domain: 1,
+                source_asset_id: bud,
+                target_domain: 3,
+                target_asset_id: usdc,
+                rate_scaled: RATE_SCALE,
+                max_target_liquidity: 60,
+                fee_bps: 0,
+                valid_until_unix_secs: 2_500,
+            },
+            LiquidityQuote {
+                quote_id: [0x11; 32],
+                source_domain: 1,
+                source_asset_id: bud,
+                target_domain: 3,
+                target_asset_id: usdc,
+                rate_scaled: RATE_SCALE,
+                max_target_liquidity: 50,
+                fee_bps: 0,
+                valid_until_unix_secs: 2_500,
+            },
+            LiquidityQuote {
+                quote_id: [0x20; 32],
+                source_domain: 4,
+                source_asset_id: sol,
+                target_domain: 3,
+                target_asset_id: usdc,
+                rate_scaled: RATE_SCALE,
+                max_target_liquidity: 100,
+                fee_bps: 80,
+                valid_until_unix_secs: 2_500,
+            },
+        ];
+        let mut quotes_rev = quotes.clone();
+        quotes_rev.reverse();
+
+        let r1 = UniversalPaymentRouter::quote_payment(&intent, &bal_ab, &quotes, 1_500).unwrap();
+        let r2 =
+            UniversalPaymentRouter::quote_payment(&intent, &bal_ba, &quotes_rev, 1_500).unwrap();
+        assert_eq!(r1.receipt_hash, r2.receipt_hash);
+        assert_eq!(r1.legs, r2.legs);
+        // Both legs draw from the 0-bps BUD balance across Q1 (60) + Q2 (40), avoiding 80-bps SOL.
+        assert_eq!(r1.legs.len(), 2);
+        assert_eq!(r1.legs[0].target_delivered, 60);
+        assert_eq!(r1.legs[1].target_delivered, 40);
+
+        let mut settle_bals = bal_ba;
+        let mut router = UniversalPaymentRouter::new();
+        router
+            .settle_payment(&intent, &mut settle_bals, &quotes_rev, 1_500)
+            .unwrap();
+        assert_eq!(settle_bals[0].available_amount, 100); // SOL untouched
+        assert_eq!(settle_bals[1].available_amount, 0); // BUD cumulatively debited 60 + 40 = 100
+    }
+
+    #[test]
+    fn liquidation_blocks_duplicate_collateral_and_accounts_actual_truncated_seizure() {
+        let wbtc = CollateralAsset {
+            domain_id: 2,
+            asset_id: [0xB7; 32],
+            amount: 2,
+            price_usd_scaled: 3_500 * RATE_SCALE,
+            oracle_updated_unix_secs: 1_000,
+            liquidation_threshold_bps: 7_000,
+        };
+        let dup_pos = CrossDomainPosition {
+            position_id: [0xE1; 32],
+            debt_domain: 3,
+            debt_asset_id: [0x01; 32],
+            debt_amount: 10_000,
+            debt_price_usd_scaled: RATE_SCALE,
+            debt_oracle_updated_unix_secs: 1_000,
+            collateral: vec![wbtc.clone(), wbtc.clone()],
+        };
+        assert_eq!(
+            dup_pos.health_factor_bps(1_010),
+            Err(LiquidationError::InvalidOraclePrice)
+        );
+
+        // High-unit-price collateral truncates 5_000 USD -> 1 WBTC (3_500 USD); remaining
+        // 1_500 USD MUST carry over to USDC collateral rather than vanishing into bad debt.
+        let mut pos = CrossDomainPosition {
+            position_id: [0xE2; 32],
+            debt_domain: 3,
+            debt_asset_id: [0x01; 32],
+            debt_amount: 10_000,
+            debt_price_usd_scaled: RATE_SCALE,
+            debt_oracle_updated_unix_secs: 1_000,
+            collateral: vec![
+                wbtc,
+                CollateralAsset {
+                    domain_id: 4,
+                    asset_id: [0xCC; 32],
+                    amount: 2_000,
+                    price_usd_scaled: RATE_SCALE,
+                    oracle_updated_unix_secs: 1_000,
+                    liquidation_threshold_bps: 8_000,
+                },
+            ],
+        };
+        let receipt =
+            UniversalLiquidationCoordinator::execute_liquidation(&mut pos, 5_000, 0, 1_010)
+                .unwrap();
+        assert_eq!(receipt.seized_legs.len(), 2);
+        assert_eq!(receipt.seized_legs[0].amount_seized, 1);
+        assert_eq!(receipt.seized_legs[0].value_usd_scaled, 3_500);
+        assert_eq!(receipt.seized_legs[1].amount_seized, 1_500);
+        assert_eq!(receipt.seized_legs[1].value_usd_scaled, 1_500);
+        assert_eq!(pos.collateral[0].amount, 1);
+        assert_eq!(pos.collateral[1].amount, 500);
     }
 }
