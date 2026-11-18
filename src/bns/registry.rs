@@ -212,6 +212,9 @@ impl BnsRegistry {
             && !label.is_empty()
             && !label.starts_with('-')
             && !label.ends_with('-')
+            // Reject RFC 5891 ACE / Punycode labels (`xn--...` and any `??--...`
+            // reserved tag) to prevent homograph spoofing across .bud and gateway hosts.
+            && label.as_bytes().get(2..4) != Some(b"--")
             && label
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
@@ -244,6 +247,7 @@ impl BnsRegistry {
         if let Some(old) = self.names.insert(name.clone(), record) {
             self.expired_by_grace_end
                 .remove(&(grace_end_of(&old), name.clone()));
+            self.clear_primary_names_for_record(&name, &old);
         }
         self.expired_by_grace_end.insert((new_grace_end, name));
     }
@@ -274,12 +278,28 @@ impl BnsRegistry {
         Self::slot_mut(&mut self.names, &mut self.name_tree, name)
     }
 
+    fn clear_primary_names_for_record(&mut self, name: &str, record: &NameRecord) {
+        if self
+            .primary_names
+            .get(&record.owner)
+            .is_some_and(|n| n == name)
+        {
+            self.primary_names.remove(&record.owner);
+        }
+        if let Some(addr) = record.address {
+            if self.primary_names.get(&addr).is_some_and(|n| n == name) {
+                self.primary_names.remove(&addr);
+            }
+        }
+    }
+
     /// B13: delete `name` and its index row together.
     fn remove_record(&mut self, name: &str) -> Option<NameRecord> {
         let removed = self.names.remove(name)?;
         self.name_tree.touch(name);
         self.expired_by_grace_end
             .remove(&(grace_end_of(&removed), name.to_string()));
+        self.clear_primary_names_for_record(name, &removed);
         Some(removed)
     }
 
@@ -323,7 +343,9 @@ impl BnsRegistry {
                 .get(&name)
                 .is_some_and(|record| grace_end_of(record) == grace_end)
             {
-                self.names.remove(&name);
+                if let Some(record) = self.names.remove(&name) {
+                    self.clear_primary_names_for_record(&name, &record);
+                }
                 self.name_tree.touch(&name);
                 removed += 1;
             }
@@ -755,16 +777,10 @@ impl BnsRegistry {
     }
 
     /// Whether `label` is a valid subdomain label (`1..=32` lowercase ASCII
-    /// `[a-z0-9-]`, no leading or trailing `-`).
+    /// `[a-z0-9-]`, no leading or trailing `-`, no RFC 5891 ACE prefix).
     #[must_use]
     pub fn is_valid_sub_label(label: &str) -> bool {
-        let len = label.len();
-        (1..=32).contains(&len)
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-            && label
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        (1..=32).contains(&label.len()) && Self::is_valid_label(label)
     }
 
     /// Split a two-level `.bud` FQDN `<sub_label>.<label>.bud` into
@@ -1997,5 +2013,73 @@ mod tests {
             Err(BnsError::NameTaken)
         );
         assert_eq!(live.names.len(), live.max_names);
+    }
+
+    #[test]
+    fn punycode_and_rfc5891_ace_labels_are_rejected_for_names_and_subdomains() {
+        let mut reg = BnsRegistry::new();
+        let owner = Address([0x41; 32]);
+        // Cyrillic "apple" IDN homograph and generic RFC 5891 ACE prefix (positions 3-4 `--`).
+        for bad in ["xn--80ak6aa92e.bud", "xn--pple-43d.bud", "bq--test.bud"] {
+            assert!(!BnsRegistry::is_valid_name(bad), "{bad} must be invalid");
+            assert_eq!(
+                reg.register(bad.into(), owner, 0, 10),
+                Err(BnsError::InvalidName)
+            );
+        }
+        reg.register("apple.bud".into(), owner, 0, 10).unwrap();
+        for bad_sub in ["xn--80ak6aa92e", "xn--login-9ja", "ab--cd"] {
+            assert!(
+                !BnsRegistry::is_valid_sub_label(bad_sub),
+                "{bad_sub} must be invalid"
+            );
+            assert_eq!(
+                reg.register_subdomain("apple.bud", bad_sub.into(), owner, &owner, 0),
+                Err(BnsError::InvalidName)
+            );
+        }
+        // Single inner hyphens and non-ACE positions remain valid.
+        assert!(BnsRegistry::is_valid_name("a-b.bud"));
+        assert!(BnsRegistry::is_valid_name("abc-def.bud"));
+        assert!(BnsRegistry::is_valid_sub_label("v1-api"));
+    }
+
+    #[test]
+    fn prune_expired_and_reclaim_clear_dangling_primary_name_entries() {
+        let mut reg = BnsRegistry::new();
+        let empty_root = reg.root();
+        let alice = Address([0x51; 32]);
+        let target = Address([0x52; 32]);
+        let bob = Address([0x53; 32]);
+
+        reg.register("alice.bud".into(), alice, 0, 10).unwrap();
+        reg.set_primary_name(&alice, Some("alice.bud".into()), 0)
+            .unwrap();
+        reg.set_address("alice.bud", &alice, Some(target), None, 0)
+            .unwrap();
+        reg.set_primary_name(&target, Some("alice.bud".into()), 0)
+            .unwrap();
+        assert_eq!(reg.primary_names.len(), 2);
+
+        let after_grace = 10 + BnsRegistry::GRACE_PERIOD;
+        assert_eq!(reg.prune_expired(after_grace), 1);
+        assert!(
+            reg.primary_names.is_empty(),
+            "prune_expired must purge dangling primary_names state"
+        );
+        assert!(reg.is_empty());
+        assert_eq!(reg.root(), empty_root);
+
+        // Same invariant on third-party registration reclaim after grace close.
+        reg.register("ephemeral.bud".into(), alice, 0, 10).unwrap();
+        reg.set_primary_name(&alice, Some("ephemeral.bud".into()), 0)
+            .unwrap();
+        assert_eq!(reg.primary_names.len(), 1);
+        reg.register("ephemeral.bud".into(), bob, after_grace, 10)
+            .unwrap();
+        assert!(
+            !reg.primary_names.contains_key(&alice),
+            "reclaim_expired must clear the prior owner's primary_names pointer"
+        );
     }
 }

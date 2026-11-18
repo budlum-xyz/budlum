@@ -1439,6 +1439,14 @@ async fn async_main() {
     // block changes either. Startup reads them; it no longer rewrites them.
     let bootstrap_domains = blockchain.state.settlement.domains.domains();
     for domain in bootstrap_domains {
+        if domain.kind == ConsensusKind::Bft {
+            tracing::info!(
+                "BFT bootstrap domain {} ({:?}) - BFT finality adapter engaged",
+                domain.id,
+                domain.status
+            );
+            continue;
+        }
         if domain.kind == ConsensusKind::PoA {
             tracing::info!(
                 "PoA bootstrap domain {} registered with status {:?}; admission and finality are state-rooted",
@@ -1447,95 +1455,90 @@ async fn async_main() {
             );
         }
 
-        let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> =
-            match &domain.kind {
-                ConsensusKind::PoW => {
-                    let engine: Arc<dyn ConsensusEngine> = if consensus_type == ConsensusType::PoW {
-                        consensus.clone()
-                    } else {
-                        Arc::new(PoWEngine::calibrated(
-                            config.difficulty,
-                            config.network.slot_ms(),
-                        ))
-                    };
-                    std::sync::Arc::new(PoWDomainPlugin::new(engine))
+        let plugin_engine: Arc<dyn ConsensusEngine> = match &domain.kind {
+            ConsensusKind::PoW => {
+                if consensus_type == ConsensusType::PoW {
+                    consensus.clone()
+                } else {
+                    Arc::new(PoWEngine::calibrated(
+                        config.difficulty,
+                        config.network.slot_ms(),
+                    ))
                 }
-                ConsensusKind::PoS => {
-                    let engine: Arc<dyn ConsensusEngine> = if consensus_type == ConsensusType::PoS {
-                        consensus.clone()
-                    } else {
-                        Arc::new(PoSEngine::new(
-                            PoSConfig {
-                                min_stake: config.min_stake,
-                                epoch_length: network_params.epoch_len,
-                            },
-                            None,
-                        ))
-                    };
-                    std::sync::Arc::new(PoSDomainPlugin::new(engine))
-                }
-                ConsensusKind::Bft => {
-                    tracing::info!(
-                        "BFT bootstrap domain {} ({:?}) - registering BftDomainPlugin",
-                        domain.id,
-                        domain.status
-                    );
-                    let engine: Arc<dyn ConsensusEngine> = Arc::new(PoSEngine::new(
+            }
+            ConsensusKind::PoS => {
+                if consensus_type == ConsensusType::PoS {
+                    consensus.clone()
+                } else {
+                    Arc::new(PoSEngine::new(
                         PoSConfig {
                             min_stake: config.min_stake,
                             epoch_length: network_params.epoch_len,
                         },
                         None,
-                    ));
-                    std::sync::Arc::new(BftDomainPlugin::new(engine))
+                    ))
                 }
-                ConsensusKind::PoA => {
-                    let engine: Arc<dyn ConsensusEngine> = if consensus_type == ConsensusType::PoA {
-                        consensus.clone()
-                    } else {
-                        Arc::new(PoAEngine::new(
-                            PoAConfig {
-                                validators_file: Some(config.validators_file.clone()),
-                                domain: domain.id,
-                                ..Default::default()
-                            },
-                            None,
-                        ))
-                    };
-                    std::sync::Arc::new(PoADomainPlugin::new(engine))
+            }
+            ConsensusKind::PoA => {
+                if consensus_type == ConsensusType::PoA {
+                    consensus.clone()
+                } else {
+                    Arc::new(PoAEngine::new(
+                        PoAConfig {
+                            validators_file: Some(config.validators_file.clone()),
+                            domain: domain.id,
+                            ..Default::default()
+                        },
+                        None,
+                    ))
                 }
-                ConsensusKind::Dag => {
-                    let engine: Arc<dyn ConsensusEngine> =
-                        Arc::new(DagEngine::new(DAGConfig::default()));
-                    std::sync::Arc::new(DagDomainPlugin::new(engine))
+            }
+            ConsensusKind::Dag => Arc::new(DagEngine::new(DAGConfig::default())),
+            ConsensusKind::Poh => Arc::new(PohEngine::new(PohConfig::default())),
+            ConsensusKind::Pospace => Arc::new(PoSpaceEngine::new(PoSpaceConfig::default())),
+            _ => continue,
+        };
+
+        let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> = match &domain
+            .kind
+        {
+            ConsensusKind::PoW => {
+                // A PoW domain registered under the Bitcoin SPV adapter must
+                // get a plugin that verifies Bitcoin's chainwork, not the
+                // bounded header-chain client; the fork of the two is per
+                // `domain.finality_adapter`, the same field the settlement
+                // dispatch checks.
+                if domain.finality_adapter == budlum_core::domain::BITCOIN_SPV_ADAPTER {
+                    std::sync::Arc::new(PoWDomainPlugin::new_bitcoin_spv(plugin_engine))
+                } else {
+                    std::sync::Arc::new(PoWDomainPlugin::new(plugin_engine))
                 }
-                ConsensusKind::Poh => {
-                    let engine: Arc<dyn ConsensusEngine> =
-                        Arc::new(PohEngine::new(PohConfig::default()));
-                    std::sync::Arc::new(PohDomainPlugin::new(engine))
-                }
-                ConsensusKind::Pospace => {
-                    let engine: Arc<dyn ConsensusEngine> =
-                        Arc::new(PoSpaceEngine::new(PoSpaceConfig::default()));
-                    std::sync::Arc::new(PospaceDomainPlugin::new(engine))
-                }
-                _ => continue,
-            };
+            }
+            ConsensusKind::PoS => std::sync::Arc::new(PoSDomainPlugin::new(plugin_engine)),
+            ConsensusKind::PoA => std::sync::Arc::new(PoADomainPlugin::new(plugin_engine)),
+            ConsensusKind::Bft => std::sync::Arc::new(BftDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Dag => std::sync::Arc::new(DagDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Poh => std::sync::Arc::new(PohDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Pospace => std::sync::Arc::new(PospaceDomainPlugin::new(plugin_engine)),
+            _ => continue,
+        };
         if let Err(e) = blockchain.plugin_registry.register(domain.id, plugin) {
-            tracing::error!(
-                "Fatal: domain plugin registration failed for domain {}: {e}",
+            // A domain with no plugin is a domain whose block rules nothing
+            // enforces; continuing to serve it plugin-less is never the
+            // safer option. Registration failure is fatal at bootstrap, not
+            // a log line someone has to notice.
+            eprintln!(
+                "Fatal: plugin registration failed for domain {}: {e}; refusing to start a \
+                 node that cannot validate a registered domain",
                 domain.id
             );
             std::process::exit(1);
         }
     }
-    if !blockchain.plugin_registry.is_empty() {
-        tracing::info!(
-            "Registered {} consensus domain plugin(s): {:?}",
-            blockchain.plugin_registry.len(),
-            blockchain.plugin_registry.domain_ids()
-        );
-    }
+    tracing::info!(
+        registered_plugins = blockchain.plugin_registry.domain_ids().len(),
+        "Domain consensus plugin registry initialized"
+    );
 
     for validator in &poa_validators {
         // A restart must not reset a stored authority to stake 1, active and
