@@ -685,7 +685,7 @@ mod tests {
         assert_eq!(validated.object_commitment, old_key);
 
         let mut bns = BnsRegistry::new();
-        bns.register("replaced".to_string(), Address(owner), 1, 100)
+        bns.register("replaced.bud".to_string(), Address(owner), 1, 100)
             .unwrap();
         Bud3BnsResolver::set_bud3_content(
             &mut bns,
