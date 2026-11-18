@@ -9,10 +9,10 @@
 
 name: Diff surface
 
+# Diagnostic-only manual runner. Disabled on PR push so stacked branches
+# do not run a redundant 120m uncached cargo test --lib alongside ci.yml.
 on:
-  pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses]
-    types: [opened, synchronize, reopened]
+  workflow_dispatch:
 
 # One run per pull request. Without this a push did not cancel the run of the
 # commit before it, so every push of a busy stacked branch left another copy of

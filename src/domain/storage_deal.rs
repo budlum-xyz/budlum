@@ -2165,6 +2165,7 @@ impl StorageRegistry {
                     max_committed_chunks: 1000,
                     challenge_interval: 10,
                     min_operator_bond: 1_000_000,
+                    require_merkle_proof: false,
                 },
                 Some(proof),
                 Some([0x42u8; 32]),
@@ -2893,20 +2894,33 @@ impl StorageRegistry {
         merkle_proof: Option<Vec<u8>>,
         storage_root: Option<Hash32>,
     ) -> Result<u64, StorageError> {
-        // === B.U.D.: Merkle envelope MANDATORY + VALIDATE ===
-        // Mainnet Proof-of-Storage claims remain fail-closed until the
-        // 64-depth VerifyMerkle soundness gate is complete. The devnet gate
-        // Still requires a proof envelope plus storage_root so later full
-        // Verification has a transaction-bound witness to consume.
-        let proof_bytes = merkle_proof
-            .as_ref()
-            .ok_or(StorageError::MerkleProofRequired)?;
-        let root = storage_root.ok_or(StorageError::MerkleProofRequired)?;
-
-        // Validate proof format: must deserialize as a valid ProofEnvelope.
-        // Full STARK verification deferred to nodes with prover capability;
-        // The chain validates structural integrity at deal-open time.
-        Self::validate_merkle_proof_format(proof_bytes, &root)?;
+        // === B.U.D.: Merkle envelope, gated by the network's activation ===
+        // The gate is one decision, read once, from the domain parameters. It
+        // used to be three answers: the profiles said closed
+        // (`[features] verify_merkle = false`), startup printed the value as
+        // "not applied", and this function required the envelope anyway, so a
+        // client that followed the profile was refused. See B-0049.
+        //
+        // Closed gate: the envelope is optional. A deal that carries none opens
+        // and records `merkle_proof: None`, which says "no proof claimed".
+        // Open gate: the envelope and the root are both mandatory, and the
+        // envelope is still only format-checked until the 64-depth verifier
+        // exists. Requiring a blob we cannot verify protects nothing, which is
+        // the second thing the old shape got wrong.
+        match (
+            domain_params.require_merkle_proof,
+            merkle_proof.clone(),
+            storage_root,
+        ) {
+            (true, None, _) | (true, _, None) => {
+                return Err(StorageError::MerkleProofRequired);
+            }
+            (_, Some(proof_bytes), Some(root)) => {
+                Self::validate_merkle_proof_format(&proof_bytes, &root)?;
+            }
+            // Closed gate and no envelope: nothing claimed, nothing to check.
+            (false, None, _) | (false, _, None) => {}
+        }
         if start_epoch >= end_epoch {
             return Err(StorageError::InvalidEpochRange {
                 start: start_epoch,
@@ -5776,6 +5790,7 @@ mod tests {
             max_committed_chunks: 1000,
             challenge_interval: 10,
             min_operator_bond: 1_000_000,
+            require_merkle_proof: false,
         }
     }
     fn operator() -> Address {
@@ -6669,6 +6684,113 @@ mod tests {
             fee_per_byte_epoch: u64::MAX,
         };
         assert_eq!(econ.total_fee(u64::MAX, u64::MAX), u64::MAX);
+    }
+
+    /// A closed `VerifyMerkle` gate means a deal opens without an envelope.
+    ///
+    /// Before B-0049 every profile set `[features] verify_merkle = false`,
+    /// startup printed the value as "not applied", and `open_deal` required the
+    /// envelope anyway. A client that followed the profile was refused by the
+    /// chain with `MerkleProofRequired` and had no way to find out why.
+    #[test]
+    fn a_closed_verify_merkle_gate_opens_a_deal_without_an_envelope() {
+        let mut reg = StorageRegistry::new();
+        let m = good_manifest();
+        let shard = &m.shards[0];
+        let id = reg
+            .open_deal(
+                42,
+                &m,
+                shard.shard_id,
+                operator(),
+                0,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                None,
+                None,
+            )
+            .expect("a closed gate must not demand a proof it cannot check");
+        let deal = reg.get_deal(id).expect("deal exists");
+        assert!(
+            deal.merkle_proof.is_none() && deal.storage_root.is_none(),
+            "a deal opened with no envelope must record that it claims no proof"
+        );
+    }
+
+    /// An open gate makes the envelope mandatory, in both directions.
+    ///
+    /// A proof without a root, a root without a proof and a deal with neither
+    /// are all refused, so "the gate is open" cannot be satisfied by half an
+    /// envelope.
+    #[test]
+    fn an_open_verify_merkle_gate_refuses_a_half_or_missing_envelope() {
+        let m = good_manifest();
+        let shard = &m.shards[0];
+        let open_params = StorageDomainParams {
+            require_merkle_proof: true,
+            ..params()
+        };
+        let cases: [(&str, Option<Vec<u8>>, Option<Hash32>); 3] = [
+            ("no proof and no root", None, None),
+            ("a proof without a root", Some(valid_merkle_proof()), None),
+            ("a root without a proof", None, Some([0x42u8; 32])),
+        ];
+        for (label, proof, root) in cases {
+            let mut reg = StorageRegistry::new();
+            let err = reg
+                .open_deal(
+                    42,
+                    &m,
+                    shard.shard_id,
+                    operator(),
+                    0,
+                    10,
+                    20,
+                    good_econ(),
+                    &open_params,
+                    proof,
+                    root,
+                )
+                .expect_err("an open gate must refuse an incomplete envelope");
+            assert!(
+                matches!(err, StorageError::MerkleProofRequired),
+                "{label} must be refused as MerkleProofRequired, got {err:?}"
+            );
+        }
+    }
+
+    /// A supplied envelope is still format-checked when the gate is closed, so
+    /// closing the gate does not turn off validation for deals that claim one.
+    #[test]
+    fn a_closed_gate_still_refuses_a_malformed_envelope() {
+        let m = good_manifest();
+        let shard = &m.shards[0];
+        let closed_params = StorageDomainParams {
+            require_merkle_proof: false,
+            ..params()
+        };
+        let mut reg = StorageRegistry::new();
+        let err = reg
+            .open_deal(
+                42,
+                &m,
+                shard.shard_id,
+                operator(),
+                0,
+                10,
+                20,
+                good_econ(),
+                &closed_params,
+                Some(vec![0u8; 8]),
+                Some([0x42u8; 32]),
+            )
+            .expect_err("a short envelope is refused whatever the gate says");
+        assert!(
+            matches!(err, StorageError::InvalidMerkleProof(_)),
+            "expected InvalidMerkleProof, got {err:?}"
+        );
     }
 
     /// The deal carries the size it was priced at. Reading the manifest again
@@ -8577,8 +8699,14 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_missing_merkle_proof() {
-        // Gate (9d82f61): None must always yield MerkleProofRequired.
+        // Gate (9d82f61): with the gate open, None must yield
+        // MerkleProofRequired. The gate is what decides whether the envelope is
+        // mandatory, so the lock states the gate it is testing.
         // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
+        let open_params = StorageDomainParams {
+            require_merkle_proof: true,
+            ..params()
+        };
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -8592,7 +8720,7 @@ mod tests {
                 100,
                 200,
                 good_econ(),
-                &params(),
+                &open_params,
                 None,
                 None,
             )
@@ -8602,8 +8730,15 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_malformed_merkle_proof() {
-        // Format gate: a blob that cannot be deserialized must yield InvalidMerkleProof.
+        // Format gate: a blob that cannot be deserialized must yield
+        // InvalidMerkleProof. A malformed envelope is refused whichever way the
+        // gate points, and this fixture opens it so the format check is what
+        // the test sees.
         // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
+        let open_params = StorageDomainParams {
+            require_merkle_proof: true,
+            ..params()
+        };
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -8617,7 +8752,7 @@ mod tests {
                 100,
                 200,
                 good_econ(),
-                &params(),
+                &open_params,
                 Some(vec![0u8; 64]), // kasitli bozuk zarf: deserialize edilemez
                 Some([0x42u8; 32]),
             )
@@ -10966,6 +11101,7 @@ mod demand_driven_replication_tests {
                 max_committed_chunks: 1000,
                 challenge_interval: 10,
                 min_operator_bond: 1_000_000,
+                require_merkle_proof: false,
             }
         }
         fn good_econ() -> StorageEconomicsParams {

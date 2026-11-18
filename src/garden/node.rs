@@ -22,8 +22,9 @@
 
 use super::invite::{GardenInvite, MAX_INVITE_PEERS};
 use super::net::{
-    self, announced_address, peer_id_of, validator_dial_address, GardenGossip, GardenNet,
-    GardenRequest, GardenResponse, NetCommand, NetEvent, MAX_GOSSIP_BATCH, MAX_SYNC_COMMITS,
+    self, announced_address, peer_id_of, validator_dial_address, BudgetedFrame, FramePermits,
+    GardenGossip, GardenNet, GardenRequest, GardenResponse, NetCommand, NetEvent, MAX_GOSSIP_BATCH,
+    MAX_SYNC_COMMITS,
 };
 use super::settlement::{GardenBudlumLink, GardenDomainView};
 use super::state::{quorum, GardenLedger, GardenObject, GardenState};
@@ -325,7 +326,7 @@ struct Fetch {
 
 struct Relay {
     requester: PeerId,
-    channel: Option<ResponseChannel<Vec<u8>>>,
+    channel: Option<ResponseChannel<BudgetedFrame>>,
     outstanding: usize,
     content_id: Hash32,
 }
@@ -617,7 +618,7 @@ struct DepositDone {
     charged_len: u64,
     already_published_for_me: bool,
     outcome: Result<bool, String>,
-    channel: ResponseChannel<Vec<u8>>,
+    channel: ResponseChannel<BudgetedFrame>,
 }
 
 /// True when a gap of `gap` between two ticks means the node itself stood
@@ -1038,6 +1039,7 @@ async fn bootstrap(
                 peer,
                 tag: TAG_HELLO,
                 response,
+                ..
             } => match response {
                 Ok(GardenResponse::Welcome {
                     genesis: shown,
@@ -1082,6 +1084,7 @@ async fn bootstrap(
                 peer,
                 tag: TAG_SYNC,
                 response,
+                ..
             } if Some(peer) == source => {
                 let Some(chain) = ledger.as_mut() else {
                     continue;
@@ -1334,7 +1337,7 @@ impl Node {
         let _ = self.net.send(NetCommand::Send { peer, request, tag }).await;
     }
 
-    async fn respond(&self, channel: ResponseChannel<Vec<u8>>, response: GardenResponse) {
+    async fn respond(&self, channel: ResponseChannel<BudgetedFrame>, response: GardenResponse) {
         let _ = self
             .net
             .send(NetCommand::Respond { channel, response })
@@ -1565,12 +1568,17 @@ impl Node {
                 peer,
                 request,
                 channel,
-            } => self.on_request(peer, request, channel).await,
+                budget,
+            } => self.on_request(peer, request, channel, budget).await,
             NetEvent::Response {
                 peer,
                 tag,
                 response,
-            } => self.on_response(peer, tag, response).await,
+                budget,
+            } => {
+                self.on_response(peer, tag, response).await;
+                drop(budget);
+            }
         }
     }
 
@@ -1689,7 +1697,8 @@ impl Node {
         &mut self,
         peer: PeerId,
         request: GardenRequest,
-        channel: ResponseChannel<Vec<u8>>,
+        channel: ResponseChannel<BudgetedFrame>,
+        frame_budget: FramePermits,
     ) {
         if let GardenRequest::Hello {
             chain_id,
@@ -2051,7 +2060,10 @@ impl Node {
                         let tx = self.deposit_tx.clone();
                         tokio::spawn(async move {
                             let outcome = tokio::task::spawn_blocking(move || {
-                                GardenContentStore::write_object_file_blocking(path, bytes)
+                                let res =
+                                    GardenContentStore::write_object_file_blocking(path, bytes);
+                                drop(frame_budget);
+                                res
                             })
                             .await
                             .unwrap_or_else(|e| Err(format!("garden object write panicked: {e}")));

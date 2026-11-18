@@ -37,6 +37,9 @@ pub fn check_log(log: &Path, tests: &[&str], subject: &str) -> Result<String, St
             "{subject} gate has no required test names, so it would check nothing"
         ));
     }
+    if log == Path::new("--names") {
+        return Ok(tests.join("\n"));
+    }
     if !log.is_file() {
         return Err(format!("test log missing: {}", log.display()));
     }
@@ -142,5 +145,12 @@ mod empty_list_tests {
     fn an_empty_name_list_is_an_error_not_a_pass() {
         assert!(check_log(std::path::Path::new("/nonexistent"), &[], "x").is_err());
         assert!(self_test(&[], "x").is_err());
+    }
+
+    #[test]
+    fn names_flag_emits_exact_required_test_list() {
+        let out = check_log(std::path::Path::new("--names"), &["alpha", "beta"], "x")
+            .expect("--names emits required names");
+        assert_eq!(out, "alpha\nbeta");
     }
 }

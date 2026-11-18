@@ -252,9 +252,35 @@ enum CodecScope {
     Connection,
 }
 
+/// Owned semaphore permits keeping a received Garden frame charged against both
+/// its per-connection and swarm-wide byte budgets until the consumer finishes
+/// processing (and for `PutObject`, writing) the frame payload.
+#[derive(Debug, Default)]
+pub(super) struct FramePermits {
+    _conn: Vec<tokio::sync::OwnedSemaphorePermit>,
+    _swarm: Vec<tokio::sync::OwnedSemaphorePermit>,
+}
+
+/// Bounded wire frame paired with the in-flight byte permits charged while
+/// reading it from the socket. Outbound frames carry empty permits.
+#[derive(Debug, Default)]
+pub(super) struct BudgetedFrame {
+    bytes: Vec<u8>,
+    permits: FramePermits,
+}
+
+impl BudgetedFrame {
+    fn outbound(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            permits: FramePermits::default(),
+        }
+    }
+}
+
 /// The codec: one bounded frame per request and per response, with both a
-/// per-connection share and a swarm-wide byte-granular budget for buffered
-/// request and response frames.
+/// per-connection share and a swarm-wide byte-granular budget held across read,
+/// queueing, and consumer processing.
 #[derive(Debug)]
 struct GardenCodec {
     scope: CodecScope,
@@ -311,7 +337,9 @@ impl Default for GardenCodec {
 
 /// Read up to `limit` total bytes (including any already-read `prefix`),
 /// charging `conn_budget` first and `swarm_budget` second in
-/// `LARGE_FRAME_UNIT_BYTES` increments strictly for bytes actually received.
+/// `LARGE_FRAME_UNIT_BYTES` increments strictly for bytes actually received and
+/// returning the permits inside [`BudgetedFrame`] so the budget remains held
+/// until the queued frame is consumed or dropped.
 async fn read_bounded_budgeted<T>(
     io: &mut T,
     prefix: &[u8],
@@ -319,7 +347,7 @@ async fn read_bounded_budgeted<T>(
     conn_budget: Option<&Arc<Semaphore>>,
     swarm_budget: Option<&Arc<Semaphore>>,
     budget_err: &'static str,
-) -> std::io::Result<Vec<u8>>
+) -> std::io::Result<BudgetedFrame>
 where
     T: AsyncRead + Unpin + Send,
 {
@@ -390,7 +418,13 @@ where
         };
         buf.extend_from_slice(slice);
     }
-    Ok(buf)
+    Ok(BudgetedFrame {
+        bytes: buf,
+        permits: FramePermits {
+            _conn: conn_charged,
+            _swarm: swarm_charged,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -398,15 +432,21 @@ async fn read_bounded<T>(io: &mut T, limit: usize) -> std::io::Result<Vec<u8>>
 where
     T: AsyncRead + Unpin + Send,
 {
-    read_bounded_budgeted(io, &[], limit, None, None, "").await
+    Ok(read_bounded_budgeted(io, &[], limit, None, None, "")
+        .await?
+        .bytes)
 }
 
 impl request_response::Codec for GardenCodec {
     type Protocol = StreamProtocol;
-    type Request = Vec<u8>;
-    type Response = Vec<u8>;
+    type Request = BudgetedFrame;
+    type Response = BudgetedFrame;
 
-    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> std::io::Result<Vec<u8>>
+    async fn read_request<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<BudgetedFrame>
     where
         T: AsyncRead + Unpin + Send,
     {
@@ -456,7 +496,11 @@ impl request_response::Codec for GardenCodec {
         .await
     }
 
-    async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T) -> std::io::Result<Vec<u8>>
+    async fn read_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<BudgetedFrame>
     where
         T: AsyncRead + Unpin + Send,
     {
@@ -475,12 +519,12 @@ impl request_response::Codec for GardenCodec {
         &mut self,
         _: &Self::Protocol,
         io: &mut T,
-        req: Vec<u8>,
+        req: BudgetedFrame,
     ) -> std::io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        io.write_all(&req).await?;
+        io.write_all(&req.bytes).await?;
         io.close().await
     }
 
@@ -488,12 +532,12 @@ impl request_response::Codec for GardenCodec {
         &mut self,
         _: &Self::Protocol,
         io: &mut T,
-        resp: Vec<u8>,
+        resp: BudgetedFrame,
     ) -> std::io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        io.write_all(&resp).await?;
+        io.write_all(&resp.bytes).await?;
         io.close().await
     }
 }
@@ -663,7 +707,7 @@ struct GardenBehaviour {
 
 /// What the node asks of its swarm.
 #[derive(Debug)]
-pub enum NetCommand {
+pub(super) enum NetCommand {
     Dial(Multiaddr),
     /// Mark a peer as admitted after it proved possession of the invite.
     Admit(PeerId),
@@ -675,7 +719,7 @@ pub enum NetCommand {
         tag: u64,
     },
     Respond {
-        channel: request_response::ResponseChannel<Vec<u8>>,
+        channel: request_response::ResponseChannel<BudgetedFrame>,
         response: GardenResponse,
     },
     /// Close every connection to a peer.
@@ -685,7 +729,7 @@ pub enum NetCommand {
 
 /// What the swarm tells the node.
 #[derive(Debug)]
-pub enum NetEvent {
+pub(super) enum NetEvent {
     Connected(PeerId),
     Disconnected(PeerId),
     DialFailed {
@@ -695,18 +739,20 @@ pub enum NetEvent {
     Request {
         peer: PeerId,
         request: GardenRequest,
-        channel: request_response::ResponseChannel<Vec<u8>>,
+        channel: request_response::ResponseChannel<BudgetedFrame>,
+        budget: FramePermits,
     },
     Response {
         peer: PeerId,
         tag: u64,
         response: Result<GardenResponse, String>,
+        budget: FramePermits,
     },
 }
 
 /// A running Garden swarm.
 #[derive(Debug)]
-pub struct GardenNet {
+pub(super) struct GardenNet {
     pub commands: mpsc::Sender<NetCommand>,
     pub events: mpsc::Receiver<NetEvent>,
     /// Source prefix observed for each currently connected peer.
@@ -727,16 +773,28 @@ pub fn is_unspecified(address: &Multiaddr) -> bool {
 
 /// Open a swarm with the validator key as its identity and listen on
 /// `listen`.
-pub async fn start(secret_key: [u8; 32], listen: &str) -> Result<GardenNet, String> {
-    start_with(secret_key, listen, MAX_CONNECTIONS).await
+pub(super) async fn start(secret_key: [u8; 32], listen: &str) -> Result<GardenNet, String> {
+    start_with(
+        secret_key,
+        listen,
+        MAX_CONNECTIONS,
+        libp2p::dns::tokio::Transport::system,
+    )
+    .await
 }
 
 /// [`start`] with the number of connections the swarm keeps.
-async fn start_with(
+async fn start_with<F>(
     secret_key: [u8; 32],
     listen: &str,
     max_connections: u32,
-) -> Result<GardenNet, String> {
+    build_dns: F,
+) -> Result<GardenNet, String>
+where
+    F: FnOnce(
+        tcp::tokio::Transport,
+    ) -> std::io::Result<libp2p::dns::tokio::Transport<tcp::tokio::Transport>>,
+{
     let listen: Multiaddr = listen
         .parse()
         .map_err(|e| format!("garden listen address is not a multiaddr: {e}"))?;
@@ -745,13 +803,26 @@ async fn start_with(
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(identity)
         .with_tokio()
         .with_other_transport(|key| {
+            let noise_cfg = noise::Config::new(key)?;
             let tcp_transport = tcp::tokio::Transport::new(tcp::Config::default());
-            let dns_transport = libp2p::dns::tokio::Transport::system(tcp_transport)?;
-            let upgraded = dns_transport
-                .upgrade(libp2p::core::upgrade::Version::V1Lazy)
-                .authenticate(noise::Config::new(key)?)
-                .multiplex(yamux::Config::default())
-                .boxed();
+            let upgraded = match build_dns(tcp_transport) {
+                Ok(dns) => dns
+                    .upgrade(libp2p::core::upgrade::Version::V1Lazy)
+                    .authenticate(noise_cfg)
+                    .multiplex(yamux::Config::default())
+                    .boxed(),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "garden system DNS resolver unavailable; falling back to direct IP/TCP transport"
+                    );
+                    tcp::tokio::Transport::new(tcp::Config::default())
+                        .upgrade(libp2p::core::upgrade::Version::V1Lazy)
+                        .authenticate(noise_cfg)
+                        .multiplex(yamux::Config::default())
+                        .boxed()
+                }
+            };
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
                 libp2p::core::transport::timeout::TransportTimeout::new(
                     upgraded,
@@ -867,7 +938,10 @@ async fn start_with(
                     Some(NetCommand::Send { peer, request, tag }) => match bincode::serialized_size(&request) {
                         Ok(size) if size <= MAX_REQUEST_BYTES as u64 => match bincode::serialize(&request) {
                             Ok(bytes) => {
-                                let id = swarm.behaviour_mut().rpc.send_request(&peer, bytes);
+                                let id = swarm
+                                    .behaviour_mut()
+                                    .rpc
+                                    .send_request(&peer, BudgetedFrame::outbound(bytes));
                                 tags.insert(id, tag);
                             }
                             Err(e) => {
@@ -876,6 +950,7 @@ async fn start_with(
                                     peer,
                                     tag,
                                     response: Err(format!("garden request cannot be encoded: {e}")),
+                                    budget: FramePermits::default(),
                                 });
                             }
                         },
@@ -891,6 +966,7 @@ async fn start_with(
                                 response: Err(format!(
                                     "garden request exceeds {MAX_REQUEST_BYTES} bytes"
                                 )),
+                                budget: FramePermits::default(),
                             });
                         }
                         Err(e) => {
@@ -899,6 +975,7 @@ async fn start_with(
                                 peer,
                                 tag,
                                 response: Err(format!("garden request cannot be encoded: {e}")),
+                                budget: FramePermits::default(),
                             });
                         }
                     },
@@ -924,7 +1001,10 @@ async fn start_with(
                             }
                         };
                         if let Some(bytes) = bytes {
-                            let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                            let _ = swarm
+                                .behaviour_mut()
+                                .rpc
+                                .send_response(channel, BudgetedFrame::outbound(bytes));
                         }
                     }
                     Some(NetCommand::Disconnect(peer)) => {
@@ -976,6 +1056,10 @@ async fn start_with(
                             request_response::Event::Message { peer, message, .. },
                         )) => match message {
                             request_response::Message::Request { request, channel, .. } => {
+                                let BudgetedFrame {
+                                    bytes: request,
+                                    permits: budget,
+                                } = request;
                                 if unadmitted_in.contains(&peer) && !admitted.contains(&peer) {
                                     let attempts = unadmitted_attempts.entry(peer).or_insert(0);
                                     *attempts = attempts.saturating_add(1);
@@ -983,7 +1067,10 @@ async fn start_with(
                                     if too_many_from_peer {
                                         let refusal = GardenResponse::Refused("too many greetings".into());
                                         if let Ok(bytes) = bincode::serialize(&refusal) {
-                                            let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                            let _ = swarm
+                                                .behaviour_mut()
+                                                .rpc
+                                                .send_response(channel, BudgetedFrame::outbound(bytes));
                                         }
                                         unadmitted_in.retain(|p| *p != peer);
                                         unadmitted_attempts.remove(&peer);
@@ -992,7 +1079,10 @@ async fn start_with(
                                     } else if request.len() > MAX_UNADMITTED_REQUEST_BYTES {
                                         let refusal = GardenResponse::Refused("show the invite first".into());
                                         if let Ok(bytes) = bincode::serialize(&refusal) {
-                                            let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                            let _ = swarm
+                                                .behaviour_mut()
+                                                .rpc
+                                                .send_response(channel, BudgetedFrame::outbound(bytes));
                                         }
                                         unadmitted_in.retain(|p| *p != peer);
                                         unadmitted_attempts.remove(&peer);
@@ -1018,32 +1108,47 @@ async fn start_with(
                                         if throttled {
                                             let refusal = GardenResponse::Refused("too many greetings".into());
                                             if let Ok(bytes) = bincode::serialize(&refusal) {
-                                                let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                                let _ = swarm
+                                                    .behaviour_mut()
+                                                    .rpc
+                                                    .send_response(channel, BudgetedFrame::outbound(bytes));
                                             }
                                             None
                                         } else {
-                                            match crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(&request, MAX_UNADMITTED_REQUEST_BYTES) {
+                                            match crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(
+                                                &request,
+                                                MAX_UNADMITTED_REQUEST_BYTES,
+                                            ) {
                                                 Ok(request @ GardenRequest::Hello { .. }) => {
-                                                    Some(NetEvent::Request { peer, request, channel })
+                                                    Some(NetEvent::Request { peer, request, channel, budget })
                                                 }
                                                 Ok(_) => {
                                                     let refusal = GardenResponse::Refused("show the invite first".into());
                                                     if let Ok(bytes) = bincode::serialize(&refusal) {
-                                                        let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                                        let _ = swarm
+                                                            .behaviour_mut()
+                                                            .rpc
+                                                            .send_response(channel, BudgetedFrame::outbound(bytes));
                                                     }
                                                     None
                                                 }
                                                 Err(_) => {
                                                     let refusal = GardenResponse::Refused("malformed request".into());
                                                     if let Ok(bytes) = bincode::serialize(&refusal) {
-                                                        let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                                        let _ = swarm
+                                                            .behaviour_mut()
+                                                            .rpc
+                                                            .send_response(channel, BudgetedFrame::outbound(bytes));
                                                     }
                                                     None
                                                 }
                                             }
                                         }
                                     }
-                                } else if let Ok(request) = crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(&request, MAX_REQUEST_BYTES) {
+                                } else if let Ok(request) = crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(
+                                    &request,
+                                    MAX_REQUEST_BYTES,
+                                ) {
                                     // Rate-limit repeated greetings and admission polls from
                                     // already-admitted peers so one member cannot spend the
                                     // validator loop on invite signature checks and genesis copies.
@@ -1061,29 +1166,43 @@ async fn start_with(
                                         if entry.1 > MAX_HELLOS_PER_PEER_PER_SEC {
                                             let refusal = GardenResponse::Refused("too many greetings".into());
                                             if let Ok(bytes) = bincode::serialize(&refusal) {
-                                                let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                                let _ = swarm
+                                                    .behaviour_mut()
+                                                    .rpc
+                                                    .send_response(channel, BudgetedFrame::outbound(bytes));
                                             }
                                             None
                                         } else {
-                                            Some(NetEvent::Request { peer, request, channel })
+                                            Some(NetEvent::Request { peer, request, channel, budget })
                                         }
                                     } else {
-                                        Some(NetEvent::Request { peer, request, channel })
+                                        Some(NetEvent::Request { peer, request, channel, budget })
                                     }
                                 } else {
                                     let refusal = GardenResponse::Refused("malformed request".into());
                                     if let Ok(bytes) = bincode::serialize(&refusal) {
-                                        let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                        let _ = swarm
+                                            .behaviour_mut()
+                                            .rpc
+                                            .send_response(channel, BudgetedFrame::outbound(bytes));
                                     }
                                     None
                                 }
                             }
                             request_response::Message::Response { request_id, response } => {
+                                let BudgetedFrame {
+                                    bytes: response,
+                                    permits: budget,
+                                } = response;
                                 tags.remove(&request_id).map(|tag| NetEvent::Response {
                                     peer,
                                     tag,
-                                    response: crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(&response, MAX_RESPONSE_BYTES)
-                                        .map_err(|_| "malformed response".to_string()),
+                                    response: crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
+                                        &response,
+                                        MAX_RESPONSE_BYTES,
+                                    )
+                                    .map_err(|_| "malformed response".to_string()),
+                                    budget,
                                 })
                             }
                         },
@@ -1093,6 +1212,7 @@ async fn start_with(
                             peer,
                             tag,
                             response: Err(error.to_string()),
+                            budget: FramePermits::default(),
                         }),
                         _ => None,
                     };
@@ -1228,9 +1348,14 @@ mod tests {
     async fn garden_inbound_peers_leave_room_for_the_dials_of_this_node() {
         let a = KeyPair::generate().unwrap();
         let b = KeyPair::generate().unwrap();
-        let mut net_a = start_with(a.private_key_bytes(), "/ip4/127.0.0.1/tcp/0", 6)
-            .await
-            .unwrap();
+        let mut net_a = start_with(
+            a.private_key_bytes(),
+            "/ip4/127.0.0.1/tcp/0",
+            6,
+            libp2p::dns::tokio::Transport::system,
+        )
+        .await
+        .unwrap();
         let net_b = start(b.private_key_bytes(), "/ip4/127.0.0.1/tcp/0")
             .await
             .unwrap();
@@ -1571,9 +1696,14 @@ mod tests {
     async fn garden_half_open_tcp_sockets_time_out_and_free_pending_slots() {
         let host = KeyPair::generate().unwrap();
         let joiner = KeyPair::generate().unwrap();
-        let net_host = start_with(host.private_key_bytes(), "/ip4/127.0.0.1/tcp/0", 24)
-            .await
-            .unwrap();
+        let net_host = start_with(
+            host.private_key_bytes(),
+            "/ip4/127.0.0.1/tcp/0",
+            24,
+            libp2p::dns::tokio::Transport::system,
+        )
+        .await
+        .unwrap();
         let mut net_join = start(joiner.private_key_bytes(), "/ip4/127.0.0.1/tcp/0")
             .await
             .unwrap();
@@ -1701,7 +1831,12 @@ mod tests {
         assert_eq!(codec.response_frames.available_permits(), full_resp_units);
         let mut ok_cursor = Cursor::new(vec![0xBBu8; 16]);
         let read_back = codec.read_response(&proto, &mut ok_cursor).await.unwrap();
-        assert_eq!(read_back, vec![0xBBu8; 16]);
+        assert_eq!(read_back.bytes, vec![0xBBu8; 16]);
+        assert_eq!(
+            codec.response_frames.available_permits(),
+            full_resp_units - 1
+        );
+        drop(read_back);
         assert_eq!(codec.response_frames.available_permits(), full_resp_units);
     }
 
@@ -1830,39 +1965,6 @@ mod tests {
     }
 
     #[test]
-    fn garden_codec_substream_clones_share_connection_frame_budget() {
-        // `Behaviour` holds the Swarm prototype and clones once per connection.
-        let swarm_proto = GardenCodec::default();
-        let first_conn = swarm_proto.clone();
-        let second_conn = swarm_proto.clone();
-        assert_eq!(swarm_proto.scope, CodecScope::Swarm);
-
-        // `Handler` clones the per-connection codec once per substream.
-        let primary_stream = first_conn.clone();
-        let sibling_stream = first_conn.clone();
-        assert_eq!(first_conn.scope, CodecScope::Connection);
-
-        let per_conn_req =
-            u32::try_from(MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES).unwrap();
-        let _held = primary_stream
-            .conn_large_frames
-            .try_acquire_many_owned(per_conn_req)
-            .expect("primary substream acquires connection budget");
-
-        // A second substream on the same connection MUST share connection A's
-        // semaphore rather than minting a fresh per-connection budget.
-        assert!(sibling_stream.conn_large_frames.try_acquire().is_err());
-
-        // Substreams on another connection remain completely isolated.
-        let other_stream = second_conn.clone();
-        assert_eq!(second_conn.scope, CodecScope::Connection);
-        assert!(other_stream
-            .conn_large_frames
-            .try_acquire_many_owned(per_conn_req)
-            .is_ok());
-    }
-
-    #[test]
     fn source_key_groups_public_prefixes_and_detects_loopback() {
         let pub_a: Multiaddr = "/ip4/198.51.100.10/tcp/4001".parse().unwrap();
         let pub_b: Multiaddr = "/ip4/198.51.100.250/tcp/4002".parse().unwrap();
@@ -1875,5 +1977,137 @@ mod tests {
         assert!(!k_a.is_loopback());
         assert!(source_key(&loop4).unwrap().is_loopback());
         assert!(source_key(&loop6).unwrap().is_loopback());
+    }
+
+    #[test]
+    fn garden_codec_substream_clones_share_connection_frame_budget() {
+        // `Behaviour` holds the swarm prototype and clones once per connection;
+        // `Handler` then clones each per-connection codec once per substream.
+        let swarm_proto = GardenCodec::default();
+        let conn_a = swarm_proto.clone();
+        let conn_b = swarm_proto.clone();
+
+        let stream_a1 = conn_a.clone();
+        let stream_a2 = conn_a.clone();
+
+        let per_conn_req =
+            u32::try_from(MAX_CONN_LARGE_FRAME_BYTES_IN_FLIGHT / LARGE_FRAME_UNIT_BYTES).unwrap();
+        let _held = stream_a1
+            .conn_large_frames
+            .try_acquire_many_owned(per_conn_req)
+            .expect("first substream acquires connection A budget");
+        assert!(
+            stream_a2.conn_large_frames.try_acquire().is_err(),
+            "sibling substream on connection A must share connection A frame budget"
+        );
+        assert!(
+            conn_b
+                .clone()
+                .conn_large_frames
+                .try_acquire_many_owned(per_conn_req)
+                .is_ok(),
+            "substream on independent connection B retains its own share"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_frame_holds_connection_and_swarm_budget_until_dropped() {
+        let conn_sem = Arc::new(Semaphore::new(2));
+        let swarm_sem = Arc::new(Semaphore::new(3));
+        let payload = vec![0xA5u8; LARGE_FRAME_UNIT_BYTES * 2];
+        let mut cursor = futures::io::Cursor::new(payload.clone());
+
+        let queued_frame = read_bounded_budgeted(
+            &mut cursor,
+            &[],
+            MAX_REQUEST_BYTES,
+            Some(&conn_sem),
+            Some(&swarm_sem),
+            "budget full",
+        )
+        .await
+        .expect("frame within budget succeeds");
+
+        // While `queued_frame` remains buffered in the handler/channel/node,
+        // both the per-connection and swarm semaphores must stay charged.
+        assert_eq!(
+            conn_sem.available_permits(),
+            0,
+            "buffered frame must hold its per-connection permits until consumed"
+        );
+        assert_eq!(
+            swarm_sem.available_permits(),
+            1,
+            "buffered frame must hold its swarm permits until consumed"
+        );
+
+        let mut second = futures::io::Cursor::new(vec![0x5Au8; LARGE_FRAME_UNIT_BYTES]);
+        let denied = read_bounded_budgeted(
+            &mut second,
+            &[],
+            MAX_REQUEST_BYTES,
+            Some(&conn_sem),
+            Some(&swarm_sem),
+            "budget full",
+        )
+        .await;
+        assert!(
+            denied.is_err(),
+            "concurrent read exceeding held connection budget must fail closed"
+        );
+
+        drop(queued_frame);
+        assert_eq!(conn_sem.available_permits(), 2);
+        assert_eq!(swarm_sem.available_permits(), 3);
+    }
+
+    #[tokio::test]
+    async fn garden_starts_and_connects_over_ip_without_system_dns() {
+        let missing_dns = |_: tcp::tokio::Transport| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "missing /etc/resolv.conf",
+            ))
+        };
+        let mut host = start_with(
+            [0x31u8; 32],
+            "/ip4/127.0.0.1/tcp/0",
+            MAX_CONNECTIONS,
+            missing_dns,
+        )
+        .await
+        .expect("host swarm falls back to IP/TCP when system DNS is absent");
+        let peer = start_with(
+            [0x32u8; 32],
+            "/ip4/127.0.0.1/tcp/0",
+            MAX_CONNECTIONS,
+            missing_dns,
+        )
+        .await
+        .expect("peer swarm falls back to IP/TCP when system DNS is absent");
+        let host_addr = host.listen.clone();
+        peer.commands
+            .send(NetCommand::Dial(host_addr))
+            .await
+            .expect("send dial");
+        let connected = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(host.events.recv().await, Some(NetEvent::Connected(_))) {
+                    return true;
+                }
+            }
+        })
+        .await
+        .expect("loopback IP connection completes without DNS");
+        assert!(connected);
+        let _ = peer.commands.send(NetCommand::Shutdown).await;
+        let _ = host.commands.send(NetCommand::Shutdown).await;
+
+        // Also exercise the public `start()` entrypoint directly (used inside
+        // isolated DNS-less mount namespaces during end-to-end verification).
+        let live = start([0x33u8; 32], "/ip4/127.0.0.1/tcp/0")
+            .await
+            .expect("public start succeeds with or without /etc/resolv.conf");
+        let _ = live.commands.send(NetCommand::Shutdown).await;
     }
 }

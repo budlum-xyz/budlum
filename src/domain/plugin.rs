@@ -3,9 +3,9 @@ use crate::core::account::AccountState;
 use crate::core::block::Block;
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::finality_adapter::{
-    block_finality_proof_hash, empty_event_root, BftFinalityAdapter, DagFinalityAdapter,
-    DomainFinalityAdapter, PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter,
-    PohFinalityAdapter, PospaceFinalityAdapter, ZkFinalityAdapter,
+    block_finality_proof_hash, empty_event_root, BftFinalityAdapter, BitcoinSpvFinalityAdapter,
+    DagFinalityAdapter, DomainFinalityAdapter, PoAFinalityAdapter, PoSFinalityAdapter,
+    PoWHeaderChainFinalityAdapter, PohFinalityAdapter, PospaceFinalityAdapter, ZkFinalityAdapter,
 };
 use crate::domain::types::{
     ConsensusDomain, ConsensusKind, DomainCommitment, DomainId, DomainStatus, Hash32,
@@ -88,14 +88,25 @@ pub trait ConsensusDomainPlugin: Send + Sync {
 
 pub struct PoWDomainPlugin {
     consensus: Arc<dyn ConsensusEngine>,
-    finality: PoWHeaderChainFinalityAdapter,
+    finality: Box<dyn DomainFinalityAdapter>,
 }
 
 impl PoWDomainPlugin {
+    /// PoW plugin backed by the bounded Budlum header-chain light client.
     pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
         Self {
             consensus,
-            finality: PoWHeaderChainFinalityAdapter,
+            finality: Box::new(PoWHeaderChainFinalityAdapter),
+        }
+    }
+
+    /// PoW plugin backed by the Bitcoin SPV finality adapter: SHA256d headers,
+    /// compact bits, chainwork. This is the plugin a node registers for a PoW
+    /// domain whose `finality_adapter` is `bitcoin-spv-v1`.
+    pub fn new_bitcoin_spv(consensus: Arc<dyn ConsensusEngine>) -> Self {
+        Self {
+            consensus,
+            finality: Box::new(BitcoinSpvFinalityAdapter),
         }
     }
 }
@@ -110,7 +121,7 @@ impl ConsensusDomainPlugin for PoWDomainPlugin {
     }
 
     fn finality_adapter(&self) -> &dyn DomainFinalityAdapter {
-        &self.finality
+        self.finality.as_ref()
     }
 }
 

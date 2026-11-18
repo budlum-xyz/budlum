@@ -71,6 +71,21 @@ pub struct StorageDomainParams {
     /// Satisfy the protocol-level `MIN_DOMAIN_OPERATOR_BOND` from
     /// `domain::registry`.
     pub min_operator_bond: u64,
+    /// Whether a deal opened under this domain must carry a `VerifyMerkle`
+    /// proof envelope and a `storage_root`.
+    ///
+    /// This is the domain's statement of the network activation schedule, not a
+    /// per-deal choice: `false` (the default, and the value every checked-in
+    /// profile implies) means the gate is closed, so a deal opens without a
+    /// proof and records that it opened without one. `true` means the envelope
+    /// is mandatory.
+    ///
+    /// The flag exists because three places used to disagree: the profiles set
+    /// `[features] verify_merkle = false`, startup printed that the requested
+    /// value was "not applied", and the deal-open path demanded the envelope
+    /// regardless. A deal path that ignores the gate is not closed.
+    #[serde(default)]
+    pub require_merkle_proof: bool,
 }
 
 impl StorageDomainParams {
@@ -122,6 +137,7 @@ impl Default for StorageDomainParams {
             max_committed_chunks: 1_000_000,
             challenge_interval: 100,
             min_operator_bond: 1_000_000,
+            require_merkle_proof: false,
         }
     }
 }
@@ -164,6 +180,7 @@ mod tests {
             max_committed_chunks: 1_000_000,
             challenge_interval: 100,
             min_operator_bond: 1_000_000,
+            require_merkle_proof: false,
         }
     }
 

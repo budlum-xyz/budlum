@@ -1502,7 +1502,18 @@ async fn async_main() {
         let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> = match &domain
             .kind
         {
-            ConsensusKind::PoW => std::sync::Arc::new(PoWDomainPlugin::new(plugin_engine)),
+            ConsensusKind::PoW => {
+                // A PoW domain registered under the Bitcoin SPV adapter must
+                // get a plugin that verifies Bitcoin's chainwork, not the
+                // bounded header-chain client; the fork of the two is per
+                // `domain.finality_adapter`, the same field the settlement
+                // dispatch checks.
+                if domain.finality_adapter == budlum_core::domain::BITCOIN_SPV_ADAPTER {
+                    std::sync::Arc::new(PoWDomainPlugin::new_bitcoin_spv(plugin_engine))
+                } else {
+                    std::sync::Arc::new(PoWDomainPlugin::new(plugin_engine))
+                }
+            }
             ConsensusKind::PoS => std::sync::Arc::new(PoSDomainPlugin::new(plugin_engine)),
             ConsensusKind::PoA => std::sync::Arc::new(PoADomainPlugin::new(plugin_engine)),
             ConsensusKind::Bft => std::sync::Arc::new(BftDomainPlugin::new(plugin_engine)),
@@ -1512,7 +1523,16 @@ async fn async_main() {
             _ => continue,
         };
         if let Err(e) = blockchain.plugin_registry.register(domain.id, plugin) {
-            println!("Plugin registration failed (domain {}): {}", domain.id, e);
+            // A domain with no plugin is a domain whose block rules nothing
+            // enforces; continuing to serve it plugin-less is never the
+            // safer option. Registration failure is fatal at bootstrap, not
+            // a log line someone has to notice.
+            eprintln!(
+                "Fatal: plugin registration failed for domain {}: {e}; refusing to start a \
+                 node that cannot validate a registered domain",
+                domain.id
+            );
+            std::process::exit(1);
         }
     }
 

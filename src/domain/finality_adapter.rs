@@ -5017,6 +5017,7 @@ mod tests {
             5,
             crate::domain::ConsensusKind::StorageAttestation(crate::domain::StorageDomainParams {
                 min_operator_bond: 100,
+                require_merkle_proof: false,
                 chunk_size: 1024,
                 challenge_interval: 10,
                 ..Default::default()

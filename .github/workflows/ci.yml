@@ -9,7 +9,7 @@ on:
     branches: [main]
   pull_request:
     # Run on the normal protected bases and on stacked continuation bases.
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
   # A manual run on a snapshot ref (a branch or a tag that names one commit).
   # Its concurrency group is the snapshot ref, so a push to a stacked branch
   # cannot cancel it, and a head gets one complete result.
@@ -1260,7 +1260,8 @@ jobs:
       - name:  named invariant tests
         run: |
           set -euo pipefail
-          cargo test --lib 2>&1 | tee /tmp/economy-invariants.txt
+          readarray -t NAMES < <(cargo run -q --release --manifest-path xtask/gates/Cargo.toml -- economy-invariants --names)
+          cargo test --lib -- "${NAMES[@]}" 2>&1 | tee /tmp/economy-invariants.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- economy-invariants /tmp/economy-invariants.txt
 
   fork-choice-gate:
@@ -1305,7 +1306,8 @@ jobs:
       - name:  fork-choice tests
         run: |
           set -euo pipefail
-          cargo test --lib 2>&1 | tee /tmp/fork-choice-gate.txt
+          readarray -t NAMES < <(cargo run -q --release --manifest-path xtask/gates/Cargo.toml -- fork-choice --names)
+          cargo test --lib -- "${NAMES[@]}" 2>&1 | tee /tmp/fork-choice-gate.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- fork-choice /tmp/fork-choice-gate.txt
 
   storage-provider-gate:
@@ -1356,7 +1358,8 @@ jobs:
       - name:  StorageProvider tests
         run: |
           set -euo pipefail
-          cargo test --lib 2>&1 | tee /tmp/storage-provider-gate.txt
+          readarray -t NAMES < <(cargo run -q --release --manifest-path xtask/gates/Cargo.toml -- storage-provider --names)
+          cargo test --lib -- "${NAMES[@]}" 2>&1 | tee /tmp/storage-provider-gate.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-provider /tmp/storage-provider-gate.txt
 
   node-classification-gate:
@@ -1456,9 +1459,8 @@ jobs:
       - name:  network hardening tests
         run: |
           set -euo pipefail
-          cargo test --lib 2>&1 | tee /tmp/network-hardening-gate.txt
-          cargo test --lib peer_rate_limit_security_profile 2>&1 | tee -a /tmp/network-hardening-gate.txt
-          cargo test --lib h5_ 2>&1 | tee -a /tmp/network-hardening-gate.txt
+          readarray -t NAMES < <(cargo run -q --release --manifest-path xtask/gates/Cargo.toml -- network-hardening --names)
+          cargo test --lib -- "${NAMES[@]}" 2>&1 | tee /tmp/network-hardening-gate.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- network-hardening /tmp/network-hardening-gate.txt
 
 
@@ -2222,48 +2224,68 @@ jobs:
           retention-days: 90
 
   cargo-deny:
-    # Every committed lockfile graph is checked in its own matrix step.
-    name: Cargo Deny (${{ matrix.name }})
+    # Every committed lockfile graph is checked sequentially inside one job so
+    # all 14 manifests are audited without fanning out 14 separate runner VMs.
+    name: Cargo Deny (all 14 manifests)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      # Fifteen lockfile graphs on one shared pool. Left uncapped this job and
-      # `license-compliance` queue thirty-one runners ahead of the gates that
-      # decide the pull request, and a stacked head then waits hours for a
-      # check that has nothing to say about its diff (measured on PR #126,
-      # where the Semver Check job sat `queued` for three hours behind them).
-      # A cap changes the order, never the verdict: every graph still runs.
-      max-parallel: 4
-      matrix:
-        include:
-          # The root policy moved to .quality/deny.toml, so it has to be named
-          # explicitly; budzero keeps its own deny.toml next to its manifest,
-          # which cargo-deny discovers on its own.
-          - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
-          - { name: bud, manifest: "bud/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny-fuzz.toml" }
-          - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: budlum-explorer, manifest: "crates/budlum-explorer/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: note-packing, manifest: "crates/note-packing/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: budlum-types, manifest: "crates/budlum-types/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: mobile-core, manifest: "mobile/core/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: mobile-ffi, manifest: "mobile/ffi/Cargo.toml", config: "--config .quality/deny-mobile-ffi.toml" }
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: cargo deny check (advisories, bans, licenses, sources)
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: cargo-deny-tool
+      - name: cargo deny check root (advisories, bans, licenses, sources)
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
-          manifest-path: ${{ matrix.manifest }}
-          arguments: --all-features ${{ matrix.config }}
+          manifest-path: ./Cargo.toml
+          arguments: --all-features --config .quality/deny.toml
           command: check
+      - name: Ensure cargo-deny CLI is available
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-deny >/dev/null 2>&1; then
+            cargo install --locked --version 0.20.2 cargo-deny
+          fi
+          cargo deny --version
+      - name: cargo deny check remaining 13 manifests
+        run: |
+          set -euo pipefail
+          entries=(
+            "budzero|budzero/Cargo.toml|"
+            "bud|bud/Cargo.toml|--config .quality/deny.toml"
+            "fuzz|fuzz/Cargo.toml|--config .quality/deny-fuzz.toml"
+            "ai-inference|crates/ai-inference/Cargo.toml|--config .quality/deny.toml"
+            "bpqs|crates/bpqs/Cargo.toml|--config .quality/deny.toml"
+            "budlum-explorer|crates/budlum-explorer/Cargo.toml|--config .quality/deny.toml"
+            "note-packing|crates/note-packing/Cargo.toml|--config .quality/deny.toml"
+            "wallet-core|crates/wallet-core/Cargo.toml|--config .quality/deny.toml"
+            "xtask-gates|xtask/gates/Cargo.toml|--config .quality/deny.toml"
+            "xtask-tools|xtask/tools/Cargo.toml|--config .quality/deny.toml"
+            "budlum-types|crates/budlum-types/Cargo.toml|--config .quality/deny.toml"
+            "mobile-core|mobile/core/Cargo.toml|--config .quality/deny.toml"
+            "mobile-ffi|mobile/ffi/Cargo.toml|--config .quality/deny-mobile-ffi.toml"
+          )
+          overall=0
+          for entry in "${entries[@]}"; do
+            IFS='|' read -r name manifest config <<< "$entry"
+            echo "=== cargo deny check: $name ($manifest) ==="
+            set +e
+            # shellcheck disable=SC2086
+            cargo deny --all-features --manifest-path "$manifest" $config check
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::cargo deny check failed for $name ($manifest) with exit $rc"
+              overall=1
+            fi
+          done
+          exit "$overall"
 
   license-compliance:
     # Dependency licence compatibility, kept as its own job on purpose.
@@ -2272,37 +2294,22 @@ jobs:
     # four sections, but a failure there surfaces as one red "Cargo Deny" check
     # and the reason has to be dug out of the log. Licence compatibility is a
     # legal-exposure question rather than a hygiene one, so it gets a check
-    # that says in its own name what broke.
-    #
-    # This does not replace or weaken the combined run: both stay required.
+    # that says in its own name what broke. Checking all 14 manifests inside
+    # one job installs cargo-deny once instead of repeating 14 installs.
     name: License Compliance (dependency licences)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      # Same reason as `cargo-deny`: a fifteen-entry matrix that fans out at
-      # once starves the pull-request gates. Every manifest is still checked.
-      max-parallel: 4
-      matrix:
-        include:
-          - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
-          - { name: bud, manifest: "bud/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny-fuzz.toml" }
-          - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: budlum-explorer, manifest: "crates/budlum-explorer/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: note-packing, manifest: "crates/note-packing/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: budlum-types, manifest: "crates/budlum-types/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: mobile-core, manifest: "mobile/core/Cargo.toml", config: "--config .quality/deny.toml" }
-          - { name: mobile-ffi, manifest: "mobile/ffi/Cargo.toml", config: "--config .quality/deny-mobile-ffi.toml" }
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: license-compliance-cargo-deny
       - name: Install cargo-deny (pinned)
         run: cargo install --locked --version 0.20.2 cargo-deny
 
@@ -2314,17 +2321,8 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/lic-canary
           printf '[licenses]\nallow = []\nconfidence-threshold = 0.8\n' > /tmp/lic-canary/deny.toml
-          # `>/dev/null 2>&1` made this canary assert only that cargo-deny
-          # exited non-zero - and it does that for a malformed config, a
-          # manifest it cannot read, or a version whose CLI moved. In all of
-          # those the canary printed "rejected as expected" while proving
-          # nothing about licences. Same defect class as the --all-features
-          # canary in the Core job. The rejection reason is read instead:
-          # cargo-deny reports an unlicensed/denied crate as a `licenses`
-          # diagnostic, and anything else means the probe failed for its own
-          # reasons.
           set +e
-          cargo deny --manifest-path "${{ matrix.manifest }}" \
+          cargo deny --manifest-path "./Cargo.toml" \
             --config /tmp/lic-canary/deny.toml check licenses > /tmp/lic-canary.log 2>&1
           canary_status=$?
           set -e
@@ -2339,11 +2337,40 @@ jobs:
           fi
           echo "Canary rejected as expected; the gate evaluates licences."
 
-      - name: cargo deny check licenses
+      - name: Check licences across all 14 manifests
         run: |
           set -euo pipefail
-          cargo deny --all-features --manifest-path "${{ matrix.manifest }}" \
-            ${{ matrix.config }} check licenses
+          entries=(
+            "root|./Cargo.toml|--config .quality/deny.toml"
+            "budzero|budzero/Cargo.toml|"
+            "bud|bud/Cargo.toml|--config .quality/deny.toml"
+            "fuzz|fuzz/Cargo.toml|--config .quality/deny-fuzz.toml"
+            "ai-inference|crates/ai-inference/Cargo.toml|--config .quality/deny.toml"
+            "bpqs|crates/bpqs/Cargo.toml|--config .quality/deny.toml"
+            "budlum-explorer|crates/budlum-explorer/Cargo.toml|--config .quality/deny.toml"
+            "note-packing|crates/note-packing/Cargo.toml|--config .quality/deny.toml"
+            "wallet-core|crates/wallet-core/Cargo.toml|--config .quality/deny.toml"
+            "xtask-gates|xtask/gates/Cargo.toml|--config .quality/deny.toml"
+            "xtask-tools|xtask/tools/Cargo.toml|--config .quality/deny.toml"
+            "budlum-types|crates/budlum-types/Cargo.toml|--config .quality/deny.toml"
+            "mobile-core|mobile/core/Cargo.toml|--config .quality/deny.toml"
+            "mobile-ffi|mobile/ffi/Cargo.toml|--config .quality/deny-mobile-ffi.toml"
+          )
+          overall=0
+          for entry in "${entries[@]}"; do
+            IFS='|' read -r name manifest config <<< "$entry"
+            echo "=== license check: $name ($manifest) ==="
+            set +e
+            # shellcheck disable=SC2086
+            cargo deny --all-features --manifest-path "$manifest" $config check licenses
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::license compliance failed for $name ($manifest) with exit $rc"
+              overall=1
+            fi
+          done
+          exit "$overall"
 
       # Inventory for the audit trail: what each dependency is licensed under,
       # not merely whether the run passed.
@@ -2351,29 +2378,42 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          # The licence VERDICT is the gate step above. This is the inventory,
-          # and an inventory that silently prints nothing is worse than no
-          # inventory: an empty code block reads as "no third-party licences"
-          # when it actually means `cargo deny list` died. The output is
-          # captured, the exit code is published with it, and emptiness is
-          # treated as the tooling failure it is.
-          set +e
-          cargo deny --all-features --manifest-path "${{ matrix.manifest }}" \
-            ${{ matrix.config }} list > /tmp/deny-list.log 2>&1
-          status=$?
-          set -e
-          {
-            echo "### Dependency licences - ${{ matrix.name }}"
-            echo ""
-            echo '```'
-            cut -c1-200 /tmp/deny-list.log
-            echo '```'
-            echo "(cargo deny list exit: $status)"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ ! -s /tmp/deny-list.log ]; then
-            echo "::error::cargo deny list (${{ matrix.name }}) exited $status and produced no inventory - an empty licence list is a missing measurement, not a clean tree."
-            exit 1
-          fi
+          entries=(
+            "root|./Cargo.toml|--config .quality/deny.toml"
+            "budzero|budzero/Cargo.toml|"
+            "bud|bud/Cargo.toml|--config .quality/deny.toml"
+            "fuzz|fuzz/Cargo.toml|--config .quality/deny-fuzz.toml"
+            "ai-inference|crates/ai-inference/Cargo.toml|--config .quality/deny.toml"
+            "bpqs|crates/bpqs/Cargo.toml|--config .quality/deny.toml"
+            "budlum-explorer|crates/budlum-explorer/Cargo.toml|--config .quality/deny.toml"
+            "note-packing|crates/note-packing/Cargo.toml|--config .quality/deny.toml"
+            "wallet-core|crates/wallet-core/Cargo.toml|--config .quality/deny.toml"
+            "xtask-gates|xtask/gates/Cargo.toml|--config .quality/deny.toml"
+            "xtask-tools|xtask/tools/Cargo.toml|--config .quality/deny.toml"
+            "budlum-types|crates/budlum-types/Cargo.toml|--config .quality/deny.toml"
+            "mobile-core|mobile/core/Cargo.toml|--config .quality/deny.toml"
+            "mobile-ffi|mobile/ffi/Cargo.toml|--config .quality/deny-mobile-ffi.toml"
+          )
+          for entry in "${entries[@]}"; do
+            IFS='|' read -r name manifest config <<< "$entry"
+            set +e
+            # shellcheck disable=SC2086
+            cargo deny --all-features --manifest-path "$manifest" $config list > /tmp/deny-list.log 2>&1
+            status=$?
+            set -e
+            {
+              echo "### Dependency licences - $name"
+              echo ""
+              echo '```'
+              cut -c1-200 /tmp/deny-list.log
+              echo '```'
+              echo "(cargo deny list exit: $status)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ ! -s /tmp/deny-list.log ]; then
+              echo "::error::cargo deny list ($name) exited $status and produced no inventory - an empty licence list is a missing measurement, not a clean tree."
+              exit 1
+            fi
+          done
 
   fuzz-quick:
     #  + : mevcut target'lar + 3 yeni (consensus/relayer/zk).
