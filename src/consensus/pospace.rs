@@ -19,6 +19,9 @@ use subtle::ConstantTimeEq;
 
 #[cfg(test)]
 const MAX_POSPACE_PLOTS: usize = 4_096;
+/// Maximum credible capacity credited to a single plot (1 PiB) so forged
+/// `u64::MAX` witnesses cannot dominate fork choice.
+const MAX_PLOT_SIZE_BYTES: u64 = 1_u64 << 50;
 const POSPACE_WITNESS_MAGIC: &[u8; 8] = b"BDLMSPC1";
 const POSPACE_WITNESS_LEN: usize = 8 + 32 + 32 + 8;
 
@@ -303,9 +306,9 @@ impl ConsensusEngine for PoSpaceEngine {
         }
 
         let (plot_id, challenge, size_bytes, response) = decode_pospace_witness(block)?;
-        if size_bytes < self.config.min_plot_size_bytes {
+        if size_bytes < self.config.min_plot_size_bytes || size_bytes > MAX_PLOT_SIZE_BYTES {
             return Err(ConsensusError(format!(
-                "PoSpace proof plot size {size_bytes} is below minimum {}",
+                "PoSpace proof plot size {size_bytes} outside permitted range [{}, {MAX_PLOT_SIZE_BYTES}]",
                 self.config.min_plot_size_bytes
             )));
         }
@@ -384,24 +387,57 @@ impl ConsensusEngine for PoSpaceEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
-        // Derive score strictly from verified space proofs committed inside the
-        // candidate chain itself (never from engine-global mutable plot totals).
+        // Derive score strictly from verified, hash-valid, contiguously linked
+        // space proofs committed inside the candidate chain itself.
+        if chain.is_empty() {
+            return 0;
+        }
+        let plots_guard = self.plots.read().ok();
+        let mut proven_capacity = 0u128;
+        let mut prev: Option<&Block> = None;
+        for block in chain {
+            if block.hash != block.calculate_hash() {
+                return 0;
+            }
+            if let Some(parent) = prev {
+                if block.index != parent.index.saturating_add(1)
+                    || block.previous_hash != parent.hash
+                {
+                    return 0;
+                }
+            }
+            prev = Some(block);
+            let Ok((plot_id, challenge, size_bytes, response)) = decode_pospace_witness(block)
+            else {
+                return 0;
+            };
+            let expected = self.expected_challenge_for_block(block);
+            if size_bytes < self.config.min_plot_size_bytes
+                || size_bytes > MAX_PLOT_SIZE_BYTES
+                || !bool::from(challenge.ct_eq(&expected))
+                || !verify_plot_response(&plot_id, &challenge, &response)
+            {
+                return 0;
+            }
+            if let Some(ref plots) = plots_guard {
+                if let Some(producer) = block.producer {
+                    if let Some(reg) = plots.get(&producer.to_hex()) {
+                        if reg.plot_id != plot_id || reg.size_bytes != size_bytes {
+                            return 0;
+                        }
+                    }
+                } else if let Some(reg) = plots.values().find(|r| r.plot_id == plot_id) {
+                    if reg.size_bytes != size_bytes {
+                        return 0;
+                    }
+                }
+            }
+            proven_capacity = proven_capacity.saturating_add(u128::from(size_bytes));
+        }
         let height_weight = chain
             .last()
             .map_or(0u128, |b| u128::from(b.index))
             .saturating_mul(1_000);
-        let mut proven_capacity = 0u128;
-        for block in chain {
-            if let Ok((plot_id, challenge, size_bytes, response)) = decode_pospace_witness(block) {
-                let expected = self.expected_challenge_for_block(block);
-                if size_bytes >= self.config.min_plot_size_bytes
-                    && bool::from(challenge.ct_eq(&expected))
-                    && verify_plot_response(&plot_id, &challenge, &response)
-                {
-                    proven_capacity = proven_capacity.saturating_add(u128::from(size_bytes));
-                }
-            }
-        }
         height_weight.saturating_add(proven_capacity)
     }
 
@@ -533,5 +569,47 @@ mod tests {
         assert!(!small.is_better_chain(&chain_large, &chain_small));
         // Reflexivity: a chain is never strictly better than itself.
         assert!(!small.is_better_chain(&chain_small, &chain_small));
+    }
+
+    #[test]
+    fn pospace_fork_choice_rejects_forged_capacity_tampered_hash_and_unlinked_blocks() {
+        let zero = "0".repeat(64);
+        let engine = PoSpaceEngine::new(PoSpaceConfig::default());
+        let plot_id = [5u8; 32];
+        engine
+            .register_plot("honest-miner", plot_id, 10_000_000)
+            .expect("register honest");
+        let mut honest = make_block(1, &zero);
+        engine
+            .prepare_block(&mut honest, &AccountState::new())
+            .expect("prepare honest");
+        assert!(engine.fork_choice_score(&[honest.clone()]) > 0);
+
+        // Forged u64::MAX capacity witness must score 0 and never beat honest chain.
+        let mut forged_cap = make_block(1, &zero);
+        let challenge = engine.expected_challenge_for_block(&forged_cap);
+        forged_cap.vrf_output = compute_plot_response(&[0x77; 32], &challenge).to_vec();
+        forged_cap.vrf_proof = encode_pospace_witness(&[0x77; 32], &challenge, u64::MAX);
+        forged_cap.hash = forged_cap.calculate_hash();
+        assert_eq!(engine.fork_choice_score(&[forged_cap.clone()]), 0);
+        assert!(!engine.is_better_chain(&[honest.clone()], &[forged_cap]));
+
+        // Registered plot lying about its size_bytes must score 0.
+        let mut inflated = make_block(1, &zero);
+        inflated.vrf_output = compute_plot_response(&plot_id, &challenge).to_vec();
+        inflated.vrf_proof = encode_pospace_witness(&plot_id, &challenge, 999_000_000);
+        inflated.hash = inflated.calculate_hash();
+        assert_eq!(engine.fork_choice_score(&[inflated]), 0);
+
+        // Duplicated/unlinked chain of identical blocks must score 0.
+        assert_eq!(
+            engine.fork_choice_score(&[honest.clone(), honest.clone()]),
+            0
+        );
+
+        // Tampered block hash must score 0.
+        let mut tampered = honest;
+        tampered.hash = "f".repeat(64);
+        assert_eq!(engine.fork_choice_score(&[tampered]), 0);
     }
 }

@@ -48,6 +48,7 @@ struct DagTip {
 struct DagGraph {
     tips: Vec<DagTip>,
     parents: BTreeMap<String, Vec<String>>,
+    heights: BTreeMap<String, u64>,
     order: VecDeque<String>,
 }
 
@@ -76,6 +77,7 @@ impl DagEngine {
             graph: RwLock::new(DagGraph {
                 tips: Vec::new(),
                 parents: BTreeMap::new(),
+                heights: BTreeMap::new(),
                 order: VecDeque::new(),
             }),
         }
@@ -99,10 +101,12 @@ impl DagEngine {
         graph
             .parents
             .insert(block.hash.clone(), parent_hashes.clone());
+        graph.heights.insert(block.hash.clone(), block.index);
 
         while graph.order.len() > MAX_DAG_HISTORY {
             if let Some(evicted) = graph.order.pop_front() {
                 graph.parents.remove(&evicted);
+                graph.heights.remove(&evicted);
             }
         }
 
@@ -212,12 +216,27 @@ impl ConsensusEngine for DagEngine {
                     if parent == GENESIS_ZERO_HASH {
                         continue;
                     }
-                    let known_in_dag = graph.parents.contains_key(parent)
-                        || graph.tips.iter().any(|t| t.hash == *parent);
-                    let known_in_chain = chain.iter().any(|b| b.hash == *parent);
-                    if !known_in_dag && !known_in_chain {
+                    let known_height = graph
+                        .heights
+                        .get(parent)
+                        .copied()
+                        .or_else(|| {
+                            graph
+                                .tips
+                                .iter()
+                                .find(|t| t.hash == *parent)
+                                .map(|t| t.height)
+                        })
+                        .or_else(|| chain.iter().find(|b| b.hash == *parent).map(|b| b.index));
+                    let Some(parent_height) = known_height else {
                         return Err(ConsensusError(format!(
                             "DAG block references unknown parent {parent}"
+                        )));
+                    };
+                    if parent_height >= block.index {
+                        return Err(ConsensusError(format!(
+                            "DAG block height {} must strictly exceed parent height {parent_height}",
+                            block.index
                         )));
                     }
                 }
@@ -257,14 +276,22 @@ impl ConsensusEngine for DagEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
-        let height = chain.last().map_or(0u128, |b| u128::from(b.index));
+        let mut max_valid_height = 0u128;
         let mut parent_refs = 0u128;
         for block in chain {
-            let parents = parse_parent_hashes(&block.previous_hash);
+            if block.hash != block.calculate_hash() {
+                return 0;
+            }
+            let Ok(parents) = self.validate_parent_list(block) else {
+                return 0;
+            };
+            max_valid_height = max_valid_height.max(u128::from(block.index));
             parent_refs = parent_refs.saturating_add(parents.len() as u128);
         }
         let graph_weight = parent_refs.saturating_mul(100);
-        height.saturating_mul(1_000).saturating_add(graph_weight)
+        max_valid_height
+            .saturating_mul(1_000)
+            .saturating_add(graph_weight)
     }
 
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
@@ -344,5 +371,33 @@ mod tests {
         assert_eq!(tips.len(), 1);
         assert_eq!(tips[0].hash, b2.hash);
         assert_eq!(engine.parents_of(&b2.hash), Some(vec![b1.hash]));
+    }
+
+    #[test]
+    fn dag_rejects_non_acyclic_parent_and_forged_fork_choice_inflation() {
+        let engine = DagEngine::new(DAGConfig::default());
+        let b1 = make_block(1, GENESIS_ZERO_HASH);
+        let b2 = make_block(2, &b1.hash);
+        engine.add_block(&b1).expect("add b1");
+        engine.add_block(&b2).expect("add b2");
+
+        // Same-height or future-height parent violates DAG acyclicity.
+        let same_height = make_block(2, &b2.hash);
+        assert!(engine
+            .validate_block(&same_height, &[], &AccountState::new())
+            .is_err());
+        let regressed = make_block(1, &b2.hash);
+        assert!(engine
+            .validate_block(&regressed, &[], &AccountState::new())
+            .is_err());
+
+        // Comma-stuffed previous_hash exceeding max_parents must score 0, never beat an honest chain.
+        let stuffed_parents = (0..64)
+            .map(|i| format!("{i:064x}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let forged = make_block(1, &stuffed_parents);
+        assert_eq!(engine.fork_choice_score(&[forged.clone()]), 0);
+        assert!(!engine.is_better_chain(&[b1, b2], &[forged]));
     }
 }
