@@ -212,8 +212,14 @@ pub struct TendermintCommitEvidence {
 ///
 /// `None` means the field is absent in this payload (an empty vector has no
 /// first element) and a probe built on it would be a lie about what it tests.
+///
+/// Deliberately not `pub`: this is how [`TendermintFinalityAdapter::fault_probes`]
+/// locates the bytes it corrupts, and nothing outside this module has any
+/// business depending on the wire layout. A `pub` accessor would also be a
+/// second, test-shaped description of the encoding that could drift from the
+/// probes that actually use it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FieldOffsets {
+struct FieldOffsets {
     /// Offset of the `validators` length prefix (u64).
     pub validators_len_at: usize,
     /// Offset of the first validator's `voting_power` (u64), when one exists.
@@ -287,7 +293,7 @@ impl TendermintCommitEvidence {
     /// returned when the field is absent (an empty set has no first entry),
     /// and the caller must then skip the probe rather than guess.
     #[must_use]
-    pub fn field_offsets(&self) -> FieldOffsets {
+    fn field_offsets(&self) -> FieldOffsets {
         // Fixed-width header: chain_id (u64 len + bytes), height (u64),
         // round (i64), block_hash (32), parts_total (u32), parts_hash (32),
         // app_hash (32), commit_time (u64), then Vec<T> length prefixes.
@@ -312,17 +318,11 @@ impl TendermintCommitEvidence {
         let signatures_len_at = validators_bytes_at;
         let signatures_bytes_at = signatures_len_at + 8;
         // TendermintSignature: address (20) + seconds (i64) + nanos (u32) +
-        // signature (u64 len + bytes).
-        let mut cursor = signatures_bytes_at;
-        let mut first_signature_address_at = None;
-        let mut first_signature_len_at = None;
-        if let Some(first) = self.signatures.first() {
-            first_signature_address_at = Some(cursor);
-            let len_at = cursor + ADDRESS_LEN + 8 + 4;
-            first_signature_len_at = Some(len_at);
-            cursor = len_at + 8 + first.signature.len();
-            let _ = cursor;
-        }
+        // signature (u64 len + bytes). Only the first entry's offsets are
+        // needed: no probe reaches past it.
+        let first_signature_address_at =
+            (!self.signatures.is_empty()).then_some(signatures_bytes_at);
+        let first_signature_len_at = first_signature_address_at.map(|at| at + ADDRESS_LEN + 8 + 4);
         FieldOffsets {
             validators_len_at,
             first_validator_power_at: (!self.validators.is_empty())
