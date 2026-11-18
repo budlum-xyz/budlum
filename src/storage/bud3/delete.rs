@@ -1,5 +1,6 @@
 //! Reference dependencies, cryptographic shredding (`SocialDelete`), and DAO
 //! public content deletion (Section 6.8.2 & Section 6.8.3).
+//!
 //! exposed for `Bud3Registry`, `StorageTxV3::SocialDelete`, and governance takedown.
 //!
 //! * Same-owner base dependencies (delta codec 11 / crop derivation codec 10):

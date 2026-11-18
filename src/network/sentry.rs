@@ -17,13 +17,13 @@
 //!      when `strict_private_network` or `allowed_private_cidrs` is set.
 //!    - Sentries are pinned as explicit gossipsub peers and unconditional peers
 //!      so a shared VPC `/24` never trips eclipse subnet limits.
-//!    - Live sentry rotation (`update_sentries`) swaps compromised or DDoS'd
+//!    - Live sentry rotation (`update_sentries`) swaps compromised or `DDoS`'d
 //!      sentries at runtime without restarting or exporting validator keys.
 //! 2. **Sentry shield node (`SentryRole::Sentry`)**:
 //!    - Participates normally in public peer discovery, sync, and gossip.
 //!    - Protects every shielded validator listed in `private_peers` as an
 //!      unconditional explicit peer (immune to `max_peers` eviction and `/24`
-//!      subnet caps during public DDoS floods).
+//!      subnet caps during public `DDoS` floods).
 //!    - Never inserts `private_peers` into Kademlia or peer-exchange responses,
 //!      hiding the validator's `PeerId` and private IP from the public network.
 
@@ -141,7 +141,7 @@ impl std::fmt::Display for IpCidr {
     }
 }
 
-fn ipv4_mask(prefix_len: u8) -> u32 {
+const fn ipv4_mask(prefix_len: u8) -> u32 {
     if prefix_len == 0 {
         0
     } else if prefix_len >= 32 {
@@ -151,7 +151,7 @@ fn ipv4_mask(prefix_len: u8) -> u32 {
     }
 }
 
-fn ipv6_mask(prefix_len: u8) -> u128 {
+const fn ipv6_mask(prefix_len: u8) -> u128 {
     if prefix_len == 0 {
         0
     } else if prefix_len >= 128 {
@@ -168,7 +168,7 @@ fn mask_ip(ip: IpAddr, prefix_len: u8) -> IpAddr {
     }
 }
 
-/// Returns `true` when `ip` belongs to a private VPC, VPN (CGNAT / WireGuard /
+/// Returns `true` when `ip` belongs to a private VPC, VPN (CGNAT / `WireGuard` /
 /// Tailscale `100.64.0.0/10`), loopback, link-local, or IPv6 ULA (`fc00::/7`)
 /// range and is therefore non-routable on the public internet.
 #[must_use]

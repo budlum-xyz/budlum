@@ -4369,7 +4369,7 @@ mod rpc_tests {
                 0,
                 Share {
                     validator: holder_c,
-                    class: Class::Mobile,
+                    class: Class::Full,
                     first_esi: 9,
                     symbols: 3,
                 },

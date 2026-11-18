@@ -330,7 +330,7 @@ impl ObjectEndowment {
     }
 
     /// Top up an existing object endowment (on renewal or shared public NFT bind).
-    pub fn deposit(&mut self, split: FeeSplit) {
+    pub const fn deposit(&mut self, split: FeeSplit) {
         self.total_deposited = self.total_deposited.saturating_add(split.endowment_share);
         self.remaining_balance = self.remaining_balance.saturating_add(split.endowment_share);
         self.gateway_paid = self.gateway_paid.saturating_add(split.gateway_share);
