@@ -1,5 +1,11 @@
 //! Bitcoin SPV finality: the Nakamoto branch of the consensus-of-consensuses.
 //!
+//! WIRING: `IntakeState::register_domain` constructs `BitcoinSpvAdapter` and the
+//! external-domain bridge is the production consumer. The header parser, hash
+//! helper and consensus limits are deliberately exposed for the pinned-mainnet
+//! test corpus and the canonical spec encoding; those callers do not name every
+//! helper in a production `.rs` file yet.
+//!
 //! # Why this adapter exists
 //!
 //! The external-domain framework declared [`SecurityBacking::Work`] and the
@@ -149,7 +155,12 @@ fn target_from_bits(bits: u32) -> Result<[u8; 32], AdapterError> {
             rule: "nBits target overflows 256 bits".to_string(),
         });
     };
-    window.copy_from_slice(&mantissa_bytes[1..4]);
+    let Some(tail) = mantissa_bytes.get(1..4) else {
+        return Err(AdapterError::ConsensusRule {
+            rule: "nBits mantissa is too short".to_string(),
+        });
+    };
+    window.copy_from_slice(tail);
     Ok(out)
 }
 
