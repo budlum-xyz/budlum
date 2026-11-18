@@ -79,6 +79,7 @@
 //! needs are in [`profile`].
 
 pub mod bitcoin_spv;
+pub mod da_sampling;
 pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
@@ -145,8 +146,9 @@ pub use spec::{
     TimeUnit, TrustModel, VerificationPolicy,
 };
 pub use tendermint::{
-    address_of, quorum_threshold, vote_sign_bytes, TendermintCommitEvidence,
-    TendermintFinalityAdapter, TendermintSignature, TendermintValidator,
+    address_of, quorum_threshold, validator_set_commitment, vote_sign_bytes,
+    PinnedTendermintAnchor, TendermintCommitEvidence, TendermintFinalityAdapter,
+    TendermintSignature, TendermintValidator,
 };
 pub use versioning::{ForkError, VersionPolicy, VersionWindow};
 pub use zkvm_proof::{

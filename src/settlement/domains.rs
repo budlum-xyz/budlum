@@ -833,14 +833,26 @@ pub fn verify_commitment_finality_observed(
         ConsensusKind::StorageAttestation(_) => {
             let adapter = crate::domain::StorageAttestationFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
-            let status = adapter.verify_finality(domain, commitment, proof);
+            let status = adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            );
             require_active_attester_authorities(state, proof, "Storage attestation")?;
             status
         }
         ConsensusKind::AiInference => {
             let adapter = crate::domain::AiInferenceFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
-            let status = adapter.verify_finality(domain, commitment, proof);
+            let status = adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            );
             require_active_attester_authorities(state, proof, "AI inference")?;
             status
         }
@@ -941,7 +953,7 @@ fn validate_commitment_state_updates(
 /// `Custom` is treated as the weakest case (a plugin or an external-domain
 /// framework decides its own proof, so this layer cannot claim a binding it
 /// has not checked): fail-closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommitmentAttestation {
     /// The proof binds `state_root`.
     pub state_root: bool,
@@ -1013,6 +1025,35 @@ impl CommitmentAttestation {
             }
         } else {
             Self::for_kind(&domain.kind)
+        }
+    }
+
+    /// What a specific verified `proof` binds for `domain`.
+    ///
+    /// Structural DAG-family proofs ([`FinalityProof::Dag`], [`FinalityProof::DagPq`],
+    /// [`FinalityProof::Poh`], [`FinalityProof::PohPq`], [`FinalityProof::Pospace`],
+    /// [`FinalityProof::PospacePq`]) fold [`crate::domain::finality_adapter::poa_commit_signing_message`]
+    /// into every authority signature, binding `state_root`, `tx_root`, `event_root`,
+    /// and `parent_domain_block_hash`; BFT/PoS certificates accepted by those same
+    /// domains bind `domain_block_hash` alone and remain `false`.
+    ///
+    /// Convenience: exposed for proof-level settlement inspection and universal
+    /// finality profile derivation without loosening [`Self::for_domain`].
+    #[must_use]
+    pub fn for_proof(domain: &ConsensusDomain, proof: &FinalityProof) -> Self {
+        match (&domain.kind, proof) {
+            (ConsensusKind::Dag, FinalityProof::Dag { .. } | FinalityProof::DagPq { .. })
+            | (ConsensusKind::Poh, FinalityProof::Poh { .. } | FinalityProof::PohPq { .. })
+            | (
+                ConsensusKind::Pospace,
+                FinalityProof::Pospace { .. } | FinalityProof::PospacePq { .. },
+            ) => Self {
+                state_root: true,
+                tx_root: true,
+                event_root: true,
+                parent: true,
+            },
+            _ => Self::for_domain(domain),
         }
     }
 }

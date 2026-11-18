@@ -60,6 +60,8 @@ pub enum QuorumClass {
     StakeWeighted,
     /// One authority one vote, with no stake concept.
     AuthorityWeighted,
+    /// Validity proof or envelope carrying its own verified statement (no signer quorum).
+    ProofCarrying,
 }
 
 /// What a verifier had to accept before the proof could be checked at all.
@@ -102,6 +104,7 @@ mod tests {
     use crate::chain::finality::{FinalityCert, ValidatorEntry, ValidatorSetSnapshot};
     use crate::core::address::Address;
     use crate::domain::types::Hash32;
+    use crate::domain::FinalityProof;
 
     const ZERO: Hash32 = [0u8; 32];
 
@@ -215,7 +218,40 @@ mod tests {
                 FinalityProof::BitcoinSpv {
                     headers: Vec::new(),
                 },
-                BINDS_HEIGHT | BINDS_PARENT_HASH | BINDS_BLOCK_HASH | BINDS_TX_ROOT,
+                BINDS_HEIGHT
+                    | BINDS_PARENT_HASH
+                    | BINDS_BLOCK_HASH
+                    | BINDS_TX_ROOT
+                    | BINDS_TIMESTAMP,
+            ),
+            (
+                FinalityProof::DagPq {
+                    round: 1,
+                    anchor: ZERO,
+                    parent_anchor: ZERO,
+                    authorities: Vec::new(),
+                    signatures: Vec::new(),
+                },
+                EVERY_FIELD,
+            ),
+            (
+                FinalityProof::PohPq {
+                    chain: Vec::new(),
+                    authorities: Vec::new(),
+                    signatures: Vec::new(),
+                },
+                EVERY_FIELD,
+            ),
+            (
+                FinalityProof::PospacePq {
+                    prover: Address::from([3u8; 32]),
+                    plot_id: ZERO,
+                    quality_bits: 1,
+                    prover_signature: Vec::new(),
+                    authorities: Vec::new(),
+                    signatures: Vec::new(),
+                },
+                EVERY_FIELD,
             ),
             (FinalityProof::Raw(Vec::new()), 0),
         ];

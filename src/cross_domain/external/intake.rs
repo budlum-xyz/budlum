@@ -183,11 +183,26 @@ pub enum AdapterSpec {
     /// empty chain id is the closed admission state: `register_domain`
     /// refuses it, because a commit's chain id is part of every sign byte and
     /// an unpinned adapter would verify any chain's commit.
-    TendermintCommit { network: String, chain_id: String },
+    TendermintCommit {
+        network: String,
+        chain_id: String,
+        /// Canonical [`crate::cross_domain::external::tendermint::validator_set_commitment`]
+        /// pinned by governance for `network`. `None` is the closed admission state.
+        #[serde(default)]
+        validator_set_hash: Option<[u8; 32]>,
+    },
+    /// Modular 2D Data-Availability Sampling (`DAS`) + Namespace Merkle Tree
+    /// (`NMT`) light-client finality bound to a governance-pinned namespace
+    /// and slashable attestation committee. APPENDED LAST (tag `4`).
+    DataAvailability {
+        network: String,
+        #[serde(default)]
+        committee: Option<crate::cross_domain::external::da_sampling::PinnedDaCommittee>,
+    },
 }
 
 impl AdapterSpec {
-    /// The network this spec serves. Both variants carry one; the accessor
+    /// The network this spec serves. Every variant carries one; the accessor
     /// exists so the intake can index registrations without matching.
     #[must_use]
     pub fn network(&self) -> &str {
@@ -195,7 +210,8 @@ impl AdapterSpec {
             Self::EthereumSync { network, .. }
             | Self::ZkVm { network, .. }
             | Self::BitcoinSpv { network, .. }
-            | Self::TendermintCommit { network, .. } => network,
+            | Self::TendermintCommit { network, .. }
+            | Self::DataAvailability { network, .. } => network,
         }
     }
 
@@ -240,8 +256,25 @@ impl AdapterSpec {
                 };
                 Box::new(adapter)
             }
-            Self::TendermintCommit { network, chain_id } => {
-                let adapter = TendermintFinalityAdapter::new(network, chain_id);
+            Self::TendermintCommit {
+                network,
+                chain_id,
+                validator_set_hash,
+            } => {
+                let adapter =
+                    TendermintFinalityAdapter::new_pinned(network, chain_id, *validator_set_hash);
+                let adapter = match golden {
+                    Some(g) => adapter.with_golden(g),
+                    None => adapter,
+                };
+                Box::new(adapter)
+            }
+            Self::DataAvailability { network, committee } => {
+                let adapter =
+                    crate::cross_domain::external::da_sampling::DataAvailabilityAdapter::new(
+                        network,
+                        committee.clone(),
+                    );
                 let adapter = match golden {
                     Some(g) => adapter.with_golden(g),
                     None => adapter,
@@ -324,6 +357,21 @@ pub struct IntakeState {
     pub pinned_ethereum_committees: std::collections::BTreeMap<
         String,
         crate::cross_domain::external::ethereum::PinnedCommittee,
+    >,
+    /// Governance-pinned Bitcoin SPV checkpoints keyed by external network.
+    #[serde(default)]
+    pub pinned_bitcoin_anchors: std::collections::BTreeMap<String, PinnedBitcoinAnchor>,
+    /// Governance-pinned Tendermint `(chain_id, validator_set_hash)` anchors keyed by network.
+    #[serde(default)]
+    pub pinned_tendermint_anchors: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::tendermint::PinnedTendermintAnchor,
+    >,
+    /// Governance-pinned modular DA sampling committees keyed by external network.
+    #[serde(default)]
+    pub pinned_da_committees: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::da_sampling::PinnedDaCommittee,
     >,
 }
 
@@ -420,6 +468,33 @@ impl IntakeState {
             .insert(network.into(), committee);
     }
 
+    /// Installs or updates the consensus-pinned Bitcoin SPV checkpoint for `network`.
+    /// WIRING: governance/genesis checkpoint installation surface paired with `register_domain`.
+    pub fn pin_bitcoin_anchor(&mut self, network: impl Into<String>, anchor: PinnedBitcoinAnchor) {
+        self.pinned_bitcoin_anchors.insert(network.into(), anchor);
+    }
+
+    /// Installs or updates the consensus-pinned Tendermint commit anchor for `network`.
+    /// WIRING: governance/genesis validator-set anchor surface paired with `register_domain`.
+    pub fn pin_tendermint_anchor(
+        &mut self,
+        network: impl Into<String>,
+        anchor: crate::cross_domain::external::tendermint::PinnedTendermintAnchor,
+    ) {
+        self.pinned_tendermint_anchors
+            .insert(network.into(), anchor);
+    }
+
+    /// Installs or updates the consensus-pinned modular DA committee for `network`.
+    /// WIRING: governance/genesis DA committee surface paired with `register_domain`.
+    pub fn pin_da_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::da_sampling::PinnedDaCommittee,
+    ) {
+        self.pinned_da_committees.insert(network.into(), committee);
+    }
+
     /// Drives the registry clock from the block-import path. Called on every
     /// committed block; monotonicity is the registry's own rule. The quorum
     /// round sweep rides the same clock: rounds nobody finished are swept on
@@ -489,20 +564,45 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
-        // A Bitcoin SPV domain with no pinned checkpoint would let a
-        // submitter finalise a private low-work chain. Refuse at the door,
-        // exactly as an unpinned sync committee is refused.
-        if let AdapterSpec::BitcoinSpv { anchor, .. } = &spec {
-            if anchor.is_none() {
+        // BitcoinSpv admission requires a governance-pinned checkpoint for `network`
+        // so a permissionless registrant cannot install a low-work regtest anchor.
+        if let AdapterSpec::BitcoinSpv { network, anchor } = &spec {
+            let Some(pinned) = self.pinned_bitcoin_anchors.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if anchor.as_ref() != Some(pinned) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
-        // A Tendermint domain with no pinned chain id would verify any chain's
-        // commit: the chain id appears inside every sign byte, but only a pin
-        // makes "the chain id matches" a statement about which chain this
-        // domain attests. Refuse at the door, as an unpinned checkpoint is.
-        if let AdapterSpec::TendermintCommit { chain_id, .. } = &spec {
+        // TendermintCommit admission requires both a non-empty chain_id and a
+        // governance-pinned validator_set_hash so an attacker cannot self-sign
+        // an arbitrary commit with freshly generated Ed25519 keys.
+        if let AdapterSpec::TendermintCommit {
+            network,
+            chain_id,
+            validator_set_hash,
+        } = &spec
+        {
             if chain_id.trim().is_empty() {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+            let Some(pinned) = self.pinned_tendermint_anchors.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if pinned.chain_id != *chain_id
+                || pinned.validator_set_hash == [0u8; 32]
+                || *validator_set_hash != Some(pinned.validator_set_hash)
+            {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // DataAvailability admission requires a governance-pinned namespace and
+        // slashable attestation committee for `network`.
+        if let AdapterSpec::DataAvailability { network, committee } = &spec {
+            let Some(pinned) = self.pinned_da_committees.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if committee.as_ref() != Some(pinned) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -1957,5 +2057,113 @@ mod tests {
         let err = execute_external_domain_tx(&mut state, &ctx_mainnet, &tx)
             .expect_err("EthereumSync must stay closed on mainnet");
         assert_eq!(err, ExternalDomainTxError::MainnetDisabled);
+    }
+
+    #[test]
+    fn tendermint_commit_intake_refuses_unpinned_or_wrong_valset_and_admits_pinned_anchor() {
+        use crate::cross_domain::external::tendermint::{
+            address_of, validator_set_commitment, vote_sign_bytes, PinnedTendermintAnchor,
+            TendermintCommitEvidence, TendermintSignature, TendermintValidator,
+        };
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let sk = SigningKey::from_bytes(&[0x71u8; 32]);
+        let pk: [u8; 32] = sk.verifying_key().to_bytes();
+        let val_addr = address_of(&pk);
+        let validators = vec![TendermintValidator {
+            address: val_addr,
+            public_key: pk,
+            voting_power: 100,
+        }];
+        let valset_hash = validator_set_commitment(&validators);
+        let block_hash = [0x5au8; 32];
+        let parts_hash = [0x3cu8; 32];
+        let sign_bytes = vote_sign_bytes(
+            "noble-1",
+            100,
+            0,
+            &block_hash,
+            1,
+            &parts_hash,
+            (1_700_000_000, 0),
+        );
+        let sig = sk.sign(&sign_bytes);
+        let commit = TendermintCommitEvidence {
+            chain_id: "noble-1".to_string(),
+            height: 100,
+            round: 0,
+            block_hash,
+            parts_total: 1,
+            parts_hash,
+            app_hash: block_hash,
+            commit_time: 1_700_000_000,
+            validators,
+            signatures: vec![TendermintSignature {
+                address: val_addr,
+                timestamp_seconds: 1_700_000_000,
+                timestamp_nanos: 0,
+                signature: sig.to_bytes().to_vec(),
+            }],
+        };
+        let payload = bincode::serialize(&commit).expect("encode commit");
+        let mk_req = |validator_set_hash: Option<[u8; 32]>| {
+            let spec = AdapterSpec::TendermintCommit {
+                network: "noble-testnet".to_string(),
+                chain_id: "noble-1".to_string(),
+                validator_set_hash,
+            };
+            let id = spec.build(None, None).descriptor().id;
+            RegistrationRequest {
+                golden: RawConsensusEvidence {
+                    adapter: id,
+                    evidence_version: 1,
+                    network: "noble-testnet".to_string(),
+                    payload: payload.clone(),
+                    declared_height: 100,
+                    declared_root: block_hash,
+                    submitter: addr(1),
+                },
+                versions: VersionPolicy::single(id, 1, 0),
+                economics: IntakeState::conservative_economics(1_000_000),
+                policy: VerificationPolicy::strict(1_700_000_010),
+                bond_atoms: economics_bond(),
+                poster: addr(1),
+                spec,
+            }
+        };
+
+        let mut intake = IntakeState::new();
+        assert!(
+            matches!(
+                intake.register_domain(mk_req(Some(valset_hash)), None),
+                Err(IntakeError::CommitteeNotPinned)
+            ),
+            "unpinned Tendermint network must be refused at intake"
+        );
+        intake.pinned_tendermint_anchors.insert(
+            "noble-testnet".to_string(),
+            PinnedTendermintAnchor {
+                chain_id: "noble-1".to_string(),
+                validator_set_hash: valset_hash,
+            },
+        );
+        assert!(
+            matches!(
+                intake.register_domain(mk_req(None), None),
+                Err(IntakeError::CommitteeNotPinned)
+            ),
+            "missing validator_set_hash must be refused even when network is pinned"
+        );
+        assert!(
+            matches!(
+                intake.register_domain(mk_req(Some([0x99u8; 32])), None),
+                Err(IntakeError::CommitteeNotPinned)
+            ),
+            "mismatched validator_set_hash must be refused"
+        );
+        let key = intake
+            .register_domain(mk_req(Some(valset_hash)), None)
+            .expect("pinned Tendermint anchor must admit cleanly");
+        assert!(intake.registry.domain(&key).is_some());
     }
 }
