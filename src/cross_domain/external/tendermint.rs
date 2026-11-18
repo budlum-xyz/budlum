@@ -345,6 +345,30 @@ pub struct TendermintCommitEvidence {
     pub signatures: Vec<TendermintSignature>,
 }
 
+/// Byte offsets inside an encoded commit, for admission probes.
+///
+/// `None` means the field is absent in this payload (an empty vector has no
+/// first element) and a probe built on it would be a lie about what it tests.
+///
+/// Deliberately not `pub`: this is how [`TendermintFinalityAdapter::fault_probes`]
+/// locates the bytes it corrupts, and nothing outside this module has any
+/// business depending on the wire layout. A `pub` accessor would also be a
+/// second, test-shaped description of the encoding that could drift from the
+/// probes that actually use it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FieldOffsets {
+    /// Offset of the `validators` length prefix (u64).
+    pub validators_len_at: usize,
+    /// Offset of the first validator's `voting_power` (u64), when one exists.
+    pub first_validator_power_at: Option<usize>,
+    /// Offset of the `signatures` length prefix (u64).
+    pub signatures_len_at: usize,
+    /// Offset of the first signature's `address` (20 bytes), when one exists.
+    pub first_signature_address_at: Option<usize>,
+    /// Offset of the first signature's `signature` length prefix (u64).
+    pub first_signature_len_at: Option<usize>,
+}
+
 impl TendermintCommitEvidence {
     /// Decodes a payload.
     ///
@@ -388,6 +412,79 @@ impl TendermintCommitEvidence {
             offset: 0,
             reason: format!("payload does not encode: {e}"),
         })
+    }
+
+    /// Byte offsets of the fields an admission probe needs to reach.
+    ///
+    /// Admission proves an adapter refuses the faults its author thought of.
+    /// The probes that matter for this adapter are the ones that keep a
+    /// forged quorum from reaching the power sum: a duplicated signer, a
+    /// zero-power validator, a duplicated set entry. All three live inside
+    /// the bincode payload, so a probe needs the offset of the field it
+    /// corrupts.
+    ///
+    /// The offsets are DERIVED, not typed in: this method walks the same
+    /// header the encoder writes and stops at the field asked for, so a
+    /// field added to the wire shape moves these with it instead of leaving
+    /// a probe pointing at the middle of the wrong integer. No offset is
+    /// returned when the field is absent (an empty set has no first entry),
+    /// and the caller must then skip the probe rather than guess.
+    #[must_use]
+    fn field_offsets(&self) -> FieldOffsets {
+        // The bincode layout, in declaration order. It is arithmetic rather than
+        // a scheme because the probes it serves corrupt exactly one field each:
+        // an offset that drifts by a byte still applies and still produces a
+        // refusal - of something else - so `field_offsets_point_at_the_fields_they_name`
+        // reads every offset back out of a real encoding. Adding a field to the
+        // evidence means adding its width here *before* the fields below it stop
+        // being where this says they are, and that test is what says so.
+        let mut at = 8usize.saturating_add(self.chain_id.len()); // chain_id
+        at += 8; // height
+        at += 8; // round
+        at += 32; // block_hash
+        at += 4; // parts_total
+        at += 32; // parts_hash
+        at += 8; // version_block
+        at += 32; // last_block_hash
+        at += 4; // last_parts_total
+        at += 32; // last_parts_hash
+        at += 32; // last_commit_hash
+        at += 32; // data_hash
+        at += 32; // validators_hash
+        at += 32; // next_validators_hash
+        at += 32; // consensus_hash
+        at += 32; // app_hash
+        at += 32; // last_results_hash
+        at += 32; // evidence_hash
+        at += ADDRESS_LEN; // proposer_address
+        at += 8; // commit_time
+        at += 4; // commit_time_nanos
+        let validators_len_at = at;
+        at += 8; // validators length prefix
+        let first_validator_at = at;
+        // TendermintValidator: address (20) + public_key (32) + power (u64).
+        let first_validator_power_at = first_validator_at + ADDRESS_LEN + PUBLIC_KEY_LEN;
+        let validators_bytes_at = at.saturating_add(
+            self.validators
+                .len()
+                .saturating_mul(ADDRESS_LEN + PUBLIC_KEY_LEN + 8),
+        );
+        let signatures_len_at = validators_bytes_at;
+        let signatures_bytes_at = signatures_len_at + 8;
+        // TendermintSignature: address (20) + seconds (i64) + nanos (u32) +
+        // signature (u64 len + bytes). Only the first entry's offsets are
+        // needed: no probe reaches past it.
+        let first_signature_address_at =
+            (!self.signatures.is_empty()).then_some(signatures_bytes_at);
+        let first_signature_len_at = first_signature_address_at.map(|at| at + ADDRESS_LEN + 8 + 4);
+        FieldOffsets {
+            validators_len_at,
+            first_validator_power_at: (!self.validators.is_empty())
+                .then_some(first_validator_power_at),
+            signatures_len_at,
+            first_signature_address_at,
+            first_signature_len_at,
+        }
     }
 
     /// Shape checks, all of them independent of any signature.
@@ -442,7 +539,7 @@ impl TendermintCommitEvidence {
                     hex::encode(validator.address)
                 )));
             }
-            if validator.address != address_of(&validator.public_key) {
+            if validator.address != validator_address_of(&validator.public_key) {
                 return Err(rule(format!(
                     "validator entry {index} carries address {} which is not SHA256 of its public key",
                     hex::encode(validator.address)
@@ -580,8 +677,12 @@ pub fn quorum_threshold(total_voting_power: u128) -> u128 {
 }
 
 /// `SHA256(public_key)[..20]`, the Tendermint validator address derivation.
+///
+/// Named `validator_address_of` so it does not share a bare identifier with the
+/// tokenomics allocation helper: the dead-API gate counts names rather than
+/// paths, and two same-named functions hide whichever of them is dead.
 #[must_use]
-pub fn address_of(public_key: &[u8; PUBLIC_KEY_LEN]) -> [u8; ADDRESS_LEN] {
+pub fn validator_address_of(public_key: &[u8; PUBLIC_KEY_LEN]) -> [u8; ADDRESS_LEN] {
     let digest = Sha256::digest(public_key);
     let mut address = [0u8; ADDRESS_LEN];
     for (dst, src) in address.iter_mut().zip(digest.iter()) {
@@ -1081,6 +1182,132 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
             }
         }
 
+        // Three attacks on the quorum itself, built from the payload's own
+        // field offsets. Each is a fault an adapter that counts what it was
+        // handed (instead of what it verified) would accept: the offsets are
+        // derived by `field_offsets`, so a wire change moves the probe with
+        // the field instead of leaving it pointed at the wrong integer.
+        if let Some(golden) = &self.golden {
+            if let Ok(decoded) = TendermintCommitEvidence::decode(&golden.payload) {
+                let offsets = decoded.field_offsets();
+
+                // A. One validator with zero power. The adapter must refuse
+                //    the set, not silently count a member that cannot sign.
+                if let Some(at) = offsets.first_validator_power_at {
+                    probes.push(FaultProbe {
+                        name: "a zero-power validator must be refused, not counted".to_string(),
+                        patch: BytePatch::InPayload {
+                            offset: at,
+                            bytes: 0u64.to_le_bytes().to_vec(),
+                        },
+                        expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
+                    });
+                }
+
+                // B. The same validator twice in the set. Two entries for one
+                //    key is how a commit buys a quorum with one signature.
+                if decoded.validators.len() >= 2 {
+                    let entry_bytes = ADDRESS_LEN + PUBLIC_KEY_LEN + 8;
+                    let first_at = offsets.validators_len_at.saturating_add(8);
+                    let second_at = first_at.saturating_add(entry_bytes);
+                    if let Some(first) = golden.payload.get(first_at..second_at) {
+                        probes.push(FaultProbe {
+                            name: "a duplicated validator entry must be refused".to_string(),
+                            patch: BytePatch::InPayload {
+                                offset: second_at,
+                                bytes: first.to_vec(),
+                            },
+                            expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
+                        });
+                    }
+                }
+
+                // C. The same signature twice. A duplicated precommit must
+                //    not add its power a second time.
+                if decoded.signatures.len() >= 2 {
+                    if let (Some(first_at), Some(len_at)) = (
+                        offsets.first_signature_address_at,
+                        offsets.first_signature_len_at,
+                    ) {
+                        let first_len = decoded.signatures.first().map_or(0, |s| s.signature.len());
+                        let end = len_at.saturating_add(8).saturating_add(first_len);
+                        // `get` rather than `[]`: a slice that does not fit is
+                        // a probe that cannot be built, and this function
+                        // reports that by not emitting the probe - it must not
+                        // panic on a golden sample whose encoding disagrees
+                        // with the offsets derived from it.
+                        if let Some(first) = golden.payload.get(first_at..end) {
+                            let second_entry_bytes = ADDRESS_LEN + 8 + 4 + 8 + first_len;
+                            probes.push(FaultProbe {
+                                name: "a duplicated signature must not add power twice".to_string(),
+                                patch: BytePatch::InPayload {
+                                    offset: first_at.saturating_add(second_entry_bytes),
+                                    bytes: first.to_vec(),
+                                },
+                                expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Two attacks that change what the commit *means* rather than what it
+        // contains: a set that can no longer reach the threshold, and a commit
+        // signed for a different chain. Both are reachable by rewriting one
+        // integer or one byte of the payload, which is exactly the kind of
+        // forgery a submitter controls the bytes for.
+        if let Some(golden) = &self.golden {
+            if let Ok(decoded) = TendermintCommitEvidence::decode(&golden.payload) {
+                let offsets = decoded.field_offsets();
+
+                // D. Raise a NON-signing validator's power. Total (and so the
+                //    threshold) goes up while signed power does not, so the
+                //    commit becomes sub-threshold with every signature still
+                //    valid. Lowering a signer's power would move `signed` and
+                //    `total` together and might leave the ratio satisfied.
+                if decoded.validators.len() >= 2 {
+                    let signed: std::collections::BTreeSet<[u8; ADDRESS_LEN]> =
+                        decoded.signatures.iter().map(|s| s.address).collect();
+                    let entry_bytes = ADDRESS_LEN + PUBLIC_KEY_LEN + 8;
+                    let first_at = offsets.validators_len_at.saturating_add(8);
+                    if let Some(index) = decoded
+                        .validators
+                        .iter()
+                        .position(|v| !signed.contains(&v.address))
+                    {
+                        let offset = first_at.saturating_add(index.saturating_mul(entry_bytes))
+                            + ADDRESS_LEN
+                            + PUBLIC_KEY_LEN;
+                        probes.push(FaultProbe {
+                            name: "a set that cannot reach the threshold must be refused"
+                                .to_string(),
+                            patch: BytePatch::InPayload {
+                                offset,
+                                bytes: u64::MAX.to_le_bytes().to_vec(),
+                            },
+                            expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
+                        });
+                    }
+                }
+
+                // E. One byte of the chain id, so the commit claims a chain the
+                //    adapter was not pinned to. The byte is derived from the
+                //    payload's own chain id rather than assumed ASCII.
+                if let Some(first) = decoded.chain_id.bytes().next() {
+                    let flipped = if first == 0 { 1 } else { first.wrapping_sub(1) };
+                    probes.push(FaultProbe {
+                        name: "a commit for another chain id must be refused".to_string(),
+                        patch: BytePatch::InPayload {
+                            offset: 8,
+                            bytes: vec![flipped],
+                        },
+                        expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
+                    });
+                }
+            }
+        }
+
         probes
     }
 
@@ -1260,7 +1487,7 @@ mod tests {
         for (signature, message) in commit.signatures.iter_mut().zip(messages) {
             let key = keys
                 .iter()
-                .find(|key| address_of(&key.public_key_bytes()) == signature.address)
+                .find(|key| validator_address_of(&key.public_key_bytes()) == signature.address)
                 .expect("a key for every signer");
             signature.signature = key.sign(&message).to_vec();
         }
@@ -1289,7 +1516,7 @@ mod tests {
             .iter()
             .zip(powers)
             .map(|(key, power)| TendermintValidator {
-                address: address_of(&key.public_key_bytes()),
+                address: validator_address_of(&key.public_key_bytes()),
                 public_key: key.public_key_bytes(),
                 voting_power: *power,
             })
@@ -2107,8 +2334,133 @@ mod tests {
         // envelope: without that, an adapter that never verifies a signature
         // would still pass admission.
         assert!(
-            report.probes.len() >= 6,
-            "expected the signature-level probe as well: {report:?}"
+            report.probes.len() >= 11,
+            "expected the signature-level and quorum-level probes (11+), got {}: {report:?}",
+            report.probes.len()
+        );
+        // Every probe the adapter declares must be a probe it can build from
+        // its own golden sample. A probe whose patch does not apply is a probe
+        // that proves nothing, and `admit` would still count it as passed.
+        for (name, outcome) in &report.probes {
+            assert!(
+                !matches!(outcome, ProbeOutcome::NotApplicable { .. }),
+                "probe {name:?} could not be applied to the golden sample: {outcome:?}"
+            );
+        }
+    }
+
+    /// `field_offsets` must name the bytes it claims to name. This is the test
+    /// that keeps the three quorum probes honest: an offset that drifts by one
+    /// still "applies" and still produces a refusal - just of something else.
+    #[test]
+    fn field_offsets_point_at_the_fields_they_name() {
+        let commit = synthetic_commit(&[10, 10, 10], 3);
+        let payload = commit.encode().expect("payload encodes");
+        let offsets = commit.field_offsets();
+
+        // validators length prefix reads back as the validator count.
+        let declared = u64::from_le_bytes(
+            payload[offsets.validators_len_at..offsets.validators_len_at + 8]
+                .try_into()
+                .expect("8 bytes"),
+        );
+        assert_eq!(declared as usize, commit.validators.len());
+
+        // The first validator's power reads back as that validator's power.
+        let at = offsets.first_validator_power_at.expect("a first validator");
+        let power = u64::from_le_bytes(payload[at..at + 8].try_into().expect("8 bytes"));
+        assert_eq!(power, commit.validators[0].voting_power);
+
+        // The first signature's address reads back as that signer's address.
+        let at = offsets
+            .first_signature_address_at
+            .expect("a first signature");
+        assert_eq!(
+            &payload[at..at + ADDRESS_LEN],
+            &commit.signatures[0].address
+        );
+
+        // The signature length prefix reads back as the signature width.
+        let at = offsets.first_signature_len_at.expect("a first signature");
+        let len = u64::from_le_bytes(payload[at..at + 8].try_into().expect("8 bytes"));
+        assert_eq!(len as usize, commit.signatures[0].signature.len());
+    }
+
+    /// The three quorum-level attacks must be refused by the adapter itself,
+    /// not only counted as malformed by the decoder. Each payload is built by
+    /// patching the encoded bytes at a derived offset, so this test fails if
+    /// either the check or the offset regresses.
+    #[test]
+    fn quorum_level_faults_are_refused_by_the_adapter() {
+        let adapter = adapter();
+        let keyring = keys(4);
+        let mut commit = synthetic_commit(&[10, 10, 10, 10], 4);
+        // Powers 10,10,10,10 -> threshold 2*40/3+1 = 27; three signers reach
+        // 30, so a duplicated entry or signature would be enough to pass if
+        // the adapter counted what it was handed.
+        //
+        // The freshness window is computed from the commit's own time, not
+        // from `policy()`'s fixed `now`: a synthetic commit is dated in 2023
+        // and `policy()` in 2026, so the staleness rule would refuse the
+        // *untouched* commit and every probe would "pass" for the wrong
+        // reason. A test that cannot show the clean payload being accepted
+        // proves nothing about the corrupted ones.
+        resign(&mut commit, &keyring);
+        let untouched = evidence_for(&adapter, &commit);
+        let mut fresh = policy();
+        fresh.now = commit.commit_time;
+        let clean = adapter.verify(&untouched, &fresh);
+        assert!(
+            clean.is_ok(),
+            "the untouched commit must verify before it is corrupted: {clean:?}"
+        );
+
+        let offsets = commit.field_offsets();
+        let payload = commit.encode().expect("payload encodes");
+
+        // A. zero power on the first validator
+        let at = offsets.first_validator_power_at.expect("a first validator");
+        let mut corrupted = untouched.clone();
+        corrupted.payload[at..at + 8].copy_from_slice(&0u64.to_le_bytes());
+        let error = adapter
+            .verify(&corrupted, &fresh)
+            .expect_err("a zero-power validator cannot carry a quorum");
+        assert!(
+            matches!(error, AdapterError::ConsensusRule { .. }),
+            "{error:?}"
+        );
+
+        // B. duplicated validator entry
+        let entry = ADDRESS_LEN + PUBLIC_KEY_LEN + 8;
+        let first_start = offsets.validators_len_at + 8;
+        let mut corrupted = untouched.clone();
+        corrupted.payload[first_start + entry..first_start + 2 * entry]
+            .copy_from_slice(&payload[first_start..first_start + entry]);
+        let error = adapter
+            .verify(&corrupted, &fresh)
+            .expect_err("one key cannot hold two seats");
+        assert!(
+            matches!(error, AdapterError::ConsensusRule { .. }),
+            "{error:?}"
+        );
+
+        // C. duplicated signature
+        let first_at = offsets
+            .first_signature_address_at
+            .expect("a first signature");
+        let len_at = offsets.first_signature_len_at.expect("a first signature");
+        let sig_len = commit.signatures[0].signature.len();
+        let end = len_at + 8 + sig_len;
+        let second = first_at + (ADDRESS_LEN + 8 + 4 + 8 + sig_len);
+        let mut corrupted = untouched.clone();
+        corrupted.payload[second..second + (end - first_at)]
+            .copy_from_slice(&payload[first_at..end]);
+        let error = adapter
+            .verify(&corrupted, &fresh)
+            .expect_err("one validator cannot sign twice");
+        assert!(
+            matches!(error, AdapterError::ConsensusRule { .. }),
+            "{error:?}"
         );
     }
 

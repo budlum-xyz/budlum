@@ -276,6 +276,11 @@ impl Asm {
         self.op(Opcode::Add, rd, a, ZERO);
     }
 
+    /// `rd = poseidon4_hash(a, b)` in a single machine step.
+    pub fn poseidon(&mut self, rd: Reg, a: Reg, b: Reg) {
+        self.op(Opcode::Poseidon, rd, a, b);
+    }
+
     /// Stop the run with an error unless `a` is not zero.
     pub fn assert(&mut self, a: Reg) {
         self.emit(Opcode::Assert, ZERO, a, ZERO, 0);

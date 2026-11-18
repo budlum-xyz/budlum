@@ -328,6 +328,20 @@ pub enum FinalityProof {
         authorities: Vec<PoAAuthorityKey>,
         signatures: Vec<PoAAuthoritySignature>,
     },
+    /// Aggregation-layer finality (Phase 4): references a verified
+    /// `Claim::Prog` inside a finalized block's `MasterProof` (`ClaimFrame`).
+    /// Appended after `PospacePq` (discriminant 16) so earlier bincode variant
+    /// indices `0..=15` stay byte-exact across the stack.
+    AggregatedProg {
+        /// Registered state-transition program hash for this domain.
+        program_hash: Hash32,
+        /// Height of the predecessor state root.
+        prev_height: u64,
+        /// Predecessor state root.
+        prev_state_root: Hash32,
+        /// Digest of the verified `Claim::Prog` inside the block's `ClaimFrame`.
+        claim_digest: Hash32,
+    },
 }
 
 impl FinalityProof {
@@ -429,8 +443,8 @@ impl FinalityProof {
                 depth: DepthClass::Confirmations,
             },
             // A Bitcoin header has no state root and no event root to bind: it
-            // commits to its parent and its merkle root, and the window around
-            // it supplies the chainwork.
+            // commits to its parent, its merkle root and its timestamp, and the
+            // window around it supplies the chainwork.
             Self::BitcoinSpv { .. } => FinalityProofShape {
                 binds: BINDS_HEIGHT
                     | BINDS_PARENT_HASH
@@ -440,6 +454,21 @@ impl FinalityProof {
                 quorum: QuorumClass::WorkWeighted,
                 trust_anchor: TrustAnchor::TrustedCheckpoint,
                 depth: DepthClass::Confirmations,
+            },
+            // Aggregated `Claim::Prog` domain transition: the guest recomputes
+            // `output_hash` over height, parent hash, block hash, state root,
+            // tx root, event root, and timestamp inside `BudAir`.
+            Self::AggregatedProg { .. } => FinalityProofShape {
+                binds: BINDS_HEIGHT
+                    | BINDS_PARENT_HASH
+                    | BINDS_BLOCK_HASH
+                    | BINDS_STATE_ROOT
+                    | BINDS_TX_ROOT
+                    | BINDS_EVENT_ROOT
+                    | BINDS_TIMESTAMP,
+                quorum: QuorumClass::ProofCarrying,
+                trust_anchor: TrustAnchor::ProofCarrying,
+                depth: DepthClass::ProofDelay,
             },
             // Raw bytes are refused by every adapter. The shape says so rather
             // than claiming a binding the bytes may not have.

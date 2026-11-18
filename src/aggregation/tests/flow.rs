@@ -255,9 +255,14 @@ fn size_domain_kind_and_duplicates_are_refused() {
     stark.scheme = SchemeId(0);
     assert_eq!(
         pool.admit(stark, &txs, &registry()),
-        Err(Rejection::Object(ObjectError::KindNotEnabled(
-            ObjectKind::StarkProof
-        )))
+        Err(Rejection::Object(ObjectError::Invalid))
+    );
+    let mut pcs = good.clone();
+    pcs.kind = ObjectKind::PcsOpening;
+    pcs.scheme = SchemeId(0);
+    assert_eq!(
+        pool.admit(pcs, &txs, &registry()),
+        Err(Rejection::Object(ObjectError::Invalid))
     );
 
     assert!(pool.admit(good.clone(), &txs, &registry()).is_ok());

@@ -146,7 +146,8 @@ pub use spec::{
     TimeUnit, TrustModel, VerificationPolicy,
 };
 pub use tendermint::{
-    address_of, quorum_threshold, validator_set_commitment, validator_set_hash, vote_sign_bytes,
+    quorum_threshold, validator_address_of, validator_set_commitment, validator_set_hash,
+    vote_sign_bytes,
     PinnedTendermintAnchor, TendermintCommitEvidence, TendermintFinalityAdapter,
     TendermintSignature, TendermintValidator,
 };
