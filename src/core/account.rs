@@ -2032,85 +2032,6 @@ impl AccountState {
         Ok(withdrawn)
     }
 
-    /// Active bond floor for a Full-seat validator on `chain_id`: the higher
-    /// of the governance-adjustable registry `min_stake` and the network's
-    /// compile-time `min_stake_full()`.
-    #[must_use]
-    pub(crate) fn full_validator_stake_floor(&self, chain_id: u64) -> u64 {
-        let registry_floor = self.registry.params().min_stake.max(1);
-        crate::core::chain_config::Network::from_chain_id(chain_id)
-            .map_or(registry_floor, |network| {
-                registry_floor.max(network.min_stake_full())
-            })
-            .max(1)
-    }
-
-    /// Active bond floor for a non-Full consensus validator on `chain_id`: the
-    /// higher of the governance-adjustable registry `min_stake` and the
-    /// network's compile-time `min_stake()`.
-    #[must_use]
-    pub(crate) fn validator_stake_floor(&self, chain_id: u64) -> u64 {
-        let registry_floor = self.registry.params().min_stake.max(1);
-        crate::core::chain_config::Network::from_chain_id(chain_id)
-            .map_or(registry_floor, |network| {
-                registry_floor.max(network.min_stake())
-            })
-            .max(1)
-    }
-
-    /// Accounts eligible for the mempool's zero-fee validator duty lane on `chain_id`.
-    ///
-    /// A duty batch pays zero fee only while a live, unslashed, unjailed bond
-    /// at or above the class floor stands behind the signer. Records retained
-    /// in `validator_directory` for resume or unbonding are stripped as soon as
-    /// their consensus seat deactivates, drops below floor, or is penalised.
-    #[must_use]
-    pub fn duty_lane_signers_for_chain(
-        &self,
-        chain_id: u64,
-    ) -> std::collections::BTreeSet<Address> {
-        let network = crate::core::chain_config::Network::from_chain_id(chain_id);
-        let registry_floor = self.registry.params().min_stake.max(1);
-        let full_floor = self.full_validator_stake_floor(chain_id);
-        let base_floor = self.validator_stake_floor(chain_id);
-        let mobile_floor = network
-            .map_or_else(|| (registry_floor / 100).max(1), |n| n.min_stake_mobile())
-            .max(1);
-        let mut signers = std::collections::BTreeSet::new();
-        for (address, validator) in &self.validators {
-            let needed = if validator.filiz.is_some() {
-                full_floor
-            } else {
-                base_floor
-            };
-            if validator.active
-                && !validator.slashed
-                && !validator.jailed
-                && validator.stake >= needed
-            {
-                signers.insert(*address);
-            }
-        }
-        for record in self.validator_directory.iter() {
-            let consensus = self.validators.get(&record.owner);
-            if consensus.is_some_and(|validator| validator.slashed || validator.jailed) {
-                signers.remove(&record.owner);
-                continue;
-            }
-            let admitted = if record.class.holds_seat() {
-                consensus.is_some_and(|validator| validator.active && validator.stake >= full_floor)
-            } else {
-                record.stake >= mobile_floor
-            };
-            if admitted {
-                signers.insert(record.owner);
-            } else {
-                signers.remove(&record.owner);
-            }
-        }
-        signers
-    }
-
     /// Run one epoch's liveness check on the state-level
     /// `LivenessTracker`. Returns the validators newly **suspended** this
     /// Epoch (V-4: absence suspends, it never slashes). `participated` is
@@ -4423,46 +4344,81 @@ impl AccountState {
     /// Authority is verified purely against `self.poa_onboarding` so block
     /// producers, validators, startup replay, reorg rebuilds and snapshot
     /// rebuilds all derive the exact same `poa_compliance` state root.
+    pub fn apply_poa_compliance_request(
+        &mut self,
+        domain_id: u32,
+        admin: Address,
+        address: Address,
+        reason_hash: [u8; 32],
+        unfreeze: bool,
+        height: u64,
+    ) -> Result<(), String> {
+        let domain = self
+            .settlement
+            .domains
+            .get(domain_id)
+            .ok_or_else(|| format!("unknown domain {domain_id}"))?;
+        let kind = if matches!(domain.kind, crate::domain::ConsensusKind::PoA) {
+            crate::registry::ComplianceDomainKind::PoA
+        } else {
+            crate::registry::ComplianceDomainKind::Permissionless
+        };
+        if kind == crate::registry::ComplianceDomainKind::PoA {
+            let admin_is_admin = self.poa_onboarding.registry().is_admin(domain_id, &admin);
+            let admin_is_operator = domain.operator == Some(admin);
+            if !admin_is_admin && !admin_is_operator {
+                return Err(format!(
+                    "admin {} holds no authority on domain {domain_id}",
+                    admin.to_hex()
+                ));
+            }
+        }
+        let result = if unfreeze {
+            self.poa_compliance
+                .unfreeze(kind, domain_id, admin, address, reason_hash, height)
+        } else {
+            self.poa_compliance.freeze_suspicious(
+                kind,
+                domain_id,
+                admin,
+                address,
+                reason_hash,
+                height,
+            )
+        };
+        result.map_err(|e| format!("{e:?}"))
+    }
+
     pub fn drain_pending_poa_compliance(&mut self, height: u64) -> usize {
         let freezes = std::mem::take(&mut self.pending_poa_freezes);
         let unfreezes = std::mem::take(&mut self.pending_poa_unfreezes);
         let mut applied = 0;
         for req in freezes {
             if self
-                .poa_onboarding
-                .registry()
-                .is_admin(req.domain_id, &req.admin)
-                && self
-                    .poa_compliance
-                    .freeze_suspicious(
-                        crate::registry::ComplianceDomainKind::PoA,
-                        req.domain_id,
-                        req.admin,
-                        req.target,
-                        req.reason_hash,
-                        height,
-                    )
-                    .is_ok()
+                .apply_poa_compliance_request(
+                    req.domain_id,
+                    req.admin,
+                    req.target,
+                    req.reason_hash,
+                    false,
+                    height,
+                )
+                .is_ok()
             {
                 applied += 1;
             }
         }
         for req in unfreezes {
             if self
-                .poa_onboarding
-                .registry()
-                .is_admin(req.domain_id, &req.admin)
-                && self
-                    .poa_compliance
-                    .unfreeze(
-                        crate::registry::ComplianceDomainKind::PoA,
-                        req.domain_id,
-                        req.admin,
-                        req.target,
-                        req.reason_hash,
-                        height,
-                    )
-                    .is_ok()
+                .apply_poa_compliance_request(
+                    req.domain_id,
+                    req.admin,
+                    req.target,
+                    req.reason_hash,
+                    true,
+                    height,
+                )
+                .is_ok()
             {
                 applied += 1;
             }

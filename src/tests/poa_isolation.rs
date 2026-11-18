@@ -530,6 +530,8 @@ mod poa_compliance_gate {
         let admin = addr(12);
         let target = addr(0x52);
         for node in [&mut live, &mut follower] {
+            node.register_consensus_domain(poa_domain(12))
+                .expect("PoA domain 12 registers");
             node.state
                 .poa_onboarding
                 .registry_mut()
@@ -560,6 +562,69 @@ mod poa_compliance_gate {
             follower.state.calculate_state_root()
         );
         assert_eq!(block.state_root, follower.state.calculate_state_root());
+    }
+
+    #[test]
+    fn drain_pending_poa_compliance_refuses_permissionless_and_unknown_domains_and_honors_poa_operator(
+    ) {
+        use crate::core::account::PendingPoaCompliance;
+        let mut bc = chain();
+        let pos_id = 31;
+        let poa_id = 32;
+        let unknown_id = 33;
+        let pos_domain = default_domain(pos_id, ConsensusKind::PoW, 931, "pow-header-chain-v1", 0);
+        bc.register_consensus_domain(pos_domain)
+            .expect("permissionless domain registers");
+        bc.register_consensus_domain(poa_domain(poa_id))
+            .expect("poa domain registers");
+
+        let spoofed_admin = addr(0x71);
+        let target = addr(0x72);
+        // Even if poa_onboarding records an admin entry under a permissionless or
+        // unregistered domain id, block-close drain must refuse to freeze on it.
+        bc.state
+            .poa_onboarding
+            .registry_mut()
+            .add_admin(pos_id, spoofed_admin);
+        bc.state
+            .poa_onboarding
+            .registry_mut()
+            .add_admin(unknown_id, spoofed_admin);
+        bc.state.pending_poa_freezes.push(PendingPoaCompliance {
+            domain_id: pos_id,
+            admin: spoofed_admin,
+            target,
+            reason_hash: [0x11; 32],
+        });
+        bc.state.pending_poa_freezes.push(PendingPoaCompliance {
+            domain_id: unknown_id,
+            admin: spoofed_admin,
+            target,
+            reason_hash: [0x22; 32],
+        });
+        // Meanwhile the registered operator of a genuine PoA domain must succeed
+        // through drain_pending_poa_compliance just as through freeze_poa_account.
+        bc.state.pending_poa_freezes.push(PendingPoaCompliance {
+            domain_id: poa_id,
+            admin: addr(poa_id as u8),
+            target,
+            reason_hash: [0x33; 32],
+        });
+
+        let applied = bc.state.drain_pending_poa_compliance(5);
+        assert_eq!(applied, 1, "only the genuine PoA domain freeze may apply");
+        assert!(!bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, pos_id, &target));
+        assert!(!bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, unknown_id, &target));
+        assert!(bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, poa_id, &target));
     }
 
     #[test]
