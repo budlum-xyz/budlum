@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Budlum BNS Resolver</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 2rem auto; max-width: 720px; padding: 0 1rem; color: #111827; background: #f9fafb; }
+    .card { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 1.25rem; margin-top: 1rem; }
+    .status { font-weight: 600; }
+    .ok { color: #065f46; }
+    .err { color: #991b1b; }
+    pre { background: #111827; color: #f3f4f6; padding: 0.75rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+    code { font-family: ui-monospace, SFMono-Regular, monospace; }
+  </style>
+</head>
+<body>
+  <h1>Budlum BNS Local Verifier</h1>
+  <div class="card">
+    <p id="status" class="status">Parsing target...</p>
+    <p id="detail"></p>
+    <pre id="proof-summary" hidden></pre>
+  </div>
+  <script type="module" src="resolver.js"></script>
+</body>
+</html>

@@ -256,12 +256,28 @@ fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
                 .and_then(|r| r.get("api_key_env"))
                 .and_then(toml::Value::as_str)
                 .unwrap_or("");
-            if profile == "mainnet" {
+            // A shielded validator runs on a private host behind its
+            // sentries (`p2p.sentry_peers` confines its peering) and a sentry
+            // is the public proxy that fronts one (`role = "sentry"`). Neither
+            // serves keyless reads, so both keep the RPC authenticated on a
+            // testnet chain. Folding them into the public-testnet arm below
+            // would demand that a private host answer anonymous reads.
+            let role = parsed
+                .get("node")
+                .and_then(|n| n.get("role"))
+                .and_then(toml::Value::as_str)
+                .unwrap_or("");
+            let shielded = role == "sentry"
+                || parsed
+                    .get("p2p")
+                    .and_then(|p| p.get("sentry_peers"))
+                    .is_some();
+            if profile == "mainnet" || shielded {
                 assert_eq!(
                     auth,
                     Some(true),
-                    "{file} is a mainnet profile and must say auth_required = true; TLS \
-                     names the server, the key names the caller"
+                    "{file} is a {profile} profile on a private host and must say \
+                     auth_required = true; a shielded validator serves no keyless reads"
                 );
             } else {
                 assert_eq!(

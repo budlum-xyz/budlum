@@ -527,17 +527,22 @@ fn archive_profile_compose_and_dockerfile_are_consistent() {
 }
 
 /// Finality certificates are verified with a seat quorum (not a bare head
-/// count and not raw stake), and the account-proof trie cache is keyed by
-/// the exact account list it was built from, so it cannot serve a stale trie
-/// at the same chain height.
+/// count and not raw stake), and the account proof is drawn from the
+/// consensus accounts tree the state root is folded from, so it verifies
+/// against the root a block header commits to and no stale proof cache can
+/// serve a proof for state that no longer exists.
 #[test]
 fn qc_import_is_weighted_and_proof_cache_is_content_keyed() {
     let chain = production_part(include_str!("../chain/blockchain.rs"));
     assert!(chain.contains("if covered < committee.quorum_seats()"));
     let actor = production_part(include_str!("../chain/chain_actor.rs"));
-    let cache = window(actor, "fn account_proof(&mut self", 1200);
-    assert!(cache.contains("cached.leaves.len() == accounts.len()"));
-    assert!(cache.contains("l.1 == acct.balance && l.2 == acct.nonce"));
+    let proof = window(actor, "fn account_proof(&mut self", 1200);
+    assert!(proof.contains("state.get_account_proof(addr)"));
+    assert!(proof.contains("current_block_height"));
+    let account = production_part(include_str!("../core/account.rs"));
+    let prover = window(account, "pub fn get_account_proof(&mut self", 1600);
+    assert!(prover.contains("self.ensure_accounts_tree()"));
+    assert!(prover.contains("cached_keys.binary_search(addr)"));
 }
 
 /// An interrupted-commit marker that cannot be read or rolled back
