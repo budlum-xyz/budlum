@@ -62,5 +62,6 @@ pub use root_seal::{
     seal_due, RootSeal, RootSealLog, SealError, SealKeys, SoftwareSealSigner, ROOT_SEAL_INTERVAL,
 };
 pub use universal_finality::{
-    compose_cross_domain_route, FinalityGuarantee, FinalityReversibility, RouteFinalityBound,
+    compose_cross_domain_route, EconomicSecurityBound, FinalityGuarantee, FinalityReversibility,
+    RouteFinalityBound,
 };

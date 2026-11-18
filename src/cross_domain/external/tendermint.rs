@@ -378,6 +378,9 @@ impl TendermintCommitEvidence {
         }
         let mut seen_validators: std::collections::BTreeSet<[u8; ADDRESS_LEN]> =
             std::collections::BTreeSet::new();
+        let mut total_power = 0u128;
+        // CometBFT protocol ceiling (`types.MaxTotalVotingPower = MaxInt64 / 8`).
+        let max_total_voting_power = (i64::MAX as u128) / 8;
         for (index, validator) in self.validators.iter().enumerate() {
             if validator.voting_power == 0 {
                 return Err(rule(format!(
@@ -395,6 +398,12 @@ impl TendermintCommitEvidence {
                 return Err(rule(format!(
                     "validator {} appears twice in the set, which would let one key count twice",
                     hex::encode(validator.address)
+                )));
+            }
+            total_power = total_power.saturating_add(u128::from(validator.voting_power));
+            if total_power > max_total_voting_power {
+                return Err(rule(format!(
+                    "total voting power {total_power} exceeds CometBFT ceiling {max_total_voting_power}"
                 )));
             }
         }
@@ -471,6 +480,348 @@ pub fn address_of(public_key: &[u8; PUBLIC_KEY_LEN]) -> [u8; ADDRESS_LEN] {
         *dst = *src;
     }
     address
+}
+
+/// Maximum RFC-6962 Merkle branch depth accepted for CometBFT header proofs.
+const MAX_RFC6962_DEPTH: usize = 32;
+/// CometBFT `Header` field index of `next_validators_hash` (0-based across 14 fields).
+pub const COMETBFT_HEADER_NEXT_VALIDATORS_INDEX: usize = 8;
+/// CometBFT `Header` field index of `app_hash` (0-based across 14 fields).
+pub const COMETBFT_HEADER_APP_HASH_INDEX: usize = 10;
+/// Total canonical leaf count of a CometBFT `Header` RFC-6962 Merkle tree.
+pub const COMETBFT_HEADER_TOTAL_LEAVES: usize = 14;
+
+/// RFC-6962 binary Merkle inclusion proof used by CometBFT `Header.Hash()` and IBC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rfc6962Proof {
+    /// Zero-based leaf position inside the tree.
+    pub index: usize,
+    /// Total number of leaves committed in the tree.
+    pub total: usize,
+    /// Sibling ("aunt") hashes ordered from leaf level to root.
+    pub aunts: Vec<[u8; 32]>,
+}
+
+fn rfc6962_leaf_hash(leaf: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update([0x00]);
+    h.update(leaf);
+    let d = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&d);
+    out
+}
+
+fn rfc6962_inner_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update([0x01]);
+    h.update(left);
+    h.update(right);
+    let d = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&d);
+    out
+}
+
+/// Largest power of two strictly less than `n` (for `n >= 2`), matching
+/// CometBFT `crypto/merkle::getSplitPoint`.
+const fn rfc6962_split_point(n: usize) -> usize {
+    let bitlen = (usize::BITS - n.leading_zeros()) as usize;
+    let k = 1usize << (bitlen - 1);
+    if k == n {
+        k >> 1
+    } else {
+        k
+    }
+}
+
+fn rfc6962_root_from_aunts(
+    index: usize,
+    total: usize,
+    leaf_hash: [u8; 32],
+    aunts: &[[u8; 32]],
+) -> Option<[u8; 32]> {
+    if total == 0 || index >= total || aunts.len() > MAX_RFC6962_DEPTH {
+        return None;
+    }
+    if total == 1 {
+        return aunts.is_empty().then_some(leaf_hash);
+    }
+    let (&top_aunt, sub_aunts) = aunts.split_last()?;
+    let k = rfc6962_split_point(total);
+    if index < k {
+        let left = rfc6962_root_from_aunts(index, k, leaf_hash, sub_aunts)?;
+        Some(rfc6962_inner_hash(&left, &top_aunt))
+    } else {
+        let right = rfc6962_root_from_aunts(index - k, total - k, leaf_hash, sub_aunts)?;
+        Some(rfc6962_inner_hash(&top_aunt, &right))
+    }
+}
+
+/// Verify an RFC-6962 inclusion proof for `leaf` against CometBFT `expected_root`
+/// (e.g. proving `AppHash` or `NextValidatorsHash` inside validator-signed `block_hash`).
+/// WIRING: Tendermint/IBC header-field verification consumed by [`verify_skipping_commit`].
+#[must_use]
+pub fn verify_rfc6962_inclusion(
+    leaf: &[u8],
+    proof: &Rfc6962Proof,
+    expected_root: &[u8; 32],
+) -> bool {
+    if *expected_root == [0u8; 32] {
+        return false;
+    }
+    let Some(computed) = rfc6962_root_from_aunts(
+        proof.index,
+        proof.total,
+        rfc6962_leaf_hash(leaf),
+        &proof.aunts,
+    ) else {
+        return false;
+    };
+    bool::from(subtle::ConstantTimeEq::ct_eq(
+        computed.as_slice(),
+        expected_root.as_slice(),
+    ))
+}
+
+/// Trusted light-client checkpoint for Tendermint/IBC skipping verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedTendermintState {
+    pub chain_id: String,
+    pub height: u64,
+    pub time_secs: u64,
+    pub trusting_period_secs: u64,
+    pub validators: Vec<TendermintValidator>,
+    pub next_validators_hash: [u8; 32],
+}
+
+/// Verified state produced by advancing a [`TrustedTendermintState`] to a newer commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedTendermintSkip {
+    pub height: u64,
+    pub block_hash: [u8; 32],
+    pub app_hash: [u8; 32],
+    pub validator_set_hash: [u8; 32],
+    pub next_validators_hash: Option<[u8; 32]>,
+    pub median_time_secs: u64,
+    pub trusted_overlap_power: u128,
+    pub target_signed_power: u128,
+}
+
+/// Verify a Tendermint/IBC light-client transition from `trusted` to `target`
+/// under the Amintoosi-Buchman-Kwon skipping theorem:
+///
+/// - Adjacent transition (`target.height == trusted.height + 1` with matching
+///   `trusted.next_validators_hash`): accepts on `>= 2/3 + 1` target voting power.
+/// - Non-adjacent skipping transition (`target.height > trusted.height`): requires
+///   BOTH strictly `> 1/3` of `trusted.validators` voting power (cross-checked by
+///   exact Ed25519 public key) AND `>= 2/3 + 1` of `target.validators` power within
+///   `trusted.trusting_period_secs`.
+/// - When `app_hash_proof` is supplied, cryptographically proves `target.app_hash`
+///   at [`COMETBFT_HEADER_APP_HASH_INDEX`] inside signed `target.block_hash`;
+///   otherwise fails closed unless `target.app_hash == target.block_hash`.
+/// - When `next_validators` is supplied, proves the rotated `next_validators_hash`
+///   at [`COMETBFT_HEADER_NEXT_VALIDATORS_INDEX`] inside signed `target.block_hash`.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] if the trusted checkpoint expired, timestamps regress,
+/// signatures fail, trusted overlap is `<= 1/3`, target quorum is `< 2/3 + 1`, or
+/// an RFC-6962 header inclusion proof fails.
+///
+/// WIRING: Tendermint/IBC dynamic validator-set rotation and AppHash light-client verifier.
+pub fn verify_skipping_commit(
+    trusted: &TrustedTendermintState,
+    target: &TendermintCommitEvidence,
+    app_hash_proof: Option<&Rfc6962Proof>,
+    next_validators: Option<([u8; 32], &Rfc6962Proof)>,
+    now_secs: u64,
+) -> Result<VerifiedTendermintSkip, AdapterError> {
+    target.validate_shape()?;
+    if trusted.chain_id.is_empty() || target.chain_id != trusted.chain_id {
+        return Err(rule(
+            "target commit chain_id mismatches trusted light-client state",
+        ));
+    }
+    if target.height <= trusted.height {
+        return Err(rule(
+            "target commit height does not advance past trusted height",
+        ));
+    }
+    if trusted.trusting_period_secs == 0 {
+        return Err(rule(
+            "trusted light-client state carries zero trusting_period_secs",
+        ));
+    }
+    if now_secs.saturating_sub(trusted.time_secs) >= trusted.trusting_period_secs {
+        return Err(AdapterError::Stale {
+            age: now_secs.saturating_sub(trusted.time_secs),
+            max_age: trusted.trusting_period_secs,
+        });
+    }
+    if trusted.validators.is_empty() || trusted.validators.len() > MAX_VALIDATORS {
+        return Err(rule("trusted validator set size outside valid bounds"));
+    }
+
+    // Build deduplicated trusted validator map and total trusted voting power.
+    let mut trusted_map: std::collections::BTreeMap<[u8; ADDRESS_LEN], &TendermintValidator> =
+        std::collections::BTreeMap::new();
+    let mut trusted_total = 0u128;
+    for v in &trusted.validators {
+        if v.voting_power == 0 || v.address != address_of(&v.public_key) {
+            return Err(rule("trusted validator entry invalid or zero power"));
+        }
+        if trusted_map.insert(v.address, v).is_some() {
+            return Err(rule("duplicate validator in trusted Tendermint state"));
+        }
+        trusted_total = trusted_total.saturating_add(u128::from(v.voting_power));
+    }
+
+    let target_map: std::collections::BTreeMap<[u8; ADDRESS_LEN], &TendermintValidator> =
+        target.validators.iter().map(|v| (v.address, v)).collect();
+    let target_total = target.total_voting_power();
+    let target_required = quorum_threshold(target_total);
+
+    // Cryptographically verify every signature, accumulating target power and
+    // trusted-set overlap power (measured strictly in `trusted` weights).
+    let mut target_signed = 0u128;
+    let mut trusted_overlap = 0u128;
+    let mut signed_times: Vec<(u64, u128)> = Vec::with_capacity(target.signatures.len());
+
+    for sig in &target.signatures {
+        let vote_ts = u64::try_from(sig.timestamp_seconds)
+            .map_err(|_| rule("precommit carries negative timestamp"))?;
+        let sign_bytes = target.canonical_vote_bytes(sig);
+        let mut verified_key: Option<[u8; PUBLIC_KEY_LEN]> = None;
+
+        if let Some(tv) = target_map.get(&sig.address) {
+            verify_signature(&sign_bytes, &sig.signature, &tv.public_key).map_err(|_| {
+                AdapterError::Crypto {
+                    what: "invalid Ed25519 precommit signature in target set".into(),
+                }
+            })?;
+            let p = u128::from(tv.voting_power);
+            target_signed = target_signed.saturating_add(p);
+            signed_times.push((vote_ts, p));
+            verified_key = Some(tv.public_key);
+        }
+        if let Some(old_v) = trusted_map.get(&sig.address) {
+            match verified_key {
+                Some(pk) if pk != old_v.public_key => {
+                    return Err(rule("validator address collided with distinct public key"));
+                }
+                Some(_) => {}
+                None => {
+                    verify_signature(&sign_bytes, &sig.signature, &old_v.public_key).map_err(
+                        |_| AdapterError::Crypto {
+                            what: "invalid Ed25519 precommit signature in trusted overlap".into(),
+                        },
+                    )?;
+                }
+            }
+            trusted_overlap = trusted_overlap.saturating_add(u128::from(old_v.voting_power));
+        }
+        if verified_key.is_none() && !trusted_map.contains_key(&sig.address) {
+            return Err(rule(
+                "precommit signer belongs to neither target nor trusted set",
+            ));
+        }
+    }
+
+    if target_signed < target_required {
+        return Err(rule(format!(
+            "target signed power {target_signed}/{target_total} below 2/3+1 quorum {target_required}"
+        )));
+    }
+
+    let target_set_hash = validator_set_commitment(&target.validators);
+    let is_committed_adjacent = Some(target.height) == trusted.height.checked_add(1)
+        && trusted.next_validators_hash != [0u8; 32]
+        && bool::from(subtle::ConstantTimeEq::ct_eq(
+            target_set_hash.as_slice(),
+            trusted.next_validators_hash.as_slice(),
+        ));
+    if !is_committed_adjacent && trusted_overlap.saturating_mul(3) <= trusted_total {
+        return Err(rule(format!(
+            "skipping trust level failed: trusted overlap {trusted_overlap}/{trusted_total} does not exceed 1/3"
+        )));
+    }
+
+    // Enforce BFT median-time monotonicity and future-clock drift bound.
+    signed_times.sort_by_key(|(ts, _)| *ts);
+    let half = target_signed / 2;
+    let mut acc = 0u128;
+    let mut median_ts = target.commit_time;
+    for (ts, power) in &signed_times {
+        acc = acc.saturating_add(*power);
+        if acc > half {
+            median_ts = *ts;
+            break;
+        }
+    }
+    if target.commit_time.abs_diff(median_ts) > MAX_COMMIT_TIME_SKEW_SECONDS {
+        return Err(rule(
+            "target commit_time diverges from signed precommit median",
+        ));
+    }
+    if median_ts <= trusted.time_secs {
+        return Err(rule(
+            "target commit BFT time does not strictly advance past trusted time",
+        ));
+    }
+    if median_ts > now_secs.saturating_add(MAX_FUTURE_SECONDS) {
+        return Err(rule(
+            "target commit BFT time exceeds future clock drift bound",
+        ));
+    }
+
+    // Bind `app_hash` to validator-signed `block_hash` via CometBFT RFC-6962 proof.
+    let verified_app_hash = if let Some(proof) = app_hash_proof {
+        if proof.index != COMETBFT_HEADER_APP_HASH_INDEX
+            || proof.total != COMETBFT_HEADER_TOTAL_LEAVES
+            || !verify_rfc6962_inclusion(&target.app_hash, proof, &target.block_hash)
+        {
+            return Err(rule(
+                "RFC-6962 proof fails to bind app_hash into signed CometBFT block_hash",
+            ));
+        }
+        target.app_hash
+    } else if bool::from(subtle::ConstantTimeEq::ct_eq(
+        target.app_hash.as_slice(),
+        target.block_hash.as_slice(),
+    )) {
+        target.block_hash
+    } else {
+        return Err(rule(
+            "skipping commit with distinct app_hash requires a valid RFC-6962 header proof",
+        ));
+    };
+
+    let verified_next = if let Some((next_hash, proof)) = next_validators {
+        if next_hash == [0u8; 32]
+            || proof.index != COMETBFT_HEADER_NEXT_VALIDATORS_INDEX
+            || proof.total != COMETBFT_HEADER_TOTAL_LEAVES
+            || !verify_rfc6962_inclusion(&next_hash, proof, &target.block_hash)
+        {
+            return Err(rule(
+                "RFC-6962 proof fails to bind next_validators_hash into signed block_hash",
+            ));
+        }
+        Some(next_hash)
+    } else {
+        None
+    };
+
+    Ok(VerifiedTendermintSkip {
+        height: target.height,
+        block_hash: target.block_hash,
+        app_hash: verified_app_hash,
+        validator_set_hash: target_set_hash,
+        next_validators_hash: verified_next,
+        median_time_secs: median_ts,
+        trusted_overlap_power: trusted_overlap,
+        target_signed_power: target_signed,
+    })
 }
 
 fn rule(reason: impl Into<String>) -> AdapterError {
@@ -981,8 +1332,8 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
                     ) {
                         let first_len = decoded.signatures.first().map_or(0, |s| s.signature.len());
                         let end = len_at + 8 + first_len;
-                        if end <= golden.payload.len() {
-                            let first = golden.payload[first_at..end].to_vec();
+                        if let Some(first_slice) = golden.payload.get(first_at..end) {
+                            let first = first_slice.to_vec();
                             let second_entry_bytes = ADDRESS_LEN + 8 + 4 + 8 + first_len;
                             probes.push(FaultProbe {
                                 name: "a duplicated signature must not add power twice".to_string(),
@@ -1912,5 +2263,183 @@ mod tests {
             .verify(&evidence_for(&adapter(), &honest_noble), &future_policy)
             .expect_err("far-future commit must fail closed under max_age");
         assert!(matches!(err, AdapterError::ConsensusRule { .. }));
+    }
+
+    fn build_rfc6962_tree_and_proof(
+        leaves: &[Vec<u8>],
+        target_idx: usize,
+    ) -> ([u8; 32], Rfc6962Proof) {
+        fn rec(slice: &[Vec<u8>], idx: Option<usize>, aunts: &mut Vec<[u8; 32]>) -> [u8; 32] {
+            if slice.len() == 1 {
+                return rfc6962_leaf_hash(&slice[0]);
+            }
+            let k = rfc6962_split_point(slice.len());
+            let (left_s, right_s) = slice.split_at(k);
+            match idx {
+                Some(i) if i < k => {
+                    let l = rec(left_s, Some(i), aunts);
+                    let r = rec(right_s, None, aunts);
+                    aunts.push(r);
+                    rfc6962_inner_hash(&l, &r)
+                }
+                Some(i) => {
+                    let l = rec(left_s, None, aunts);
+                    let r = rec(right_s, Some(i - k), aunts);
+                    aunts.push(l);
+                    rfc6962_inner_hash(&l, &r)
+                }
+                None => {
+                    let l = rec(left_s, None, aunts);
+                    let r = rec(right_s, None, aunts);
+                    rfc6962_inner_hash(&l, &r)
+                }
+            }
+        }
+        let mut aunts = Vec::new();
+        let root = rec(leaves, Some(target_idx), &mut aunts);
+        (
+            root,
+            Rfc6962Proof {
+                index: target_idx,
+                total: leaves.len(),
+                aunts,
+            },
+        )
+    }
+
+    #[test]
+    fn tendermint_skipping_light_client_verifies_rotation_and_rfc6962_app_hash_and_refuses_forgery()
+    {
+        use crate::crypto::primitives::KeyPair;
+
+        let chain_id = "cosmoshub-4";
+        let keys: Vec<KeyPair> = (0..6).map(|_| KeyPair::generate().expect("kp")).collect();
+        let make_val = |kp: &KeyPair, power: u64| {
+            let public_key = kp.public_key_bytes();
+            TendermintValidator {
+                address: address_of(&public_key),
+                public_key,
+                voting_power: power,
+            }
+        };
+
+        // Trusted validator set at height 100: keys[0..4], 100 power each (total 400).
+        let trusted_vals = vec![
+            make_val(&keys[0], 100),
+            make_val(&keys[1], 100),
+            make_val(&keys[2], 100),
+            make_val(&keys[3], 100),
+        ];
+        // Rotated validator set at non-adjacent height 250: keys[0], keys[1] stay (200/400 = 50% > 1/3),
+        // keys[4], keys[5] join (total target power 400; keys[0,1,4] sign = 300 >= 267).
+        let target_vals = vec![
+            make_val(&keys[0], 100),
+            make_val(&keys[1], 100),
+            make_val(&keys[4], 100),
+            make_val(&keys[5], 100),
+        ];
+        let next_vals_hash = [0x77; 32];
+        let app_hash = [0x99; 32];
+
+        // Build exact 14-leaf CometBFT Header RFC-6962 tree committing both next_validators_hash (8) and app_hash (10).
+        let mut header_leaves: Vec<Vec<u8>> = (0..COMETBFT_HEADER_TOTAL_LEAVES)
+            .map(|i| vec![i as u8; 32])
+            .collect();
+        header_leaves[COMETBFT_HEADER_NEXT_VALIDATORS_INDEX] = next_vals_hash.to_vec();
+        header_leaves[COMETBFT_HEADER_APP_HASH_INDEX] = app_hash.to_vec();
+        let (block_hash, app_proof) =
+            build_rfc6962_tree_and_proof(&header_leaves, COMETBFT_HEADER_APP_HASH_INDEX);
+        let (block_hash_chk, next_proof) =
+            build_rfc6962_tree_and_proof(&header_leaves, COMETBFT_HEADER_NEXT_VALIDATORS_INDEX);
+        assert_eq!(block_hash, block_hash_chk);
+
+        let parts_hash = [0x55; 32];
+        let vote_ts = 1_750_010_000i64;
+        let sign_commit = |signer_indices: &[usize]| -> TendermintCommitEvidence {
+            let signatures = signer_indices
+                .iter()
+                .map(|&idx| {
+                    let msg = vote_sign_bytes(
+                        chain_id,
+                        250,
+                        0,
+                        &block_hash,
+                        1,
+                        &parts_hash,
+                        (vote_ts, 0),
+                    );
+                    let pk = keys[idx].public_key_bytes();
+                    TendermintSignature {
+                        address: address_of(&pk),
+                        timestamp_seconds: vote_ts,
+                        timestamp_nanos: 0,
+                        signature: keys[idx].sign(&msg).to_vec(),
+                    }
+                })
+                .collect();
+            TendermintCommitEvidence {
+                chain_id: chain_id.to_string(),
+                height: 250,
+                round: 0,
+                block_hash,
+                parts_total: 1,
+                parts_hash,
+                app_hash,
+                commit_time: vote_ts as u64,
+                validators: target_vals.clone(),
+                signatures,
+            }
+        };
+
+        let trusted = TrustedTendermintState {
+            chain_id: chain_id.to_string(),
+            height: 100,
+            time_secs: 1_750_000_000,
+            trusting_period_secs: 86_400,
+            validators: trusted_vals,
+            next_validators_hash: [0x12; 32],
+        };
+        let valid_skip = sign_commit(&[0, 1, 4]);
+        let verified = verify_skipping_commit(
+            &trusted,
+            &valid_skip,
+            Some(&app_proof),
+            Some((next_vals_hash, &next_proof)),
+            1_750_010_010,
+        )
+        .expect("50% trusted overlap + 75% target quorum + RFC-6962 proofs verify");
+        assert_eq!(verified.height, 250);
+        assert_eq!(verified.app_hash, app_hash);
+        assert_eq!(verified.next_validators_hash, Some(next_vals_hash));
+        assert_eq!(verified.trusted_overlap_power, 200);
+        assert_eq!(verified.target_signed_power, 300);
+
+        // 1. Forgery: signers [0, 4, 5] reach 300/400 (75% > 2/3) of target set,
+        //    but only 100/400 (25% <= 1/3) of trusted set -> refused!
+        let low_overlap = sign_commit(&[0, 4, 5]);
+        assert!(matches!(
+            verify_skipping_commit(
+                &trusted,
+                &low_overlap,
+                Some(&app_proof),
+                None,
+                1_750_010_010
+            ),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // 2. Forgery: substituted app_hash fails RFC-6962 header proof against signed block_hash.
+        let mut forged_app = valid_skip.clone();
+        forged_app.app_hash = [0xEE; 32];
+        assert!(matches!(
+            verify_skipping_commit(&trusted, &forged_app, Some(&app_proof), None, 1_750_010_010),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // 3. Expired trusting period must fail closed with AdapterError::Stale.
+        assert!(matches!(
+            verify_skipping_commit(&trusted, &valid_skip, Some(&app_proof), None, 1_750_100_000),
+            Err(AdapterError::Stale { .. })
+        ));
     }
 }

@@ -333,6 +333,126 @@ fn meets_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
     as_be <= *target
 }
 
+/// Bitcoin protocol difficulty adjustment interval (2016 blocks).
+pub const DIFFICULTY_ADJUSTMENT_INTERVAL: u64 = 2_016;
+/// Bitcoin protocol target epoch timespan (14 days in seconds).
+pub const POW_TARGET_TIMESPAN_SECS: u32 = 14 * 24 * 60 * 60;
+/// Minimum clamped retarget timespan (`POW_TARGET_TIMESPAN_SECS / 4`).
+pub const MIN_ACTUAL_TIMESPAN_SECS: u32 = POW_TARGET_TIMESPAN_SECS / 4;
+/// Maximum clamped retarget timespan (`POW_TARGET_TIMESPAN_SECS * 4`).
+pub const MAX_ACTUAL_TIMESPAN_SECS: u32 = POW_TARGET_TIMESPAN_SECS * 4;
+/// Bitcoin mainnet minimum-difficulty ceiling (`nBits = 0x1d00ffff`).
+pub const MAINNET_POW_LIMIT_BITS: u32 = 0x1d00_ffff;
+/// BIP-113 Median-Time-Past sliding window size (11 prior headers).
+pub const MTP_WINDOW_LEN: usize = 11;
+
+/// Compute the BIP-113 Median-Time-Past of up to the last 11 block timestamps.
+/// WIRING: Bitcoin SPV BIP-113 timestamp rule consumed by [`BitcoinSpvAdapter::verify`].
+#[must_use]
+pub fn median_time_past(prior_timestamps: &[u32]) -> Option<u32> {
+    if prior_timestamps.is_empty() {
+        return None;
+    }
+    let start = prior_timestamps.len().saturating_sub(MTP_WINDOW_LEN);
+    let mut window: Vec<u32> = prior_timestamps.get(start..)?.to_vec();
+    window.sort_unstable();
+    window.get(window.len() / 2).copied()
+}
+
+/// Encode a big-endian 256-bit positive target back into canonical Bitcoin
+/// compact `nBits` form (preserving the non-negative sign-bit invariant).
+#[must_use]
+fn target_to_bits(target: &[u8; 32]) -> u32 {
+    let first_nz = target.iter().position(|&b| b != 0);
+    let Some(idx) = first_nz else {
+        return 0;
+    };
+    let mut size = 32 - idx;
+    let b0 = target.get(idx).copied().unwrap_or(0);
+    let b1 = target.get(idx + 1).copied().unwrap_or(0);
+    let b2 = target.get(idx + 2).copied().unwrap_or(0);
+    let mut compact = match size {
+        1 => u32::from(b0),
+        2 => (u32::from(b0) << 8) | u32::from(b1),
+        _ => (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2),
+    };
+    // If the top bit (0x0080_0000) is set, Bitcoin shifts the mantissa right by
+    // one byte and increments the exponent so the compact number stays positive.
+    if (compact & 0x0080_0000) != 0 {
+        compact >>= 8;
+        size += 1;
+    }
+    ((size as u32) << 24) | (compact & 0x007f_ffff)
+}
+
+/// Multiply a 256-bit big-endian integer by `mul` (`u32`) and divide by `div`
+/// (`u32`, non-zero), clamping to `[0xff; 32]` on overflow.
+fn mul_div_be256(value: &[u8; 32], mul: u32, div: u32) -> [u8; 32] {
+    // 36-byte big-endian intermediate product (`256 + 32 = 288` bits).
+    let mut prod = [0u8; 36];
+    let mut carry = 0u64;
+    let m = u64::from(mul);
+    for i in (0..32).rev() {
+        let v = u64::from(value.get(i).copied().unwrap_or(0));
+        let acc = v * m + carry;
+        if let Some(slot) = prod.get_mut(i + 4) {
+            *slot = (acc & 0xff) as u8;
+        }
+        carry = acc >> 8;
+    }
+    for i in (0..4).rev() {
+        if let Some(slot) = prod.get_mut(i) {
+            *slot = (carry & 0xff) as u8;
+        }
+        carry >>= 8;
+    }
+
+    let mut quot = [0u8; 36];
+    let mut rem = 0u64;
+    let d = u64::from(div.max(1));
+    for (p, q) in prod.iter().zip(quot.iter_mut()) {
+        let cur = (rem << 8) | u64::from(*p);
+        *q = (cur / d) as u8;
+        rem = cur % d;
+    }
+    if quot.get(0..4).is_some_and(|hi| hi.iter().any(|&b| b != 0)) {
+        return [0xff; 32];
+    }
+    let mut out = [0u8; 32];
+    if let Some(lo) = quot.get(4..36) {
+        out.copy_from_slice(lo);
+    }
+    out
+}
+
+/// Exact integer Bitcoin difficulty retarget (`CalculateNextWorkRequired`):
+/// clamps `epoch_last_timestamp - epoch_first_timestamp` to `[3.5 days, 56 days]`,
+/// scales the 256-bit target by `actual_timespan / 14 days`, and caps at
+/// `MAINNET_POW_LIMIT_BITS` (`0x1d00ffff`).
+///
+/// # Errors
+///
+/// Returns [`AdapterError::ConsensusRule`] if `prev_bits` is malformed.
+///
+/// WIRING: Multi-epoch Bitcoin SPV difficulty transition rule consumed by [`BitcoinSpvAdapter::verify`].
+pub fn compute_next_work_required(
+    epoch_first_timestamp: u32,
+    epoch_last_timestamp: u32,
+    prev_bits: u32,
+) -> Result<u32, AdapterError> {
+    let old_target = target_from_bits(prev_bits)?;
+    let pow_limit = target_from_bits(MAINNET_POW_LIMIT_BITS)?;
+    let raw_span = epoch_last_timestamp.saturating_sub(epoch_first_timestamp);
+    let clamped = raw_span.clamp(MIN_ACTUAL_TIMESPAN_SECS, MAX_ACTUAL_TIMESPAN_SECS);
+    let scaled = mul_div_be256(&old_target, clamped, POW_TARGET_TIMESPAN_SECS);
+    let capped = if scaled > pow_limit {
+        pow_limit
+    } else {
+        scaled
+    };
+    Ok(target_to_bits(&capped))
+}
+
 /// Reads Bitcoin SPV evidence and produces the shared attestation.
 pub struct BitcoinSpvAdapter {
     descriptor: AdapterDescriptor,
@@ -427,46 +547,105 @@ impl ExternalFinalityAdapter for BitcoinSpvAdapter {
                 reason: "no Bitcoin checkpoint is pinned for this domain".to_string(),
             });
         };
-        let target = target_from_bits(anchor.bits)?;
-        let bits = difficulty_bits(anchor.bits)?;
+        let mut current_bits = anchor.bits;
+        let mut current_target = target_from_bits(current_bits)?;
+        let mut min_difficulty_bits = difficulty_bits(current_bits)?;
         let headers = parse_headers(&evidence.payload)?;
 
         let mut previous_hash = anchor.block_hash;
-        let mut previous_timestamp = 0u64;
-        let mut first = true;
-        for header in &headers {
-            if header.bits != anchor.bits {
-                return Err(AdapterError::ConsensusRule {
-                    rule: format!(
-                        "header nBits {:08x} leaves the pinned difficulty epoch {:08x}",
-                        header.bits, anchor.bits
-                    ),
-                });
+        let mut seen_timestamps: Vec<u32> = Vec::with_capacity(headers.len());
+        let mut epoch_first_ts: Option<u32> = None;
+        for (idx, header) in headers.iter().enumerate() {
+            let step = u64::try_from(idx + 1).map_err(|_| AdapterError::Malformed {
+                offset: 0,
+                reason: "header index overflows u64".to_string(),
+            })?;
+            let h = anchor
+                .height
+                .checked_add(step)
+                .ok_or(AdapterError::Malformed {
+                    offset: 0,
+                    reason: "derived header height overflows u64".to_string(),
+                })?;
+            if h % DIFFICULTY_ADJUSTMENT_INTERVAL == 0 {
+                // Crossing a 2016-block difficulty boundary requires the epoch's
+                // opening block timestamp inside the verified chain to compute
+                // `CalculateNextWorkRequired` without trusting external claims.
+                if let (Some(first_ts), Some(&last_ts)) = (epoch_first_ts, seen_timestamps.last()) {
+                    let expected_bits =
+                        compute_next_work_required(first_ts, last_ts, current_bits)?;
+                    if header.bits != expected_bits {
+                        return Err(AdapterError::ConsensusRule {
+                            rule: format!(
+                                "Bitcoin retarget at height {h} expected nBits {expected_bits:08x}, found {:08x}",
+                                header.bits
+                            ),
+                        });
+                    }
+                    current_bits = expected_bits;
+                    current_target = target_from_bits(current_bits)?;
+                    min_difficulty_bits = min_difficulty_bits.min(difficulty_bits(current_bits)?);
+                    epoch_first_ts = Some(header.timestamp);
+                } else if header.bits != current_bits {
+                    return Err(AdapterError::ConsensusRule {
+                        rule: format!(
+                            "header nBits {:08x} leaves the pinned difficulty epoch {:08x}",
+                            header.bits, current_bits
+                        ),
+                    });
+                }
+            } else {
+                if header.bits != current_bits {
+                    return Err(AdapterError::ConsensusRule {
+                        rule: format!(
+                            "header nBits {:08x} leaves the pinned difficulty epoch {:08x}",
+                            header.bits, current_bits
+                        ),
+                    });
+                }
+                if h % DIFFICULTY_ADJUSTMENT_INTERVAL == 1 {
+                    epoch_first_ts = Some(header.timestamp);
+                }
             }
             if header.parent_hash != previous_hash {
                 return Err(AdapterError::ConsensusRule {
                     rule: "Bitcoin header does not link to its parent".to_string(),
                 });
             }
-            if !first && u64::from(header.timestamp) < previous_timestamp {
-                return Err(AdapterError::ConsensusRule {
-                    rule: "Bitcoin header timestamp moves backwards".to_string(),
-                });
+            // Enforce BIP-113 strict Median-Time-Past once 11 prior headers are
+            // observed, and monotonic timestamps on shorter checkpoint windows.
+            if seen_timestamps.len() >= MTP_WINDOW_LEN {
+                if let Some(mtp) = median_time_past(&seen_timestamps) {
+                    if header.timestamp <= mtp {
+                        return Err(AdapterError::ConsensusRule {
+                            rule: format!(
+                                "Bitcoin header timestamp {} does not exceed BIP-113 MTP {mtp}",
+                                header.timestamp
+                            ),
+                        });
+                    }
+                }
+            } else if let Some(&prev_ts) = seen_timestamps.last() {
+                if header.timestamp < prev_ts {
+                    return Err(AdapterError::ConsensusRule {
+                        rule: "Bitcoin header timestamp moves backwards".to_string(),
+                    });
+                }
             }
             if !verify_spv_tx_inclusion(&header.merkle_root, &header.merkle_root, 0, &[]) {
                 return Err(AdapterError::ConsensusRule {
                     rule: "Bitcoin header carries an empty zero merkle_root".to_string(),
                 });
             }
-            if !meets_target(&header.hash, &target) {
+            if !meets_target(&header.hash, &current_target) {
                 return Err(AdapterError::ConsensusRule {
                     rule: "Bitcoin header hash does not meet the nBits target".to_string(),
                 });
             }
             previous_hash = header.hash;
-            previous_timestamp = u64::from(header.timestamp);
-            first = false;
+            seen_timestamps.push(header.timestamp);
         }
+        let bits = min_difficulty_bits;
 
         let count = u64::try_from(headers.len()).map_err(|_| AdapterError::Malformed {
             offset: 0,
@@ -792,5 +971,43 @@ mod tests {
         assert!(!verify_spv_tx_inclusion(&tx0, &dup_root, 0, &[tx0]));
         assert!(!verify_spv_tx_inclusion(&tx0, &dup_root, 1, &[tx0]));
         assert!(!verify_spv_tx_inclusion(&[0u8; 32], &root, 0, &[tx1, h23]));
+    }
+
+    #[test]
+    fn bitcoin_difficulty_retarget_matches_mainnet_block_32256_vector_and_clamps_bounds() {
+        // Real Bitcoin Core test vector (`pow_tests.cpp`): epoch ending at
+        // block 32255 (first = 1261130161, last = 1262152739, prev = 0x1d00ffff)
+        // produces exact next compact target `0x1d00d86a`.
+        let next = compute_next_work_required(1_261_130_161, 1_262_152_739, 0x1d00_ffff)
+            .expect("valid Bitcoin mainnet retarget");
+        assert_eq!(next, 0x1d00_d86a);
+
+        // Exact 14-day epoch leaves difficulty unchanged.
+        let base_ts = 1_700_000_000u32;
+        let unchanged =
+            compute_next_work_required(base_ts, base_ts + POW_TARGET_TIMESPAN_SECS, 0x1c0f_fff0)
+                .expect("exact 14-day retarget");
+        assert_eq!(unchanged, 0x1c0f_fff0);
+
+        // Extreme fast epoch clamps at exactly 1/4 target (4x harder).
+        let clamped_fast = compute_next_work_required(base_ts, base_ts + 10, 0x1c0f_fff0)
+            .expect("clamped fast retarget");
+        let exact_quarter =
+            compute_next_work_required(base_ts, base_ts + MIN_ACTUAL_TIMESPAN_SECS, 0x1c0f_fff0)
+                .expect("exact quarter retarget");
+        assert_eq!(clamped_fast, exact_quarter);
+        assert!(
+            target_from_bits(clamped_fast).expect("t") < target_from_bits(0x1c0f_fff0).expect("t")
+        );
+
+        // Extreme slow epoch clamps at 4x target and never exceeds MAINNET_POW_LIMIT_BITS.
+        let clamped_slow = compute_next_work_required(base_ts, base_ts + 50_000_000, 0x1d00_ffff)
+            .expect("pow limit clamp");
+        assert_eq!(clamped_slow, MAINNET_POW_LIMIT_BITS);
+
+        // BIP-113 Median-Time-Past computes exact median of trailing 11 blocks,
+        // permitting non-monotonic minor clock skew above MTP while rejecting <= MTP.
+        let ts = [100, 120, 115, 130, 125, 140, 135, 150, 145, 160, 155];
+        assert_eq!(median_time_past(&ts), Some(135));
     }
 }

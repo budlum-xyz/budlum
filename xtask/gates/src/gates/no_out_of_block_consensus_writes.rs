@@ -73,6 +73,7 @@ const CALLS: &[(&str, Class)] = &[
     ("external_domain_profile", Read),
     ("external_domain_profiles", Read),
     ("external_domain_registration", Read),
+    ("validate_and_extract_domain_block", Read),
     ("external_quorum_round", Read),
     ("external_quorum_rounds", Read),
     ("fetch_verified_bud3_symbol_page", Read),

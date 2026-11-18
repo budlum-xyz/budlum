@@ -23,11 +23,13 @@
 //!   registration, decided by the bond that backs it; no other key holds
 //!   them, and there is no network-wide key at all.
 //!
-//! Slashing a prover is not a door here. The registry's `slash` takes the
-//! challenger's word that an accepted attestation was wrong; there is no
-//! contradiction proof format yet, and a door that slashes on a claim would
-//! let anyone take any carrier's bond. `bud_slashExternalProver` stays
-//! refused until a proof that an attestation was false is defined.
+//! - contradiction challenge: any non-self challenger supplying a second
+//!   cryptographically verified finality proof at the same external
+//!   `(height, evidence_version)` and distinct `state_root`; atomically
+//!   withdraws the false attestation, freezes the domain, slashes the
+//!   carrier's escrowed bond at the routing ceiling, and pays the challenger
+//!   reward (`bud_slashExternalProver` RPC stays refused in favor of this
+//!   signed in-block transaction).
 
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -72,6 +74,13 @@ pub enum ExternalDomainTx {
         domain: DomainKey,
         policy: QuorumPolicy,
     },
+    /// Prove an accepted external finality attestation false by supplying a
+    /// cryptographically verified conflicting proof for the same external
+    /// `(height, evidence_version)` and distinct `state_root`. Atomically
+    /// withdraws the false attestation, freezes the domain (`Faulted`),
+    /// slashes the carrier's escrowed bond, and pays the challenger reward.
+    /// APPENDED LAST (tag `6`).
+    ChallengeContradiction(Box<RawConsensusEvidence>),
 }
 
 /// What the executor hands the door: the signer, the chain, the fee the
@@ -152,7 +161,8 @@ fn uses_ethereum_sync(state: &AccountState, tx: &ExternalDomainTx) -> bool {
         ExternalDomainTx::Register(request) => {
             matches!(&request.spec, AdapterSpec::EthereumSync { .. })
         }
-        ExternalDomainTx::SubmitEvidence(evidence) => {
+        ExternalDomainTx::SubmitEvidence(evidence)
+        | ExternalDomainTx::ChallengeContradiction(evidence) => {
             entry_is_sync(&DomainKey::from_parts(&evidence.adapter, &evidence.network))
         }
         ExternalDomainTx::BondProver { domain, .. }
@@ -216,6 +226,9 @@ pub fn execute_external_domain_tx(
                 .external_intake
                 .set_quorum_policy(domain, *policy)
                 .map_err(ExternalDomainTxError::from)
+        }
+        ExternalDomainTx::ChallengeContradiction(evidence) => {
+            challenge_contradiction(state, ctx, evidence)
         }
     }
 }
@@ -322,6 +335,60 @@ fn submit_evidence(
         Err(_) if *intake != before => Ok(()),
         Err(e) => Err(e.into()),
     }
+}
+
+fn challenge_contradiction(
+    state: &mut AccountState,
+    ctx: &ExternalDomainTxContext,
+    evidence: &RawConsensusEvidence,
+) -> Result<(), ExternalDomainTxError> {
+    if evidence.submitter != ctx.sender {
+        return Err(ExternalDomainTxError::SubmitterIsNotSender);
+    }
+    let key = DomainKey::from_parts(&evidence.adapter, &evidence.network);
+    let Some(spec) = state
+        .settlement
+        .external_intake
+        .entries
+        .get(&key)
+        .map(|entry| entry.spec.clone())
+    else {
+        return Err(ExternalDomainTxError::UnknownDomain);
+    };
+    if is_testnet(ctx.chain_id) && matches!(spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
+    let bls = bls_for(&spec, ctx);
+    let intake_before = state.settlement.external_intake.clone();
+    let outcome: crate::cross_domain::external::intake::ContradictionSlashOutcome = state
+        .settlement
+        .external_intake
+        .slash_on_contradiction(evidence, ctx.sender, bls)?;
+    let slashed = match u64::try_from(outcome.slashed_atoms) {
+        Ok(v) => v,
+        Err(_) => {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::BondTooLarge(outcome.slashed_atoms));
+        }
+    };
+    let reward = match u64::try_from(outcome.challenger_reward_atoms) {
+        Ok(v) => v,
+        Err(_) => {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::BondTooLarge(
+                outcome.challenger_reward_atoms,
+            ));
+        }
+    };
+    if slashed > 0 {
+        if let Err(err) =
+            state.slash_external_bond(&outcome.slashed_prover, slashed, reward, &ctx.sender)
+        {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::Intake(err));
+        }
+    }
+    Ok(())
 }
 
 fn bond_prover(
@@ -829,5 +896,109 @@ mod tests {
         let err = execute_external_domain_tx(&mut state, &ctx(poster), &tx).unwrap_err();
         assert!(matches!(err, ExternalDomainTxError::Fork(_)), "{err}");
         assert_eq!(state.settlement.root(), before);
+    }
+
+    #[test]
+    fn challenge_contradiction_slashes_carrier_freezes_domain_and_refuses_self_or_forged() {
+        use crate::cross_domain::external::profile::DomainState;
+
+        let (mut state, key, poster) = registered();
+        let challenger = addr(42);
+        state.add_balance(&challenger, 10_000);
+
+        // 1. Accept initial attestation at height 200 for state_root [0xAA; 32].
+        let accepted = evidence(poster, 200, [0xAA; 32]);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(accepted)),
+        )
+        .expect("initial evidence accepted");
+
+        let pre_root = state.settlement.root();
+        let pre_escrow = state
+            .external_bond_escrow
+            .get(&poster)
+            .copied()
+            .expect("poster escrowed bond");
+        let pre_challenger_bal = state.get_balance(&challenger);
+
+        // 2. Self-challenge MUST be refused with zero state change.
+        let self_ev = evidence(poster, 200, [0xBB; 32]);
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(self_ev)),
+        )
+        .is_err());
+        assert_eq!(state.settlement.root(), pre_root);
+
+        // 3. Same state_root "contradiction" MUST be refused with zero state change.
+        let same_root_ev = evidence(challenger, 200, [0xAA; 32]);
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(same_root_ev)),
+        )
+        .is_err());
+        assert_eq!(state.settlement.root(), pre_root);
+
+        // 4. Forged/corrupted proof (zeroed BLS signature) MUST be refused with zero state change.
+        let mut forged = evidence(challenger, 200, [0xBB; 32]);
+        forged.payload[crate::cross_domain::external::ethereum::layout::SIGNATURE].fill(0);
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(forged)),
+        )
+        .is_err());
+        assert_eq!(state.settlement.root(), pre_root);
+        assert_eq!(state.external_bond_escrow.get(&poster), Some(&pre_escrow));
+
+        // 5. Valid conflicting proof for the same (height=200, version=2) and root [0xBB; 32]
+        // withdraws the false attestation, freezes the domain, slashes poster's escrow,
+        // and rewards challenger without minting net supply.
+        let valid_contradiction = evidence(challenger, 200, [0xBB; 32]);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(valid_contradiction.clone())),
+        )
+        .expect("verified contradiction slashes carrier and freezes domain");
+
+        let post_escrow = state
+            .external_bond_escrow
+            .get(&poster)
+            .copied()
+            .unwrap_or(0);
+        let post_challenger_bal = state.get_balance(&challenger);
+        assert!(post_escrow < pre_escrow, "carrier bond must be slashed");
+        assert!(
+            post_challenger_bal > pre_challenger_bal,
+            "challenger must receive slash reward"
+        );
+        let slashed_delta = pre_escrow - post_escrow;
+        let reward_delta = post_challenger_bal - pre_challenger_bal;
+        assert!(
+            reward_delta <= slashed_delta,
+            "challenger reward must never exceed slashed bond (conservation)"
+        );
+
+        let reg = state
+            .settlement
+            .external_intake
+            .registry
+            .domain(&key)
+            .expect("domain registered");
+        assert_eq!(reg.record.state, DomainState::Faulted);
+        assert!(!reg.attestations.contains_key(&(200, 2)));
+
+        // 6. Replaying the same contradiction after slashing MUST fail cleanly.
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(valid_contradiction)),
+        )
+        .is_err());
     }
 }

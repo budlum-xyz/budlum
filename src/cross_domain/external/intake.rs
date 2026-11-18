@@ -199,6 +199,20 @@ pub enum AdapterSpec {
         #[serde(default)]
         committee: Option<crate::cross_domain::external::da_sampling::PinnedDaCommittee>,
     },
+    /// Linear chained BFT (`HotStuff` 3-chain QC rule) finality bound to a
+    /// governance-pinned epoch validator set. APPENDED LAST (tag `5`).
+    HotStuffQc {
+        network: String,
+        #[serde(default)]
+        committee: Option<crate::cross_domain::external::hotstuff::PinnedHotStuffCommittee>,
+    },
+    /// Stake-weighted round-DAG BFT (`Bullshark` anchor + wave-commit quorum)
+    /// finality bound to a governance-pinned epoch committee. APPENDED LAST (tag `6`).
+    DagCertificate {
+        network: String,
+        #[serde(default)]
+        committee: Option<crate::cross_domain::external::dag_bft::PinnedDagCommittee>,
+    },
 }
 
 impl AdapterSpec {
@@ -211,7 +225,9 @@ impl AdapterSpec {
             | Self::ZkVm { network, .. }
             | Self::BitcoinSpv { network, .. }
             | Self::TendermintCommit { network, .. }
-            | Self::DataAvailability { network, .. } => network,
+            | Self::DataAvailability { network, .. }
+            | Self::HotStuffQc { network, .. }
+            | Self::DagCertificate { network, .. } => network,
         }
     }
 
@@ -275,6 +291,29 @@ impl AdapterSpec {
                         network,
                         committee.clone(),
                     );
+                let adapter = match golden {
+                    Some(g) => adapter.with_golden(g),
+                    None => adapter,
+                };
+                Box::new(adapter)
+            }
+            Self::HotStuffQc { network, committee } => {
+                let adapter =
+                    crate::cross_domain::external::hotstuff::HotStuffThreeChainAdapter::new(
+                        network,
+                        committee.clone(),
+                    );
+                let adapter = match golden {
+                    Some(g) => adapter.with_golden(g),
+                    None => adapter,
+                };
+                Box::new(adapter)
+            }
+            Self::DagCertificate { network, committee } => {
+                let adapter = crate::cross_domain::external::dag_bft::BullsharkDagAdapter::new(
+                    network,
+                    committee.clone(),
+                );
                 let adapter = match golden {
                     Some(g) => adapter.with_golden(g),
                     None => adapter,
@@ -373,6 +412,18 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::da_sampling::PinnedDaCommittee,
     >,
+    /// Governance-pinned HotStuff 3-chain epoch validator committees keyed by external network.
+    #[serde(default)]
+    pub pinned_hotstuff_committees: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::hotstuff::PinnedHotStuffCommittee,
+    >,
+    /// Governance-pinned Bullshark round-DAG BFT committees keyed by external network.
+    #[serde(default)]
+    pub pinned_dag_committees: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::dag_bft::PinnedDagCommittee,
+    >,
 }
 
 /// The clock `max_age` measures against at submission: the domain's most
@@ -421,6 +472,29 @@ pub enum IntakeError {
     InvalidQuorumPolicy { reason: &'static str },
     #[error("an agreed quorum round holds no entry that carried the winning claim")]
     MissingCarrier,
+    #[error("a prover cannot challenge its own accepted attestation")]
+    SelfChallengeForbidden,
+    #[error("contradiction proof refused: {reason}")]
+    InvalidContradiction { reason: String },
+}
+
+/// Verified receipt emitted by [`IntakeState::slash_on_contradiction`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContradictionSlashOutcome {
+    /// External domain whose attestation was contradicted and frozen.
+    pub domain: DomainKey,
+    /// Bonded carrier of the withdrawn false attestation.
+    pub slashed_prover: Address,
+    /// Digest of the withdrawn false attestation.
+    pub contradicted_digest: [u8; 32],
+    /// External height at which the conflicting finality proofs verified.
+    pub height: u64,
+    /// Evidence format version shared by both proofs.
+    pub evidence_version: u32,
+    /// Total collateral slashed from `slashed_prover` (in atoms).
+    pub slashed_atoms: u128,
+    /// Portion of `slashed_atoms` awarded to the challenger (`<= slashed_atoms`).
+    pub challenger_reward_atoms: u128,
 }
 
 /// The first prover in arrival order whose entry carries `state_root`.
@@ -485,6 +559,61 @@ impl IntakeState {
             .insert(network.into(), anchor);
     }
 
+    /// Advance a pinned Tendermint light-client anchor across a validator-set
+    /// rotation by verifying an IBC-style skipping or adjacent commit (`>1/3`
+    /// trusted overlap + `>=2/3 + 1` target quorum + RFC-6962 header proofs).
+    ///
+    /// # Errors
+    ///
+    /// Refuses unpinned networks, chain-id or trusted-set mismatches, expired
+    /// trusting periods, insufficient trusted overlap, or forged header proofs.
+    ///
+    /// WIRING: Light-client Tendermint validator-set rotation advancing `pinned_tendermint_anchors`.
+    pub fn rotate_tendermint_anchor(
+        &mut self,
+        network: &str,
+        trusted: &crate::cross_domain::external::tendermint::TrustedTendermintState,
+        update: &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+        next_validators_proof: Option<(
+            [u8; 32],
+            &crate::cross_domain::external::tendermint::Rfc6962Proof,
+        )>,
+        now_unix_secs: u64,
+    ) -> Result<crate::cross_domain::external::tendermint::VerifiedTendermintSkip, IntakeError>
+    {
+        use subtle::ConstantTimeEq;
+
+        let Some(pinned) = self.pinned_tendermint_anchors.get(network) else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        if pinned.chain_id != trusted.chain_id {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
+        let trusted_hash = crate::cross_domain::external::tendermint::validator_set_commitment(
+            &trusted.validators,
+        );
+        if !bool::from(trusted_hash.ct_eq(&pinned.validator_set_hash)) {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
+        let skip = crate::cross_domain::external::tendermint::verify_skipping_commit(
+            trusted,
+            update,
+            None,
+            next_validators_proof,
+            now_unix_secs,
+        )
+        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let new_hash = skip.next_validators_hash.unwrap_or(skip.validator_set_hash);
+        self.pinned_tendermint_anchors.insert(
+            network.to_string(),
+            crate::cross_domain::external::tendermint::PinnedTendermintAnchor {
+                chain_id: trusted.chain_id.clone(),
+                validator_set_hash: new_hash,
+            },
+        );
+        Ok(skip)
+    }
+
     /// Installs or updates the consensus-pinned modular DA committee for `network`.
     /// WIRING: governance/genesis DA committee surface paired with `register_domain`.
     pub fn pin_da_committee(
@@ -493,6 +622,27 @@ impl IntakeState {
         committee: crate::cross_domain::external::da_sampling::PinnedDaCommittee,
     ) {
         self.pinned_da_committees.insert(network.into(), committee);
+    }
+
+    /// Installs or updates the consensus-pinned HotStuff epoch committee for `network`.
+    /// WIRING: governance/genesis HotStuff validator-set surface paired with `register_domain`.
+    pub fn pin_hotstuff_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::hotstuff::PinnedHotStuffCommittee,
+    ) {
+        self.pinned_hotstuff_committees
+            .insert(network.into(), committee);
+    }
+
+    /// Installs or updates the consensus-pinned Bullshark DAG-BFT committee for `network`.
+    /// WIRING: governance/genesis DAG-BFT validator-set surface paired with `register_domain`.
+    pub fn pin_dag_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::dag_bft::PinnedDagCommittee,
+    ) {
+        self.pinned_dag_committees.insert(network.into(), committee);
     }
 
     /// Drives the registry clock from the block-import path. Called on every
@@ -606,6 +756,24 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
+        // HotStuffQc admission requires a governance-pinned epoch validator set.
+        if let AdapterSpec::HotStuffQc { network, committee } = &spec {
+            let Some(pinned) = self.pinned_hotstuff_committees.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if committee.as_ref() != Some(pinned) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // DagCertificate admission requires a governance-pinned round-DAG committee.
+        if let AdapterSpec::DagCertificate { network, committee } = &spec {
+            let Some(pinned) = self.pinned_dag_committees.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if committee.as_ref() != Some(pinned) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
         // Economics under which lying pays are refused at the door. The
         // framework checks the bond amount; whether the fee/penalty shape
         // rewards honesty is a question only the intake asks, because the
@@ -710,6 +878,169 @@ impl IntakeState {
         }
         let attestation = self.registry.submit(adapter.as_ref(), evidence, &policy)?;
         Ok(attestation)
+    }
+
+    /// Cryptographically verify a contradicting finality proof against the same
+    /// domain adapter at an already-accepted `(height, evidence_version)` and,
+    /// when it certifies a distinct `state_root`, atomically withdraw the false
+    /// attestation, slash its bonded carrier at the domain's routing ceiling,
+    /// and transition the domain to [`DomainState::Faulted`].
+    ///
+    /// Security invariants:
+    /// 1. The contradicting evidence MUST pass full cryptographic adapter
+    ///    verification with `max_age = 0` (so historic equivocations remain
+    ///    slashable after time advances) and `require_declared_match = true`.
+    /// 2. The evidence format version MUST lie inside the domain's declared
+    ///    version window for `height`.
+    /// 3. Self-challenge (`challenger == carrier`) is unconditionally forbidden
+    ///    so a dishonest prover cannot reclaim the challenger reward share.
+    /// 4. State-root divergence is evaluated via [`subtle::ConstantTimeEq`].
+    /// 5. For PoW domains, the contradicting proof must carry at least the
+    ///    accumulated difficulty bits of the accepted attestation.
+    /// 6. The penalty is always computed at `economics.routing_ceiling_atoms`
+    ///    so a colluding front-runner cannot dust-slash for 1 atom.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] leaving `self` unchanged if any check fails.
+    pub fn slash_on_contradiction(
+        &mut self,
+        contradicting: &RawConsensusEvidence,
+        challenger: Address,
+        bls: Option<Box<dyn BlsVerifier>>,
+    ) -> Result<ContradictionSlashOutcome, IntakeError> {
+        use crate::cross_domain::external::spec::SecurityBacking;
+        use subtle::ConstantTimeEq;
+
+        if contradicting.submitter != challenger {
+            return Err(IntakeError::InvalidContradiction {
+                reason: "contradiction evidence submitter must match challenger".to_string(),
+            });
+        }
+        let key = DomainKey::from_parts(&contradicting.adapter, &contradicting.network);
+        let Some(entry) = self.entries.get(&key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        if matches!(entry.spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
+            return Err(IntakeError::MissingBlsVerifier);
+        }
+        if matches!(entry.spec, AdapterSpec::EthereumSync { .. })
+            && bls.as_ref().is_some_and(|v| v.sync_committee_closed())
+        {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
+        let Some(reg) = self.registry.domain(&key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        let slot = (
+            contradicting.declared_height,
+            contradicting.evidence_version,
+        );
+        let Some(existing) = reg.attestations.get(&slot).cloned() else {
+            return Err(IntakeError::InvalidContradiction {
+                reason: format!(
+                    "no accepted attestation at external height {} version {}",
+                    slot.0, slot.1
+                ),
+            });
+        };
+        let Some(slashed_prover) = reg
+            .attestation_provers
+            .get(&existing.evidence_digest)
+            .copied()
+        else {
+            return Err(IntakeError::MissingCarrier);
+        };
+        if slashed_prover == Address::zero() {
+            return Err(IntakeError::MissingCarrier);
+        }
+        if slashed_prover == challenger {
+            return Err(IntakeError::SelfChallengeForbidden);
+        }
+        reg.versions
+            .gate(
+                contradicting.evidence_version,
+                contradicting.declared_height,
+            )
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let value_atoms = reg.economics.routing_ceiling_atoms;
+
+        let adapter = entry.spec.build(bls, None);
+        let mut challenge_policy = entry.policy.clone();
+        challenge_policy.max_age = 0;
+        challenge_policy.require_declared_match = true;
+        let verified = adapter
+            .verify(contradicting, &challenge_policy)
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+
+        if verified.domain != existing.domain
+            || verified.adapter != existing.adapter
+            || verified.height != existing.height
+            || verified.evidence_version != existing.evidence_version
+        {
+            return Err(IntakeError::InvalidContradiction {
+                reason: "verified challenge attestation does not target the same domain slot"
+                    .to_string(),
+            });
+        }
+        if bool::from(verified.state_root.ct_eq(&existing.state_root)) {
+            return Err(IntakeError::InvalidContradiction {
+                reason: "challenge attestation commits the identical state_root".to_string(),
+            });
+        }
+        if let SecurityBacking::Work {
+            difficulty_bits: accepted_bits,
+        } = existing.security
+        {
+            match verified.security {
+                SecurityBacking::Work {
+                    difficulty_bits: challenge_bits,
+                } if challenge_bits >= accepted_bits => {}
+                _ => {
+                    return Err(IntakeError::InvalidContradiction {
+                        reason: format!(
+                            "PoW contradiction must carry at least {accepted_bits} difficulty bits"
+                        ),
+                    });
+                }
+            }
+        }
+
+        let registry_before = self.registry.clone();
+        let (slashed_atoms, challenger_reward_atoms) =
+            match self.registry.slash_verified_contradiction(
+                &key,
+                slashed_prover,
+                existing.evidence_digest,
+                value_atoms,
+                challenger,
+            ) {
+                Ok(amounts) => amounts,
+                Err(err) => {
+                    self.registry = registry_before;
+                    return Err(IntakeError::Registry(err));
+                }
+            };
+        if let Err(err) = self.registry.mark_faulted(
+            &key,
+            &format!(
+                "cryptographic contradiction proven at external height {} (version {})",
+                existing.height, existing.evidence_version
+            ),
+        ) {
+            self.registry = registry_before;
+            return Err(IntakeError::Registry(err));
+        }
+
+        Ok(ContradictionSlashOutcome {
+            domain: key,
+            slashed_prover,
+            contradicted_digest: existing.evidence_digest,
+            height: existing.height,
+            evidence_version: existing.evidence_version,
+            slashed_atoms,
+            challenger_reward_atoms,
+        })
     }
 
     /// The round path of [`Self::submit_evidence`]. Verifies without
