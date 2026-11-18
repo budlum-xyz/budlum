@@ -8703,8 +8703,12 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_missing_merkle_proof() {
-        // Gate (9d82f61): None must always yield MerkleProofRequired.
-        // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
+        // Gate (9d82f61): with the VerifyMerkle gate open, None must always yield
+        // MerkleProofRequired. REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
+        let open_params = StorageDomainParams {
+            require_merkle_proof: true,
+            ..params()
+        };
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -8718,7 +8722,7 @@ mod tests {
                 100,
                 200,
                 good_econ(),
-                &params(),
+                &open_params,
                 None,
                 None,
             )
