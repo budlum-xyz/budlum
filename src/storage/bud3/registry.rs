@@ -5038,7 +5038,7 @@ mod tests {
             .collect();
         let new_key = r
             .replace_object(
-                (addr(10), 10_000),
+                (owner, 10_000),
                 &old_key,
                 new_rec,
                 shares.clone(),
