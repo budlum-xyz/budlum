@@ -447,4 +447,8 @@ impl AggBackend for StarkBackend {
         }
         verify_agg_fold(&steps, &pub_stmt, &decoded.fold_proof).map_err(|_| AggError::ProofMismatch)
     }
+
+    fn requires_bonded_aggregators(&self) -> bool {
+        true
+    }
 }

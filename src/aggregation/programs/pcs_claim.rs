@@ -391,8 +391,9 @@ impl PcsOpeningObject {
         if usize::try_from(decoder.total_in()).ok() != Some(payload.len()) {
             return Err(ObjectError::Invalid);
         }
+        let raw_limit = u64::try_from(raw.len()).map_err(|_| ObjectError::Invalid)?;
         let obj: Self = bincode::DefaultOptions::new()
-            .with_limit(MAX_DECOMPRESSED_PCS_BYTES as u64)
+            .with_limit(raw_limit)
             .reject_trailing_bytes()
             .deserialize(&raw)
             .map_err(|_| ObjectError::Invalid)?;

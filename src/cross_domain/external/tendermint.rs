@@ -672,7 +672,7 @@ pub fn verify_skipping_commit(
         std::collections::BTreeMap::new();
     let mut trusted_total = 0u128;
     for v in &trusted.validators {
-        if v.voting_power == 0 || v.address != address_of(&v.public_key) {
+        if v.voting_power == 0 || v.address != validator_address_of(&v.public_key) {
             return Err(rule("trusted validator entry invalid or zero power"));
         }
         if trusted_map.insert(v.address, v).is_some() {
@@ -2542,6 +2542,8 @@ mod tests {
             result.is_err(),
             "a forged signature must not finalize: {result:?}"
         );
+    }
+
     fn build_rfc6962_tree_and_proof(
         leaves: &[Vec<u8>],
         target_idx: usize,
@@ -2594,7 +2596,7 @@ mod tests {
         let make_val = |kp: &KeyPair, power: u64| {
             let public_key = kp.public_key_bytes();
             TendermintValidator {
-                address: address_of(&public_key),
+                address: validator_address_of(&public_key),
                 public_key,
                 voting_power: power,
             }
@@ -2647,7 +2649,7 @@ mod tests {
                     );
                     let pk = keys[idx].public_key_bytes();
                     TendermintSignature {
-                        address: address_of(&pk),
+                        address: validator_address_of(&pk),
                         timestamp_seconds: vote_ts,
                         timestamp_nanos: 0,
                         signature: keys[idx].sign(&msg).to_vec(),
