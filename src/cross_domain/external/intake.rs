@@ -426,6 +426,134 @@ pub struct IntakeState {
     >,
 }
 
+/// Which anchor map an external-domain adapter family reads.
+///
+/// The four families that verify against a pinned trust anchor keep separate
+/// maps in [`IntakeState`], keyed by network name. A network name alone is not
+/// a key: `"mainnet"` denotes an Ethereum sync committee in one map and a
+/// Bitcoin checkpoint in another, so every lookup and every vote names the
+/// family too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum AnchorFamily {
+    Ethereum,
+    Bitcoin,
+    Tendermint,
+    Da,
+}
+
+impl AnchorFamily {
+    /// The family's name as it appears in a proposal and in a refusal.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ethereum => "ethereum",
+            Self::Bitcoin => "bitcoin",
+            Self::Tendermint => "tendermint",
+            Self::Da => "da",
+        }
+    }
+}
+
+/// A trust anchor as consensus installs it.
+///
+/// Until this existed, the four anchor maps in [`IntakeState`] had no writer
+/// outside this crate's tests: every anchored adapter was closed on every
+/// chain, because "governance pins a committee" named a vote that could not
+/// happen. The anchors are inside `external_intake_root`
+/// ([`IntakeState::state_digest`] hashes the whole state), so an operator-side
+/// RPC or a node-local flag could not have written one without forking the
+/// chain: the value is consensus state, and only a block may move it.
+///
+/// This is the value a `ProposalType::PinExternalAnchor` vote carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PinnedExternalAnchor {
+    Ethereum(crate::cross_domain::external::ethereum::PinnedCommittee),
+    Bitcoin(PinnedBitcoinAnchor),
+    Tendermint(crate::cross_domain::external::tendermint::PinnedTendermintAnchor),
+    Da(crate::cross_domain::external::da_sampling::PinnedDaCommittee),
+}
+
+impl PinnedExternalAnchor {
+    /// Which map this anchor belongs in.
+    #[must_use]
+    pub const fn family(&self) -> AnchorFamily {
+        match self {
+            Self::Ethereum(_) => AnchorFamily::Ethereum,
+            Self::Bitcoin(_) => AnchorFamily::Bitcoin,
+            Self::Tendermint(_) => AnchorFamily::Tendermint,
+            Self::Da(_) => AnchorFamily::Da,
+        }
+    }
+
+    /// Whether the anchor is a real trust root rather than a placeholder.
+    ///
+    /// A vote installs a value that is trusted without being proved, so the
+    /// cheapest sanity check belongs at proposal time: an all-zero hash or an
+    /// empty set is not an anchor, it is the shape of one.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the field that is empty.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Ethereum(committee) => {
+                if committee.aggregate_pubkey.is_empty() {
+                    return Err("the pinned Ethereum committee has no aggregate key".into());
+                }
+                if committee.next_committee_root == [0u8; 32] {
+                    return Err(
+                        "the pinned Ethereum committee's next_committee_root is all zeroes".into(),
+                    );
+                }
+            }
+            Self::Bitcoin(checkpoint) => {
+                if checkpoint.height == 0 {
+                    return Err("the pinned Bitcoin checkpoint is at height 0".into());
+                }
+                if checkpoint.block_hash == [0u8; 32] {
+                    return Err("the pinned Bitcoin checkpoint's block hash is all zeroes".into());
+                }
+            }
+            Self::Tendermint(anchor) => {
+                if anchor.chain_id.is_empty() {
+                    return Err("the pinned Tendermint anchor has no chain id".into());
+                }
+                if anchor.validator_set_hash == [0u8; 32] {
+                    return Err(
+                        "the pinned Tendermint anchor's validator-set root is all zeroes".into(),
+                    );
+                }
+            }
+            Self::Da(committee) => {
+                if committee.members.is_empty() {
+                    return Err("the pinned DA committee has no members".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The anchor's own digest, over a family-tagged encoding.
+    ///
+    /// A vote that replaces an anchor names the digest it expects to find,
+    /// the same shape as `UnfreezeConsensusDomain`'s expected validator-set
+    /// hash: without it, a vote taken against one checkpoint could be applied
+    /// to whatever occupies the slot when it activates.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's message when the anchor cannot be encoded, which
+    /// for these types means a `Vec` length the encoder refuses.
+    pub fn digest(&self) -> Result<[u8; 32], String> {
+        let bytes = bincode::serialize(self).map_err(|e| e.to_string())?;
+        Ok(crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_EXTERNAL_ANCHOR_V1",
+            self.family().as_str().as_bytes(),
+            &bytes,
+        ]))
+    }
+}
+
 /// The clock `max_age` measures against at submission: the domain's most
 /// recent accepted height, never lower than the stored registration value
 /// (the same high-water-mark rule as the EVM relay's
@@ -643,6 +771,85 @@ impl IntakeState {
         committee: crate::cross_domain::external::dag_bft::PinnedDagCommittee,
     ) {
         self.pinned_dag_committees.insert(network.into(), committee);
+    }
+
+    /// Installs or replaces a family's trust anchor for `network`.
+    ///
+    /// The consensus door: `GovernanceAction::PinExternalAnchor` in block
+    /// execution is the only production caller. The four `pin_*` helpers above
+    /// remain the genesis/test initializers; anything that can be reached from
+    /// an operator RPC or a node-local flag would fork the chain, because these
+    /// maps are inside `state_digest`. (HotStuff and DAG-BFT committees are not
+    /// yet part of `PinnedExternalAnchor`/`AnchorFamily`; they stay genesis/test
+    /// -only until their own governance door is added.)
+    pub fn install_pinned_anchor(&mut self, network: &str, anchor: PinnedExternalAnchor) {
+        match anchor {
+            PinnedExternalAnchor::Ethereum(committee) => {
+                self.pinned_ethereum_committees
+                    .insert(network.to_string(), committee);
+            }
+            PinnedExternalAnchor::Bitcoin(checkpoint) => {
+                self.pinned_bitcoin_anchors
+                    .insert(network.to_string(), checkpoint);
+            }
+            PinnedExternalAnchor::Tendermint(anchor) => {
+                self.pinned_tendermint_anchors
+                    .insert(network.to_string(), anchor);
+            }
+            PinnedExternalAnchor::Da(committee) => {
+                self.pinned_da_committees
+                    .insert(network.to_string(), committee);
+            }
+        }
+    }
+
+    /// The anchor installed for `family` on `network`, if any.
+    #[must_use]
+    pub fn pinned_anchor(
+        &self,
+        family: AnchorFamily,
+        network: &str,
+    ) -> Option<PinnedExternalAnchor> {
+        match family {
+            AnchorFamily::Ethereum => self
+                .pinned_ethereum_committees
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Ethereum),
+            AnchorFamily::Bitcoin => self
+                .pinned_bitcoin_anchors
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Bitcoin),
+            AnchorFamily::Tendermint => self
+                .pinned_tendermint_anchors
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Tendermint),
+            AnchorFamily::Da => self
+                .pinned_da_committees
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Da),
+        }
+    }
+
+    /// The digest of the anchor installed for `family` on `network`.
+    ///
+    /// `None` means the slot is empty. The executor compares this against the
+    /// `expected_previous` a vote named before it installs a replacement.
+    ///
+    /// # Errors
+    ///
+    /// The encoder's message when the installed anchor cannot be encoded.
+    pub fn pinned_anchor_digest(
+        &self,
+        family: AnchorFamily,
+        network: &str,
+    ) -> Result<Option<[u8; 32]>, String> {
+        self.pinned_anchor(family, network)
+            .map(|anchor| anchor.digest())
+            .transpose()
     }
 
     /// Drives the registry clock from the block-import path. Called on every
@@ -2520,5 +2727,84 @@ mod tests {
             .register_domain(mk_req(Some(valset_hash)), None)
             .expect("pinned Tendermint anchor must admit cleanly");
         assert!(intake.registry.domain(&key).is_some());
+    }
+
+    #[test]
+    fn a_governance_installed_anchor_is_what_registration_must_match() {
+        // The door a vote reaches: `install_pinned_anchor` writes the same map
+        // `register_domain` reads, so an anchor that arrived by vote admits a
+        // matching registration and refuses a mismatched one. Before this
+        // existed, only the tests could write the map and every anchored
+        // adapter was closed on every chain.
+        let mut intake = IntakeState::new();
+        assert_eq!(
+            intake.pinned_anchor(AnchorFamily::Tendermint, "noble-testnet"),
+            None,
+            "an untouched slot is empty, which is what `expected_previous: None` means"
+        );
+        let anchor = PinnedExternalAnchor::Tendermint(
+            crate::cross_domain::external::tendermint::PinnedTendermintAnchor {
+                chain_id: "noble-1".to_string(),
+                validator_set_hash: [0x11; 32],
+            },
+        );
+        intake.install_pinned_anchor("noble-testnet", anchor.clone());
+        assert_eq!(
+            intake.pinned_anchor(AnchorFamily::Tendermint, "noble-testnet"),
+            Some(anchor.clone())
+        );
+        assert_eq!(
+            intake.pinned_anchor_digest(AnchorFamily::Tendermint, "noble-testnet"),
+            Ok(Some(anchor.digest().expect("digest")))
+        );
+
+        // A replacement changes the digest, which is the value a vote binds:
+        // an expected_previous taken against the old anchor no longer matches.
+        let replacement = PinnedExternalAnchor::Tendermint(
+            crate::cross_domain::external::tendermint::PinnedTendermintAnchor {
+                chain_id: "noble-1".to_string(),
+                validator_set_hash: [0x22; 32],
+            },
+        );
+        let before = intake
+            .pinned_anchor_digest(AnchorFamily::Tendermint, "noble-testnet")
+            .expect("digest");
+        intake.install_pinned_anchor("noble-testnet", replacement.clone());
+        let after = intake
+            .pinned_anchor_digest(AnchorFamily::Tendermint, "noble-testnet")
+            .expect("digest");
+        assert_ne!(before, after);
+        assert_eq!(after, Some(replacement.digest().expect("digest")));
+
+        // Families do not collide: one network name denotes a different anchor
+        // in each map, and the digest names the family.
+        assert_eq!(
+            intake.pinned_anchor(AnchorFamily::Bitcoin, "noble-testnet"),
+            None
+        );
+        let bitcoin = PinnedExternalAnchor::Bitcoin(PinnedBitcoinAnchor {
+            height: 800_000,
+            block_hash: [0x33; 32],
+            bits: 0x1d00_ffff,
+        });
+        intake.install_pinned_anchor("noble-testnet", bitcoin.clone());
+        assert_ne!(
+            intake
+                .pinned_anchor_digest(AnchorFamily::Bitcoin, "noble-testnet")
+                .expect("digest"),
+            intake
+                .pinned_anchor_digest(AnchorFamily::Tendermint, "noble-testnet")
+                .expect("digest")
+        );
+
+        // And the anchors are inside the state root: two nodes that disagree
+        // about one cannot agree about the digest.
+        let mut other = IntakeState::new();
+        other.install_pinned_anchor("noble-testnet", anchor);
+        other.install_pinned_anchor("noble-testnet", bitcoin);
+        assert_ne!(
+            intake.state_digest().expect("digest"),
+            other.state_digest().expect("digest")
+        );
     }
 }
