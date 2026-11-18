@@ -1008,6 +1008,62 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
             }
         }
 
+        // Two attacks that change what the commit *means* rather than what it
+        // contains: a set that can no longer reach the threshold, and a commit
+        // signed for a different chain. Both are reachable by rewriting one
+        // integer or one byte of the payload, which is exactly the kind of
+        // forgery a submitter controls the bytes for.
+        if let Some(golden) = &self.golden {
+            if let Ok(decoded) = TendermintCommitEvidence::decode(&golden.payload) {
+                let offsets = decoded.field_offsets();
+
+                // D. Raise a NON-signing validator's power. Total (and so the
+                //    threshold) goes up while signed power does not, so the
+                //    commit becomes sub-threshold with every signature still
+                //    valid. Lowering a signer's power would move `signed` and
+                //    `total` together and might leave the ratio satisfied.
+                if decoded.validators.len() >= 2 {
+                    let signed: std::collections::BTreeSet<[u8; ADDRESS_LEN]> =
+                        decoded.signatures.iter().map(|s| s.address).collect();
+                    let entry_bytes = ADDRESS_LEN + PUBLIC_KEY_LEN + 8;
+                    let first_at = offsets.validators_len_at.saturating_add(8);
+                    if let Some(index) = decoded
+                        .validators
+                        .iter()
+                        .position(|v| !signed.contains(&v.address))
+                    {
+                        let offset = first_at.saturating_add(index.saturating_mul(entry_bytes))
+                            + ADDRESS_LEN
+                            + PUBLIC_KEY_LEN;
+                        probes.push(FaultProbe {
+                            name: "a set that cannot reach the threshold must be refused"
+                                .to_string(),
+                            patch: BytePatch::InPayload {
+                                offset,
+                                bytes: u64::MAX.to_le_bytes().to_vec(),
+                            },
+                            expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
+                        });
+                    }
+                }
+
+                // E. One byte of the chain id, so the commit claims a chain the
+                //    adapter was not pinned to. The byte is derived from the
+                //    payload's own chain id rather than assumed ASCII.
+                if let Some(first) = decoded.chain_id.bytes().next() {
+                    let flipped = if first == 0 { 1 } else { first.wrapping_sub(1) };
+                    probes.push(FaultProbe {
+                        name: "a commit for another chain id must be refused".to_string(),
+                        patch: BytePatch::InPayload {
+                            offset: 8,
+                            bytes: vec![flipped],
+                        },
+                        expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
+                    });
+                }
+            }
+        }
+
         probes
     }
 
@@ -1720,8 +1776,8 @@ mod tests {
         // envelope: without that, an adapter that never verifies a signature
         // would still pass admission.
         assert!(
-            report.probes.len() >= 9,
-            "expected the signature-level and quorum-level probes (9+), got {}: {report:?}",
+            report.probes.len() >= 11,
+            "expected the signature-level and quorum-level probes (11+), got {}: {report:?}",
             report.probes.len()
         );
         // Every probe the adapter declares must be a probe it can build from
