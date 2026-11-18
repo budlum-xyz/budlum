@@ -103,6 +103,7 @@ pub enum DomainLifecycleStatus {
 }
 
 impl DomainLifecycleStatus {
+    #[must_use]
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),

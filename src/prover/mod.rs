@@ -100,6 +100,7 @@ pub struct ZkProofSubmission {
 /// same: the allow list must decide over exactly the value the proof is bound
 /// to against the AIR. Using a separate tagged hash would open a gap in which
 /// the listed program and the proven program could differ.
+#[must_use]
 pub fn zk_program_hash(program: &[u64]) -> Hash32 {
     use sha3::{Digest, Keccak256};
     let mut hasher = Keccak256::new();
@@ -163,6 +164,7 @@ impl ZkProofSubmission {
     ///
     /// That is why the domain separator is `V2`: the preimage changed and the
     /// old hashes are deliberately invalid.
+    #[must_use]
     pub fn payload_binding_hash(
         proof: &ProofEnvelope,
         public_inputs: &ExecutionPublicInputs,
@@ -204,6 +206,7 @@ impl ZkProofSubmission {
 
     /// Recompute and return the expected payload binding hash for this
     /// Submission.
+    #[must_use]
     pub fn expected_payload_hash(&self) -> Hash32 {
         Self::payload_binding_hash(
             &self.proof,
@@ -215,16 +218,19 @@ impl ZkProofSubmission {
     }
 
     /// The domain this proof advances.
+    #[must_use]
     pub fn domain(&self) -> DomainId {
         self.message.target_domain
     }
 
     /// The target height this proof claims.
+    #[must_use]
     pub fn target_height(&self) -> u64 {
         self.message.source_height
     }
 
     /// The submitter (fee payer / reward recipient candidate).
+    #[must_use]
     pub fn submitter(&self) -> Address {
         self.message.sender
     }
@@ -296,25 +302,25 @@ pub enum ProofError {
 impl std::fmt::Display for ProofError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProofError::PayloadHashMismatch => {
+            Self::PayloadHashMismatch => {
                 write!(f, "message payload hash does not match proof payload")
             }
-            ProofError::WrongMessageKind => write!(f, "message kind is not a ZK proof"),
-            ProofError::InvalidProof(e) => write!(f, "invalid proof: {e}"),
-            ProofError::ConflictingClaim {
+            Self::WrongMessageKind => write!(f, "message kind is not a ZK proof"),
+            Self::InvalidProof(e) => write!(f, "invalid proof: {e}"),
+            Self::ConflictingClaim {
                 domain_id,
                 target_height,
             } => write!(
                 f,
                 "conflicting proof claim for domain {domain_id} height {target_height}"
             ),
-            ProofError::InsufficientFee { have, need } => {
+            Self::InsufficientFee { have, need } => {
                 write!(
                     f,
                     "insufficient balance for proof fee: have {have}, need {need}"
                 )
             }
-            ProofError::RegistryFull { cap } => {
+            Self::RegistryFull { cap } => {
                 write!(f, "proof claim registry is full ({cap} entries)")
             }
         }
@@ -349,14 +355,17 @@ pub struct ProofClaimRegistry {
 }
 
 impl ProofClaimRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn get(&self, key: &ProofClaimKey) -> Option<&AcceptedProofClaim> {
         self.claims.get(key)
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.claims.len()
     }
@@ -382,6 +391,7 @@ impl ProofClaimRegistry {
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.claims.is_empty()
     }

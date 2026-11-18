@@ -54,7 +54,7 @@ impl SovereignDomainClass {
     ///
     /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
-        if let SovereignDomainClass::Custom(label) = self {
+        if let Self::Custom(label) = self {
             validate_label("SovereignDomainClass::Custom", label)?;
         }
         Ok(())
@@ -70,6 +70,7 @@ pub enum DomainLifecycleState {
 }
 
 impl DomainLifecycleState {
+    #[must_use]
     pub fn can_transition_to(&self, next: &Self) -> bool {
         match (self, next) {
             (Self::Draft, Self::Active | Self::Frozen | Self::Retired) => true,
@@ -133,6 +134,7 @@ impl ComplianceEvidence {
 
     /// Domain-separated root over public commitments only. No KYC/person data
     /// Is carried here; private compliance data remains off-chain.
+    #[must_use]
     pub fn root(&self) -> Hash32 {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_SOVEREIGN_COMPLIANCE_EVIDENCE_V1");
@@ -157,6 +159,7 @@ pub struct SovereignDomainTemplate {
 }
 
 impl SovereignDomainTemplate {
+    #[must_use]
     pub fn new(
         domain_id: DomainId,
         class: SovereignDomainClass,
@@ -180,6 +183,7 @@ impl SovereignDomainTemplate {
         template
     }
 
+    #[must_use]
     pub fn calculate_id(&self) -> Hash32 {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_SOVEREIGN_DOMAIN_TEMPLATE_V1");
@@ -193,6 +197,7 @@ impl SovereignDomainTemplate {
         hasher.finalize().into()
     }
 
+    #[must_use]
     pub fn verify_id(&self) -> bool {
         self.template_id == self.calculate_id()
     }
@@ -292,6 +297,7 @@ pub struct SovereignDomainRegistry {
 }
 
 impl SovereignDomainRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -417,6 +423,7 @@ impl SovereignDomainRegistry {
         template.transition_to(next)
     }
 
+    #[must_use]
     pub fn root(&self) -> Hash32 {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_SOVEREIGN_DOMAIN_REGISTRY_V1");

@@ -80,11 +80,11 @@ pub struct EffortTier(u16);
 
 impl EffortTier {
     /// The `0.5x` floor - fast and rough.
-    pub const FASTEST: EffortTier = EffortTier(TIER_MIN_TENTHS);
+    pub const FASTEST: Self = Self(TIER_MIN_TENTHS);
     /// The `1.0x` reference point.
-    pub const BASELINE: EffortTier = EffortTier(TIER_BASELINE_TENTHS);
+    pub const BASELINE: Self = Self(TIER_BASELINE_TENTHS);
     /// The `10.0x` ceiling - dedicated hardware only.
-    pub const DEEPEST: EffortTier = EffortTier(TIER_MAX_TENTHS);
+    pub const DEEPEST: Self = Self(TIER_MAX_TENTHS);
 
     /// Build a tier from tenths of the baseline (`5` = 0.5x, `10` = 1.0x,
     /// `100` = 10.0x).
@@ -123,7 +123,7 @@ impl EffortTier {
                 TIER_MAX_TENTHS % TIER_SCALE
             ));
         }
-        Ok(EffortTier(tenths))
+        Ok(Self(tenths))
     }
 
     /// The raw tenths value, for hashing and storage.
@@ -149,7 +149,7 @@ impl EffortTier {
 
     /// Whether an operator advertising `ceiling` can serve this tier.
     #[must_use]
-    pub const fn servable_by(&self, ceiling: EffortTier) -> bool {
+    pub const fn servable_by(&self, ceiling: Self) -> bool {
         self.0 <= ceiling.0
     }
 }
@@ -173,7 +173,7 @@ impl<'de> serde::Deserialize<'de> for EffortTier {
 impl Default for EffortTier {
     /// `1.0x` - a request that does not say otherwise gets baseline work.
     fn default() -> Self {
-        EffortTier::BASELINE
+        Self::BASELINE
     }
 }
 

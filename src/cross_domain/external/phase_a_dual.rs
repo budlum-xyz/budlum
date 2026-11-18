@@ -17,7 +17,7 @@ pub const MAX_SEGMENT_ROWS: u64 = 1 << 20;
 pub const MAX_BATCH_PROOF_DELAY_BLOCKS: u64 = 8;
 
 /// Boundary summary of one `<= 2^20`-row execution segment ( Step 1).
-/// WIRING: produced per chunk by the BudZero segment prover.
+/// WIRING: produced per chunk by the `BudZero` segment prover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentBoundary {
     pub program_hash: Hash32,

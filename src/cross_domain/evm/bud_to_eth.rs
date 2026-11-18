@@ -68,17 +68,17 @@ pub enum BudToEthError {
 impl std::fmt::Display for BudToEthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BudToEthError::BurnEventNotFound => write!(f, "bud-to-eth: burn event not found"),
-            BudToEthError::NotBurned => write!(f, "bud-to-eth: transfer not in Burned status"),
-            BudToEthError::InvalidRecipient => {
+            Self::BurnEventNotFound => write!(f, "bud-to-eth: burn event not found"),
+            Self::NotBurned => write!(f, "bud-to-eth: transfer not in Burned status"),
+            Self::InvalidRecipient => {
                 write!(f, "bud-to-eth: invalid Ethereum recipient (20 bytes)")
             }
-            BudToEthError::FinalityProofMissing => write!(f, "bud-to-eth: finality proof missing"),
-            BudToEthError::AmountExceedsCap => write!(f, "bud-to-eth: amount exceeds bridge cap"),
-            BudToEthError::BurnDebitNotRecorded => {
+            Self::FinalityProofMissing => write!(f, "bud-to-eth: finality proof missing"),
+            Self::AmountExceedsCap => write!(f, "bud-to-eth: amount exceeds bridge cap"),
+            Self::BurnDebitNotRecorded => {
                 write!(f, "bud-to-eth: the burn recorded no net debit")
             }
-            BudToEthError::BurnExpired => {
+            Self::BurnExpired => {
                 write!(f, "bud-to-eth: burn expired before finalized claim height")
             }
         }

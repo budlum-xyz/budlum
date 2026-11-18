@@ -101,6 +101,10 @@ pub struct ShareState {
     /// unacknowledged assignment handover, Section 7.6).
     #[serde(default)]
     pub assigned_epoch: u64,
+    /// Index of the repair [`SymbolRoot`] generated to replace this lost share,
+    /// or `None` if this share has not yet been assigned a replacement repair root.
+    #[serde(default)]
+    pub replaced_by_root: Option<usize>,
 }
 
 /// A symbol root and the ESI range it covers. The upload root covers ESI
@@ -435,6 +439,7 @@ fn initial_state(
             lost: false,
             root: usize::try_from(segment).unwrap_or(usize::MAX),
             assigned_epoch: epoch,
+            replaced_by_root: None,
         })
         .collect();
     let roots = record
@@ -922,6 +927,23 @@ impl Bud3Registry {
             })
     }
 
+    /// Return whether `receipt_id` is still retained in the on-chain paid-view table.
+    #[must_use]
+    pub fn has_paid_view(&self, receipt_id: &[u8; 32]) -> bool {
+        self.paid_views.contains_key(receipt_id)
+    }
+
+    /// Highest epoch observed across live [`PaidViewRecord`] entries, providing a
+    /// monotonic lower bound against caller-omitted or backdated epoch parameters.
+    #[must_use]
+    pub fn observed_paid_view_epoch(&self) -> u64 {
+        self.paid_views
+            .values()
+            .map(|rec| rec.paid_at_epoch)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Item 6 of section 6.14: every new share of `key` is confirmed, so every
     /// object it replaced releases its shares. The old commitment keeps
     /// answering, as a redirect to `key`.
@@ -971,20 +993,15 @@ impl Bud3Registry {
         }
     }
 
-    /// `BindNft`: one more reference to a live object.
-    ///
-    /// `nft_owner` is the chain-resolved owner of `nft` from the NFT registry.
-    /// Binding is refused unless `nft_owner == Some(holder)` so no account can
-    /// squat an unowned or third-party NFT id.
+    /// Validate whether `nft` can be bound to `key` on behalf of `holder` without
+    /// mutating registry state.
     ///
     /// # Errors
     ///
-    /// [`RegistryError::UnknownObject`], [`RegistryError::Tombstoned`],
-    /// [`RegistryError::NotAuthorized`], [`RegistryError::NftAlreadyBound`], or
-    /// [`RegistryError::BadRecord`] when `key` has a pending replacement or reached
-    /// the reference cap.
-    pub fn bind_nft(
-        &mut self,
+    /// Returns [`RegistryError`] if ownership verification, tombstone, pending
+    /// replacement, sealed ownership, duplicate binding, or reference-cap checks fail.
+    pub fn can_bind_nft(
+        &self,
         nft: NftId,
         holder: Address,
         nft_owner: Option<Address>,
@@ -1004,16 +1021,40 @@ impl Bud3Registry {
                 "object has pending replacement; bind successor commitment",
             ));
         }
-        let obj = self
-            .objects
-            .get_mut(key)
-            .ok_or(RegistryError::UnknownObject)?;
+        let obj = self.objects.get(key).ok_or(RegistryError::UnknownObject)?;
         if obj.record.content_id.kind == ContentIdKind::Sealed && obj.owner != holder {
             return Err(RegistryError::NotAuthorized);
         }
         if obj.references.len() >= MAX_OBJECT_REFERENCES {
             return Err(RegistryError::BadRecord("object reference limit reached"));
         }
+        Ok(())
+    }
+
+    /// `BindNft`: one more reference to a live object.
+    ///
+    /// `nft_owner` is the chain-resolved owner of `nft` from the NFT registry.
+    /// Binding is refused unless `nft_owner == Some(holder)` so no account can
+    /// squat an unowned or third-party NFT id.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::UnknownObject`], [`RegistryError::Tombstoned`],
+    /// [`RegistryError::NotAuthorized`], [`RegistryError::NftAlreadyBound`], or
+    /// [`RegistryError::BadRecord`] when `key` has a pending replacement or reached
+    /// the reference cap.
+    pub fn bind_nft(
+        &mut self,
+        nft: NftId,
+        holder: Address,
+        nft_owner: Option<Address>,
+        key: &ObjectKey,
+    ) -> Result<(), RegistryError> {
+        self.can_bind_nft(nft, holder, nft_owner, key)?;
+        let obj = self
+            .objects
+            .get_mut(key)
+            .ok_or(RegistryError::UnknownObject)?;
         obj.references.insert(nft);
         self.nfts.insert(nft, (*key, holder));
         Ok(())
@@ -1183,10 +1224,16 @@ impl Bud3Registry {
             return Err(RegistryError::NotAuthorized);
         }
         let live_leaf = self.pending_replacement_leaf(key);
-        let has_deps = self
-            .pending_replacement_sources(&live_leaf)
-            .into_iter()
-            .any(|k| self.base_deps.get(&k).is_some_and(|d| !d.is_empty()));
+        let lineage = self.pending_replacement_sources(&live_leaf);
+        if lineage
+            .iter()
+            .any(|k| self.objects.get(k).is_some_and(|o| o.owner != *signer))
+        {
+            return Err(RegistryError::NotAuthorized);
+        }
+        let has_deps = lineage
+            .iter()
+            .any(|k| self.base_deps.get(k).is_some_and(|d| !d.is_empty()));
         if has_deps {
             return Err(RegistryError::HasDependents);
         }
@@ -1293,8 +1340,12 @@ impl Bud3Registry {
                     .all(|r| self.nfts.get(r).is_some_and(|(_, h)| h == to))
         });
         if all_held_by_to {
-            if let Some(obj) = self.objects.get_mut(&key) {
-                obj.owner = *to;
+            for lineage_key in self.pending_replacement_sources(&key) {
+                if let Some(obj) = self.objects.get_mut(&lineage_key) {
+                    if obj.owner == *from {
+                        obj.owner = *to;
+                    }
+                }
             }
         }
         Ok(())
@@ -1603,6 +1654,16 @@ impl Bud3Registry {
         Some(key)
     }
 
+    /// Resolve `key` to the live leaf [`ObjectKey`] and [`ObjectEntry`] that
+    /// carries future custody/renewal lifetime across finalized and pending
+    /// `ReplaceObject` hops.
+    #[must_use]
+    pub fn resolve_renewal_target(&self, key: &ObjectKey) -> Option<(ObjectKey, &ObjectEntry)> {
+        let (live_key, _) = self.resolve_live_object(key)?;
+        let target_key = self.pending_replacement_leaf(&live_key);
+        self.objects.get(&target_key).map(|obj| (target_key, obj))
+    }
+
     /// `RenewObject`: anyone may extend the paid lifetime.
     ///
     /// # Errors
@@ -1612,9 +1673,12 @@ impl Bud3Registry {
         if extra_epochs == 0 {
             return Err(RegistryError::BadLifetime);
         }
+        let (target_key, _) = self
+            .resolve_renewal_target(key)
+            .ok_or(RegistryError::UnknownObject)?;
         let obj = self
             .objects
-            .get_mut(key)
+            .get_mut(&target_key)
             .ok_or(RegistryError::UnknownObject)?;
         let new_expires = obj
             .expires_at
@@ -2170,17 +2234,12 @@ impl Bud3Registry {
     /// Missed windows withhold that window's reward and route it to the Network
     /// Security Pool without slashing stake. Returns the number of misses.
     pub fn close_windows(&mut self, epoch: u64) -> usize {
+        // Retire unacknowledged repair shares once their 3-epoch acknowledgment
+        // window elapses (clearing `replaced_by_root` on covered lost shares)
+        // so a silent recipient cannot freeze future repairs.
+        let _ = self.retire_unacknowledged_repairs(epoch);
         let mut missed = 0;
         for obj in self.objects.values_mut() {
-            let upload_roots = obj.record.symbol_roots.len();
-            // Retire unacknowledged repair shares once their 3-epoch acknowledgment
-            // window elapses so a silent recipient cannot freeze future repairs.
-            obj.shares.retain(|s| {
-                !(s.root >= upload_roots
-                    && s.status == ShareStatus::Pending
-                    && epoch.saturating_sub(s.assigned_epoch)
-                        >= super::custody::SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS)
-            });
             for s in &mut obj.shares {
                 if s.open_audit.is_some_and(|(_, last)| last < epoch) {
                     s.open_audit = None;
@@ -2573,10 +2632,23 @@ impl Bud3Registry {
             return Err(RegistryError::BadRepair("ESI range"));
         }
         let added = next - u64::from(first);
+        let expired_repair_roots: BTreeSet<usize> = obj
+            .shares
+            .iter()
+            .filter(|s| is_expired_pending_repair(s))
+            .map(|s| s.root)
+            .collect();
+        let needs_repair_for_root = |s: &ShareState| {
+            s.segment == segment
+                && s.lost
+                && (s.replaced_by_root.is_none()
+                    || s.replaced_by_root
+                        .is_some_and(|r| expired_repair_roots.contains(&r)))
+        };
         let lost: u64 = obj
             .shares
             .iter()
-            .filter(|s| s.segment == segment && s.lost)
+            .filter(|s| needs_repair_for_root(s))
             .map(|s| u64::from(s.share.symbols))
             .sum();
         if added < lost {
@@ -2693,6 +2765,15 @@ impl Bud3Registry {
             count,
         });
         let root = obj.roots.len() - 1;
+        for s in obj.shares.iter_mut().filter(|s| {
+            s.segment == segment
+                && s.lost
+                && (s.replaced_by_root.is_none()
+                    || s.replaced_by_root
+                        .is_some_and(|r| expired_repair_roots.contains(&r)))
+        }) {
+            s.replaced_by_root = Some(root);
+        }
         for share in sorted {
             obj.shares.push(ShareState {
                 segment,
@@ -2705,6 +2786,7 @@ impl Bud3Registry {
                 lost: false,
                 root,
                 assigned_epoch: epoch,
+                replaced_by_root: None,
             });
         }
         if let Some(n) = obj.next_esi.get_mut(seg_idx) {
@@ -2721,27 +2803,44 @@ impl Bud3Registry {
         let mut retired = 0;
         for obj in self.objects.values_mut() {
             let upload_roots = obj.record.symbol_roots.len();
-            let before = obj.shares.len();
-            obj.shares.retain(|s| {
-                !(s.root >= upload_roots
+            let is_retired = |s: &ShareState| {
+                s.root >= upload_roots
                     && s.status == ShareStatus::Pending
                     && !s.lost
                     && epoch.saturating_sub(s.assigned_epoch)
-                        >= super::custody::SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS)
-            });
+                        >= super::custody::SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS
+            };
+            let retired_roots: BTreeSet<usize> = obj
+                .shares
+                .iter()
+                .filter(|s| is_retired(s))
+                .map(|s| s.root)
+                .collect();
+            let before = obj.shares.len();
+            obj.shares.retain(|s| !is_retired(s));
             retired += before - obj.shares.len();
+            if !retired_roots.is_empty() {
+                for s in &mut obj.shares {
+                    if s.replaced_by_root
+                        .is_some_and(|r| retired_roots.contains(&r))
+                    {
+                        s.replaced_by_root = None;
+                    }
+                }
+            }
         }
         retired
     }
 
-    /// Drop the lost shares of every segment whose repair shares are all
-    /// confirmed. Old shares never go before the new ones hold. Returns how
-    /// many were dropped.
+    /// Drop the lost shares whose replacement repair shares are all confirmed.
+    /// Old shares never go before the new ones covering them hold, and later
+    /// losses on the same segment stay intact until their own repair settles.
+    /// Returns how many were dropped.
     pub fn settle_repairs(&mut self) -> usize {
         let mut dropped = 0;
         for obj in self.objects.values_mut() {
             let upload_roots = obj.record.symbol_roots.len();
-            let settled: BTreeSet<u64> = obj
+            let settled_roots: BTreeSet<usize> = obj
                 .roots
                 .iter()
                 .enumerate()
@@ -2759,11 +2858,14 @@ impl Bud3Registry {
                         confirmed_symbols == u64::from(r.count)
                     }
                 })
-                .map(|(_, r)| r.segment)
+                .map(|(i, _)| i)
                 .collect();
             let before = obj.shares.len();
-            obj.shares
-                .retain(|s| !(s.lost && settled.contains(&s.segment)));
+            obj.shares.retain(|s| {
+                !(s.lost
+                    && s.replaced_by_root
+                        .is_some_and(|r| settled_roots.contains(&r)))
+            });
             dropped += before - obj.shares.len();
         }
         dropped
@@ -3109,6 +3211,10 @@ impl Bud3Registry {
                     .map_or((0u8, 0u64, 0u64, 0u64, 0u64), |(a, last)| {
                         (1, a.segment, a.position, a.sub_block, last)
                     });
+                let (has_repair_root, repair_root) = match s.replaced_by_root {
+                    None => (0u8, 0u64),
+                    Some(r) => (1u8, r as u64),
+                };
                 fold(&[
                     b"share",
                     &s.segment.to_le_bytes(),
@@ -3128,6 +3234,8 @@ impl Bud3Registry {
                     &[u8::from(s.lost)],
                     &(s.root as u64).to_le_bytes(),
                     &s.assigned_epoch.to_le_bytes(),
+                    &[has_repair_root],
+                    &repair_root.to_le_bytes(),
                 ]);
             }
         }
@@ -5498,5 +5606,233 @@ mod tests {
             r.register_object(owner3, up.record, shares, 2, 50).unwrap(),
             Registered::Deduplicated(expected_key2)
         );
+    }
+
+    #[test]
+    fn settle_repairs_preserves_subsequent_lost_share_until_its_repair_settles() {
+        use super::super::custody::symbol_root;
+        use super::super::fountain::SegmentEncoder;
+
+        let mut r = Bud3Registry::default();
+        let content: Vec<u8> = (0..1500u32).map(|i| (i % 247) as u8).collect();
+        let (up, shares) = upload(&content);
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record.clone(), shares, 0, 1000)
+            .unwrap();
+        for h in 0..4u8 {
+            r.ack(&key, &addr(10 + h)).unwrap();
+        }
+
+        // First loss (validator 13) -> repaired (ESI 20..25) and settled cleanly.
+        assert_eq!(r.mark_unseen(&addr(13)), 1);
+        let obj_bytes = super::super::bof1::Object::raw_public(&content).encode();
+        let enc = SegmentEncoder::new(0, &obj_bytes, &P).unwrap();
+        let k = enc.k();
+        let fresh1 = enc.repair_symbols(20 - k, 5).unwrap();
+        let leaves1: Vec<(u32, [u8; 32])> = fresh1
+            .iter()
+            .map(|x| (x.esi, symbol_leaf(&x.data)))
+            .collect();
+        let witness = super::super::repair::RepairWitness::ProvenSymbols(
+            super::super::repair::build_repair_proven_witness(0, &up.segments[0], &up.segments[0])
+                .unwrap(),
+        );
+        r.record_repair(
+            &key,
+            SegmentRepair {
+                segment: 0,
+                new_shares: vec![Share {
+                    validator: addr(20),
+                    class: Class::Full,
+                    first_esi: 20,
+                    symbols: 5,
+                }],
+                new_symbols: fresh1,
+                new_root: symbol_root(&leaves1),
+                witness: &witness,
+            },
+            10,
+        )
+        .unwrap();
+        r.ack(&key, &addr(20)).unwrap();
+        assert_eq!(r.settle_repairs(), 1);
+        assert!(r.object(&key).unwrap().shares.iter().all(|s| !s.lost));
+
+        // Subsequent loss (validator 12) on the same segment must NOT be dropped by
+        // the already-settled prior repair root; it waits until its own repair lands & settles.
+        assert_eq!(r.mark_unseen(&addr(12)), 1);
+        assert_eq!(r.settle_repairs(), 0);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        let fresh2 = enc.repair_symbols(25 - k, 5).unwrap();
+        let leaves2: Vec<(u32, [u8; 32])> = fresh2
+            .iter()
+            .map(|x| (x.esi, symbol_leaf(&x.data)))
+            .collect();
+        r.record_repair(
+            &key,
+            SegmentRepair {
+                segment: 0,
+                new_shares: vec![Share {
+                    validator: addr(21),
+                    class: Class::Full,
+                    first_esi: 25,
+                    symbols: 5,
+                }],
+                new_symbols: fresh2,
+                new_root: symbol_root(&leaves2),
+                witness: &witness,
+            },
+            11,
+        )
+        .unwrap();
+        // While second repair is pending, a third loss (validator 11) stays untouched
+        // when the second repair confirms & settles.
+        assert_eq!(r.mark_unseen(&addr(11)), 1);
+        r.ack(&key, &addr(21)).unwrap();
+        assert_eq!(r.settle_repairs(), 1);
+        let lost_holders: Vec<Address> = r
+            .object(&key)
+            .unwrap()
+            .shares
+            .iter()
+            .filter(|s| s.lost)
+            .map(|s| s.share.validator)
+            .collect();
+        assert_eq!(lost_holders, vec![addr(11)]);
+    }
+
+    #[test]
+    fn renew_follows_finalized_and_pending_replacement_to_live_leaf() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(1);
+        let (up, shares) = upload(b"renew follows pending and finalized replacement");
+        let old_key = up.record.commitment;
+        r.register_object(owner, up.record.clone(), shares.clone(), 0, 10)
+            .unwrap();
+        for (_, sh) in &shares {
+            r.ack(&old_key, &sh.validator).unwrap();
+        }
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12]
+            .into_iter()
+            .map(|id| {
+                (
+                    addr(id),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &addr(id)).unwrap(),
+                )
+            })
+            .collect();
+
+        // Propose pending replacement old -> mid (unfinalized).
+        let mut mid_rec = up.record.clone();
+        mid_rec.codec = if mid_rec.codec == 0 { 1 } else { 0 };
+        mid_rec.object_len = mid_rec.object_len.saturating_add(1);
+        mid_rec.commitment = [0xE1; 32];
+        let atts1: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|id| {
+                sign_replace_attestation(addr(id), &addr(id), &old_key, &mid_rec, &shares).unwrap()
+            })
+            .collect();
+        let mid_key = r
+            .replace_object(
+                (addr(10), 10_000),
+                &old_key,
+                mid_rec,
+                shares.clone(),
+                &atts1,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+
+        // Renewing via `old_key` while pending extends `mid_key` (not `old_key`).
+        let mid_exp_before = r.object(&mid_key).unwrap().expires_at;
+        let new_exp = r.renew(&old_key, 7).unwrap();
+        assert_eq!(new_exp, mid_exp_before + 7);
+        assert_eq!(r.object(&mid_key).unwrap().expires_at, new_exp);
+        assert_eq!(r.object(&old_key).unwrap().expires_at, 10);
+
+        // Finalize mid_key (`old_key` dropped); renewing via `old_key` still extends `mid_key`.
+        for (_, sh) in &shares {
+            r.ack(&mid_key, &sh.validator).unwrap();
+        }
+        assert!(r.object(&old_key).is_none());
+        assert_eq!(r.renew(&old_key, 5).unwrap(), new_exp + 5);
+        assert_eq!(r.object(&mid_key).unwrap().expires_at, new_exp + 5);
+    }
+
+    #[test]
+    fn transfer_nft_reference_syncs_pending_predecessor_owner_and_blocks_old_delete() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let seller = addr(1);
+        let buyer = addr(2);
+        let nft = [0x9A; 32];
+        let (up, shares) = upload(b"pending replace ownership transfer safety");
+        let old_key = up.record.commitment;
+        r.register_object(seller, up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        r.bind_nft(nft, seller, Some(seller), &old_key).unwrap();
+        for (_, sh) in &shares {
+            r.ack(&old_key, &sh.validator).unwrap();
+        }
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12]
+            .into_iter()
+            .map(|id| {
+                (
+                    addr(id),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &addr(id)).unwrap(),
+                )
+            })
+            .collect();
+        let mut new_rec = up.record;
+        new_rec.codec = if new_rec.codec == 0 { 1 } else { 0 };
+        new_rec.object_len = new_rec.object_len.saturating_add(1);
+        new_rec.commitment = [0xE2; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|id| {
+                sign_replace_attestation(addr(id), &addr(id), &old_key, &new_rec, &shares).unwrap()
+            })
+            .collect();
+        let new_key = r
+            .replace_object(
+                (addr(10), 10_000),
+                &old_key,
+                new_rec,
+                shares,
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+
+        // Transfer NFT from seller -> buyer while replacement is still unfinalized.
+        r.transfer_nft_reference(&nft, &seller, &buyer).unwrap();
+        assert_eq!(r.object(&new_key).unwrap().owner, buyer);
+        assert_eq!(r.object(&old_key).unwrap().owner, buyer);
+
+        // Seller must NOT be able to delete `old_key` (nor indirectly kill buyer's `new_key`).
+        assert_eq!(
+            r.delete_object(&old_key, &seller, 2),
+            Err(RegistryError::NotAuthorized)
+        );
+        assert!(r.object(&new_key).is_some());
+        assert_eq!(r.nft_binding(&nft), Some((new_key, buyer)));
     }
 }

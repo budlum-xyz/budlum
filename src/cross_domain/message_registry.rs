@@ -22,6 +22,7 @@ pub struct CrossDomainMessageRegistry {
 }
 
 impl CrossDomainMessageRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             messages: BTreeMap::new(),
@@ -80,6 +81,7 @@ impl CrossDomainMessageRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn get(&self, message_id: &MessageId) -> Option<&CrossDomainMessage> {
         self.messages.get(message_id)
     }
@@ -88,10 +90,12 @@ impl CrossDomainMessageRegistry {
         self.messages.remove(message_id)
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.messages.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
@@ -100,6 +104,7 @@ impl CrossDomainMessageRegistry {
         self.messages.values()
     }
 
+    #[must_use]
     pub fn root(&self) -> Hash32 {
         let leaves: Vec<Hash32> = self
             .messages
