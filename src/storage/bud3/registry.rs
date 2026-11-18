@@ -458,7 +458,7 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
     if record.symbol_roots.len() as u64 != seg.count() {
         return Err(RegistryError::BadRecord("one symbol root per segment"));
     }
-    if record.symbol_roots.iter().any(|r| *r == [0u8; 32]) {
+    if record.symbol_roots.contains(&[0u8; 32]) {
         return Err(RegistryError::BadRecord("zero symbol root"));
     }
     for index in 0..seg.count() {

@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "Budlum BNS Resolver",
+  "version": "0.1.0",
+  "description": "Gateway-free cryptographic resolver for .bud and *.budlum.xyz names using local wallet-core WASM proof verification.",
+  "permissions": [
+    "declarativeNetRequest",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://*.budlum.xyz/*",
+    "http://*.bud/*",
+    "https://*.bud/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Budlum BNS Resolver",
+    "default_popup": "popup.html"
+  },
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "bns_redirect_rules",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "resolver.html",
+        "resolver.js",
+        "bns_host.js",
+        "wasm/*"
+      ],
+      "matches": [
+        "https://*.budlum.xyz/*",
+        "http://*.bud/*",
+        "https://*.bud/*"
+      ]
+    }
+  ]
+}
