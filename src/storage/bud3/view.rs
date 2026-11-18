@@ -1144,7 +1144,7 @@ mod tests {
                 0,
                 Share {
                     validator: validators[2],
-                    class: Class::Mobile,
+                    class: Class::Full,
                     first_esi: 12,
                     symbols: 4,
                 },
