@@ -72,6 +72,16 @@ A changes-requested review from CodeRabbit remains in the review history of #164
 - [Ubuntu userland execution record](findings/os-ubuntu.md)
 - [Testnet specification index](testnet/index.md)
 
+## Snapshot refresh 2026-11-18 (late afternoon, Europe/Istanbul)
+
+- Live PR heads: #126 `56cfddb4fede`, #164 `3467a0bababb` (2 failing checks: `Budlum Core library test` job 134729279818 and the Coverage ratchet, both red on the `garden::invite_refuses_non_canonical_hex_and_duplicate_peers` assertion at `src/garden/invite.rs:354`), #183 `f36491d2` after the B-0051 baseline repair push (CI not yet observed green), #194 `22860424031a`, #198 `1857ffd36254`, #201 `02de7030ac56` (VerifyMerkle gate fix). #200 carries the audit notes; PR #201 opened by this audit effort.
+- CI runner starvation is the dominant state: on #194/#198/#200 the large majority of checks sit `queued`; on #126 111 success with 2 `cancelled` (Cross-Platform Digest macos-latest) and no failures; nothing in this snapshot is a green-merge claim.
+- Local `cargo fmt --all -- --check` passes on `audit/budlum-continuation-20261118`. A local `cargo test --lib --all-features --no-run` was killed by the OOM killer with the test profile's `opt-level = 1` and debug info (2 GB RAM host). It is running again with debug info disabled; profile overrides are local-only and change no repository file.
+- `protoc` was not present; `protoc` 29.3 was installed locally from the official release archive whose SHA-256 matches the value pinned in `ci.yml`.
+- `THE_BUDLUM_DIREKTIF.md` is intentionally absent from the repository (Bölüm 0.5: the document does not enter the repo; `tree_is_english`). Its absence is not a finding; the inventory is reconciled through `audit-notes/testnet/index.md`.
+- All 1390+ Strix review threads repo-wide remain `resolved` in the ledger; the required `Strix Security Review` status is still unsatisfiable because Strix reports its included review quota exhausted. Branch protection was not bypassed, and no review comment was deleted.
+- Newly opened: PR #201 `fix(storage): make the Merkle envelope requirement follow the VerifyMerkle gate` (base `budlum-stack`) closes B-0054. B-0049 repair (the test-fixture mutation) is prepared in a local worktree and will be pushed to `garden` once the focused regression passes locally; the production parser is unchanged.
+
 ## Local evidence and outstanding work
 
 - The Garden staged tree passed formatting, the 16 `garden::net::tests` cases, the three-node validator/sentry/public relay test, and the no-bare-lock regression. The exact default library listing contained 6,038 tests.
