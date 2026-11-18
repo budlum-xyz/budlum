@@ -1141,6 +1141,39 @@ impl Bud3Registry {
         Ok(deleted)
     }
 
+    /// Delete an object outright. Only the object's owner may do this, and
+    /// only while no dependent delta/derived objects stand on it. Third-party
+    /// NFT references do not block the owner: they are unbound along with the
+    /// object (their holders keep the NFT itself; only this registry's
+    /// reference to it is dropped). The commitment is tombstoned when the
+    /// object was custody-confirmed, exactly as on the burn path.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::UnknownObject`], [`RegistryError::NotAuthorized`] when
+    /// `signer` is not the object's owner, or [`RegistryError::HasDependents`]
+    /// when dependent objects still stand on it.
+    pub fn delete_object(
+        &mut self,
+        key: &ObjectKey,
+        signer: &Address,
+        epoch: u64,
+    ) -> Result<(), RegistryError> {
+        let owner = self
+            .objects
+            .get(key)
+            .ok_or(RegistryError::UnknownObject)?
+            .owner;
+        if owner != *signer {
+            return Err(RegistryError::NotAuthorized);
+        }
+        if self.base_deps.get(key).is_some_and(|d| !d.is_empty()) {
+            return Err(RegistryError::HasDependents);
+        }
+        self.delete(key, epoch);
+        Ok(())
+    }
+
     /// Check whether a chain-verified NFT transfer (`from -> to`) is permitted
     /// by the B.U.D. 3.0 registry without mutating state.
     ///
@@ -3376,6 +3409,42 @@ mod tests {
         assert_eq!(
             r.bind_nft([3; 32], addr(1), Some(addr(1)), &key),
             Err(RegistryError::Tombstoned)
+        );
+    }
+
+    #[test]
+    fn owner_delete_object_ignores_third_party_nft_references() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"owner deletable content");
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record, shares.clone(), 0, 100)
+            .unwrap();
+        for (_, s) in &shares {
+            r.ack(&key, &s.validator).unwrap();
+        }
+        // A third party binds its own NFT to the owner's public object.
+        r.bind_nft([9; 32], addr(2), Some(addr(2)), &key).unwrap();
+        assert_eq!(r.refcount(&key), 1);
+        // The third party cannot delete the owner's object.
+        assert_eq!(
+            r.delete_object(&key, &addr(2), 5),
+            Err(RegistryError::NotAuthorized)
+        );
+        assert!(r.object(&key).is_some());
+        // The owner can: the third-party reference is unbound with it.
+        r.delete_object(&key, &addr(1), 6).unwrap();
+        assert!(r.object(&key).is_none());
+        assert_eq!(r.tombstone(&key), Some(6));
+        assert_eq!(r.refcount(&key), 0);
+        // The NFT itself is untouched; only this registry's reference is gone.
+        assert_eq!(
+            r.burn_reference(&[9; 32], &addr(2), 7),
+            Err(RegistryError::UnknownNft)
+        );
+        // Deletion is final.
+        assert_eq!(
+            r.delete_object(&key, &addr(1), 8),
+            Err(RegistryError::UnknownObject)
         );
     }
 
