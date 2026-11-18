@@ -311,9 +311,9 @@ impl ZkVmExecutor {
         })
     }
 
-    /// Generates and checks a universal BudZero predicate STARK proof (`BLG-242`).
+    /// Generates and checks a universal `BudZero` predicate STARK proof (`BLG-242`).
     ///
-    /// exposed for: ZkVm universal predicate adapters and contract verification callers.
+    /// exposed for: `ZkVm` universal predicate adapters and contract verification callers.
     ///
     /// # Errors
     ///
@@ -328,10 +328,10 @@ impl ZkVmExecutor {
     }
 }
 
-/// Produce a real STARK proof for a BudZKVM bytecode program, returning the
+/// Produce a real STARK proof for a `BudZKVM` bytecode program, returning the
 /// Proof envelope, its public inputs and the decoded program.
 ///
-/// This is the proving counterpart used by the chain ↔ BudZKVM proof bridge (and
+/// This is the proving counterpart used by the chain ↔ `BudZKVM` proof bridge (and
 /// By tests): it runs the VM, derives the canonical public inputs and generates
 /// A `ProofEnvelope` that `budlum-core` can verify natively.
 pub fn prove_bytecode(
@@ -341,7 +341,7 @@ pub fn prove_bytecode(
     prove_bytecode_inner(bytecode, gas_limit, false)
 }
 
-/// F2: Prove bytecode in mainnet mode where VerifyMerkle is gated.
+/// F2: Prove bytecode in mainnet mode where `VerifyMerkle` is gated.
 pub fn prove_bytecode_mainnet(
     bytecode: &[u8],
     gas_limit: u64,
@@ -362,7 +362,7 @@ pub fn prove_bytecode_mainnet(
 /// execution that is `weights_digest` plus `input_commitment` on the
 /// transaction, see `docs/AI_VERIFICATION_STATUS.md`.
 ///
-/// The staged-rollout opcode gate applies here as on the ContractCall path.
+/// The staged-rollout opcode gate applies here as on the `ContractCall` path.
 pub fn prove_bytecode_with_memory<F>(
     bytecode: &[u8],
     gas_limit: u64,
@@ -552,8 +552,8 @@ fn build_public_inputs_for_chain(
     }
 }
 
-/// Pack Log-event accumulator the way `bud-proof` trace_matrix + AIR expect:
-/// Limb 0 = sum of (event & 0xFFFF_FFFF) as a u32 LE in bytes[0..4]; other limbs 0.
+/// Pack Log-event accumulator the way `bud-proof` `trace_matrix` + AIR expect:
+/// Limb 0 = sum of (event & `0xFFFF_FFFF`) as a u32 LE in bytes[0..4]; other limbs 0.
 fn event_digest_air_limbs(events: &[u64]) -> [u8; 32] {
     // Delegate to the one implementation the AIR agrees with.
     //

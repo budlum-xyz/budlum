@@ -2,7 +2,7 @@
 //!
 //! The end-to-end flow of an AI inference layer query through the real budlum-core AI layer:
 //! model registration -> operator compute bond -> building the request with a
-//! closed-circuit input_ref (canonical request_id) -> `submit_request` ->
+//! closed-circuit `input_ref` (canonical `request_id`) -> `submit_request` ->
 //! `AiInferenceResult` -> `submit_result`.
 //! No mocks; real types and real registry methods.
 
@@ -48,7 +48,7 @@ pub fn register_ai_model(
 
 /// Build a closed-circuit AI inference layer inference request (with a canonical `request_id`).
 ///
-/// `input_ref` = the reference to the data used (an AiDataInputRef encoding or
+/// `input_ref` = the reference to the data used (an `AiDataInputRef` encoding or
 /// an opaque value).
 ///
 /// `grant` = the requester's authority to read that data. It is a mandatory

@@ -130,6 +130,7 @@ impl PerceptionKind {
     /// The unit differs per variant on purpose; see [`PerceptionKind::perception_unit`]
     /// for the name of it. A single shared number would have to be bytes,
     /// and bytes are the wrong unit for three of the four.
+    #[must_use]
     pub const fn max_units(self) -> u32 {
         match self {
             Self::Text => MAX_TEXT_INPUT_BYTES,
@@ -141,6 +142,7 @@ impl PerceptionKind {
 
     /// The name of the unit this modality is measured in, for error messages
     /// and for anything reporting a quota to an operator.
+    #[must_use]
     pub const fn perception_unit(self) -> &'static str {
         match self {
             Self::Text => "bytes",
@@ -158,6 +160,7 @@ impl PerceptionKind {
     /// operators running different decoders can disagree about what an image
     /// contains. Anything built on top of this has to treat a decoded
     /// modality as an operator-local result, never as a consensus fact.
+    #[must_use]
     pub const fn needs_decoder(self) -> bool {
         !matches!(self, Self::Text)
     }
@@ -227,11 +230,13 @@ impl ModalitySet {
     /// A model that reads nothing. Refuses every request, which is the right
     /// default: a model whose declaration was lost should stop working rather
     /// than accept everything.
+    #[must_use]
     pub const fn none() -> Self {
         Self(0)
     }
 
     /// A text-only model, which is what most of them are.
+    #[must_use]
     pub const fn text_only() -> Self {
         Self(1 << 0)
     }
@@ -263,16 +268,19 @@ impl ModalitySet {
     }
 
     /// Whether the model declared this modality.
+    #[must_use]
     pub fn declares_modality(self, kind: PerceptionKind) -> bool {
         self.0 & Self::bit(kind) != 0
     }
 
     /// How many modalities are declared.
+    #[must_use]
     pub const fn declared_count(self) -> u32 {
         self.0.count_ones()
     }
 
     /// The raw bits, for hashing into a model spec.
+    #[must_use]
     pub const fn bits(self) -> u32 {
         self.0
     }
@@ -334,6 +342,7 @@ impl PerceptionRequest {
     /// would let one commitment stand for reads of two different assets that
     /// happen to share a content id, which is exactly what deduplication
     /// makes possible.
+    #[must_use]
     pub fn perception_commitment_tag(&self) -> [u8; 32] {
         hash_fields_bytes(&[
             b"BDLM_AI_PERCEPTION_V1",

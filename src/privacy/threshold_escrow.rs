@@ -3,7 +3,7 @@
 //! Binds a 7-member ML-DSA-65 escrow committee with a 4-of-7 quorum requirement,
 //! replay-protected `(escrow_id, chain_id, epoch, nonce)` signing domain,
 //! duplicate-signer refusal, and `PredicateKind::Yk6ThresholdQuorum` STARK
-//! verification against BudZero.
+//! verification against `BudZero`.
 //!
 //! Convenience: exposed for confidential n-of-t threshold escrow lifecycle callers.
 

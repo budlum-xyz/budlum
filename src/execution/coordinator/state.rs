@@ -32,7 +32,7 @@ pub const NS_EVM_ACCOUNT: &str = "ee/evm/account";
 pub const NS_EVM_CODE: &str = "ee/evm/code";
 pub const NS_EVM_STORAGE: &str = "ee/evm/storage";
 
-/// Canonical WASM (CosmWasm) namespaces.
+/// Canonical WASM (`CosmWasm`) namespaces.
 pub const NS_WASM_CODE: &str = "ee/wasm/code";
 pub const NS_WASM_CONTRACT: &str = "ee/wasm/contract";
 pub const NS_WASM_STORE: &str = "ee/wasm/store";
@@ -43,7 +43,7 @@ pub const NS_SVM_ACCOUNT: &str = "ee/svm/account";
 /// Canonical Move namespace.
 pub const NS_MOVE_STATE: &str = "ee/move/state";
 
-/// Canonical BudZero stateful contract namespaces.
+/// Canonical `BudZero` stateful contract namespaces.
 pub const NS_BUDZERO_PROGRAM: &str = "ee/budzero/program";
 pub const NS_BUDZERO_STORAGE: &str = "ee/budzero/storage";
 
@@ -56,7 +56,7 @@ pub const NS_CAIRO_STATE: &str = "ee/cairo/state";
 /// Canonical NEAR-WASM namespace (`EeId::NEAR_WASM = 0x07`).
 pub const NS_NEAR_STATE: &str = "ee/near/state";
 
-/// Canonical PolkaVM namespace (`EeId::POLKAVM = 0x08`).
+/// Canonical `PolkaVM` namespace (`EeId::POLKAVM = 0x08`).
 pub const NS_POLKAVM_STATE: &str = "ee/polkavm/state";
 
 /// Canonical TVM (TON) namespace (`EeId::TVM = 0x09`).

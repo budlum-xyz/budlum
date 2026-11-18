@@ -94,6 +94,7 @@ pub const GOVERNANCE_PARAMETER_WHITELIST: &[&str] = &[
     "liveness_slashing_enabled",
 ];
 
+#[must_use]
 pub fn is_governance_parameter_whitelisted(key: &str) -> bool {
     GOVERNANCE_PARAMETER_WHITELIST.contains(&key)
 }
@@ -351,6 +352,7 @@ pub struct Proposal {
 const GOVERNANCE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/governance";
 
 impl Proposal {
+    #[must_use]
     pub fn new(
         id: u64,
         proposer: Address,
@@ -358,7 +360,7 @@ impl Proposal {
         start_epoch: u64,
         duration: u64,
     ) -> Self {
-        Proposal {
+        Self {
             id,
             proposer,
             p_type,
@@ -373,10 +375,12 @@ impl Proposal {
         }
     }
 
+    #[must_use]
     pub fn activation_epoch(&self) -> u64 {
         self.activation_epoch.unwrap_or(self.end_epoch)
     }
 
+    #[must_use]
     pub fn activation_ready(&self, current_epoch: u64) -> bool {
         current_epoch >= self.activation_epoch()
     }
@@ -414,6 +418,7 @@ impl Proposal {
         Ok(())
     }
 
+    #[must_use]
     pub fn vote_weight_of(&self, voter: &Address) -> u64 {
         self.voter_weights.get(voter).copied().unwrap_or(0)
     }
@@ -541,6 +546,7 @@ impl GovernanceState {
             .count()
     }
 
+    #[must_use]
     pub fn has_non_default_state(&self) -> bool {
         !self.proposals.is_empty()
             || self.next_proposal_id != 0
@@ -550,6 +556,7 @@ impl GovernanceState {
             || !self.consumed_slash_evidence.is_empty()
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -774,6 +781,7 @@ impl GovernanceState {
         self.proposals.iter_mut().find(|p| p.id == id)
     }
 
+    #[must_use]
     pub fn active_proposals(&self) -> Vec<&Proposal> {
         self.proposals
             .iter()
@@ -786,6 +794,7 @@ impl GovernanceState {
     /// Fee multiplier for the proposer's next submission in this epoch.
     /// With `count` already accepted proposals, next cost is `2^count`:
     /// First = 1x, second = 2x, third = 4x. Overflow saturates fail-closed.
+    #[must_use]
     pub fn proposal_fee_multiplier(&self, proposer: &Address, current_epoch: u64) -> u64 {
         let count = self
             .proposer_epoch_count
