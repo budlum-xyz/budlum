@@ -47,12 +47,12 @@ use crate::cross_domain::external::quorum::{
     DisputeBehavior, LowParticipantsBehavior, QuorumPolicy,
 };
 use crate::cross_domain::external::registry::{ExternalDomainRegistry, RegistryError};
-use crate::cross_domain::external::tendermint::TendermintFinalityAdapter;
 use crate::cross_domain::external::selftest::{admit, AdmissionReport};
 use crate::cross_domain::external::spec::{
     AdapterDescriptor, DomainKey, ExternalFinalityAdapter, FinalityAttestation,
     RawConsensusEvidence, VerificationPolicy,
 };
+use crate::cross_domain::external::tendermint::TendermintFinalityAdapter;
 use crate::cross_domain::external::versioning::VersionPolicy;
 use crate::cross_domain::external::zkvm_proof::ZkVmFinalityAdapter;
 use serde::{Deserialize, Serialize};
@@ -183,10 +183,7 @@ pub enum AdapterSpec {
     /// empty chain id is the closed admission state: `register_domain`
     /// refuses it, because a commit's chain id is part of every sign byte and
     /// an unpinned adapter would verify any chain's commit.
-    TendermintCommit {
-        network: String,
-        chain_id: String,
-    },
+    TendermintCommit { network: String, chain_id: String },
 }
 
 impl AdapterSpec {

@@ -5482,10 +5482,7 @@ mod tests {
         }
         assert_eq!(r.public_object(&digest), Some(key1));
 
-        assert_eq!(
-            r.release_shares(&addr(10), &key1, None, 0).unwrap(),
-            1
-        );
+        assert_eq!(r.release_shares(&addr(10), &key1, None, 0).unwrap(), 1);
 
         let expected_key2 = Bud3Registry::claimant_scoped_key(&key1, &owner2);
         assert_eq!(
