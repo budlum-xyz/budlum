@@ -3,10 +3,10 @@
 use crate::chain::blockchain::Blockchain;
 use crate::chain::finality::{FinalityCert, Precommit, Prevote};
 use crate::consensus::qc::{QcBlob, QcFaultProof};
+use crate::core::account::ConsensusAccountProof;
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
-use crate::persistence::state_trie::AccountProofBundle;
 use tokio::sync::{mpsc, oneshot};
 
 /// Direction filter for agent payment queries.
@@ -67,13 +67,14 @@ pub enum ChainCommand {
     GetBlockByHash(String, oneshot::Sender<Option<Block>>),
     GetBalance(Address, oneshot::Sender<u64>),
     GetNonce(Address, oneshot::Sender<u64>),
-    /// Account inclusion/absence proof against the proof-bearing state root.
+    /// Account inclusion/absence proof against the consensus accounts root,
+    /// with the height the proof was drawn at.
     ///
     /// Distinct from [`Self::GetBalance`]: that answers what the node says a
     /// balance is, this answers what the node can *prove* about it.
     GetAccountProof(
         Address,
-        oneshot::Sender<Option<crate::persistence::state_trie::AccountProofBundle>>,
+        oneshot::Sender<Option<(crate::core::account::ConsensusAccountProof, u64)>>,
     ),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
     /// Run the aggregation side of the node with this ML-DSA-87 seed; the
@@ -731,7 +732,7 @@ impl ChainHandle {
     /// `None` means the node could not answer, which is not the same as the
     /// account being absent: absence is itself a proof and comes back as
     /// `Some` with `present: false`.
-    pub async fn get_account_proof(&self, addr: &Address) -> Option<AccountProofBundle> {
+    pub async fn get_account_proof(&self, addr: &Address) -> Option<(ConsensusAccountProof, u64)> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetAccountProof(*addr, tx)).await;
         rx.await.unwrap_or(None)
@@ -2927,20 +2928,9 @@ impl ChainHandle {
 /// block pays; every later request at that height is a tree walk.
 ///
 /// `leaves` is what makes the cache honest. Balances change outside blocks
-/// (faucet, bond debit and refund) and an equal length reorg swaps state at
-/// the same chain length, so the chain length cannot tag the trie. The trie
-/// keeps the exact (address, balance, nonce) list it was built from. A hit
-/// needs the live accounts to match that list, so a stale trie is never used.
-/// The compare is one pass over the accounts and is far cheaper than a build.
-struct ProofTrieCache {
-    leaves: Vec<([u8; 32], u64, u64)>,
-    trie: crate::persistence::state_trie::MerkleTrie,
-}
-
 pub struct ChainActor {
     blockchain: Blockchain,
     rx: mpsc::Receiver<ChainCommand>,
-    proof_trie: Option<ProofTrieCache>,
 }
 
 impl ChainActor {
@@ -2962,58 +2952,20 @@ impl ChainActor {
 
     pub fn new(blockchain: Blockchain) -> (Self, ChainHandle) {
         let (tx, rx) = mpsc::channel(1000);
-        (
-            Self {
-                blockchain,
-                rx,
-                proof_trie: None,
-            },
-            ChainHandle { tx },
-        )
+        (Self { blockchain, rx }, ChainHandle { tx })
     }
 
-    /// Proof for one account, reusing the trie when the accounts did not change.
+    /// Proof for one account, drawn from the consensus accounts tree the
+    /// state root is folded from, with the height it was drawn at.
     ///
-    /// The cache is keyed by the account contents and rebuilt when they do not
-    /// match, so a proof is always drawn against the state the node holds. A
-    /// stale trie would produce a proof that verifies against its own root and
-    /// describes state that no longer exists - worse than no proof, because it
-    /// is a correct-looking answer to the wrong question.
-    fn account_proof(&mut self, addr: &Address) -> AccountProofBundle {
-        let accounts = &self.blockchain.state.accounts;
-        let fresh = self.proof_trie.as_ref().is_some_and(|cached| {
-            cached.leaves.len() == accounts.len()
-                && cached
-                    .leaves
-                    .iter()
-                    .zip(accounts.iter())
-                    .all(|(l, (a, acct))| l.0 == a.0 && l.1 == acct.balance && l.2 == acct.nonce)
-        });
-        if !fresh {
-            let leaves: Vec<([u8; 32], u64, u64)> = accounts
-                .iter()
-                .map(|(a, acct)| (a.0, acct.balance, acct.nonce))
-                .collect();
-            let mut trie = crate::persistence::state_trie::MerkleTrie::new();
-            for (a, balance, nonce) in &leaves {
-                trie.insert(a, *balance, *nonce);
-            }
-            self.proof_trie = Some(ProofTrieCache { leaves, trie });
-        }
-        match self.proof_trie.as_ref() {
-            Some(cached) => crate::persistence::state_trie::prove_from_trie(&cached.trie, &addr.0),
-            // Unreachable: the branch above assigns it. Written as a fallback
-            // rather than an unwrap so a future edit that breaks the
-            // invariant costs one rebuild instead of stopping the node.
-            None => crate::persistence::state_trie::prove_account(
-                self.blockchain
-                    .state
-                    .accounts
-                    .iter()
-                    .map(|(a, acct)| (a.0, acct.balance, acct.nonce)),
-                &addr.0,
-            ),
-        }
+    /// The proof verifies against the accounts root a block header commits
+    /// to, so a light client can anchor the claim to a finalized block. There
+    /// is no separate proof cache: the tree is maintained incrementally by
+    /// the state itself, so a stale proof cannot be served.
+    fn account_proof(&mut self, addr: &Address) -> (ConsensusAccountProof, u64) {
+        let proof = self.blockchain.state.get_account_proof(addr);
+        let height = self.blockchain.state.current_block_height;
+        (proof, height)
     }
 
     /// Height the AI read queries judge deadlines at. It is the height the
@@ -4653,11 +4605,11 @@ mod proof_cache_tests {
         let (mut actor, _handle) = ChainActor::new(bc);
         let who = Address([7u8; 32]);
         actor.blockchain.state.add_balance(&who, 100);
-        let before = actor.account_proof(&who);
+        let (before, _) = actor.account_proof(&who);
         assert_eq!(before.balance, 100);
         // No block is added: the chain length stays the same.
         actor.blockchain.state.add_balance(&who, 50);
-        let after = actor.account_proof(&who);
+        let (after, _) = actor.account_proof(&who);
         assert_eq!(after.balance, 150);
         assert_ne!(before.root, after.root);
     }

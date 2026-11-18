@@ -281,6 +281,9 @@ impl GlobalDedup {
     }
 }
 
+/// WIRING: test-only helper. The economics gates take a `MerkleTrie` to
+/// check `k_bud_trie_root`; the `trie_root_commits_to_values` and
+/// `merkle_trie` tests below are its callers.
 #[derive(Debug, Clone)]
 pub struct MerkleTrie {
     pub root: [u8; 32],

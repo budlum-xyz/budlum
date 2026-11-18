@@ -9,7 +9,7 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, tls, yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -62,57 +62,61 @@ const STALLED_SYNC_PEER_COOLDOWN: Duration = Duration::from_secs(30);
 /// 100; with a 1 MiB request ceiling that pins 100 MiB or more per peer.
 const MAX_SYNC_CONCURRENT_STREAMS: usize = 16;
 
-/// Pick the target peer for a header sync round.
+/// Pick a peer that has not already returned empty headers at our current tip.
 ///
 /// `eligible_best` is already filtered to connected, handshaked, non-banned
 /// peers ordered by score, and `preferred` is already checked for eligibility.
-/// `stalled` is a peer within `STALLED_SYNC_PEER_COOLDOWN`; `empty_at_tip` is
-/// a peer that already returned no new headers for our current tip hash.
-fn select_sync_peer(
+/// `stalled` is a peer within `STALLED_SYNC_PEER_COOLDOWN`; `empty_at_tip`
+/// identifies every peer that already answered with nothing new for our tip.
+fn select_non_empty_sync_peer(
     preferred: Option<PeerId>,
     eligible_best: &[PeerId],
     stalled: Option<PeerId>,
-    empty_at_tip: Option<PeerId>,
+    empty_at_tip: impl Fn(&PeerId) -> bool,
 ) -> Option<PeerId> {
-    let fresh = |p: &PeerId| Some(*p) != stalled && Some(*p) != empty_at_tip;
-    let not_empty = |p: &PeerId| Some(*p) != empty_at_tip;
+    let fresh = |p: &PeerId| Some(*p) != stalled && !empty_at_tip(p);
+    let not_empty = |p: &PeerId| !empty_at_tip(p);
 
     preferred
         .filter(fresh)
         .or_else(|| eligible_best.iter().copied().find(fresh))
         .or_else(|| preferred.filter(not_empty))
         .or_else(|| eligible_best.iter().copied().find(not_empty))
-        .or(preferred)
-        .or_else(|| eligible_best.first().copied())
 }
 
-/// [`select_sync_peer`], with the peers set aside as sync sources asked last.
+/// Pick the target peer for a header sync round, asking sync-resting peers
+/// only after every non-resting candidate has been ruled out or already
+/// returned empty at our current tip.
 ///
 /// A peer that left a run of sync requests unanswered rests
-/// (`PeerManager::is_sync_resting`): it is passed over while any other
-/// eligible peer is there, whatever its score and even when it is the peer
-/// that asked for the round. When every eligible peer rests, the choice is
-/// made among all of them as if none did: with all of them looking slow the
-/// slow one is this node, and it still has to sync from someone.
+/// (`PeerManager::is_sync_resting`): it is passed over while any non-resting
+/// peer can still offer unheld headers, whatever its score and even when it
+/// asked for the round. Once every non-resting peer has already answered empty
+/// for the current tip (for example a co-located sibling lagging at the same
+/// height while a resting upstream validator announces higher blocks), a
+/// resting peer that has not returned empty is tried immediately instead of
+/// re-polling the empty sibling for the whole rest window. Only when every
+/// connected peer has already returned empty does the selector fall back to an
+/// already-empty peer, again preferring non-resting peers first.
 fn select_sync_peer_resting_last(
     preferred: Option<PeerId>,
     eligible_best: &[PeerId],
     stalled: Option<PeerId>,
-    empty_at_tip: Option<PeerId>,
+    empty_at_tip: impl Fn(&PeerId) -> bool,
     resting: impl Fn(&PeerId) -> bool,
 ) -> Option<PeerId> {
+    let rested_preferred = preferred.filter(|p| !resting(p));
     let rested_best: Vec<PeerId> = eligible_best
         .iter()
         .copied()
         .filter(|p| !resting(p))
         .collect();
-    select_sync_peer(
-        preferred.filter(|p| !resting(p)),
-        &rested_best,
-        stalled,
-        empty_at_tip,
-    )
-    .or_else(|| select_sync_peer(preferred, eligible_best, stalled, empty_at_tip))
+    select_non_empty_sync_peer(rested_preferred, &rested_best, stalled, &empty_at_tip)
+        .or_else(|| select_non_empty_sync_peer(preferred, eligible_best, stalled, &empty_at_tip))
+        .or(rested_preferred)
+        .or_else(|| rested_best.first().copied())
+        .or(preferred)
+        .or_else(|| eligible_best.first().copied())
 }
 const MAX_PENDING_BITSWAP_FETCH_WAITERS: usize = 128;
 /// QC blobs assembled at once, across all peers.
@@ -1188,8 +1192,9 @@ pub struct Node {
     /// Peer whose most recent sync round stalled or failed unanswered, with
     /// the instant it stalled so the cooldown expires instead of exiling it.
     last_stalled_sync_peer: Option<(PeerId, std::time::Instant)>,
-    /// Most recent peer that returned no new headers for our current tip hash.
-    last_empty_sync_peer: Option<(PeerId, String)>,
+    /// Peers that already returned no new headers for our current tip hash,
+    /// tracked as a set so two lagging peers cannot ping-pong every sync round.
+    empty_sync_peers_at_tip: Option<(String, HashSet<PeerId>)>,
     /// Multi-chunk range-sync cursor for the active sync round.
     sync_range_cursor: Option<SyncRangeCursor>,
     /// Spacing between the locator re-walks a fork signal triggers. Without it
@@ -2092,10 +2097,10 @@ impl Node {
             None => None,
         };
         let tip_hash = locator.first().cloned();
-        let empty_at_tip = tip_hash.as_deref().and_then(|tip| {
-            self.last_empty_sync_peer
+        let empty_peers = tip_hash.as_deref().and_then(|tip| {
+            self.empty_sync_peers_at_tip
                 .as_ref()
-                .and_then(|(peer, seen_tip)| (seen_tip == tip).then_some(*peer))
+                .and_then(|(seen_tip, peers)| (seen_tip == tip).then_some(peers))
         });
         let target = {
             let pm = self.peer_manager_lock();
@@ -2111,7 +2116,7 @@ impl Node {
                 preferred_eligible,
                 &eligible_best,
                 stalled,
-                empty_at_tip,
+                |p| empty_peers.is_some_and(|set| set.contains(p)),
                 |p| pm.is_sync_resting(p),
             )
         };
@@ -2676,10 +2681,35 @@ impl Node {
         Some(best_height)
     }
 
+    /// Record that `peer` returned no unheld headers for `tip`.
+    fn record_empty_sync_peer(&mut self, peer: PeerId, tip: String) {
+        match &mut self.empty_sync_peers_at_tip {
+            Some((seen_tip, peers)) if *seen_tip == tip => {
+                if peers.len() < MAX_PEERS.saturating_mul(2) {
+                    peers.insert(peer);
+                }
+            }
+            slot => {
+                let mut peers = HashSet::new();
+                peers.insert(peer);
+                *slot = Some((tip, peers));
+            }
+        }
+    }
+
+    /// Forget a previous empty-headers answer from `peer` once it advertises
+    /// a chain strictly ahead of ours.
+    fn clear_empty_sync_peer(&mut self, peer: &PeerId) {
+        if let Some((_, peers)) = &mut self.empty_sync_peers_at_tip {
+            peers.remove(peer);
+        }
+    }
+
     /// Open a sync round with a peer that just told us it is ahead.
     async fn sync_if_behind(&mut self, peer_id: PeerId, peer_best_height: u64) {
         let our_chain_length = self.chain.get_height().await.saturating_add(1);
         if peer_best_height > our_chain_length {
+            self.clear_empty_sync_peer(&peer_id);
             let locator = self.chain.get_locator().await;
             if !self.request_headers_from_peer(Some(peer_id), locator, 500) {
                 info!("Failed to request headers after handshake: a sync round is already open or no peer is eligible");
@@ -3046,7 +3076,7 @@ impl Node {
             active_sync_peer: None,
             active_sync_locator_tip: None,
             last_stalled_sync_peer: None,
-            last_empty_sync_peer: None,
+            empty_sync_peers_at_tip: None,
             sync_range_cursor: None,
             fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate::new(),
             deferred_votes: crate::network::deferred_votes::DeferredVotes::new(),
@@ -5672,6 +5702,9 @@ impl Node {
                                                     }
                                                     if e.contains("epoch mismatch")
                                                         || e.contains("height mismatch")
+                                                        || (e.contains("No active finality aggregator")
+                                                            && checkpoint_height
+                                                                > self.chain.get_height().await)
                                                     {
                                                         self.trigger_fork_sync(peer_id).await;
                                                     }
@@ -5861,6 +5894,9 @@ impl Node {
                                                     }
                                                     if e.contains("epoch mismatch")
                                                         || e.contains("height mismatch")
+                                                        || (e.contains("No active finality aggregator")
+                                                            && checkpoint_height
+                                                                > self.chain.get_height().await)
                                                     {
                                                         self.trigger_fork_sync(peer_id).await;
                                                     }
@@ -6544,7 +6580,7 @@ impl Node {
                                                                 "peer returned no headers past our locator"
                                                             );
                                                             if let Some(tip) = self.active_sync_locator_tip.clone() {
-                                                                self.last_empty_sync_peer = Some((peer, tip));
+                                                                self.record_empty_sync_peer(peer, tip);
                                                             }
                                                             self.clear_sync_round();
                                                         } else {
@@ -6577,7 +6613,7 @@ impl Node {
                                                                         "peer returned no unheld headers past our locator"
                                                                     );
                                                                     if let Some(tip) = self.active_sync_locator_tip.clone() {
-                                                                        self.last_empty_sync_peer = Some((peer, tip));
+                                                                        self.record_empty_sync_peer(peer, tip);
                                                                     }
                                                                     self.clear_sync_round();
                                                                 }
@@ -6988,7 +7024,7 @@ impl Node {
                                                             }
                                                         } else {
                                                             if joined > 0 {
-                                                                self.last_empty_sync_peer = None;
+                                                                self.empty_sync_peers_at_tip = None;
                                                                 if self
                                                                     .last_stalled_sync_peer
                                                                     .is_some_and(|(p, _)| p == peer)
@@ -8502,12 +8538,19 @@ mod finality_publish_tests {
     fn select_sync_peer_breaks_stalled_and_empty_fallback_deadlock() {
         let ahead = super::PeerId::random();
         let sibling = super::PeerId::random();
+        let sibling_b = super::PeerId::random();
         let other = super::PeerId::random();
 
         // While the ahead peer is in stall cooldown and the sibling has not
         // yet answered empty at this tip, rotation tries the sibling first.
         assert_eq!(
-            super::select_sync_peer(Some(ahead), &[sibling, ahead], Some(ahead), None),
+            super::select_sync_peer_resting_last(
+                Some(ahead),
+                &[sibling, ahead],
+                Some(ahead),
+                |_| false,
+                |_| false,
+            ),
             Some(sibling),
         );
 
@@ -8516,29 +8559,61 @@ mod finality_publish_tests {
         // selector must fall back to the ahead peer instead of re-polling the
         // empty sibling (with or without a preferred peer).
         assert_eq!(
-            super::select_sync_peer(Some(ahead), &[sibling, ahead], Some(ahead), Some(sibling)),
+            super::select_sync_peer_resting_last(
+                Some(ahead),
+                &[sibling, ahead],
+                Some(ahead),
+                |p| *p == sibling,
+                |_| false,
+            ),
             Some(ahead),
         );
         assert_eq!(
-            super::select_sync_peer(None, &[sibling, ahead], Some(ahead), Some(sibling)),
+            super::select_sync_peer_resting_last(
+                None,
+                &[sibling, ahead],
+                Some(ahead),
+                |p| *p == sibling,
+                |_| false,
+            ),
+            Some(ahead),
+        );
+
+        // Multiple peers that already returned empty at our tip are all skipped
+        // instead of ping-ponging between each other and starving `ahead`.
+        assert_eq!(
+            super::select_sync_peer_resting_last(
+                Some(sibling),
+                &[sibling, sibling_b, ahead],
+                None,
+                |p| *p == sibling || *p == sibling_b,
+                |_| false,
+            ),
             Some(ahead),
         );
 
         // When a third fresh peer exists, it still takes precedence over both
         // the stalled peer and the empty peer.
         assert_eq!(
-            super::select_sync_peer(
+            super::select_sync_peer_resting_last(
                 Some(ahead),
                 &[sibling, other, ahead],
                 Some(ahead),
-                Some(sibling),
+                |p| *p == sibling,
+                |_| false,
             ),
             Some(other),
         );
 
         // After the stall cooldown expires, the ahead peer is selected directly.
         assert_eq!(
-            super::select_sync_peer(Some(ahead), &[sibling, ahead], None, Some(sibling)),
+            super::select_sync_peer_resting_last(
+                Some(ahead),
+                &[sibling, ahead],
+                None,
+                |p| *p == sibling,
+                |_| false,
+            ),
             Some(ahead),
         );
     }
@@ -8587,9 +8662,13 @@ mod finality_publish_tests {
         let third = super::PeerId::random();
         let order = [best, other, third];
         let pick = |preferred, resting: &[super::PeerId]| {
-            super::select_sync_peer_resting_last(preferred, &order, None, None, |p| {
-                resting.contains(p)
-            })
+            super::select_sync_peer_resting_last(
+                preferred,
+                &order,
+                None,
+                |_| false,
+                |p| resting.contains(p),
+            )
         };
         // Nobody rests: the plain choice.
         assert_eq!(pick(None, &[]), Some(best));
@@ -8605,12 +8684,65 @@ mod finality_publish_tests {
         // The stalled peer and the peer that had nothing new keep their
         // place in the order among the rested ones.
         assert_eq!(
-            super::select_sync_peer_resting_last(None, &order, Some(other), None, |p| *p == best),
+            super::select_sync_peer_resting_last(
+                None,
+                &order,
+                Some(other),
+                |_| false,
+                |p| *p == best,
+            ),
             Some(third)
+        );
+        // Testnet rehearsal validator-loss regression: while a non-resting
+        // peer (`third`) still has not answered empty, the resting upstream
+        // peer (`best`) stays resting; once every non-resting peer (`other`
+        // and `third`) has already answered empty at our tip, the selector
+        // falls through to `best` instead of re-polling an empty sibling.
+        assert_eq!(
+            super::select_sync_peer_resting_last(
+                Some(best),
+                &order,
+                None,
+                |p| *p == other,
+                |p| *p == best,
+            ),
+            Some(third)
+        );
+        assert_eq!(
+            super::select_sync_peer_resting_last(
+                Some(best),
+                &order,
+                None,
+                |p| *p == other || *p == third,
+                |p| *p == best,
+            ),
+            Some(best)
+        );
+        assert_eq!(
+            super::select_sync_peer_resting_last(
+                Some(other),
+                &order,
+                None,
+                |p| *p == other || *p == third,
+                |p| *p == best,
+            ),
+            Some(best)
+        );
+        // Only when every peer (rested and resting alike) has already returned
+        // empty does the fallback prefer a non-resting peer over a resting one.
+        assert_eq!(
+            super::select_sync_peer_resting_last(
+                Some(best),
+                &order,
+                None,
+                |_| true,
+                |p| *p == best,
+            ),
+            Some(other)
         );
         // Nobody eligible, nobody asked.
         assert_eq!(
-            super::select_sync_peer_resting_last(None, &[], None, None, |_| false),
+            super::select_sync_peer_resting_last(None, &[], None, |_| false, |_| false),
             None
         );
     }
