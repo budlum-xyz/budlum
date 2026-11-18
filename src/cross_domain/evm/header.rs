@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_chain is reached in this tree only through adapter.rs and evm/verify.rs, both of which declare themselves unwired; the relayer path wires it.
+//! WIRING: unwired - `verify_chain` is reached in this tree only through adapter.rs and evm/verify.rs, both of which declare themselves unwired; the relayer path wires it.
 //! Minimal Ethereum block header decode + chain-link + N-confirmation finality.
 //!
 //! Sync-committee light-client finality = **F10.3** (`PoS`, BLS12-381 sync-aggregate).
@@ -55,16 +55,16 @@ pub enum HeaderError {
 impl std::fmt::Display for HeaderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HeaderError::Rlp(e) => write!(f, "header rlp error: {e}"),
-            HeaderError::InvalidHeader => write!(f, "header: invalid structure"),
-            HeaderError::ChainBroken => write!(f, "header: chain broken"),
-            HeaderError::CheckpointNotReached => {
+            Self::Rlp(e) => write!(f, "header rlp error: {e}"),
+            Self::InvalidHeader => write!(f, "header: invalid structure"),
+            Self::ChainBroken => write!(f, "header: chain broken"),
+            Self::CheckpointNotReached => {
                 write!(f, "header: chain does not reach the trusted checkpoint")
             }
-            HeaderError::InsufficientConfirmations => {
+            Self::InsufficientConfirmations => {
                 write!(f, "header: insufficient confirmations")
             }
-            HeaderError::ZeroConfirmations => write!(f, "header: zero confirmations demanded"),
+            Self::ZeroConfirmations => write!(f, "header: zero confirmations demanded"),
         }
     }
 }
@@ -73,7 +73,7 @@ impl std::error::Error for HeaderError {}
 
 impl From<RlpError> for HeaderError {
     fn from(e: RlpError) -> Self {
-        HeaderError::Rlp(e)
+        Self::Rlp(e)
     }
 }
 

@@ -21,6 +21,7 @@ pub enum NodeMode {
 }
 
 impl NodeMode {
+    #[must_use]
     pub fn from_role(role: &str) -> Option<Self> {
         match role {
             "archive" => Some(Self::Archive),
@@ -29,6 +30,7 @@ impl NodeMode {
         }
     }
 
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Full => "full",
@@ -59,6 +61,7 @@ pub struct PruningPolicy {
 }
 
 impl PruningPolicy {
+    #[must_use]
     pub const fn full_node_default() -> Self {
         Self {
             mode: NodeMode::Full,
@@ -70,6 +73,7 @@ impl PruningPolicy {
         }
     }
 
+    #[must_use]
     pub const fn archive_node_default() -> Self {
         Self {
             mode: NodeMode::Archive,
@@ -113,6 +117,7 @@ impl PruningPolicy {
     /// finalized snapshot retention, or with `retention_blocks == 0`) never
     /// prunes, however its flags read. `PruningPolicy` deserializes with
     /// every field public, so the flags alone are not the answer.
+    #[must_use]
     pub fn should_prune_historical_state(&self) -> bool {
         self.validate().is_ok() && self.mode == NodeMode::Full && self.pruning_enabled
     }

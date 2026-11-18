@@ -159,6 +159,29 @@ fn domain_and_commitment(
 #[test]
 fn bitcoin_spv_domain_registers_and_passes_admission() {
     let mut state = IntakeState::new();
+    // Self-supplied anchor before governance pinning must fail closed.
+    let unpinned_err = state
+        .register_domain(request(bitcoin_spec()), None)
+        .expect_err("self-supplied unpinned Bitcoin checkpoint must be refused");
+    assert_eq!(unpinned_err, IntakeError::CommitteeNotPinned);
+
+    state.pin_bitcoin_anchor("mainnet", anchor());
+
+    // A registrant supplying a forged regtest checkpoint on a pinned network
+    // must also be refused.
+    let forged_spec = Spec::BitcoinSpv {
+        network: "mainnet".to_string(),
+        anchor: Some(PinnedBitcoinAnchor {
+            height: 0,
+            block_hash: [0xee; 32],
+            bits: 0x207f_ffff,
+        }),
+    };
+    let forged_err = state
+        .register_domain(request(forged_spec), None)
+        .expect_err("forged regtest checkpoint must be refused");
+    assert_eq!(forged_err, IntakeError::CommitteeNotPinned);
+
     let key = state
         .register_domain(request(bitcoin_spec()), None)
         .expect("a pinned Bitcoin domain registers end to end");
