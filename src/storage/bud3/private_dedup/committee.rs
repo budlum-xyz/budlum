@@ -110,8 +110,9 @@ pub struct OprfPartialShare {
     pub evaluation: [u8; 32],
 }
 
-/// Experimental deterministic transcript-share model, **not** a threshold
-/// OPRF. All shares are computed from one seed and a public digest; the final
+/// Experimental deterministic transcript-share model, **not** a threshold OPRF.
+///
+/// All shares are computed from one seed and a public digest; the final
 /// hash is neither blinded nor a threshold secret reconstruction. Never use
 /// this API as evidence of content ownership or privacy on a live network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +192,7 @@ impl ThresholdOprfCommittee {
 }
 
 /// Plaintext challenge transcript, **not** a zero-knowledge ownership proof.
+///
 /// The caller supplies the entire plaintext to [`OwnershipProof::is_authentic`];
 /// a verifier receives the secret bytes. This is suitable only for isolated
 /// algorithm tests, not for private sealed-object admission.

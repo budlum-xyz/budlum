@@ -95,10 +95,7 @@ pub mod spec;
 pub mod versioning;
 pub mod zkvm_proof;
 
-pub use bitcoin_spv::{
-    sha256d, BitcoinHeader, BitcoinSpvAdapter, PinnedBitcoinAnchor, EVIDENCE_VERSION, HEADER_LEN,
-    MAX_FUTURE_SECONDS, MAX_HEADERS, REQUIRED_DEPTH,
-};
+pub use bitcoin_spv::{BitcoinSpvAdapter, PinnedBitcoinAnchor};
 pub use domain_bridge::{
     decode_external_evidence, encode_external_evidence, ExternalDomainFinalityBridge,
     EXTERNAL_DOMAIN_FINALITY_ADAPTER,

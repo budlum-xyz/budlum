@@ -58,20 +58,22 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Bytes in one Bitcoin block header.
-pub const HEADER_LEN: usize = 80;
+///
+/// WIRING: fixed 80-byte Bitcoin header wire size shared with `src/tests/bitcoin_spv.rs`.
+pub(crate) const HEADER_LEN: usize = 80;
 /// A bounded SPV window: a registration cannot make a node hash an unbounded
 /// chain inside one verification.
-pub const MAX_HEADERS: usize = 256;
+const MAX_HEADERS: usize = 256;
 /// This adapter's evidence format. Only this exact value is accepted.
-pub const EVIDENCE_VERSION: u32 = 1;
+const EVIDENCE_VERSION: u32 = 1;
 /// How many headers the evidence must build on the pinned anchor before the
 /// tip is called final. Declared in the descriptor so a consumer reads the
 /// number before relying on it. This is `required_depth` in the shared model:
 /// distance from the trusted checkpoint, not confirmations mined *above* the
 /// tip (an SPV proof cannot know those).
-pub const REQUIRED_DEPTH: u64 = 6;
+const REQUIRED_DEPTH: u64 = 6;
 /// Maximum seconds a header may be ahead of the policy clock.
-pub const MAX_FUTURE_SECONDS: u64 = 2 * 60 * 60;
+const MAX_FUTURE_SECONDS: u64 = 2 * 60 * 60;
 
 /// The checkpoint the adapter is pinned to. `block_hash` is in Bitcoin's
 /// internal byte order (the raw `SHA256d` output, not the reversed display
@@ -89,20 +91,22 @@ pub struct PinnedBitcoinAnchor {
 
 /// A parsed Bitcoin header in wire order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BitcoinHeader {
-    pub version: i32,
-    pub parent_hash: [u8; 32],
-    pub merkle_root: [u8; 32],
-    pub timestamp: u32,
-    pub bits: u32,
-    pub nonce: u32,
+struct BitcoinHeader {
+    version: i32,
+    parent_hash: [u8; 32],
+    merkle_root: [u8; 32],
+    timestamp: u32,
+    bits: u32,
+    nonce: u32,
     /// The header's own `SHA256d` digest, internal byte order.
-    pub hash: [u8; 32],
+    hash: [u8; 32],
 }
 
 /// `SHA256(SHA256(bytes))`, in internal byte order.
+///
+/// WIRING: canonical Bitcoin double-SHA256 helper shared with `src/tests/bitcoin_spv.rs`.
 #[must_use]
-pub fn sha256d(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256d(bytes: &[u8]) -> [u8; 32] {
     let first = Sha256::digest(bytes);
     let second = Sha256::digest(first);
     let mut out = [0u8; 32];
@@ -149,7 +153,8 @@ fn target_from_bits(bits: u32) -> Result<[u8; 32], AdapterError> {
             rule: "nBits target overflows 256 bits".to_string(),
         });
     };
-    window.copy_from_slice(&mantissa_bytes[1..4]);
+    let [_, b1, b2, b3] = mantissa_bytes;
+    window.copy_from_slice(&[b1, b2, b3]);
     Ok(out)
 }
 
@@ -229,14 +234,15 @@ fn parse_headers(payload: &[u8]) -> Result<Vec<BitcoinHeader>, AdapterError> {
     let mut headers = Vec::with_capacity(count);
     for index in 0..count {
         let base = 4usize.saturating_add(index.saturating_mul(HEADER_LEN));
-        let raw = &payload[base..base + HEADER_LEN];
+        let end = base.saturating_add(HEADER_LEN);
+        let raw = payload
+            .get(base..end)
+            .ok_or_else(|| AdapterError::Malformed {
+                offset: base,
+                reason: "header slice is not present".to_string(),
+            })?;
         headers.push(BitcoinHeader {
-            version: i32::from_le_bytes(raw[0..4].try_into().map_err(|_| {
-                AdapterError::Malformed {
-                    offset: base,
-                    reason: "version is not 4 bytes".to_string(),
-                }
-            })?),
+            version: i32::from_le_bytes(u32_le(raw, 0, "version")?.to_le_bytes()),
             parent_hash: fixed(raw, 4, "parent_hash")?,
             merkle_root: fixed(raw, 36, "merkle_root")?,
             timestamp: u32_le(raw, 68, "timestamp")?,
