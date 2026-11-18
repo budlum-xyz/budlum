@@ -14,6 +14,7 @@ pub mod registries;
 pub mod reseal;
 pub mod root_seal;
 pub mod shared_security;
+pub mod universal_finality;
 
 #[cfg(test)]
 pub use cold_quorum::dev_fixture_device_signers;
@@ -59,4 +60,7 @@ pub use proof_verifier::{ProofVerificationError, SettlementProofVerifier, Verifi
 pub use registries::SettlementRegistries;
 pub use root_seal::{
     seal_due, RootSeal, RootSealLog, SealError, SealKeys, SoftwareSealSigner, ROOT_SEAL_INTERVAL,
+};
+pub use universal_finality::{
+    compose_cross_domain_route, FinalityGuarantee, FinalityReversibility, RouteFinalityBound,
 };

@@ -4379,7 +4379,13 @@ impl Blockchain {
         if tx.from == Address::zero() {
             reasons.push("genesis_transaction_forbidden".to_string());
         }
-        if !tx.verify_in(&self.state.scheme_registry) {
+        if self.state.auth_program_hash(&tx.from).is_some() {
+            if tx.auth_claim.is_none() {
+                reasons.push("program_account_requires_auth_claim".to_string());
+            } else if !tx.claimed_shape_is_canonical() {
+                reasons.push("non_canonical_claimed_tx".to_string());
+            }
+        } else if !tx.verify_in(&self.state.scheme_registry) {
             reasons.push("invalid_signature".to_string());
         }
         if tx.fee < self.state.base_fee {
@@ -5058,6 +5064,18 @@ impl Blockchain {
             .map_err(ObjectRefusal::Transaction)?;
         crate::settlement::domains::check_ingest_garden_domain_reservation(&tx)
             .map_err(ObjectRefusal::Transaction)?;
+        if let Some(program_hash) = self.state.auth_program_hash(&tx.from) {
+            let Some(domain) = crate::aggregation::chain::claim_domain(self.chain_id) else {
+                return Err(ObjectRefusal::NoAggregator);
+            };
+            let expected = crate::aggregation::chain::account_claim_for(&tx, Some(program_hash))
+                .map(|c| c.digest(domain));
+            if tx.auth_claim != expected {
+                return Err(ObjectRefusal::Transaction(
+                    "program account auth_claim does not match registered auth_program_hash".into(),
+                ));
+            }
+        }
         match self.agg_node.as_mut() {
             Some(node) => node.admit(envelope, tx, &self.state.scheme_registry),
             None => Err(ObjectRefusal::NoAggregator),

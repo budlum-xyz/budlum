@@ -11,8 +11,9 @@ use crate::aggregation::chain::{
 };
 use crate::aggregation::claim::Claim;
 use crate::aggregation::domain_finality::{
-    compile_domain_transition, domain_transition_claim, prove_domain_transition,
-    ClaimedDomainFinalityAdapter, TAG_DOMAIN_TRANSITION_IN, TAG_DOMAIN_TRANSITION_OUT,
+    compile_domain_transition, derive_transition_state_root, domain_transition_claim,
+    prove_domain_transition, ClaimedDomainFinalityAdapter, TAG_DOMAIN_TRANSITION_IN,
+    TAG_DOMAIN_TRANSITION_OUT, TAG_DOMAIN_TRANSITION_STEP,
 };
 use crate::aggregation::frame::FrameLimits;
 use crate::aggregation::hash::{
@@ -308,8 +309,9 @@ fn phase4_domain_transition_finalizes_through_master_proof() {
 
     let prev_height = 10u64;
     let prev_root = [0x11; 32];
-    let next_root = [0x99; 32];
     let batch_digest = [0xAB; 32];
+    let next_root =
+        derive_transition_state_root(77, 42_161, prev_height, 11, &prev_root, &batch_digest);
     let commitment = test_commitment(11, next_root);
 
     // Non-monotonic height must abort inside BudVM.
@@ -321,6 +323,22 @@ fn phase4_domain_transition_finalizes_through_master_proof() {
             prev_height,
             &prev_root,
             &bad_height,
+            &batch_digest,
+            DOMAIN,
+        )
+        .unwrap_err(),
+        ProgClaimError::AssertionFailed
+    );
+
+    // Forged state_root unrelated to (prev_root, batch_digest) must abort inside BudVM.
+    let forged_root_commitment = test_commitment(11, [0xFE; 32]);
+    assert_eq!(
+        prove_domain_transition(
+            &compiled,
+            &ext_domain,
+            prev_height,
+            &prev_root,
+            &forged_root_commitment,
             &batch_digest,
             DOMAIN,
         )
@@ -433,6 +451,97 @@ fn phase4_domain_transition_finalizes_through_master_proof() {
             .expect("rejected"),
         FinalityStatus::Rejected(_)
     ));
+
+    // 4. Tampered parent_domain_block_hash or timestamp_ms must be rejected.
+    let mut tampered_parent = commitment.clone();
+    tampered_parent.parent_domain_block_hash = [0x7E; 32];
+    assert!(matches!(
+        adapter
+            .verify_finality(&ext_domain, &tampered_parent, &proof)
+            .expect("rejected"),
+        FinalityStatus::Rejected(_)
+    ));
+    let mut tampered_time = commitment.clone();
+    tampered_time.timestamp_ms += 1;
+    assert!(matches!(
+        adapter
+            .verify_finality(&ext_domain, &tampered_time, &proof)
+            .expect("rejected"),
+        FinalityStatus::Rejected(_)
+    ));
+
+    // 5. Once finalized tip advances to (11, next_root), replaying the old
+    //    (10 -> 11) transition fails predecessor continuity, while anchoring at
+    //    (10, prev_root) admits it.
+    adapter.record_finalized_tip(ext_domain.id, prev_height, prev_root);
+    assert_eq!(
+        adapter
+            .verify_finality(&ext_domain, &commitment, &proof)
+            .expect("connected transition finalizes"),
+        FinalityStatus::Finalized
+    );
+    adapter.record_finalized_tip(
+        ext_domain.id,
+        commitment.domain_height,
+        commitment.state_root,
+    );
+    assert!(matches!(
+        adapter
+            .verify_finality(&ext_domain, &commitment, &proof)
+            .expect("stale predecessor rejected"),
+        FinalityStatus::Rejected(_)
+    ));
+
+    // 6. Trailing bytes after deflate EOF on StarkProofObject must be rejected.
+    let mut trailing = encoded.clone();
+    trailing.push(0x00);
+    assert!(StarkProofObject::decode(&trailing).is_err());
+}
+
+#[test]
+fn phase4_program_account_refuses_inline_signature_and_binds_merkle_proof() {
+    use crate::core::account::TxAuthority;
+    use crate::execution::executor::Executor;
+
+    let kp = WalletKeyPair::generate();
+    let sender = kp.address();
+    let recipient = Address::from([0x44; 32]);
+    let prog_hash = [0xA5; 32];
+
+    let mut state = AccountState::new();
+    state.add_balance(&sender, 1_000_000);
+    state.set_auth_program_hash(&sender, Some(prog_hash));
+    let _ = state.calculate_state_root();
+
+    // Account Merkle proof commits to `auth_program_hash` and refuses stripping.
+    let proof = state.get_account_proof(&sender);
+    assert!(proof.present);
+    assert_eq!(proof.auth_program_hash, Some(prog_hash));
+    assert!(proof.verify_self_consistent());
+    let mut stripped = proof.clone();
+    stripped.auth_program_hash = None;
+    assert!(!stripped.verify_self_consistent());
+
+    // Absence proof adjacent to a program account also verifies cleanly.
+    let absent = state.get_account_proof(&recipient);
+    assert!(!absent.present);
+    assert!(absent.verify_self_consistent());
+
+    // Inline signature for the underlying wallet key MUST be refused once
+    // `auth_program_hash` is set, on both validate_transaction and Executor.
+    let mut inline_tx = Transaction::new(sender, recipient, 1_000, Vec::new());
+    inline_tx.fee = 10;
+    inline_tx.nonce = 0;
+    inline_tx.chain_id = CHAIN_ID;
+    inline_tx.sign_v5(&kp);
+    assert!(inline_tx.verify_in(&state.scheme_registry));
+    let err = state
+        .validate_transaction_with_context(&inline_tx, 0, 1_000_000, TxAuthority::Inline)
+        .expect_err("inline signature must not bypass auth_program_hash");
+    assert!(err.contains("Program account"));
+    let exec_err = Executor::apply_transaction_checked(&mut state, &inline_tx)
+        .expect_err("Executor must refuse inline transaction from program account");
+    assert_eq!(exec_err.code(), "program_account_requires_auth_claim");
 }
 
 #[test]
@@ -448,6 +557,7 @@ fn phase4_domain_tags_are_unique_and_prefix_free() {
         b"BDLM_AUTH_PROG_V1",
         TAG_DOMAIN_TRANSITION_IN,
         TAG_DOMAIN_TRANSITION_OUT,
+        TAG_DOMAIN_TRANSITION_STEP,
     ];
     for (i, a) in tags.iter().enumerate() {
         for (j, b) in tags.iter().enumerate() {
