@@ -60,7 +60,7 @@ pub struct Ics23ExistenceProof {
     pub path: Vec<Ics23InnerOp>,
 }
 
-/// Verified CosmWasm contract + storage migration request (`8.12.3` WASM row).
+/// Verified `CosmWasm` contract + storage migration request (`8.12.3` WASM row).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WasmMigrationRequest {
     /// Target Budlum chain ID (`45261` on testnet).
@@ -73,7 +73,7 @@ pub struct WasmMigrationRequest {
     pub source_block: u64,
     /// Finalized source `app_hash` / IAVL state root.
     pub state_root: [u8; 32],
-    /// CosmWasm bech32 contract address to install identically on Budlum.
+    /// `CosmWasm` bech32 contract address to install identically on Budlum.
     pub contract_address: String,
     /// Bech32 address of the contract's creator/admin signer on the source chain.
     pub creator: String,
@@ -83,7 +83,7 @@ pub struct WasmMigrationRequest {
     pub creator_signature64: Vec<u8>,
     /// Contract label recorded in `WasmContractMeta`.
     pub label: String,
-    /// Deterministic CosmWasm bytecode (validated identically to `WasmEe::validate_deploy`).
+    /// Deterministic `CosmWasm` bytecode (validated identically to `WasmEe::validate_deploy`).
     pub wasm_code: Vec<u8>,
     /// ICS-23 proof binding `(contract_address, creator, code_hash)` to `state_root`.
     pub contract_info_proof: Ics23ExistenceProof,

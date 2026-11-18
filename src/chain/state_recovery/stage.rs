@@ -802,7 +802,7 @@ impl RecoveryLedger {
 /// overflowing past its own limit.
 ///
 /// A free function of the length so the saturation boundary is testable
-/// without materializing four billion ledger entries: the ASan job measured
+/// without materializing four billion ledger entries: the `ASan` job measured
 /// the old in-test loop at a 20 GiB allocation, which is an out-of-memory
 /// abort, not a measurement of the cast. Private on purpose - its only
 /// production caller is `event_count` in this file, and a `pub` here would

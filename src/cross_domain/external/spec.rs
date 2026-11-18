@@ -88,7 +88,7 @@ impl DomainKey {
     }
 }
 
-/// String map-key form, so `BTreeMap<DomainKey, _>` survives serde_json.
+/// String map-key form, so `BTreeMap<DomainKey, _>` survives `serde_json`.
 /// A named key type carries its own impl next to its definition (the same
 /// convention `ContentId` and `AiRequestId` follow); the 64-hex form matches
 /// the bare `[u8; 32]` impl in `core::map_keys`.

@@ -411,16 +411,19 @@ impl<'a> BridgeRelayerPipeline<'a> {
     }
 
     /// Generate a Merkle proof for an event at a given index in a domain's tree.
+    #[must_use]
     pub fn event_proof(&self, domain: DomainId, index: usize) -> Option<MerkleProof> {
         self.event_trees.get(&domain).and_then(|t| t.proof(index))
     }
 
     /// Get the bridge state for inspection.
+    #[must_use]
     pub fn bridge_state(&self) -> &BridgeState {
         self.bridge
     }
 
     /// Get the relayer for inspection.
+    #[must_use]
     pub fn relayer(&self) -> &UniversalRelayer {
         self.relayer
     }

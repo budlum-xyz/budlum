@@ -133,8 +133,8 @@ enum Node {
         hash: [u8; 32],
     },
     Inner {
-        left: Option<Box<Node>>,
-        right: Option<Box<Node>>,
+        left: Option<Box<Self>>,
+        right: Option<Box<Self>>,
         hash: [u8; 32],
     },
 }

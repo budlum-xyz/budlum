@@ -246,6 +246,15 @@ impl Bud3RpcService {
                 if count == 0 || count > super::symbol_protocol::MAX_SYMBOLS_PER_REQUEST {
                     return Err(String::from("symbol count outside 1..=64"));
                 }
+                let range_req = super::symbol_protocol::SymbolRangeRequest {
+                    object,
+                    segment,
+                    first_esi,
+                    count,
+                };
+                self.limiter
+                    .check_symbol_request(&holder, &range_req, now_sec)
+                    .map_err(|e| format!("symbol request rate limit: {e:?}"))?;
                 let syms =
                     network.fetch_holder_symbols(&holder, &object, segment, first_esi, count);
                 let encoded: Vec<Value> = syms
@@ -255,11 +264,17 @@ impl Bud3RpcService {
                 Ok(json!({ "symbols": encoded }))
             }
             "bud_storageGetContent" => {
+                const MAX_CONSUMED_PAID_VIEWS: usize = 65_536;
                 let payer: Address = parse_hex32(params.get("payer"), "payer")?;
                 let object: ObjectKey = parse_hex32(params.get("object"), "object")?;
                 let receipt_id: [u8; 32] = parse_hex32(params.get("receipt_id"), "receipt_id")?;
+                self.consumed_paid_views
+                    .retain(|id| registry.has_paid_view(id));
                 if self.consumed_paid_views.contains(&receipt_id) {
                     return Err(String::from("paid view receipt already consumed"));
+                }
+                if self.consumed_paid_views.len() >= MAX_CONSUMED_PAID_VIEWS {
+                    return Err(String::from("paid view replay cache full"));
                 }
                 let fee_paid_atoms = params
                     .get("fee_paid_atoms")
@@ -271,10 +286,13 @@ impl Bud3RpcService {
                     receipt_id,
                     fee_paid_atoms,
                 };
-                if let Some(current_epoch) = params.get("current_epoch").and_then(Value::as_u64) {
-                    if !registry.verify_paid_view_at(&receipt, current_epoch) {
-                        return Err(String::from("paid view receipt expired or unpaid"));
-                    }
+                let caller_epoch = params
+                    .get("current_epoch")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let effective_epoch = caller_epoch.max(registry.observed_paid_view_epoch());
+                if !registry.verify_paid_view_at(&receipt, effective_epoch) {
+                    return Err(String::from("paid view receipt expired or unpaid"));
                 }
                 let content = fallback_decode_public(registry, &object, &receipt, network)
                     .map_err(|e| format!("{e:?}"))?;
@@ -593,7 +611,9 @@ mod upload_delivery_tests {
 
     #[test]
     fn bud_storage_get_content_blocks_paid_view_receipt_replay() {
-        use super::super::view::{MemorySymbolNetwork, MIN_PAID_VIEW_FEE_ATOMS};
+        use super::super::view::{
+            MemorySymbolNetwork, MIN_PAID_VIEW_FEE_ATOMS, PAID_VIEW_RETENTION_EPOCHS,
+        };
 
         let content = b"one time paid view content".repeat(4);
         let prepared =
@@ -625,7 +645,7 @@ mod upload_delivery_tests {
                     ),
                 ],
                 0,
-                20,
+                PAID_VIEW_RETENTION_EPOCHS * 3,
             )
             .unwrap();
 
@@ -669,5 +689,99 @@ mod upload_delivery_tests {
             )
             .unwrap_err();
         assert!(replay.contains("already consumed"), "{replay}");
+
+        // Omitting or backdating `current_epoch` cannot bypass paid-view TTL once
+        // the registry has recorded activity past the retention horizon.
+        let expired_receipt = [0xD4; 32];
+        let fresh_receipt = [0xD5; 32];
+        let post_ttl_epoch = PAID_VIEW_RETENTION_EPOCHS + 2;
+        registry
+            .record_paid_view(payer, key, expired_receipt, MIN_PAID_VIEW_FEE_ATOMS, 1)
+            .unwrap();
+        registry
+            .record_paid_view(
+                payer,
+                key,
+                fresh_receipt,
+                MIN_PAID_VIEW_FEE_ATOMS,
+                post_ttl_epoch,
+            )
+            .unwrap();
+        let omitted_epoch_err = rpc
+            .handle(
+                "bud_storageGetContent",
+                &json!({
+                    "payer": hex::encode(payer),
+                    "object": hex::encode(key),
+                    "receipt_id": hex::encode(expired_receipt),
+                    "fee_paid_atoms": MIN_PAID_VIEW_FEE_ATOMS,
+                }),
+                &registry,
+                &net,
+                (&row, &candidates, 12),
+            )
+            .unwrap_err();
+        assert!(omitted_epoch_err.contains("expired"), "{omitted_epoch_err}");
+
+        // Once paid_views expire out of the registry, the next paid-view lookup
+        // prunes stale consumed receipt IDs so node memory stays bounded.
+        let sweep_epoch = post_ttl_epoch + PAID_VIEW_RETENTION_EPOCHS + 2;
+        let _ = registry.expire(sweep_epoch);
+        let stale_probe = rpc.handle(
+            "bud_storageGetContent",
+            &json!({
+                "payer": hex::encode(payer),
+                "object": hex::encode(key),
+                "receipt_id": hex::encode([0xEE; 32]),
+                "fee_paid_atoms": MIN_PAID_VIEW_FEE_ATOMS,
+                "current_epoch": sweep_epoch,
+            }),
+            &registry,
+            &net,
+            (&row, &candidates, 13),
+        );
+        assert!(stale_probe.is_err());
+        assert!(
+            rpc.consumed_paid_views.is_empty(),
+            "expired paid-view receipt id leaked in Bud3RpcService"
+        );
+    }
+
+    #[test]
+    fn rpc_get_symbols_rejects_burst_above_symbol_peer_rate_limit() {
+        let registry = Bud3Registry::default();
+        let net = MemorySymbolNetwork::default();
+        let (row, candidates) = placement();
+        let mut rpc = Bud3RpcService::default();
+        let req = json!({
+            "holder": hex::encode([0x42; 32]),
+            "object": hex::encode([0x24; 32]),
+            "segment": 0,
+            "first_esi": 0,
+            "count": 1,
+        });
+        for _ in 0..crate::storage::bud3::symbol_protocol::MAX_SYMBOL_REQUESTS_PER_SEC {
+            rpc.handle(
+                "bud_storageGetSymbols",
+                &req,
+                &registry,
+                &net,
+                (&row, &candidates, 77),
+            )
+            .expect("within per-second symbol budget");
+        }
+        let burst_err = rpc
+            .handle(
+                "bud_storageGetSymbols",
+                &req,
+                &registry,
+                &net,
+                (&row, &candidates, 77),
+            )
+            .expect_err("burst past MAX_SYMBOL_REQUESTS_PER_SEC must be refused");
+        assert!(
+            burst_err.contains("RateLimited") || burst_err.contains("rate"),
+            "{burst_err}"
+        );
     }
 }

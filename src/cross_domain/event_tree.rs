@@ -15,10 +15,10 @@ pub enum DomainEventKind {
 impl DomainEventKind {
     fn as_bytes(&self) -> Vec<u8> {
         match self {
-            DomainEventKind::BridgeLocked => b"bridge-locked".to_vec(),
-            DomainEventKind::BridgeMinted => b"bridge-minted".to_vec(),
-            DomainEventKind::BridgeBurned => b"bridge-burned".to_vec(),
-            DomainEventKind::Custom(bytes) => {
+            Self::BridgeLocked => b"bridge-locked".to_vec(),
+            Self::BridgeMinted => b"bridge-minted".to_vec(),
+            Self::BridgeBurned => b"bridge-burned".to_vec(),
+            Self::Custom(bytes) => {
                 let mut out = b"custom:".to_vec();
                 out.extend_from_slice(bytes);
                 out
@@ -39,6 +39,7 @@ pub struct DomainEvent {
 }
 
 impl DomainEvent {
+    #[must_use]
     pub fn leaf_hash(&self) -> Hash32 {
         let kind = self.kind.as_bytes();
         let message_id = self
@@ -72,6 +73,7 @@ pub struct DomainEventTree {
 }
 
 impl DomainEventTree {
+    #[must_use]
     pub fn new() -> Self {
         Self { events: Vec::new() }
     }
@@ -80,6 +82,7 @@ impl DomainEventTree {
         self.events.push(event);
     }
 
+    #[must_use]
     pub fn events(&self) -> &[DomainEvent] {
         &self.events
     }

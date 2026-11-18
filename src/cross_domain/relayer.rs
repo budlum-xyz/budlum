@@ -44,13 +44,13 @@ pub enum RelayerError {
 impl std::fmt::Display for RelayerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RelayerError::AlreadyRelayed(id) => {
+            Self::AlreadyRelayed(id) => {
                 write!(f, "message {} already relayed", hex::encode(id))
             }
-            RelayerError::InvalidProof(reason) => {
+            Self::InvalidProof(reason) => {
                 write!(f, "invalid relay proof: {reason}")
             }
-            RelayerError::Expired {
+            Self::Expired {
                 message_id,
                 expiry,
                 current_height,
@@ -63,10 +63,10 @@ impl std::fmt::Display for RelayerError {
                     current_height
                 )
             }
-            RelayerError::SourceDomainMismatch { expected, got } => {
+            Self::SourceDomainMismatch { expected, got } => {
                 write!(f, "source domain mismatch: expected {expected}, got {got}")
             }
-            RelayerError::Other(msg) => write!(f, "relay error: {msg}"),
+            Self::Other(msg) => write!(f, "relay error: {msg}"),
         }
     }
 }
@@ -77,7 +77,7 @@ impl std::error::Error for RelayerError {}
 /// Used for replay protection and slashing evidence.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RelayLedger {
-    /// Message_id → (`relayer_address`, `relay_height`, `proof_hash`)
+    /// `Message_id` → (`relayer_address`, `relay_height`, `proof_hash`)
     #[serde(with = "crate::core::map_keys")]
     relayed: BTreeMap<MessageId, RelayRecord>,
 }
@@ -90,6 +90,7 @@ pub struct RelayRecord {
 }
 
 impl RelayLedger {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -120,10 +121,12 @@ impl RelayLedger {
         Ok(())
     }
 
+    #[must_use]
     pub fn is_relayed(&self, message_id: &MessageId) -> bool {
         self.relayed.contains_key(message_id)
     }
 
+    #[must_use]
     pub fn get_record(&self, message_id: &MessageId) -> Option<&RelayRecord> {
         self.relayed.get(message_id)
     }
@@ -154,6 +157,7 @@ impl RelayLedger {
     }
 
     /// Merkle root of all relay records (for on-chain commitment).
+    #[must_use]
     pub fn root(&self) -> Hash32 {
         let leaves: Vec<Hash32> = self
             .relayed
@@ -226,6 +230,7 @@ impl Default for UniversalRelayer {
 }
 
 impl UniversalRelayer {
+    #[must_use]
     pub fn new(config: RelayerConfig) -> Self {
         Self {
             config,
@@ -379,16 +384,19 @@ impl UniversalRelayer {
     }
 
     /// Get a pending relay by message ID.
+    #[must_use]
     pub fn pending_relay(&self, message_id: &MessageId) -> Option<&PendingRelay> {
         self.pending.get(message_id)
     }
 
     /// Check if a message has been relayed.
+    #[must_use]
     pub fn is_relayed(&self, message_id: &MessageId) -> bool {
         self.ledger.is_relayed(message_id)
     }
 
     /// Get the number of pending relays.
+    #[must_use]
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -400,6 +408,7 @@ impl UniversalRelayer {
     }
 
     /// Get expired relays that should be slashed.
+    #[must_use]
     pub fn expired_relays(&self, current_height: u64) -> Vec<&PendingRelay> {
         self.pending
             .values()
@@ -441,11 +450,13 @@ impl UniversalRelayer {
     }
 
     /// Merkle root of the relay ledger (for on-chain commitment).
+    #[must_use]
     pub fn ledger_root(&self) -> Hash32 {
         self.ledger.root()
     }
 
     /// True when no relay is pending and the ledger holds no record.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty() && self.ledger.relayed.is_empty()
     }
@@ -454,6 +465,7 @@ impl UniversalRelayer {
     /// the ledger root and every pending relay in key order. The relayer is
     /// consensus state, so two nodes that disagree
     /// on the queue must disagree on the root.
+    #[must_use]
     pub fn state_root(&self) -> Hash32 {
         let mut pending = Vec::new();
         for relay in self.pending.values() {

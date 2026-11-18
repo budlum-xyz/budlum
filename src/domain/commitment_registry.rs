@@ -12,6 +12,7 @@ pub struct DomainCommitmentRegistry {
 }
 
 impl DomainCommitmentRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             commitments: BTreeMap::new(),
@@ -70,6 +71,7 @@ impl DomainCommitmentRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn accepted_height(
         &self,
         domain_id: DomainId,
@@ -81,6 +83,7 @@ impl DomainCommitmentRegistry {
             .copied()
     }
 
+    #[must_use]
     pub fn earliest_accepted_height(&self, domain_id: DomainId, domain_height: u64) -> Option<u64> {
         self.accepted_at_height
             .range((domain_id, domain_height, 0)..=(domain_id, domain_height, u64::MAX))
@@ -88,10 +91,12 @@ impl DomainCommitmentRegistry {
             .min()
     }
 
+    #[must_use]
     pub fn commitments_for_global_block(&self) -> Vec<DomainCommitment> {
         self.commitments.values().cloned().collect()
     }
 
+    #[must_use]
     pub fn get(
         &self,
         domain_id: DomainId,
@@ -101,10 +106,12 @@ impl DomainCommitmentRegistry {
         self.commitments.get(&(domain_id, domain_height, sequence))
     }
 
+    #[must_use]
     pub fn find_by_height(&self, domain_id: DomainId, height: u64) -> Option<DomainCommitment> {
         self.at_height(domain_id, height).next().cloned()
     }
 
+    #[must_use]
     pub fn get_by_block_hash(
         &self,
         domain_id: DomainId,
@@ -148,10 +155,12 @@ impl DomainCommitmentRegistry {
         Some(commitment)
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.commitments.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.commitments.is_empty()
     }
