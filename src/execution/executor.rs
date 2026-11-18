@@ -867,20 +867,14 @@ impl Executor {
                 let is_full_seat = state
                     .get_validator(&tx.from)
                     .is_some_and(|validator| validator.filiz.is_some());
-                let unstake_floor =
-                    crate::core::chain_config::Network::from_chain_id(tx.chain_id).map_or(
-                        1,
-                        |network| {
-                            if is_full_seat {
-                                network.min_stake_full()
-                            } else {
-                                network.min_stake()
-                            }
-                        },
-                    );
+                let unstake_floor = if is_full_seat {
+                    state.full_validator_stake_floor(tx.chain_id)
+                } else {
+                    state.validator_stake_floor(tx.chain_id)
+                };
                 if let Some(validator) = state.get_validator_mut(&tx.from) {
                     validator.stake = new_stake;
-                    if validator.stake == 0 || (is_full_seat && validator.stake < unstake_floor) {
+                    if validator.stake == 0 || validator.stake < unstake_floor {
                         validator.active = false;
                     }
                 }
@@ -6323,8 +6317,11 @@ mod tests {
 
         let mut state = AccountState::new();
         let validator = Address::from([0xE2; 32]);
-        let base_stake = crate::core::chain_config::Network::from_chain_id(DEFAULT_CHAIN_ID)
+        let floor = crate::core::chain_config::Network::from_chain_id(DEFAULT_CHAIN_ID)
             .map_or(1_000, |n| n.min_stake().max(1_000));
+        // Keep headroom above `min_stake` so the partial self-unstake below
+        // stays active while clamping its snapshotted vote weight.
+        let base_stake = floor.saturating_add(1_000);
         let topup = 600;
         state.add_balance(
             &validator,
@@ -6620,6 +6617,184 @@ mod tests {
                 .map(|record| record.stake),
             Some(floor - 1),
             "permissionless registry keeps the remaining slashable stake synced"
+        );
+    }
+
+    #[test]
+    fn non_full_validator_self_unstake_below_network_floor_deactivates() {
+        let mut state = AccountState::new();
+        let network = crate::core::chain_config::Network::Testnet;
+        let chain_id = network.chain_id().value();
+        let floor = network.min_stake();
+        let val = Address::from([0x78u8; 32]);
+        state.add_balance(&val, 1_000);
+        state.add_validator_with_floor(val, floor, floor);
+        let unstake = Transaction::new_with_chain_id(
+            val,
+            Address::zero(),
+            1,
+            10,
+            0,
+            Vec::new(),
+            chain_id,
+            TransactionType::Unstake,
+        );
+        Executor::apply_transaction_checked(&mut state, &unstake)
+            .expect("partial self-unstake succeeds");
+        let after = state.get_validator(&val).expect("validator retained");
+        assert_eq!(after.stake, floor - 1);
+        assert!(
+            !after.active,
+            "non-full validator below network.min_stake() must be deactivated"
+        );
+        assert!(
+            !after.is_eligible(state.epoch_index),
+            "underbonded non-full validator must leave the eligible set"
+        );
+    }
+
+    #[test]
+    fn non_full_validator_self_unstake_below_governance_floor_deactivates() {
+        let mut state = AccountState::new();
+        let network = crate::core::chain_config::Network::Testnet;
+        let chain_id = network.chain_id().value();
+        let raised_floor = network.min_stake().saturating_add(500);
+        let mut params = *state.registry.params();
+        params.min_stake = raised_floor;
+        state.registry.set_params(params);
+        let val = Address::from([0x79u8; 32]);
+        state.add_balance(&val, 1_000);
+        state.add_validator_with_floor(val, raised_floor, raised_floor);
+        let unstake = Transaction::new_with_chain_id(
+            val,
+            Address::zero(),
+            1,
+            10,
+            0,
+            Vec::new(),
+            chain_id,
+            TransactionType::Unstake,
+        );
+        Executor::apply_transaction_checked(&mut state, &unstake)
+            .expect("partial self-unstake succeeds");
+        let after = state.get_validator(&val).expect("validator retained");
+        assert_eq!(after.stake, raised_floor - 1);
+        assert!(
+            !after.active,
+            "validator below governance-raised registry min_stake must be deactivated"
+        );
+    }
+
+    #[test]
+    fn unbonded_or_slashed_directory_owner_excluded_from_duty_lane() {
+        use crate::validators::{
+            LeaderCommitment, SeatFields, ValidatorClass, ValidatorRegistration,
+        };
+
+        let network = crate::core::chain_config::Network::Testnet;
+        let chain_id = network.chain_id().value();
+        let consensus: std::sync::Arc<dyn crate::consensus::ConsensusEngine> =
+            std::sync::Arc::new(crate::consensus::pos::PoSEngine::new(
+                crate::consensus::pos::PoSConfig::default(),
+                None,
+            ));
+        let mut chain = crate::chain::blockchain::Blockchain::new(consensus, None, chain_id, None);
+        let full_floor = network.min_stake_full();
+        let mobile_floor = network.min_stake_mobile();
+
+        let unbonded_full = Address::from([0x81u8; 32]);
+        let slashed_mobile = Address::from([0x82u8; 32]);
+        let live_mobile = Address::from([0x83u8; 32]);
+
+        chain
+            .state
+            .validator_directory
+            .register(
+                &ValidatorRegistration {
+                    owner: unbonded_full,
+                    class: ValidatorClass::Full,
+                    operator_key: vec![0x11; 32],
+                    bls_key: vec![0x22; 96],
+                    bls_pop: vec![0x33; 48],
+                    seat: Some(SeatFields {
+                        vrf_key: vec![0x44; 32],
+                        pq_vote_key: vec![0x55; 32],
+                        leader_commitment: LeaderCommitment {
+                            commitment: [0x66; 32],
+                            length: 10,
+                        },
+                    }),
+                    custody_quota_bytes: 1_000_000,
+                    relay_offer: None,
+                    gateway_offer: None,
+                    peer_id: [0x11; 32],
+                },
+                full_floor,
+                full_floor,
+                0,
+            )
+            .expect("register full record");
+        chain
+            .state
+            .validator_directory
+            .register(
+                &ValidatorRegistration {
+                    owner: slashed_mobile,
+                    class: ValidatorClass::Mobile,
+                    operator_key: vec![0x12; 32],
+                    bls_key: vec![0x23; 96],
+                    bls_pop: vec![0x34; 48],
+                    seat: None,
+                    custody_quota_bytes: 1_000_000,
+                    relay_offer: None,
+                    gateway_offer: None,
+                    peer_id: [0x12; 32],
+                },
+                mobile_floor,
+                mobile_floor,
+                0,
+            )
+            .expect("register slashed mobile record");
+        chain
+            .state
+            .add_validator_with_floor(slashed_mobile, full_floor, full_floor);
+        if let Some(v) = chain.state.get_validator_mut(&slashed_mobile) {
+            v.slashed = true;
+        }
+        chain
+            .state
+            .validator_directory
+            .register(
+                &ValidatorRegistration {
+                    owner: live_mobile,
+                    class: ValidatorClass::Mobile,
+                    operator_key: vec![0x13; 32],
+                    bls_key: vec![0x24; 96],
+                    bls_pop: vec![0x35; 48],
+                    seat: None,
+                    custody_quota_bytes: 1_000_000,
+                    relay_offer: None,
+                    gateway_offer: None,
+                    peer_id: [0x13; 32],
+                },
+                mobile_floor,
+                mobile_floor,
+                0,
+            )
+            .expect("register live mobile record");
+
+        let signers = chain.duty_validator_snapshot_for_test();
+        assert!(
+            !signers.contains(&unbonded_full),
+            "Full directory record without active consensus seat must not get zero-fee duty lane"
+        );
+        assert!(
+            !signers.contains(&slashed_mobile),
+            "slashed owner must be stripped from zero-fee duty lane"
+        );
+        assert!(
+            signers.contains(&live_mobile),
+            "bonded unslashed mobile validator remains eligible for duty lane"
         );
     }
 }

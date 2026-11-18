@@ -2032,6 +2032,85 @@ impl AccountState {
         Ok(withdrawn)
     }
 
+    /// Active bond floor for a Full-seat validator on `chain_id`: the higher
+    /// of the governance-adjustable registry `min_stake` and the network's
+    /// compile-time `min_stake_full()`.
+    #[must_use]
+    pub(crate) fn full_validator_stake_floor(&self, chain_id: u64) -> u64 {
+        let registry_floor = self.registry.params().min_stake.max(1);
+        crate::core::chain_config::Network::from_chain_id(chain_id)
+            .map_or(registry_floor, |network| {
+                registry_floor.max(network.min_stake_full())
+            })
+            .max(1)
+    }
+
+    /// Active bond floor for a non-Full consensus validator on `chain_id`: the
+    /// higher of the governance-adjustable registry `min_stake` and the
+    /// network's compile-time `min_stake()`.
+    #[must_use]
+    pub(crate) fn validator_stake_floor(&self, chain_id: u64) -> u64 {
+        let registry_floor = self.registry.params().min_stake.max(1);
+        crate::core::chain_config::Network::from_chain_id(chain_id)
+            .map_or(registry_floor, |network| {
+                registry_floor.max(network.min_stake())
+            })
+            .max(1)
+    }
+
+    /// Accounts eligible for the mempool's zero-fee validator duty lane on `chain_id`.
+    ///
+    /// A duty batch pays zero fee only while a live, unslashed, unjailed bond
+    /// at or above the class floor stands behind the signer. Records retained
+    /// in `validator_directory` for resume or unbonding are stripped as soon as
+    /// their consensus seat deactivates, drops below floor, or is penalised.
+    #[must_use]
+    pub fn duty_lane_signers_for_chain(
+        &self,
+        chain_id: u64,
+    ) -> std::collections::BTreeSet<Address> {
+        let network = crate::core::chain_config::Network::from_chain_id(chain_id);
+        let registry_floor = self.registry.params().min_stake.max(1);
+        let full_floor = self.full_validator_stake_floor(chain_id);
+        let base_floor = self.validator_stake_floor(chain_id);
+        let mobile_floor = network
+            .map_or_else(|| (registry_floor / 100).max(1), |n| n.min_stake_mobile())
+            .max(1);
+        let mut signers = std::collections::BTreeSet::new();
+        for (address, validator) in &self.validators {
+            let needed = if validator.filiz.is_some() {
+                full_floor
+            } else {
+                base_floor
+            };
+            if validator.active
+                && !validator.slashed
+                && !validator.jailed
+                && validator.stake >= needed
+            {
+                signers.insert(*address);
+            }
+        }
+        for record in self.validator_directory.iter() {
+            let consensus = self.validators.get(&record.owner);
+            if consensus.is_some_and(|validator| validator.slashed || validator.jailed) {
+                signers.remove(&record.owner);
+                continue;
+            }
+            let admitted = if record.class.holds_seat() {
+                consensus.is_some_and(|validator| validator.active && validator.stake >= full_floor)
+            } else {
+                record.stake >= mobile_floor
+            };
+            if admitted {
+                signers.insert(record.owner);
+            } else {
+                signers.remove(&record.owner);
+            }
+        }
+        signers
+    }
+
     /// Run one epoch's liveness check on the state-level
     /// `LivenessTracker`. Returns the validators newly **suspended** this
     /// Epoch (V-4: absence suspends, it never slashes). `participated` is
