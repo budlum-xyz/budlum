@@ -1,0 +1,343 @@
+# Testnet specification index
+
+The specification is kept outside the repository. The source is the uploaded 6,044-line document.
+Every entry below is a source-line pointer and remains unchecked until its requirements, implementation, tests and CI evidence are reviewed.
+The list indexes section boundaries; it does not claim that every individual clause has been verified.
+
+## Section and work-package map
+
+- [ ] Section 0, source lines 49-50.
+- [ ] Section 0.1, source lines 51-59.
+- [ ] Section 0.2, source lines 60-66.
+- [ ] Section 0.3, source lines 67-74.
+- [ ] Section 0.4, source lines 75-81.
+- [ ] Section 0.5, source lines 82-89.
+- [ ] Section 1, source lines 90-91.
+- [ ] Section 1.1, source lines 92-101.
+- [ ] Section 1.2, source lines 102-114.
+- [ ] Section 1.3, source lines 115-128.
+- [ ] Section 1.4, source lines 129-136.
+- [ ] Section 1.5, source lines 137-174.
+- [ ] Section 2, source lines 175-176.
+- [ ] Section 2.1, source lines 177-185.
+- [ ] Section 2.2, source lines 186-267.
+- [ ] Section 2.3, source lines 268-279.
+- [ ] Section 2.4, source lines 280-301.
+- [ ] Section 3, source lines 302-305.
+- [ ] Section 3.1, source lines 306-318.
+- [ ] Section 3.2, source lines 319-338.
+- [ ] Section 3.3, source lines 339-348.
+- [ ] Section 3.4, source lines 349-360.
+- [ ] Section 3.5, source lines 361-369.
+- [ ] Section 3.6, source lines 370-381.
+- [ ] Section 4, source lines 382-383.
+- [ ] Section 4.1, source lines 384-417.
+- [ ] Section 4.2, source lines 418-425.
+- [ ] Section 4.3, source lines 426-480.
+- [ ] Section 5, source lines 481-482.
+- [ ] Section 5.1, source lines 483-491.
+- [ ] Section 5.2, source lines 492-530.
+- [ ] Section 5.3, source lines 531-541.
+- [ ] Section 5.4, source lines 542-563.
+- [ ] Section 5.5, source lines 564-579.
+- [ ] Section 5.6, source lines 580-592.
+- [ ] Section 5.7, source lines 593-603.
+- [ ] Section 6, source lines 604-607.
+- [ ] Section 6.1, source lines 608-609.
+- [ ] Section 6.1.1, source lines 610-622.
+- [ ] Section 6.1.2, source lines 623-629.
+- [ ] Section 6.1.3, source lines 630-644.
+- [ ] Section 6.1.4, source lines 645-656.
+- [ ] Section 6.2, source lines 657-681.
+- [ ] Section 6.3, source lines 682-683.
+- [ ] Section 6.3.1, source lines 684-687.
+- [ ] Section 6.3.2, source lines 688-717.
+- [ ] Section 6.3.3, source lines 718-739.
+- [ ] Section 6.4, source lines 740-793.
+- [ ] Section 6.5, source lines 794-808.
+- [ ] Section 6.6, source lines 809-810.
+- [ ] Section 6.6.1, source lines 811-848.
+- [ ] Section 6.6.2, source lines 849-863.
+- [ ] Section 6.6.3, source lines 864-877.
+- [ ] Section 6.6.4, source lines 878-901.
+- [ ] Section 6.6.5, source lines 902-937.
+- [ ] Section 6.6.6, source lines 938-958.
+- [ ] Section 6.7, source lines 959-968.
+- [ ] Section 6.8, source lines 969-970.
+- [ ] Section 6.8.1, source lines 971-979.
+- [ ] Section 6.8.2, source lines 980-985.
+- [ ] Section 6.8.3, source lines 986-995.
+- [ ] Section 6.9, source lines 996-997.
+- [ ] Section 6.9.1, source lines 998-1007.
+- [ ] Section 6.9.2, source lines 1008-1017.
+- [ ] Section 6.9.3, source lines 1018-1026.
+- [ ] Section 6.9.4, source lines 1027-1048.
+- [ ] Section 6.9.5, source lines 1049-1054.
+- [ ] Section 6.10, source lines 1055-1066.
+- [ ] Section 6.11, source lines 1067-1068.
+- [ ] Section 6.11.1, source lines 1069-1074.
+- [ ] Section 6.11.2, source lines 1075-1085.
+- [ ] Section 6.11.3, source lines 1086-1095.
+- [ ] Section 6.12, source lines 1096-1104.
+- [ ] Section 6.13, source lines 1105-1113.
+- [ ] Section 6.14, source lines 1114-1125.
+- [ ] Section 6.15, source lines 1126-1131.
+- [ ] Section 6.16, source lines 1132-1140.
+- [ ] Section 6.17, source lines 1141-1149.
+- [ ] Section 6.18, source lines 1150-1157.
+- [ ] Section 6.19, source lines 1158-1181.
+- [ ] Section 6.20, source lines 1182-1193.
+- [ ] Section 6.21, source lines 1194-1197.
+- [ ] Section 6.21.1, source lines 1198-1211.
+- [ ] Section 6.21.2, source lines 1212-1217.
+- [ ] Section 6.21.3, source lines 1218-1222.
+- [ ] Section 6.21.4, source lines 1223-1229.
+- [ ] Section 6.21.5, source lines 1230-1234.
+- [ ] Section 6.21.6, source lines 1235-1241.
+- [ ] Section 6.22, source lines 1242-1243.
+- [ ] Section 6.22.1, source lines 1244-1260.
+- [ ] Section 6.22.2, source lines 1261-1274.
+- [ ] Section 6.23, source lines 1275-1322.
+- [ ] Section 7, source lines 1323-1324.
+- [ ] Section 7.1, source lines 1325-1334.
+- [ ] Section 7.2, source lines 1335-1355.
+- [ ] Section 7.3, source lines 1356-1378.
+- [ ] Section 7.4, source lines 1379-1380.
+- [ ] Section 7.4.1, source lines 1381-1384.
+- [ ] Section 7.4.2, source lines 1385-1394.
+- [ ] Section 7.4.3, source lines 1395-1401.
+- [ ] Section 7.4.4, source lines 1402-1407.
+- [ ] Section 7.4.5, source lines 1408-1412.
+- [ ] Section 7.4.6, source lines 1413-1418.
+- [ ] Section 7.4.7, source lines 1419-1424.
+- [ ] Section 7.5, source lines 1425-1426.
+- [ ] Section 7.5.1, source lines 1427-1436.
+- [ ] Section 7.5.2, source lines 1437-1442.
+- [ ] Section 7.5.3, source lines 1443-1446.
+- [ ] Section 7.6, source lines 1447-1462.
+- [ ] Section 7.7, source lines 1463-1470.
+- [ ] Section 7.8, source lines 1471-1482.
+- [ ] Section 7.9, source lines 1483-1484.
+- [ ] Section 7.9.1, source lines 1485-1492.
+- [ ] Section 7.9.2, source lines 1493-1499.
+- [ ] Section 7.9.3, source lines 1500-1519.
+- [ ] Section 7.9.4, source lines 1520-1529.
+- [ ] Section 7.9.5, source lines 1530-1536.
+- [ ] Section 7.9.6, source lines 1537-1543.
+- [ ] Section 7.9.7, source lines 1544-1550.
+- [ ] Section 7.9.8, source lines 1551-1557.
+- [ ] Section 7.9.9, source lines 1558-1565.
+- [ ] Section 7.9.10, source lines 1566-1571.
+- [ ] Section 7.9.11, source lines 1572-1577.
+- [ ] Section 7.10, source lines 1578-1587.
+- [ ] Section 7.11, source lines 1588-1606.
+- [ ] Section 7.12, source lines 1607-1630.
+- [ ] Section 8, source lines 1631-1632.
+- [ ] Section 8.1, source lines 1633-1640.
+- [ ] Section 8.2, source lines 1641-1665.
+- [ ] Section 8.3, source lines 1666-1667.
+- [ ] Section 8.3.1, source lines 1668-1689.
+- [ ] Section 8.3.2, source lines 1690-1699.
+- [ ] Section 8.3.3, source lines 1700-1730.
+- [ ] Section 8.3.4, source lines 1731-1737.
+- [ ] Section 8.3.5, source lines 1738-1749.
+- [ ] Section 8.4, source lines 1750-1751.
+- [ ] Section 8.4.1, source lines 1752-1761.
+- [ ] Section 8.4.2, source lines 1762-1783.
+- [ ] Section 8.5, source lines 1784-1802.
+- [ ] Section 8.6, source lines 1803-1804.
+- [ ] Section 8.6.1, source lines 1805-1818.
+- [ ] Section 8.6.2, source lines 1819-1841.
+- [ ] Section 8.6.3, source lines 1842-1848.
+- [ ] Section 8.7, source lines 1849-1850.
+- [ ] Section 8.7.1, source lines 1851-1859.
+- [ ] Section 8.7.2, source lines 1860-1869.
+- [ ] Section 8.7.3, source lines 1870-1880.
+- [ ] Section 8.8, source lines 1881-1901.
+- [ ] Section 8.9, source lines 1902-1921.
+- [ ] Section 8.10, source lines 1922-1945.
+- [ ] Section 8.11, source lines 1946-1947.
+- [ ] Section 8.11.1, source lines 1948-1960.
+- [ ] Section 8.11.2, source lines 1961-1964.
+- [ ] Section 8.11.3, source lines 1965-1968.
+- [ ] Section 8.11.4, source lines 1969-1972.
+- [ ] Section 8.11.5, source lines 1973-1978.
+- [ ] Section 8.12, source lines 1979-1980.
+- [ ] Section 8.12.1, source lines 1981-1984.
+- [ ] Section 8.12.2, source lines 1985-1996.
+- [ ] Section 8.12.3, source lines 1997-2005.
+- [ ] Section 8.13, source lines 2006-2021.
+- [ ] Section 8.14, source lines 2022-2031.
+- [ ] Section 8.15, source lines 2032-2041.
+- [ ] Section 8.16, source lines 2042-2063.
+- [ ] Section 9, source lines 2064-2067.
+- [ ] Section 9.1, source lines 2068-2077.
+- [ ] Section 9.2, source lines 2078-2094.
+- [ ] Section 9.3, source lines 2095-2096.
+- [ ] Section 9.3.1, source lines 2097-2102.
+- [ ] Section 9.3.2, source lines 2103-2109.
+- [ ] Section 9.3.3, source lines 2110-2120.
+- [ ] Section 9.3.4, source lines 2121-2129.
+- [ ] Section 9.3.5, source lines 2130-2135.
+- [ ] Section 9.3.6, source lines 2136-2145.
+- [ ] Section 9.3.7, source lines 2146-2153.
+- [ ] Section 9.3.8, source lines 2154-2161.
+- [ ] Section 9.3.9, source lines 2162-2167.
+- [ ] Section 9.3.10, source lines 2168-2173.
+- [ ] Section 9.3.11, source lines 2174-2179.
+- [ ] Section 9.4, source lines 2180-2185.
+- [ ] Section 9.5, source lines 2186-2193.
+- [ ] Section 9.6, source lines 2194-2197.
+- [ ] Section 9.7, source lines 2198-2201.
+- [ ] Section 9.8, source lines 2202-2212.
+- [ ] Section 10, source lines 2213-2216.
+- [ ] Section 10.1, source lines 2217-2223.
+- [ ] Section 10.2, source lines 2224-2236.
+- [ ] Section 10.3, source lines 2237-2256.
+- [ ] Section 10.4, source lines 2257-2268.
+- [ ] Section 10.5, source lines 2269-2275.
+- [ ] Section 10.6, source lines 2276-2288.
+- [ ] Section 10.7, source lines 2289-2294.
+- [ ] Section 11, source lines 2295-2298.
+- [ ] Section 11.1, source lines 2299-2307.
+- [ ] Section 11.2, source lines 2308-2320.
+- [ ] Section 11.3, source lines 2321-2331.
+- [ ] Section 11.4, source lines 2332-2349.
+- [ ] Section 11.5, source lines 2350-2362.
+- [ ] Section 11.6, source lines 2363-2374.
+- [ ] Section 11.7, source lines 2375-2389.
+- [ ] Section 11.8, source lines 2390-2397.
+- [ ] Section 11.9, source lines 2398-2404.
+- [ ] Section 11.10, source lines 2405-2435.
+- [ ] Section 11.11, source lines 2436-2446.
+- [ ] Section 12, source lines 2447-2450.
+- [ ] Section 12.1, source lines 2451-2460.
+- [ ] Section 12.2, source lines 2461-2467.
+- [ ] Section 12.3, source lines 2468-2474.
+- [ ] Section 12.4, source lines 2475-2482.
+- [ ] Section 12.5, source lines 2483-2489.
+- [ ] Section 12.6, source lines 2490-2495.
+- [ ] Section 12.7, source lines 2496-2505.
+- [ ] Section 13, source lines 2506-2552.
+- [ ] Section 14, source lines 2553-2556.
+- [ ] Section 14.1, source lines 2557-2572.
+- [ ] Section 14.2, source lines 2573-2584.
+- [ ] Section 14.3, source lines 2585-2804.
+- [ ] Section 14.4, source lines 2805-2847.
+- [ ] Section 14.5, source lines 2848-2874.
+- [ ] Section 14.6, source lines 2875-2925.
+- [ ] Section 14.7, source lines 2926-2931.
+- [ ] Section 15, source lines 2932-2935.
+- [ ] Section 15.1, source lines 2936-2948.
+- [ ] Section 15.2, source lines 2949-2982.
+- [ ] Section 15.3, source lines 2983-3007.
+- [ ] Section 15.4, source lines 3008-3019.
+- [ ] Section 15.5, source lines 3020-3038.
+- [ ] Section 15.6, source lines 3039-3055.
+- [ ] Section 15.7, source lines 3056-3130.
+- [ ] Section 15.8, source lines 3131-3147.
+- [ ] Work package 01, source lines 3148-3168.
+- [ ] Work package 02, source lines 3169-3183.
+- [ ] Work package 03, source lines 3184-3199.
+- [ ] Work package 04, source lines 3200-3216.
+- [ ] Work package 05, source lines 3217-3233.
+- [ ] Work package 06, source lines 3234-3249.
+- [ ] Work package 07, source lines 3250-3270.
+- [ ] Work package 08, source lines 3271-3291.
+- [ ] Work package 09, source lines 3292-3307.
+- [ ] Work package 10, source lines 3308-3326.
+- [ ] Work package 11, source lines 3327-3346.
+- [ ] Work package 12, source lines 3347-3369.
+- [ ] Work package 13, source lines 3370-3389.
+- [ ] Work package 14, source lines 3390-3405.
+- [ ] Work package 15, source lines 3406-3423.
+- [ ] Work package 16, source lines 3424-3442.
+- [ ] Work package 17, source lines 3443-3458.
+- [ ] Work package 18, source lines 3459-3476.
+- [ ] Work package 19, source lines 3477-3496.
+- [ ] Work package 20, source lines 3497-3521.
+- [ ] Work package 21, source lines 3522-3542.
+- [ ] Work package 22, source lines 3543-3562.
+- [ ] Work package 23, source lines 3563-3581.
+- [ ] Work package 24, source lines 3582-3601.
+- [ ] Work package 25, source lines 3602-3620.
+- [ ] Work package 26, source lines 3621-3643.
+- [ ] Work package 27, source lines 3644-3663.
+- [ ] Work package 28, source lines 3664-3680.
+- [ ] Work package 29, source lines 3681-3696.
+- [ ] Work package 30, source lines 3697-3712.
+- [ ] Work package 31, source lines 3713-3729.
+- [ ] Work package 32, source lines 3730-3747.
+- [ ] Work package 33, source lines 3748-3766.
+- [ ] Work package 34, source lines 3767-3781.
+- [ ] Work package 35, source lines 3782-3795.
+- [ ] Work package 36, source lines 3796-3820.
+- [ ] Work package 37, source lines 3821-3836.
+- [ ] Work package 38, source lines 3837-3852.
+- [ ] Work package 39, source lines 3853-3874.
+- [ ] Work package 40, source lines 3875-3892.
+- [ ] Work package 41, source lines 3893-3912.
+- [ ] Work package 42, source lines 3913-3931.
+- [ ] Work package 43, source lines 3932-3949.
+- [ ] Work package 44, source lines 3950-3970.
+- [ ] Work package 45, source lines 3971-3988.
+- [ ] Work package 46, source lines 3989-4012.
+- [ ] Work package 47, source lines 4013-4028.
+- [ ] Work package 48, source lines 4029-4043.
+- [ ] Work package 49, source lines 4044-4126.
+- [ ] Work package 50, source lines 4127-4134.
+- [ ] Work package 51, source lines 4135-4142.
+- [ ] Work package 52, source lines 4143-4153.
+- [ ] Work package 53, source lines 4154-4161.
+- [ ] Work package 54, source lines 4162-4176.
+- [ ] Work package 55, source lines 4177-4185.
+- [ ] Work package 56, source lines 4186-4274.
+- [ ] Work package 57, source lines 4275-4334.
+- [ ] Work package 58, source lines 4335-4342.
+- [ ] Work package 59, source lines 4343-4350.
+- [ ] Work package 60, source lines 4351-4391.
+- [ ] Work package 61, source lines 4392-4407.
+- [ ] Work package 62, source lines 4408-4418.
+- [ ] Section 16, source lines 4419-4420.
+- [ ] Section 16.1, source lines 4421-4437.
+- [ ] Section 16.2, source lines 4438-4461.
+- [ ] Section 16.3, source lines 4462-4494.
+- [ ] Section 16.4, source lines 4495-4502.
+- [ ] Section 16.5, source lines 4503-4511.
+- [ ] Section 17, source lines 4512-4513.
+- [ ] Section 17.1, source lines 4514-4519.
+- [ ] Section 17.2, source lines 4520-4531.
+- [ ] Section 17.3, source lines 4532-4542.
+- [ ] Section 17.4, source lines 4543-4556.
+- [ ] Section 17.5, source lines 4557-4562.
+- [ ] Section 17.6, source lines 4563-4570.
+- [ ] Section 18, source lines 4571-4612.
+- [ ] Section 19, source lines 4613-4663.
+- [ ] Section 20, source lines 4664-4667.
+- [ ] Section 20.1, source lines 4668-4676.
+- [ ] Section 20.2, source lines 4677-4691.
+- [ ] Section 20.3, source lines 4692-4704.
+- [ ] Section 20.4, source lines 4705-4713.
+- [ ] Section 20.5, source lines 4714-4720.
+- [ ] Section 20.6, source lines 4721-4731.
+- [ ] Appendix A, source lines 4732-4842.
+- [ ] Section 1, source lines 4843-4851.
+- [ ] Section 2, source lines 4852-4869.
+- [ ] Section 3, source lines 4870-4887.
+- [ ] Section 4, source lines 4888-4911.
+- [ ] Section 5, source lines 4912-5226.
+- [ ] Appendix B, source lines 5227-5329.
+- [ ] Section 1, source lines 5330-5338.
+- [ ] Section 2, source lines 5339-5357.
+- [ ] Section 3, source lines 5358-5376.
+- [ ] Section 4, source lines 5377-5400.
+- [ ] Section 5, source lines 5401-5717.
+- [ ] Appendix C, source lines 5718-6018.
+- [ ] Appendix D, source lines 6019-6044.
+
+## Required follow-up
+
+- [ ] Extract and check each individual requirement and table row, including later-phase items.
+- [ ] Write one design record per item with current implementation, gaps, files, steps and verification.
+- [ ] Implement missing behavior and regression tests without weakening launch gates.
+- [ ] Record the relevant commit and a successful CI run for each completed item.
