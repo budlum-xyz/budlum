@@ -5703,7 +5703,7 @@ impl AccountState {
     }
 
     /// The accounts subtree root: the root of the tree
-    /// [`Self::ensure_accounts_tree`] maintains, folded into the consensus
+    /// `Self::ensure_accounts_tree` maintains, folded into the consensus
     /// state root body. A light client that holds a finalized block checks
     /// this root against the state root body the header commits to.
     #[must_use]
