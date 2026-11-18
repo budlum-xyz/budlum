@@ -66,6 +66,12 @@ pub enum StorageTxV3 {
         /// The NFT.
         nft: NftId,
     },
+    /// Delete an object outright. Signed by the object's owner. Third-party
+    /// NFT references do not block the owner; they are unbound with it.
+    DeleteObject {
+        /// The object.
+        object: ObjectKey,
+    },
     /// Extend the paid lifetime. Anyone may sign.
     RenewObject {
         /// The object.
@@ -150,6 +156,8 @@ pub enum Applied {
     Bound,
     /// Reference burned; `true` when the object was deleted.
     Burned(bool),
+    /// Object deleted by its owner.
+    Deleted,
     /// New expiry epoch.
     Renewed(u64),
     /// Decline recorded.
@@ -259,6 +267,9 @@ pub(crate) fn apply_with_validators_and_nft_owner(
         StorageTxV3::BurnReference { nft } => registry
             .burn_reference(&nft, &signer, epoch)
             .map(Applied::Burned),
+        StorageTxV3::DeleteObject { object } => registry
+            .delete_object(&object, &signer, epoch)
+            .map(|()| Applied::Deleted),
         StorageTxV3::RenewObject {
             object,
             extra_epochs,
@@ -467,6 +478,48 @@ mod tests {
             Ok(Applied::Burned(true))
         );
         assert_eq!(r.tombstone(&key), Some(3));
+    }
+
+    #[test]
+    fn the_door_deletes_an_object_by_its_owner_only() {
+        let mut r = Bud3Registry::default();
+        let (tx, key) = register_tx();
+        assert_eq!(
+            apply(&mut r, [1; 32], tx, 0),
+            Ok(Applied::Registered(Registered::New(key)))
+        );
+        // A third party cannot delete the owner's object.
+        assert_eq!(
+            apply(
+                &mut r,
+                [2; 32],
+                StorageTxV3::DeleteObject { object: key },
+                1
+            ),
+            Err(RegistryError::NotAuthorized)
+        );
+        assert!(r.object(&key).is_some());
+        // The owner deletes it outright.
+        assert_eq!(
+            apply(
+                &mut r,
+                [1; 32],
+                StorageTxV3::DeleteObject { object: key },
+                2
+            ),
+            Ok(Applied::Deleted)
+        );
+        assert!(r.object(&key).is_none());
+        // Deletion is final.
+        assert_eq!(
+            apply(
+                &mut r,
+                [1; 32],
+                StorageTxV3::DeleteObject { object: key },
+                3
+            ),
+            Err(RegistryError::UnknownObject)
+        );
     }
 
     #[test]

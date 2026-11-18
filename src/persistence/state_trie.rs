@@ -7,8 +7,11 @@
 //!
 //! Path bits are MSB-first (address bit 0 = root branch).
 //!
-//! WIRING: wired - reached from the chain actor's `GetAccountProof` command
-//! and served on the RPC surface as `bud_getAccountProof`.
+//! WIRING: unwired - reference structure, exercised by tests. Production
+//! account proofs (`bud_getAccountProof`) are drawn from the consensus
+//! accounts tree (`AccountState::get_account_proof`), which verifies against
+//! the accounts root a block header commits to; this trie is kept as the
+//! sparse-trie reference and is not on the serving path.
 //!
 //! # Why a second root exists
 //!
@@ -17,22 +20,17 @@
 //! incrementally. That root is correct for what it does, and it stays the
 //! consensus root; changing it would fork the chain.
 //!
-//! It cannot, however, carry an account proof. Its leaf order follows the
-//! iteration order of the account map, so a leaf's *position* has no
-//! cryptographic relation to the address it describes. A proof drawn from
-//! it establishes that some leaf is in the tree, not which address that leaf
-//! belongs to, and it cannot establish absence at all without shipping every
-//! leaf so the caller can look for the address itself: an O(n) witness.
+//! The consensus tree carries account proofs directly
+//! (`AccountState::prove_account`): each leaf hash commits to its address,
+//! and absence is proved by the neighboring leaves in sorted order. This
+//! trie is the alternative shape, where position *is* the address, bit by
+//! bit: inclusion and absence are the same fixed-depth proof, and a proof
+//! for one address cannot be relabelled as a proof for another (see
+//! [`MerkleProof::verify`]).
 //!
-//! In this trie position *is* the address, bit by bit. Inclusion and absence
-//! are the same fixed-depth proof, and a proof for one address cannot be
-//! relabelled as a proof for another (see [`MerkleProof::verify`]).
-//!
-//! So this is a second, proof-bearing root, served alongside the consensus
-//! root and never in place of it. The bundle returned by [`prove_account`]
-//! carries its own root precisely because a caller must not assume the two
-//! roots are equal - they commit to the same accounts under different
-//! structures.
+//! The bundle returned by [`prove_account`] carries its own root precisely
+//! because a caller must not assume the two roots are equal - they commit
+//! to the same accounts under different structures.
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
