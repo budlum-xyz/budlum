@@ -10599,13 +10599,18 @@ impl Blockchain {
         segment: u64,
         items: &[crate::storage::bud3::symbol_protocol::VerifiedSymbolItem],
     ) -> Result<usize, String> {
+        let (live_key, _) = self
+            .state
+            .bud3_registry
+            .resolve_live_object(object)
+            .ok_or_else(|| "unknown or tombstoned B.U.D. 3.0 object".to_string())?;
         let accepted = self
             .bud3_symbols
-            .insert_verified(&self.state.bud3_registry, holder, object, segment, items)
+            .insert_verified(&self.state.bud3_registry, holder, &live_key, segment, items)
             .map_err(|e| format!("verified symbol admission refused: {e:?}"))?;
         if let Some(ref store) = self.storage {
             store
-                .put_bud3_verified_symbols(holder, object, segment, &accepted)
+                .put_bud3_verified_symbols(holder, &live_key, segment, &accepted)
                 .map_err(|e| format!("failed to persist verified symbols: {e}"))?;
         }
         Ok(accepted.len())

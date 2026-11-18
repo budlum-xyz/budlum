@@ -28,7 +28,9 @@ pub mod worker;
 use crate::core::account::{AccountState, BudEnvUnit};
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
-use crate::execution::coordinator::alias::{derive_contract_account, ALIAS_NAMESPACE};
+use crate::execution::coordinator::alias::{
+    alias_storage_key, derive_contract_account, ALIAS_NAMESPACE,
+};
 use crate::execution::coordinator::evm_ee::EvmEe;
 use crate::execution::coordinator::expansion_ee::{
     CairoEe, MoveSuiEe, NearWasmEe, PlutusEe, PolkaVmEe, Rv32Ee, TvmEe, UtxoEe,
@@ -284,6 +286,65 @@ impl std::fmt::Display for CoordinatorError {
             Self::WorkerHalt { attempts, cause } => {
                 write!(f, "UEL halted after {attempts} worker retries: {cause}")
             }
+        }
+    }
+}
+
+/// The two writes a block attempt makes about the sender before it knows
+/// whether the call will succeed: the sender's foreign-lane registration and
+/// its `uel/alias` entry.
+///
+/// Neither goes through `TxOverlay`, which is the only thing the revert arms
+/// roll back, so a call that ends in `Revert`, `OutOfGas` or `InvalidCode`
+/// used to leave both behind and changed `execution_root` on a transaction
+/// that wrote nothing. That is what
+/// `expansion_ee_all_twelve_environments_execute_on_devnet` caught: after a
+/// refused `Deploy` the root had moved. The record remembers which of the two
+/// this attempt actually created, and only those are undone.
+struct CallerRegistration {
+    /// The sender the record belongs to.
+    sender: Address,
+    /// The `uel/alias` key of `(sender, ee)`.
+    alias_key: [u8; 33],
+    /// Whether this attempt wrote the alias entry (it was absent before).
+    wrote_alias: bool,
+    /// Whether this attempt registered the sender in the foreign lane.
+    registered_lane: bool,
+}
+
+impl CallerRegistration {
+    /// Read what is already there, before the writes happen.
+    fn new(state: &AccountState, sender: Address, ee: EeId) -> Result<Self, String> {
+        let alias_key = alias_storage_key(&sender, ee);
+        Ok(Self {
+            sender,
+            alias_key,
+            wrote_alias: state
+                .execution_state
+                .read(ALIAS_NAMESPACE, &alias_key)?
+                .is_none(),
+            registered_lane: !state
+                .execution_state
+                .foreign_lane
+                .accounts
+                .contains_key(&sender),
+        })
+    }
+
+    /// Undo the writes this attempt created. A write that was already there
+    /// belongs to an earlier transaction and stays.
+    fn rollback(self, state: &mut AccountState) {
+        if self.wrote_alias {
+            let _ = state
+                .execution_state
+                .write(ALIAS_NAMESPACE, &self.alias_key, None);
+        }
+        if self.registered_lane {
+            state
+                .execution_state
+                .foreign_lane
+                .accounts
+                .remove(&self.sender);
         }
     }
 }
@@ -853,6 +914,8 @@ impl ExecutionCoordinator {
                 continue;
             }
 
+            let registration = CallerRegistration::new(state, tx.sender, tx.ee)
+                .map_err(AttemptError::Deterministic)?;
             if !state
                 .execution_state
                 .foreign_lane
@@ -924,6 +987,7 @@ impl ExecutionCoordinator {
                         .is_err()
                     {
                         overlay.rollback_root(state);
+                        registration.rollback(state);
                         let fail_gas = tx.gas_limit_bgu.min(2_100);
                         meter
                             .record_used(tx.ee, fail_gas)
@@ -991,14 +1055,17 @@ impl ExecutionCoordinator {
                         }
                         OutcomeStatus::Revert => {
                             overlay.rollback_root(state);
+                            registration.rollback(state);
                             (UelReceiptStatus::Revert, Vec::new(), None)
                         }
                         OutcomeStatus::OutOfGas => {
                             overlay.rollback_root(state);
+                            registration.rollback(state);
                             (UelReceiptStatus::OutOfGas, Vec::new(), None)
                         }
                         OutcomeStatus::InvalidCode => {
                             overlay.rollback_root(state);
+                            registration.rollback(state);
                             (UelReceiptStatus::InvalidCode, Vec::new(), None)
                         }
                     };
@@ -1027,6 +1094,7 @@ impl ExecutionCoordinator {
                 }
                 Err(fault) => {
                     overlay.rollback_root(state);
+                    registration.rollback(state);
                     self.supervisor
                         .note_fault_and_restart(fault.ee)
                         .map_err(AttemptError::Transport)?;
