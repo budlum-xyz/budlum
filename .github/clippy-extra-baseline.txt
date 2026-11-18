@@ -1,4 +1,4 @@
-8513
+7223
 # ---------------------------------------------------------------------------
 # G2 pedantic/nursery ratchet baseline.
 # The FIRST bare-number line of this file is the baseline
@@ -54,3 +54,11 @@
 #   entries). The testnet branch carries the quantum canary, the app_binding and
 #   domain modules, the settlement doors and the testnet daemons the consensus
 #   branch does not, and their doc/`must_use` surface is what the +52 is.
+# 2026-11-18: 8513 -> 7223 (B-0051). Measured 7223 on CI run 44292586425,
+# job 134761302116, source df970fc98402e0d025b7832ebada47581f8174f6
+# ("Budlum Core quality": `clippy-extra: 7223 | baseline: 8513`). The gate's
+# own stale-baseline rule failed the job: the base was more than 10% above the
+# measured count. The ratchet itself is unchanged; the base only descends to a
+# CI-measured count, as the 2026-10-29 entry records. No other branch inherits
+# this number; Garden, main and the aggregation heads keep their own baselines
+# until each has its own complete CI measurement.
