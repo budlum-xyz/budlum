@@ -96,6 +96,7 @@ pub struct KeyPairSigner {
 }
 
 impl KeyPairSigner {
+    #[must_use]
     pub fn new(keypair: KeyPair) -> Self {
         Self {
             keypair,
@@ -104,11 +105,13 @@ impl KeyPairSigner {
         }
     }
 
+    #[must_use]
     pub fn with_bls(mut self, bls: BlsKeypair) -> Self {
         self.bls_key = Some(bls);
         self
     }
 
+    #[must_use]
     pub fn with_pq(mut self, pq: PqKeyPair) -> Self {
         self.pq_key = Some(pq);
         self

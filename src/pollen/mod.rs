@@ -7,10 +7,10 @@
 //! - **R2:** there was no `Signature` type in the code base; it is defined here
 //!   as a bounded `Signature64`. `Default` = the zero sentinel (invalid
 //!   signature); no verification passes with the sentinel (the section 5 rule).
-//! - **R3:** a serde_json object key can only be a string; a raw `[u8; N]` key
+//! - **R3:** a `serde_json` object key can only be a string; a raw `[u8; N]` key
 //!   blows up on serialize (the `permissionless.rs:176` trap). `AssetId`
 //!   string-serializes with the Address pattern (`core/address.rs:64-73`).
-//! - **(review decision; revised - user scope_v1):** this `AssetId` originally
+//! - **(review decision; revised - user `scope_v1)`:** this `AssetId` originally
 //!   lived under `crate::bud::marketplace`; categorization C2 moved it under
 //!   `crate::pollen`. `cross_domain::AssetId` (= the `Hash32` alias) is
 //!   untouched.
@@ -40,17 +40,20 @@ impl AssetId {
         }
         let mut id = [0u8; 32];
         id.copy_from_slice(&bytes);
-        Ok(AssetId(id))
+        Ok(Self(id))
     }
 
+    #[must_use]
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
 
+    #[must_use]
     pub fn zero() -> Self {
-        AssetId([0u8; 32])
+        Self([0u8; 32])
     }
 
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -96,13 +99,13 @@ impl<'de> Deserialize<'de> for AssetId {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        AssetId::from_hex(&s).map_err(serde::de::Error::custom)
+        Self::from_hex(&s).map_err(serde::de::Error::custom)
     }
 }
 
 impl From<[u8; 32]> for AssetId {
     fn from(bytes: [u8; 32]) -> Self {
-        AssetId(bytes)
+        Self(bytes)
     }
 }
 
@@ -116,8 +119,9 @@ pub struct Signature64(pub [u8; 64]);
 
 impl Signature64 {
     /// The invalid-signature sentinel (the same value as `Default`).
-    pub const SENTINEL: Self = Signature64([0u8; 64]);
+    pub const SENTINEL: Self = Self([0u8; 64]);
 
+    #[must_use]
     pub fn is_sentinel(&self) -> bool {
         self.0 == [0u8; 64]
     }
@@ -138,13 +142,15 @@ impl Signature64 {
         }
         let mut sig = [0u8; 64];
         sig.copy_from_slice(&bytes);
-        Ok(Signature64(sig))
+        Ok(Self(sig))
     }
 
+    #[must_use]
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
 
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8; 64] {
         &self.0
     }
@@ -190,13 +196,13 @@ impl<'de> Deserialize<'de> for Signature64 {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Signature64::from_hex(&s).map_err(serde::de::Error::custom)
+        Self::from_hex(&s).map_err(serde::de::Error::custom)
     }
 }
 
 impl From<[u8; 64]> for Signature64 {
     fn from(bytes: [u8; 64]) -> Self {
-        Signature64(bytes)
+        Self(bytes)
     }
 }
 

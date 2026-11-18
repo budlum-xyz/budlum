@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_evm_receipt's production caller is adapter.rs, which declares itself unwired in this tree; the observed relayer path that wires it is not in this tree yet.
+//! WIRING: unwired - `verify_evm_receipt`'s production caller is adapter.rs, which declares itself unwired in this tree; the observed relayer path that wires it is not in this tree yet.
 //! F10.2 security core: `verify_evm_receipt`, the deterministic orchestrator.
 //!
 //! Combines the steps of RFC section 4.1 (the ETH -> Budlum mint flow) into a
@@ -72,16 +72,16 @@ pub enum VerifyError {
 impl std::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VerifyError::Header(m) => write!(f, "evm verify: header chain: {m}"),
-            VerifyError::Mpt(e) => write!(f, "evm verify: mpt: {e}"),
-            VerifyError::Receipt(e) => write!(f, "evm verify: receipt: {e}"),
-            VerifyError::TxFailed => write!(f, "evm verify: transaction status=false"),
-            VerifyError::EmptyTransactionHash => {
+            Self::Header(m) => write!(f, "evm verify: header chain: {m}"),
+            Self::Mpt(e) => write!(f, "evm verify: mpt: {e}"),
+            Self::Receipt(e) => write!(f, "evm verify: receipt: {e}"),
+            Self::TxFailed => write!(f, "evm verify: transaction status=false"),
+            Self::EmptyTransactionHash => {
                 write!(f, "evm verify: transaction hash is empty")
             }
-            VerifyError::LogNotFound => write!(f, "evm verify: deposit log not found"),
-            VerifyError::PayloadMismatch => write!(f, "evm verify: deposit payload mismatch"),
-            VerifyError::SyncCommittee(e) => write!(f, "evm verify: sync-committee: {e}"),
+            Self::LogNotFound => write!(f, "evm verify: deposit log not found"),
+            Self::PayloadMismatch => write!(f, "evm verify: deposit payload mismatch"),
+            Self::SyncCommittee(e) => write!(f, "evm verify: sync-committee: {e}"),
         }
     }
 }
@@ -90,17 +90,17 @@ impl std::error::Error for VerifyError {}
 
 impl From<MptError> for VerifyError {
     fn from(e: MptError) -> Self {
-        VerifyError::Mpt(e)
+        Self::Mpt(e)
     }
 }
 impl From<ReceiptError> for VerifyError {
     fn from(e: ReceiptError) -> Self {
-        VerifyError::Receipt(e)
+        Self::Receipt(e)
     }
 }
 impl From<SyncCommitteeError> for VerifyError {
     fn from(e: SyncCommitteeError) -> Self {
-        VerifyError::SyncCommittee(e)
+        Self::SyncCommittee(e)
     }
 }
 

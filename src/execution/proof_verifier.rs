@@ -55,16 +55,16 @@ pub enum ProofVerifyError {
 impl std::fmt::Display for ProofVerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProofVerifyError::ProofTooLarge { size, max } => {
+            Self::ProofTooLarge { size, max } => {
                 write!(f, "proof too large: {size} bytes (max {max})")
             }
-            ProofVerifyError::DegreeTooLarge { degree_bits, max } => {
+            Self::DegreeTooLarge { degree_bits, max } => {
                 write!(f, "degree bits too large: {degree_bits} (max {max})")
             }
-            ProofVerifyError::FormatVersionTooOld { version, min } => {
+            Self::FormatVersionTooOld { version, min } => {
                 write!(f, "proof format version {version} too old (min {min})")
             }
-            ProofVerifyError::PublicInputsMismatch { expected, got } => {
+            Self::PublicInputsMismatch { expected, got } => {
                 write!(
                     f,
                     "public inputs hash mismatch: expected {}, got {}",
@@ -72,16 +72,16 @@ impl std::fmt::Display for ProofVerifyError {
                     hex::encode(got)
                 )
             }
-            ProofVerifyError::InvalidProof(msg) => {
+            Self::InvalidProof(msg) => {
                 write!(f, "invalid STARK proof: {msg}")
             }
-            ProofVerifyError::DeserializationError(msg) => {
+            Self::DeserializationError(msg) => {
                 write!(f, "proof deserialization error: {msg}")
             }
-            ProofVerifyError::UnsupportedBackend(backend) => {
+            Self::UnsupportedBackend(backend) => {
                 write!(f, "unsupported proof backend: {backend}")
             }
-            ProofVerifyError::GasExceeded { required, limit } => {
+            Self::GasExceeded { required, limit } => {
                 write!(f, "proof verification gas exceeded: {required} > {limit}")
             }
         }
@@ -137,6 +137,7 @@ pub struct ExecutionPublicInputs {
 
 impl ExecutionPublicInputs {
     /// Canonical serialization for hashing.
+    #[must_use]
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(176);
         bytes.extend_from_slice(&self.chain_id.to_le_bytes());
@@ -156,6 +157,7 @@ impl ExecutionPublicInputs {
     }
 
     /// Keccak-256 hash of canonical bytes, aligned with `bud_proof`.
+    #[must_use]
     pub fn hash(&self) -> [u8; 32] {
         let bytes = self.to_canonical_bytes();
         let mut hasher = Keccak256::new();

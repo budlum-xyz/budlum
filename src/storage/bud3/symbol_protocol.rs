@@ -36,6 +36,9 @@ pub const MAX_STREAMS_PER_SHARE: u32 = 1;
 /// Maximum concurrent `/budlum/bud3/custody/1` streams per peer.
 pub const MAX_CUSTODY_STREAMS_PER_PEER: u32 = 4;
 
+/// Maximum distinct peer identifiers tracked concurrently in [`SymbolPeerLimiter`].
+pub const MAX_TRACKED_SYMBOL_PEERS: usize = 4_096;
+
 /// Network link metering classification for Mobile symbol serving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkMetering {
@@ -154,6 +157,13 @@ impl SymbolPeerLimiter {
         if req.count == 0 || req.count > MAX_SYMBOLS_PER_REQUEST {
             return Err(SymbolProtocolError::InvalidSymbolCount);
         }
+        if !self.window_sec.contains_key(peer) && self.window_sec.len() >= MAX_TRACKED_SYMBOL_PEERS
+        {
+            self.window_sec.retain(|_, (sec, _)| *sec == now_sec);
+            if self.window_sec.len() >= MAX_TRACKED_SYMBOL_PEERS {
+                return Err(SymbolProtocolError::RateLimited);
+            }
+        }
         let entry = self.window_sec.entry(*peer).or_insert((now_sec, 0));
         if entry.0 != now_sec {
             *entry = (now_sec, 0);
@@ -171,6 +181,14 @@ impl SymbolPeerLimiter {
     ///
     /// [`SymbolProtocolError::TooManyCustodyStreams`].
     pub fn open_custody_stream(&mut self, peer: &[u8; 32]) -> Result<(), SymbolProtocolError> {
+        if !self.active_custody_streams.contains_key(peer)
+            && self.active_custody_streams.len() >= MAX_TRACKED_SYMBOL_PEERS
+        {
+            self.active_custody_streams.retain(|_, count| *count > 0);
+            if self.active_custody_streams.len() >= MAX_TRACKED_SYMBOL_PEERS {
+                return Err(SymbolProtocolError::TooManyCustodyStreams);
+            }
+        }
         let count = self.active_custody_streams.entry(*peer).or_insert(0);
         if *count >= MAX_CUSTODY_STREAMS_PER_PEER {
             return Err(SymbolProtocolError::TooManyCustodyStreams);
@@ -183,6 +201,9 @@ impl SymbolPeerLimiter {
     pub fn close_custody_stream(&mut self, peer: &[u8; 32]) {
         if let Some(count) = self.active_custody_streams.get_mut(peer) {
             *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.active_custody_streams.remove(peer);
+            }
         }
     }
 }
@@ -440,6 +461,37 @@ mod tests {
         assert_eq!(
             verify_symbol_range_response(0, root, syms.len() as u64, profile.symbol_size, &dup_esi),
             Err(SymbolProtocolError::BadMerkleProof)
+        );
+    }
+
+    #[test]
+    fn symbol_peer_limiter_bounds_peer_tables_and_drops_closed_streams() {
+        let mut limiter = SymbolPeerLimiter::default();
+        let req = SymbolRangeRequest {
+            object: [0x11; 32],
+            segment: 0,
+            first_esi: 0,
+            count: 1,
+        };
+        // Churning 5_000 distinct peers across seconds must evict expired windows
+        // and keep window_sec bounded at or below 4_096 entries.
+        for i in 0u32..5_000 {
+            let mut peer = [0u8; 32];
+            peer[..4].copy_from_slice(&i.to_le_bytes());
+            let now_sec = u64::from(i / 64);
+            assert!(limiter.check_symbol_request(&peer, &req, now_sec).is_ok());
+            assert!(limiter.open_custody_stream(&peer).is_ok());
+            limiter.close_custody_stream(&peer);
+        }
+        assert!(
+            limiter.window_sec.len() <= 4_096,
+            "window_sec leaked {} peers without bound",
+            limiter.window_sec.len()
+        );
+        assert!(
+            limiter.active_custody_streams.is_empty(),
+            "closed custody streams remained retained: {}",
+            limiter.active_custody_streams.len()
         );
     }
 }

@@ -12,7 +12,7 @@
 //! - Extension: `[hp_encoded_path, child_ref]` - terminator flag=0.
 //! - Branch: `[c0, c1, ..., c15, value]` - 17 elements (16 children + optional value).
 //!
-//! `child_ref` is either a 32-byte keccak256 hash (looked up in node_map) or an inline
+//! `child_ref` is either a 32-byte keccak256 hash (looked up in `node_map`) or an inline
 //! RLP-encoded node (32 bytes or fewer, the small-node optimization).
 //!
 //! # Security
@@ -80,14 +80,14 @@ pub enum MptError {
 impl std::fmt::Display for MptError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MptError::KeyNotFound => write!(f, "mpt: key not found in trie"),
-            MptError::MissingNode => write!(f, "mpt: missing node in proof"),
-            MptError::Rlp(e) => write!(f, "mpt: rlp decode error: {e}"),
-            MptError::InvalidNode => write!(f, "mpt: invalid node structure"),
-            MptError::InvalidHpEncoding => write!(f, "mpt: invalid hex-prefix encoding"),
-            MptError::InvalidNodeRef => write!(f, "mpt: invalid node reference"),
-            MptError::PathMismatch => write!(f, "mpt: path does not match"),
-            MptError::NestingTooDeep => {
+            Self::KeyNotFound => write!(f, "mpt: key not found in trie"),
+            Self::MissingNode => write!(f, "mpt: missing node in proof"),
+            Self::Rlp(e) => write!(f, "mpt: rlp decode error: {e}"),
+            Self::InvalidNode => write!(f, "mpt: invalid node structure"),
+            Self::InvalidHpEncoding => write!(f, "mpt: invalid hex-prefix encoding"),
+            Self::InvalidNodeRef => write!(f, "mpt: invalid node reference"),
+            Self::PathMismatch => write!(f, "mpt: path does not match"),
+            Self::NestingTooDeep => {
                 write!(f, "mpt: trie descent exceeded {MAX_WALK_DEPTH} levels")
             }
         }
@@ -98,11 +98,12 @@ impl std::error::Error for MptError {}
 
 impl From<RlpError> for MptError {
     fn from(e: RlpError) -> Self {
-        MptError::Rlp(e)
+        Self::Rlp(e)
     }
 }
 
 /// Keccak-256 digest (32 bytes).
+#[must_use]
 pub fn keccak256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Keccak256::new();
     hasher.update(data);
@@ -120,6 +121,7 @@ pub const EMPTY_TRIE_ROOT: [u8; 32] = [
 
 /// Expands bytes into nibbles, high nibble first. The MPT path of a key is the nibbles of the
 /// key itself (plain trie, as the Ethereum receipts trie); a secure trie would pass a hash.
+#[must_use]
 pub fn to_nibbles(bytes: &[u8]) -> Vec<u8> {
     let mut nibbles = Vec::with_capacity(bytes.len().saturating_mul(2));
     for &b in bytes {
@@ -132,6 +134,7 @@ pub fn to_nibbles(bytes: &[u8]) -> Vec<u8> {
 /// Hex-prefix encode (Yellow Paper Appendix D compact function).
 ///
 /// `is_leaf=true` -> the terminator flag; `nibbles` may have odd or even length.
+#[must_use]
 pub fn hp_encode(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
     let flag = if is_leaf { 2u8 } else { 0u8 };
     let odd = nibbles.len() % 2 == 1;
