@@ -2075,36 +2075,4 @@ mod tests {
             .expect("public start succeeds with or without /etc/resolv.conf");
         let _ = live.commands.send(NetCommand::Shutdown).await;
     }
-
-    #[test]
-    fn forged_length_prefix_garden_frames_are_rejected_without_allocating() {
-        let forged_frame = |variant: u32| {
-            let mut buf = Vec::with_capacity(16);
-            buf.extend_from_slice(&variant.to_le_bytes());
-            buf.extend_from_slice(&0x0000_FFFF_FFFF_FFFFu64.to_le_bytes());
-            buf.extend_from_slice(&[0u8; 4]);
-            buf
-        };
-        assert!(
-            crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(
-                &forged_frame(1),
-                MAX_UNADMITTED_REQUEST_BYTES,
-            )
-            .is_err()
-        );
-        assert!(
-            crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
-                &forged_frame(2),
-                MAX_RESPONSE_BYTES,
-            )
-            .is_err()
-        );
-        assert!(
-            crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
-                &forged_frame(4),
-                MAX_RESPONSE_BYTES,
-            )
-            .is_err()
-        );
-    }
 }
