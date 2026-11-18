@@ -154,8 +154,8 @@ pub use spec::{
     TimeUnit, TrustModel, VerificationPolicy,
 };
 pub use tendermint::{
-    quorum_threshold, validator_address_of, validator_set_commitment, vote_sign_bytes,
-    PinnedTendermintAnchor, TendermintCommitEvidence, TendermintFinalityAdapter,
+    quorum_threshold, validator_address_of, validator_set_commitment, validator_set_hash,
+    vote_sign_bytes, PinnedTendermintAnchor, TendermintCommitEvidence, TendermintFinalityAdapter,
     TendermintSignature, TendermintValidator,
 };
 pub use versioning::{ForkError, VersionPolicy, VersionWindow};
