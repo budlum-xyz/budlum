@@ -389,6 +389,14 @@ impl Executor {
                 "Burn reserve is schedule-controlled and cannot originate transactions",
             ));
         }
+        if state.auth_program_hash(&tx.from).is_some()
+            && (tx.auth_claim.is_none() || !tx.claimed_shape_is_canonical())
+        {
+            return Err(BudlumError::validation(
+                "program_account_requires_auth_claim",
+                "Program account requires a canonical aggregated authorization claim",
+            ));
+        }
         // Every arm increments the sender nonce. Refuse exhaustion before any
         // arm can debit funds, touch a registry or escrow value.
         Self::checked_next_nonce(state.get_nonce(&tx.from))?;

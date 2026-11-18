@@ -299,21 +299,6 @@ pub enum FinalityProof {
         authorities: Vec<crate::core::address::Address>,
         signatures: Vec<PoAAuthoritySignature>,
     },
-    /// Aggregation-layer finality (Phase 4): references a verified
-    /// `Claim::Prog` inside a finalized block's `MasterProof` (`ClaimFrame`).
-    /// Appended after `Pospace` so the families the consensus branch pinned
-    /// keep their discriminants; the post-quantum DAG-family variants are
-    /// appended after this one for the same reason.
-    AggregatedProg {
-        /// Registered state-transition program hash for this domain.
-        program_hash: Hash32,
-        /// Height of the predecessor state root.
-        prev_height: u64,
-        /// Predecessor state root.
-        prev_state_root: Hash32,
-        /// Digest of the verified `Claim::Prog` inside the block's `ClaimFrame`.
-        claim_digest: Hash32,
-    },
     /// Post-quantum DAG structural finality: causal-anchor verification plus a
     /// composite validator-suite (`Ed25519 + ML-DSA-65`) authority quorum bound
     /// via [`poa_pq_authority_set_hash`]. Appended after `Pospace` so existing
@@ -342,6 +327,20 @@ pub enum FinalityProof {
         prover_signature: Vec<u8>,
         authorities: Vec<PoAAuthorityKey>,
         signatures: Vec<PoAAuthoritySignature>,
+    },
+    /// Aggregation-layer finality (Phase 4): references a verified
+    /// `Claim::Prog` inside a finalized block's `MasterProof` (`ClaimFrame`).
+    /// Appended after `PospacePq` (discriminant 16) so earlier bincode variant
+    /// indices `0..=15` stay byte-exact across the stack.
+    AggregatedProg {
+        /// Registered state-transition program hash for this domain.
+        program_hash: Hash32,
+        /// Height of the predecessor state root.
+        prev_height: u64,
+        /// Predecessor state root.
+        prev_state_root: Hash32,
+        /// Digest of the verified `Claim::Prog` inside the block's `ClaimFrame`.
+        claim_digest: Hash32,
     },
 }
 
@@ -456,14 +455,17 @@ impl FinalityProof {
                 trust_anchor: TrustAnchor::TrustedCheckpoint,
                 depth: DepthClass::Confirmations,
             },
-            // An aggregation-layer proof names a verified `Claim::Prog` in a
-            // finalized block's `ClaimFrame`. What it binds is the predecessor
-            // height and its state root; the program hash and the claim digest
-            // identify the claim rather than a commitment field. It carries no
-            // signer quorum of its own, and it is delayed by construction
-            // behind the claim it names.
+            // Aggregated `Claim::Prog` domain transition: the guest recomputes
+            // `output_hash` over height, parent hash, block hash, state root,
+            // tx root, event root, and timestamp inside `BudAir`.
             Self::AggregatedProg { .. } => FinalityProofShape {
-                binds: BINDS_HEIGHT | BINDS_STATE_ROOT,
+                binds: BINDS_HEIGHT
+                    | BINDS_PARENT_HASH
+                    | BINDS_BLOCK_HASH
+                    | BINDS_STATE_ROOT
+                    | BINDS_TX_ROOT
+                    | BINDS_EVENT_ROOT
+                    | BINDS_TIMESTAMP,
                 quorum: QuorumClass::ProofCarrying,
                 trust_anchor: TrustAnchor::ProofCarrying,
                 depth: DepthClass::ProofDelay,

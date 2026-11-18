@@ -1624,6 +1624,7 @@ impl RpcServer {
                 "balance": Self::to_hex(leaf.balance),
                 "nonce": Self::to_hex(leaf.nonce),
                 "fracAttos": Self::to_hex(leaf.frac_attos),
+                "authProgramHash": leaf.auth_program_hash.map(Self::bytes32_to_0x),
                 "leafHash": Self::bytes32_to_0x(leaf.leaf_hash),
                 "siblings": leaf
                     .siblings
@@ -1646,6 +1647,7 @@ impl RpcServer {
                    "balance": Self::to_hex(bundle.balance),
                    "nonce": Self::to_hex(bundle.nonce),
                    "fracAttos": Self::to_hex(bundle.frac_attos),
+                   "authProgramHash": bundle.auth_program_hash.map(Self::bytes32_to_0x),
                    "leafHash": Self::bytes32_to_0x(bundle.leaf_hash),
                    "siblings": bundle
                        .siblings

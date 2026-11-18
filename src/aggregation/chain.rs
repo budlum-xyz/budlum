@@ -545,6 +545,20 @@ pub fn check_block_with_backend_and_airs<B: AggBackend>(
         }
         (_, None) => 0,
     };
+    if params.mode != AggMode::On {
+        if let Some(state) = accounts {
+            if block
+                .transactions
+                .iter()
+                .any(|tx| state.auth_program_hash(&tx.from).is_some())
+            {
+                return Err(
+                    "aggregation: program account requires aggregation mode On and a verified auth claim"
+                        .into(),
+                );
+            }
+        }
+    }
     let views = views_with_accounts(domain, block, accounts);
     let txs = tx_claims(&views, block);
     check_block_claims(
