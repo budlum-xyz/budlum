@@ -3977,6 +3977,68 @@ mod tests {
                 ),
                 Err(RegistryError::BadRepair(_))
             ));
+        // Three colluding Full validators signing fabricated symbols without a
+        // seat- or stake-weighted quorum certificate must be rejected fail closed.
+        {
+            let mut fabricated = fresh.clone();
+            fabricated[0].data.fill(0xEE);
+            let fab_leaves: Vec<(u32, [u8; 32])> = fabricated
+                .iter()
+                .map(|x| (x.esi, symbol_leaf(&x.data)))
+                .collect();
+            let fab_root = symbol_root(&fab_leaves);
+            let orig_root = r.object(&key).expect("object exists").record.symbol_roots[0];
+            let mut val_keys = BTreeMap::new();
+            let repairer_pk = crate::crypto::pq::ml_dsa_public_key(
+                crate::crypto::scheme::SchemeId::ML_DSA_65,
+                &[0x8Fu8; 32],
+            )
+            .expect("repairer pk");
+            val_keys.insert(addr(30), repairer_pk.clone());
+            val_keys.insert(new_share.validator, repairer_pk);
+            let mut atts = Vec::new();
+            for idx in 0u8..3 {
+                let attester = addr(80 + idx);
+                let seed = [0x90 + idx; 32];
+                let pk = crate::crypto::pq::ml_dsa_public_key(
+                    crate::crypto::scheme::SchemeId::ML_DSA_65,
+                    &seed,
+                )
+                .expect("ml-dsa pk");
+                let att = super::super::repair::sign_repair_attestation(
+                    attester,
+                    &seed,
+                    &key,
+                    0,
+                    (fresh[0].esi, fresh.len() as u32),
+                    &fab_root,
+                    &orig_root,
+                )
+                .expect("sign attestation");
+                val_keys.insert(attester, pk);
+                atts.push(att);
+            }
+            let fabricated_verdict = r.record_repair_with_validators(
+                &key,
+                SegmentRepair {
+                    segment: 0,
+                    new_shares: vec![new_share],
+                    new_symbols: fabricated,
+                    new_root: fab_root,
+                    witness: &super::super::repair::RepairWitness::ValidatorAttestations(atts),
+                },
+                Some(&addr(30)),
+                &val_keys,
+                100,
+            );
+            assert_eq!(
+                fabricated_verdict,
+                Err(RegistryError::BadRepair(
+                    "validator repair attestations require a seat- or stake-weighted quorum certificate"
+                )),
+                "3-signature repair attestation over fabricated symbols must fail closed"
+            );
+        }
         assert_eq!(
             super::super::tx::apply(
                 &mut r,

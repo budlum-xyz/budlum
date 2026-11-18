@@ -6604,6 +6604,8 @@ impl Blockchain {
             self.finalized_height,
             crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id),
         );
+        self.mempool
+            .sync_duty_validators(self.active_duty_validators());
         self.emit_chain_metrics();
         self.emit_tx_processed(block.transactions.len() as u64);
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
@@ -6612,11 +6614,16 @@ impl Blockchain {
     pub fn mine_pending_transactions(&mut self, miner_address: Address) {
         self.produce_block(miner_address);
     }
-    /// The signers every admission door hands the pool's duty lane. One
-    /// authority, [`AccountState::duty_lane_signers`], so no door can install
-    /// a wider set than another.
-    fn active_duty_validators(&self) -> std::collections::BTreeSet<Address> {
-        self.state.duty_lane_signers_for_chain(self.chain_id)
+    fn active_duty_validators(&self) -> Vec<Address> {
+        self.state
+            .duty_lane_signers_for_chain(self.chain_id)
+            .into_iter()
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn duty_validator_snapshot_for_test(&self) -> std::collections::BTreeSet<Address> {
+        self.active_duty_validators().into_iter().collect()
     }
 
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
