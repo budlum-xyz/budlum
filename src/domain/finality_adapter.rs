@@ -2242,14 +2242,17 @@ pub fn block_finality_proof_hash(_block: &Block) -> [u8; 32] {
 /// claim a slot. A registered floor rather than a per-domain parameter: the
 /// domain's `pow_parameters` describe a header chain, and borrowing them here
 /// would let a registrant lower a difficulty this adapter never claimed.
+/// Convenience: exposed for external DAG-family domain producers.
 pub const DAG_FAMILY_QUALITY_BITS: u32 = 16;
 
 /// The longest PoH ladder one commitment may carry. One tick is one hash, so
 /// this is also the exact number of hashes a verifier performs: an unbounded
 /// ladder is a denial-of-service lever inside a block, not a proof.
+/// Convenience: exposed for external PoH domain producers.
 pub const DAG_FAMILY_MAX_POH_TICKS: usize = 1024;
 
 /// The largest authority set a DAG-family proof may declare.
+/// Convenience: exposed for external DAG-family domain producers.
 pub const DAG_FAMILY_MAX_AUTHORITIES: usize = 256;
 
 /// The anchor hash a DAG domain commits to.
@@ -2260,6 +2263,7 @@ pub const DAG_FAMILY_MAX_AUTHORITIES: usize = 256;
 /// cover the lie. `parent_anchor` is part of the derivation so the anchor
 /// commits to the DAG edge it extends, and the committed block hash is part of
 /// it so the anchor and the commitment cannot be presented apart.
+/// Convenience: exposed for external DAG domain producers constructing proofs.
 #[must_use]
 pub fn dag_anchor_hash(
     chain_id: u64,
@@ -2281,6 +2285,7 @@ pub fn dag_anchor_hash(
 /// The digest a DAG authority signs: the anchor-bearing header followed by the
 /// full commitment binding message, so every field a PoA authority covers is
 /// covered here as well.
+/// Convenience: exposed for external DAG domain authorities signing proofs.
 #[must_use]
 pub fn dag_commit_signing_message(
     chain_id: u64,
@@ -2302,6 +2307,7 @@ pub fn dag_commit_signing_message(
 }
 
 /// The root of a PoH ladder, bound to the commitment it orders.
+/// Convenience: exposed for external PoH domain producers constructing proofs.
 #[must_use]
 pub fn poh_ladder_root(
     chain_id: u64,
@@ -2321,12 +2327,14 @@ pub fn poh_ladder_root(
 }
 
 /// One PoH tick: the hash a verifier must reproduce to accept the ladder.
+/// Convenience: exposed for external PoH domain producers constructing proofs.
 #[must_use]
 pub fn poh_next_tick(previous: &Hash32) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_POH_TICK_V1", previous])
 }
 
 /// The digest a PoH authority signs: the ladder root plus the commitment.
+/// Convenience: exposed for external PoH domain authorities signing proofs.
 #[must_use]
 pub fn poh_commit_signing_message(
     chain_id: u64,
@@ -2349,6 +2357,7 @@ pub fn poh_commit_signing_message(
 /// a prover cannot present another prover's plot: the identifier would not
 /// match the key that has to sign the claim, and a plot built for one farm
 /// cannot be replayed at another.
+/// Convenience: exposed for external PoSpace domain producers constructing proofs.
 #[must_use]
 pub fn pospace_plot_id(prover: &crate::core::address::Address, config_hash: &Hash32) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_POSPACE_PLOT_V1", prover.as_bytes(), config_hash])
@@ -2356,6 +2365,7 @@ pub fn pospace_plot_id(prover: &crate::core::address::Address, config_hash: &Has
 
 /// The challenge a plot answers: a value the prover cannot choose, derived from
 /// the commitment being finalized.
+/// Convenience: exposed for external PoSpace domain producers constructing proofs.
 #[must_use]
 pub fn pospace_challenge(domain: &ConsensusDomain, commitment: &DomainCommitment) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[
@@ -2371,12 +2381,14 @@ pub fn pospace_challenge(domain: &ConsensusDomain, commitment: &DomainCommitment
 /// The quality a plot reaches for a challenge: the leading zero bits of this
 /// hash are the work the space buys, exactly as a PoW hash's leading zero bits
 /// are the work the computation buys.
+/// Convenience: exposed for external PoSpace domain producers constructing proofs.
 #[must_use]
 pub fn pospace_quality(plot_id: &Hash32, challenge: &Hash32) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_POSPACE_QUALITY_V1", plot_id, challenge])
 }
 
 /// The digest a PoSpace authority signs.
+/// Convenience: exposed for external PoSpace domain authorities signing proofs.
 #[must_use]
 pub fn pospace_commit_signing_message(
     chain_id: u64,
@@ -2465,6 +2477,7 @@ fn dag_family_quorum(
 
 /// DAG structural finality: a two-thirds vote on an anchor derived from the
 /// commitment and tied to the commitment's parent.
+/// Convenience: called by `DagFinalityAdapter::verify_finality` and exposed for direct verifier calls.
 ///
 /// # Errors
 ///
@@ -2529,6 +2542,7 @@ pub fn verify_dag_anchor_finality(
 
 /// PoH structural finality: a hash ladder recomputed tick by tick, plus a
 /// two-thirds vote on a root that binds the ladder to the commitment.
+/// Convenience: called by `PohFinalityAdapter::verify_finality` and exposed for direct verifier calls.
 ///
 /// # Errors
 ///
@@ -2588,6 +2602,7 @@ pub fn verify_poh_ladder_finality(
 /// PoSpace structural finality: a plot quality recomputed from a challenge
 /// nobody chose, the plot owner's signature over the commitment, and the
 /// authority quorum.
+/// Convenience: called by `PospaceFinalityAdapter::verify_finality` and exposed for direct verifier calls.
 ///
 /// # Errors
 ///
