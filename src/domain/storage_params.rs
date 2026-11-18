@@ -82,8 +82,8 @@ pub struct StorageDomainParams {
     ///
     /// The flag exists because three places used to disagree: the profiles set
     /// `[features] verify_merkle = false`, startup printed that the requested
-    /// value was "not applied", and `StorageRegistry::open_deal` demanded the
-    /// envelope regardless. A deal path that ignores the gate is not closed.
+    /// value was "not applied", and the deal-open path demanded the envelope
+    /// regardless. A deal path that ignores the gate is not closed.
     #[serde(default)]
     pub require_merkle_proof: bool,
 }
