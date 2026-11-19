@@ -241,6 +241,7 @@ struct NearExecScope<'a> {
     contract_id: &'a str,
     caller_id: &'a [u8],
     gas_limit: u64,
+    is_view: bool,
 }
 
 fn run_near_ops(
@@ -254,6 +255,21 @@ fn run_near_ops(
     for op in ops {
         if !charge_step(gas_used, scope.gas_limit, 400, host) {
             return Err(b"OUT_OF_GAS".to_vec());
+        }
+        if scope.is_view
+            && matches!(
+                op,
+                NearOp::StorageWrite { .. }
+                    | NearOp::StorageAddU64 { .. }
+                    | NearOp::SetFromArg { .. }
+                    | NearOp::EmitEvent { .. }
+                    | NearOp::UniversalPromise {
+                        is_static: false,
+                        ..
+                    }
+            )
+        {
+            return Err(b"state mutation forbidden in NEAR view method".to_vec());
         }
         match op {
             NearOp::StorageWrite { key, value } => {
@@ -322,7 +338,8 @@ fn run_near_ops(
             }
             NearOp::EmitEvent { event, data } => {
                 let topic: [u8; 32] = Sha256::digest(event.as_bytes()).into();
-                let payload = format!("EVENT_JSON:{{\"event\":\"{event}\",\"data\":\"{data}\"}}");
+                let body = serde_json::json!({ "event": event, "data": data }).to_string();
+                let payload = format!("EVENT_JSON:{body}");
                 if host
                     .emit_log(EeLog {
                         emitter: EeIdentity {
@@ -344,10 +361,11 @@ fn run_near_ops(
                 gas_limit: sub_gas,
                 is_static,
             } => {
+                let cap = (*sub_gas).min(scope.gas_limit.saturating_sub(*gas_used));
                 let call = UniversalCall {
                     from: EeIdentity {
                         ee: EeId::NEAR_WASM,
-                        id: scope.caller_id.to_vec(),
+                        id: scope.contract_id.as_bytes().to_vec(),
                     },
                     to_ee: EeId(*to_ee),
                     target: EeIdentity {
@@ -356,12 +374,21 @@ fn run_near_ops(
                     },
                     value: BudAmount(0),
                     input: input.clone(),
-                    gas_limit: *sub_gas,
-                    is_static: *is_static,
+                    gas_limit: cap,
+                    is_static: *is_static || scope.is_view,
                 };
                 match host.universal_call(call) {
-                    Ok(res) if res.success => ret = res.output,
-                    Ok(res) => return Err(res.output),
+                    Ok(res) => {
+                        if !charge_step(gas_used, scope.gas_limit, res.gas_used, host) {
+                            return Err(b"OUT_OF_GAS".to_vec());
+                        }
+                        if res.success {
+                            ret = res.output;
+                        } else {
+                            return Err(res.output);
+                        }
+                    }
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS".to_vec()),
                     Err(_) => return Err(b"universal promise failed".to_vec()),
                 }
             }
@@ -454,27 +481,33 @@ impl ExecutionEnvironment for NearWasmWorker {
                 ));
             };
             let mut h = Sha256::new();
+            h.update((call.caller.id.len() as u64).to_le_bytes());
             h.update(&call.caller.id);
             h.update(call.tx_hash);
             let derived: [u8; 32] = h.finalize().into();
             let contract_id = account_id_key(&derived);
-            if host
-                .write(&ns, &code_key(&contract_id), Some(&call.input))
-                .is_err()
-            {
+            if matches!(host.read(&ns, &code_key(&contract_id)), Ok(Some(_))) {
                 return Ok(ee_reverted(
-                    b"failed to store NEAR contract".to_vec(),
+                    b"NEAR contract already deployed".to_vec(),
                     gas_used,
                 ));
             }
-            // The deployer is the owner. The init ops run as the deployer, so a
-            // `RequireOwner` in them passes.
-            if host
-                .write(&ns, &owner_key(&contract_id), Some(&call.caller.id))
-                .is_err()
-            {
+            let Ok(cp) = host.checkpoint_begin() else {
                 return Ok(ee_reverted(
-                    b"failed to record the NEAR contract owner".to_vec(),
+                    b"NEAR checkpoint begin failed".to_vec(),
+                    gas_used,
+                ));
+            };
+            if host
+                .write(&ns, &code_key(&contract_id), Some(&call.input))
+                .is_err()
+                || host
+                    .write(&ns, &owner_key(&contract_id), Some(&call.caller.id))
+                    .is_err()
+            {
+                let _ = host.checkpoint_rollback(cp);
+                return Ok(ee_reverted(
+                    b"failed to store NEAR contract".to_vec(),
                     gas_used,
                 ));
             }
@@ -485,12 +518,26 @@ impl ExecutionEnvironment for NearWasmWorker {
                     contract_id: &contract_id,
                     caller_id: &call.caller.id,
                     gas_limit: call.gas_limit,
+                    is_view: false,
                 };
                 match run_near_ops(&scope, &prog.init_ops, &empty_args, &mut gas_used, host) {
-                    Ok(_) => return Ok(ee_success(contract_id.into_bytes(), gas_used)),
-                    Err(e) if e == b"OUT_OF_GAS" => return Ok(ee_out_of_gas(call.gas_limit)),
-                    Err(e) => return Ok(ee_reverted(e, gas_used)),
+                    Ok(_) => {}
+                    Err(e) if e == b"OUT_OF_GAS" => {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(ee_out_of_gas(call.gas_limit));
+                    }
+                    Err(e) => {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(ee_reverted(e, gas_used));
+                    }
                 }
+            }
+            if host.checkpoint_commit(cp).is_err() {
+                let _ = host.checkpoint_rollback(cp);
+                return Ok(ee_reverted(
+                    b"NEAR checkpoint commit failed".to_vec(),
+                    gas_used,
+                ));
             }
             return Ok(ee_success(contract_id.into_bytes(), gas_used));
         }
@@ -522,16 +569,38 @@ impl ExecutionEnvironment for NearWasmWorker {
         let Some(method) = prog.methods.iter().find(|m| m.name == fc.method_name) else {
             return Ok(ee_reverted(b"NEAR method not found".to_vec(), gas_used));
         };
+        let Ok(cp) = host.checkpoint_begin() else {
+            return Ok(ee_reverted(
+                b"NEAR checkpoint begin failed".to_vec(),
+                gas_used,
+            ));
+        };
         let scope = NearExecScope {
             ns: &ns,
             contract_id: &contract_id,
             caller_id: &call.caller.id,
             gas_limit: call.gas_limit,
+            is_view: method.is_view,
         };
         match run_near_ops(&scope, &method.ops, &fc.args, &mut gas_used, host) {
-            Ok(out) => Ok(ee_success(out, gas_used)),
-            Err(e) if e == b"OUT_OF_GAS" => Ok(ee_out_of_gas(call.gas_limit)),
-            Err(e) => Ok(ee_reverted(e, gas_used)),
+            Ok(out) => {
+                if host.checkpoint_commit(cp).is_err() {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok(ee_reverted(
+                        b"NEAR checkpoint commit failed".to_vec(),
+                        gas_used,
+                    ));
+                }
+                Ok(ee_success(out, gas_used))
+            }
+            Err(e) if e == b"OUT_OF_GAS" => {
+                let _ = host.checkpoint_rollback(cp);
+                Ok(ee_out_of_gas(call.gas_limit))
+            }
+            Err(e) => {
+                let _ = host.checkpoint_rollback(cp);
+                Ok(ee_reverted(e, gas_used))
+            }
         }
     }
 

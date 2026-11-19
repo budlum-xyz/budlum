@@ -13,6 +13,8 @@ contract AppBindingExecutor is BudlumOutboundEmitter {
     uint64 private constant EVM_ADDRESS_BYTE_LEN = 20;
     uint256 private constant FULFILLED_PAYLOAD_FIELDS = 9;
     uint256 private constant POST_CALL_GAS_RESERVE = 8_000;
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
 
     struct IntentAuthorization {
         address solver;
@@ -29,6 +31,7 @@ contract AppBindingExecutor is BudlumOutboundEmitter {
     address public immutable authority;
     mapping(bytes32 => IntentAuthorization) public intentAuthorization;
     mapping(bytes32 => bool) public fulfilled;
+    uint256 private _reentrancyLock;
 
     event BudlumAppBindingFulfilled(
         bytes32 indexed intentId,
@@ -58,9 +61,20 @@ contract AppBindingExecutor is BudlumOutboundEmitter {
     error NotAuthority(address caller);
     error NotAwardedSolver(bytes32 intentId, address caller);
     error ValueTooLarge(uint256 value);
+    error ReentrantCall();
 
     constructor() {
         authority = msg.sender;
+        _reentrancyLock = _NOT_ENTERED;
+    }
+
+    modifier nonReentrant() {
+        if (_reentrancyLock == _ENTERED) {
+            revert ReentrantCall();
+        }
+        _reentrancyLock = _ENTERED;
+        _;
+        _reentrancyLock = _NOT_ENTERED;
     }
 
     /// Mirror one finalized Budlum award into a one-use, exact call permit.
@@ -78,7 +92,10 @@ contract AppBindingExecutor is BudlumOutboundEmitter {
         if (msg.sender != authority) {
             revert NotAuthority(msg.sender);
         }
-        if (intentId == bytes32(0) || solver == address(0) || budlumSolver == bytes32(0) || target == address(0)) {
+        if (
+            intentId == bytes32(0) || solver == address(0) || budlumSolver == bytes32(0) || target == address(0)
+                || target == address(this)
+        ) {
             revert InvalidAuthorization();
         }
         if (intentAuthorization[intentId].solver != address(0) || fulfilled[intentId]) {
@@ -98,6 +115,7 @@ contract AppBindingExecutor is BudlumOutboundEmitter {
     function execute(bytes32 intentId, address target, bytes calldata data, bytes calldata beneficiary)
         external
         payable
+        nonReentrant
         returns (bytes memory result)
     {
         IntentAuthorization memory authorization = intentAuthorization[intentId];
@@ -186,6 +204,8 @@ abstract contract BudlumAppBindingClaimer is BudlumOutboundEmitter {
 
     event BudlumAppBindingClaim(bytes32 indexed appBindingId, bytes32 payout);
 
+    error InvalidPayout();
+
     function budlumAppBindingId(uint32 domainKey) public view returns (bytes32) {
         bytes memory origin = bytes.concat(bytes20(address(this)));
         bytes[] memory fields = new bytes[](APP_BINDING_APP_FIELDS);
@@ -205,6 +225,9 @@ abstract contract BudlumAppBindingClaimer is BudlumOutboundEmitter {
     }
 
     function _claimBudlumPayout(uint32 domainKey, bytes32 payout) internal {
+        if (payout == bytes32(0)) {
+            revert InvalidPayout();
+        }
         bytes32 appBindingId = budlumAppBindingId(domainKey);
         emit BudlumAppBindingClaim(appBindingId, payout);
         _emitOutbound(CLAIM_KIND, payout, appBindingId, claimPayloadHash(appBindingId, payout));
