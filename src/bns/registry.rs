@@ -170,7 +170,7 @@ impl Default for BnsRegistry {
 }
 
 impl BnsRegistry {
-    /// F14: the renewal window, in epochs, that the previous owner keeps after
+    /// The renewal grace window, in epochs, that the previous owner keeps after
     /// a name expires. During that window no third party can register the name,
     /// which protects against squatting and front-running. It is roughly a
     /// 30-day window, at about 100 epochs per day.

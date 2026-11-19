@@ -1047,11 +1047,7 @@ mod tests {
     }
 
     fn public_of(seed_byte: u8) -> [u8; ED25519_PUBLIC_KEY_LEN] {
-        let key: [u8; ED25519_PUBLIC_KEY_LEN] = keypair(seed_byte)
-            .public_key_bytes()
-            .try_into()
-            .expect("32-byte ed25519 key");
-        key
+        keypair(seed_byte).public_key_bytes()
     }
 
     /// Six signers holding equal stake: no single one is anywhere near the
@@ -1331,8 +1327,7 @@ mod tests {
     fn a_block_from_an_unregistered_producer_is_refused() {
         let base = decoded(&golden_evidence());
         let stranger = keypair(77);
-        let stranger_key: [u8; ED25519_PUBLIC_KEY_LEN] =
-            stranger.public_key_bytes().try_into().expect("32 bytes");
+        let stranger_key: [u8; ED25519_PUBLIC_KEY_LEN] = stranger.public_key_bytes();
         let evidence = with_payload(&base, |copy| {
             copy.slot_proof.producer = stranger_key;
             let message = praos_vote_message(

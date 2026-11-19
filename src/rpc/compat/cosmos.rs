@@ -13,7 +13,7 @@ use crate::rpc::compat::{
 };
 
 const DEFAULT_COSMOS_MAX_REQUESTS_PER_WINDOW: u32 = 120;
-/// Maximum hex payload length for `abci_query` data field (Strix B-0062).
+/// Maximum hex payload length for `abci_query` data field.
 /// 64 KB covers any realistic CosmWasm query; larger payloads are a
 /// DoS vector that must be refused before hex decoding.
 const MAX_HEX_PAYLOAD_CHARS: usize = 64 * 1024;

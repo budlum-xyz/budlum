@@ -280,7 +280,7 @@ mod tests {
             .prepare_block(&mut block, &bc.state)
             .expect("prepare Merkle-proven PoSpace block");
 
-        // B-0046: without a registered plugin the gate MUST fail closed.
+        // without a registered plugin the gate MUST fail closed.
         assert!(bc
             .validate_and_extract_domain_block(domain_id, &block, &[], 1)
             .is_err());

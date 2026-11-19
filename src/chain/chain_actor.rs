@@ -2224,7 +2224,7 @@ impl ChainHandle {
     }
 
     /// Fail-closed consensus-plugin block validation and commitment extraction
-    /// through `Blockchain::validate_and_extract_domain_block` (`B-0046`).
+    /// through `Blockchain::validate_and_extract_domain_block`.
     ///
     /// # Errors
     ///

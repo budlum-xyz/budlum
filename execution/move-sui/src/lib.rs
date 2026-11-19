@@ -927,7 +927,7 @@ mod tests {
         assert_eq!(out.output, b"MOVE_SUI_CLOSED_ON_TESTNET");
     }
 
-    /// Directive IP-50 conformance suite: `uel_conformance_move_sui`
+    /// Sui Move conformance suite: `uel_conformance_move_sui`
     /// (`0x2::coin` split/merge, `0x2::transfer` owned & shared objects, Lamport versions).
     #[test]
     fn uel_conformance_move_sui() {
@@ -1196,7 +1196,7 @@ mod tests {
         object.contents
     }
 
-    /// Directive IP-50 gate: `sui_cli_publish_runs_unchanged`. A package creates its own
+    /// Sui Move publish gate: `sui_cli_publish_runs_unchanged`. A package creates its own
     /// object, shares it and increments it: the object's type is the package's, so the
     /// write is the package's to make.
     #[test]

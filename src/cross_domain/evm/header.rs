@@ -1,7 +1,7 @@
 //! WIRING: unwired - `verify_chain` is reached in this tree only through adapter.rs and evm/verify.rs, both of which declare themselves unwired; the relayer path wires it.
 //! Minimal Ethereum block header decode + chain-link + N-confirmation finality.
 //!
-//! Sync-committee light-client finality = **F10.3** (`PoS`, BLS12-381 sync-aggregate).
+//! Sync-committee light-client finality (`PoS`, BLS12-381 sync-aggregate).
 //! This module provides **bounded k-confirmation** (RFC Q2 = both -> N-conf
 //! fallback; the `PoS` sync committee is added later as an option).
 //!

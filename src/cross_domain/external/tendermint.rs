@@ -807,7 +807,7 @@ pub fn verify_rfc6962_inclusion(
     ))
 }
 
-/// Maximum single-step height jump permitted from a trusted anchor (`B-0063`).
+/// Maximum single-step height jump permitted from a trusted anchor.
 ///
 /// Spans above `MAX_HEIGHT_DRIFT` require multi-step ICS-07 bisection.
 /// WIRING: enforced by [`verify_skipping_commit`], [`TendermintFinalityAdapter`],
@@ -827,7 +827,7 @@ const MAX_STORED_CONSENSUS_STATES: usize = 256;
 /// Forward is unbounded at the raw anchor floor (while ICS-07 light-client and
 /// era-pinned transitions additionally enforce strict forward drift bounds via
 /// `height_within_forward_drift`); backward is bounded by [`MAX_HEIGHT_DRIFT`].
-/// WIRING: `B-0063` pinned-era guard consumed by [`TendermintFinalityAdapter::verify`] and intake callers.
+/// WIRING: pinned-era drift guard consumed by [`TendermintFinalityAdapter::verify`] and intake callers.
 #[must_use]
 pub const fn height_within_pinned_era(pinned_height: u64, height: u64) -> bool {
     height.saturating_add(MAX_HEIGHT_DRIFT) >= pinned_height
@@ -877,7 +877,7 @@ pub struct TendermintLightParams {
     pub unbonding_period_secs: u64,
     /// Maximum seconds a header's BFT time may lead the verifier's clock.
     pub max_clock_drift_secs: u64,
-    /// Maximum single-step height leap before bisection is mandatory (`B-0063`).
+    /// Maximum single-step height leap before bisection is mandatory.
     pub max_height_drift: u64,
 }
 
@@ -927,7 +927,7 @@ impl TendermintLightParams {
     }
 }
 
-/// Pinned-era trust anchor on [`TendermintFinalityAdapter`] closing `B-0063`.
+/// Pinned-era trust anchor on [`TendermintFinalityAdapter`].
 ///
 /// Prevents a retired committee whose unbonding window elapsed long ago from
 /// finalizing arbitrary future heights under a static validator-set pin.
@@ -1244,7 +1244,7 @@ fn verify_skipping_commit_bounded(
 }
 
 /// Verify a `CometBFT`/IBC light-client transition from `trusted` to `target`
-/// under the Amintoosi-Buchman-Kwon skipping theorem and `B-0063` drift bounds.
+/// under the Amintoosi-Buchman-Kwon skipping theorem and bounded single-step height drift.
 ///
 /// Enforces full 14-leaf `Header.Hash() == block_hash`, `validators_hash`
 /// agreement, strict adjacent `next_validators_hash` equality, `> 1/3` trusted
@@ -1979,7 +1979,7 @@ impl TendermintFinalityAdapter {
         adapter
     }
 
-    /// Attach a `B-0063` pinned-era height and ICS-07 trusting-period anchor so
+    /// Attach a pinned-era height and ICS-07 trusting-period anchor so
     /// retired committees past `trusting_period` or `max_height_drift` fail closed.
     ///
     /// Convenience: kept for the CLI and era-bounded `CometBFT` domain builders.
@@ -4264,10 +4264,10 @@ mod tests {
     }
 
     #[test]
-    fn strix_skipping_commit_refuses_sybil_validator_injection_against_signed_header() {
+    fn skipping_commit_refuses_sybil_validator_injection_against_signed_header() {
         use crate::crypto::primitives::KeyPair;
 
-        let chain_id = "cosmoshub-strix-1";
+        let chain_id = "cosmoshub-sybil-probe-1";
         let honest: Vec<KeyPair> = (1u8..=4)
             .map(|s| KeyPair::from_seed(&[s; 32]).expect("key"))
             .collect();
@@ -4448,7 +4448,7 @@ mod tests {
             [0x21; 32]
         );
 
-        // B-0063: TendermintFinalityAdapter::with_trusted_era refuses height leaps past max_height_drift.
+        // TendermintFinalityAdapter::with_trusted_era refuses height leaps past max_height_drift.
         let set_100_hash = validator_set_hash(&initial.validators);
         let far_commit = build_signed_tm_commit(
             chain_id,
@@ -4484,7 +4484,7 @@ mod tests {
         };
         let leap_err = era_adapter
             .verify(&raw_ev, &pol)
-            .expect_err("B-0063 height leap past MAX_HEIGHT_DRIFT must fail closed");
+            .expect_err("height leap past MAX_HEIGHT_DRIFT must fail closed");
         assert!(matches!(
             leap_err,
             AdapterError::ConsensusRule { ref rule } if rule.contains("pinned era")

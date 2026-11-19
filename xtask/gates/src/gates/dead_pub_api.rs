@@ -35,7 +35,7 @@
 //! in the diff, and that this gate's job is to keep the list in front of a human
 //! rather than to certify the list.
 //!
-//! Three further limits, stated explicitly rather than hidden (`B-0047`): a
+//! Three further limits, stated explicitly rather than hidden: a
 //! name taken as a value (`let hook = registry::seed;`) is not a call and reads
 //! as dead; a function reached only from another member's `src/` reads as live
 //! because the corpus is cross-directory; and token matching is not

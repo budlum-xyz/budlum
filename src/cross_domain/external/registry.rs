@@ -1115,7 +1115,7 @@ pub fn no_backing() -> SecurityBacking {
 #[cfg(test)]
 mod tests {
     // The R3 registry had no direct tests at all - the
-    // defects of F03, F05 and F11 would have been found by any of these.
+    // prior header, quorum and encoding defects are all caught by these probes.
     use super::*;
     use crate::cross_domain::external::selftest::{admit, FaultProbe};
     use crate::cross_domain::external::spec::{

@@ -36,7 +36,7 @@ See `docs/STORAGE.md` for the current B.U.D. 3.0 construction status.
 2. **No permission/consent layer:** manifest and deal information is fully public;
    the `AccessGrant` concept will be designed in the permission layer
    (aimed at hard enforcement; the sovereignty rule rules out soft enforcement).
-3. **`ContentManifest` carries an owner, but it is not mandatory.** F01 added the `owner`
+3. **`ContentManifest` carries an owner, but it is not mandatory.** Manifest v2 added the `owner`
    field and the `manifest_id` computation covers the owner (fields:
    `manifest_id/owner/total_size/shard_count/shards`). However `from_shards()`
    initialises the owner with the zero address and the real owner is set separately with

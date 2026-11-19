@@ -1111,7 +1111,7 @@ mod tests {
     }
 
     #[test]
-    fn strix_hotstuff_verifies_pacemaker_timeout_certificate_and_double_vote_equivocation() {
+    fn hotstuff_verifies_pacemaker_timeout_certificate_and_double_vote_equivocation() {
         let keys: Vec<(KeyPair, PqKeyPair)> = (0..4)
             .map(|_| (KeyPair::generate().unwrap(), PqKeyPair::generate()))
             .collect();

@@ -872,7 +872,7 @@ mod tests {
         assert_eq!(out.output, b"CAIRO_CLOSED_ON_TESTNET");
     }
 
-    /// Directive IP-51 gates: `uel_conformance_cairo` and
+    /// Cairo conformance gates: `uel_conformance_cairo` and
     /// `starknet_foundry_declare_and_deploy_unchanged`.
     #[test]
     fn uel_conformance_cairo() {

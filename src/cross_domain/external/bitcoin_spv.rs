@@ -2250,7 +2250,7 @@ mod tests {
     }
 
     #[test]
-    fn strix_retarget_boundary_refuses_unverified_constant_bits_without_epoch_start() {
+    fn retarget_boundary_refuses_unverified_constant_bits_without_epoch_start() {
         // Anchor at height 2015 without epoch_start_timestamp: header #1 is
         // block 2016 (a mandatory Bitcoin difficulty retarget boundary) and
         // MUST fail closed rather than accepting unverified constant nBits.
@@ -2295,7 +2295,7 @@ mod tests {
     }
 
     #[test]
-    fn strix_intermediate_future_header_timestamp_warp_is_refused() {
+    fn intermediate_future_header_timestamp_warp_is_refused() {
         // Inject 5 year-2106 (u32::MAX) intermediate headers capped by a normal
         // tip above MTP-11: per-header +2h enforcement MUST refuse header #1.
         let bits = REGTEST_POW_LIMIT_BITS;

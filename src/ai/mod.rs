@@ -19,7 +19,7 @@ pub use execution::{
 };
 pub use registry::AiRegistry;
 
-/// Testnet keeps proof-required AI models closed until BLG-059 through BLG-062
+/// Testnet keeps proof-required AI models closed until all AI proof-verifier soundness checks
 /// are resolved and the VL-1 opening gate is independently verified.
 pub const FULL_AI_STARK_VERIFICATION_LIVE: bool = false;
 
@@ -2122,7 +2122,7 @@ mod tests {
         assert!(result.unwrap_err().contains("different"));
     }
 
-    // ===================== F06 Edge-Case Test Matrisi =====================
+    // ===================== Edge-Case Test Matrix =====================
 
     /// Helper: create a standard test registry with one active model.
     fn setup_ai_registry(

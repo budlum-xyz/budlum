@@ -1,4 +1,4 @@
-//! KR-17 ProofCarryingLiquidation: oracle-free AMM/TWAP state-root-proven
+//! ProofCarryingLiquidation: oracle-free AMM/TWAP state-root-proven
 //! cross-domain liquidation engine.
 //!
 //! This module implements a liquidation mechanism that does not depend on

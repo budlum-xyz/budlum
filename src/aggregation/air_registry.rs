@@ -150,7 +150,7 @@ fn validate_opened_slice(slice: &[[u64; 3]]) -> Result<(), AirVerifyError> {
 /// an on-chain [`VerifyStarkTx`] without allocating beyond the payload size.
 ///
 /// Enforced both by every [`AirAlgebraEvaluator`] and directly by
-/// `Executor::apply_transaction_checked` as defense in depth (`STRIX-AGG-02`).
+/// `Executor::apply_transaction_checked` as defense in depth.
 ///
 /// # Errors
 ///

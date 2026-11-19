@@ -182,7 +182,7 @@ pub struct Account {
     /// the value while expecting the tag byte. An account persisted through
     /// `Storage::commit_durable_batch` was written 8 bytes and read back as
     /// `unexpected end of file`, which took `test_durable_commit_batch_and_recovery`
-    /// down with it. See B-0048.
+    /// down with it.
     #[serde(default)]
     pub auth_program_hash: Option<[u8; 32]>,
 }
@@ -913,7 +913,7 @@ pub struct AccountState {
     /// Governance-controlled consensus-domain tip rollbacks awaiting deterministic
     /// application inside `apply_block_effects` before `calculate_state_root`.
     pub pending_domain_tip_resets: Vec<PendingDomainTipReset>,
-    /// (F09): the PoA compliance ledger (screening,
+    /// The PoA compliance ledger (screening,
     /// freeze, travel-rule) in consensus state - rooted and snapshotted
     /// with everything else that decides writes.
     pub poa_compliance: crate::registry::PoaComplianceRegistry,
@@ -7863,7 +7863,7 @@ mod tests {
         );
     }
 
-    /// (F09): the PoA gate state is ROOTED - an
+    /// The PoA gate state is ROOTED - an
     /// admission write or a compliance freeze moves the state root, so a
     /// node that skipped them diverges instead of agreeing silently.
     #[test]

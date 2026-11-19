@@ -311,7 +311,7 @@ impl ZkVmExecutor {
         })
     }
 
-    /// Generates and checks a universal `BudZero` predicate STARK proof (`BLG-242`).
+    /// Generates and checks a universal `BudZero` predicate STARK proof.
     ///
     /// exposed for: `ZkVm` universal predicate adapters and contract verification callers.
     ///

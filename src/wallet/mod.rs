@@ -32,7 +32,7 @@ mod bip39_wordlist;
 pub const MNEMONIC_WORDS: usize = 24;
 /// PBKDF2 iterations for a new key file (OWASP 2023 figure for SHA-256).
 pub const DEFAULT_KDF_ITERATIONS: u32 = 600_000;
-/// Maximum PBKDF2 iteration count. Strix B-0065: values above this are a
+/// Maximum PBKDF2 iteration count. Values above this are a
 /// DoS vector (tens of seconds per open on constrained hardware).
 /// WIRING: enforced in `KeyFile::open` and exposed for CLI wallet callers.
 pub const MAX_KDF_ITERATIONS: u32 = 10_000_000;
@@ -432,7 +432,7 @@ impl KeyFile {
                 self.version, self.kdf, self.cipher
             )));
         }
-        // Strix B-0065: PBKDF2 iteration floor and ceiling.
+        // PBKDF2 iteration floor and ceiling.
         if self.iterations == 0 || self.iterations > MAX_KDF_ITERATIONS {
             return Err(WalletError::Format(format!(
                 "PBKDF2 iterations {} outside 1..={MAX_KDF_ITERATIONS}",
@@ -445,7 +445,7 @@ impl KeyFile {
         let salt = decode("salt", &self.salt)?;
         let nonce = decode("nonce", &self.nonce)?;
         let ciphertext = decode("ciphertext", &self.ciphertext)?;
-        // Strix B-0065: exact envelope length validation.
+        // exact envelope length validation.
         if salt.len() != SALT_LEN {
             return Err(WalletError::Format(format!(
                 "salt length {} != expected {SALT_LEN}",
