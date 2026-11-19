@@ -129,18 +129,22 @@ fn sayim(body: &str, list: &[(usize, String)], arms: usize) -> (usize, Vec<Strin
     (ok, problems)
 }
 
+fn missing_bud_format(root: &Path, f: &Path) -> Result<String, String> {
+    if !root.join("bud").exists() {
+        return Ok(String::from(
+            "multi-ratio-consensus OK: standalone bud/ legacy ratio tree removed; B.U.D. 3.0 codecs are deterministic.",
+        ));
+    }
+    Err(format!("no bud_format.rs at {}", f.display()))
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
 pub fn run(root: &Path) -> Result<String, String> {
     let f = root.join("bud/src/bud_format.rs");
     if !f.is_file() {
-        if !root.join("bud").exists() {
-            return Ok(String::from(
-                "multi-ratio-consensus OK: standalone bud/ legacy ratio tree removed; B.U.D. 3.0 codecs are deterministic.",
-            ));
-        }
-        return Err(format!("no bud_format.rs at {}", f.display()));
+        return missing_bud_format(root, &f);
     }
     let src = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
     // `candidates_for_format` only measures the ratios; the list itself is
