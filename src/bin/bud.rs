@@ -471,6 +471,20 @@ enum DomainAction {
         /// Chain id the proof must commit to.
         #[arg(long)]
         chain_id: Option<u64>,
+        /// The Tendermint chain id the commit must be from (`--adapter
+        /// tendermint`). Required for that family: the chain id is inside
+        /// every sign byte, so an unpinned adapter would verify any chain.
+        #[arg(long = "tm-chain-id")]
+        tm_chain_id: Option<String>,
+        /// The pinned `ValidatorSet.Hash()` of the commit's validator set, as
+        /// hex (32 bytes). Required for `--adapter tendermint`: the set the
+        /// evidence carries is not a pin, so a self-test run without this
+        /// flag would report "admitted" for a commit signed by any freshly
+        /// minted key set - which is the exact claim the registration gate
+        /// refuses. Take the value from the chain itself (it is the header's
+        /// `validators_hash`, printed by every explorer).
+        #[arg(long = "tm-pin-set-hash")]
+        tm_pin_set_hash: Option<String>,
         /// The target's current time for the verification policy.
         #[arg(long, default_value_t = 0)]
         now: u64,
@@ -2150,16 +2164,24 @@ fn run_domain_register_poa(
 /// `bud domain selftest`: the admission harness
 /// (`cross_domain::external::admit`) run locally, so an adapter author sees
 /// the report before bonding anything.
+///
+/// One flag per adapter pin: the command's options are the function's
+/// arguments, and grouping them would make the option parsing read worse
+/// than the arity lint does.
+#[allow(clippy::too_many_arguments)]
 fn run_domain_selftest(
     adapter: &str,
     network: &str,
     golden: &std::path::Path,
     program_hash: Option<&str>,
     chain_id: Option<u64>,
+    tm_chain_id: Option<&str>,
+    tm_pin_set_hash: Option<&str>,
     now: u64,
 ) -> Result<(), String> {
     use budlum_core::cross_domain::external::{
-        admit, RawConsensusEvidence, VerificationPolicy, ZkVmFinalityAdapter,
+        admit, RawConsensusEvidence, TendermintFinalityAdapter, VerificationPolicy,
+        ZkVmFinalityAdapter,
     };
     let text = std::fs::read_to_string(golden)
         .map_err(|e| format!("cannot read {}: {e}", golden.display()))?;
@@ -2181,7 +2203,34 @@ fn run_domain_selftest(
                 ZkVmFinalityAdapter::new(network, program_hash, chain_id).with_golden(sample);
             admit(&adapter, &VerificationPolicy::proven(now))
         }
-        other => return Err(format!("unknown adapter family: {other} (known: zkvm)")),
+        "tendermint" => {
+            // The chain id is a pin, so it is a required argument rather than
+            // something read out of the sample being tested: a pin the sample
+            // supplies is not a pin.
+            let chain_id = tm_chain_id.ok_or_else(|| {
+                "the tendermint family needs --tm-chain-id (e.g. noble-1)".to_string()
+            })?;
+            // The unpinned constructor verifies whatever set the evidence
+            // carries, which is the F-T1 hole: the admission report would say
+            // "admitted" for five keys an attacker just minted. The self-test
+            // is the gate an operator reads before registering, so it runs the
+            // pinned adapter and asks for the pin explicitly.
+            let pin = tm_pin_set_hash.ok_or_else(|| {
+                "the tendermint family needs --tm-pin-set-hash (the chain's own ValidatorSet.Hash())"
+                    .to_string()
+            })?;
+            let pin_bytes = hex_bytes(pin, "--tm-pin-set-hash")?;
+            let pin = <[u8; 32]>::try_from(pin_bytes.as_slice())
+                .map_err(|_| "--tm-pin-set-hash must be 32 bytes".to_string())?;
+            let adapter = TendermintFinalityAdapter::new_pinned(network, chain_id, Some(pin))
+                .with_golden(sample);
+            admit(&adapter, &VerificationPolicy::strict(now))
+        }
+        other => {
+            return Err(format!(
+                "unknown adapter family: {other} (known: zkvm, tendermint)"
+            ))
+        }
     };
     println!(
         "{}",
@@ -4077,6 +4126,8 @@ fn main() {
                 golden,
                 program_hash,
                 chain_id,
+                tm_chain_id,
+                tm_pin_set_hash,
                 now,
             } => run_domain_selftest(
                 adapter,
@@ -4084,6 +4135,8 @@ fn main() {
                 golden,
                 program_hash.as_deref(),
                 *chain_id,
+                tm_chain_id.as_deref(),
+                tm_pin_set_hash.as_deref(),
                 *now,
             ),
         },

@@ -171,6 +171,20 @@ pub struct Account {
     /// Sub-atom balance in attoBUD (`0 <= frac_attos < 10^12`).
     #[serde(default)]
     pub frac_attos: u64,
+    /// Optional `BudZKVM` authorization program hash (Phase 4 program accounts).
+    ///
+    /// When set, transactions from this account authorize via
+    /// `Claim::Prog { program_hash, input_hash: tx.signing_hash(), output_hash: AUTH_OK }`
+    /// rather than an inline signature.
+    /// Serialized unconditionally. `skip_serializing_if` is load bearing here
+    /// in the wrong direction: `bincode` is not self describing, so omitting a
+    /// `None` field shortens the record and the decoder then hits the end of
+    /// the value while expecting the tag byte. An account persisted through
+    /// `Storage::commit_durable_batch` was written 8 bytes and read back as
+    /// `unexpected end of file`, which took `test_durable_commit_batch_and_recovery`
+    /// down with it. See B-0048.
+    #[serde(default)]
+    pub auth_program_hash: Option<[u8; 32]>,
 }
 
 /// One leaf of the consensus accounts tree, with its Merkle path to the root.
@@ -180,6 +194,7 @@ pub struct ConsensusTreeLeaf {
     pub balance: u64,
     pub nonce: u64,
     pub frac_attos: u64,
+    pub auth_program_hash: Option<[u8; 32]>,
     pub leaf_hash: [u8; 32],
     /// Sibling hashes from leaf toward root.
     pub siblings: Vec<[u8; 32]>,
@@ -202,6 +217,7 @@ pub struct ConsensusAccountProof {
     pub balance: u64,
     pub nonce: u64,
     pub frac_attos: u64,
+    pub auth_program_hash: Option<[u8; 32]>,
     pub leaf_hash: [u8; 32],
     /// Sibling hashes from leaf toward root (present case).
     pub siblings: Vec<[u8; 32]>,
@@ -214,14 +230,16 @@ pub struct ConsensusAccountProof {
 }
 
 /// The consensus accounts leaf hash: `SHA-256(0x00 || pubkey || balance ||
-/// nonce || frac_attos?)`, with `frac_attos` folded in only when non-zero.
-/// This is the exact preimage the state root tree is built from.
+/// nonce || frac_attos? || (TAG_ACCOUNT_AUTH_PROGRAM || auth_program_hash)?)`,
+/// shared with `AccountState::hash_account_leaf` for both key and program
+/// accounts while keeping pre-existing hashes unchanged when `None`.
 #[must_use]
 pub fn consensus_account_leaf(
     address: &Address,
     balance: u64,
     nonce: u64,
     frac_attos: u64,
+    auth_program_hash: Option<[u8; 32]>,
 ) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -231,6 +249,10 @@ pub fn consensus_account_leaf(
     h.update(nonce.to_le_bytes());
     if frac_attos != 0 {
         h.update(frac_attos.to_le_bytes());
+    }
+    if let Some(program_hash) = auth_program_hash {
+        h.update(TAG_ACCOUNT_AUTH_PROGRAM);
+        h.update(program_hash);
     }
     h.finalize().into()
 }
@@ -295,7 +317,13 @@ impl ConsensusTreeLeaf {
     #[must_use]
     pub fn verifies_against(&self, root: &[u8; 32]) -> bool {
         self.leaf_hash
-            == consensus_account_leaf(&self.address, self.balance, self.nonce, self.frac_attos)
+            == consensus_account_leaf(
+                &self.address,
+                self.balance,
+                self.nonce,
+                self.frac_attos,
+                self.auth_program_hash,
+            )
             && consensus_path_verifies(&self.leaf_hash, &self.siblings, &self.directions, root)
     }
 }
@@ -313,7 +341,13 @@ impl ConsensusAccountProof {
                 return false;
             }
             self.leaf_hash
-                == consensus_account_leaf(&self.address, self.balance, self.nonce, self.frac_attos)
+                == consensus_account_leaf(
+                    &self.address,
+                    self.balance,
+                    self.nonce,
+                    self.frac_attos,
+                    self.auth_program_hash,
+                )
                 && consensus_path_verifies(
                     &self.leaf_hash,
                     &self.siblings,
@@ -321,7 +355,11 @@ impl ConsensusAccountProof {
                     &self.root,
                 )
         } else {
-            if self.balance != 0 || self.nonce != 0 || self.frac_attos != 0 {
+            if self.balance != 0
+                || self.nonce != 0
+                || self.frac_attos != 0
+                || self.auth_program_hash.is_some()
+            {
                 return false;
             }
             if self.root == [0u8; 32] {
@@ -409,21 +447,47 @@ impl StateRootSink<'_> {
 /// once, and a fixed marker keeps the root identical across nodes.
 const STATE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/account-state";
 
+/// Domain separator mixed into an account's Merkle leaf only when
+/// `Account.auth_program_hash` is set, preserving existing leaf hashes for
+/// accounts without a program hook.
+const TAG_ACCOUNT_AUTH_PROGRAM: &[u8] = b"BDLM_AUTH_PROG_V1";
+
 impl Account {
-    pub fn new(public_key: Address) -> Self {
-        Account {
+    #[must_use]
+    pub const fn new(public_key: Address) -> Self {
+        Self {
             public_key,
             balance: 0,
             nonce: 0,
             frac_attos: 0,
+            auth_program_hash: None,
         }
     }
-    pub fn with_balance(public_key: Address, balance: u64) -> Self {
-        Account {
+    #[must_use]
+    pub const fn with_balance(public_key: Address, balance: u64) -> Self {
+        Self {
             public_key,
             balance,
             nonce: 0,
             frac_attos: 0,
+            auth_program_hash: None,
+        }
+    }
+
+    /// Creates a program-authorized account (Phase 4) with `balance` and
+    /// `auth_program_hash`.
+    #[must_use]
+    pub const fn with_auth_program(
+        public_key: Address,
+        balance: u64,
+        auth_program_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            public_key,
+            balance,
+            nonce: 0,
+            frac_attos: 0,
+            auth_program_hash: Some(auth_program_hash),
         }
     }
 
@@ -2095,9 +2159,12 @@ impl AccountState {
         Ok(withdrawn)
     }
 
-    /// Active bond floor for a Full-seat validator on `chain_id`: the higher
-    /// of the governance-adjustable registry `min_stake` and the network's
-    /// compile-time `min_stake_full()`.
+    /// The effective Full-validator bond floor for `chain_id`.
+    ///
+    /// The permissionless registry parameter is a governance lower bound. A
+    /// network profile may require a larger bond, so every eligibility path
+    /// uses the maximum of both values. Keeping the calculation here prevents
+    /// stake, resume, and duty-lane admission from drifting apart.
     #[must_use]
     pub(crate) fn full_validator_stake_floor(&self, chain_id: u64) -> u64 {
         let registry_floor = self.registry.params().min_stake.max(1);
@@ -2121,6 +2188,13 @@ impl AccountState {
             .max(1)
     }
 
+    /// The accounts whose duty batches the pool's free lane admits on the
+    /// default chain.
+    #[must_use]
+    pub fn duty_lane_signers(&self) -> std::collections::BTreeSet<Address> {
+        self.duty_lane_signers_for_chain(crate::core::transaction::DEFAULT_CHAIN_ID)
+    }
+
     /// Accounts eligible for the mempool's zero-fee validator duty lane on `chain_id`.
     ///
     /// A duty batch pays zero fee only while a live, unslashed, unjailed bond
@@ -2128,7 +2202,7 @@ impl AccountState {
     /// in `validator_directory` for resume or unbonding are stripped as soon as
     /// their consensus seat deactivates, drops below floor, or is penalised.
     #[must_use]
-    pub(crate) fn duty_lane_signers_for_chain(
+    pub fn duty_lane_signers_for_chain(
         &self,
         chain_id: u64,
     ) -> std::collections::BTreeSet<Address> {
@@ -2294,6 +2368,22 @@ impl AccountState {
     }
     pub fn get_nonce(&self, public_key: &Address) -> u64 {
         self.accounts.get(public_key).map_or(0, |a| a.nonce)
+    }
+
+    /// Returns the `BudZKVM` authorization program hash bound to `public_key`,
+    /// or `None` for standard signature-authenticated accounts.
+    #[must_use]
+    pub fn auth_program_hash(&self, public_key: &Address) -> Option<[u8; 32]> {
+        self.accounts
+            .get(public_key)
+            .and_then(|a| a.auth_program_hash)
+    }
+
+    /// Binds or clears the Phase 4 `BudZKVM` authorization program hash on
+    /// `public_key` and marks the account dirty for state-root recomputation.
+    pub fn set_auth_program_hash(&mut self, public_key: &Address, program_hash: Option<[u8; 32]>) {
+        let acct = self.get_or_create(public_key);
+        acct.auth_program_hash = program_hash;
     }
     pub fn get_or_create(&mut self, public_key: &Address) -> &mut Account {
         if !self.accounts.contains_key(public_key) {
@@ -2563,6 +2653,9 @@ impl AccountState {
                 }
             }
             TxAuthority::Inline => {
+                if self.auth_program_hash(&tx.from).is_some() {
+                    return Err("Program account requires an aggregated authorization claim".into());
+                }
                 if !tx.verify_in(&self.scheme_registry) {
                     return Err("Invalid signature".into());
                 }
@@ -2652,7 +2745,11 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS create offer requires zero amount and recipient".into());
                 }
-                let req: crate::bns::CreateNameOffer = bincode::deserialize(&tx.data)
+                let req: crate::bns::CreateNameOffer =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS create offer data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&req.name) {
                     return Err(
@@ -2715,8 +2812,11 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS cancel offer requires zero amount and recipient".into());
                 }
-                let offer_id: u64 = bincode::deserialize(&tx.data)
-                    .map_err(|e| format!("Invalid BNS cancel offer data: {e}"))?;
+                let offer_id: u64 = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS cancel offer data: {e}"))?;
                 let offer = self
                     .marketplace
                     .get_name_offer(offer_id)
@@ -2734,8 +2834,11 @@ impl AccountState {
                         "BNS buy name requires a positive payment and zero header recipient".into(),
                     );
                 }
-                let offer_id: u64 = bincode::deserialize(&tx.data)
-                    .map_err(|e| format!("Invalid BNS buy name data: {e}"))?;
+                let offer_id: u64 = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS buy name data: {e}"))?;
                 let offer = self
                     .marketplace
                     .get_name_offer(offer_id)
@@ -2801,7 +2904,11 @@ impl AccountState {
                 if tx.amount == 0 || tx.to != Address::zero() {
                     return Err("BNS renewal requires a positive payment and zero recipient".into());
                 }
-                let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
+                let (name, duration): (String, u64) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS renewal data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_duration(duration) {
                     return Err(format!(
@@ -2831,7 +2938,11 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS transfer requires zero amount and recipient".into());
                 }
-                let (_name, new_owner): (String, Address) = bincode::deserialize(&tx.data)
+                let (_name, new_owner): (String, Address) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS transfer data: {e}"))?;
                 if new_owner == Address::zero() {
                     return Err("BNS transfer new owner cannot be the zero address".into());
@@ -2850,8 +2961,11 @@ impl AccountState {
                     return Err("BNS set address requires zero amount and recipient".into());
                 }
                 let (name, target, _domain_id): (String, Option<Address>, Option<u32>) =
-                    bincode::deserialize(&tx.data)
-                        .map_err(|e| format!("Invalid BNS set address data: {e}"))?;
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS set address data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&name) {
                     return Err("Invalid BNS name".into());
                 }
@@ -2869,7 +2983,11 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS set primary name requires zero amount and recipient".into());
                 }
-                let primary: Option<String> = bincode::deserialize(&tx.data)
+                let primary: Option<String> =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS set primary name data: {e}"))?;
                 if let Some(ref name) = primary {
                     if !crate::bns::BnsRegistry::is_valid_name(name) {
@@ -2893,8 +3011,11 @@ impl AccountState {
                     return Err("BNS set records requires zero amount and recipient".into());
                 }
                 let (name, updates): (String, std::collections::BTreeMap<String, Option<String>>) =
-                    bincode::deserialize(&tx.data)
-                        .map_err(|e| format!("Invalid BNS set records data: {e}"))?;
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS set records data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&name) {
                     return Err("Invalid BNS name".into());
                 }
@@ -2925,8 +3046,11 @@ impl AccountState {
                 let (name, cref): (
                     String,
                     Option<crate::storage::bud3::content_ref::ContentRef>,
-                ) = bincode::deserialize(&tx.data)
-                    .map_err(|e| format!("Invalid BNS set content data: {e}"))?;
+                ) = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS set content data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&name) {
                     return Err("Invalid BNS name".into());
                 }
@@ -2965,8 +3089,11 @@ impl AccountState {
                     return Err("BNS register subdomain requires zero amount and recipient".into());
                 }
                 let (parent, sub_label, sub_owner): (String, String, Address) =
-                    bincode::deserialize(&tx.data)
-                        .map_err(|e| format!("Invalid BNS subdomain data: {e}"))?;
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS subdomain data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&parent)
                     || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
                     || sub_owner == Address::zero()
@@ -2984,7 +3111,11 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS remove subdomain requires zero amount and recipient".into());
                 }
-                let (parent, sub_label): (String, String) = bincode::deserialize(&tx.data)
+                let (parent, sub_label): (String, String) =
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
                     .map_err(|e| format!("Invalid BNS remove subdomain data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&parent)
                     || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
@@ -3015,8 +3146,11 @@ impl AccountState {
                     String,
                     String,
                     Option<crate::storage::bud3::content_ref::ContentRef>,
-                ) = bincode::deserialize(&tx.data)
-                    .map_err(|e| format!("Invalid BNS set subdomain content data: {e}"))?;
+                ) = crate::network::bounded_bincode::decode_bounded_bincode(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                )
+                .map_err(|e| format!("Invalid BNS set subdomain content data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&parent)
                     || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
                 {
@@ -3035,8 +3169,11 @@ impl AccountState {
                     return Err("BNS set storage requires zero amount and recipient".into());
                 }
                 let (name, _root, _dom_id): (String, [u8; 32], u32) =
-                    bincode::deserialize(&tx.data)
-                        .map_err(|e| format!("Invalid BNS set storage data: {e}"))?;
+                    crate::network::bounded_bincode::decode_bounded_bincode(
+                        &tx.data,
+                        crate::network::protocol::MAX_TX_SIZE,
+                    )
+                    .map_err(|e| format!("Invalid BNS set storage data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&name) {
                     return Err("Invalid BNS name".into());
                 }
@@ -3912,6 +4049,7 @@ impl AccountState {
         }
         registry.expire(epoch);
         registry.close_windows(epoch);
+        registry.retire_unacknowledged_repairs(epoch);
         registry.settle_repairs();
         let seed = crate::core::hash::hash_fields_bytes(&[
             b"BDLM_BUD3_AUDIT_SEED_V1",
@@ -4016,9 +4154,9 @@ impl AccountState {
 
         // ResumeValidator requests whose epoch has come lift the suspension
         // (section 7.8.7); the validator re-enters the active set only if it
-        // still carries at least the registry minimum stake floor. Absence
-        // itself never slashed (V-4).
-        let resume_floor = self.registry.params().min_stake.max(1);
+        // still carries at least the registry and network minimum stake floor.
+        // Absence itself never slashed (V-4).
+        let resume_floor = self.full_validator_stake_floor(chain_id);
         for resumed in self.liveness.activate_due_resumes(self.epoch_index) {
             if let Some(v) = self.validators.get_mut(&resumed) {
                 if !v.slashed && !v.jailed && v.stake >= resume_floor {
@@ -4469,6 +4607,16 @@ impl AccountState {
                     Err(e) => tracing::warn!("Rejecting BnsSetPrimarySellers: {e}"),
                 }
             }
+            ProposalType::PinExternalAnchor { network, .. } => {
+                // Applied by the executor's `GovernanceAction::PinExternalAnchor`
+                // arm, inside block execution, which is where every node sees
+                // the same anchor. A second writer here would install the same
+                // vote twice on two different paths.
+                tracing::warn!(
+                    "PinExternalAnchor for network {network} reached execute_proposal; \
+                     the anchor is installed by the GovernanceAction path"
+                );
+            }
             ProposalType::BnsSetBaseCost { base_cost } => {
                 match self.bns_registry.set_base_cost(*base_cost) {
                     Ok(()) => {
@@ -4486,7 +4634,9 @@ impl AccountState {
     /// Authority is verified purely against `self.poa_onboarding` so block
     /// producers, validators, startup replay, reorg rebuilds and snapshot
     /// rebuilds all derive the exact same `poa_compliance` state root.
-    pub fn apply_poa_compliance_request(
+    /// Apply a PoA compliance freeze/unfreeze after verifying the domain record
+    /// is genuinely `ConsensusKind::PoA` and `admin` holds domain authority.
+    pub(crate) fn apply_poa_compliance_request(
         &mut self,
         domain_id: u32,
         admin: Address,
@@ -5569,12 +5719,29 @@ impl AccountState {
         )
     }
 
+    fn hash_account_leaf(pubkey: &Address, account: &Account) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+
+        let mut h = Sha256::new();
+        h.update([0x00]);
+        h.update(pubkey.0);
+        h.update(account.balance.to_le_bytes());
+        h.update(account.nonce.to_le_bytes());
+        if account.frac_attos != 0 {
+            h.update(account.frac_attos.to_le_bytes());
+        }
+        if let Some(auth_program_hash) = account.auth_program_hash {
+            h.update(TAG_ACCOUNT_AUTH_PROGRAM);
+            h.update(auth_program_hash);
+        }
+        h.finalize().into()
+    }
+
     /// Ensure the cached accounts Merkle tree reflects `self.accounts`.
     ///
     /// This is the exact tree [`Self::state_root_body`] folds into the
-    /// consensus state root: leaves are
-    /// `SHA-256(0x00 || pubkey || balance || nonce || frac_attos?)` over
-    /// the sorted account keys, internal nodes are
+    /// consensus state root: leaves are hashed by [`Self::hash_account_leaf`]
+    /// over the sorted account keys, internal nodes are
     /// `SHA-256(0x01 || left || right)` with the last odd node duplicated.
     /// [`Self::get_account_proof`] reads proofs from this tree, so a proof
     /// verifies against the accounts root a block header commits to.
@@ -5594,17 +5761,7 @@ impl AccountState {
                 self.cached_leaves = self
                     .accounts
                     .par_iter()
-                    .map(|(pubkey, account)| {
-                        let mut h = Sha256::new();
-                        h.update([0x00]);
-                        h.update(pubkey.0);
-                        h.update(account.balance.to_le_bytes());
-                        h.update(account.nonce.to_le_bytes());
-                        if account.frac_attos != 0 {
-                            h.update(account.frac_attos.to_le_bytes());
-                        }
-                        h.finalize().into()
-                    })
+                    .map(|(pubkey, account)| Self::hash_account_leaf(pubkey, account))
                     .collect();
             }
             #[cfg(miri)]
@@ -5612,17 +5769,7 @@ impl AccountState {
                 self.cached_leaves = self
                     .accounts
                     .iter()
-                    .map(|(pubkey, account)| {
-                        let mut h = Sha256::new();
-                        h.update([0x00]);
-                        h.update(pubkey.0);
-                        h.update(account.balance.to_le_bytes());
-                        h.update(account.nonce.to_le_bytes());
-                        if account.frac_attos != 0 {
-                            h.update(account.frac_attos.to_le_bytes());
-                        }
-                        h.finalize().into()
-                    })
+                    .map(|(pubkey, account)| Self::hash_account_leaf(pubkey, account))
                     .collect();
             }
 
@@ -5667,15 +5814,7 @@ impl AccountState {
             for dirty_key in &self.dirty_accounts {
                 if let Ok(pos) = self.cached_keys.binary_search(dirty_key) {
                     if let Some(account) = self.accounts.get(dirty_key) {
-                        let mut h = Sha256::new();
-                        h.update([0x00]);
-                        h.update(dirty_key.0);
-                        h.update(account.balance.to_le_bytes());
-                        h.update(account.nonce.to_le_bytes());
-                        if account.frac_attos != 0 {
-                            h.update(account.frac_attos.to_le_bytes());
-                        }
-                        self.cached_leaves[pos] = h.finalize().into();
+                        self.cached_leaves[pos] = Self::hash_account_leaf(dirty_key, account);
                         affected_indices.insert(pos);
                     }
                 }
@@ -5758,6 +5897,7 @@ impl AccountState {
                     balance: acct.balance,
                     nonce: acct.nonce,
                     frac_attos: acct.frac_attos,
+                    auth_program_hash: acct.auth_program_hash,
                     leaf_hash: self.cached_leaves[idx],
                     siblings,
                     directions,
@@ -5776,6 +5916,7 @@ impl AccountState {
                     balance: 0,
                     nonce: 0,
                     frac_attos: 0,
+                    auth_program_hash: None,
                     leaf_hash: [0u8; 32],
                     siblings: Vec::new(),
                     directions: Vec::new(),
@@ -5795,6 +5936,7 @@ impl AccountState {
             balance: acct.balance,
             nonce: acct.nonce,
             frac_attos: acct.frac_attos,
+            auth_program_hash: acct.auth_program_hash,
             leaf_hash: self.cached_leaves[idx],
             siblings,
             directions,
@@ -7639,6 +7781,37 @@ mod tests {
         );
         state.execute_proposal(&p);
         assert_eq!(state.registry.params().unbonding_epochs, old_u);
+    }
+
+    /// `full_validator_stake_floor` is the larger of two contracts: the
+    /// governance parameter (a *registration* floor, 1,000 atoms by default)
+    /// and the network profile's bond (10^9 atoms on testnet). The suite
+    /// pins the direction where the network floor is the stricter one;
+    /// `testnet_unstake_below_full_floor_deactivates_and_loses_duty_lane`.
+    /// This pins the other: governance raises its floor above the network's,
+    /// and the parameter has to bind. A helper returning either side alone
+    /// passes the first test and fails this one.
+    #[test]
+    fn full_validator_stake_floor_is_the_max_of_the_two_contracts() {
+        let mut state = AccountState::new();
+        let network = crate::core::chain_config::Network::Testnet;
+        let chain = network.chain_id().0;
+        let network_floor = network.min_stake_full();
+        let registry_floor = state.registry.params().min_stake.max(1);
+        assert!(
+            registry_floor < network_floor,
+            "the default registry floor sits above the network floor; this test would prove nothing"
+        );
+        assert_eq!(state.full_validator_stake_floor(chain), network_floor);
+
+        let mut params = *state.registry.params();
+        params.min_stake = network_floor.saturating_add(1);
+        state.registry.set_params(params);
+        assert_eq!(
+            state.full_validator_stake_floor(chain),
+            network_floor.saturating_add(1),
+            "a governance raise above the network floor must bind"
+        );
     }
 
     #[test]

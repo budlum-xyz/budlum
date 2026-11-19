@@ -1,0 +1,150 @@
+# Machine-readable launch verdicts for every named public-testnet feature test.
+# `xtask/gates launch-matrix-tests-exist` requires a one-to-one match between
+# these rows and `#[test] fn <id>_is_{open,closed}_on_testnet` in the tree.
+# Changing a state therefore requires changing and running its behavioral test.
+version = 1
+
+[[feature]]
+id = "ai_execution_proof"
+state = "closed"
+evidence = "ai_execution_proof_is_closed_on_testnet"
+
+[[feature]]
+id = "ai_layer"
+state = "closed"
+evidence = "ai_layer_is_closed_on_testnet"
+
+[[feature]]
+id = "app_binding"
+state = "closed"
+evidence = "app_binding_is_closed_on_testnet"
+
+[[feature]]
+id = "bud3_live"
+state = "closed"
+evidence = "bud3_live_is_closed_on_testnet"
+
+[[feature]]
+id = "cairo"
+state = "closed"
+evidence = "cairo_is_closed_on_testnet"
+
+[[feature]]
+id = "compression_context"
+state = "closed"
+evidence = "compression_context_is_closed_on_testnet"
+
+[[feature]]
+id = "expansion_coordinator"
+state = "closed"
+evidence = "expansion_coordinator_is_closed_on_testnet"
+
+[[feature]]
+id = "ethereum_sync_committee"
+state = "closed"
+evidence = "ethereum_sync_committee_is_closed_on_testnet"
+
+[[feature]]
+id = "foreign_sui"
+state = "closed"
+evidence = "foreign_sui_is_closed_on_testnet"
+
+[[feature]]
+id = "live_stream"
+state = "closed"
+evidence = "live_stream_is_closed_on_testnet"
+
+[[feature]]
+id = "move_sui"
+state = "closed"
+evidence = "move_sui_is_closed_on_testnet"
+
+[[feature]]
+id = "near_wasm"
+state = "closed"
+evidence = "near_wasm_is_closed_on_testnet"
+
+[[feature]]
+id = "note_registry"
+state = "closed"
+evidence = "note_registry_is_closed_on_testnet"
+
+[[feature]]
+id = "object_layer"
+state = "closed"
+evidence = "object_layer_is_closed_on_testnet"
+
+[[feature]]
+id = "parallel_scheduler"
+state = "closed"
+evidence = "parallel_scheduler_is_closed_on_testnet"
+
+[[feature]]
+id = "plutus"
+state = "closed"
+evidence = "plutus_is_closed_on_testnet"
+
+[[feature]]
+id = "polkavm"
+state = "closed"
+evidence = "polkavm_is_closed_on_testnet"
+
+[[feature]]
+id = "private_dedup"
+state = "closed"
+evidence = "private_dedup_is_closed_on_testnet"
+
+[[feature]]
+id = "private_transfer"
+state = "closed"
+evidence = "private_transfer_is_closed_on_testnet"
+
+[[feature]]
+id = "shared_security"
+state = "closed"
+evidence = "shared_security_is_closed_on_testnet"
+
+[[feature]]
+id = "starknet_rpc"
+state = "closed"
+evidence = "starknet_rpc_is_closed_on_testnet"
+
+[[feature]]
+id = "sui_rpc"
+state = "closed"
+evidence = "sui_rpc_is_closed_on_testnet"
+
+[[feature]]
+id = "svm_and_move_pointer_deployment"
+state = "closed"
+evidence = "svm_and_move_pointer_deployment_is_closed_on_testnet"
+
+[[feature]]
+id = "svm_move_pointer_policy"
+state = "closed"
+evidence = "svm_move_pointer_policy_is_closed_on_testnet"
+
+[[feature]]
+id = "tvm"
+state = "closed"
+evidence = "tvm_is_closed_on_testnet"
+
+[[feature]]
+id = "utxo"
+state = "closed"
+evidence = "utxo_is_closed_on_testnet"
+
+[[feature]]
+id = "verify_inference"
+state = "closed"
+evidence = "verify_inference_is_closed_on_testnet"
+
+[[feature]]
+id = "verify_merkle"
+state = "closed"
+evidence = "verify_merkle_is_closed_on_testnet"
+
+[[feature]]
+id = "zk_qc_fault_proof"
+state = "closed"
+evidence = "zk_qc_fault_proof_is_closed_on_testnet"

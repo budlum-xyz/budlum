@@ -1,8 +1,9 @@
 //! Permanent B.U.D. 3.0 content reference (`ContentRef`,  item 7).
-//! exposed for BNS, SocialFi, DataMarket, EducationDomain, and gateway callers.
+//!
+//! exposed for BNS, `SocialFi`, `DataMarket`, `EducationDomain`, and gateway callers.
 //!
 //! Replaces transitional pre-B.U.D.-3.0 content pointers without any
-//! `Bud3NotReady` rejection: every dependent domain (BNS, SocialFi, Data Market,
+//! `Bud3NotReady` rejection: every dependent domain (BNS, `SocialFi`, Data Market,
 //! Education Domain, App Registry) binds a [`ContentId`] and its verified
 //! [`ObjectKey`] commitment, plus an optional [`NftId`] ownership handle.
 

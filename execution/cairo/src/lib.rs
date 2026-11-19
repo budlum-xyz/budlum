@@ -26,7 +26,7 @@ pub const AUDITED_CAIRO_ENGINE_SPDX: &str = "Apache-2.0";
 /// Budlum testnet chain ID (`Section 1.5`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed activation height on testnet `45261` (open from block zero).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 pub const PROPOSED_CAIRO_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing Starknet classes, contract instances, nonces, and storage.
@@ -290,11 +290,11 @@ impl Default for CairoWorker {
 }
 
 impl CairoWorker {
-    /// Default testnet posture: open from [`PROPOSED_CAIRO_ACTIVATION_HEIGHT`] (`0`).
+    /// Default public-testnet posture: closed until an explicit activation height.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            testnet_activation_height: Some(PROPOSED_CAIRO_ACTIVATION_HEIGHT),
+            testnet_activation_height: None,
         }
     }
 
@@ -309,8 +309,11 @@ impl CairoWorker {
     /// Returns `true` if `CairoWorker` is active at `ctx`.
     #[must_use]
     pub const fn is_active(&self, ctx: &BlockContext) -> bool {
-        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+        if ctx.chain_id == budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID {
             return true;
+        }
+        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+            return false;
         }
         match self.testnet_activation_height {
             Some(h) => ctx.height >= h,
@@ -823,15 +826,28 @@ mod tests {
         }
     }
 
-    /// Testnet `45261` activation posture: open at launch (`PROPOSED_CAIRO_ACTIVATION_HEIGHT = 0`),
-    /// while `with_activation_height(None)` retains closed override refusal.
+    /// Testnet `45261` launch posture is closed until an explicit activation height.
     #[test]
-    fn cairo_is_open_on_testnet() {
+    fn cairo_is_closed_on_testnet() {
         assert_eq!(AUDITED_CAIRO_ENGINE_SPDX, "Apache-2.0");
-        let open_worker = CairoWorker::new();
-        assert!(open_worker.is_active(&launch_ctx()));
-        let mut closed_worker = CairoWorker::with_activation_height(None);
+        let mut closed_worker = CairoWorker::new();
         assert!(!closed_worker.is_active(&launch_ctx()));
+        for chain_id in [45_260, 99_999] {
+            assert!(!closed_worker.is_active(&BlockContext {
+                chain_id,
+                ..launch_ctx()
+            }));
+        }
+        assert!(closed_worker.is_active(&BlockContext {
+            chain_id: 45_262,
+            ..launch_ctx()
+        }));
+        let activated_worker = CairoWorker::with_activation_height(Some(10));
+        assert!(!activated_worker.is_active(&BlockContext {
+            height: 9,
+            ..launch_ctx()
+        }));
+        assert!(activated_worker.is_active(&launch_ctx()));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::CAIRO, vec![0xAB; 32]) else {
             panic!("caller");
@@ -865,7 +881,7 @@ mod tests {
 
     #[test]
     fn starknet_foundry_declare_and_deploy_unchanged() {
-        let mut worker = CairoWorker::new();
+        let mut worker = CairoWorker::with_activation_height(Some(0));
         assert_eq!(worker.id(), EeId::CAIRO);
 
         let mut host = MemoryHost::new(10_000_000);

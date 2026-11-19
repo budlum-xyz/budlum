@@ -550,9 +550,19 @@ fn the_genesis_of_a_chain_with_the_layer_on_commits_to_its_parameters() {
 fn parameters_a_chain_cannot_run_with_are_refused_at_startup() {
     assert!(validate_params(&AggParams::default(), CHAIN).is_ok());
     assert!(validate_params(&on(), CHAIN).is_ok());
-    // The main network keeps the layer off.
+    // Mainnet and public Testnet reject mode `on` until recursive leaf proving lands.
     assert!(validate_params(&on(), 45260).is_err());
+    assert!(validate_params(&on(), 45261).is_err());
     assert!(validate_params(&AggParams::default(), 45260).is_ok());
+    assert!(validate_params(&AggParams::default(), 45261).is_ok());
+    assert!(validate_params(
+        &AggParams {
+            mode: AggMode::Shadow,
+            ..AggParams::default()
+        },
+        45261
+    )
+    .is_ok());
     // A share over the whole.
     assert!(validate_params(
         &AggParams {

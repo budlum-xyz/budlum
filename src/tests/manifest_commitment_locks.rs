@@ -1,7 +1,6 @@
 //! Locks on what a `ContentManifest` commits to and who is allowed to say so.
 //!
-//! Two findings closed alongside the Reed-Solomon coder, both of which were
-//! invisible while replication was the only redundancy scheme:
+//! Two invariants sealed alongside the Reed-Solomon coder:
 //!
 //! 1. `manifest_id` arrived from an RPC caller and nothing recomputed it, so a
 //!    caller could register content under any id it chose.
@@ -536,7 +535,7 @@ mod self_host_policy {
 
     #[test]
     fn critical_content_without_its_paid_replicas_is_refused() {
-        // The finding, stated as a test: the owner asked for two paid
+        // Storage policy invariant: the owner asked for two paid
         // replicas before self-hosting, and none are open.
         let mut reg = StorageRegistry::new();
         reg.declare_self_host_policy(ContentId([1u8; 32]), policy(true, 2, true), &profile())
@@ -561,9 +560,8 @@ mod self_host_policy {
     ///
     /// Every earlier test in this module calls `check_self_host_allowed`
     /// itself, which proves the check is correct and proves nothing about
-    /// whether anything runs it. That distinction is the finding: the check
-    /// was correct and tested six ways for as long as no production path
-    /// called it.
+    /// whether anything runs it. End-to-end integration invariant: the check
+    /// must be wired into the live production path.
     fn open_for(
         reg: &mut StorageRegistry,
         manifest: &ContentManifest,
@@ -599,7 +597,7 @@ mod self_host_policy {
 
     #[test]
     fn a_phone_cannot_take_a_replica_the_owner_reserved_for_paid_operators() {
-        // The finding, exercised where it bites: the owner marked this
+        // Enforce priority ordering: the owner marked this
         // content critical and asked for two paid replicas first, none are
         // open, and a phone offers to hold it. Before the check was wired,
         // this call returned a deal id.

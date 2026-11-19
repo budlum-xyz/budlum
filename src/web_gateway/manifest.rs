@@ -79,14 +79,38 @@ pub enum RouteError {
     MissingIndex,
 }
 
+/// Maximum raw JSON byte length accepted for a serialized [`SiteManifest`].
+const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+
+/// Reject percent-encoded dot, separator, or NUL sequences (`%2e`, `%2f`,
+/// `%5c`, `%00`, case-insensitive) so a proxy/client mismatch cannot sneak a
+/// traversal or NUL segment through `is_well_formed_path`.
+fn contains_encoded_traversal_or_nul(path: &str) -> bool {
+    path.as_bytes().windows(3).any(|triple| {
+        matches!(
+            triple,
+            [b'%', a, b]
+                if matches!(
+                    &[a.to_ascii_lowercase(), b.to_ascii_lowercase()],
+                    b"2e" | b"2f" | b"5c" | b"00"
+                )
+        )
+    })
+}
+
 /// Check a request path before it is used to look anything up.
 ///
 /// Rejects, in this order: a missing leading slash, a NUL byte, a backslash
-/// (some stacks fold it into a separator), any `..` segment, and any empty
-/// segment other than the single trailing slash. A query string is not part of
-/// the path and must already have been stripped by the caller.
+/// (some stacks fold it into a separator), percent-encoded traversal/separator
+/// bytes, any `.`/`..` segment, and any empty segment other than the single
+/// trailing slash. A query string is not part of the path and must already have
+/// been stripped by the caller.
 fn is_well_formed_path(path: &str) -> bool {
-    if !path.starts_with('/') || path.contains('\0') || path.contains('\\') {
+    if !path.starts_with('/')
+        || path.contains('\0')
+        || path.contains('\\')
+        || contains_encoded_traversal_or_nul(path)
+    {
         return false;
     }
     let trimmed = path.strip_suffix('/').unwrap_or(path);
@@ -101,13 +125,19 @@ fn is_well_formed_path(path: &str) -> bool {
 }
 
 impl SiteManifest {
-    /// Parse a JSON site manifest and enforce the route-count ceiling.
+    /// Parse a JSON site manifest and enforce byte-size and route-count ceilings.
     ///
     /// # Errors
     ///
-    /// Returns a human-readable error if the bytes are not valid JSON or the
-    /// manifest declares more than `MAX_MANIFEST_ROUTES` routes.
+    /// Returns a human-readable error if the bytes exceed `MAX_MANIFEST_BYTES`,
+    /// are not valid JSON, or declare more than `MAX_MANIFEST_ROUTES` routes.
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() > MAX_MANIFEST_BYTES {
+            return Err(format!(
+                "manifest is {} bytes, exceeding ceiling {MAX_MANIFEST_BYTES}",
+                bytes.len()
+            ));
+        }
         let manifest: Self = serde_json::from_slice(bytes).map_err(|e| format!("manifest: {e}"))?;
         if manifest.routes.len() > MAX_MANIFEST_ROUTES {
             return Err(format!(
@@ -279,5 +309,33 @@ mod tests {
         let bytes = serde_json::to_vec(&manifest).expect("manifest json");
         let err = SiteManifest::from_json_bytes(&bytes).unwrap_err();
         assert!(err.contains("exceeding ceiling"), "got: {err}");
+    }
+
+    #[test]
+    fn manifest_rejects_oversized_payload_and_percent_encoded_traversal() {
+        let oversized = vec![b' '; MAX_MANIFEST_BYTES + 1];
+        let err = SiteManifest::from_json_bytes(&oversized).unwrap_err();
+        assert!(err.contains("exceeding ceiling"), "got: {err}");
+
+        let mut routes = BTreeMap::new();
+        routes.insert("/index.html".to_string(), route(0x01, "text/html"));
+        let site = SiteManifest {
+            index: "/index.html".to_string(),
+            routes,
+            csp: None,
+        };
+        for bad in [
+            "/%2e%2e/secret",
+            "/%2E%2e/secret",
+            "/a%2fb",
+            "/a%5cb",
+            "/index.html%00.png",
+        ] {
+            assert_eq!(
+                site.resolve(bad),
+                Err(RouteError::Malformed),
+                "encoded traversal {bad:?} must be refused"
+            );
+        }
     }
 }

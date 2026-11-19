@@ -261,6 +261,40 @@ pub struct NodeConfig {
     #[arg(long)]
     pub mdns_enabled: Option<bool>,
 
+    /// Optional IP address to bind the P2P listener to instead of `0.0.0.0`
+    /// (for example a private VPC IP like `10.10.0.5` on a shielded validator).
+    #[arg(long)]
+    pub p2p_listen_addr: Option<String>,
+
+    /// Optional additional private VPC multiaddr for a sentry node's shielded
+    /// validator link (for example `/ip4/10.10.0.11/tcp/30334`).
+    #[arg(long)]
+    pub p2p_private_listen_addr: Option<String>,
+
+    /// `PeerId`s of private validators shielded behind this sentry node (never
+    /// entered into Kademlia/PEX and protected from eviction).
+    #[arg(long)]
+    pub private_peers: Vec<String>,
+
+    /// `PeerId`s exempt from `max_peers` eviction and `/24` subnet caps.
+    #[arg(long)]
+    pub unconditional_peers: Vec<String>,
+
+    /// Allowed private VPC/VPN CIDRs (e.g. `10.10.0.0/16`, `100.64.0.0/10`)
+    /// enforced on validator <-> sentry links.
+    #[arg(long)]
+    pub allowed_private_cidrs: Vec<String>,
+
+    /// Disable Kademlia/mDNS/DNS/bootnode peer discovery. Always forced `true`
+    /// for shielded validators.
+    #[arg(long)]
+    pub disable_peer_discovery: Option<bool>,
+
+    /// Require validator <-> sentry links to use private/VPN IPs or
+    /// `allowed_private_cidrs` (defaults to `true` for shielded validators).
+    #[arg(long)]
+    pub strict_private_network: Option<bool>,
+
     #[arg(long)]
     pub rpc_public_listener: Option<String>,
 
@@ -373,8 +407,8 @@ pub struct NodeConfig {
     // The `--evm-bridge-address` registration
     // is REMOVED. The EVM bridge leg has no live end-to-end route (the
     // off-chain half is a stub that refuses at broadcast), and a registration
-    // surface that reads as "production" while the leg cannot operate was the
-    // finding. Outbound EVM relay stays off until the real receipt flow
+    // surface that reads as "production" while the leg cannot operate is prevented.
+    // Outbound EVM relay stays off until the real receipt flow
     // lands; there is nothing safe to point the adapter at.
 }
 
@@ -450,6 +484,13 @@ impl Default for NodeConfig {
             banned_peer_db: None,
             vote_history_db: None,
             mdns_enabled: None,
+            p2p_listen_addr: None,
+            p2p_private_listen_addr: None,
+            private_peers: Vec::new(),
+            unconditional_peers: Vec::new(),
+            allowed_private_cidrs: Vec::new(),
+            disable_peer_discovery: None,
+            strict_private_network: None,
             rpc_public_listener: None,
             rpc_operator_listener: None,
             rpc_trusted_proxies: Vec::new(),
@@ -626,6 +667,13 @@ pub struct P2pSection {
     pub banned_peer_db: Option<String>,
     pub vote_history_db: Option<String>,
     pub mdns_enabled: Option<bool>,
+    pub listen_addr: Option<String>,
+    pub private_listen_addr: Option<String>,
+    pub private_peers: Option<Vec<String>>,
+    pub unconditional_peers: Option<Vec<String>>,
+    pub allowed_private_cidrs: Option<Vec<String>>,
+    pub disable_peer_discovery: Option<bool>,
+    pub strict_private_network: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, Default, Clone)]
@@ -908,6 +956,33 @@ impl NodeConfig {
             }
             if self.mdns_enabled.is_none() {
                 self.mdns_enabled = p2p.mdns_enabled;
+            }
+            if self.p2p_listen_addr.is_none() {
+                self.p2p_listen_addr = p2p.listen_addr;
+            }
+            if self.p2p_private_listen_addr.is_none() {
+                self.p2p_private_listen_addr = p2p.private_listen_addr;
+            }
+            if self.private_peers.is_empty() {
+                if let Some(peers) = p2p.private_peers {
+                    self.private_peers = peers;
+                }
+            }
+            if self.unconditional_peers.is_empty() {
+                if let Some(peers) = p2p.unconditional_peers {
+                    self.unconditional_peers = peers;
+                }
+            }
+            if self.allowed_private_cidrs.is_empty() {
+                if let Some(cidrs) = p2p.allowed_private_cidrs {
+                    self.allowed_private_cidrs = cidrs;
+                }
+            }
+            if self.disable_peer_discovery.is_none() {
+                self.disable_peer_discovery = p2p.disable_peer_discovery;
+            }
+            if self.strict_private_network.is_none() {
+                self.strict_private_network = p2p.strict_private_network;
             }
             if self.bootstrap.is_none() {
                 self.bootstrap = self.bootnodes.first().cloned();
@@ -1281,6 +1356,48 @@ impl NodeConfig {
         })
     }
 
+    /// Builds and validates the active [`crate::network::sentry::SentryPolicy`]
+    /// from CLI flags and TOML `[p2p]` settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::network::sentry::SentryConfigError`] if any multiaddr,
+    /// peer ID, CIDR, or shielded-validator safety invariant is invalid.
+    pub fn sentry_policy(
+        &self,
+    ) -> Result<crate::network::sentry::SentryPolicy, crate::network::sentry::SentryConfigError>
+    {
+        let mut combined_private_peers = self.private_peers.clone();
+        for entry in &self.validator_peers {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let peer_str = if trimmed.contains('/') {
+                trimmed
+                    .parse::<libp2p::Multiaddr>()
+                    .ok()
+                    .and_then(|ma| crate::network::sentry::peer_id_from_multiaddr(&ma))
+                    .map_or_else(|| trimmed.to_string(), |id| id.to_string())
+            } else {
+                trimmed.to_string()
+            };
+            if !combined_private_peers.contains(&peer_str) {
+                combined_private_peers.push(peer_str);
+            }
+        }
+        let cfg = crate::network::sentry::SentryConfig {
+            role: self.role.clone(),
+            sentry_peers: self.sentry_peers.clone(),
+            private_peers: combined_private_peers,
+            unconditional_peers: self.unconditional_peers.clone(),
+            allowed_private_cidrs: self.allowed_private_cidrs.clone(),
+            disable_peer_discovery: self.disable_peer_discovery,
+            strict_private_network: self.strict_private_network,
+        };
+        crate::network::sentry::SentryPolicy::from_config(&cfg)
+    }
+
     // Strict validation rules for production environments (especially Mainnet profile)
     fn validate_strict_rules(&self) {
         if self.backup_interval_secs == 0 {
@@ -1319,6 +1436,36 @@ impl NodeConfig {
                 eprintln!(
                     "CRITICAL CONFIGURATION ERROR: Network profile '{}' requires chain ID {}, got {}.",
                     self.network, expected_chain_id, chain_id
+                );
+                std::process::exit(1);
+            }
+        }
+
+        // Sentry node architecture policy check (fails closed on malformed
+        // multiaddrs, invalid CIDRs, conflicting roles, or shielded validators
+        // attempting to re-enable discovery).
+        let sentry_policy = self.sentry_policy().unwrap_or_else(|e| {
+            eprintln!("CRITICAL SECURITY FAILURE: {e}");
+            std::process::exit(1);
+        });
+        if sentry_policy.is_discovery_disabled() && self.mdns_enabled == Some(true) {
+            eprintln!(
+                "CRITICAL SECURITY FAILURE: mDNS discovery cannot be enabled when peer discovery is disabled (shielded validator)!"
+            );
+            std::process::exit(1);
+        }
+        if let Some(ref listen_ip) = self.p2p_listen_addr {
+            if listen_ip.trim().parse::<std::net::IpAddr>().is_err() {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: invalid p2p.listen_addr '{listen_ip}' (expected IPv4 or IPv6 address)"
+                );
+                std::process::exit(1);
+            }
+        }
+        if let Some(ref priv_addr) = self.p2p_private_listen_addr {
+            if priv_addr.trim().parse::<libp2p::Multiaddr>().is_err() {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: invalid p2p.private_listen_addr '{priv_addr}' (expected libp2p multiaddr)"
                 );
                 std::process::exit(1);
             }
@@ -2115,6 +2262,26 @@ mod persona_config_tests {
                 toml::from_str(&content).unwrap_or_else(|e| panic!("parse {path}: {e}"));
             assert!(fc.network.is_some(), "{path} needs [network]");
             assert!(fc.node.is_some(), "{path} needs [node]");
+        }
+    }
+
+    #[test]
+    fn sentry_and_shielded_validator_templates_parse_and_build_policy() {
+        for rel in ["config/sentry.toml", "config/validator-shielded.toml"] {
+            let content =
+                std::fs::read_to_string(rel).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            let fc: FileConfig =
+                toml::from_str(&content).unwrap_or_else(|e| panic!("parse {rel}: {e}"));
+            let mut cfg = NodeConfig::default();
+            cfg.apply_file_config(fc);
+            let policy = cfg
+                .sentry_policy()
+                .unwrap_or_else(|e| panic!("sentry_policy failed for {rel}: {e}"));
+            if rel.contains("sentry.toml") {
+                assert_eq!(policy.role(), crate::network::sentry::SentryRole::Sentry);
+            } else {
+                assert!(policy.is_discovery_disabled());
+            }
         }
     }
 

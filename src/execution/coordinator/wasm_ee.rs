@@ -356,13 +356,51 @@ fn read_store(host: &dyn HostRead, contract: &[u8], key: &[u8]) -> Result<Option
         .map_err(|e| e.to_string())
 }
 
+/// BGU charged per byte of key plus value a CosmWasm store write stages.
+const WASM_STORE_BYTE_BGU: u64 = 200;
+/// BGU charged per byte of module code a CosmWasm deploy stores.
+const WASM_DEPLOY_BYTE_BGU: u64 = 200;
+/// Longest store key a message may produce. Every key is a short fixed prefix
+/// followed by names the caller chooses.
+const MAX_WASM_STORE_KEY_BYTES: usize = 1_280;
+/// Largest value one store entry may hold.
+const MAX_WASM_STORE_VALUE_BYTES: usize = 64 * 1024;
+
+/// The BGU a store write of `key` and `val` for `contract` costs.
+fn store_write_cost(contract: &[u8], key: &[u8], val: Option<&[u8]>) -> u64 {
+    let bytes = contract
+        .len()
+        .saturating_add(1)
+        .saturating_add(key.len())
+        .saturating_add(val.map_or(0, <[u8]>::len));
+    u64::try_from(bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(WASM_STORE_BYTE_BGU)
+}
+
+/// Stage one CosmWasm store write.
+///
+/// This is the only door a message has to `ee/wasm/store`, so the bound on an
+/// entry and the price of its bytes live here and not in the message that
+/// asked for it: a message shape cannot be cheaper than another, and a shape
+/// added later cannot be added unpriced. Consensus state grows by the key and
+/// the value, so the charge is linear in both, and a write the remaining
+/// budget cannot pay for fails the call.
 fn write_store(
     host: &mut dyn HostApi,
     contract: &[u8],
     key: &[u8],
     val: Option<&[u8]>,
 ) -> Result<(), String> {
+    if key.len() > MAX_WASM_STORE_KEY_BYTES {
+        return Err(String::from("CosmWasm storage key exceeds 1280 bytes"));
+    }
+    if val.is_some_and(|v| v.len() > MAX_WASM_STORE_VALUE_BYTES) {
+        return Err(String::from("CosmWasm storage value exceeds 64 KiB cap"));
+    }
     let ns = Namespace::new(NS_WASM_STORE).map_err(|e| e.to_string())?;
+    host.charge(store_write_cost(contract, key, val))
+        .map_err(|_| String::from("out of gas writing CosmWasm storage"))?;
     host.write(&ns, &wasm_store_key(contract, key), val)
         .map_err(|e| e.to_string())
 }
@@ -1441,24 +1479,18 @@ fn execute_cosmwasm_json(
             ));
         }
         let v = kv.get("value").and_then(|v| v.as_str()).unwrap_or_default();
-        const MAX_WASM_KV_VALUE_BYTES: usize = 64 * 1024;
-        if v.len() > MAX_WASM_KV_VALUE_BYTES {
+        if v.len() > MAX_WASM_STORE_VALUE_BYTES {
             return Ok((
                 OutcomeStatus::Revert,
                 b"CosmWasm storage value exceeds 64 KiB cap".to_vec(),
             ));
         }
         let namespaced = format!("kv:{k}");
-        // Meter consensus state growth linearly in key+value byte length so
-        // callers cannot write multi-kilobyte blobs for a flat 20k BGU fee.
-        let byte_cost = (namespaced.len() as u64)
-            .saturating_add(v.len() as u64)
-            .saturating_mul(200);
-        if byte_cost > gas_budget {
+        // `write_store` charges the bytes. A write the call's own limit could
+        // never pay for is refused before the host is asked.
+        if store_write_cost(contract, namespaced.as_bytes(), Some(v.as_bytes())) > gas_budget {
             return Err(String::from("out of gas writing CosmWasm storage"));
         }
-        host.charge(byte_cost)
-            .map_err(|_| String::from("out of gas writing CosmWasm storage"))?;
         write_store(host, contract, namespaced.as_bytes(), Some(v.as_bytes()))?;
         return Ok((OutcomeStatus::Success, v.as_bytes().to_vec()));
     }
@@ -1516,6 +1548,18 @@ impl ExecutionEnvironment for WasmEe {
                         status: OutcomeStatus::InvalidCode,
                         output: reason.into_bytes(),
                         gas_used: 15_000,
+                    });
+                }
+                // The module is consensus state as well: its bytes are priced
+                // like the bytes a contract stores.
+                let deploy_gas = u64::try_from(raw_in.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(WASM_DEPLOY_BYTE_BGU);
+                if host.charge(deploy_gas).is_err() {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::OutOfGas,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
                     });
                 }
                 let code_hash: [u8; 32] = Sha256::digest(raw_in).into();
@@ -1576,7 +1620,7 @@ impl ExecutionEnvironment for WasmEe {
                 Ok(EeOutcome {
                     status: OutcomeStatus::Success,
                     output: call.target.id.clone(),
-                    gas_used: 25_000,
+                    gas_used: 25_000u64.saturating_add(deploy_gas),
                 })
             }
             EeCallKind::Call => {
@@ -1693,6 +1737,10 @@ mod creator_gate_tests {
 
     #[derive(Default)]
     struct MockHost {
+        /// BGU charged so far.
+        charged: u64,
+        /// The most the host lets a call charge, when set.
+        budget: Option<u64>,
         store: BTreeMap<(String, Vec<u8>), Vec<u8>>,
     }
 
@@ -1752,7 +1800,12 @@ mod creator_gate_tests {
             Ok(())
         }
 
-        fn charge(&mut self, _bgu: u64) -> Result<(), OutOfGas> {
+        fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+            let next = self.charged.saturating_add(bgu);
+            if self.budget.is_some_and(|budget| next > budget) {
+                return Err(OutOfGas);
+            }
+            self.charged = next;
             Ok(())
         }
 
@@ -1763,6 +1816,119 @@ mod creator_gate_tests {
             _attos: u128,
         ) -> Result<(), HostError> {
             Ok(())
+        }
+    }
+
+    /// What one message charges a fresh host.
+    fn charged_by(sender: &str, msg: &serde_json::Value) -> u64 {
+        let contract = b"contract-1";
+        let mut host = MockHost::with_creator(contract, "creator");
+        let (status, _) =
+            execute_cosmwasm_json(contract, sender, msg, false, u64::MAX, &mut host).unwrap();
+        assert_eq!(status, OutcomeStatus::Success, "msg: {msg}");
+        host.charged
+    }
+
+    /// Every message that writes the store pays for the bytes of the key and
+    /// the value it writes, not only `put`. A caller-chosen name that is 500
+    /// bytes longer costs exactly 500 bytes more.
+    #[test]
+    fn every_store_write_is_priced_by_its_key_and_value_bytes() {
+        let short = "r".repeat(100);
+        let long = "r".repeat(600);
+        // Each shape with the number of keys the chosen name goes into. The
+        // last one is `put` at the root of the message, without the `execute`
+        // wrapper, which the dispatcher also accepts.
+        let message = |shape: &str, name: &str| match shape {
+            "transfer" => {
+                serde_json::json!({"execute": {"transfer": {"recipient": name, "amount": "0"}}})
+            }
+            "set_allowance" => {
+                serde_json::json!({"execute": {"set_allowance": {"spender": name, "amount": "7"}}})
+            }
+            "increase_allowance" => serde_json::json!(
+                {"execute": {"increase_allowance": {"spender": name, "amount": "7"}}}
+            ),
+            "mint_nft" => {
+                serde_json::json!({"execute": {"mint_nft": {"token_id": name, "owner": "alice"}}})
+            }
+            "put" => serde_json::json!({"execute": {"put": {"key": name, "value": "v"}}}),
+            _ => serde_json::json!({"put": {"key": name, "value": "v"}}),
+        };
+        for (shape, keys) in [
+            ("transfer", 1u64),
+            ("set_allowance", 1),
+            ("increase_allowance", 1),
+            ("mint_nft", 2),
+            ("put", 1),
+            ("root put", 1),
+        ] {
+            let base = charged_by("creator", &message(shape, &short));
+            let grown = charged_by("creator", &message(shape, &long));
+            assert!(base > 0, "{shape} writes the store and must be charged");
+            assert_eq!(
+                grown - base,
+                keys * 500 * WASM_STORE_BYTE_BGU,
+                "{shape}: 500 more bytes in {keys} key(s) cost that many more bytes"
+            );
+        }
+
+        // The value is priced on the same scale as the key.
+        let small = charged_by(
+            "creator",
+            &serde_json::json!({"execute": {"put": {"key": "k", "value": "v"}}}),
+        );
+        let large = charged_by(
+            "creator",
+            &serde_json::json!({"execute": {"put": {"key": "k", "value": "v".repeat(1_001)}}}),
+        );
+        assert_eq!(large - small, 1_000 * WASM_STORE_BYTE_BGU);
+    }
+
+    /// A write the remaining budget cannot pay for fails the call and stages
+    /// nothing, and a key past the cap is refused whatever the budget.
+    #[test]
+    fn store_write_fails_when_unpaid_and_refuses_an_oversized_key() {
+        let contract = b"contract-1";
+        let recipient = "r".repeat(600);
+        let transfer =
+            serde_json::json!({"execute": {"transfer": {"recipient": recipient, "amount": "0"}}});
+        let key = format!("cw20:bal:{recipient}");
+
+        let needed = charged_by("anyone", &transfer);
+        let mut poor = MockHost::with_creator(contract, "creator");
+        poor.budget = Some(needed - 1);
+        let refusal =
+            execute_cosmwasm_json(contract, "anyone", &transfer, false, u64::MAX, &mut poor)
+                .unwrap_err();
+        assert!(refusal.contains("out of gas"), "{refusal}");
+        assert!(read_store(&poor, contract, key.as_bytes())
+            .unwrap()
+            .is_none());
+
+        let mut funded = MockHost::with_creator(contract, "creator");
+        funded.budget = Some(needed);
+        execute_cosmwasm_json(contract, "anyone", &transfer, false, u64::MAX, &mut funded).unwrap();
+        assert!(read_store(&funded, contract, key.as_bytes())
+            .unwrap()
+            .is_some());
+
+        let oversized = "r".repeat(MAX_WASM_STORE_KEY_BYTES);
+        for msg in [
+            serde_json::json!({"execute": {"transfer": {"recipient": oversized, "amount": "0"}}}),
+            serde_json::json!({"execute": {"set_allowance": {"spender": oversized, "amount": "1"}}}),
+        ] {
+            let mut host = MockHost::with_creator(contract, "creator");
+            let refusal =
+                execute_cosmwasm_json(contract, "anyone", &msg, false, u64::MAX, &mut host)
+                    .unwrap_err();
+            assert!(refusal.contains("storage key exceeds"), "{refusal}");
+            assert!(
+                host.store
+                    .keys()
+                    .all(|(_, key)| key.len() < MAX_WASM_STORE_KEY_BYTES),
+                "the oversized key is not staged"
+            );
         }
     }
 

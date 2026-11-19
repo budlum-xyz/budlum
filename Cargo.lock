@@ -551,6 +551,7 @@ dependencies = [
  "p3-fri",
  "p3-goldilocks",
  "p3-keccak",
+ "p3-keccak-air",
  "p3-matrix",
  "p3-maybe-rayon",
  "p3-merkle-tree",
@@ -3869,6 +3870,21 @@ dependencies = [
  "p3-symmetric",
  "p3-util",
  "tiny-keccak",
+]
+
+[[package]]
+name = "p3-keccak-air"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f27eece036ec32f0e29f7e258321c94596c04ed1d75473df85d1d44dcc70658"
+dependencies = [
+ "p3-air",
+ "p3-field",
+ "p3-matrix",
+ "p3-maybe-rayon",
+ "p3-util",
+ "rand 0.10.3",
+ "tracing",
 ]
 
 [[package]]

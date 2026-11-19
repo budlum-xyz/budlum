@@ -1373,10 +1373,11 @@ fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<Stri
         line_value(&ids, "mirror account: 0x").ok_or("app_binding id printed no mirror")?;
     let query_params = format!("[\"{app_binding_id}\"]");
     let before_tip = tip();
-    // Permissionlessly registered PoA domains (without an onboarded PoA admin
-    // or bootstrapped external chain id) cannot serve as an AppBinding trust
-    // anchor: verify fail-closed refusal at submission or block execution,
-    // leaving no AppBinding row and zero balance on the derived mirror account.
+    // Remote app binding (`app_binding`) is closed on public testnet (45261)
+    // and mainnet (45260); only devnet (45262) keeps the door open. Verify the
+    // live fail-closed boundary (G-7): registration must either be refused at
+    // submission or dropped in execution without creating a binding row or
+    // crediting the mirror account.
     let register_result = backend.bud(&[
         "app-binding",
         "register",
@@ -1396,9 +1397,7 @@ fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<Stri
             let now = tip();
             (now >= before_tip.saturating_add(2)).then_some(now)
         })
-        .ok_or(
-            "chain did not advance 2 blocks after AppBinding permissionless-PoA refusal probe",
-        )?;
+        .ok_or("chain did not advance 2 blocks after AppBinding closed-feature probe")?;
         String::from("refused in execution")
     };
     let registered = call("bud_getAppBindingApplication", &query_params);
@@ -1407,17 +1406,17 @@ fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<Stri
         .is_some_and(|v| *v != crate::json::Value::Null)
     {
         return Err(format!(
-            "AppBinding {app_binding_id} unexpectedly registered on permissionless PoA domain {DOMAIN}"
+            "AppBinding {app_binding_id} unexpectedly registered on closed testnet {CHAIN_ID}"
         ));
     }
     let held = balance(&mirror);
     if held != 0 {
         return Err(format!(
-            "AppBinding mirror 0x{mirror} unexpectedly holds {held} after refused registration"
+            "AppBinding mirror 0x{mirror} unexpectedly holds {held} on closed testnet {CHAIN_ID}"
         ));
     }
     Ok(format!(
-        "PoA domain {DOMAIN} registered; permissionless AppBinding {app_binding_id} refused ({refusal_stage})"
+        "PoA domain {DOMAIN} registered; AppBinding {app_binding_id} stayed closed ({refusal_stage})"
     ))
 }
 

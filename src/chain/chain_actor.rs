@@ -40,6 +40,14 @@ pub type BnsContentView = (
     Result<Vec<u8>, String>,
 );
 
+/// Verified B.U.D. 3.0 symbol range plus segment root metadata returned to RPC callers.
+#[derive(Debug, Clone)]
+pub struct Bud3SymbolPage {
+    pub symbol_size: u16,
+    pub roots: Vec<crate::storage::bud3::registry::SymbolRoot>,
+    pub items: Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>,
+}
+
 /// A name proof and the block it was read at.
 #[derive(Debug, Clone)]
 pub struct BnsAnchoredProof {
@@ -192,6 +200,30 @@ pub enum ChainCommand {
         crate::storage::bud3::registry::Bud3Query,
         oneshot::Sender<serde_json::Value>,
     ),
+    GetBud3Nfts(
+        Vec<crate::storage::bud3::registry::NftId>,
+        oneshot::Sender<Vec<serde_json::Value>>,
+    ),
+    Bud3StoreVerifiedSymbols {
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        items: Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>,
+        reply: oneshot::Sender<Result<usize, String>>,
+    },
+    Bud3GetSymbols {
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+        reply: oneshot::Sender<Result<Bud3SymbolPage, String>>,
+    },
+    Bud3GetContent {
+        receipt: crate::storage::bud3::view::PaidViewReceipt,
+        reply: oneshot::Sender<Result<Vec<u8>, crate::storage::bud3::view::ViewBud3Error>>,
+    },
+    ValidatorPeerId([u8; 32], oneshot::Sender<Option<[u8; 32]>>),
     GetValidatorAddress(oneshot::Sender<Option<Address>>),
     GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
@@ -211,7 +243,29 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::settlement::GlobalBlockHeader>>,
     ),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
+    GetDomainCommitmentsWithGarden(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
+    GetConsensusDomainsWithGarden(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
+    RegisterGardenDomain(
+        Box<crate::domain::ConsensusDomain>,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    SubmitVerifiedGardenCommitment(
+        Box<crate::domain::VerifiedDomainCommitment>,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    RotateBridgelessPoaAuthoritySet {
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        validator_set_hash: crate::domain::Hash32,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    TransitionBridgelessPoaDomainStatus {
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        next: crate::domain::DomainStatus,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     GetAppBindingApplication(
         [u8; 32],
         oneshot::Sender<Option<crate::settlement::app_binding::AppBindingApp>>,
@@ -284,6 +338,12 @@ pub enum ChainCommand {
     GetExternalDomainRegistration(
         crate::cross_domain::external::DomainKey,
         oneshot::Sender<Option<(crate::cross_domain::external::DomainRegistration, u64)>>,
+    ),
+    ValidateDomainBlock(
+        crate::domain::DomainId,
+        Box<Block>,
+        u64,
+        oneshot::Sender<Result<crate::domain::DomainCommitment, String>>,
     ),
     GetAiModel(
         crate::ai::types::AiModelId,
@@ -1564,6 +1624,100 @@ impl ChainHandle {
             .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
     }
 
+    /// Resolve a batch of B.U.D. 3.0 NFT bindings (`NftId`) in a single actor turn.
+    pub async fn bud3_nfts(
+        &self,
+        nfts: Vec<crate::storage::bud3::registry::NftId>,
+    ) -> Result<Vec<serde_json::Value>, &'static str> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::GetBud3Nfts(nfts, tx))
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// Verify and store node-local B.U.D. 3.0 custody symbols against live consensus roots.
+    pub async fn bud3_store_verified_symbols(
+        &self,
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        items: Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>,
+    ) -> Result<Result<usize, String>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::Bud3StoreVerifiedSymbols {
+                holder,
+                object,
+                segment,
+                items,
+                reply,
+            })
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// Read verified B.U.D. 3.0 symbol items and segment roots for `(holder, object, segment)`.
+    pub async fn bud3_get_symbols(
+        &self,
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<Result<Bud3SymbolPage, String>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::Bud3GetSymbols {
+                holder,
+                object,
+                segment,
+                first_esi,
+                count,
+                reply,
+            })
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// G8 paid public fallback decode via the chain actor's verified symbol store.
+    pub async fn bud3_get_content(
+        &self,
+        receipt: crate::storage::bud3::view::PaidViewReceipt,
+    ) -> Result<Result<Vec<u8>, crate::storage::bud3::view::ViewBud3Error>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::Bud3GetContent { receipt, reply })
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// Resolve a registered validator's 32-byte Ed25519 transport peer key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the chain actor channel is closed or the reply is dropped.
+    pub async fn validator_peer_id(
+        &self,
+        owner: [u8; 32],
+    ) -> Result<Option<[u8; 32]>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::ValidatorPeerId(owner, reply))
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
     /// The quantum alarm and the observed crypto facts of the native domains.
     pub async fn quantum_view(&self) -> serde_json::Value {
         let (tx, rx) = oneshot::channel();
@@ -1701,6 +1855,23 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// Canonical in-block domain commitments merged with this node's local
+    /// Garden commitments. Served only on the operator RPC listener so
+    /// public RPC callers never observe node-local Gardens.
+    pub async fn get_domain_commitments_with_garden(&self) -> Vec<crate::domain::DomainCommitment> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetDomainCommitmentsWithGarden(tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// Query the latest committed height of `domain_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the chain actor stopped or the domain is unknown.
     pub async fn get_domain_height(
         &self,
         domain_id: crate::domain::DomainId,
@@ -1714,6 +1885,11 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    /// Build the current global settlement header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the chain actor stopped or header construction fails.
     pub async fn build_global_header(
         &self,
         _dummy: Option<()>,
@@ -1728,6 +1904,114 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetConsensusDomains(tx)).await;
         rx.await.unwrap_or_default()
+    }
+
+    /// Canonical in-block domains merged with this node's local Garden
+    /// domains. Operator-only callers such as `GardenBudlumLink::view` use
+    /// this instead of `get_consensus_domains`, which serves public RPC.
+    pub async fn get_consensus_domains_with_garden(&self) -> Vec<crate::domain::ConsensusDomain> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetConsensusDomainsWithGarden(tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// Register a sovereign, bridgeless `PoA` Garden domain in this node's
+    /// local Garden registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the domain record is invalid or already registered,
+    /// or if the chain actor stopped.
+    pub async fn register_garden_domain(
+        &self,
+        domain: crate::domain::ConsensusDomain,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterGardenDomain(Box::new(domain), tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Verify and record one Garden domain commitment in this node's local
+    /// Garden registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if verification fails, the domain is not active, or the
+    /// chain actor stopped.
+    pub async fn submit_verified_garden_commitment(
+        &self,
+        verified: crate::domain::VerifiedDomainCommitment,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitVerifiedGardenCommitment(
+                Box::new(verified),
+                tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Replace the registered authority set of a bridgeless `PoA` Garden domain
+    /// the caller operates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the caller does not operate the domain, the domain
+    /// is retired, the hash is zero, or the chain actor stopped.
+    pub async fn rotate_bridgeless_poa_authority_set(
+        &self,
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        validator_set_hash: crate::domain::Hash32,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RotateBridgelessPoaAuthoritySet {
+                domain_id,
+                operator,
+                validator_set_hash,
+                reply,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Move a bridgeless `PoA` Garden domain the caller operates to `next`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transition is illegal, the domain is
+    /// quarantined, the caller is not the operator, or the chain actor stopped.
+    pub async fn transition_bridgeless_poa_domain_status(
+        &self,
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        next: crate::domain::DomainStatus,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::TransitionBridgelessPoaDomainStatus {
+                domain_id,
+                operator,
+                next,
+                reply,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
     pub async fn get_app_binding_payment_proof(
@@ -1937,6 +2221,34 @@ impl ChainHandle {
             .send(ChainCommand::GetExternalDomainRegistration(key, tx))
             .await;
         rx.await.unwrap_or(None)
+    }
+
+    /// Fail-closed consensus-plugin block validation and commitment extraction
+    /// through `Blockchain::validate_and_extract_domain_block` (`B-0046`).
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown/inactive domains, unregistered plugins, and invalid blocks.
+    ///
+    /// WIRING: Actor handle for domain-local block intake (`plugin_registry`).
+    pub async fn import_domain_block(
+        &self,
+        domain_id: crate::domain::DomainId,
+        block: Block,
+        sequence: u64,
+    ) -> Result<crate::domain::DomainCommitment, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::ValidateDomainBlock(
+                domain_id,
+                Box::new(block),
+                sequence,
+                tx,
+            ))
+            .await
+            .map_err(|_| "Chain actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Chain actor dropped response".to_string())?
     }
 
     pub async fn get_ai_model(
@@ -3192,7 +3504,71 @@ impl ChainActor {
                     let _ = tx.send(self.blockchain.quantum_view());
                 }
                 ChainCommand::GetBud3(query, tx) => {
+                    let query = match query {
+                        crate::storage::bud3::registry::Bud3Query::Grant(tag) => {
+                            crate::storage::bud3::registry::Bud3Query::GrantAt(
+                                tag,
+                                self.blockchain.state.epoch_index,
+                            )
+                        }
+                        other => other,
+                    };
                     let _ = tx.send(self.blockchain.state.bud3_registry.query_json(&query));
+                }
+                ChainCommand::GetBud3Nfts(nfts, tx) => {
+                    let values =
+                        nfts.into_iter()
+                            .map(|nft| {
+                                self.blockchain.state.bud3_registry.query_json(
+                                    &crate::storage::bud3::registry::Bud3Query::Nft(nft),
+                                )
+                            })
+                            .collect();
+                    let _ = tx.send(values);
+                }
+                ChainCommand::Bud3StoreVerifiedSymbols {
+                    holder,
+                    object,
+                    segment,
+                    items,
+                    reply,
+                } => {
+                    let res = self
+                        .blockchain
+                        .store_verified_bud3_symbols(&holder, &object, segment, &items);
+                    let _ = reply.send(res);
+                }
+                ChainCommand::Bud3GetSymbols {
+                    holder,
+                    object,
+                    segment,
+                    first_esi,
+                    count,
+                    reply,
+                } => {
+                    let res = self
+                        .blockchain
+                        .fetch_verified_bud3_symbol_page(
+                            &holder, &object, segment, first_esi, count,
+                        )
+                        .map(|(symbol_size, roots, items)| Bud3SymbolPage {
+                            symbol_size,
+                            roots,
+                            items,
+                        });
+                    let _ = reply.send(res);
+                }
+                ChainCommand::Bud3GetContent { receipt, reply } => {
+                    let res = self.blockchain.decode_bud3_paid_content(&receipt);
+                    let _ = reply.send(res);
+                }
+                ChainCommand::ValidatorPeerId(owner, reply) => {
+                    let record = self
+                        .blockchain
+                        .state
+                        .validator_directory
+                        .get(&Address(owner));
+                    let _ = reply.send(record.map(|r| r.peer_id));
                 }
                 ChainCommand::GetValidatorDirectory(query, tx) => {
                     let state = &self.blockchain.state;
@@ -3283,16 +3659,60 @@ impl ChainActor {
                     let _ = tx.send(header);
                 }
                 ChainCommand::GetDomainCommitments(tx) => {
-                    let commitments = self
-                        .blockchain
-                        .state
-                        .settlement
-                        .commitments
-                        .commitments_for_global_block();
-                    let _ = tx.send(commitments);
+                    // Public RPC (`bud_getDomainCommitments`) reads canonical
+                    // in-block settlement commitments only; node-local Gardens
+                    // stay private to the node operator.
+                    let _ = tx.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .commitments
+                            .commitments_for_global_block(),
+                    );
+                }
+                ChainCommand::GetDomainCommitmentsWithGarden(tx) => {
+                    let _ = tx.send(self.blockchain.domain_commitments_with_garden());
                 }
                 ChainCommand::GetConsensusDomains(tx) => {
+                    // Public RPC (`bud_getConsensusDomains`) reads canonical
+                    // in-block domains only.
                     let _ = tx.send(self.blockchain.state.settlement.domains.domains());
+                }
+                ChainCommand::GetConsensusDomainsWithGarden(tx) => {
+                    let _ = tx.send(self.blockchain.consensus_domains_with_garden());
+                }
+                ChainCommand::RegisterGardenDomain(domain, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.register_garden_domain(*domain));
+                }
+                ChainCommand::SubmitVerifiedGardenCommitment(verified, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .submit_verified_garden_commitment(verified.commitment, verified.proof),
+                    );
+                }
+                ChainCommand::RotateBridgelessPoaAuthoritySet {
+                    domain_id,
+                    operator,
+                    validator_set_hash,
+                    reply,
+                } => {
+                    let _ = reply.send(self.blockchain.rotate_bridgeless_poa_authority_set(
+                        domain_id,
+                        operator,
+                        validator_set_hash,
+                    ));
+                }
+                ChainCommand::TransitionBridgelessPoaDomainStatus {
+                    domain_id,
+                    operator,
+                    next,
+                    reply,
+                } => {
+                    let _ =
+                        reply
+                            .send(self.blockchain.transition_bridgeless_poa_domain_status(
+                                domain_id, operator, next,
+                            ));
                 }
                 ChainCommand::GetAppBindingPaymentProof(payment_id, tx) => {
                     let _ = tx.send(self.blockchain.app_binding_payment_proof(&payment_id));
@@ -3410,6 +3830,14 @@ impl ChainActor {
                 }
                 ChainCommand::GetExternalDomainRegistration(key, res_tx) => {
                     let _ = res_tx.send(self.blockchain.external_domain_registration(&key));
+                }
+                ChainCommand::ValidateDomainBlock(domain_id, block, seq, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.validate_and_extract_domain_block(
+                        domain_id,
+                        &block,
+                        &[],
+                        seq,
+                    ));
                 }
                 ChainCommand::GetAiModel(id, res_tx) => {
                     let res = self.blockchain.state.ai_registry.models.get(&id).cloned();
@@ -4028,6 +4456,7 @@ impl ChainActor {
                 ChainCommand::BnsResolveContent { name, response } => {
                     let state = &self.blockchain.state;
                     let epoch = state.epoch_index;
+                    let source = self.blockchain.bud3_symbol_source();
                     let view =
                         crate::bns::Bud3BnsResolver::binding(&state.bns_registry, &name, epoch)
                             .map(|binding| {
@@ -4035,7 +4464,7 @@ impl ChainActor {
                                 let bytes = crate::bns::Bud3BnsResolver::resolve_via_bud3_view(
                                     &state.bns_registry,
                                     &state.bud3_registry,
-                                    &crate::storage::bud3::view::NoSymbolsHeld,
+                                    &source,
                                     &name,
                                     epoch,
                                     &crate::bns::bud3::BnsViewAccess::default(),

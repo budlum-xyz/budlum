@@ -39,11 +39,13 @@
 //! # WIRING STATUS - read this before trusting anything below
 //!
 //! **Wired through [`intake`]** - with the limit spelled out here
-//! The attestation is NOT part of any block or header
-//! yet. `state_digest` is an RPC value a consumer can compare; nothing in
-//! consensus commits it until the `GlobalBlockHeader` root lands. The two
-//! consensus decisions the earlier version of this notice deferred were
-//! made, in writing, in `intake.rs`'s module docs:
+//! The intake is in the state root (two nodes that applied the same blocks
+//! hold the same intake), and the `GlobalBlockHeader` carries its digest as
+//! the presence-tagged `external_intake_root` (set in `blockchain.rs` when
+//! the intake holds any record, hashed into the header by
+//! `global_block.rs`). The two consensus decisions the earlier version of
+//! this notice deferred were made, in writing, in `intake.rs`'s module
+//! docs:
 //!
 //! 1. The registry lives in the account state as
 //!    `settlement.external_intake` ([`IntakeState`]), written only by the
@@ -63,12 +65,11 @@
 //! the transaction. Re-derive before believing, as always:
 //! `grep -rn 'external_intake' src/ --include='*.rs'`.
 //!
-//! **Limit of that claim.** The intake is now in the state root, so two
-//! nodes that applied the same blocks hold the same intake. The
-//! `GlobalBlockHeader` does not carry its digest yet (
-//!). Prover slashing has no door: it needs a proof that an accepted
-//! attestation was false, which is not defined yet, so
-//! `bud_slashExternalProver` is closed.
+//! **Limit of that claim.** The intake is in the state root and its digest
+//! is in the header when the intake holds any record (presence-tagged
+//! `external_intake_root`, commit `fb58775c`). Prover slashing still has no
+//! door: it needs a proof that an accepted attestation was false, which is
+//! not defined yet, so `bud_slashExternalProver` is closed.
 //!
 //! # The rule underneath all six
 //!
@@ -78,30 +79,79 @@
 //! with their units attached. The judgement is the reader's, and the numbers it
 //! needs are in [`profile`].
 
+pub mod algorand_stateproof;
+pub mod aptos_jolteon_bft;
+pub mod arweave_spora;
+pub mod auxpow_pop;
 pub mod babylon_eots;
+pub mod based_preconf;
+pub mod bitcoin_spv;
+pub mod chain_key_ni_dkg;
+pub mod da_sampling;
+pub mod dag_bft;
 pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
 pub mod external_tx;
+pub mod ghostdag;
+pub mod heterogeneous_multiprover;
+pub mod hotstuff;
 pub mod intake;
 pub mod intake_quorum;
+pub mod mina_recursive;
+pub mod near_doomslug;
+pub mod nipopow;
 pub mod ouroboros_mithril;
 pub mod phase_a_dual;
+pub mod pospace_vdf;
 pub mod profile;
 pub mod prover;
 pub mod quorum;
 pub mod registry;
+pub mod restaking_avs;
 pub mod selftest;
+pub mod sentry;
+pub mod simplex_bft;
+pub mod solana_tower_bft;
 pub mod spec;
+pub mod stellar_fba;
+pub mod symbiotic_vault;
+pub mod tendermint;
+pub mod ton_catchain;
 pub mod versioning;
 pub mod zkvm_proof;
 
+pub use algorand_stateproof::{
+    advance_algorand_verifier, verify_algorand_equivocation, AlgorandStateProofAdapter,
+    AlgorandStateProofMessage, PinnedAlgorandVerifier,
+};
+pub use aptos_jolteon_bft::{
+    encode_jolteon_evidence, jolteon_tc_sign_bytes, jolteon_vote_sign_bytes,
+    verify_jolteon_equivocation, AptosJolteonAdapter, JolteonBlock, JolteonEquivocationProof,
+    JolteonQuorumCert, JolteonTimeoutCert, JolteonTwoChainEvidence, JolteonValidator,
+    JolteonValidatorSig, PinnedJolteonEpochState, APTOS_JOLTEON_ADAPTER_NAME,
+};
+pub use arweave_spora::{ArweaveSpOraAdapter, ArweaveSpOraEvidence};
+pub use auxpow_pop::{
+    AuxPowPopAdapter, PinnedAuxPowAnchor, PopAnchorSigner, PopEquivocationProof, U256Bytes,
+};
 pub use babylon_eots::{
     epoch_vote_message, BabylonEotsAdapter, BtcCheckpoint, BtcWeakSubjectivityAnchor,
     EotsEquivocationProof, EotsEvidence, EotsPublicKey, EotsVote, PostQuantumHalf,
     DEFAULT_REQUIRED_BTC_CONFIRMATIONS, EVIDENCE_VERSION as EOTS_EVIDENCE_VERSION,
     SCHNORR_PUBLIC_KEY_LEN, SCHNORR_SIGNATURE_LEN,
 };
+pub use based_preconf::{BasedPreconfAdapter, BasedPreconfValidator, PinnedBasedPreconfCommittee};
+pub use bitcoin_spv::{
+    sha256d, BitcoinHeader, BitcoinSpvAdapter, PinnedBitcoinAnchor, EVIDENCE_VERSION, HEADER_LEN,
+    MAX_FUTURE_SECONDS, MAX_HEADERS, REQUIRED_DEPTH,
+};
+pub use chain_key_ni_dkg::{
+    compute_nidkg_transcript_digest, cup_signing_digest, delegation_signing_digest,
+    encode_chain_key_evidence, ChainKeyCatchUpPackage, ChainKeyEvidenceBundle,
+    ChainKeyNiDkgAdapter, ChainKeySubnetDelegation, PinnedChainKeyRoot, CHAIN_KEY_ADAPTER_NAME,
+};
+pub use dag_bft::{BullsharkDagAdapter, DagBftValidator, PinnedDagCommittee};
 pub use domain_bridge::{
     decode_external_evidence, encode_external_evidence, ExternalDomainFinalityBridge,
     EXTERNAL_DOMAIN_FINALITY_ADAPTER,
@@ -121,16 +171,47 @@ pub use evm_hybrid::{
 pub use external_tx::{
     execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext, ExternalDomainTxError,
 };
+pub use ghostdag::{
+    encode_ghostdag_evidence, GhostdagEvidence, GhostdagHeader, GhostdagPowAdapter,
+    PinnedGhostdagAnchor,
+};
+pub use heterogeneous_multiprover::{
+    detect_prover_disagreement, AttestedCommitteeLeg, FaultWindowLeg,
+    HeterogeneousMultiProverAdapter, MultiProverCommitteeMember, MultiProverDisagreement,
+    MultiProverEvidence, PinnedFaultProposer, PinnedMultiProverConfig, ProverFamily,
+    RollupBatchClaim, StarkProverLeg,
+};
+pub use hotstuff::{
+    verify_hotstuff_equivocation, verify_hotstuff_timeout_certificate, HotStuffEquivocationProof,
+    HotStuffThreeChainAdapter, HotStuffTimeoutCertificate, HotStuffTimeoutVote, HotStuffValidator,
+    HotStuffVoteSig, PinnedHotStuffCommittee,
+};
 pub(crate) use intake::live_policy_clock;
-pub use intake::{AdapterSpec, IntakeEntry, IntakeError, IntakeState, RegistrationRequest};
+pub use intake::{
+    AdapterSpec, ContradictionSlashOutcome, IntakeEntry, IntakeError, IntakeState,
+    RegistrationRequest,
+};
 pub use intake_quorum::{
     QuorumRound, QuorumRounds, RoundEntry, RoundError, RoundKey, RoundProgress, RoundState,
     ROUND_RETENTION_BLOCKS,
+};
+pub use mina_recursive::{PinnedSuccinctGenesis, SuccinctRecursiveAdapter};
+pub use near_doomslug::{
+    advance_near_epoch, verify_near_approval_slash, NearBlockProducer, NearDoomslugAdapter,
+    PinnedNearEpoch,
+};
+pub use nipopow::{
+    best_superchain_score, superblock_level, InterlinkHop, InterlinkMerkleStep, NipopowAdapter,
+    NipopowEvidence, NipopowHeader, PinnedNipopowGenesis,
 };
 pub use ouroboros_mithril::{
     mithril_certificate_message, mithril_threshold, praos_vote_message, proof_of_equivocation,
     EpochSigner, EpochStake, MithrilEvidence, MithrilSignature, OuroborosMithrilAdapter,
     PraosEquivocationProof, PraosSlotProof, EVIDENCE_VERSION as PRAOS_EVIDENCE_VERSION,
+};
+pub use pospace_vdf::{
+    verify_double_signage_equivocation, PinnedPoSpaceAnchor, PoSpaceEquivocationProof,
+    PoSpaceVdfAdapter, PoSpaceVdfBlock, PoSpaceVdfEvidence, SignedPoSpaceSignage,
 };
 pub use profile::{profile_of, DomainProfile, DomainRecord, DomainState, StateEvent, BOND_UNIT};
 pub use prover::{
@@ -142,15 +223,37 @@ pub use quorum::{
     LowParticipantsBehavior, QuorumOutcome, QuorumPolicy,
 };
 pub use registry::{no_backing, DomainRegistration, ExternalDomainRegistry, RegistryError};
+pub use restaking_avs::{
+    AvsQuorumMember, PinnedRestakingAvsSet, RestakedOperator, RestakingAvsAdapter,
+    RestakingSlashingProof,
+};
 pub use selftest::{
     admit, admit_observed, apply_patch, run_probe, AdmissionReport, BytePatch, ExpectedRefusal,
     FaultProbe, ProbeOutcome, RefusalKind,
 };
+pub use sentry::{
+    evaluate_testnet_readiness, ConsensusSentry, DomainQuantumPosture, SentryAction, SentryAlert,
+    SentryCircuitState, SentryDomainPolicy, SentryError, SentryFindingKind, SentryObservation,
+    SentrySeverity, TestnetLaunchVerdict, TestnetReadinessSnapshot, WatchedDomainState,
+};
+pub use simplex_bft::{
+    NoEndorsementCertificate, PinnedSimplexCommittee, SimplexBftAdapter, SimplexSlashingProof,
+    SimplexValidator,
+};
+pub use solana_tower_bft::{PinnedSolEpoch, SolanaTowerBftAdapter, SolanaValidator};
 pub use spec::{
     AdapterDescriptor, AdapterError, AdapterId, DomainKey, ExternalFinalityAdapter,
     FinalityAttestation, FinalityKind, ProofSystem, RawConsensusEvidence, SecurityBacking,
     TimeUnit, TrustModel, VerificationPolicy,
 };
+pub use stellar_fba::{PinnedScpTier, ScpQuorumSet, ScpValidatorNode, StellarScpAdapter};
+pub use symbiotic_vault::{SymbioticVaultAdapter, SymbioticVaultEvidence};
+pub use tendermint::{
+    quorum_threshold, validator_address_of, validator_set_commitment, validator_set_hash,
+    vote_sign_bytes, PinnedTendermintAnchor, TendermintCommitEvidence, TendermintFinalityAdapter,
+    TendermintSignature, TendermintValidator,
+};
+pub use ton_catchain::{PinnedTonMasterchainAnchor, TonCatchainAdapter, TonValidator};
 pub use versioning::{ForkError, VersionPolicy, VersionWindow};
 pub use zkvm_proof::{
     ZkFinalityEvidence, ZkVmFinalityAdapter, EVIDENCE_VERSION as ZK_EVIDENCE_VERSION,

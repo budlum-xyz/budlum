@@ -35,6 +35,7 @@ pub const BUD_UNIT: u64 = 1_000_000; // 10^6
 pub const BUD_TOTAL_SUPPLY: u64 = 100_000_000 * BUD_UNIT; // 1e14
 
 /// Convert whole $BUD to base units.
+#[must_use]
 pub const fn bud(whole: u64) -> u64 {
     whole * BUD_UNIT
 }
@@ -95,13 +96,14 @@ pub enum Allocation {
 }
 
 impl Allocation {
-    pub fn label(&self) -> &'static str {
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
         match self {
-            Allocation::Community => "community",
-            Allocation::Liquidity => "liquidity",
-            Allocation::Ecosystem => "ecosystem",
-            Allocation::Team => "team",
-            Allocation::BurnReserve => "burn_reserve",
+            Self::Community => "community",
+            Self::Liquidity => "liquidity",
+            Self::Ecosystem => "ecosystem",
+            Self::Team => "team",
+            Self::BurnReserve => "burn_reserve",
         }
     }
 }
@@ -116,7 +118,7 @@ pub struct VestingSchedule {
     /// Number of epochs before ANY tokens unlock (cliff).
     pub cliff_epochs: u64,
     /// Number of epochs over which the full amount unlocks linearly, measured
-    /// From `start_epoch` (must be >= cliff_epochs).
+    /// From `start_epoch` (must be >= `cliff_epochs`).
     pub duration_epochs: u64,
 }
 
@@ -128,6 +130,7 @@ impl VestingSchedule {
     /// nonzero cliff unlocks everything at the cliff, not at genesis: the
     /// zero-duration shortcut is for the no-schedule case, and it used to
     /// bypass the cliff.
+    #[must_use]
     pub fn unlocked_at(&self, epoch: u64) -> u64 {
         if epoch < self.start_epoch.saturating_add(self.cliff_epochs) {
             return 0;
@@ -144,6 +147,7 @@ impl VestingSchedule {
     }
 
     /// Amount still locked at `epoch`.
+    #[must_use]
     pub fn locked_at(&self, epoch: u64) -> u64 {
         self.total.saturating_sub(self.unlocked_at(epoch))
     }
@@ -162,7 +166,7 @@ pub struct TokenomicsParams {
     /// Number of epochs that constitute one "year" for the timed reserve burn.
     pub epochs_per_year: u64,
     /// Annual fraction of the ORIGINAL burn reserve to burn each year, scaled by
-    /// `FIXED_POINT_SCALE` (e.g. FIXED_POINT_SCALE/10 == 10%/yr).
+    /// `FIXED_POINT_SCALE` (e.g. `FIXED_POINT_SCALE/10` == 10%/yr).
     pub annual_burn_ratio_fixed: u64,
 
     /// Team vesting.
@@ -188,7 +192,7 @@ pub struct TokenomicsParams {
 impl Default for TokenomicsParams {
     fn default() -> Self {
         use crate::core::chain_config::FIXED_POINT_SCALE;
-        TokenomicsParams {
+        Self {
             community: bud(10_000_000),
             liquidity: bud(10_000_000),
             ecosystem: bud(20_000_000),
@@ -219,6 +223,7 @@ impl Default for TokenomicsParams {
 
 impl TokenomicsParams {
     /// Wall-clock seconds represented by one canonical tokenomics epoch.
+    #[must_use]
     pub fn seconds_per_epoch(&self) -> u64 {
         self.slot_duration_secs
             .max(1)
@@ -226,6 +231,7 @@ impl TokenomicsParams {
     }
 
     /// Wall-clock seconds represented by one annual reserve-burn period.
+    #[must_use]
     pub fn seconds_per_year(&self) -> u64 {
         self.epochs_per_year
             .max(1)
@@ -236,12 +242,14 @@ impl TokenomicsParams {
     /// Existing vesting schedules. This keeps the storage format stable while
     /// Ensuring production unlocks advance with time, not with arbitrary epoch
     /// Counter jumps.
+    #[must_use]
     pub fn epoch_at_timestamp(&self, timestamp_secs: u64) -> u64 {
         timestamp_secs / self.seconds_per_epoch()
     }
 
     /// Sum of all category allocations - must equal [`BUD_TOTAL_SUPPLY`].
-    pub fn total(&self) -> u64 {
+    #[must_use]
+    pub const fn total(&self) -> u64 {
         self.community
             .saturating_add(self.liquidity)
             .saturating_add(self.ecosystem)
@@ -250,11 +258,13 @@ impl TokenomicsParams {
     }
 
     /// True iff allocations sum to exactly the fixed total supply.
-    pub fn is_balanced(&self) -> bool {
+    #[must_use]
+    pub const fn is_balanced(&self) -> bool {
         self.total() == BUD_TOTAL_SUPPLY
     }
 
-    pub fn amount_of(&self, alloc: Allocation) -> u64 {
+    #[must_use]
+    pub const fn amount_of(&self, alloc: Allocation) -> u64 {
         match alloc {
             Allocation::Community => self.community,
             Allocation::Liquidity => self.liquidity,
@@ -265,7 +275,8 @@ impl TokenomicsParams {
     }
 
     /// Team vesting schedule anchored at `genesis_epoch` (usually 0).
-    pub fn team_vesting(&self, genesis_epoch: u64) -> VestingSchedule {
+    #[must_use]
+    pub const fn team_vesting(&self, genesis_epoch: u64) -> VestingSchedule {
         VestingSchedule {
             total: self.team,
             start_epoch: genesis_epoch,
@@ -282,6 +293,7 @@ impl TokenomicsParams {
     /// holding a single unit more than its share of the annual budget, and
     /// with enough such accounts the sum exceeded the yield the parameters
     /// promise.
+    #[must_use]
     pub fn calculate_epoch_reward(&self, validator_stake: u64) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
         if validator_stake == 0 {
@@ -326,6 +338,7 @@ impl TokenomicsParams {
         u64::try_from(epoch_yield).unwrap_or(validator_stake)
     }
 
+    #[must_use]
     pub fn annual_burn_amount(&self) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
         // No `as u64` truncation. With the ratio capped
@@ -338,6 +351,7 @@ impl TokenomicsParams {
     }
 
     /// The metabolic burn taken from a single `fee`.
+    #[must_use]
     pub fn metabolic_burn(&self, fee: u64) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
         // Same rule - a burn can never exceed the fee it comes
@@ -348,10 +362,12 @@ impl TokenomicsParams {
     }
 }
 
-/// Genesis addresses for the tokenomics allocation accounts. In a real
-/// Deployment these come from the genesis config; here they are derived
-/// Deterministically from a low reserved-address range for the on-chain reserve
-/// Pool (the burn reserve must live in an account so it can be burned from).
+/// Genesis addresses for the tokenomics allocation accounts.
+///
+/// In a real deployment these come from the genesis config; here they are
+/// derived deterministically from a low reserved-address range for the
+/// on-chain reserve pool (the burn reserve must live in an account so it can
+/// be burned from).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenomicsAddresses {
     pub community: Address,
@@ -362,9 +378,10 @@ pub struct TokenomicsAddresses {
 }
 
 impl TokenomicsAddresses {
-    /// Deterministic reserved addresses (0xB0_D0_00.. range) for devnet/testing.
+    /// Deterministic reserved addresses (`0xB0_D0_00..` range) for devnet/testing.
     /// Production genesis must pass ceremony-controlled destinations. This
     /// Address bundle does not by itself encode or prove a multisig policy.
+    #[must_use]
     pub fn reserved() -> Self {
         let mk = |tag: u8| {
             let mut a = [0u8; 32];
@@ -373,7 +390,7 @@ impl TokenomicsAddresses {
             a[2] = tag;
             Address::from(a)
         };
-        TokenomicsAddresses {
+        Self {
             community: mk(1),
             liquidity: mk(2),
             ecosystem: mk(3),
@@ -382,7 +399,8 @@ impl TokenomicsAddresses {
         }
     }
 
-    pub fn address_of(&self, alloc: Allocation) -> Address {
+    #[must_use]
+    pub const fn address_of(&self, alloc: Allocation) -> Address {
         match alloc {
             Allocation::Community => self.community,
             Allocation::Liquidity => self.liquidity,
@@ -444,6 +462,7 @@ pub struct TimedBurnState {
 }
 
 impl TimedBurnState {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -451,7 +470,13 @@ impl TimedBurnState {
     /// How many annual burns SHOULD have happened by `current_epoch`, given the
     /// Genesis epoch and `epochs_per_year`. Kept for deterministic legacy/devnet
     /// Tests; production callers should prefer [`Self::due_years_by_time`].
-    pub fn due_years(&self, genesis_epoch: u64, current_epoch: u64, epochs_per_year: u64) -> u64 {
+    #[must_use]
+    pub const fn due_years(
+        &self,
+        genesis_epoch: u64,
+        current_epoch: u64,
+        epochs_per_year: u64,
+    ) -> u64 {
         if epochs_per_year == 0 {
             return 0;
         }
@@ -459,7 +484,8 @@ impl TimedBurnState {
     }
 
     /// How many annual burns SHOULD have happened by wall-clock time.
-    pub fn due_years_by_time(
+    #[must_use]
+    pub const fn due_years_by_time(
         &self,
         genesis_timestamp_secs: u64,
         current_timestamp_secs: u64,

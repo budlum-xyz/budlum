@@ -288,6 +288,14 @@ name = "timing_safe"
 path = "benches/micro/timing_safe.rs"
 harness = false
 
+[[test]]
+name = "garden_scenario"
+path = "tests/garden/garden_scenario.rs"
+
+[[test]]
+name = "garden_nat"
+path = "tests/garden/garden_nat.rs"
+
 # Ratio-pipeline packing throughput, serial against rayon. Runs in CI as the
 # `Ratio rayon vs serial throughput` step; its numbers belong to the host that ran
 # the step, so nothing in the tree pins them.
@@ -320,6 +328,29 @@ required-features = ["wallet-ml-dsa"]
 [[bench]]
 name = "agg_tick_steps"
 path = "benches/agg_tick_steps.rs"
+harness = false
+required-features = ["wallet-ml-dsa"]
+
+# Aggregation Phase 3 measurement: AggMerge BudAir + BoundKeccakAir proof,
+# StarkBackend recursive MasterProofs (16 / 64 / 256 / 1024 claims), and
+# 10,000-block ShadowAuditor native/aggregation parity audit.
+[[bench]]
+name = "agg_phase3_stark"
+path = "benches/agg_phase3_stark.rs"
+harness = false
+required-features = ["wallet-ml-dsa"]
+
+# Phase 4 benchmark: hidden m-of-n multisig Claim::Prog, domain state-transition
+# Claim::Prog, and ClaimedDomainFinalityAdapter MasterProof finality.
+[[bench]]
+name = "agg_phase4_prog"
+path = "benches/agg_phase4_prog.rs"
+harness = false
+required-features = ["wallet-ml-dsa"]
+
+[[bench]]
+name = "agg_phase5_pcs"
+path = "benches/agg_phase5_pcs.rs"
 harness = false
 required-features = ["wallet-ml-dsa"]
 
@@ -474,6 +505,8 @@ opt-level = 3
 [profile.dev.package.p3-poseidon2]
 opt-level = 3
 [profile.dev.package.p3-symmetric]
+opt-level = 3
+[profile.dev.package.raptorq]
 opt-level = 3
 # Upstream rust-libp2p 0.54 uses `debug_assert!(false, ...)` on asynchronous
 # connection/substream teardown races (`libp2p-kad` handler.rs:860 / bootstrap.rs:90,

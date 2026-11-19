@@ -2,7 +2,7 @@
 //! exposed for expansion-tier A0 context codecs (12 and 13), context rotation, and Context Maintenance Pool accounting.
 //!
 //! Binding invariants (`K15`..`K19`):
-//! 1. Enabled by default from genesis on testnet `45261` (`TESTNET_CONTEXT_ENABLED_BY_DEFAULT == true`).
+//! 1. Closed at public-testnet launch (`TESTNET_CONTEXT_ENABLED_BY_DEFAULT == false`).
 //! 2. A shared context is the network's shared dictionary for a public content class,
 //!    defined on-chain solely by [`ContextManifest`]; materialized dictionary bytes live
 //!    only in each node's local cache ([`LocalContextCache`]).
@@ -26,9 +26,9 @@ use super::super::access_tiering::AccessTier;
 use super::super::content_id::ContentId;
 use super::super::registry::ObjectKey;
 
-/// Testnet posture: shared compression context is open from height 0 (`Section 6.20.1`).
+/// Public-testnet launch posture: shared compression context is closed.
 /// Convenience: exposed for launch configuration gates.
-pub const TESTNET_CONTEXT_ENABLED_BY_DEFAULT: bool = true;
+pub const TESTNET_CONTEXT_ENABLED_BY_DEFAULT: bool = false;
 
 /// Codec identifier `12`: fast shared-context codec (`Section 6.20.2.3`).
 /// Convenience: exposed for A0 expansion codec dispatch.
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn bud3_context_codec_vectors() {
-        const { assert!(TESTNET_CONTEXT_ENABLED_BY_DEFAULT) };
+        const { assert!(!TESTNET_CONTEXT_ENABLED_BY_DEFAULT) };
         let engine =
             SharedContextEngine::new(true, "json-records".to_owned(), sample_corpus(), 10).unwrap();
         assert!(engine.manifest.verify_id());

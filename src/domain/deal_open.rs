@@ -68,6 +68,7 @@ pub fn open_deal_escrowed(
     now_unix_secs: u64,
     min_operator_bond: u64,
     payer_reserve: u64,
+    require_merkle_proof: bool,
 ) -> Result<u64, String> {
     let operator = terms.operator;
     let manifest = terms.manifest;
@@ -122,7 +123,7 @@ pub fn open_deal_escrowed(
             terms.start_epoch,
             terms.end_epoch,
             terms.economics.clone(),
-            &registry_params(min_operator_bond),
+            &registry_params(min_operator_bond, require_merkle_proof),
             terms.merkle_proof.clone(),
             terms.storage_root,
         )
@@ -151,6 +152,7 @@ pub fn accept_reallocation_escrowed(
     now_unix_secs: u64,
     min_operator_bond: u64,
     payer_reserve: u64,
+    require_merkle_proof: bool,
 ) -> Result<u64, String> {
     let ticket_id = terms.ticket_id;
     let operator = terms.replacement_operator;
@@ -277,7 +279,7 @@ pub fn accept_reallocation_escrowed(
             terms.start_epoch,
             terms.end_epoch,
             terms.economics.clone(),
-            &registry_params(min_operator_bond),
+            &registry_params(min_operator_bond, require_merkle_proof),
             terms.merkle_proof.clone(),
             terms.storage_root,
         )
@@ -403,11 +405,16 @@ fn check_funds(
     Ok(Escrow { fee, bond })
 }
 
-/// The registry reads only `min_operator_bond` from the domain params when it
-/// opens a deal, so the defaults for every other field are inert here.
-fn registry_params(min_operator_bond: u64) -> StorageDomainParams {
+/// The registry reads `min_operator_bond` and the `require_merkle_proof`
+/// gate from the domain params when it opens a deal, so the defaults for
+/// every other field are inert here. The gate is the domain's own activation
+/// statement; the in-block doors pass their caller's value (a checked-in
+/// constant until per-domain params ride the door, and the test harness's
+/// domain params), never a hardcoded closed flag.
+fn registry_params(min_operator_bond: u64, require_merkle_proof: bool) -> StorageDomainParams {
     StorageDomainParams {
         min_operator_bond,
+        require_merkle_proof,
         ..StorageDomainParams::default()
     }
 }
@@ -526,7 +533,7 @@ mod tests {
         reserve: u64,
     ) -> Result<u64, String> {
         let before = snapshot(&state);
-        let result = open_deal_escrowed(&mut state, t, payer_address, now, BOND, reserve);
+        let result = open_deal_escrowed(&mut state, t, payer_address, now, BOND, reserve, false);
         if result.is_err() {
             assert_eq!(snapshot(&state), before, "a refusal must not write");
         }
@@ -568,7 +575,7 @@ mod tests {
         let manifest = manifest();
         let t = terms(&manifest, operator());
         let mut state = funded(5_000_000, 5_000_000);
-        open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0).unwrap();
+        open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0, false).unwrap();
         let mut shifted = terms(&manifest, operator());
         shifted.replica_index = 1;
         shifted.start_epoch = t.start_epoch + 1;
@@ -581,7 +588,7 @@ mod tests {
         let manifest = manifest();
         let t = terms(&manifest, operator());
         let mut state = funded(5_000_000, 5_000_000);
-        open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0).unwrap();
+        open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0, false).unwrap();
         let err = open_without_write(state, &t, payer(), 0, 0).unwrap_err();
         assert!(err.contains("refusing a replayed open"), "got {err:?}");
     }
@@ -607,7 +614,9 @@ mod tests {
     fn a_registry_refusal_is_reported_and_writes_nothing() {
         let manifest = manifest();
         let mut t = terms(&manifest, operator());
-        t.merkle_proof = None;
+        // With the VerifyMerkle gate closed by default (B-0049/B-0054), an omitted
+        // envelope is optional; a malformed envelope is refused regardless of gate state.
+        t.merkle_proof = Some(vec![0u8; 8]);
         let err = open_without_write(funded(5_000_000, 5_000_000), &t, payer(), 0, 0).unwrap_err();
         assert!(err.contains("open_deal failed"), "got {err:?}");
     }
@@ -634,7 +643,7 @@ mod tests {
             short.get_balance(&operator()),
             short.storage_registry.root(),
         );
-        let err = open_deal_escrowed(&mut short, &t, operator(), 0, BOND, 0)
+        let err = open_deal_escrowed(&mut short, &t, operator(), 0, BOND, 0, false)
             .expect_err("one unit short must be refused");
         assert!(err.contains("Insufficient operator balance"), "got {err:?}");
         assert_eq!(
@@ -647,7 +656,7 @@ mod tests {
 
         let mut exact = AccountState::new();
         exact.add_balance(&operator(), fee + BOND);
-        open_deal_escrowed(&mut exact, &t, operator(), 0, BOND, 0).unwrap();
+        open_deal_escrowed(&mut exact, &t, operator(), 0, BOND, 0, false).unwrap();
         assert_eq!(exact.get_balance(&operator()), 0);
     }
 
@@ -669,14 +678,14 @@ mod tests {
         assert!(err.contains("Insufficient payer balance"), "got {err:?}");
 
         let mut state = funded(fee + reserve, 5_000_000);
-        open_deal_escrowed(&mut state, &t, payer(), 0, BOND, reserve).unwrap();
+        open_deal_escrowed(&mut state, &t, payer(), 0, BOND, reserve, false).unwrap();
         assert_eq!(state.get_balance(&payer()), reserve);
         assert_eq!(state.get_balance(&operator()), 5_000_000 - BOND);
     }
 
-    /// The finding: the escrow left balances with no supply-denominator
-    /// counterpart, so every open deal looked like supply destruction and
-    /// opened that much minting headroom under the fixed cap.
+    /// Escrow balance invariant: the escrow must preserve supply-denominator
+    /// counterpart, so open deals never look like supply destruction or
+    /// open artificial minting headroom under the fixed cap.
     #[test]
     fn an_open_deal_moves_supply_into_escrow_without_changing_what_is_committed() {
         let manifest = manifest();
@@ -684,7 +693,8 @@ mod tests {
         let mut state = funded(5_000_000, 5_000_000);
         let committed = state.total_bud_committed();
         let capacity = state.supply_capacity_remaining();
-        let deal_id = open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0).expect("opens");
+        let deal_id =
+            open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0, false).expect("opens");
         let deal = state.storage_registry.get_deal(deal_id).expect("deal");
         // The escrow holds the client fee and the operator bond, both of which
         // left balances; committed supply and the remaining capacity do not
@@ -699,7 +709,7 @@ mod tests {
         let manifest = manifest();
         let t = terms(&manifest, operator());
         let mut state = funded(5_000_000, 5_000_000);
-        let deal_id = open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0).unwrap();
+        let deal_id = open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0, false).unwrap();
         let deal = state.storage_registry.get_deal(deal_id).unwrap();
         assert_eq!(deal.status, DealStatus::Active);
         let epochs = t.end_epoch - t.start_epoch;
@@ -723,7 +733,7 @@ mod tests {
             state.get_balance(&operator()),
             state.storage_registry.root(),
         );
-        let err = open_deal_escrowed(&mut state, &t, operator(), 0, BOND, reserve)
+        let err = open_deal_escrowed(&mut state, &t, operator(), 0, BOND, reserve, false)
             .expect_err("fee, reserve and bond together must be covered");
         assert!(err.contains("Insufficient operator balance"), "got {err:?}");
         assert_eq!(
@@ -737,7 +747,7 @@ mod tests {
 
         let mut enough = AccountState::new();
         enough.add_balance(&operator(), fee + BOND + reserve);
-        open_deal_escrowed(&mut enough, &t, operator(), 0, BOND, reserve).unwrap();
+        open_deal_escrowed(&mut enough, &t, operator(), 0, BOND, reserve, false).unwrap();
         assert_eq!(enough.get_balance(&operator()), reserve);
     }
 
@@ -793,7 +803,7 @@ mod tests {
         );
 
         let mut state = funded(5_000_000, 5_000_000);
-        let deal_id = open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0).unwrap();
+        let deal_id = open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0, false).unwrap();
         let deal = state.storage_registry.get_deal(deal_id).unwrap();
         assert_eq!(deal.shard_bytes, 4);
         assert_eq!(deal.total_fee(epochs), 4 * epochs);
@@ -815,7 +825,7 @@ mod tests {
         );
 
         let mut state = funded(5_000_000, 5_000_000);
-        let deal_id = open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0).unwrap();
+        let deal_id = open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0, false).unwrap();
         let deal = state.storage_registry.get_deal(deal_id).unwrap();
         assert_eq!(deal.shard_bytes, 0);
         assert_eq!(deal.total_fee(epochs), 0);
@@ -872,7 +882,7 @@ mod tests {
         let terms = reallocation_terms(ticket_id, operator(), &manifest);
         let before = snapshot(&state);
 
-        let err = accept_reallocation_escrowed(&mut state, &terms, payer(), 0, BOND, 0)
+        let err = accept_reallocation_escrowed(&mut state, &terms, payer(), 0, BOND, 0, false)
             .expect_err("a short operator cannot take the repair");
         assert!(err.contains("Insufficient operator balance"), "got {err:?}");
         assert_eq!(snapshot(&state), before, "the payer must not lose the fee");
@@ -896,7 +906,7 @@ mod tests {
         );
 
         let deal_id =
-            accept_reallocation_escrowed(&mut state, &terms, payer(), 0, BOND, 0).unwrap();
+            accept_reallocation_escrowed(&mut state, &terms, payer(), 0, BOND, 0, false).unwrap();
         let deal = state.storage_registry.get_deal(deal_id).unwrap();
         assert_eq!(deal.shard_bytes, 4);
         assert_eq!(deal.total_fee(epochs), 4 * epochs);
@@ -916,7 +926,7 @@ mod tests {
             .begin_operator_cooldown(operator(), 100);
         let terms = reallocation_terms(ticket_id, operator(), &manifest);
         let before = snapshot(&state);
-        let err = accept_reallocation_escrowed(&mut state, &terms, payer(), 200, BOND, 0)
+        let err = accept_reallocation_escrowed(&mut state, &terms, payer(), 200, BOND, 0, false)
             .expect_err("the cooldown applies to repairs too");
         assert!(err.contains("missed a challenge"), "got {err:?}");
         assert_eq!(snapshot(&state), before);
@@ -931,7 +941,7 @@ mod tests {
         let terms = reallocation_terms(ticket_id, operator(), &manifest);
         let before = snapshot(&state);
 
-        let err = accept_reallocation_escrowed(&mut state, &terms, stranger, 0, BOND, 0)
+        let err = accept_reallocation_escrowed(&mut state, &terms, stranger, 0, BOND, 0, false)
             .expect_err("a stranger must not be debited to fund another owner's ticket");
         assert!(err.contains("does not belong to payer"), "got {err:?}");
         assert_eq!(snapshot(&state), before);
@@ -950,20 +960,22 @@ mod tests {
         state.storage_registry.register_manifest(&owned);
 
         let initial_terms = terms(&owned, operator());
-        let deal_id = open_deal_escrowed(&mut state, &initial_terms, payer(), 0, BOND, 0).unwrap();
+        let deal_id =
+            open_deal_escrowed(&mut state, &initial_terms, payer(), 0, BOND, 0, false).unwrap();
         let ticket_id = state
             .storage_registry
             .open_expiry_reallocation(deal_id, 10)
             .expect("a lapsed deal opens a FailedDeal reallocation ticket");
 
         let repair_terms = reallocation_terms(ticket_id, replacement, &owned);
-        let err = accept_reallocation_escrowed(&mut state, &repair_terms, victim, 0, BOND, 0)
-            .expect_err("naming a victim as payer on a slashed-deal ticket must fail");
+        let err =
+            accept_reallocation_escrowed(&mut state, &repair_terms, victim, 0, BOND, 0, false)
+                .expect_err("naming a victim as payer on a slashed-deal ticket must fail");
         assert!(err.contains("was funded by"), "got {err:?}");
         assert_eq!(state.get_balance(&victim), 5_000_000);
 
         let replacement_id =
-            accept_reallocation_escrowed(&mut state, &repair_terms, payer(), 0, BOND, 0)
+            accept_reallocation_escrowed(&mut state, &repair_terms, payer(), 0, BOND, 0, false)
                 .expect("the original deal payer may fund the repair");
         assert_eq!(
             state
@@ -987,11 +999,11 @@ mod tests {
 
         let mut terms_a = terms(&owned, op_a);
         terms_a.replica_index = 0;
-        let deal_a = open_deal_escrowed(&mut state, &terms_a, payer(), 0, BOND, 0).unwrap();
+        let deal_a = open_deal_escrowed(&mut state, &terms_a, payer(), 0, BOND, 0, false).unwrap();
 
         let mut terms_b = terms(&owned, op_b);
         terms_b.replica_index = 1;
-        let _deal_b = open_deal_escrowed(&mut state, &terms_b, payer(), 0, BOND, 0).unwrap();
+        let _deal_b = open_deal_escrowed(&mut state, &terms_b, payer(), 0, BOND, 0, false).unwrap();
 
         let ticket_id = state
             .storage_registry
@@ -999,11 +1011,16 @@ mod tests {
             .expect("lapsed deal opens reallocation ticket");
 
         let repair_by_existing = reallocation_terms(ticket_id, op_b, &owned);
-        let err =
-            accept_reallocation_escrowed(&mut state, &repair_by_existing, payer(), 0, BOND, 0)
-                .expect_err(
-                    "operator already serving shard over overlapping epochs must be refused",
-                );
+        let err = accept_reallocation_escrowed(
+            &mut state,
+            &repair_by_existing,
+            payer(),
+            0,
+            BOND,
+            0,
+            false,
+        )
+        .expect_err("operator already serving shard over overlapping epochs must be refused");
         assert!(err.contains("adds no durability"), "got: {err:?}");
     }
 }

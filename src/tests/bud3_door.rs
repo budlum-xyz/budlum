@@ -1871,9 +1871,19 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_stays_closed() {
         inclusion_path: path,
         predicate_proof: None,
     };
-    remote_view
+    let testnet_refused = remote_view
         .verify_for_chain(&checkpoint, &acct_state.state_root_body(), testnet_chain)
-        .expect("the remote state view is enabled on testnet");
+        .expect_err("the remote state view stays closed on testnet");
+    assert!(
+        testnet_refused.to_string().contains("app binding disabled"),
+        "got {testnet_refused}"
+    );
+    let devnet_chain = crate::core::chain_config::Network::Devnet
+        .chain_id()
+        .value();
+    remote_view
+        .verify_for_chain(&checkpoint, &acct_state.state_root_body(), devnet_chain)
+        .expect("the remote state view is enabled on devnet");
     let mainnet_chain = crate::core::chain_config::Network::Mainnet
         .chain_id()
         .value();
@@ -2253,4 +2263,350 @@ fn bind_nft_through_executor_requires_minted_nft_ownership() {
     )
     .expect("verified NFT owner binds cleanly");
     assert_eq!(state.bud3_registry.refcount(&key), 1);
+}
+
+#[test]
+fn register_object_scoped_claimant_dedup_waives_duplicate_storage_fee() {
+    use crate::storage::bud3::content_id::ContentKey;
+    use crate::storage::bud3::pipeline::prepare_sealed_upload;
+    use crate::storage::bud3::seal::SEAL_SALT_LEN;
+
+    let squatter = Address::from([0xF1; 32]);
+    let alice = Address::from([0xF2; 32]);
+    let val_a = [0xF3; 32];
+    let val_b = [0xF4; 32];
+    let mut state = AccountState::new();
+    state.add_balance(&squatter, 50_000);
+    state.add_balance(&alice, 50_000);
+    state.add_validator(Address::from(val_a), 50_000);
+    state.add_validator(Address::from(val_b), 50_000);
+
+    let up = prepare_sealed_upload(
+        b"scoped claimant dedup payload for exact pre_storage_fee accounting",
+        &ContentKey([0xA7; 32]),
+        [0x13; SEAL_SALT_LEN],
+        &P,
+        &Bud3Limits::default(),
+        6,
+    )
+    .unwrap();
+    let raw_key = up.record.commitment;
+    let shares = vec![
+        (
+            0,
+            Share {
+                validator: val_a,
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 3,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: val_b,
+                class: Class::Full,
+                first_esi: 3,
+                symbols: 3,
+            },
+        ),
+    ];
+
+    // Squatter places an unconfirmed entry at `raw_key`.
+    apply(
+        &mut state,
+        &storage_tx(
+            squatter,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record.clone(),
+                shares: shares.clone(),
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .unwrap();
+
+    // Legitimate claimant `alice` is admitted under her claimant-scoped key.
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record.clone(),
+                shares: shares.clone(),
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .unwrap();
+    let scoped =
+        crate::storage::bud3::registry::Bud3Registry::claimant_scoped_key(&raw_key, &alice.0);
+    assert!(state.bud3_registry.object(&scoped).is_some());
+
+    // Drain `alice` to a single tx fee (`1`) so any non-zero `pre_storage_fee` fails.
+    state.accounts.get_mut(&alice).unwrap().balance = 1;
+    let alice_nonce = state.get_nonce(&alice);
+    apply(
+        &mut state,
+        &storage_tx(
+            alice,
+            alice_nonce,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record,
+                shares,
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .expect("deduplicating already-registered claimant-scoped object must waive storage fee");
+    assert_eq!(state.get_balance(&alice), 0);
+}
+
+#[test]
+fn renew_and_pay_fallback_view_follow_finalized_replacement_fees_accurately() {
+    use crate::crypto::pq::ml_dsa_public_key;
+    use crate::crypto::scheme::SchemeId;
+    use crate::storage::bud3::fees::{renewal_fee_epochs, split_storage_fee, FeeParams};
+    use crate::storage::bud3::replace::sign_replace_attestation;
+    use crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS;
+
+    let uploader = Address::from([0xE1; 32]);
+    let proposer = Address::from([205u8; 32]);
+    let second_holder = Address::from([206u8; 32]);
+    let third_holder = Address::from([207u8; 32]);
+    let viewer = Address::from([0xE2; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&uploader, 5_000_000);
+    state.add_balance(&proposer, 5_000_000);
+    state.add_balance(&second_holder, 100_000);
+    state.add_balance(&third_holder, 100_000);
+    state.add_balance(&viewer, 5_000_000);
+    for id in [205u8, 206, 207] {
+        let v_addr = Address::from([id; 32]);
+        state.add_validator(v_addr, 50_000);
+        state.get_validator_mut(&v_addr).unwrap().pq_public_key =
+            ml_dsa_public_key(SchemeId::ML_DSA_65, &[id; 32]).unwrap();
+    }
+
+    let body: Vec<u8> = (0..750u32)
+        .flat_map(|i| i.wrapping_mul(0x9E37_79B9).to_le_bytes())
+        .collect();
+    let old_up = prepare_public_upload(&body, &P, &Bud3Limits::default(), 48).unwrap();
+    let old_key = old_up.record.commitment;
+    let t_old = old_up.record.symbols_per_segment / 3;
+    let old_shares: Vec<(u64, Share)> = (0..old_up.segments.len() as u64)
+        .flat_map(|seg| {
+            [
+                (
+                    seg,
+                    Share {
+                        validator: [205; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: t_old,
+                    },
+                ),
+                (
+                    seg,
+                    Share {
+                        validator: [206; 32],
+                        class: Class::Full,
+                        first_esi: t_old,
+                        symbols: t_old,
+                    },
+                ),
+                (
+                    seg,
+                    Share {
+                        validator: [207; 32],
+                        class: Class::Full,
+                        first_esi: t_old * 2,
+                        symbols: old_up.record.symbols_per_segment - t_old * 2,
+                    },
+                ),
+            ]
+        })
+        .collect();
+    apply(
+        &mut state,
+        &storage_tx(
+            uploader,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: old_up.record.clone(),
+                shares: old_shares,
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .unwrap();
+    for holder in [proposer, second_holder, third_holder] {
+        apply(
+            &mut state,
+            &storage_tx(holder, 0, 1, 0, StorageTxV3::CustodyAck { object: old_key }),
+        )
+        .unwrap();
+    }
+
+    let p_alt = Profile {
+        id: 0,
+        qr_version: 40,
+        symbol_size: 256,
+        fps: 10,
+        k_max: 64,
+    };
+    let new_up = prepare_public_upload(&body, &p_alt, &Bud3Limits::default(), 24).unwrap();
+    let new_key = new_up.record.commitment;
+    assert_ne!(old_key, new_key);
+    let t_new = new_up.record.symbols_per_segment / 3;
+    let new_shares: Vec<(u64, Share)> = (0..new_up.segments.len() as u64)
+        .flat_map(|seg| {
+            [
+                (
+                    seg,
+                    Share {
+                        validator: [205; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: t_new,
+                    },
+                ),
+                (
+                    seg,
+                    Share {
+                        validator: [206; 32],
+                        class: Class::Full,
+                        first_esi: t_new,
+                        symbols: t_new,
+                    },
+                ),
+                (
+                    seg,
+                    Share {
+                        validator: [207; 32],
+                        class: Class::Full,
+                        first_esi: t_new * 2,
+                        symbols: new_up.record.symbols_per_segment - t_new * 2,
+                    },
+                ),
+            ]
+        })
+        .collect();
+    let attestations: Vec<_> = [205u8, 206, 207]
+        .into_iter()
+        .map(|id| {
+            sign_replace_attestation([id; 32], &[id; 32], &old_key, &new_up.record, &new_shares)
+                .unwrap()
+        })
+        .collect();
+    apply(
+        &mut state,
+        &storage_tx(
+            proposer,
+            1,
+            1,
+            0,
+            StorageTxV3::ReplaceObject {
+                old_object: old_key,
+                new_record: new_up.record,
+                new_shares,
+                attestations,
+                proposer_stake: 50_000,
+            },
+        ),
+    )
+    .unwrap();
+    for (holder, nonce) in [
+        (proposer, 2u64),
+        (second_holder, 1u64),
+        (third_holder, 1u64),
+    ] {
+        apply(
+            &mut state,
+            &storage_tx(
+                holder,
+                nonce,
+                1,
+                0,
+                StorageTxV3::CustodyAck { object: new_key },
+            ),
+        )
+        .unwrap();
+    }
+    assert!(state.bud3_registry.object(&old_key).is_none());
+
+    // Renewing against finalized `old_key` must charge exact renewal fee and extend `new_key`.
+    let new_phys = state
+        .bud3_registry
+        .object(&new_key)
+        .unwrap()
+        .endowment
+        .fee_record
+        .user_physical_bytes;
+    let expected_renew_fee = renewal_fee_epochs(new_phys, 5, &FeeParams::TESTNET_DEFAULT).unwrap();
+    assert!(expected_renew_fee > 0);
+    let viewer_bal_0 = state.get_balance(&viewer);
+    let end_bal_0 = state.get_balance(&custody_endowment_account());
+    let old_expires = state.bud3_registry.object(&new_key).unwrap().expires_at;
+    apply(
+        &mut state,
+        &storage_tx(
+            viewer,
+            0,
+            1,
+            0,
+            StorageTxV3::RenewObject {
+                object: old_key,
+                extra_epochs: 5,
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        state.get_balance(&viewer),
+        viewer_bal_0 - 1 - expected_renew_fee
+    );
+    assert_eq!(
+        state.get_balance(&custody_endowment_account()),
+        end_bal_0 + split_storage_fee(expected_renew_fee).endowment_share
+    );
+    assert_eq!(
+        state.bud3_registry.object(&new_key).unwrap().expires_at,
+        old_expires + 5
+    );
+
+    // Paying fallback view against finalized `old_key` must collect the full fee & credit endowment.
+    let viewer_bal_1 = state.get_balance(&viewer);
+    let end_bal_1 = state.get_balance(&custody_endowment_account());
+    let paid_amt = MIN_PAID_VIEW_FEE_ATOMS;
+    apply(
+        &mut state,
+        &storage_tx(
+            viewer,
+            1,
+            1,
+            0,
+            StorageTxV3::PayFallbackView {
+                object: old_key,
+                receipt_id: [0x9F; 32],
+                amount_atoms: paid_amt,
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(state.get_balance(&viewer), viewer_bal_1 - 1 - paid_amt);
+    assert_eq!(
+        state.get_balance(&custody_endowment_account()),
+        end_bal_1 + split_storage_fee(paid_amt).endowment_share
+    );
 }

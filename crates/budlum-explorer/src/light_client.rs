@@ -275,9 +275,8 @@ impl MerkleProof {
     ///
     /// The direction bits are **derived from the address and compared**.
     /// Without the comparison a valid proof could be labelled as a proof for a
-    /// different address, which is exactly what the LOW (CWE-345) finding
-    /// closed in `state_trie.rs`. It has to stay closed here too: leaving the
-    /// verifier side open makes the proof meaningless.
+    /// different address. Trie root binding invariant: address direction bits
+    /// must match the target address strictly.
     #[must_use]
     pub fn verify(&self, expected_root: &[u8; 32]) -> bool {
         if self.siblings.len() != TRIE_DEPTH || self.directions.len() != TRIE_DEPTH {

@@ -130,7 +130,7 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/chain/storage_maintenance.rs",
-        5,
+        4,
         "the storage reward tick pays the operator out of the fee that \
          `open_deal` debited from the payer, as the difference of two \
          cumulative totals so the sum cannot pass the escrowed fee; the \
@@ -155,7 +155,7 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/domain/storage_tx.rs",
-        2,
+        1,
         "the challenge settlement returns the opener's bond to the opener: the \
          amount `answer_challenge`'s debit side took out of the opener's \
          escrow when the challenge was opened, so the refund cannot exceed \

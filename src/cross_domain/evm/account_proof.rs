@@ -138,7 +138,7 @@ pub fn verify_account(
     if proof_nodes.len() > MAX_PROOF_NODES {
         return Err(AccountProofError::ProofTooLarge);
     }
-    let value = mpt::verify(proof_nodes, state_root, &account_key(address))?;
+    let value = mpt::verify_yellow_paper(proof_nodes, state_root, &account_key(address))?;
     decode_account(&value)
 }
 
@@ -181,7 +181,7 @@ pub fn verify_storage(
     if proof_nodes.len() > MAX_PROOF_NODES {
         return Err(AccountProofError::ProofTooLarge);
     }
-    match mpt::verify(proof_nodes, storage_root, &storage_key(slot)) {
+    match mpt::verify_yellow_paper(proof_nodes, storage_root, &storage_key(slot)) {
         Ok(value) => Ok(Some(decode_storage_value(&value)?)),
         Err(MptError::KeyNotFound) => Ok(None),
         Err(e) => Err(AccountProofError::Trie(e)),

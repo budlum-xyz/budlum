@@ -3,9 +3,6 @@
 //! A claim carries only hashes and field elements. Its encoding is canonical:
 //! one kind byte, then fixed-width fields, so a claim has exactly one byte
 //! form and that form is 67, 97 or 81 bytes long.
-//!
-//! WIRING: [`Ext`] is named only by the polynomial claim until the PCS
-//! objects of Phase 5 construct one from an opening.
 
 use super::hash::{h, TAG_CLAIM};
 use crate::core::address::Address;

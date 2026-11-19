@@ -208,15 +208,16 @@ impl Network {
 
     /// The shared-security parameters of this profile.
     ///
-    /// Enabled on Testnet (`45261`) and Devnet (`45262`); Mainnet (`45260`)
-    /// waits for launch sign-off. `max_restaked_share_ppm = 300_000` and one
-    /// weight atom per allocated unit are TESTNET-DEFAULT values.
+    /// Enabled only on Devnet (`45262`). Public Testnet (`45261`) and Mainnet
+    /// (`45260`) fail closed until their activation gates and external evidence
+    /// rehearsals pass. `max_restaked_share_ppm = 300_000` and one weight atom
+    /// per allocated unit are development defaults.
     #[must_use]
     pub const fn shared_security(
         &self,
     ) -> crate::settlement::shared_security::SharedSecurityParams {
         crate::settlement::shared_security::SharedSecurityParams {
-            enabled: matches!(self, Network::Devnet | Network::Testnet),
+            enabled: matches!(self, Network::Devnet),
             // TESTNET-DEFAULT: restaked weight stays below a third of
             // the total, so ETH-backed validators cannot finalize alone.
             max_restaked_share_ppm: 300_000,
@@ -228,11 +229,11 @@ impl Network {
 
     /// Whether remote app binding (`app_binding`) is enabled on this profile.
     ///
-    /// Enabled on Testnet (`45261`) and Devnet (`45262`); Mainnet (`45260`)
-    /// remains closed until explicit launch activation.
+    /// Enabled only on Devnet (`45262`). Public Testnet (`45261`) and Mainnet
+    /// (`45260`) remain closed until explicit activation.
     #[must_use]
     pub const fn app_binding_enabled(&self) -> bool {
-        matches!(self, Network::Devnet | Network::Testnet)
+        matches!(self, Network::Devnet)
     }
 
     pub fn mempool_config(&self) -> crate::mempool::pool::MempoolConfig {

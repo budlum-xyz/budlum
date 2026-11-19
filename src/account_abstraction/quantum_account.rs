@@ -474,11 +474,25 @@ impl BftGuardianFinality {
         if votes.len() < threshold {
             return Err("K-BUD-BFT-GUARDIAN: quorum < threshold");
         }
-        let quorum = (guardians.len() * 2).div_ceil(3);
+        let quorum = Self::strict_bft_quorum(guardians.len());
         if votes.len() < quorum {
-            return Err("K-BUD-BFT-GUARDIAN: quorum <2n/3");
+            return Err("K-BUD-BFT-GUARDIAN: quorum <= 2n/3");
         }
         Ok(votes)
+    }
+
+    /// Strict Byzantine quorum `floor(2n / 3) + 1 > 2n / 3`.
+    ///
+    /// Guarantees every pair of finalizing vote subsets over `total_guardians >= 1`
+    /// intersects in at least `floor(total_guardians / 3) + 1 >= f + 1` guardians,
+    /// closing the `ceil(2n / 3) == 2n / 3` split-brain when `3 | total_guardians`
+    /// (e.g. `n = 3, f = 1` or `n = 6, f = 2`).
+    const fn strict_bft_quorum(total_guardians: usize) -> usize {
+        if total_guardians == 0 {
+            0
+        } else {
+            total_guardians.saturating_mul(2) / 3 + 1
+        }
     }
 }
 
@@ -798,10 +812,52 @@ mod tests {
             BftGuardianFinality::finalize(honest.clone(), &guardians, 2, &proposal).is_ok(),
             "three honest votes finalise"
         );
-        assert!(
-            BftGuardianFinality::finalize(honest[..2].to_vec(), &guardians, 2, &proposal).is_ok(),
-            "two of three is both the threshold and 2n/3"
+        assert_eq!(
+            BftGuardianFinality::finalize(honest[..2].to_vec(), &guardians, 2, &proposal)
+                .unwrap_err(),
+            "K-BUD-BFT-GUARDIAN: quorum <= 2n/3",
+            "two of three equals 2n/3 and permits f=1 split-brain; strict >2n/3 requires 3"
         );
+        // Split-brain regression (n = 3, f = 1 and n = 6, f = 2): a Byzantine
+        // minority double-signing `proposal` and `other` cannot finalize both.
+        let byz_left = vec![honest[0].clone(), vote(&keys[2], proposal)];
+        let byz_right = vec![honest[1].clone(), vote(&keys[2], other)];
+        assert!(BftGuardianFinality::finalize(byz_left, &guardians, 2, &proposal).is_err());
+        assert!(BftGuardianFinality::finalize(byz_right, &guardians, 2, &other).is_err());
+
+        let keys6 = [
+            WalletKeyPair::generate(),
+            WalletKeyPair::generate(),
+            WalletKeyPair::generate(),
+            WalletKeyPair::generate(),
+            WalletKeyPair::generate(),
+            WalletKeyPair::generate(),
+        ];
+        let g6: Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]> =
+            keys6.iter().map(WalletKeyPair::public_key_bytes).collect();
+        let split_a = vec![
+            vote(&keys6[0], proposal),
+            vote(&keys6[1], proposal),
+            vote(&keys6[4], proposal),
+            vote(&keys6[5], proposal),
+        ];
+        let split_b = vec![
+            vote(&keys6[2], other),
+            vote(&keys6[3], other),
+            vote(&keys6[4], other),
+            vote(&keys6[5], other),
+        ];
+        assert_eq!(
+            BftGuardianFinality::finalize(split_a, &g6, 4, &proposal).unwrap_err(),
+            "K-BUD-BFT-GUARDIAN: quorum <= 2n/3"
+        );
+        assert_eq!(
+            BftGuardianFinality::finalize(split_b, &g6, 4, &other).unwrap_err(),
+            "K-BUD-BFT-GUARDIAN: quorum <= 2n/3"
+        );
+        let supermajority_5: Vec<GuardianVote> =
+            keys6.iter().take(5).map(|k| vote(k, proposal)).collect();
+        assert!(BftGuardianFinality::finalize(supermajority_5, &g6, 4, &proposal).is_ok());
         // the same guardian twice, padded to the count
         let dup = vec![honest[0].clone(), honest[0].clone()];
         assert!(BftGuardianFinality::finalize(dup, &guardians, 2, &proposal).is_err());

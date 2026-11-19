@@ -119,6 +119,24 @@ fn select_sync_peer_resting_last(
         .or_else(|| eligible_best.first().copied())
 }
 const MAX_PENDING_BITSWAP_FETCH_WAITERS: usize = 128;
+/// Maximum concurrent outbound B.U.D. 3.0 P2P symbol/custody requests tracked in memory.
+const MAX_INFLIGHT_BUD3_REQUESTS: usize = 256;
+
+struct PendingBud3SymbolRequest {
+    peer_id: PeerId,
+    request: crate::network::bud3_protocol::Bud3SymbolsRequest,
+    symbol_size: u16,
+    roots: Vec<crate::storage::bud3::registry::SymbolRoot>,
+    sender: oneshot::Sender<
+        Result<Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>, String>,
+    >,
+}
+
+struct PendingBud3CustodyRequest {
+    peer_id: PeerId,
+    request: crate::network::bud3_protocol::Bud3CustodyRequest,
+    sender: oneshot::Sender<Result<usize, String>>,
+}
 /// QC blobs assembled at once, across all peers.
 const MAX_QC_ASSEMBLIES: usize = 8;
 /// A slow or malicious peer cannot occupy every outbound fetch slot.
@@ -646,6 +664,10 @@ pub struct BudlumBehaviour {
     /// `/budlum/witness/1.0.0`: witnesses of a block for a node that
     /// pruned them, checked against the block's `witness_root`.
     witness: request_response::Behaviour<crate::network::witness_protocol::WitnessCodec>,
+    /// `/budlum/bud3/symbols/1`: B.U.D. 3.0 bounded symbol range serving & Merkle verification.
+    bud3_symbols: request_response::Behaviour<crate::network::bud3_protocol::Bud3SymbolsCodec>,
+    /// `/budlum/bud3/custody/1`: B.U.D. 3.0 verified custody share delivery.
+    bud3_custody: request_response::Behaviour<crate::network::bud3_protocol::Bud3CustodyCodec>,
     /// Connection budget: without it a peer can open unbounded connections
     /// and exhaust memory (libp2p resource-management `DoS`, RUSTSEC-2022-0084).
     /// The incoming cap plus the per-peer cap also blunt eclipse attempts: an
@@ -706,6 +728,34 @@ pub enum NodeCommand {
     /// Operator RPC (`bud_adminListBannedPeers`): list currently banned ids.
     AdminListBannedPeers {
         response: oneshot::Sender<Result<Vec<String>, String>>,
+    },
+    /// Operator RPC (`bud_adminUpdateSentries`): live zero-downtime replacement
+    /// of sentry peers on a shielded validator without restarting or exporting
+    /// validator keys.
+    AdminUpdateSentries {
+        sentries: Vec<String>,
+        response: oneshot::Sender<Result<crate::network::sentry::SentryRotationDiff, String>>,
+    },
+    /// Operator RPC (`bud_adminSentryStatus`): inspect sentry-architecture
+    /// role, discovery state, and connection counts.
+    AdminSentryStatus {
+        response: oneshot::Sender<Result<crate::network::sentry::SentryStatus, String>>,
+    },
+    /// Fetch and Merkle-verify B.U.D. 3.0 symbols from a specific custody peer over `/budlum/bud3/symbols/1`.
+    Bud3FetchSymbols {
+        peer_id: PeerId,
+        request: crate::network::bud3_protocol::Bud3SymbolsRequest,
+        symbol_size: u16,
+        roots: Vec<crate::storage::bud3::registry::SymbolRoot>,
+        response: oneshot::Sender<
+            Result<Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>, String>,
+        >,
+    },
+    /// Push Merkle-verified B.U.D. 3.0 custody symbols to a validator peer over `/budlum/bud3/custody/1`.
+    Bud3PushCustody {
+        peer_id: PeerId,
+        request: crate::network::bud3_protocol::Bud3CustodyRequest,
+        response: oneshot::Sender<Result<usize, String>>,
     },
 }
 #[derive(Clone)]
@@ -867,6 +917,112 @@ impl NodeClient {
             .await
             .map_err(|_| "banned-peer list timed out".to_string())?
             .map_err(|e| format!("failed to receive banned-peer list response: {e}"))?
+    }
+
+    /// Replaces the sentry peer list on a shielded validator without
+    /// restarting (`bud_adminUpdateSentries`); operator listener only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node is not a shielded validator, if any
+    /// multiaddr is invalid or outside the private VPC/VPN allowlist, or if
+    /// the node command channel is closed.
+    pub async fn admin_update_sentries(
+        &self,
+        sentries: Vec<String>,
+    ) -> Result<crate::network::sentry::SentryRotationDiff, String> {
+        const ADMIN_ROTATE_TIMEOUT: Duration = Duration::from_secs(5);
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(NodeCommand::AdminUpdateSentries {
+                sentries,
+                response: tx,
+            })
+            .await
+            .map_err(|e| format!("failed to send sentry rotation request: {e}"))?;
+        tokio::time::timeout(ADMIN_ROTATE_TIMEOUT, rx)
+            .await
+            .map_err(|_| "sentry rotation timed out".to_string())?
+            .map_err(|e| format!("failed to receive sentry rotation response: {e}"))?
+    }
+
+    /// Queries the active sentry-architecture status (`bud_adminSentryStatus`);
+    /// operator listener only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node loop is unreachable or times out.
+    pub async fn admin_sentry_status(
+        &self,
+    ) -> Result<crate::network::sentry::SentryStatus, String> {
+        const ADMIN_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(NodeCommand::AdminSentryStatus { response: tx })
+            .await
+            .map_err(|e| format!("failed to send sentry status request: {e}"))?;
+        tokio::time::timeout(ADMIN_STATUS_TIMEOUT, rx)
+            .await
+            .map_err(|_| "sentry status request timed out".to_string())?
+            .map_err(|e| format!("failed to receive sentry status response: {e}"))?
+    }
+
+    /// Fetch and Merkle-verify B.U.D. 3.0 symbols from `peer_id` over `/budlum/bud3/symbols/1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request times out, the peer is banned or unavailable,
+    /// or any returned symbol fails Merkle custody verification against `roots`.
+    pub async fn bud3_fetch_symbols(
+        &self,
+        peer_id: PeerId,
+        request: crate::network::bud3_protocol::Bud3SymbolsRequest,
+        symbol_size: u16,
+        roots: Vec<crate::storage::bud3::registry::SymbolRoot>,
+    ) -> Result<Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>, String> {
+        const BUD3_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(NodeCommand::Bud3FetchSymbols {
+                peer_id,
+                request,
+                symbol_size,
+                roots,
+                response: tx,
+            })
+            .await
+            .map_err(|e| format!("failed to queue B.U.D. 3.0 symbol fetch: {e}"))?;
+        tokio::time::timeout(BUD3_FETCH_TIMEOUT, rx)
+            .await
+            .map_err(|_| "B.U.D. 3.0 symbol fetch timed out".to_string())?
+            .map_err(|e| format!("failed to receive B.U.D. 3.0 symbol response: {e}"))?
+    }
+
+    /// Push verified B.U.D. 3.0 custody symbols to `peer_id` over `/budlum/bud3/custody/1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request times out, the peer rejects the custody
+    /// items, or the receipt digest fails verification.
+    pub async fn bud3_push_custody(
+        &self,
+        peer_id: PeerId,
+        request: crate::network::bud3_protocol::Bud3CustodyRequest,
+    ) -> Result<usize, String> {
+        const BUD3_PUSH_TIMEOUT: Duration = Duration::from_secs(15);
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(NodeCommand::Bud3PushCustody {
+                peer_id,
+                request,
+                response: tx,
+            })
+            .await
+            .map_err(|e| format!("failed to queue B.U.D. 3.0 custody push: {e}"))?;
+        tokio::time::timeout(BUD3_PUSH_TIMEOUT, rx)
+            .await
+            .map_err(|_| "B.U.D. 3.0 custody push timed out".to_string())?
+            .map_err(|e| format!("failed to receive B.U.D. 3.0 custody receipt: {e}"))?
     }
 }
 #[tokio::test]
@@ -1259,6 +1415,8 @@ pub struct Node {
     /// the public networks, where a private advertisement is a poisoning
     /// attempt rather than a description of where the peer is.
     pub accept_private_peer_addresses: bool,
+    /// Sentry node architecture policy (shielded validator / public sentry / standard).
+    pub sentry_policy: crate::network::sentry::SentryPolicy,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
     /// Whether this node runs the aggregation side of its chain; set by
     /// `NodeCommand::EnableAggregation`.
@@ -1324,6 +1482,12 @@ pub struct Node {
             PeerId,
         ),
     >,
+    /// B.U.D. 3.0 symbol fetch requests in flight on `/budlum/bud3/symbols/1`.
+    bud3_symbol_requests: HashMap<request_response::OutboundRequestId, PendingBud3SymbolRequest>,
+    /// B.U.D. 3.0 custody push requests in flight on `/budlum/bud3/custody/1`.
+    bud3_custody_requests: HashMap<request_response::OutboundRequestId, PendingBud3CustodyRequest>,
+    /// Per-peer rate and custody stream limits for B.U.D. 3.0 protocols.
+    bud3_peer_limiter: crate::storage::bud3::symbol_protocol::SymbolPeerLimiter,
     /// Single-flight guard ensuring peer-supplied fork batches can keep at
     /// most one `reorg_to_peer_suffix` task running at a time (CWE-407).
     reorg_in_flight: Arc<std::sync::atomic::AtomicBool>,
@@ -1778,16 +1942,21 @@ impl Node {
         all_peers.sort_by_key(|p| p.to_bytes());
         sync_peers.sort_by_key(|p| p.to_bytes());
         if all_peers.is_empty()
-            && !self.bootstrap_peers.is_empty()
             && self.stale_tip_ticks >= 3
             && self.stale_tip_ticks.is_multiple_of(3)
         {
-            for addr in self.bootstrap_peers.clone() {
-                if let Err(e) = self.bootstrap(&addr) {
-                    tracing::debug!("Starvation bootstrap retry failed for {addr}: {e}");
-                }
+            if self.sentry_policy.role() == crate::network::sentry::SentryRole::ShieldedValidator {
+                self.dial_configured_sentries();
+                return;
             }
-            return;
+            if !self.sentry_policy.is_discovery_disabled() && !self.bootstrap_peers.is_empty() {
+                for addr in self.bootstrap_peers.clone() {
+                    if let Err(e) = self.bootstrap(&addr) {
+                        tracing::debug!("Starvation bootstrap retry failed for {addr}: {e}");
+                    }
+                }
+                return;
+            }
         }
         if !all_peers.is_empty() {
             let peer = all_peers[self.sync_poll_cursor % all_peers.len()];
@@ -2974,6 +3143,20 @@ impl Node {
                 StreamProtocol::new(crate::network::witness_protocol::WITNESS_PROTOCOL),
                 request_response::ProtocolSupport::Full,
             )],
+            req_cfg.clone(),
+        );
+        let bud3_symbols = request_response::Behaviour::new(
+            [(
+                StreamProtocol::new(crate::storage::bud3::symbol_protocol::SYMBOLS_PROTOCOL_ID),
+                request_response::ProtocolSupport::Full,
+            )],
+            req_cfg.clone(),
+        );
+        let bud3_custody = request_response::Behaviour::new(
+            [(
+                StreamProtocol::new(crate::storage::bud3::symbol_protocol::CUSTODY_PROTOCOL_ID),
+                request_response::ProtocolSupport::Full,
+            )],
             req_cfg,
         );
 
@@ -2993,6 +3176,8 @@ impl Node {
             sync,
             bitswap,
             witness,
+            bud3_symbols,
+            bud3_custody,
             limits: libp2p::connection_limits::Behaviour::new(
                 libp2p::connection_limits::ConnectionLimits::default()
                     .with_max_established(Some(
@@ -3227,6 +3412,7 @@ impl Node {
             mdns_enabled,
             sentry_shield: crate::network::sentry::SentryShieldConfig::default(),
             accept_private_peer_addresses: true,
+            sentry_policy: crate::network::sentry::SentryPolicy::default(),
             metrics: None,
             aggregation: false,
             storage_node,
@@ -3239,6 +3425,9 @@ impl Node {
             recovery_mempool: crate::chain::state_recovery::RecoveryMempool::new(),
             recovery_stash_from: None,
             witness_requests: HashMap::new(),
+            bud3_symbol_requests: HashMap::new(),
+            bud3_custody_requests: HashMap::new(),
+            bud3_peer_limiter: crate::storage::bud3::symbol_protocol::SymbolPeerLimiter::default(),
             reorg_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reorg_last_completed_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reorg_strikes: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -3352,9 +3541,10 @@ impl Node {
         let security = network.security_config();
         self.max_peers = security.max_peers;
         self.sync_connection_caps();
-        self.mdns_enabled = security.mdns_enabled
-            && cfg!(feature = "p2p-mdns")
-            && !self.sentry_shield.is_validator_shielded();
+        self.mdns_enabled = !self.sentry_policy.is_discovery_disabled()
+            && !self.sentry_shield.is_validator_shielded()
+            && security.mdns_enabled
+            && cfg!(feature = "p2p-mdns");
         // Wire peer_rate_limit_per_minute into PeerManager token bucket.
         {
             let mut pm = self.peer_manager_lock();
@@ -3426,6 +3616,50 @@ impl Node {
     pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
         self.metrics = Some(metrics);
         self
+    }
+
+    /// Configures the sentry-node architecture policy (shielded validator or
+    /// public sentry node).
+    ///
+    /// - Pins every sentry / private validator / unconditional peer as an
+    ///   explicit gossipsub peer so votes and blocks propagate immediately.
+    /// - Synchronizes the swarm-level `SentryGateBehaviour` and `PeerManager`
+    ///   protected set so both policy and swarm layers enforce identical rules.
+    /// - Forces mDNS and public discovery off when `policy.is_discovery_disabled()`.
+    #[must_use]
+    pub fn with_sentry_policy(mut self, policy: crate::network::sentry::SentryPolicy) -> Self {
+        let shield = crate::network::sentry::SentryShieldConfig::from_policy(&policy);
+        let _ = self.configure_sentry_shield(shield);
+        if policy.is_discovery_disabled() {
+            self.mdns_enabled = false;
+        }
+        let explicit = policy.explicit_gossip_peers();
+        self.peer_manager_lock()
+            .set_protected_peers(explicit.iter().copied());
+        for peer_id in explicit {
+            self.swarm
+                .behaviour_mut()
+                .gossipsub
+                .add_explicit_peer(&peer_id);
+        }
+        self.sentry_policy = policy;
+        self
+    }
+
+    /// Dials every configured sentry peer that is not currently connected.
+    /// Used on startup, periodic reconnect, and starvation recovery for
+    /// [`crate::network::sentry::SentryRole::ShieldedValidator`].
+    fn dial_configured_sentries(&mut self) {
+        for (peer_id, addr) in self.sentry_policy.sentry_addrs() {
+            if self.peer_manager_lock().is_banned(&peer_id) || self.swarm.is_connected(&peer_id) {
+                continue;
+            }
+            if let Err(e) = self.swarm.dial(addr.clone()) {
+                warn!("Shielded validator failed to dial sentry {peer_id} at {addr}: {e}");
+            } else {
+                info!("Shielded validator dialing sentry {peer_id} at {addr}");
+            }
+        }
     }
 
     /// Active sentry-validator shield configuration on this node.
@@ -3517,6 +3751,7 @@ impl Node {
             }
         }
     }
+
     pub fn get_client(&self) -> NodeClient {
         NodeClient {
             sender: self.command_tx.clone(),
@@ -3525,29 +3760,64 @@ impl Node {
             sync_state: self.sync_state.clone(),
         }
     }
-    /// Performs the requested operation.
+    /// Listens for TCP and QUIC P2P connections on `0.0.0.0:<port>`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns an error if the TCP listener cannot bind.
     pub fn listen(&mut self, port: u16) -> Result<(), Box<dyn Error>> {
-        let addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-        self.swarm.listen_on(addr)?;
-        // The same port over QUIC (UDP),.
-        let quic: Multiaddr = format!("/ip4/0.0.0.0/udp/{port}/quic-v1").parse()?;
-        if let Err(e) = self.swarm.listen_on(quic) {
-            warn!("QUIC listener not started: {e}");
+        self.listen_on(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port)
+    }
+
+    /// Listens for TCP and QUIC P2P connections on a specific bind IP and port
+    /// (for example, a shielded validator's private VPC IP `10.10.0.5`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the TCP listener cannot bind.
+    pub fn listen_on(&mut self, ip: std::net::IpAddr, port: u16) -> Result<(), Box<dyn Error>> {
+        let tcp_addr: Multiaddr = match ip {
+            std::net::IpAddr::V4(v4) => format!("/ip4/{v4}/tcp/{port}").parse()?,
+            std::net::IpAddr::V6(v6) => format!("/ip6/{v6}/tcp/{port}").parse()?,
+        };
+        self.swarm.listen_on(tcp_addr)?;
+        let quic_addr: Multiaddr = match ip {
+            std::net::IpAddr::V4(v4) => format!("/ip4/{v4}/udp/{port}/quic-v1").parse()?,
+            std::net::IpAddr::V6(v6) => format!("/ip6/{v6}/udp/{port}/quic-v1").parse()?,
+        };
+        if let Err(e) = self.swarm.listen_on(quic_addr) {
+            warn!("QUIC listener not started on {ip}:{port}: {e}");
         }
-        info!("Listening on port {port}");
+        info!("Listening on {ip}:{port}");
         Ok(())
     }
-    /// Performs the requested operation.
+
+    /// Adds an additional libp2p listener on an explicit multiaddr (for
+    /// example, a sentry node's dedicated private VPC interface).
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns an error if the multiaddr cannot be parsed or bound.
+    pub fn listen_multiaddr(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
+        let ma: Multiaddr = addr.parse()?;
+        self.swarm.listen_on(ma)?;
+        info!("Listening on additional interface {addr}");
+        Ok(())
+    }
+
+    /// Dials a peer multiaddr, enforcing the active
+    /// [`crate::network::sentry::SentryPolicy`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the address is invalid, refused by sentry policy,
+    /// or rejected by the swarm.
     pub fn dial(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
         let remote: Multiaddr = addr.parse()?;
+        if let Err(reason) = self.sentry_policy.can_dial(None, &remote) {
+            warn!("Refusing dial to {addr}: {reason}");
+            return Err(Box::new(reason));
+        }
         if !self.dns_transport_available && Self::multiaddr_uses_dns(&remote) {
             return Err(
                 "cannot dial DNS multiaddr because system DNS transport is unavailable".into(),
@@ -3564,12 +3834,18 @@ impl Node {
         info!("Dialing {addr}");
         Ok(())
     }
-    /// Performs the requested operation.
+    /// Bootstraps Kademlia via `addr` unless peer discovery is disabled by the
+    /// active [`crate::network::sentry::SentryPolicy`].
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns an error if the address lacks `/p2p/<ID>` or Kademlia bootstrap
+    /// fails.
     pub fn bootstrap(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
+        if self.sentry_policy.is_discovery_disabled() {
+            info!("Skipping bootstrap for {addr}: peer discovery disabled by sentry policy");
+            return Ok(());
+        }
         let multiaddr: Multiaddr = addr.parse()?;
         if !self.dns_transport_available && Self::multiaddr_uses_dns(&multiaddr) {
             return Err(
@@ -3596,6 +3872,12 @@ impl Node {
             );
         }
         if self.peer_manager_lock().is_banned(&peer_id) {
+            return Ok(());
+        }
+        if !self.sentry_policy.can_share_in_dht(&peer_id) {
+            if !self.swarm.is_connected(&peer_id) {
+                let _ = self.swarm.dial(multiaddr);
+            }
             return Ok(());
         }
         info!("Bootstrapping via {addr}");
@@ -3810,8 +4092,14 @@ impl Node {
         self.sync_connection_caps();
         self.maintain_sentry_shield_links();
 
-        // Bootstrap from configured peers (suppressed on shielded validators)
-        if !self.sentry_shield.is_validator_shielded() {
+        // Shielded validator: connect ONLY to its configured sentries and never
+        // dial public bootnodes or DNS seeds.
+        if self.sentry_policy.role() == crate::network::sentry::SentryRole::ShieldedValidator {
+            self.dial_configured_sentries();
+        } else if !self.sentry_policy.is_discovery_disabled()
+            && !self.sentry_shield.is_validator_shielded()
+        {
+            // Bootstrap from configured peers
             for addr in self.bootstrap_peers.clone() {
                 if let Err(e) = self.bootstrap(&addr) {
                     warn!("Bootstrap dial failed for {addr}: {e}");
@@ -3936,7 +4224,11 @@ impl Node {
                     self.maintain_sentry_shield_links();
                 }
                 _ = discovery_interval.tick() => {
-                    if !self.sentry_shield.is_validator_shielded() {
+                    if self.sentry_policy.role() == crate::network::sentry::SentryRole::ShieldedValidator {
+                        self.dial_configured_sentries();
+                    } else if !self.sentry_policy.is_discovery_disabled()
+                        && !self.sentry_shield.is_validator_shielded()
+                    {
                         info!("Running periodic peer discovery...");
                         for addr in self.bootstrap_peers.clone() {
                             if let Err(e) = self.bootstrap(&addr) {
@@ -4392,13 +4684,17 @@ impl Node {
                     }
                 }
                 _ = dht_interval.tick() => {
-                    if !self.sentry_shield.is_validator_shielded() {
+                    if !self.sentry_policy.is_discovery_disabled()
+                        && !self.sentry_shield.is_validator_shielded()
+                    {
                         info!("Running periodic DHT bootstrapping...");
                         let _ = self.swarm.behaviour_mut().kad.bootstrap();
                     }
                 }
                 _ = storage_announce_interval.tick() => {
-                    if !self.sentry_shield.is_validator_shielded() {
+                    if !self.sentry_policy.is_discovery_disabled()
+                        && !self.sentry_shield.is_validator_shielded()
+                    {
                         if let Some(ref bitswap) = self.storage_node {
                             #[allow(clippy::single_match)]
                             let cids = bitswap.store().list_cids();
@@ -4470,9 +4766,16 @@ impl Node {
                                 }
                             }
                             NodeCommand::ListPeers => {
-                                let peers: Vec<_> = self.swarm.behaviour().gossipsub.all_peers().collect();
-                                info!("Connected peers: {:?}", peers.len());
-                                for (peer, _topics) in peers {
+                                let all_ids: Vec<PeerId> = self
+                                    .swarm
+                                    .behaviour()
+                                    .gossipsub
+                                    .all_peers()
+                                    .map(|(peer, _)| *peer)
+                                    .collect();
+                                let visible = self.sentry_policy.scrub_public_peers(&all_ids);
+                                info!("Connected public peers: {}", visible.len());
+                                for peer in visible {
                                     info!(" - {peer}");
                                 }
                             }
@@ -4609,6 +4912,130 @@ impl Node {
                                     });
                                 let _ = response.send(result);
                             }
+                            NodeCommand::AdminUpdateSentries { sentries, response } => {
+                                let result = self
+                                    .sentry_policy
+                                    .update_sentries(&sentries)
+                                    .map_err(|e| e.to_string());
+                                if let Ok(ref diff) = result {
+                                    let updated_shield =
+                                        crate::network::sentry::SentryShieldConfig::from_policy(
+                                            &self.sentry_policy,
+                                        );
+                                    self.swarm
+                                        .behaviour_mut()
+                                        .sentry_gate
+                                        .set_shield(updated_shield.clone());
+                                    self.sentry_shield = updated_shield;
+                                    self.peer_manager_lock().set_protected_peers(
+                                        self.sentry_policy.explicit_gossip_peers(),
+                                    );
+                                    for removed_id in &diff.removed {
+                                        self.swarm
+                                            .behaviour_mut()
+                                            .gossipsub
+                                            .remove_explicit_peer(removed_id);
+                                        let _ = self.swarm.disconnect_peer_id(*removed_id);
+                                    }
+                                    for (added_id, addr) in &diff.added {
+                                        self.swarm
+                                            .behaviour_mut()
+                                            .gossipsub
+                                            .add_explicit_peer(added_id);
+                                        if let Err(e) = self.swarm.dial(addr.clone()) {
+                                            warn!(
+                                                "Live sentry rotation failed to dial {added_id} at {addr}: {e}"
+                                            );
+                                        }
+                                    }
+                                    info!(
+                                        added = diff.added.len(),
+                                        removed = diff.removed.len(),
+                                        active = diff.active_sentries.len(),
+                                        "Live sentry rotation applied without restart"
+                                    );
+                                }
+                                let _ = response.send(result);
+                            }
+                            NodeCommand::AdminSentryStatus { response } => {
+                                let connected: std::collections::BTreeSet<PeerId> = self
+                                    .peer_manager_lock()
+                                    .connected_peers()
+                                    .into_iter()
+                                    .collect();
+                                let status = self.sentry_policy.status(&connected);
+                                let _ = response.send(Ok(status));
+                            }
+                            NodeCommand::Bud3FetchSymbols {
+                                peer_id,
+                                request,
+                                symbol_size,
+                                roots,
+                                response,
+                            } => {
+                                self.bud3_symbol_requests
+                                    .retain(|_, pending| !pending.sender.is_closed());
+                                if self.peer_manager_lock().is_banned(&peer_id) {
+                                    let _ = response.send(Err(format!(
+                                        "refused B.U.D. 3.0 symbol fetch to banned peer {peer_id}"
+                                    )));
+                                } else if self.bud3_symbol_requests.len()
+                                    >= MAX_INFLIGHT_BUD3_REQUESTS
+                                {
+                                    let _ = response.send(Err(String::from(
+                                        "B.U.D. 3.0 outbound symbol request limit reached",
+                                    )));
+                                } else {
+                                    let req_id = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .bud3_symbols
+                                        .send_request(&peer_id, request.clone());
+                                    self.bud3_symbol_requests.insert(
+                                        req_id,
+                                        PendingBud3SymbolRequest {
+                                            peer_id,
+                                            request,
+                                            symbol_size,
+                                            roots,
+                                            sender: response,
+                                        },
+                                    );
+                                }
+                            }
+                            NodeCommand::Bud3PushCustody {
+                                peer_id,
+                                request,
+                                response,
+                            } => {
+                                self.bud3_custody_requests
+                                    .retain(|_, pending| !pending.sender.is_closed());
+                                if self.peer_manager_lock().is_banned(&peer_id) {
+                                    let _ = response.send(Err(format!(
+                                        "refused B.U.D. 3.0 custody push to banned peer {peer_id}"
+                                    )));
+                                } else if self.bud3_custody_requests.len()
+                                    >= MAX_INFLIGHT_BUD3_REQUESTS
+                                {
+                                    let _ = response.send(Err(String::from(
+                                        "B.U.D. 3.0 outbound custody request limit reached",
+                                    )));
+                                } else {
+                                    let req_id = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .bud3_custody
+                                        .send_request(&peer_id, request.clone());
+                                    self.bud3_custody_requests.insert(
+                                        req_id,
+                                        PendingBud3CustodyRequest {
+                                            peer_id,
+                                            request,
+                                            sender: response,
+                                        },
+                                    );
+                                }
+                            }
                             NodeCommand::FetchRemoteContent { cid, response } => {
                                 // 1. Try local fetch first
                                 let local_result = if let Some(ref storage_node) = self.storage_node {
@@ -4674,11 +5101,38 @@ impl Node {
                 event = self.swarm.select_next_some() => {
                     match event {
                         SwarmEvent::NewListenAddr { address, .. } => {
-                            info!("Listening on {address}");
+                            if self.sentry_policy.should_advertise_external() {
+                                info!("Listening on {address}");
+                            } else {
+                                info!(
+                                    "Shielded validator bound private listener {address} (external advertisement disabled)"
+                                );
+                            }
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                             let remote = endpoint.get_remote_address();
                             let subnet = subnet_bucket(remote);
+                            // Sentry architecture firewall: a shielded validator
+                            // accepts ONLY configured sentries over allowed
+                            // private VPC/VPN CIDRs, and a sentry restricts its
+                            // private_peers to allowed private CIDRs when set.
+                            if let Err(reason) =
+                                self.sentry_policy.check_connection(&peer_id, remote)
+                            {
+                                let code = match reason {
+                                    crate::network::sentry::ConnectionRefusal::NotASentry => "not_a_sentry",
+                                    crate::network::sentry::ConnectionRefusal::DisallowedAddress => "disallowed_address",
+                                    crate::network::sentry::ConnectionRefusal::MissingTargetPeerId => "missing_peer_id",
+                                };
+                                warn!(
+                                    code,
+                                    "Sentry policy rejected peer {} from {}: {}",
+                                    peer_id, remote, reason
+                                );
+                                let _ = self.swarm.disconnect_peer_id(peer_id);
+                                continue;
+                            }
+                            let is_unconditional = self.sentry_policy.is_unconditional(&peer_id);
                             // Security review (HIGH): a banned peer
                             // could reconnect and carry on issuing
                             // /sync requests, because the handshaked
@@ -4699,40 +5153,34 @@ impl Node {
                                 let _ = self.swarm.disconnect_peer_id(peer_id);
                                 continue;
                             }
-                            // H5.1 eclipse bound before admitting.
-                            // Through the recovering helper, not a raw
-                            // `lock()`. A poisoned mutex made this
-                            // `unwrap_or(true)`, which turns the /24
-                            // eclipse bound OFF at exactly the moment
-                            // something has already gone wrong: one
-                            // operator could then fill the peer table
-                            // from a single subnet and surround the
-                            // node. The rest of this file recovers the
-                            // guard and keeps enforcing; these four
-                            // sites were the ones that did not.
-                            let admit = is_shield_peer
-                                || self.peer_manager_lock().is_connected(&peer_id)
-                                || self.peer_manager_lock().can_admit_subnet(subnet);
-                            if !admit {
-                                warn!(
-                                    "Eclipse bound: rejecting {} from {:?} (per-subnet limit)",
-                                    peer_id, subnet
-                                );
-                                let _ = self.swarm.disconnect_peer_id(peer_id);
-                                continue;
-                            }
-                            // H5.2 outbound diversity: an extra /24 limit for outbound connections.
-                            if endpoint.is_dialer() {
-                                let ob_admit = is_shield_peer
-                                    || self.peer_manager_lock().is_connected(&peer_id)
-                                    || self.peer_manager_lock().can_admit_outbound_subnet(subnet);
-                                if !ob_admit {
+                            // H5.1 eclipse bound before admitting. Protected
+                            // sentry/private-validator peers are exempt so
+                            // multiple sentries sharing a private VPC /24 are
+                            // never blocked; all public peers remain bounded.
+                            let is_shielded_link = is_unconditional || is_shield_peer;
+                            if !is_shielded_link {
+                                let admit = self.peer_manager_lock().is_connected(&peer_id)
+                                    || self.peer_manager_lock().can_admit_subnet(subnet);
+                                if !admit {
                                     warn!(
-                                        "Outbound diversity: rejecting outbound {} from {:?}",
+                                        "Eclipse bound: rejecting {} from {:?} (per-subnet limit)",
                                         peer_id, subnet
                                     );
                                     let _ = self.swarm.disconnect_peer_id(peer_id);
                                     continue;
+                                }
+                                // H5.2 outbound diversity: an extra /24 limit for outbound connections.
+                                if endpoint.is_dialer() {
+                                    let ob_admit = self.peer_manager_lock().is_connected(&peer_id)
+                                        || self.peer_manager_lock().can_admit_outbound_subnet(subnet);
+                                    if !ob_admit {
+                                        warn!(
+                                            "Outbound diversity: rejecting outbound {} from {:?}",
+                                            peer_id, subnet
+                                        );
+                                        let _ = self.swarm.disconnect_peer_id(peer_id);
+                                        continue;
+                                    }
                                 }
                             }
                             let newly_connected = {
@@ -4743,11 +5191,16 @@ impl Node {
                                 }
                                 c
                             };
-                            if is_shield_peer {
+                            if is_shielded_link {
                                 self.swarm
                                     .behaviour_mut()
                                     .gossipsub
                                     .add_explicit_peer(&peer_id);
+                                if self.sentry_policy.is_private_peer(&peer_id) {
+                                    info!(
+                                        "Sentry admitted shielded validator peer (identity hidden from DHT/PEX)"
+                                    );
+                                }
                             }
                             // The peer is back: take its score record
                             // out of the eviction queue so a connected
@@ -4771,7 +5224,7 @@ impl Node {
                                 self.peer_count.load(Ordering::SeqCst)
                             };
                             let public_count = self.peer_manager_lock().public_connected_count();
-                            if !is_shield_peer && public_count > self.max_peers {
+                            if !is_shielded_link && public_count > self.max_peers {
                                 warn!(
                                     "Max public peers reached ({}/{}), disconnecting {}",
                                     public_count, self.max_peers, peer_id
@@ -4792,6 +5245,34 @@ impl Node {
                                     }
                                 }
                                 continue;
+                            }
+                            if is_shielded_link && count > self.max_peers {
+                                // Protected sentry/validator peer must never be
+                                // starved by a public peer flood: evict one
+                                // non-protected public peer if above ceiling.
+                                let evict = self
+                                    .peer_manager_lock()
+                                    .connected_peers()
+                                    .into_iter()
+                                    .find(|cand| {
+                                        *cand != peer_id
+                                            && !self.sentry_policy.is_unconditional(cand)
+                                            && !self.sentry_shield.is_protected_peer(cand)
+                                    });
+                                if let Some(victim) = evict {
+                                    if self.sentry_policy.is_private_peer(&peer_id) {
+                                        warn!(
+                                            "Max peers reached ({}/{}): evicting public peer {} to protect hidden shielded validator",
+                                            count, self.max_peers, victim
+                                        );
+                                    } else {
+                                        warn!(
+                                            "Max peers reached ({}/{}): evicting public peer {} to protect unconditional peer {}",
+                                            count, self.max_peers, victim, peer_id
+                                        );
+                                    }
+                                    let _ = self.swarm.disconnect_peer_id(victim);
+                                }
                             }
                             if newly_connected {
                                 self.peer_connected_at
@@ -4963,7 +5444,10 @@ impl Node {
                         }
                         #[cfg(feature = "p2p-mdns")]
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Mdns(event)) => {
-                            if !self.mdns_enabled || self.sentry_shield.is_validator_shielded() {
+                            if !self.mdns_enabled
+                                || self.sentry_policy.is_discovery_disabled()
+                                || self.sentry_shield.is_validator_shielded()
+                            {
                                 continue;
                             }
                             match event {
@@ -6412,23 +6896,30 @@ impl Node {
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Identify(identify::Event::Received { info, .. })) => {
                             let identified = info.public_key.to_peer_id();
                             info!("Received identity from {identified:?}");
-                            if self.sentry_shield.hides_from_public_routing(&identified) {
+                            if !self.sentry_policy.can_share_in_dht(&identified)
+                                || self.sentry_shield.hides_from_public_routing(&identified)
+                            {
+                                // Shielded validator (discovery disabled) or
+                                // sentry shielding a private validator: never
+                                // enter the peer's addresses into Kademlia.
                                 self.swarm.behaviour_mut().kad.remove_peer(&identified);
-                                tracing::debug!(
-                                    peer = %identified,
-                                    "Sentry shield: suppressing Kademlia address advertisement for protected peer"
-                                );
                                 continue;
                             }
+                            let allow_private_direct = self.sentry_policy.accept_private_addr_from(
+                                &identified,
+                                self.accept_private_peer_addresses,
+                            );
+                            // Never insert private VPC/RFC1918 addresses into
+                            // public Kademlia even for unconditional peers;
+                            // public DHT tables are queried by untrusted peers.
+                            let allow_private_in_dht =
+                                allow_private_direct && self.accept_private_peer_addresses;
                             for addr in info.listen_addrs {
                                 // Kademlia poisoning: an advertisement
                                 // is taken on the advertiser's word, so a
                                 // private address is only believable on a
                                 // private network.
-                                if !advertised_address_is_allowed(
-                                    &addr,
-                                    self.accept_private_peer_addresses,
-                                ) {
+                                if !advertised_address_is_allowed(&addr, allow_private_in_dht) {
                                     warn!("Refusing private address {addr} from {identified}");
                                     continue;
                                 }
@@ -7459,6 +7950,300 @@ impl Node {
                                 }
                                 request_response::Event::OutboundFailure { request_id, .. } => {
                                     self.witness_requests.remove(&request_id);
+                                }
+                                _ => {}
+                            }
+                        }
+                        SwarmEvent::Behaviour(BudlumBehaviourEvent::Bud3Symbols(event)) => {
+                            use crate::network::bud3_protocol::{
+                                verify_bud3_symbols_response, Bud3SymbolsResponse,
+                            };
+                            use crate::storage::bud3::symbol_protocol::SymbolRangeResponse;
+                            match event {
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Request {
+                                            request, channel, ..
+                                        },
+                                    ..
+                                } => {
+                                    let allowed = {
+                                        let mut pm = self.peer_manager_lock();
+                                        !pm.is_banned(&peer)
+                                            && pm.is_handshaked(&peer)
+                                            && pm.check_rate_limit(&peer)
+                                    };
+                                    if !allowed {
+                                        warn!("Rejected B.U.D. 3.0 symbol request from banned/unhandshaked/rate-limited peer {peer}");
+                                        continue;
+                                    }
+                                    let peer_key = crate::core::hash::calculate_hash_bytes(&peer.to_bytes());
+                                    let now_sec = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs();
+                                    if let Err(err) = self.bud3_peer_limiter.check_symbol_request(
+                                        &peer_key,
+                                        &request.range,
+                                        now_sec,
+                                    ) {
+                                        let _ = self
+                                            .swarm
+                                            .behaviour_mut()
+                                            .bud3_symbols
+                                            .send_response(
+                                                channel,
+                                                Bud3SymbolsResponse::Unavailable(format!("{err:?}")),
+                                            );
+                                        continue;
+                                    }
+                                    if self.mobile_mode
+                                        && self.mobile_profile.as_ref().is_some_and(|p| {
+                                            p.battery.power_mode()
+                                                == crate::network::mobile::PowerMode::Critical
+                                        })
+                                    {
+                                        let _ = self
+                                            .swarm
+                                            .behaviour_mut()
+                                            .bud3_symbols
+                                            .send_response(
+                                                channel,
+                                                Bud3SymbolsResponse::Unavailable(String::from(
+                                                    "mobile validator in critical power mode",
+                                                )),
+                                            );
+                                        continue;
+                                    }
+                                    let chain = self.chain.clone();
+                                    let reply = match chain
+                                        .bud3_get_symbols(
+                                            request.holder,
+                                            request.range.object,
+                                            request.range.segment,
+                                            request.range.first_esi,
+                                            request.range.count,
+                                        )
+                                        .await
+                                    {
+                                        Ok(Ok(page)) => {
+                                            Bud3SymbolsResponse::Symbols(SymbolRangeResponse {
+                                                items: page.items,
+                                            })
+                                        }
+                                        Ok(Err(err)) => Bud3SymbolsResponse::Unavailable(err),
+                                        Err(err) => {
+                                            Bud3SymbolsResponse::Unavailable(err.to_string())
+                                        }
+                                    };
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .bud3_symbols
+                                        .send_response(channel, reply);
+                                }
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Response {
+                                            request_id,
+                                            response,
+                                        },
+                                    ..
+                                } => {
+                                    let Some(PendingBud3SymbolRequest {
+                                        peer_id: asked,
+                                        request: req,
+                                        symbol_size,
+                                        roots,
+                                        sender,
+                                    }) = self.bud3_symbol_requests.remove(&request_id)
+                                    else {
+                                        warn!("Unsolicited B.U.D. 3.0 symbol response from {peer}");
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        continue;
+                                    };
+                                    if asked != peer {
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        let _ = sender.send(Err(String::from(
+                                            "B.U.D. 3.0 symbol response peer mismatch",
+                                        )));
+                                        continue;
+                                    }
+                                    match verify_bud3_symbols_response(
+                                        &req,
+                                        &response,
+                                        symbol_size,
+                                        &roots,
+                                    ) {
+                                        Ok(items) => {
+                                            self.peer_manager_lock().report_good_behavior(&peer);
+                                            let _ = sender.send(Ok(items));
+                                        }
+                                        Err(err) => {
+                                            if matches!(response, Bud3SymbolsResponse::Symbols(_)) {
+                                                self.peer_manager_lock()
+                                                    .report_bad_behavior(&peer);
+                                            }
+                                            let _ = sender.send(Err(err));
+                                        }
+                                    }
+                                }
+                                request_response::Event::OutboundFailure {
+                                    peer,
+                                    request_id,
+                                    error,
+                                    ..
+                                } => {
+                                    if let Some(PendingBud3SymbolRequest { sender, .. }) =
+                                        self.bud3_symbol_requests.remove(&request_id)
+                                    {
+                                        let _ = sender.send(Err(format!(
+                                            "B.U.D. 3.0 symbol request to {peer} failed: {error:?}"
+                                        )));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        SwarmEvent::Behaviour(BudlumBehaviourEvent::Bud3Custody(event)) => {
+                            use crate::network::bud3_protocol::{
+                                custody_receipt_digest, verify_bud3_custody_response,
+                                Bud3CustodyResponse,
+                            };
+                            match event {
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Request {
+                                            request, channel, ..
+                                        },
+                                    ..
+                                } => {
+                                    let allowed = {
+                                        let mut pm = self.peer_manager_lock();
+                                        !pm.is_banned(&peer)
+                                            && pm.is_handshaked(&peer)
+                                            && pm.check_rate_limit(&peer)
+                                    };
+                                    if !allowed {
+                                        warn!("Rejected B.U.D. 3.0 custody push from banned/unhandshaked/rate-limited peer {peer}");
+                                        continue;
+                                    }
+                                    let peer_key = crate::core::hash::calculate_hash_bytes(&peer.to_bytes());
+                                    if let Err(err) =
+                                        self.bud3_peer_limiter.open_custody_stream(&peer_key)
+                                    {
+                                        let _ = self
+                                            .swarm
+                                            .behaviour_mut()
+                                            .bud3_custody
+                                            .send_response(
+                                                channel,
+                                                Bud3CustodyResponse::Rejected(format!("{err:?}")),
+                                            );
+                                        continue;
+                                    }
+                                    let holder = request.holder;
+                                    let object = request.object;
+                                    let segment = request.segment;
+                                    let chain = self.chain.clone();
+                                    let local_peer = self.peer_id;
+                                    let is_target_holder = matches!(
+                                        chain.validator_peer_id(holder).await,
+                                        Ok(Some(pk))
+                                            if crate::network::bud3_protocol::ed25519_key_to_peer_id(
+                                                &pk,
+                                            ) == Ok(local_peer)
+                                    );
+                                    let res = if is_target_holder {
+                                        chain
+                                            .bud3_store_verified_symbols(
+                                                holder,
+                                                object,
+                                                segment,
+                                                request.items,
+                                            )
+                                            .await
+                                    } else {
+                                        Ok(Err(String::from(
+                                            "node is not the registered custody holder",
+                                        )))
+                                    };
+                                    self.bud3_peer_limiter.close_custody_stream(&peer_key);
+                                    let reply = match res {
+                                        Ok(Ok(stored)) => Bud3CustodyResponse::Accepted {
+                                            stored,
+                                            receipt_digest: custody_receipt_digest(
+                                                &holder, &object, segment, stored,
+                                            ),
+                                        },
+                                        Ok(Err(err)) => Bud3CustodyResponse::Rejected(err),
+                                        Err(err) => Bud3CustodyResponse::Rejected(err.to_string()),
+                                    };
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .bud3_custody
+                                        .send_response(channel, reply);
+                                }
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Response {
+                                            request_id,
+                                            response,
+                                        },
+                                    ..
+                                } => {
+                                    let Some(PendingBud3CustodyRequest {
+                                        peer_id: asked,
+                                        request: req,
+                                        sender,
+                                    }) = self.bud3_custody_requests.remove(&request_id)
+                                    else {
+                                        warn!("Unsolicited B.U.D. 3.0 custody response from {peer}");
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        continue;
+                                    };
+                                    if asked != peer {
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        let _ = sender.send(Err(String::from(
+                                            "B.U.D. 3.0 custody response peer mismatch",
+                                        )));
+                                        continue;
+                                    }
+                                    match verify_bud3_custody_response(&req, &response) {
+                                        Ok(stored) => {
+                                            self.peer_manager_lock().report_good_behavior(&peer);
+                                            let _ = sender.send(Ok(stored));
+                                        }
+                                        Err(err) => {
+                                            if matches!(
+                                                response,
+                                                Bud3CustodyResponse::Accepted { .. }
+                                            ) {
+                                                self.peer_manager_lock()
+                                                    .report_bad_behavior(&peer);
+                                            }
+                                            let _ = sender.send(Err(err));
+                                        }
+                                    }
+                                }
+                                request_response::Event::OutboundFailure {
+                                    peer,
+                                    request_id,
+                                    error,
+                                    ..
+                                } => {
+                                    if let Some(PendingBud3CustodyRequest { sender, .. }) =
+                                        self.bud3_custody_requests.remove(&request_id)
+                                    {
+                                        let _ = sender.send(Err(format!(
+                                            "B.U.D. 3.0 custody push to {peer} failed: {error:?}"
+                                        )));
+                                    }
                                 }
                                 _ => {}
                             }
@@ -9459,26 +10244,30 @@ mod identity_file_tests {
             client.subscribe("transactions".to_string()).await;
         }
 
+        /// Read both peers' connection and handshake states under one lock.
+        fn handshake_state(
+            pm: &Arc<Mutex<PeerManager>>,
+            shielded: &PeerId,
+            public: &PeerId,
+        ) -> (bool, bool, bool) {
+            let guard = pm.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                guard.is_handshaked(shielded),
+                guard.is_connected(public),
+                guard.is_handshaked(public),
+            )
+        }
+
         // Wait until V<->S and S<->P complete their application handshakes,
         // while asserting P NEVER establishes a connection to shielded V.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let v_has_s = val_pm
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_handshaked(&sentry_peer_id);
-            let v_has_p = val_pm
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_connected(&pub_peer_id);
-            let s_has_v = sentry_pm
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_handshaked(&val_peer_id);
-            let s_has_p = sentry_pm
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_handshaked(&pub_peer_id);
+            // Both questions are asked of the same guard: taking the lock
+            // twice per iteration let the peer set change in between, and the
+            // second `unwrap()` panicked the whole suite when the first
+            // holder of the lock had panicked.
+            let (v_has_s, v_has_p, _) = handshake_state(&val_pm, &sentry_peer_id, &pub_peer_id);
+            let (s_has_v, _, s_has_p) = handshake_state(&sentry_pm, &val_peer_id, &pub_peer_id);
             assert!(
                 !v_has_p,
                 "Public peer {pub_peer_id} must NEVER connect directly to shielded validator {val_peer_id}"
@@ -9508,10 +10297,7 @@ mod identity_file_tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while pub_chain.get_height().await < 1 {
             assert!(
-                !val_pm
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .is_connected(&pub_peer_id),
+                !handshake_state(&val_pm, &sentry_peer_id, &pub_peer_id).1,
                 "shielded validator must remain invisible to direct public peer connections"
             );
             assert!(
@@ -9529,7 +10315,7 @@ mod identity_file_tests {
         assert_eq!(
             val_pm
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .connected_peers(),
             vec![sentry_peer_id],
             "shielded validator must speak ONLY with its configured sentry node"

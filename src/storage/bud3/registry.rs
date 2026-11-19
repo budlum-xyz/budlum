@@ -160,6 +160,9 @@ pub struct PaidViewRecord {
     pub amount_atoms: u64,
     /// Epoch in which the payment was recorded.
     pub paid_at_epoch: u64,
+    /// Whether this fallback-view receipt has already been redeemed.
+    #[serde(default)]
+    pub consumed: bool,
 }
 
 /// One replacement of an object: a second, better representation of the same
@@ -275,10 +278,16 @@ impl From<GrantBud3Error> for RegistryError {
 pub enum Bud3Query {
     /// One object by commitment.
     Object(ObjectKey),
+    /// Placement, share confirmation, and physical-byte endowment details for one object.
+    Placement(ObjectKey),
     /// The shares one validator holds.
     Custody(Address),
     /// One unlinkable view grant by `grant_tag`.
     Grant([u8; 32]),
+    /// One unlinkable view grant by `grant_tag` evaluated at `current_epoch`.
+    GrantAt([u8; 32], u64),
+    /// Resolve an NFT binding (`NftId`) to its live/replaced object metadata.
+    Nft(NftId),
 }
 
 /// What a registration did.
@@ -456,6 +465,9 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
     if record.symbol_roots.len() as u64 != seg.count() {
         return Err(RegistryError::BadRecord("one symbol root per segment"));
     }
+    if record.symbol_roots.contains(&[0u8; 32]) {
+        return Err(RegistryError::BadRecord("zero symbol root"));
+    }
     for index in 0..seg.count() {
         let k = seg
             .source_symbols(index)
@@ -513,6 +525,44 @@ impl Bud3Registry {
         self.objects.get(key)
     }
 
+    /// Whether `nft` authorizes reads of `object`, accounting for finalized and
+    /// pending Section 6.14 `ReplaceObject` redirects (`old -> new` moves
+    /// `nfts[nft]` at proposal time while `old` stays live until `new` ACKs).
+    #[must_use]
+    pub fn nft_matches_object(&self, nft: &NftId, object: &ObjectKey) -> bool {
+        let Some((bound_key, _)) = self.nfts.get(nft).copied() else {
+            return false;
+        };
+        if bound_key == *object {
+            return true;
+        }
+        let Some((resolved_key, _)) = self.resolve_live_object(object) else {
+            return false;
+        };
+        if bound_key == resolved_key {
+            return true;
+        }
+        // During a pending (unfinalized) Section 6.14 replacement `old -> new`,
+        // `replace_object` moves `nfts[nft]` to `new` immediately while `old`
+        // remains live until `new` is ACKed. Walk pending replacement targets
+        // so NFT holders keep read access throughout the handover window.
+        let mut cur = resolved_key;
+        let mut seen = BTreeSet::new();
+        for _ in 0..16 {
+            if !seen.insert(cur) {
+                break;
+            }
+            let Some(rep) = self.replacements.get(&cur) else {
+                break;
+            };
+            if rep.new == bound_key {
+                return true;
+            }
+            cur = rep.new;
+        }
+        false
+    }
+
     /// Look up the `(object_key, holder_address)` binding for a bound `NftId`.
     #[must_use]
     pub fn nft_binding(&self, nft: &NftId) -> Option<(ObjectKey, Address)> {
@@ -523,6 +573,12 @@ impl Bud3Registry {
     #[must_use]
     pub fn tombstone(&self, key: &ObjectKey) -> Option<u64> {
         self.tombstones.get(key).copied()
+    }
+
+    /// Iterate tombstoned object keys so node-local symbol caches can purge
+    /// deleted payloads even after a restart.
+    pub fn tombstone_keys(&self) -> impl Iterator<Item = &ObjectKey> {
+        self.tombstones.keys()
     }
 
     /// `RegisterObject`. Public content already held is deduplicated.
@@ -569,7 +625,8 @@ impl Bud3Registry {
         if public {
             if let Some(existing) = self.public_index.get(&record.content_id.digest) {
                 if self.objects.get(existing).is_some_and(|entry| {
-                    entry.record.content_id == record.content_id
+                    entry.custody_confirmed
+                        && entry.record.content_id == record.content_id
                         && !entry.shares.is_empty()
                         && entry
                             .shares
@@ -602,9 +659,12 @@ impl Bud3Registry {
                 }
                 return Ok(Registered::Deduplicated(raw_key));
             }
-            let scoped = hash_fields_bytes(&[b"BDLM_BUD3_CLAIMANT_KEY_V1", &raw_key, &owner]);
+            let scoped = Self::claimant_scoped_key(&raw_key, &owner);
             if self.tombstones.contains_key(&scoped) {
                 return Err(RegistryError::Tombstoned);
+            }
+            if self.replacements.contains_key(&scoped) {
+                return Err(RegistryError::BadRecord("commitment was already replaced"));
             }
             if let Some(own_entry) = self.objects.get(&scoped) {
                 if own_entry.record.content_id.kind == ContentIdKind::Public {
@@ -622,6 +682,8 @@ impl Bud3Registry {
                 return Ok(Registered::Deduplicated(scoped));
             }
             scoped
+        } else if self.replacements.contains_key(&raw_key) {
+            return Err(RegistryError::BadRecord("commitment was already replaced"));
         } else {
             raw_key
         };
@@ -663,6 +725,93 @@ impl Bud3Registry {
     #[must_use]
     pub fn replacement(&self, old: &ObjectKey) -> Option<&Replacement> {
         self.replacements.get(old)
+    }
+
+    /// Deterministic owner-scoped object key used when deduplicating/isolating
+    /// a claimant registration under a contested raw commitment.
+    #[must_use]
+    pub(crate) fn claimant_scoped_key(raw_key: &ObjectKey, owner: &Address) -> ObjectKey {
+        hash_fields_bytes(&[b"BDLM_BUD3_CLAIMANT_KEY_V1", raw_key, owner])
+    }
+
+    fn pending_replacement_sources(&self, key: &ObjectKey) -> Vec<ObjectKey> {
+        let mut out = vec![*key];
+        let mut cur = *key;
+        let mut seen = BTreeSet::from([*key]);
+        for _ in 0..16 {
+            let Some((old, _)) = self
+                .replacements
+                .iter()
+                .find(|(_, r)| !r.finalized && r.new == cur)
+            else {
+                break;
+            };
+            if !seen.insert(*old) {
+                break;
+            }
+            out.push(*old);
+            cur = *old;
+        }
+        out
+    }
+
+    fn pending_replacement_leaf(&self, key: &ObjectKey) -> ObjectKey {
+        let mut cur = *key;
+        let mut seen = BTreeSet::from([*key]);
+        for _ in 0..16 {
+            let Some(rep) = self.replacements.get(&cur) else {
+                break;
+            };
+            if rep.finalized || !seen.insert(rep.new) {
+                break;
+            }
+            cur = rep.new;
+        }
+        cur
+    }
+
+    /// Return an unfinalized predecessor object whose shares remain confirmed
+    /// while `key` is awaiting custody confirmation.
+    #[must_use]
+    pub(crate) fn pending_confirmed_fallback(&self, key: &ObjectKey) -> Option<ObjectKey> {
+        if self
+            .objects
+            .get(key)
+            .is_none_or(|entry| entry.custody_confirmed)
+        {
+            return None;
+        }
+        self.replacements
+            .iter()
+            .find(|(old, r)| {
+                !r.finalized
+                    && r.new == *key
+                    && self.objects.get(*old).is_some_and(|o| o.custody_confirmed)
+            })
+            .map(|(old, _)| *old)
+    }
+
+    /// Resolve `key` to its live [`ObjectEntry`], following finalized Section 6.14
+    /// `ReplaceObject` redirects up to 16 hops while rejecting tombstoned,
+    /// cyclic, or missing targets.
+    #[must_use]
+    pub fn resolve_live_object(&self, key: &ObjectKey) -> Option<(ObjectKey, &ObjectEntry)> {
+        let mut cur = *key;
+        let mut seen = BTreeSet::new();
+        for _ in 0..16 {
+            if !seen.insert(cur) || self.tombstones.contains_key(&cur) {
+                return None;
+            }
+            if let Some(entry) = self.objects.get(&cur) {
+                return Some((cur, entry));
+            }
+            let rep = self.replacements.get(&cur)?;
+            if !rep.finalized {
+                return None;
+            }
+            cur = rep.new;
+        }
+        None
     }
 
     /// Record an on-chain G8 paid fallback decode authorization for a public object.
@@ -707,10 +856,14 @@ impl Bud3Registry {
                 "global paid view receipt limit reached",
             ));
         }
+        let target_object = self
+            .resolve_live_object(&object)
+            .map(|(k, _)| k)
+            .ok_or(RegistryError::UnknownObject)?;
         let mut object_receipts = 0usize;
         let mut payer_object_receipts = 0usize;
         for rec in self.paid_views.values() {
-            if rec.object == object {
+            if rec.object == target_object {
                 object_receipts += 1;
                 if rec.payer == payer {
                     payer_object_receipts += 1;
@@ -729,7 +882,7 @@ impl Bud3Registry {
         }
         let obj = self
             .objects
-            .get_mut(&object)
+            .get_mut(&target_object)
             .ok_or(RegistryError::UnknownObject)?;
         if obj.record.content_id.kind != ContentIdKind::Public {
             return Err(RegistryError::InvalidPaidView(
@@ -741,36 +894,70 @@ impl Bud3Registry {
             receipt_id,
             PaidViewRecord {
                 payer,
-                object,
+                object: target_object,
                 amount_atoms,
                 paid_at_epoch: epoch,
+                consumed: false,
             },
         );
         Ok(())
     }
 
-    /// Verify that `receipt` corresponds to a live on-chain [`PaidViewRecord`].
+    /// Verify that `receipt` corresponds to a live, unconsumed on-chain [`PaidViewRecord`].
     #[must_use]
     pub fn verify_paid_view(&self, receipt: &PaidViewReceipt) -> bool {
         receipt.fee_paid_atoms >= MIN_PAID_VIEW_FEE_ATOMS
             && self.paid_views.get(&receipt.receipt_id).is_some_and(|rec| {
-                self.objects.contains_key(&rec.object)
-                    && !self.tombstones.contains_key(&rec.object)
-                    && rec.payer == receipt.payer
-                    && rec.object == receipt.object
-                    && rec.amount_atoms >= receipt.fee_paid_atoms
-                    && rec.amount_atoms >= MIN_PAID_VIEW_FEE_ATOMS
+                !rec.consumed
+                    && self
+                        .resolve_live_object(&receipt.object)
+                        .is_some_and(|(resolved, _)| {
+                            resolved == rec.object
+                                && self.objects.contains_key(&rec.object)
+                                && !self.tombstones.contains_key(&rec.object)
+                                && rec.payer == receipt.payer
+                                && rec.amount_atoms >= receipt.fee_paid_atoms
+                                && rec.amount_atoms >= MIN_PAID_VIEW_FEE_ATOMS
+                        })
             })
     }
 
-    /// Verify that `receipt` corresponds to an unexpired on-chain [`PaidViewRecord`]
-    /// at `current_epoch` (even before `expire` sweeps the epoch boundary).
+    /// Verify that `receipt` corresponds to an unexpired, unconsumed on-chain
+    /// [`PaidViewRecord`] at `current_epoch` (even before `expire` sweeps the
+    /// epoch boundary).
     #[must_use]
     pub fn verify_paid_view_at(&self, receipt: &PaidViewReceipt, current_epoch: u64) -> bool {
         self.verify_paid_view(receipt)
             && self.paid_views.get(&receipt.receipt_id).is_some_and(|rec| {
                 current_epoch <= rec.paid_at_epoch.saturating_add(PAID_VIEW_RETENTION_EPOCHS)
             })
+    }
+
+    /// Atomically verify and mark `receipt` consumed at `current_epoch`, retaining
+    /// the spent entry across snapshot round-trips until its retention window
+    /// expires so the same `receipt_id` can neither be redeemed twice nor
+    /// re-registered before expiry.
+    ///
+    /// exposed for stateful single-use paid fallback-view redemption.
+    pub fn consume_paid_view_at(&mut self, receipt: &PaidViewReceipt, current_epoch: u64) -> bool {
+        if !self.verify_paid_view_at(receipt, current_epoch) {
+            return false;
+        }
+        if let Some(rec) = self.paid_views.get_mut(&receipt.receipt_id) {
+            rec.consumed = true;
+            return true;
+        }
+        false
+    }
+
+    /// Return whether `receipt_id` has been redeemed while still retained.
+    ///
+    /// exposed for paid fallback-view ledger queries.
+    #[must_use]
+    pub fn is_paid_view_consumed(&self, receipt_id: &[u8; 32]) -> bool {
+        self.paid_views
+            .get(receipt_id)
+            .is_some_and(|rec| rec.consumed)
     }
 
     /// Return whether `receipt_id` is still retained in the on-chain paid-view table.
@@ -819,7 +1006,11 @@ impl Bud3Registry {
                         dep_set.insert(*key);
                     }
                 }
-                self.paid_views.retain(|_, rec| rec.object != old);
+                for rec in self.paid_views.values_mut() {
+                    if rec.object == old {
+                        rec.object = *key;
+                    }
+                }
                 for nft in obj.references {
                     if let Some((_, holder)) = self.nfts.get(&nft).copied() {
                         self.nfts.insert(nft, (*key, holder));
@@ -833,6 +1024,44 @@ impl Bud3Registry {
                 r.finalized = true;
             }
         }
+    }
+
+    /// Validate whether `nft` can be bound to `key` on behalf of `holder` without
+    /// mutating registry state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] if ownership verification, tombstone, pending
+    /// replacement, sealed ownership, duplicate binding, or reference-cap checks fail.
+    pub fn can_bind_nft(
+        &self,
+        nft: NftId,
+        holder: Address,
+        nft_owner: Option<Address>,
+        key: &ObjectKey,
+    ) -> Result<(), RegistryError> {
+        if nft_owner != Some(holder) {
+            return Err(RegistryError::NotAuthorized);
+        }
+        if self.nfts.contains_key(&nft) {
+            return Err(RegistryError::NftAlreadyBound);
+        }
+        if self.tombstones.contains_key(key) {
+            return Err(RegistryError::Tombstoned);
+        }
+        if self.replacements.get(key).is_some_and(|r| !r.finalized) {
+            return Err(RegistryError::BadRecord(
+                "object has pending replacement; bind successor commitment",
+            ));
+        }
+        let obj = self.objects.get(key).ok_or(RegistryError::UnknownObject)?;
+        if obj.record.content_id.kind == ContentIdKind::Sealed && obj.owner != holder {
+            return Err(RegistryError::NotAuthorized);
+        }
+        if obj.references.len() >= MAX_OBJECT_REFERENCES {
+            return Err(RegistryError::BadRecord("object reference limit reached"));
+        }
+        Ok(())
     }
 
     /// `BindNft`: one more reference to a live object.
@@ -854,30 +1083,11 @@ impl Bud3Registry {
         nft_owner: Option<Address>,
         key: &ObjectKey,
     ) -> Result<(), RegistryError> {
-        if nft_owner != Some(holder) {
-            return Err(RegistryError::NotAuthorized);
-        }
-        if self.nfts.contains_key(&nft) {
-            return Err(RegistryError::NftAlreadyBound);
-        }
-        if self.tombstones.contains_key(key) {
-            return Err(RegistryError::Tombstoned);
-        }
-        if self.replacements.get(key).is_some_and(|r| !r.finalized) {
-            return Err(RegistryError::BadRecord(
-                "object has pending replacement; bind successor commitment",
-            ));
-        }
+        self.can_bind_nft(nft, holder, nft_owner, key)?;
         let obj = self
             .objects
             .get_mut(key)
             .ok_or(RegistryError::UnknownObject)?;
-        if obj.record.content_id.kind == ContentIdKind::Sealed && obj.owner != holder {
-            return Err(RegistryError::NotAuthorized);
-        }
-        if obj.references.len() >= MAX_OBJECT_REFERENCES {
-            return Err(RegistryError::BadRecord("object reference limit reached"));
-        }
         obj.references.insert(nft);
         self.nfts.insert(nft, (*key, holder));
         Ok(())
@@ -898,17 +1108,39 @@ impl Bud3Registry {
         self.drop_object(key, epoch);
         // A replacement whose new object is deleted leaves no object that
         // carries the content: the references are already gone (this is the
-        // burn of the last one, or expiry), so the replaced object goes with
-        // it and no redirect stands.
-        let replaced: Vec<ObjectKey> = self
-            .replacements
-            .iter()
-            .filter(|(_, r)| r.new == *key)
-            .map(|(old, _)| *old)
-            .collect();
-        for old in replaced {
-            self.drop_object(&old, epoch);
-            self.replacements.remove(&old);
+        // burn of the last one, or expiry), so every chained replaced object
+        // goes with it and no orphan redirect stands. Likewise, deleting an
+        // old object (for example via `dao_delete_public_content`) while a
+        // replacement is still unfinalized removes the pending target too so
+        // confirming its remaining shares cannot resurrect deleted content.
+        let mut queue = vec![*key];
+        let mut seen = BTreeSet::from([*key]);
+        while let Some(target) = queue.pop() {
+            let replaced: Vec<ObjectKey> = self
+                .replacements
+                .iter()
+                .filter(|(_, r)| r.new == target)
+                .map(|(old, _)| *old)
+                .collect();
+            for old in replaced {
+                self.drop_object(&old, epoch);
+                self.replacements.remove(&old);
+                if seen.insert(old) {
+                    queue.push(old);
+                }
+            }
+            if let Some(next) = self
+                .replacements
+                .get(&target)
+                .filter(|r| !r.finalized)
+                .map(|r| r.new)
+            {
+                self.replacements.remove(&target);
+                self.drop_object(&next, epoch);
+                if seen.insert(next) {
+                    queue.push(next);
+                }
+            }
         }
     }
 
@@ -932,6 +1164,10 @@ impl Bud3Registry {
                 self.nfts.remove(&nft);
             }
             self.base_deps.remove(key);
+            for deps in self.base_deps.values_mut() {
+                deps.remove(key);
+            }
+            self.base_deps.retain(|_, deps| !deps.is_empty());
             self.paid_views.retain(|_, rec| rec.object != *key);
             // Only custody-confirmed objects earn a permanent deletion
             // tombstone: an unconfirmed squatter letting a bogus registration
@@ -966,7 +1202,10 @@ impl Bud3Registry {
             .get(&key)
             .ok_or(RegistryError::UnknownObject)?
             .owner;
-        let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
+        let has_deps = self
+            .pending_replacement_sources(&key)
+            .into_iter()
+            .any(|k| self.base_deps.get(&k).is_some_and(|d| !d.is_empty()));
         let nft_count = self.objects.get(&key).map_or(0, |o| o.references.len());
         if nft_count <= 1 && has_deps {
             return Err(RegistryError::HasDependents);
@@ -1017,7 +1256,18 @@ impl Bud3Registry {
         if owner != *signer {
             return Err(RegistryError::NotAuthorized);
         }
-        if self.base_deps.get(key).is_some_and(|d| !d.is_empty()) {
+        let live_leaf = self.pending_replacement_leaf(key);
+        let lineage = self.pending_replacement_sources(&live_leaf);
+        if lineage
+            .iter()
+            .any(|k| self.objects.get(k).is_some_and(|o| o.owner != *signer))
+        {
+            return Err(RegistryError::NotAuthorized);
+        }
+        let has_deps = lineage
+            .iter()
+            .any(|k| self.base_deps.get(k).is_some_and(|d| !d.is_empty()));
+        if has_deps {
             return Err(RegistryError::HasDependents);
         }
         self.delete(key, epoch);
@@ -1052,24 +1302,38 @@ impl Bud3Registry {
             return Err(RegistryError::UnknownObject);
         }
         if from != to && obj.owner == *from {
+            let lineage = self.pending_replacement_sources(&key);
             for (base, deps) in &self.base_deps {
-                if deps.contains(&key)
-                    && self
+                if lineage.iter().any(|k| deps.contains(k)) {
+                    let base_live = self.pending_replacement_leaf(base);
+                    let conflict = self
                         .objects
                         .get(base)
                         .is_some_and(|base_obj| base_obj.owner != *to)
-                {
-                    return Err(RegistryError::CrossOwnerDependency);
+                        || self
+                            .objects
+                            .get(&base_live)
+                            .is_some_and(|base_obj| base_obj.owner != *to);
+                    if conflict {
+                        return Err(RegistryError::CrossOwnerDependency);
+                    }
                 }
             }
-            if let Some(deps) = self.base_deps.get(&key) {
-                for dep in deps {
-                    if self
-                        .objects
-                        .get(dep)
-                        .is_some_and(|dep_obj| dep_obj.owner != *to)
-                    {
-                        return Err(RegistryError::CrossOwnerDependency);
+            for base_k in &lineage {
+                if let Some(deps) = self.base_deps.get(base_k) {
+                    for dep in deps {
+                        let dep_live = self.pending_replacement_leaf(dep);
+                        let conflict = self
+                            .objects
+                            .get(dep)
+                            .is_some_and(|dep_obj| dep_obj.owner != *to)
+                            || self
+                                .objects
+                                .get(&dep_live)
+                                .is_some_and(|dep_obj| dep_obj.owner != *to);
+                        if conflict {
+                            return Err(RegistryError::CrossOwnerDependency);
+                        }
                     }
                 }
             }
@@ -1109,8 +1373,12 @@ impl Bud3Registry {
                     .all(|r| self.nfts.get(r).is_some_and(|(_, h)| h == to))
         });
         if all_held_by_to {
-            if let Some(obj) = self.objects.get_mut(&key) {
-                obj.owner = *to;
+            for lineage_key in self.pending_replacement_sources(&key) {
+                if let Some(obj) = self.objects.get_mut(&lineage_key) {
+                    if obj.owner == *from {
+                        obj.owner = *to;
+                    }
+                }
             }
         }
         Ok(())
@@ -1135,7 +1403,10 @@ impl Bud3Registry {
             return Err(RegistryError::NotAuthorized);
         }
         let obj = self.objects.get(&key).ok_or(RegistryError::UnknownObject)?;
-        let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
+        let has_deps = self
+            .pending_replacement_sources(&key)
+            .into_iter()
+            .any(|k| self.base_deps.get(&k).is_some_and(|d| !d.is_empty()));
         if obj.references.len() <= 1 && has_deps {
             return Err(RegistryError::HasDependents);
         }
@@ -1208,19 +1479,33 @@ impl Bud3Registry {
 
     /// Convenience: detach `dependent` from `base` after standalone rehydration.
     pub fn detach_dependency(&mut self, dependent: &ObjectKey, base: &ObjectKey, epoch: u64) {
-        let mut remove_entry = false;
-        if let Some(set) = self.base_deps.get_mut(base) {
-            set.remove(dependent);
-            remove_entry = set.is_empty();
-        }
-        if remove_entry {
-            self.base_deps.remove(base);
-            if self
-                .objects
-                .get(base)
-                .is_some_and(|o| o.references.is_empty())
-            {
-                self.delete(base, epoch);
+        let dep_keys = self.pending_replacement_sources(dependent);
+        let base_keys = self.pending_replacement_sources(base);
+        for base_k in base_keys {
+            let mut remove_entry = false;
+            if let Some(set) = self.base_deps.get_mut(&base_k) {
+                for dep_k in &dep_keys {
+                    set.remove(dep_k);
+                }
+                remove_entry = set.is_empty();
+            }
+            if remove_entry {
+                self.base_deps.remove(&base_k);
+                let live_k = self.pending_replacement_leaf(&base_k);
+                let has_refs = self
+                    .objects
+                    .get(&base_k)
+                    .is_some_and(|o| !o.references.is_empty())
+                    || self
+                        .objects
+                        .get(&live_k)
+                        .is_some_and(|o| !o.references.is_empty());
+                if !has_refs
+                    && self.objects.contains_key(&base_k)
+                    && self.replacements.get(&base_k).is_none_or(|r| r.finalized)
+                {
+                    self.delete(&base_k, epoch);
+                }
             }
         }
     }
@@ -1249,6 +1534,10 @@ impl Bud3Registry {
     }
 
     /// Check grant issuance without changing registry state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] if the NFT, object, signer, tag, or grant row is invalid.
     pub fn validate_view_grant(
         &self,
         nft: &NftId,
@@ -1275,6 +1564,7 @@ impl Bud3Registry {
     }
 
     /// Issue a view grant through the canonical issuance path.
+    ///
     /// # Errors
     ///
     /// Returns [`RegistryError`] from the shared validation in [`Self::validate_view_grant`]
@@ -1350,7 +1640,10 @@ impl Bud3Registry {
             .get(&key)
             .ok_or(RegistryError::UnknownObject)?
             .owner;
-        let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
+        let has_deps = self
+            .pending_replacement_sources(&key)
+            .into_iter()
+            .any(|k| self.base_deps.get(&k).is_some_and(|d| !d.is_empty()));
         let nft_count = self.objects.get(&key).map_or(0, |o| o.references.len());
         if nft_count <= 1 && has_deps {
             return Err(RegistryError::HasDependents);
@@ -1396,6 +1689,16 @@ impl Bud3Registry {
         Some(key)
     }
 
+    /// Resolve `key` to the live leaf [`ObjectKey`] and [`ObjectEntry`] that
+    /// carries future custody/renewal lifetime across finalized and pending
+    /// `ReplaceObject` hops.
+    #[must_use]
+    pub fn resolve_renewal_target(&self, key: &ObjectKey) -> Option<(ObjectKey, &ObjectEntry)> {
+        let (live_key, _) = self.resolve_live_object(key)?;
+        let target_key = self.pending_replacement_leaf(&live_key);
+        self.objects.get(&target_key).map(|obj| (target_key, obj))
+    }
+
     /// `RenewObject`: anyone may extend the paid lifetime.
     ///
     /// # Errors
@@ -1405,9 +1708,12 @@ impl Bud3Registry {
         if extra_epochs == 0 {
             return Err(RegistryError::BadLifetime);
         }
+        let (target_key, _) = self
+            .resolve_renewal_target(key)
+            .ok_or(RegistryError::UnknownObject)?;
         let obj = self
             .objects
-            .get_mut(key)
+            .get_mut(&target_key)
             .ok_or(RegistryError::UnknownObject)?;
         let new_expires = obj
             .expires_at
@@ -1428,6 +1734,7 @@ impl Bud3Registry {
 
     /// Admit and record a Mobile validator's declared custody quota under `limits`.
     /// Convenience: exposed for Mobile validator quota updates and RPC admission.
+    ///
     /// # Errors
     ///
     /// Returns [`RegistryError::BadQuota`] when the declared custody quota violates `limits`.
@@ -1453,6 +1760,10 @@ impl Bud3Registry {
     /// References move at proposal, but old shares and their endowment stay
     /// until every new share is acknowledged. The old commitment then remains
     /// as a finalized redirect instead of becoming a deletion tombstone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] if the object, authorization, shares, or attestations are invalid.
     pub fn replace_object(
         &mut self,
         proposer: (Address, u64),
@@ -1460,7 +1771,7 @@ impl Bud3Registry {
         new_record: ObjectRecord,
         new_shares: Vec<(u64, Share)>,
         attestations: &[super::replace::ReplaceAttestation],
-        (epoch, validator_keys): (u64, &BTreeMap<Address, Vec<u8>>),
+        (chain_id, epoch, validator_keys): (u64, u64, &BTreeMap<Address, Vec<u8>>),
     ) -> Result<ObjectKey, RegistryError> {
         let (sender, proposer_stake) = proposer;
         if self.tombstones.contains_key(old_key) {
@@ -1494,6 +1805,7 @@ impl Bud3Registry {
             .map(|s| s.share.validator)
             .collect();
         super::replace::admit_object_replacement(
+            chain_id,
             (&sender, &old_entry.owner, proposer_stake),
             (&old_entry.record, &new_record),
             &new_shares,
@@ -1509,7 +1821,10 @@ impl Bud3Registry {
         super::limits::Bud3Limits::TESTNET_DEFAULT
             .admit_content(new_record.object_len)
             .map_err(|_| RegistryError::BadRecord("object length exceeds testnet ceiling"))?;
-        if self.tombstones.contains_key(&new_key) || self.objects.contains_key(&new_key) {
+        if self.tombstones.contains_key(&new_key)
+            || self.objects.contains_key(&new_key)
+            || self.replacements.contains_key(&new_key)
+        {
             return Err(RegistryError::BadReplacement(
                 super::replace::ReplaceError::CommitmentAlreadyLive,
             ));
@@ -1742,10 +2057,16 @@ impl Bud3Registry {
         // (section 6.14, item 6).
         if n > 0 && complete {
             if let Some(digest) = public_digest {
-                let occupied_live = self
-                    .public_index
-                    .get(&digest)
-                    .is_some_and(|existing| existing != key && self.objects.contains_key(existing));
+                let occupied_live = self.public_index.get(&digest).is_some_and(|existing| {
+                    existing != key
+                        && self.objects.get(existing).is_some_and(|e| {
+                            e.custody_confirmed
+                                && !e.shares.is_empty()
+                                && e.shares
+                                    .iter()
+                                    .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+                        })
+                });
                 if !occupied_live {
                     self.public_index.insert(digest, *key);
                 }
@@ -1948,17 +2269,11 @@ impl Bud3Registry {
     /// Missed windows withhold that window's reward and route it to the Network
     /// Security Pool without slashing stake. Returns the number of misses.
     pub fn close_windows(&mut self, epoch: u64) -> usize {
+        // Retire unacknowledged repair shares once their 3-epoch acknowledgment
+        // window elapses so a silent recipient cannot freeze future repairs.
+        let _ = self.retire_unacknowledged_repairs(epoch);
         let mut missed = 0;
         for obj in self.objects.values_mut() {
-            let upload_roots = obj.record.symbol_roots.len();
-            // Retire unacknowledged repair shares once their 3-epoch acknowledgment
-            // window elapses so a silent recipient cannot freeze future repairs.
-            obj.shares.retain(|s| {
-                !(s.root >= upload_roots
-                    && s.status == ShareStatus::Pending
-                    && epoch.saturating_sub(s.assigned_epoch)
-                        >= super::custody::SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS)
-            });
             for s in &mut obj.shares {
                 if s.open_audit.is_some_and(|(_, last)| last < epoch) {
                     s.open_audit = None;
@@ -2215,14 +2530,26 @@ impl Bud3Registry {
         repair: SegmentRepair<'_>,
         epoch: u64,
     ) -> Result<(), RegistryError> {
-        self.record_repair_with_validators(key, repair, None, &BTreeMap::new(), epoch)
+        self.record_repair_with_validators(
+            key,
+            repair,
+            None,
+            &BTreeMap::new(),
+            (crate::core::transaction::DEFAULT_CHAIN_ID, epoch),
+        )
     }
 
-    /// Verify and record a segment repair using either Merkle-proven live symbols
-    /// or `MIN_REPAIR_ATTESTATIONS` independent active Full validator signatures.
+    /// Verify and record a segment repair from Merkle-proven live symbols.
+    ///
+    /// The legacy validator-attestation witness stays decodable for wire
+    /// compatibility, but is refused until it carries a seat- or stake-weighted
+    /// quorum certificate. A fixed signature count is not finality.
     ///
     /// Convenience: called by `super::tx::apply_with_validators_and_nft_owner` with the
     /// consensus active Full validator key directory and by direct registry callers.
+    ///
+    /// A validator attestation is verified against the digest for `chain_id`,
+    /// so a quorum signed for one network cannot be replayed on another.
     ///
     /// # Errors
     ///
@@ -2233,7 +2560,7 @@ impl Bud3Registry {
         repair: SegmentRepair<'_>,
         repairer: Option<&Address>,
         validator_keys: &BTreeMap<Address, Vec<u8>>,
-        epoch: u64,
+        (_chain_id, epoch): (u64, u64),
     ) -> Result<(), RegistryError> {
         let SegmentRepair {
             segment,
@@ -2372,6 +2699,8 @@ impl Bud3Registry {
             return Err(RegistryError::BadRepair("ESI range"));
         }
         let added = next - u64::from(first);
+        // Settled-or-upload roots only: a lost baseline share counts toward
+        // the deficit until its replacement repair root settles.
         let is_settled_or_upload = |s: &ShareState, roots: &[SymbolRoot]| {
             s.root < upload_roots || roots.get(s.root).is_some_and(|r| r.settled)
         };
@@ -2498,7 +2827,6 @@ impl Bud3Registry {
                 }
             }
             RepairWitness::ValidatorAttestations(_) => {
-                let _ = (repairer, validator_keys);
                 return Err(RegistryError::BadRepair(
                     "validator repair attestations require a seat- or stake-weighted quorum certificate",
                 ));
@@ -2567,6 +2895,63 @@ impl Bud3Registry {
     /// confirmed non-lost symbols it added, so a previously settled repair can
     /// never silently erase subsequent share losses and a concurrent extra loss
     /// stays marked `lost` until its own repair is confirmed.
+    /// Retire pending repair shares that remained unacknowledged past
+    /// `SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS`, across every segment of every
+    /// object (the proactive, all-segments counterpart of the lazy pruning
+    /// `record_repair` performs for the one segment it touches).
+    ///
+    /// A repair root whose pending shares are all pruned and that has no
+    /// confirmed live symbols left is marked `settled`; partially confirmed
+    /// roots stay unsettled so their confirmed symbols keep exact-budget
+    /// retirement. Returns how many shares were retired.
+    pub(crate) fn retire_unacknowledged_repairs(&mut self, epoch: u64) -> usize {
+        let mut retired = 0;
+        for obj in self.objects.values_mut() {
+            let upload_roots = obj.record.symbol_roots.len();
+            let is_retired = |s: &ShareState| {
+                s.root >= upload_roots
+                    && s.status == ShareStatus::Pending
+                    && epoch.saturating_sub(s.assigned_epoch)
+                        >= super::custody::SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS
+            };
+            let mut touched_roots: BTreeSet<usize> = BTreeSet::new();
+            for s in &obj.shares {
+                if is_retired(s) {
+                    touched_roots.insert(s.root);
+                }
+            }
+            if touched_roots.is_empty() {
+                continue;
+            }
+            let before = obj.shares.len();
+            obj.shares.retain(|s| !is_retired(s));
+            retired += before - obj.shares.len();
+            for root_idx in touched_roots {
+                if let Some(r) = obj.roots.get_mut(root_idx) {
+                    if r.settled {
+                        continue;
+                    }
+                    let confirmed_live: u64 = obj
+                        .shares
+                        .iter()
+                        .filter(|s| {
+                            s.root == root_idx && s.status == ShareStatus::Confirmed && !s.lost
+                        })
+                        .map(|s| u64::from(s.share.symbols))
+                        .sum();
+                    let has_open_pending = obj
+                        .shares
+                        .iter()
+                        .any(|s| s.root == root_idx && s.status != ShareStatus::Confirmed);
+                    if confirmed_live == 0 && !has_open_pending {
+                        r.settled = true;
+                    }
+                }
+            }
+        }
+        retired
+    }
+
     pub fn settle_repairs(&mut self) -> usize {
         let mut dropped = 0;
         for obj in self.objects.values_mut() {
@@ -2695,6 +3080,7 @@ impl Bud3Registry {
                             "count": r.count,
                         })).collect::<Vec<_>>(),
                         "references": o.references.len(),
+                        "custody_confirmed": o.custody_confirmed,
                         "expires_at_epoch": o.expires_at,
                         "repairs_due": self.repairs_due(key),
                         "endowment": {
@@ -2709,6 +3095,9 @@ impl Bud3Registry {
                             .replacement(key)
                             .filter(|r| !r.finalized)
                             .map(|r| hex::encode(r.new)),
+                        "pending_fallback_commitment": self
+                            .pending_confirmed_fallback(key)
+                            .map(hex::encode),
                     })
                 } else if let Some(r) = self.replacements.get(key) {
                     serde_json::json!({
@@ -2730,6 +3119,83 @@ impl Bud3Registry {
                     })
                 } else {
                     serde_json::Value::Null
+                }
+            }
+            Bud3Query::Placement(key) => {
+                if let Some(o) = self.objects.get(key) {
+                    let mut n_full: u64 = 0;
+                    let mut n_mobile: u64 = 0;
+                    let mut total_full_symbols: u64 = 0;
+                    let mut total_mobile_symbols: u64 = 0;
+                    let mut active_symbols: u64 = 0;
+                    let shares: Vec<serde_json::Value> = o
+                        .shares
+                        .iter()
+                        .map(|s| {
+                            if !s.lost {
+                                active_symbols =
+                                    active_symbols.saturating_add(u64::from(s.share.symbols));
+                                match s.share.class {
+                                    Class::Full => {
+                                        n_full = n_full.saturating_add(1);
+                                        total_full_symbols = total_full_symbols
+                                            .saturating_add(u64::from(s.share.symbols));
+                                    }
+                                    Class::Mobile => {
+                                        n_mobile = n_mobile.saturating_add(1);
+                                        total_mobile_symbols = total_mobile_symbols
+                                            .saturating_add(u64::from(s.share.symbols));
+                                    }
+                                }
+                            }
+                            serde_json::json!({
+                                "validator": hex::encode(s.share.validator),
+                                "class": match s.share.class {
+                                    Class::Full => "Full",
+                                    Class::Mobile => "Mobile",
+                                },
+                                "segment": s.segment,
+                                "first_esi": s.share.first_esi,
+                                "symbols": s.share.symbols,
+                                "root": s.root,
+                                "confirmed": s.status == ShareStatus::Confirmed,
+                                "lost": s.lost,
+                                "passes": s.passes,
+                                "misses": s.misses,
+                                "assigned_epoch": s.assigned_epoch,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "commitment": hex::encode(key),
+                        "status": "live",
+                        "content_digest": hex::encode(o.record.content_id.digest),
+                        "content_len": o.record.content_id.len,
+                        "sealed": o.record.content_id.kind == ContentIdKind::Sealed,
+                        "object_len": o.record.object_len,
+                        "symbol_size": o.record.profile.symbol_size,
+                        "segments": o.record.symbol_roots.len(),
+                        "custody_confirmed": o.custody_confirmed,
+                        "expires_at_epoch": o.expires_at,
+                        "repairs_due": self.repairs_due(key),
+                        "n_full": n_full,
+                        "n_mobile": n_mobile,
+                        "total_full_symbols": total_full_symbols,
+                        "total_mobile_symbols": total_mobile_symbols,
+                        "active_symbols": active_symbols,
+                        "user_physical_bytes": o.endowment.fee_record.user_physical_bytes,
+                        "decentralization_physical_bytes": o.endowment.fee_record.decentralization_physical_bytes,
+                        "total_physical_bytes": o.endowment.fee_record.total_physical_bytes(),
+                        "symbol_roots": o.roots.iter().map(|r| serde_json::json!({
+                            "segment": r.segment,
+                            "root": hex::encode(r.root),
+                            "first_esi": r.first_esi,
+                            "count": r.count,
+                        })).collect::<Vec<_>>(),
+                        "shares": shares,
+                    })
+                } else {
+                    self.query_json(&Bud3Query::Object(*key))
                 }
             }
             Bud3Query::Custody(validator) => {
@@ -2783,6 +3249,56 @@ impl Bud3Registry {
                 } else {
                     serde_json::Value::Null
                 }
+            }
+            Bud3Query::GrantAt(tag, current_epoch) => {
+                if let Some(row) = self.grants.get(tag) {
+                    let expired = row.expires_at_epoch <= *current_epoch;
+                    serde_json::json!({
+                        "grant_tag": hex::encode(row.grant_tag),
+                        "status": if expired { "expired" } else { "active" },
+                        "current_epoch": current_epoch,
+                        "one_time_pk": hex::encode(&row.one_time_pk),
+                        "sealed_key_package": hex::encode(&row.sealed_key_package),
+                        "expires_at_epoch": row.expires_at_epoch,
+                    })
+                } else if self.revoked_grants.contains(tag) {
+                    serde_json::json!({
+                        "grant_tag": hex::encode(tag),
+                        "status": "revoked",
+                        "current_epoch": current_epoch,
+                    })
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+            Bud3Query::Nft(nft) => {
+                let Some((key, owner)) = self.nfts.get(nft) else {
+                    return serde_json::Value::Null;
+                };
+                let mut obj = self.query_json(&Bud3Query::Object(*key));
+                if let Some(map) = obj.as_object_mut() {
+                    map.insert("nft_id".to_string(), serde_json::json!(hex::encode(nft)));
+                    map.insert(
+                        "nft_owner".to_string(),
+                        serde_json::json!(hex::encode(owner)),
+                    );
+                    if let Some((live_key, _)) = self.resolve_live_object(key) {
+                        if live_key != *key {
+                            map.insert(
+                                "resolved_commitment".to_string(),
+                                serde_json::json!(hex::encode(live_key)),
+                            );
+                        }
+                    }
+                } else {
+                    obj = serde_json::json!({
+                        "nft_id": hex::encode(nft),
+                        "nft_owner": hex::encode(owner),
+                        "commitment": hex::encode(key),
+                        "status": "missing",
+                    });
+                }
+                obj
             }
         }
     }
@@ -2975,6 +3491,7 @@ impl Bud3Registry {
                 &pv.object,
                 &pv.amount_atoms.to_le_bytes(),
                 &pv.paid_at_epoch.to_le_bytes(),
+                &[u8::from(pv.consumed)],
             ]);
         }
         acc
@@ -3674,16 +4191,16 @@ mod tests {
                     &seed,
                 )
                 .expect("ml-dsa pk");
-                let att = super::super::repair::sign_repair_attestation(
-                    attester,
-                    &seed,
-                    &key,
-                    0,
-                    (fresh[0].esi, fresh.len() as u32),
-                    &fab_root,
-                    &orig_root,
-                )
-                .expect("sign attestation");
+                let claim = super::super::repair::RepairClaim {
+                    object: &key,
+                    segment: 0,
+                    first_esi: fresh[0].esi,
+                    count: fresh.len() as u32,
+                    new_root: &fab_root,
+                    original_segment_root: &orig_root,
+                };
+                let att = super::super::repair::sign_repair_attestation(attester, &seed, &claim)
+                    .expect("sign attestation");
                 val_keys.insert(attester, pk);
                 atts.push(att);
             }
@@ -3698,7 +4215,7 @@ mod tests {
                 },
                 Some(&addr(30)),
                 &val_keys,
-                100,
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 100),
             );
             assert_eq!(
                 fabricated_verdict,
@@ -4099,6 +4616,89 @@ mod tests {
         );
     }
 
+    /// A fixed three-signature witness is not a finality certificate. Until the
+    /// repair path carries a seat- or stake-weighted quorum certificate, the
+    /// cryptographic symbol witness is the only fail-closed admission path.
+    #[test]
+    fn minority_validator_attestations_cannot_authorize_a_segment_repair() {
+        let mut r = Bud3Registry::default();
+        let content: Vec<u8> = (0u16..1500).map(|i| (i.wrapping_mul(31)) as u8).collect();
+        let (up, shares) = upload(&content);
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record.clone(), shares, 0, 1_000)
+            .unwrap();
+        for holder in 10u8..14 {
+            r.ack(&key, &addr(holder)).unwrap();
+        }
+        assert_eq!(r.mark_unseen(&addr(13)), 1);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        let object_bytes = super::super::bof1::Object::raw_public(&content).encode();
+        let encoder = SegmentEncoder::new(0, &object_bytes, &P).unwrap();
+        let k = encoder.k();
+        let repaired = encoder.repair_symbols(20 - k, 5).unwrap();
+        let new_root = symbol_root(
+            &repaired
+                .iter()
+                .map(|symbol| (symbol.esi, symbol_leaf(&symbol.data)))
+                .collect::<Vec<_>>(),
+        );
+        let new_share = Share {
+            validator: addr(21),
+            class: Class::Full,
+            first_esi: 20,
+            symbols: 5,
+        };
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [13u8, 20, 21, 30, 31, 32, 33, 34]
+            .into_iter()
+            .map(|id| {
+                (
+                    addr(id),
+                    crate::crypto::pq::ml_dsa_public_key(
+                        crate::crypto::scheme::SchemeId::ML_DSA_65,
+                        &[id; 32],
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        let original_root = up.record.symbol_roots[0];
+        let claim = super::super::repair::RepairClaim {
+            object: &key,
+            segment: 0,
+            first_esi: 20,
+            count: 5,
+            new_root: &new_root,
+            original_segment_root: &original_root,
+        };
+        let attestations = [30u8, 31, 32]
+            .into_iter()
+            .map(|id| {
+                super::super::repair::sign_repair_attestation(addr(id), &[id; 32], &claim).unwrap()
+            })
+            .collect();
+        let witness = super::super::repair::RepairWitness::ValidatorAttestations(attestations);
+
+        let result = r.record_repair_with_validators(
+            &key,
+            SegmentRepair {
+                segment: 0,
+                new_shares: vec![new_share],
+                new_symbols: repaired,
+                new_root,
+                witness: &witness,
+            },
+            Some(&addr(20)),
+            &validator_keys,
+            (crate::core::transaction::DEFAULT_CHAIN_ID, 100),
+        );
+        assert!(
+            result.is_err(),
+            "three independent signatures are not a stake- or seat-weighted finality certificate"
+        );
+    }
+
     #[test]
     fn unacknowledged_repair_share_expires_after_deadline_and_unblocks_segment() {
         let mut r = Bud3Registry::default();
@@ -4363,7 +4963,11 @@ mod tests {
                 new_record,
                 new_shares.clone(),
                 &attestations,
-                (1, &validator_keys),
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
             )
             .unwrap();
 
@@ -4380,6 +4984,1162 @@ mod tests {
         }
         assert_eq!(r.nft_binding(&existing_nft), Some((new_key, addr(1))));
         assert_eq!(r.nft_binding(&late_nft), Some((new_key, addr(2))));
+
+        let nft_view = r.query_json(&Bud3Query::Nft(existing_nft));
+        assert_eq!(nft_view["status"], "live");
+        assert_eq!(nft_view["commitment"], hex::encode(new_key));
+        assert_eq!(nft_view["nft_id"], hex::encode(existing_nft));
+        assert_eq!(nft_view["nft_owner"], hex::encode(addr(1)));
+        assert!(r.query_json(&Bud3Query::Nft([0xFE; 32])).is_null());
+
+        let placement_view = r.query_json(&Bud3Query::Placement(new_key));
+        assert_eq!(placement_view["status"], "live");
+        assert_eq!(placement_view["n_full"], 3);
+        // `upload` seats three `Full` holders and one `Mobile` holder, and the
+        // replacement keeps every share it was given. The view therefore has
+        // four rows, three of them full; the old count of three was written
+        // before the mobile holder was part of the fixture.
+        let shares = placement_view["shares"]
+            .as_array()
+            .expect("a live placement lists its shares");
+        assert_eq!(shares.len(), 4, "three full holders and one mobile holder");
+        assert_eq!(
+            shares.iter().filter(|s| s["class"] == "Full").count(),
+            3,
+            "the full class stays at three"
+        );
+        assert_eq!(
+            r.query_json(&Bud3Query::Placement(old_key))["status"],
+            "replaced"
+        );
+    }
+
+    #[test]
+    fn query_json_grant_at_distinguishes_active_expired_and_revoked_grants() {
+        use super::super::content_id::ContentKey;
+        use super::super::grants::{build_grant_row, grant_revoke_digest};
+        use super::super::keys::{
+            derive_grant_one_time_keypair, seal_key_package, sign_with_grant_one_time_key,
+        };
+        use crate::crypto::hpke::HpkeKeyPair;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(1);
+        let (up, shares) = upload(b"sealed grant status payload");
+        let obj = up.record.commitment;
+        r.register_object(owner, up.record, shares, 0, 20).unwrap();
+        let nft = [0x91u8; 32];
+        r.bind_nft(nft, owner, Some(owner), &obj).unwrap();
+
+        let seed = [0x44u8; 32];
+        let nonce = [0x55u8; 32];
+        let (otk_seed, otk_pk) = derive_grant_one_time_keypair(&seed, &nft, &nonce).unwrap();
+        let grantee = HpkeKeyPair::from_seed(&[0x66u8; 32]).unwrap();
+        let tag = super::super::grants::compute_grant_tag(&nft, &nonce);
+        let pkg =
+            seal_key_package(grantee.public_key(), &tag, &obj, &ContentKey([0x77u8; 32])).unwrap();
+        let row = build_grant_row(&nft, &nonce, otk_pk, pkg, 15, 0).unwrap();
+        r.issue_view_grant(&nft, &nonce, &owner, row, 0).unwrap();
+
+        let active = r.query_json(&Bud3Query::GrantAt(tag, 14));
+        assert_eq!(active["status"], "active");
+        assert_eq!(active["current_epoch"], 14);
+
+        let expired = r.query_json(&Bud3Query::GrantAt(tag, 15));
+        assert_eq!(expired["status"], "expired");
+        assert_eq!(expired["expires_at_epoch"], 15);
+
+        let sig = sign_with_grant_one_time_key(&otk_seed, &grant_revoke_digest(&tag)).unwrap();
+        r.revoke_view_grant(&tag, &sig).unwrap();
+        let revoked = r.query_json(&Bud3Query::GrantAt(tag, 16));
+        assert_eq!(revoked["status"], "revoked");
+        assert!(r.query_json(&Bud3Query::GrantAt([0xAA; 32], 16)).is_null());
+    }
+
+    #[test]
+    fn dropping_expired_or_burned_dependent_clears_base_deps_and_unblocks_base_burn() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(1);
+        let (base_up, base_shares) = upload(b"base object for dep cleanup test");
+        let base_key = base_up.record.commitment;
+        r.register_object(owner, base_up.record.clone(), base_shares.clone(), 0, 50)
+            .unwrap();
+        for (_, sh) in &base_shares {
+            r.ack(&base_key, &sh.validator).unwrap();
+        }
+        let base_nft = [0xD1; 32];
+        r.bind_nft(base_nft, owner, Some(owner), &base_key).unwrap();
+
+        let (dep_exp_up, dep_exp_shares) = upload(b"expiring dependent delta object");
+        let dep_exp_key = dep_exp_up.record.commitment;
+        r.register_object(owner, dep_exp_up.record, dep_exp_shares, 0, 5)
+            .unwrap();
+        r.register_dependency(dep_exp_key, base_key).unwrap();
+        assert_eq!(r.refcount(&base_key), 2);
+        assert_eq!(
+            r.burn_reference(&base_nft, &owner, 1),
+            Err(RegistryError::HasDependents)
+        );
+
+        // Expiring the dependent removes it from `base_deps[base_key]` too.
+        r.expire(6);
+        assert!(r.object(&dep_exp_key).is_none());
+        assert_eq!(r.refcount(&base_key), 1);
+
+        // Burning a second dependent also clears `base_deps[base_key]` and unblocks `base_nft` burn.
+        let (dep_burn_up, dep_burn_shares) = upload(b"burnable dependent delta object");
+        let dep_burn_key = dep_burn_up.record.commitment;
+        r.register_object(owner, dep_burn_up.record, dep_burn_shares, 6, 40)
+            .unwrap();
+        let dep_nft = [0xD2; 32];
+        r.bind_nft(dep_nft, owner, Some(owner), &dep_burn_key)
+            .unwrap();
+        r.register_dependency(dep_burn_key, base_key).unwrap();
+        assert_eq!(r.refcount(&base_key), 2);
+        assert!(r.burn_reference(&dep_nft, &owner, 7).unwrap());
+        assert_eq!(r.refcount(&base_key), 1);
+        assert!(r.burn_reference(&base_nft, &owner, 7).unwrap());
+        assert!(r.is_tombstoned(&base_key));
+
+        // Chained finalized replacements (`k1 -> k2 -> k3`) leave zero orphan redirects on delete.
+        let (k1_up, k1_shares) = upload(b"chained replacement deletion test");
+        let k1 = k1_up.record.commitment;
+        r.register_object(owner, k1_up.record.clone(), k1_shares.clone(), 10, 50)
+            .unwrap();
+        for (_, sh) in &k1_shares {
+            r.ack(&k1, &sh.validator).unwrap();
+        }
+        let chain_nft = [0xD3; 32];
+        r.bind_nft(chain_nft, owner, Some(owner), &k1).unwrap();
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut r2 = k1_up.record.clone();
+        r2.codec = if r2.codec == 0 { 1 } else { 0 };
+        r2.object_len = r2.object_len.saturating_add(1);
+        r2.commitment = [0xC2; 32];
+        let att2: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| sign_replace_attestation(addr(v), &[v; 32], &k1, &r2, &k1_shares).unwrap())
+            .collect();
+        let k2 = r
+            .replace_object(
+                (addr(10), 10_000),
+                &k1,
+                r2.clone(),
+                k1_shares.clone(),
+                &att2,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    11,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for (_, sh) in &k1_shares {
+            r.ack(&k2, &sh.validator).unwrap();
+        }
+        assert_eq!(r.resolve_live_object(&k1).map(|(k, _)| k), Some(k2));
+
+        let mut r3 = r2;
+        r3.codec = if r3.codec == 0 { 1 } else { 0 };
+        r3.object_len = r3.object_len.saturating_add(1);
+        r3.commitment = [0xC3; 32];
+        let att3: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| sign_replace_attestation(addr(v), &[v; 32], &k2, &r3, &k1_shares).unwrap())
+            .collect();
+        let k3 = r
+            .replace_object(
+                (addr(10), 10_000),
+                &k2,
+                r3,
+                k1_shares.clone(),
+                &att3,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    12,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for (_, sh) in &k1_shares {
+            r.ack(&k3, &sh.validator).unwrap();
+        }
+        assert_eq!(r.resolve_live_object(&k1).map(|(k, _)| k), Some(k3));
+        assert!(r.burn_reference(&chain_nft, &owner, 13).unwrap());
+        assert!(r.resolve_live_object(&k1).is_none());
+        assert!(r.replacement(&k1).is_none());
+        assert!(r.replacement(&k2).is_none());
+    }
+
+    #[test]
+    fn pending_replacement_enforces_base_dependencies_across_burn_transfer_and_detach() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(1);
+        let outsider = addr(99);
+        let (base_up, base_shares) = upload(b"pending replacement base dependency object");
+        let base_old = base_up.record.commitment;
+        r.register_object(owner, base_up.record.clone(), base_shares.clone(), 0, 50)
+            .unwrap();
+        let base_nft = [0xD1; 32];
+        r.bind_nft(base_nft, owner, Some(owner), &base_old).unwrap();
+        for (_, sh) in &base_shares {
+            r.ack(&base_old, &sh.validator).unwrap();
+        }
+
+        let (dep_up, dep_shares) = upload(b"dependent child object referencing base");
+        let dep_key = dep_up.record.commitment;
+        r.register_object(owner, dep_up.record, dep_shares.clone(), 0, 50)
+            .unwrap();
+        r.register_dependency(dep_key, base_old).unwrap();
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut base_new_rec = base_up.record;
+        base_new_rec.codec = if base_new_rec.codec == 0 { 1 } else { 0 };
+        base_new_rec.object_len = base_new_rec.object_len.saturating_add(2);
+        base_new_rec.commitment = [0xD2; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &base_old, &base_new_rec, &base_shares)
+                    .unwrap()
+            })
+            .collect();
+        let base_new = r
+            .replace_object(
+                (addr(10), 10_000),
+                &base_old,
+                base_new_rec,
+                base_shares.clone(),
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+
+        // While replacement is pending, `base_nft` already points at `base_new`
+        // while `base_deps` still keys off `base_old`: burn, release, cross-owner
+        // transfer, and pending-old deletion via detach must all uphold dependency safety.
+        assert_eq!(
+            r.can_release_verified_nft_reference(&base_nft, &owner),
+            Err(RegistryError::HasDependents)
+        );
+        assert_eq!(
+            r.burn_reference(&base_nft, &owner, 2),
+            Err(RegistryError::HasDependents)
+        );
+        assert_eq!(
+            r.can_transfer_nft_reference(&base_nft, &owner, &outsider),
+            Err(RegistryError::CrossOwnerDependency)
+        );
+        r.detach_dependency(&dep_key, &base_old, 2);
+        assert!(
+            r.object(&base_old).is_some(),
+            "pending predecessor must remain intact until new custody confirms"
+        );
+        assert!(r.resolve_live_object(&base_new).is_some());
+
+        for (_, sh) in &base_shares {
+            r.ack(&base_new, &sh.validator).unwrap();
+        }
+        assert!(r.burn_reference(&base_nft, &owner, 3).unwrap());
+    }
+
+    #[test]
+    fn pending_replacement_dependent_blocks_cross_owner_transfer() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(2);
+        let outsider = addr(88);
+        let (base_up, base_shares) = upload(b"immutable base object owned by alice");
+        let base_key = base_up.record.commitment;
+        r.register_object(owner, base_up.record, base_shares.clone(), 0, 50)
+            .unwrap();
+        for (_, sh) in &base_shares {
+            r.ack(&base_key, &sh.validator).unwrap();
+        }
+
+        let (dep_up, dep_shares) = upload(b"dependent object slated for replacement");
+        let dep_old = dep_up.record.commitment;
+        r.register_object(owner, dep_up.record.clone(), dep_shares.clone(), 0, 50)
+            .unwrap();
+        let dep_nft = [0xD3; 32];
+        r.bind_nft(dep_nft, owner, Some(owner), &dep_old).unwrap();
+        for (_, sh) in &dep_shares {
+            r.ack(&dep_old, &sh.validator).unwrap();
+        }
+        r.register_dependency(dep_old, base_key).unwrap();
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut dep_new_rec = dep_up.record;
+        dep_new_rec.codec = if dep_new_rec.codec == 0 { 1 } else { 0 };
+        dep_new_rec.object_len = dep_new_rec.object_len.saturating_add(3);
+        dep_new_rec.commitment = [0xD4; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &dep_old, &dep_new_rec, &dep_shares)
+                    .unwrap()
+            })
+            .collect();
+        let _dep_new = r
+            .replace_object(
+                (addr(10), 10_000),
+                &dep_old,
+                dep_new_rec,
+                dep_shares,
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            r.can_transfer_nft_reference(&dep_nft, &owner, &outsider),
+            Err(RegistryError::CrossOwnerDependency)
+        );
+    }
+
+    #[test]
+    fn finalized_replacement_rejects_reregistration_under_superseded_commitment() {
+        use super::super::keys::derive_object_content_key;
+        use super::super::pipeline::prepare_sealed_upload;
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(3);
+        let ck = derive_object_content_key(&[0x55; 32], 1);
+        let up = prepare_sealed_upload(
+            b"sealed object replaced and finalized",
+            &ck,
+            [0x19; 24],
+            &P,
+            &Bud3Limits::default(),
+            20,
+        )
+        .unwrap();
+        let old_key = up.record.commitment;
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: addr(10),
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(11),
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(12),
+                    class: Class::Full,
+                    first_esi: 12,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(13),
+                    class: Class::Mobile,
+                    first_esi: 16,
+                    symbols: 4,
+                },
+            ),
+        ];
+        r.register_object(owner, up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        for (_, sh) in &shares {
+            r.ack(&old_key, &sh.validator).unwrap();
+        }
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut new_rec = up.record.clone();
+        new_rec.codec = if new_rec.codec == 0 { 1 } else { 0 };
+        new_rec.object_len = new_rec.object_len.saturating_add(4);
+        new_rec.commitment = [0xD5; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &old_key, &new_rec, &shares).unwrap()
+            })
+            .collect();
+        let new_key = r
+            .replace_object(
+                (owner, 10_000),
+                &old_key,
+                new_rec,
+                shares.clone(),
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for (_, sh) in &shares {
+            r.ack(&new_key, &sh.validator).unwrap();
+        }
+        assert!(r.object(&old_key).is_none());
+        assert_eq!(
+            r.resolve_live_object(&old_key).map(|(k, _)| k),
+            Some(new_key)
+        );
+
+        assert_eq!(
+            r.register_object(addr(77), up.record, shares, 2, 50),
+            Err(RegistryError::BadRecord("commitment was already replaced"))
+        );
+        assert_eq!(
+            r.resolve_live_object(&old_key).map(|(k, _)| k),
+            Some(new_key)
+        );
+    }
+
+    #[test]
+    fn dao_delete_public_content_cleans_unfinalized_replacement_and_blocks_ack_resurrection() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(1);
+        let (up, shares) = upload(b"dao takedown across pending replacement");
+        let old_key = up.record.commitment;
+        let digest = up.record.content_id.digest;
+        r.register_object(owner, up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        let nft = [0xE1; 32];
+        r.bind_nft(nft, owner, Some(owner), &old_key).unwrap();
+        for (_, sh) in &shares {
+            r.ack(&old_key, &sh.validator).unwrap();
+        }
+        assert_eq!(r.public_object(&digest), Some(old_key));
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut new_rec = up.record;
+        new_rec.codec = if new_rec.codec == 0 { 1 } else { 0 };
+        new_rec.object_len = new_rec.object_len.saturating_add(5);
+        new_rec.commitment = [0xE2; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &old_key, &new_rec, &shares).unwrap()
+            })
+            .collect();
+        let new_key = r
+            .replace_object(
+                (addr(10), 10_000),
+                &old_key,
+                new_rec,
+                shares,
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        assert!(r.replacement(&old_key).is_some_and(|rep| !rep.finalized));
+
+        assert_eq!(r.dao_delete_public_content(&digest, 2), Some(old_key));
+        assert!(r.object(&old_key).is_none());
+        assert!(r.object(&new_key).is_none());
+        assert!(r.replacement(&old_key).is_none());
+        assert!(r.nft_binding(&nft).is_none());
+        assert!(r.public_object(&digest).is_none());
+        assert!(r.resolve_live_object(&old_key).is_none());
+        assert!(r.is_tombstoned(&old_key));
+        assert_eq!(
+            r.ack(&new_key, &addr(10)),
+            Err(RegistryError::UnknownObject)
+        );
+        assert!(r.public_object(&digest).is_none());
+    }
+
+    #[test]
+    fn delete_object_rejects_pending_replacement_with_base_dependents() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(4);
+        let (base_up, base_shares) = upload(b"delete_object pending replacement dep guard");
+        let base_old = base_up.record.commitment;
+        r.register_object(owner, base_up.record.clone(), base_shares.clone(), 0, 50)
+            .unwrap();
+        for (_, sh) in &base_shares {
+            r.ack(&base_old, &sh.validator).unwrap();
+        }
+
+        let (dep_up, dep_shares) = upload(b"dependent child blocking delete_object");
+        let dep_key = dep_up.record.commitment;
+        r.register_object(owner, dep_up.record, dep_shares, 0, 50)
+            .unwrap();
+        r.register_dependency(dep_key, base_old).unwrap();
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut new_rec = base_up.record;
+        new_rec.codec = if new_rec.codec == 0 { 1 } else { 0 };
+        new_rec.object_len = new_rec.object_len.saturating_add(4);
+        new_rec.commitment = [0xE6; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &base_old, &new_rec, &base_shares)
+                    .unwrap()
+            })
+            .collect();
+        let base_new = r
+            .replace_object(
+                (addr(10), 10_000),
+                &base_old,
+                new_rec,
+                base_shares,
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            r.delete_object(&base_new, &owner, 2),
+            Err(RegistryError::HasDependents)
+        );
+        assert_eq!(
+            r.delete_object(&base_old, &owner, 2),
+            Err(RegistryError::HasDependents)
+        );
+        assert!(r.object(&base_old).is_some());
+        assert!(r.object(&base_new).is_some());
+
+        r.detach_dependency(&dep_key, &base_old, 2);
+        r.delete_object(&base_new, &owner, 2).unwrap();
+        assert!(r.object(&base_old).is_none());
+        assert!(r.object(&base_new).is_none());
+        assert!(r.replacement(&base_old).is_none());
+    }
+
+    #[test]
+    fn social_delete_checks_pending_replacement_dependents_before_shredding_grants() {
+        use super::super::content_id::ContentKey;
+        use super::super::grants::{build_grant_row, compute_grant_tag, grant_revoke_digest};
+        use super::super::keys::{
+            derive_grant_one_time_keypair, derive_object_content_key, seal_key_package,
+            sign_with_grant_one_time_key,
+        };
+        use super::super::pipeline::prepare_sealed_upload;
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::hpke::HpkeKeyPair;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(2);
+        let ck = derive_object_content_key(&[0x33; 32], 1);
+        let up = prepare_sealed_upload(
+            b"sealed base object with pending replacement",
+            &ck,
+            [0x21; 24],
+            &P,
+            &Bud3Limits::default(),
+            20,
+        )
+        .unwrap();
+        let old_key = up.record.commitment;
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: addr(10),
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(11),
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(12),
+                    class: Class::Full,
+                    first_esi: 12,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(13),
+                    class: Class::Mobile,
+                    first_esi: 16,
+                    symbols: 4,
+                },
+            ),
+        ];
+        r.register_object(owner, up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        let nft = [0xE3; 32];
+        r.bind_nft(nft, owner, Some(owner), &old_key).unwrap();
+        for (_, sh) in &shares {
+            r.ack(&old_key, &sh.validator).unwrap();
+        }
+
+        let seed = [0x44u8; 32];
+        let nonce = [0x55u8; 32];
+        let (otk_seed, otk_pk) = derive_grant_one_time_keypair(&seed, &nft, &nonce).unwrap();
+        let grantee = HpkeKeyPair::from_seed(&[0x66u8; 32]).unwrap();
+        let tag = compute_grant_tag(&nft, &nonce);
+        let pkg = seal_key_package(
+            grantee.public_key(),
+            &tag,
+            &old_key,
+            &ContentKey([0x77u8; 32]),
+        )
+        .unwrap();
+        let row = build_grant_row(&nft, &nonce, otk_pk, pkg, 25, 0).unwrap();
+        r.issue_view_grant(&nft, &nonce, &owner, row, 0).unwrap();
+        let sig = sign_with_grant_one_time_key(&otk_seed, &grant_revoke_digest(&tag)).unwrap();
+        let auth = GrantShredAuth {
+            grant_tag: tag,
+            one_time_signature: sig,
+        };
+
+        let (dep_up, dep_shares) = upload(b"dependent child blocking social delete");
+        let dep_key = dep_up.record.commitment;
+        r.register_object(owner, dep_up.record, dep_shares, 0, 50)
+            .unwrap();
+        r.register_dependency(dep_key, old_key).unwrap();
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut new_rec = up.record;
+        new_rec.codec = if new_rec.codec == 0 { 1 } else { 0 };
+        new_rec.object_len = new_rec.object_len.saturating_add(3);
+        new_rec.commitment = [0xE4; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation(addr(v), &[v; 32], &old_key, &new_rec, &shares).unwrap()
+            })
+            .collect();
+        r.replace_object(
+            (owner, 10_000),
+            &old_key,
+            new_rec,
+            shares,
+            &atts,
+            (
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                1,
+                &validator_keys,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            r.social_delete(&nft, &owner, &[auth], 2),
+            Err(RegistryError::HasDependents)
+        );
+        assert!(r.grant_row(&tag).is_some());
+        assert!(r.active_grant(&tag, 2).is_some());
+    }
+
+    #[test]
+    fn replace_object_rejects_already_replaced_commitment_preventing_cycles() {
+        use super::super::replace::{sign_replace_attestation, ReplaceError};
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(3);
+        let (up, shares) = upload(b"object for replace cycle prevention test");
+        let a_rec = up.record;
+        let a_key = a_rec.commitment;
+        r.register_object(owner, a_rec.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        for (_, sh) in &shares {
+            r.ack(&a_key, &sh.validator).unwrap();
+        }
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12, 13]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut b_rec = a_rec.clone();
+        b_rec.codec = if b_rec.codec == 0 { 1 } else { 0 };
+        b_rec.object_len = b_rec.object_len.saturating_add(2);
+        b_rec.commitment = [0xE5; 32];
+        let atts_ab: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| sign_replace_attestation(addr(v), &[v; 32], &a_key, &b_rec, &shares).unwrap())
+            .collect();
+        let b_key = r
+            .replace_object(
+                (addr(10), 10_000),
+                &a_key,
+                b_rec,
+                shares.clone(),
+                &atts_ab,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for (_, sh) in &shares {
+            r.ack(&b_key, &sh.validator).unwrap();
+        }
+
+        let atts_ba: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| sign_replace_attestation(addr(v), &[v; 32], &b_key, &a_rec, &shares).unwrap())
+            .collect();
+        assert_eq!(
+            r.replace_object(
+                (addr(10), 10_000),
+                &b_key,
+                a_rec,
+                shares,
+                &atts_ba,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    2,
+                    &validator_keys,
+                ),
+            ),
+            Err(RegistryError::BadReplacement(
+                ReplaceError::CommitmentAlreadyLive
+            ))
+        );
+        assert_eq!(r.resolve_live_object(&a_key).map(|(k, _)| k), Some(b_key));
+    }
+
+    #[test]
+    fn ack_updates_public_index_when_existing_copy_has_lost_share() {
+        let mut r = Bud3Registry::default();
+        let owner1 = addr(1);
+        let owner2 = addr(2);
+        let owner3 = addr(3);
+        let (up, shares) = upload(b"public index heals after indexed copy loses share");
+        let key1 = up.record.commitment;
+        let digest = up.record.content_id.digest;
+
+        assert_eq!(
+            r.register_object(owner1, up.record.clone(), shares.clone(), 0, 50)
+                .unwrap(),
+            Registered::New(key1)
+        );
+        for (_, sh) in &shares {
+            r.ack(&key1, &sh.validator).unwrap();
+        }
+        assert_eq!(r.public_object(&digest), Some(key1));
+
+        assert_eq!(r.release_shares(&addr(10), &key1, None, 0).unwrap(), 1);
+
+        let expected_key2 = Bud3Registry::claimant_scoped_key(&key1, &owner2);
+        assert_eq!(
+            r.register_object(owner2, up.record.clone(), shares.clone(), 1, 50)
+                .unwrap(),
+            Registered::New(expected_key2)
+        );
+        for (_, sh) in &shares {
+            r.ack(&expected_key2, &sh.validator).unwrap();
+        }
+        assert_eq!(r.public_object(&digest), Some(expected_key2));
+        assert_eq!(
+            r.register_object(owner3, up.record, shares, 2, 50).unwrap(),
+            Registered::Deduplicated(expected_key2)
+        );
+    }
+
+    #[test]
+    fn settle_repairs_preserves_subsequent_lost_share_until_its_repair_settles() {
+        use super::super::custody::symbol_root;
+        use super::super::fountain::SegmentEncoder;
+
+        let mut r = Bud3Registry::default();
+        let content: Vec<u8> = (0..1500u32).map(|i| (i % 247) as u8).collect();
+        let (up, shares) = upload(&content);
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record.clone(), shares, 0, 1000)
+            .unwrap();
+        for h in 0..4u8 {
+            r.ack(&key, &addr(10 + h)).unwrap();
+        }
+
+        // First loss (validator 13) -> repaired (ESI 20..25) and settled cleanly.
+        assert_eq!(r.mark_unseen(&addr(13)), 1);
+        let obj_bytes = super::super::bof1::Object::raw_public(&content).encode();
+        let enc = SegmentEncoder::new(0, &obj_bytes, &P).unwrap();
+        let k = enc.k();
+        let fresh1 = enc.repair_symbols(20 - k, 5).unwrap();
+        let leaves1: Vec<(u32, [u8; 32])> = fresh1
+            .iter()
+            .map(|x| (x.esi, symbol_leaf(&x.data)))
+            .collect();
+        let witness = super::super::repair::RepairWitness::ProvenSymbols(
+            super::super::repair::build_repair_proven_witness(0, &up.segments[0], &up.segments[0])
+                .unwrap(),
+        );
+        r.record_repair(
+            &key,
+            SegmentRepair {
+                segment: 0,
+                new_shares: vec![Share {
+                    validator: addr(20),
+                    class: Class::Full,
+                    first_esi: 20,
+                    symbols: 5,
+                }],
+                new_symbols: fresh1,
+                new_root: symbol_root(&leaves1),
+                witness: &witness,
+            },
+            10,
+        )
+        .unwrap();
+        r.ack(&key, &addr(20)).unwrap();
+        assert_eq!(r.settle_repairs(), 1);
+        assert!(r.object(&key).unwrap().shares.iter().all(|s| !s.lost));
+
+        // Subsequent loss (validator 12) on the same segment must NOT be dropped by
+        // the already-settled prior repair root; it waits until its own repair lands & settles.
+        assert_eq!(r.mark_unseen(&addr(12)), 1);
+        assert_eq!(r.settle_repairs(), 0);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        let fresh2 = enc.repair_symbols(25 - k, 5).unwrap();
+        let leaves2: Vec<(u32, [u8; 32])> = fresh2
+            .iter()
+            .map(|x| (x.esi, symbol_leaf(&x.data)))
+            .collect();
+        r.record_repair(
+            &key,
+            SegmentRepair {
+                segment: 0,
+                new_shares: vec![Share {
+                    validator: addr(21),
+                    class: Class::Full,
+                    first_esi: 25,
+                    symbols: 5,
+                }],
+                new_symbols: fresh2,
+                new_root: symbol_root(&leaves2),
+                witness: &witness,
+            },
+            11,
+        )
+        .unwrap();
+        // While second repair is pending, a third loss (validator 11) stays untouched
+        // when the second repair confirms & settles.
+        assert_eq!(r.mark_unseen(&addr(11)), 1);
+        r.ack(&key, &addr(21)).unwrap();
+        assert_eq!(r.settle_repairs(), 1);
+        let lost_holders: Vec<Address> = r
+            .object(&key)
+            .unwrap()
+            .shares
+            .iter()
+            .filter(|s| s.lost)
+            .map(|s| s.share.validator)
+            .collect();
+        assert_eq!(lost_holders, vec![addr(11)]);
+    }
+
+    #[test]
+    fn renew_follows_finalized_and_pending_replacement_to_live_leaf() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(1);
+        let (up, shares) = upload(b"renew follows pending and finalized replacement");
+        let old_key = up.record.commitment;
+        r.register_object(owner, up.record.clone(), shares.clone(), 0, 10)
+            .unwrap();
+        for (_, sh) in &shares {
+            r.ack(&old_key, &sh.validator).unwrap();
+        }
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12]
+            .into_iter()
+            .map(|id| {
+                (
+                    addr(id),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &addr(id)).unwrap(),
+                )
+            })
+            .collect();
+
+        // Propose pending replacement old -> mid (unfinalized).
+        let mut mid_rec = up.record.clone();
+        mid_rec.codec = if mid_rec.codec == 0 { 1 } else { 0 };
+        mid_rec.object_len = mid_rec.object_len.saturating_add(1);
+        mid_rec.commitment = [0xE1; 32];
+        let atts1: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|id| {
+                sign_replace_attestation(addr(id), &addr(id), &old_key, &mid_rec, &shares).unwrap()
+            })
+            .collect();
+        let mid_key = r
+            .replace_object(
+                (addr(10), 10_000),
+                &old_key,
+                mid_rec,
+                shares.clone(),
+                &atts1,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+
+        // Renewing via `old_key` while pending extends `mid_key` (not `old_key`).
+        let mid_exp_before = r.object(&mid_key).unwrap().expires_at;
+        let new_exp = r.renew(&old_key, 7).unwrap();
+        assert_eq!(new_exp, mid_exp_before + 7);
+        assert_eq!(r.object(&mid_key).unwrap().expires_at, new_exp);
+        assert_eq!(r.object(&old_key).unwrap().expires_at, 10);
+
+        // Finalize mid_key (`old_key` dropped); renewing via `old_key` still extends `mid_key`.
+        for (_, sh) in &shares {
+            r.ack(&mid_key, &sh.validator).unwrap();
+        }
+        assert!(r.object(&old_key).is_none());
+        assert_eq!(r.renew(&old_key, 5).unwrap(), new_exp + 5);
+        assert_eq!(r.object(&mid_key).unwrap().expires_at, new_exp + 5);
+    }
+
+    #[test]
+    fn transfer_nft_reference_syncs_pending_predecessor_owner_and_blocks_old_delete() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let seller = addr(1);
+        let buyer = addr(2);
+        let nft = [0x9A; 32];
+        let (up, shares) = upload(b"pending replace ownership transfer safety");
+        let old_key = up.record.commitment;
+        r.register_object(seller, up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        r.bind_nft(nft, seller, Some(seller), &old_key).unwrap();
+        for (_, sh) in &shares {
+            r.ack(&old_key, &sh.validator).unwrap();
+        }
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12]
+            .into_iter()
+            .map(|id| {
+                (
+                    addr(id),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &addr(id)).unwrap(),
+                )
+            })
+            .collect();
+        let mut new_rec = up.record;
+        new_rec.codec = if new_rec.codec == 0 { 1 } else { 0 };
+        new_rec.object_len = new_rec.object_len.saturating_add(1);
+        new_rec.commitment = [0xE2; 32];
+        let atts: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|id| {
+                sign_replace_attestation(addr(id), &addr(id), &old_key, &new_rec, &shares).unwrap()
+            })
+            .collect();
+        let new_key = r
+            .replace_object(
+                (addr(10), 10_000),
+                &old_key,
+                new_rec,
+                shares,
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+
+        // Transfer NFT from seller -> buyer while replacement is still unfinalized.
+        r.transfer_nft_reference(&nft, &seller, &buyer).unwrap();
+        assert_eq!(r.object(&new_key).unwrap().owner, buyer);
+        assert_eq!(r.object(&old_key).unwrap().owner, buyer);
+
+        // Seller must NOT be able to delete `old_key` (nor indirectly kill buyer's `new_key`).
+        assert_eq!(
+            r.delete_object(&old_key, &seller, 2),
+            Err(RegistryError::NotAuthorized)
+        );
+        assert!(r.object(&new_key).is_some());
+        assert_eq!(r.nft_binding(&nft), Some((new_key, buyer)));
+    }
+
+    #[test]
+    fn paid_view_consumption_is_single_use_digest_bound_and_survives_snapshot() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"single use paid view content");
+        let key = up.record.commitment;
+        let lifetime = PAID_VIEW_RETENTION_EPOCHS
+            .saturating_mul(2)
+            .saturating_add(20);
+        r.register_object(addr(1), up.record, shares, 1, lifetime)
+            .unwrap();
+
+        let receipt_id = [0xC7; 32];
+        let receipt = PaidViewReceipt {
+            payer: addr(2),
+            object: key,
+            receipt_id,
+            fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS,
+        };
+        r.record_paid_view(addr(2), key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 5)
+            .unwrap();
+        assert!(r.verify_paid_view_at(&receipt, 5));
+        assert!(!r.is_paid_view_consumed(&receipt_id));
+        let root_unconsumed = r.state_root();
+
+        // First consumption succeeds, flips the consensus state root, and blocks
+        // both repeat redemption and duplicate receipt_id re-registration.
+        assert!(r.consume_paid_view_at(&receipt, 5));
+        assert!(r.is_paid_view_consumed(&receipt_id));
+        assert!(r.has_paid_view(&receipt_id));
+        let root_consumed = r.state_root();
+        assert_ne!(
+            root_unconsumed, root_consumed,
+            "paid view consumption state must commit into the consensus state root"
+        );
+        assert!(!r.verify_paid_view(&receipt));
+        assert!(!r.verify_paid_view_at(&receipt, 5));
+        assert!(!r.consume_paid_view_at(&receipt, 5));
+        assert!(matches!(
+            r.record_paid_view(addr(2), key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 6),
+            Err(RegistryError::InvalidPaidView(_))
+        ));
+
+        // Round-trip through serde snapshot (simulating node restart) must keep
+        // the receipt marked consumed and preserve the exact state root.
+        let encoded = bincode::serialize(&r).expect("serialize Bud3Registry");
+        let mut restored: Bud3Registry =
+            bincode::deserialize(&encoded).expect("deserialize Bud3Registry");
+        assert_eq!(restored.state_root(), root_consumed);
+        assert!(restored.is_paid_view_consumed(&receipt_id));
+        assert!(!restored.verify_paid_view(&receipt));
+        assert!(!restored.consume_paid_view_at(&receipt, 6));
+
+        // Retention sweep still prunes spent records past PAID_VIEW_RETENTION_EPOCHS.
+        restored.expire(6 + PAID_VIEW_RETENTION_EPOCHS);
+        assert!(!restored.has_paid_view(&receipt_id));
+        assert!(!restored.is_paid_view_consumed(&receipt_id));
     }
 
     #[test]

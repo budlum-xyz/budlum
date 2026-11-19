@@ -157,9 +157,8 @@ fn producer_executes_on_a_disposable_candidate_state() {
 }
 
 /// The nonce the block path enforces is exact, not a floor: a block that
-/// carries a transaction out of order is refused before any arm runs. The
-/// finding that started this class assumed the executor applied whatever
-/// nonce it was handed.
+/// carries a transaction out of order is refused before any arm runs.
+/// Exact sequence invariant: the executor enforces strict nonce progression.
 #[test]
 fn a_block_transaction_must_carry_the_exact_account_nonce() {
     use crate::core::account::AccountState;
@@ -401,9 +400,12 @@ fn actor_commands_do_not_mutate_state_between_blocks() {
 #[test]
 fn missed_challenge_settles_through_one_slash_path() {
     let m = production_part(include_str!("../chain/storage_maintenance.rs"));
-    let body = window(m, "pub(crate) fn finalize_missed_challenges(", 2600);
-    assert!(body.contains("apply_bond_slash("));
-    assert!(body.matches("apply_bond_slash(").count() >= 1);
+    let body = window(m, "pub(crate) fn finalize_missed_challenges(", 6000);
+    assert_eq!(
+        body.matches("apply_bond_slash(").count(),
+        1,
+        "missed challenges must settle through exactly one bond-slash call site"
+    );
     for file in [
         include_str!("../domain/storage_deal.rs"),
         include_str!("../chain/storage_maintenance.rs"),
@@ -570,7 +572,7 @@ fn stored_chain_is_walk_checked_before_replay_slices_it() {
 }
 
 /// The executor holds no lock of its own, so there is no lock error
-/// left to swallow there (the finding is invalid on live).
+/// left to swallow there (invariant strictly preserved on live).
 #[test]
 fn executor_takes_no_locks() {
     let exec = production_part(include_str!("../execution/executor.rs"));

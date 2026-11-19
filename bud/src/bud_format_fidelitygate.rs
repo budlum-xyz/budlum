@@ -10,7 +10,7 @@
 //! - AVIF/JPEG visually lossless: crf <= 32 (the threshold of the measured 3.2x
 //!   gain; F134)
 //! - ZFP/SZ error-bounded: a relative error <= 1e-3 (the scientific class; the
-//!   100-web finding says 6-23x)
+//!   100-web benchmark says 6-23x)
 //! - Resolution is ALWAYS preserved (KF2)
 //!
 //! The defaults are open to a product decision (they are comment lines and ask

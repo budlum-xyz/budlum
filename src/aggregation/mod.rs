@@ -22,13 +22,16 @@
 //! program computes.
 
 pub mod aggregator;
+pub mod air_registry;
 pub mod backend;
 pub mod block;
 pub mod chain;
 pub mod claim;
+pub mod domain_finality;
 pub mod envelope;
 pub mod fees;
 pub mod frame;
+pub mod fraud;
 pub mod hash;
 pub mod merkle;
 #[cfg(any(test, feature = "agg-native-backend"))]
@@ -39,6 +42,9 @@ pub mod params;
 pub mod pool;
 pub mod programs;
 pub mod schemes;
+pub mod shadow;
+pub mod stark;
+pub mod universal_light_proof;
 
 #[cfg(test)]
 mod tests;

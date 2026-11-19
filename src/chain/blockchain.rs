@@ -15,9 +15,11 @@ use crate::core::transaction::Transaction;
 use crate::cross_domain::{BridgeState, CrossDomainMessageRegistry};
 #[cfg(test)]
 use crate::cross_domain::{DomainEvent, MerkleProof};
-#[cfg(test)]
-use crate::domain::{ConsensusDomain, DomainCommitment, FinalityProof};
-use crate::domain::{DomainId, DomainPluginRegistry};
+use crate::domain::{
+    hash_finality_proof, ConsensusDomain, ConsensusDomainRegistry, ConsensusKind, DomainCommitment,
+    DomainCommitmentRegistry, DomainFinalityAdapter, DomainId, DomainPluginRegistry, DomainStatus,
+    FinalityProof, FinalityStatus, PoAFinalityAdapter,
+};
 use crate::execution::executor::Executor;
 use crate::mempool::pool::Mempool;
 use crate::persistence::db::Storage;
@@ -27,7 +29,7 @@ use crate::settlement::ColdWalletState;
 use crate::settlement::{merkle_root, GlobalBlockHeader};
 #[cfg(test)]
 use crate::settlement::{ProofVerificationError, VerifiedDomainEvent};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
@@ -51,8 +53,8 @@ pub const MAX_VALIDATOR_SNAPSHOTS: usize = 100;
 /// Upper bound of the slashing evidence pool. The pool is copied into the next
 /// block, so it must stay small.
 /// How long an alarm stays in the ledger.
-/// Orders of magnitude past any honest audit window and still finite -
-/// "never trimmed" was the finding.
+/// Orders of magnitude past any honest audit window and strictly finite
+/// to bound state retention.
 const ALARM_RETENTION_BLOCKS: u64 = 100_000;
 const MAX_PENDING_SLASHING_EVIDENCE: usize = 64;
 #[cfg(test)]
@@ -152,6 +154,21 @@ pub struct Blockchain {
         ),
     >,
     pub plugin_registry: DomainPluginRegistry,
+    /// Node-local registry for sovereign, bridgeless PoA Garden domains.
+    /// Kept outside `self.state` and outside the state root so a private
+    /// Garden observed by one node never diverges Budlum's consensus state
+    /// from peers (G-1).
+    pub garden_domains: ConsensusDomainRegistry,
+    /// Node-local commitments verified for Garden domains through
+    /// `PoAFinalityAdapter`, kept outside `self.state`.
+    pub garden_commitments: DomainCommitmentRegistry,
+    /// Insertion-ordered `(height, sequence)` keys retained per Garden domain
+    /// so `garden_commitments` stays bounded to a sliding window and drains
+    /// cleanly when a Garden retires.
+    garden_commitment_keys: BTreeMap<DomainId, std::collections::VecDeque<(u64, u64)>>,
+    /// Garden domains frozen for equivocation; the operator cannot reactivate
+    /// them.
+    pub garden_quarantined: BTreeSet<DomainId>,
     /// Durable alarm & quarantine ledger. Node-local and persisted
     /// through the storage layer; deliberately not folded into the state root
     /// (see `registry/quarantine_ledger.rs`).
@@ -216,6 +233,13 @@ pub struct Blockchain {
     /// Rolling post-end-of-block state checkpoints so candidate-chain validation
     /// replays from the nearest ancestor anchor rather than genesis (CWE-400).
     reorg_anchors: Vec<(usize, String, AccountState)>,
+    /// Bounded node-local cache of Merkle-verified B.U.D. 3.0 symbol items,
+    /// kept outside consensus `AccountState` and mirrored to `storage` when
+    /// persistent.
+    pub bud3_symbols: crate::storage::bud3::symbol_protocol::Bud3SymbolStore,
+    /// Epoch index at which persisted `sled` `BUD3_SYM:` keys were last swept
+    /// for expired unconfirmed objects lacking tombstones.
+    last_bud3_disk_prune_epoch: u64,
 }
 
 /// Heights one finality event looks at for witness pruning: finality
@@ -1144,6 +1168,8 @@ impl Blockchain {
             .map(|network| network.mempool_config())
             .unwrap_or_default();
         let mut mempool = Mempool::new(mempool_config);
+        mempool.sync_scheme_registry(&state.scheme_registry);
+        mempool.sync_duty_validators(state.duty_lane_signers_for_chain(chain_id));
         if let Some(ref store) = storage {
             if let Ok(txs) = store.load_mempool_txs() {
                 let count = txs.len();
@@ -1260,6 +1286,10 @@ impl Blockchain {
             global_header_openings,
             app_binding_payment_windows: BTreeMap::new(),
             plugin_registry: DomainPluginRegistry::new(),
+            garden_domains: ConsensusDomainRegistry::new(),
+            garden_commitments: DomainCommitmentRegistry::new(),
+            garden_commitment_keys: BTreeMap::new(),
+            garden_quarantined: BTreeSet::new(),
             quarantine_ledger,
             quarantine_dirty: false,
             pending_slashing_evidence: Vec::new(),
@@ -1278,6 +1308,8 @@ impl Blockchain {
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             recovery_tracker: crate::validators::handover::RecoveryTracker::new(),
             reorg_anchors: init_reorg_anchors,
+            bud3_symbols: crate::storage::bud3::symbol_protocol::Bud3SymbolStore::default(),
+            last_bud3_disk_prune_epoch: 0,
         };
 
         if let Some(first) = bc.chain.first() {
@@ -1308,6 +1340,11 @@ impl Blockchain {
                 Self::block_context_entropy(&last.previous_hash, &last.vrf_output);
             bc.seed_round_price_window();
         }
+
+        if bc.chain.len() > 1 || snapshot_height > 0 {
+            bc.prune_persisted_unregistered_bud3_symbols();
+        }
+        bc.last_bud3_disk_prune_epoch = bc.state.epoch_index;
 
         bc
     }
@@ -1464,6 +1501,407 @@ impl Blockchain {
             &mut self.state,
             commitment,
         ))
+    }
+
+    /// Canonical in-block domains together with this node's local Garden
+    /// domains (which live outside `self.state` and never alter consensus
+    /// roots). When a local Garden domain exists, it always takes precedence
+    /// over any canonical row sharing the id.
+    pub fn consensus_domains_with_garden(&self) -> Vec<ConsensusDomain> {
+        let mut out: Vec<ConsensusDomain> = self
+            .state
+            .settlement
+            .domains
+            .domains()
+            .into_iter()
+            .filter(|d| self.garden_domains.get(d.id).is_none())
+            .collect();
+        out.extend(self.garden_domains.domains());
+        out
+    }
+
+    /// Canonical in-block domain commitments together with verified
+    /// commitments for this node's local Garden domains.
+    pub fn domain_commitments_with_garden(&self) -> Vec<DomainCommitment> {
+        let mut out = self
+            .state
+            .settlement
+            .commitments
+            .commitments_for_global_block();
+        out.extend(self.garden_commitments.commitments_for_global_block());
+        out
+    }
+
+    /// Register a sovereign, bridgeless PoA Garden domain in this node's
+    /// local Garden registry. Writes nothing to `self.state`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses non-PoA, bridge-enabled, invalid, non-Garden-range, or
+    /// colliding domain ids.
+    pub fn register_garden_domain(&mut self, domain: ConsensusDomain) -> Result<(), String> {
+        crate::settlement::domains::validate_domain_registration(&domain)?;
+        if !crate::garden::is_garden_domain_id(domain.id) {
+            return Err(format!(
+                "Domain {} is outside the reserved Garden domain id range",
+                domain.id
+            ));
+        }
+        if domain.kind != ConsensusKind::PoA {
+            return Err(format!("Domain {} is not a PoA domain", domain.id));
+        }
+        if domain.bridge_enabled {
+            return Err(format!(
+                "Domain {} is bridge-enabled: Garden domains have no bridge",
+                domain.id
+            ));
+        }
+        if domain.operator.is_none() {
+            return Err(format!("Domain {} has no operator", domain.id));
+        }
+        if self.state.settlement.domains.get(domain.id).is_some() {
+            return Err(format!(
+                "Domain {} is already registered on the settlement chain",
+                domain.id
+            ));
+        }
+        self.garden_domains.register(domain)
+    }
+
+    /// Fail-closed domain block validation and commitment extraction through
+    /// [`DomainPluginRegistry`] (`B-0046`): resolves the registered consensus
+    /// plugin for `domain_id`, checks its consensus kind and finality adapter
+    /// binding against the active domain record, runs the engine's structural
+    /// `validate_domain_block`, and derives the canonical [`DomainCommitment`].
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown or inactive domains, domains with no registered plugin,
+    /// plugin/domain kind or adapter mismatches, and invalid domain blocks.
+    ///
+    /// WIRING: Live consensus-plugin validation gate pairing `plugin_registry.get`
+    /// with `validate_domain_block` and `extract_commitment`.
+    pub fn validate_and_extract_domain_block(
+        &self,
+        domain_id: DomainId,
+        block: &Block,
+        domain_chain: &[Block],
+        sequence: u64,
+    ) -> Result<DomainCommitment, String> {
+        let domain = self
+            .state
+            .settlement
+            .domains
+            .get(domain_id)
+            .or_else(|| self.garden_domains.get(domain_id))
+            .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+        if !domain.is_active() {
+            return Err(format!("Consensus domain {domain_id} is not active"));
+        }
+        let plugin = self.plugin_registry.get(domain_id).ok_or_else(|| {
+            format!("No consensus plugin registered for domain {domain_id} (refusing fail-closed)")
+        })?;
+        if plugin.kind() != domain.kind {
+            return Err(format!(
+                "Domain {domain_id} plugin kind {:?} mismatches registered domain kind {:?}",
+                plugin.kind(),
+                domain.kind
+            ));
+        }
+        let runtime_adapter = plugin.finality_adapter().adapter_name();
+        if runtime_adapter != domain.finality_adapter {
+            return Err(format!(
+                "Domain {domain_id} plugin adapter {runtime_adapter:?} mismatches domain record {:?}",
+                domain.finality_adapter
+            ));
+        }
+        let ctx = crate::domain::DomainContext {
+            domain,
+            chain: domain_chain,
+            state: &self.state,
+            sequence,
+        };
+        plugin
+            .validate_domain_block(block, ctx.clone())
+            .map_err(|e| e.to_string())?;
+        plugin
+            .extract_commitment(block, ctx)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The local Garden domain `domain_id`, when it is a bridgeless `PoA` domain
+    /// operated by `operator`.
+    fn bridgeless_poa_domain_operated_by(
+        &self,
+        domain_id: DomainId,
+        operator: Address,
+    ) -> Result<&ConsensusDomain, String> {
+        let domain = self
+            .garden_domains
+            .get(domain_id)
+            .or_else(|| self.state.settlement.domains.get(domain_id))
+            .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+        if domain.kind != ConsensusKind::PoA {
+            return Err(format!("Domain {domain_id} is not a PoA domain"));
+        }
+        if domain.bridge_enabled {
+            return Err(format!(
+                "Domain {domain_id} is bridge-enabled: its authority set and lifecycle change \
+                 through governance, not through its operator"
+            ));
+        }
+        if domain.operator != Some(operator) {
+            return Err(format!("Domain {domain_id} is not operated by the caller"));
+        }
+        if self.garden_domains.get(domain_id).is_none() {
+            return Err(format!(
+                "Domain {domain_id} is a canonical settlement domain and changes only in blocks"
+            ));
+        }
+        Ok(domain)
+    }
+
+    /// Replace the registered authority set of a node-local bridgeless `PoA`
+    /// Garden domain. Writes nothing to `self.state`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown, non-`PoA`, bridge-enabled, wrong-operator, retired, or
+    /// zero authority-set rotations without mutating state.
+    pub fn rotate_bridgeless_poa_authority_set(
+        &mut self,
+        domain_id: DomainId,
+        operator: Address,
+        validator_set_hash: crate::domain::Hash32,
+    ) -> Result<(), String> {
+        let domain = self.bridgeless_poa_domain_operated_by(domain_id, operator)?;
+        if domain.status == DomainStatus::Retired {
+            return Err(format!("Domain {domain_id} is retired"));
+        }
+        if validator_set_hash == [0u8; 32] {
+            return Err(format!(
+                "Domain {domain_id} cannot rotate to an unregistered (zero) authority set"
+            ));
+        }
+        if domain.validator_set_hash == validator_set_hash {
+            return Ok(());
+        }
+        let slot = self
+            .garden_domains
+            .get_mut(domain_id)
+            .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+        slot.validator_set_hash = validator_set_hash;
+        Ok(())
+    }
+
+    /// Move a node-local bridgeless `PoA` Garden domain along its lifecycle:
+    /// Active to Frozen, Frozen to Active, Frozen to Retired. Writes nothing
+    /// to `self.state`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown, bridge-enabled, wrong-operator, quarantined
+    /// reactivation, or illegal lifecycle transitions without mutating state.
+    pub fn transition_bridgeless_poa_domain_status(
+        &mut self,
+        domain_id: DomainId,
+        operator: Address,
+        next: DomainStatus,
+    ) -> Result<(), String> {
+        let domain = self.bridgeless_poa_domain_operated_by(domain_id, operator)?;
+        if domain.status == next {
+            return Ok(());
+        }
+        if self.garden_quarantined.contains(&domain_id) && next == DomainStatus::Active {
+            return Err(format!(
+                "Domain {domain_id} is quarantined for equivocation; its operator cannot \
+                 reactivate it"
+            ));
+        }
+        let mut scratch = ConsensusDomainRegistry::new();
+        scratch.restore_persisted(domain.clone())?;
+        scratch.transition_status_checked(domain_id, next)?;
+        self.garden_domains
+            .transition_status_checked(domain_id, next)?;
+        if next == DomainStatus::Retired {
+            if let Some(keys) = self.garden_commitment_keys.remove(&domain_id) {
+                for (height, sequence) in keys {
+                    self.garden_commitments.remove(domain_id, height, sequence);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify a Garden commitment through Budlum's `PoAFinalityAdapter` and
+    /// record it in this node's local Garden commitment registry. Writes
+    /// nothing to `self.state`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses invalid proofs, inactive domains, authority-set mismatches,
+    /// non-empty native state updates, or equivocation (which freezes and
+    /// quarantines the local Garden domain).
+    pub fn submit_verified_garden_commitment(
+        &mut self,
+        commitment: DomainCommitment,
+        proof: FinalityProof,
+    ) -> Result<(), String> {
+        self.apply_verified_garden_commitment(commitment, &proof)?
+            .map_or(Ok(()), Err)
+    }
+
+    /// Stateless validation of a Garden commitment and its `PoA` proof against
+    /// `domain`.
+    fn validate_garden_commitment_fields(
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<(), String> {
+        if domain.kind != ConsensusKind::PoA || domain.bridge_enabled {
+            return Err(format!(
+                "Domain {} is not a bridgeless PoA Garden domain",
+                commitment.domain_id
+            ));
+        }
+        if domain.status != DomainStatus::Active {
+            return Err(format!(
+                "Domain {} is not active (status={:?})",
+                commitment.domain_id, domain.status
+            ));
+        }
+        if commitment.consensus_kind != ConsensusKind::PoA {
+            return Err(format!(
+                "Commitment consensus kind {:?} does not match domain PoA",
+                commitment.consensus_kind
+            ));
+        }
+        if !commitment.state_updates.is_empty() {
+            return Err(format!(
+                "Garden domain {} commitment may not carry native account state updates",
+                commitment.domain_id
+            ));
+        }
+        if commitment.domain_height == 0 {
+            return Err(format!(
+                "Domain {} commitment height must be > 0",
+                commitment.domain_id
+            ));
+        }
+        if commitment.domain_block_hash == [0u8; 32] {
+            return Err(format!(
+                "Domain {} commitment block hash must be non-zero",
+                commitment.domain_id
+            ));
+        }
+        if domain.validator_set_hash != [0u8; 32]
+            && commitment.validator_set_hash != domain.validator_set_hash
+        {
+            return Err(format!(
+                "Commitment validator set hash mismatch for domain {}",
+                commitment.domain_id
+            ));
+        }
+        let expected_hash = hash_finality_proof(proof).map_err(|e| e.to_string())?;
+        if commitment.finality_proof_hash != expected_hash {
+            return Err(format!(
+                "Finality proof hash mismatch for domain {}",
+                commitment.domain_id
+            ));
+        }
+        match PoAFinalityAdapter::default().verify_finality(domain, commitment, proof) {
+            Ok(FinalityStatus::Finalized) => Ok(()),
+            Ok(FinalityStatus::Pending {
+                required_depth,
+                observed_depth,
+            }) => Err(format!(
+                "Domain {} finality is pending (required={required_depth}, observed={observed_depth})",
+                commitment.domain_id
+            )),
+            Ok(FinalityStatus::Rejected(reason)) => Err(format!(
+                "PoA finality adapter rejected domain {}: {reason}",
+                commitment.domain_id
+            )),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Inner helper for [`Self::submit_verified_garden_commitment`]: returns
+    /// `Ok(Some(reason))` when an equivocation freeze is recorded so no
+    /// refusal path mutates state before returning `Err`.
+    fn apply_verified_garden_commitment(
+        &mut self,
+        commitment: DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<Option<String>, String> {
+        let domain = self
+            .garden_domains
+            .get(commitment.domain_id)
+            .ok_or_else(|| format!("Unknown consensus domain {}", commitment.domain_id))?
+            .clone();
+        Self::validate_garden_commitment_fields(&domain, &commitment, proof)?;
+
+        if let Some(existing) = self
+            .garden_commitments
+            .find_by_height(commitment.domain_id, commitment.domain_height)
+        {
+            if existing.domain_block_hash == commitment.domain_block_hash {
+                return Ok(None);
+            }
+            let _ = self
+                .garden_domains
+                .set_status(commitment.domain_id, DomainStatus::Frozen);
+            self.garden_quarantined.insert(commitment.domain_id);
+            return Ok(Some(format!(
+                "domain {} equivocation at height {}",
+                commitment.domain_id, commitment.domain_height
+            )));
+        }
+
+        let next = domain.last_committed_height.saturating_add(1);
+        if commitment.domain_height != next {
+            return Err(format!(
+                "Domain {} commitment height {} is not next expected height {next}",
+                commitment.domain_id, commitment.domain_height
+            ));
+        }
+        if domain.last_committed_hash != [0u8; 32]
+            && commitment.parent_domain_block_hash != domain.last_committed_hash
+        {
+            let _ = self
+                .garden_domains
+                .set_status(commitment.domain_id, DomainStatus::Frozen);
+            self.garden_quarantined.insert(commitment.domain_id);
+            return Ok(Some(format!(
+                "domain {} parent hash mismatch at height {}",
+                commitment.domain_id, commitment.domain_height
+            )));
+        }
+
+        /// Maximum verified Garden commitments retained per local Garden domain
+        /// in `garden_commitments`. Older commitments are pruned in FIFO order
+        /// once the window fills; `last_committed_height` on the domain record
+        /// continues to enforce strictly sequential advancement.
+        const KEPT_GARDEN_COMMITMENTS: usize = 4096;
+
+        let domain_id = commitment.domain_id;
+        let height = commitment.domain_height;
+        let sequence = commitment.sequence;
+        let block_hash = commitment.domain_block_hash;
+        self.garden_commitments.insert(commitment)?;
+        let queue = self.garden_commitment_keys.entry(domain_id).or_default();
+        queue.push_back((height, sequence));
+        while queue.len() > KEPT_GARDEN_COMMITMENTS {
+            if let Some((stale_height, stale_seq)) = queue.pop_front() {
+                self.garden_commitments
+                    .remove(domain_id, stale_height, stale_seq);
+            }
+        }
+        if let Some(slot) = self.garden_domains.get_mut(domain_id) {
+            slot.last_committed_height = height;
+            slot.last_committed_hash = block_hash;
+        }
+        Ok(None)
     }
 
     /// Test harness only: the body of the `SettlementTx::SubmitCommitment`
@@ -1658,15 +2096,56 @@ impl Blockchain {
         reason_hash: [u8; 32],
         unfreeze: bool,
     ) -> Result<(), String> {
+        let domain = self
+            .state
+            .settlement
+            .domains
+            .get(domain_id)
+            .ok_or_else(|| format!("unknown domain {domain_id}"))?;
+        // The domain's kind is read from its record, not from the caller: a caller
+        // cannot declare its own domain "PoA" and manufacture freeze authority.
+        let kind = if matches!(domain.kind, crate::domain::ConsensusKind::PoA) {
+            crate::registry::ComplianceDomainKind::PoA
+        } else {
+            crate::registry::ComplianceDomainKind::Permissionless
+        };
+        // The named admin must actually hold authority on this domain: an
+        // admin in the admission registry, or the registered operator while
+        // the domain has no admins yet.
+        //
+        // Only a PoA domain has such authority to check. A permissionless
+        // domain has none to hold, and the compliance ledger refuses it by
+        // KIND - the refusal that says why, rather than a missing admin.
+        if kind == crate::registry::ComplianceDomainKind::PoA {
+            let admin_is_admin = self
+                .state
+                .poa_onboarding
+                .registry()
+                .is_admin(domain_id, &admin);
+            let admin_is_operator = domain.operator == Some(admin);
+            if !admin_is_admin && !admin_is_operator {
+                return Err(format!(
+                    "admin {} holds no authority on domain {domain_id}",
+                    admin.to_hex()
+                ));
+            }
+        }
         let height = self.chain.len() as u64;
-        self.state.apply_poa_compliance_request(
-            domain_id,
-            admin,
-            address,
-            reason_hash,
-            unfreeze,
-            height,
-        )
+        let result = if unfreeze {
+            self.state
+                .poa_compliance
+                .unfreeze(kind, domain_id, admin, address, reason_hash, height)
+        } else {
+            self.state.poa_compliance.freeze_suspicious(
+                kind,
+                domain_id,
+                admin,
+                address,
+                reason_hash,
+                height,
+            )
+        };
+        result.map_err(|e| format!("{e:?}"))
     }
 
     /// Apply the governance-queued PoA compliance requests,
@@ -3942,6 +4421,7 @@ impl Blockchain {
         // A transaction the block rules of the aggregation layer would refuse
         // must not wait here: the block built from it would be invalid.
         crate::aggregation::chain::check_pool_transaction(&self.aggregation_params(), tx)?;
+        crate::settlement::domains::check_ingest_garden_domain_reservation(tx)?;
 
         let (expected_nonce, spendable_balance) = self.projected_sender_state(tx);
         self.state.validate_transaction_with_context(
@@ -3960,13 +4440,22 @@ impl Blockchain {
         {
             reasons.push(error.code().to_string());
         }
+        if crate::settlement::domains::check_ingest_garden_domain_reservation(tx).is_err() {
+            reasons.push("garden_domain_id_reserved".to_string());
+        }
         if tx.chain_id != self.chain_id {
             reasons.push("invalid_chain_id".to_string());
         }
         if tx.from == Address::zero() {
             reasons.push("genesis_transaction_forbidden".to_string());
         }
-        if !tx.verify_in(&self.state.scheme_registry) {
+        if self.state.auth_program_hash(&tx.from).is_some() {
+            if tx.auth_claim.is_none() {
+                reasons.push("program_account_requires_auth_claim".to_string());
+            } else if !tx.claimed_shape_is_canonical() {
+                reasons.push("non_canonical_claimed_tx".to_string());
+            }
+        } else if !tx.verify_in(&self.state.scheme_registry) {
             reasons.push("invalid_signature".to_string());
         }
         if tx.fee < self.state.base_fee {
@@ -4084,7 +4573,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_create_offer_shape".to_string());
                 }
-                match bincode::deserialize::<crate::bns::CreateNameOffer>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<
+                    crate::bns::CreateNameOffer,
+                >(&tx.data, crate::network::protocol::MAX_TX_SIZE)
+                {
                     Ok(req) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&req.name) {
                             reasons.push("invalid_bns_offer_name".to_string());
@@ -4134,7 +4626,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_cancel_offer_shape".to_string());
                 }
-                match bincode::deserialize::<u64>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<u64>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok(offer_id) => match self.state.marketplace.get_name_offer(offer_id) {
                         None => reasons.push("bns_offer_not_found".to_string()),
                         Some(offer) if !offer.active => {
@@ -4152,7 +4647,10 @@ impl Blockchain {
                 if tx.amount == 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_buy_name_shape".to_string());
                 }
-                match bincode::deserialize::<u64>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<u64>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok(offer_id) => match self.state.marketplace.get_name_offer(offer_id) {
                         None => reasons.push("bns_offer_not_found".to_string()),
                         Some(offer) => {
@@ -4168,7 +4666,10 @@ impl Blockchain {
                 }
             }
             crate::core::transaction::TransactionType::BnsRenew => {
-                match bincode::deserialize::<(String, u64)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(String, u64)>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok((name, duration)) => {
                         if tx.amount != self.state.bns_registry.calculate_cost(&name, duration) {
                             reasons.push("invalid_bns_renewal_payment".to_string());
@@ -4184,7 +4685,10 @@ impl Blockchain {
                 }
             }
             crate::core::transaction::TransactionType::BnsTransfer => {
-                match bincode::deserialize::<(String, Address)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(String, Address)>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok((_name, new_owner)) if new_owner != Address::zero() => {
                         if new_owner != tx.from
                             && self
@@ -4207,7 +4711,12 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_set_address_shape".to_string());
                 }
-                match bincode::deserialize::<(String, Option<Address>, Option<u32>)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
+                    String,
+                    Option<Address>,
+                    Option<u32>,
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
+                {
                     Ok((name, target, _domain_id)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&name) {
                             reasons.push("invalid_bns_name".to_string());
@@ -4223,7 +4732,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_set_primary_shape".to_string());
                 }
-                match bincode::deserialize::<Option<String>>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<Option<String>>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok(Some(name)) if !crate::bns::BnsRegistry::is_valid_name(&name) => {
                         reasons.push("invalid_bns_name".to_string());
                     }
@@ -4235,10 +4747,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_set_records_shape".to_string());
                 }
-                match bincode::deserialize::<(
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
                     String,
                     std::collections::BTreeMap<String, Option<String>>,
-                )>(&tx.data)
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                 {
                     Ok((name, updates)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&name) {
@@ -4265,7 +4777,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_remove_subdomain_shape".to_string());
                 }
-                match bincode::deserialize::<(String, String)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(String, String)>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     Ok((parent, sub_label)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&parent)
                             || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
@@ -4280,11 +4795,11 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_set_subdomain_content_shape".to_string());
                 }
-                match bincode::deserialize::<(
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
                     String,
                     String,
                     Option<crate::storage::bud3::content_ref::ContentRef>,
-                )>(&tx.data)
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                 {
                     Ok((parent, sub_label, content)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&parent)
@@ -4311,10 +4826,10 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_content_shape".to_string());
                 }
-                match bincode::deserialize::<(
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
                     String,
                     Option<crate::storage::bud3::content_ref::ContentRef>,
-                )>(&tx.data)
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
                 {
                     Ok((name, cref)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&name) {
@@ -4339,7 +4854,12 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_register_subdomain_shape".to_string());
                 }
-                match bincode::deserialize::<(String, String, Address)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
+                    String,
+                    String,
+                    Address,
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
+                {
                     Ok((parent, sub_label, sub_owner)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&parent)
                             || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
@@ -4355,7 +4875,12 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_set_storage_shape".to_string());
                 }
-                match bincode::deserialize::<(String, [u8; 32], u32)>(&tx.data) {
+                match crate::network::bounded_bincode::decode_bounded_bincode::<(
+                    String,
+                    [u8; 32],
+                    u32,
+                )>(&tx.data, crate::network::protocol::MAX_TX_SIZE)
+                {
                     Ok((name, _, _)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&name) {
                             reasons.push("invalid_bns_name".to_string());
@@ -4607,6 +5132,20 @@ impl Blockchain {
                 crate::core::account::TxAuthority::ClaimChecked,
             )
             .map_err(ObjectRefusal::Transaction)?;
+        crate::settlement::domains::check_ingest_garden_domain_reservation(&tx)
+            .map_err(ObjectRefusal::Transaction)?;
+        if let Some(program_hash) = self.state.auth_program_hash(&tx.from) {
+            let Some(domain) = crate::aggregation::chain::claim_domain(self.chain_id) else {
+                return Err(ObjectRefusal::NoAggregator);
+            };
+            let expected = crate::aggregation::chain::account_claim_for(&tx, Some(program_hash))
+                .map(|c| c.digest(domain));
+            if tx.auth_claim != expected {
+                return Err(ObjectRefusal::Transaction(
+                    "program account auth_claim does not match registered auth_program_hash".into(),
+                ));
+            }
+        }
         match self.agg_node.as_mut() {
             Some(node) => node.admit(envelope, tx, &self.state.scheme_registry),
             None => Err(ObjectRefusal::NoAggregator),
@@ -4758,6 +5297,15 @@ impl Blockchain {
             } else {
                 candidate.validate_transaction(tx)
             };
+            if let Err(error) =
+                crate::settlement::domains::check_ingest_garden_domain_reservation(tx)
+            {
+                warn!(
+                    "Block frame dropped: transaction {} refused: {error}",
+                    tx.hash
+                );
+                return Err(tx.signing_hash());
+            }
             if let Err(error) = checked {
                 warn!(
                     "Block frame dropped: transaction {} refused: {error}",
@@ -4885,6 +5433,9 @@ impl Blockchain {
                     continue;
                 }
                 if temp_state.validate_transaction(tx).is_err() {
+                    continue;
+                }
+                if crate::settlement::domains::check_ingest_garden_domain_reservation(tx).is_err() {
                     continue;
                 }
                 // A block built here carries no claim frame, so it may hold
@@ -5190,7 +5741,10 @@ impl Blockchain {
         let mut cids = Vec::new();
         for tx in &block.transactions {
             if let crate::core::transaction::TransactionType::NftBurn = tx.tx_type {
-                if let Ok(nft_id) = bincode::deserialize::<u64>(&tx.data) {
+                if let Ok(nft_id) = crate::network::bounded_bincode::decode_bounded_bincode::<u64>(
+                    &tx.data,
+                    crate::network::protocol::MAX_TX_SIZE,
+                ) {
                     if let Some(nft) = state.nft_registry.get_nft(nft_id) {
                         // Burning a token is not proof of owning the content
                         // it names: `NftMint` accepts an arbitrary content id.
@@ -5364,7 +5918,11 @@ impl Blockchain {
     ) -> Result<(AccountState, Vec<DomainId>), String> {
         // The claim fees of the block: who pays, which transaction fails and
         // who is paid. Empty for a block without a claim frame.
-        let claim_fees = crate::aggregation::chain::settlement_of(aggregation, block)?;
+        let claim_fees = crate::aggregation::chain::settlement_of_with_accounts(
+            aggregation,
+            Some(base_state),
+            block,
+        )?;
         let burn_cids = Self::collect_nft_burn_cids_from_state(base_state, block);
         let mut next_state = base_state.clone();
         next_state.current_block_height = block.index;
@@ -5612,7 +6170,11 @@ impl Blockchain {
                     self.chain_id,
                 );
                 probe.claim_frame = Some(frame.clone());
-                match crate::aggregation::chain::settlement_of(&self.aggregation_params(), &probe) {
+                match crate::aggregation::chain::settlement_of_with_accounts(
+                    &self.aggregation_params(),
+                    Some(&self.state),
+                    &probe,
+                ) {
                     Ok(fees) if !fees.failed.contains(&true) => true,
                     Ok(_) => {
                         tracing::warn!(
@@ -5668,9 +6230,10 @@ impl Blockchain {
                     return None;
                 }
             }
-            if let Err(error) = crate::aggregation::chain::check_block(
+            if let Err(error) = crate::aggregation::chain::check_block_with_accounts(
                 &self.aggregation_params(),
                 &self.state.scheme_registry,
+                &self.state,
                 &block,
             ) {
                 tracing::warn!("Block frame refused, no block built: {error}");
@@ -5922,6 +6485,7 @@ impl Blockchain {
 
         let frozen_before = Self::frozen_domain_ids(&self.state);
         self.state = committed_state;
+        self.prune_unregistered_bud3_symbols();
         // Governance-controlled domain unfreeze (5.C) is applied inside
         // `apply_block_effects_with_unfreezes` BEFORE `calculate_state_root`;
         // only the node-local quarantine ledger follows here.
@@ -6011,16 +6575,16 @@ impl Blockchain {
     pub fn mine_pending_transactions(&mut self, miner_address: Address) {
         self.produce_block(miner_address);
     }
-    fn active_duty_validators(&self) -> Vec<Address> {
-        self.state
-            .duty_lane_signers_for_chain(self.chain_id)
-            .into_iter()
-            .collect()
+    /// The signers every admission door hands the pool's duty lane. One
+    /// authority, [`AccountState::duty_lane_signers`], so no door can install
+    /// a wider set than another.
+    fn active_duty_validators(&self) -> std::collections::BTreeSet<Address> {
+        self.state.duty_lane_signers_for_chain(self.chain_id)
     }
 
     #[cfg(test)]
     pub(crate) fn duty_validator_snapshot_for_test(&self) -> std::collections::BTreeSet<Address> {
-        self.active_duty_validators().into_iter().collect()
+        self.active_duty_validators()
     }
 
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
@@ -6450,8 +7014,17 @@ impl Blockchain {
         // not. A claimed transaction below is accepted only because this
         // check passed: the frame proves its signature was verified.
         let aggregation = self.aggregation_params();
-        crate::aggregation::chain::check_block(&aggregation, &self.state.scheme_registry, &block)?;
-        let claim_fees = crate::aggregation::chain::settlement_of(&aggregation, &block)?;
+        crate::aggregation::chain::check_block_with_accounts(
+            &aggregation,
+            &self.state.scheme_registry,
+            &self.state,
+            &block,
+        )?;
+        let claim_fees = crate::aggregation::chain::settlement_of_with_accounts(
+            &aggregation,
+            Some(&self.state),
+            &block,
+        )?;
 
         if block.index > 0 && block.state_root.is_empty() {
             return Err("Block missing state_root".into());
@@ -6570,6 +7143,7 @@ impl Blockchain {
 
         let frozen_before = Self::frozen_domain_ids(&self.state);
         self.state = commit_state;
+        self.prune_unregistered_bud3_symbols();
         // Governance-controlled domain unfreeze (5.C) is applied inside
         // `apply_block_effects_with_unfreezes` BEFORE `calculate_state_root`;
         // only the node-local quarantine ledger follows here.
@@ -6823,10 +7397,19 @@ impl Blockchain {
             Self::check_block_slashing_evidence(block)
                 .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
             // The claims of the candidate block, exactly as on the tip path.
-            crate::aggregation::chain::check_block(&aggregation, &state.scheme_registry, block)
-                .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
-            let claim_fees = crate::aggregation::chain::settlement_of(&aggregation, block)
-                .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
+            crate::aggregation::chain::check_block_with_accounts(
+                &aggregation,
+                &state.scheme_registry,
+                &state,
+                block,
+            )
+            .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
+            let claim_fees = crate::aggregation::chain::settlement_of_with_accounts(
+                &aggregation,
+                Some(&state),
+                block,
+            )
+            .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
 
             let mut projected = state.clone();
             projected.current_block_height = block.index;
@@ -7296,6 +7879,7 @@ impl Blockchain {
             self.consensus
                 .record_block_with_chain(last_block, &self.chain, self.storage.as_ref());
         }
+        self.prune_unregistered_bud3_symbols();
         self.mempool.set_min_fee(self.state.base_fee);
         Ok(true)
     }
@@ -9615,6 +10199,7 @@ impl Blockchain {
             now_unix_secs,
             domain_params.min_operator_bond,
             0,
+            domain_params.require_merkle_proof,
         )?;
         // Persistence rides the block commit: on this branch the door the
         // RPC points at is the signed storage transaction, whose effects
@@ -9634,9 +10219,10 @@ impl Blockchain {
     /// untouched and there is nothing to refund.
     ///
     /// The registry's `accept_reallocation_ticket` keeps the one-shot
-    /// guarantee (a filled ticket refuses a second acceptance) and the
-    /// merkle envelope stays mandatory, so a replacement cannot claim a
-    /// shard it cannot prove. Until this path existed, a repair ticket
+    /// guarantee (a filled ticket refuses a second acceptance) and, with the
+    /// domain's VerifyMerkle gate open, the merkle envelope is mandatory, so
+    /// a replacement cannot claim a shard it cannot prove. Until this path
+    /// existed, a repair ticket
     /// opened by the maintenance sweep could never be filled on-chain:
     /// the trigger ran, and the acceptance was test-only.
     /// Test harness only, and for the same reason as
@@ -9675,6 +10261,7 @@ impl Blockchain {
             now_unix_secs,
             domain_params.min_operator_bond,
             0,
+            domain_params.require_merkle_proof,
         )?;
         // Persistence rides the block commit; see `open_storage_deal_with_escrow`.
         Ok(replacement_deal_id)
@@ -10082,6 +10669,277 @@ impl Blockchain {
     ) -> Result<(u32, u64), String> {
         crate::chain::storage_maintenance::finalize_expired_deals(&mut self.state, current_epoch)
     }
+
+    /// Borrow a [`crate::storage::bud3::view::NetworkSymbolSource`] backed by
+    /// this node's Merkle-verified B.U.D. 3.0 symbol cache and persistent `sled`
+    /// storage, checked against the live consensus `Bud3Registry`.
+    #[must_use]
+    pub fn bud3_symbol_source(&self) -> impl crate::storage::bud3::view::NetworkSymbolSource + '_ {
+        BlockchainSymbolSource {
+            registry: &self.state.bud3_registry,
+            symbols: &self.bud3_symbols,
+            storage: self.storage.as_ref(),
+        }
+    }
+
+    /// Verify every item's Merkle custody proof and holder assignment against
+    /// `self.state.bud3_registry`, then store in `self.bud3_symbols` and
+    /// `self.storage` (node-local only, zero impact on `state_root`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an explicit reason if any item fails verification, belongs to an
+    /// unknown/tombstoned object, or persistence fails.
+    pub fn store_verified_bud3_symbols(
+        &mut self,
+        holder: &[u8; 32],
+        object: &[u8; 32],
+        segment: u64,
+        items: &[crate::storage::bud3::symbol_protocol::VerifiedSymbolItem],
+    ) -> Result<usize, String> {
+        let (live_key, _) = self
+            .state
+            .bud3_registry
+            .resolve_live_object(object)
+            .ok_or_else(|| "unknown or tombstoned B.U.D. 3.0 object".to_string())?;
+        let accepted = self
+            .bud3_symbols
+            .insert_verified(&self.state.bud3_registry, holder, &live_key, segment, items)
+            .map_err(|e| format!("verified symbol admission refused: {e:?}"))?;
+        if let Some(ref store) = self.storage {
+            store
+                .put_bud3_verified_symbols(holder, &live_key, segment, &accepted)
+                .map_err(|e| format!("failed to persist verified symbols: {e}"))?;
+        }
+        Ok(accepted.len())
+    }
+
+    /// Fetch up to `count` (`1..=64`) verified B.U.D. 3.0 symbol items and the
+    /// matching segment roots for `(holder, object, segment)` from memory/`sled`,
+    /// re-verifying every item's Merkle custody proof against `self.state.bud3_registry`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses out-of-range counts, unknown/tombstoned objects, or any item
+    /// that fails Merkle proof verification on read.
+    pub fn fetch_verified_bud3_symbol_page(
+        &self,
+        holder: &[u8; 32],
+        object: &[u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<
+        (
+            u16,
+            Vec<crate::storage::bud3::registry::SymbolRoot>,
+            Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>,
+        ),
+        String,
+    > {
+        let resp = self.fetch_verified_bud3_symbols(holder, object, segment, first_esi, count)?;
+        let (_, entry) = self
+            .state
+            .bud3_registry
+            .resolve_live_object(object)
+            .ok_or_else(|| "unknown or tombstoned B.U.D. 3.0 object".to_string())?;
+        let roots = entry
+            .roots
+            .iter()
+            .filter(|r| r.segment == segment)
+            .copied()
+            .collect();
+        Ok((entry.record.profile.symbol_size, roots, resp.items))
+    }
+
+    /// Decode and verify a public B.U.D. 3.0 object under G8 paid fallback,
+    /// enforcing live on-chain `PaidViewReceipt` expiry and unconditionally
+    /// refusing sealed objects.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::bud3::view::ViewBud3Error`].
+    pub fn decode_bud3_paid_content(
+        &self,
+        receipt: &crate::storage::bud3::view::PaidViewReceipt,
+    ) -> Result<Vec<u8>, crate::storage::bud3::view::ViewBud3Error> {
+        use crate::storage::bud3::content_id::ContentIdKind;
+        use crate::storage::bud3::view::{fallback_decode_public, ViewBud3Error};
+        let Some((_, entry)) = self
+            .state
+            .bud3_registry
+            .resolve_live_object(&receipt.object)
+        else {
+            return Err(ViewBud3Error::UnknownObject);
+        };
+        if entry.record.content_id.kind == ContentIdKind::Sealed {
+            return Err(ViewBud3Error::SealedFallbackForbidden);
+        }
+        if !self
+            .state
+            .bud3_registry
+            .verify_paid_view_at(receipt, self.state.epoch_index)
+        {
+            return Err(ViewBud3Error::UnpaidFallbackView);
+        }
+        let source = self.bud3_symbol_source();
+        fallback_decode_public(&self.state.bud3_registry, &receipt.object, receipt, &source)
+    }
+
+    fn fetch_verified_bud3_symbols(
+        &self,
+        holder: &[u8; 32],
+        object: &[u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<crate::storage::bud3::symbol_protocol::SymbolRangeResponse, String> {
+        use crate::storage::bud3::symbol_protocol::{
+            verify_item_against_entry, SymbolRangeResponse, VerifiedSymbolItem,
+            MAX_SYMBOLS_PER_REQUEST,
+        };
+        if count == 0 || count > MAX_SYMBOLS_PER_REQUEST {
+            return Err(format!(
+                "symbol count must be within 1..={MAX_SYMBOLS_PER_REQUEST}"
+            ));
+        }
+        let (live_key, entry) = self
+            .state
+            .bud3_registry
+            .resolve_live_object(object)
+            .ok_or_else(|| "unknown or tombstoned B.U.D. 3.0 object".to_string())?;
+        let mut by_esi: BTreeMap<u32, VerifiedSymbolItem> = BTreeMap::new();
+        let mem = self.bud3_symbols.verified_range(
+            &self.state.bud3_registry,
+            holder,
+            &live_key,
+            segment,
+            first_esi,
+            count,
+        );
+        for item in mem.items {
+            by_esi.insert(item.symbol.esi, item);
+        }
+        if let Some(ref store) = self.storage {
+            let disk_items = store
+                .get_bud3_verified_symbols(holder, &live_key, segment, first_esi, count)
+                .map_err(|e| format!("failed to read persisted symbols: {e}"))?;
+            for item in disk_items {
+                verify_item_against_entry(entry, holder, segment, &item).map_err(|e| {
+                    format!(
+                        "stored symbol esi {} failed Merkle verification: {e:?}",
+                        item.symbol.esi
+                    )
+                })?;
+                by_esi.entry(item.symbol.esi).or_insert(item);
+            }
+        }
+        Ok(SymbolRangeResponse {
+            items: by_esi.into_values().collect(),
+        })
+    }
+
+    /// Purge persisted `sled` symbol keys whose objects are no longer registered
+    /// in `bud3_registry` (covering expired unconfirmed objects without tombstones
+    /// across restarts and epoch transitions).
+    fn prune_persisted_unregistered_bud3_symbols(&self) {
+        if let Some(ref store) = self.storage {
+            if let Ok(disk_objects) = store.list_bud3_symbol_objects() {
+                for obj in disk_objects {
+                    if self.state.bud3_registry.object(&obj).is_none()
+                        || self.state.bud3_registry.is_tombstoned(&obj)
+                    {
+                        let _ = store.delete_bud3_object_symbols(&obj);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Purge cached and persisted B.U.D. 3.0 symbols whose objects are no
+    /// longer registered or have been tombstoned.
+    fn prune_unregistered_bud3_symbols(&mut self) {
+        let removed = self
+            .bud3_symbols
+            .prune_unregistered(&self.state.bud3_registry);
+        if let Some(ref store) = self.storage {
+            for obj in removed {
+                let _ = store.delete_bud3_object_symbols(&obj);
+            }
+            for tomb in self.state.bud3_registry.tombstone_keys() {
+                let _ = store.delete_bud3_object_symbols(tomb);
+            }
+        }
+        if self.state.epoch_index != self.last_bud3_disk_prune_epoch {
+            self.prune_persisted_unregistered_bud3_symbols();
+            self.last_bud3_disk_prune_epoch = self.state.epoch_index;
+        }
+    }
+}
+
+/// Node-local B.U.D. 3.0 symbol source backed by verified memory cache and
+/// `sled` storage, re-verifying every symbol against live `Bud3Registry` roots.
+struct BlockchainSymbolSource<'a> {
+    registry: &'a crate::storage::bud3::registry::Bud3Registry,
+    symbols: &'a crate::storage::bud3::symbol_protocol::Bud3SymbolStore,
+    storage: Option<&'a Storage>,
+}
+
+impl crate::storage::bud3::view::NetworkSymbolSource for BlockchainSymbolSource<'_> {
+    fn fetch_holder_symbols(
+        &self,
+        holder: &crate::storage::bud3::registry::Address,
+        object: &crate::storage::bud3::registry::ObjectKey,
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Vec<crate::storage::bud3::fountain::Symbol> {
+        use crate::storage::bud3::symbol_protocol::{
+            verify_item_against_entry, MAX_SYMBOLS_PER_REQUEST,
+        };
+        let Some((live_key, entry)) = self.registry.resolve_live_object(object) else {
+            return Vec::new();
+        };
+        if count == 0 {
+            return Vec::new();
+        }
+        let mut collected = BTreeMap::new();
+        let mut cursor = first_esi;
+        let mut remaining = count;
+        while remaining > 0 {
+            let chunk = remaining.min(MAX_SYMBOLS_PER_REQUEST);
+            let mem_resp = self.symbols.verified_range(
+                self.registry,
+                holder,
+                &live_key,
+                segment,
+                cursor,
+                chunk,
+            );
+            for item in mem_resp.items {
+                collected.insert(item.symbol.esi, item.symbol);
+            }
+            if let Some(store) = self.storage {
+                if let Ok(disk_items) =
+                    store.get_bud3_verified_symbols(holder, &live_key, segment, cursor, chunk)
+                {
+                    for item in disk_items {
+                        if !collected.contains_key(&item.symbol.esi)
+                            && verify_item_against_entry(entry, holder, segment, &item).is_ok()
+                        {
+                            collected.insert(item.symbol.esi, item.symbol);
+                        }
+                    }
+                }
+            }
+            remaining -= chunk;
+            let Some(next) = cursor.checked_add(chunk) else {
+                break;
+            };
+            cursor = next;
+        }
+        collected.into_values().collect()
+    }
 }
 
 impl Clone for Blockchain {
@@ -10110,6 +10968,10 @@ impl Clone for Blockchain {
             global_header_openings: self.global_header_openings.clone(),
             app_binding_payment_windows: self.app_binding_payment_windows.clone(),
             plugin_registry: DomainPluginRegistry::new(),
+            garden_domains: self.garden_domains.clone(),
+            garden_commitments: self.garden_commitments.clone(),
+            garden_commitment_keys: self.garden_commitment_keys.clone(),
+            garden_quarantined: self.garden_quarantined.clone(),
             quarantine_ledger: self.quarantine_ledger.clone(),
             quarantine_dirty: self.quarantine_dirty,
             pending_slashing_evidence: self.pending_slashing_evidence.clone(),
@@ -10128,6 +10990,8 @@ impl Clone for Blockchain {
             scheme_registry: self.scheme_registry.clone(),
             recovery_tracker: self.recovery_tracker.clone(),
             reorg_anchors: Vec::new(),
+            bud3_symbols: self.bud3_symbols.clone(),
+            last_bud3_disk_prune_epoch: self.last_bud3_disk_prune_epoch,
         }
     }
 }
@@ -10546,6 +11410,7 @@ mod tests {
                     max_committed_chunks: 1000,
                     challenge_interval: 10,
                     min_operator_bond: 1_000_000,
+                    require_merkle_proof: false,
                 },
                 Some(bincode::serialize(&envelope).unwrap()),
                 Some([0x42u8; 32]),
@@ -10786,6 +11651,7 @@ mod tests {
                         max_committed_chunks: 1000,
                         challenge_interval: 10,
                         min_operator_bond: 1_000_000,
+                        require_merkle_proof: false,
                     },
                     Some(proof.clone()),
                     Some([0x42u8; 32]),
@@ -13349,7 +14215,7 @@ mod bond_and_reorg_tests {
         assert!(error.contains("state root mismatch"));
     }
 
-    /// Regression for the HIGH finding: an externally submitted
+    /// Security regression test: an externally submitted
     /// `Unverified` report used to be promoted to `ConsensusVerified` after
     /// checking only that two signatures verify under the offender's key.
     /// That is not an equivocation proof: a validator signs one block per
@@ -13716,6 +14582,7 @@ mod bond_and_reorg_tests {
             0,
             crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND,
             0,
+            crate::domain::storage_params::STORAGE_REQUIRE_MERKLE_PROOF,
         )
         .unwrap();
 
@@ -13741,6 +14608,7 @@ mod bond_and_reorg_tests {
             0,
             crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND,
             0,
+            crate::domain::storage_params::STORAGE_REQUIRE_MERKLE_PROOF,
         )
         .unwrap();
 
@@ -14641,5 +15509,276 @@ mod bond_and_reorg_tests {
             table.version, 0,
             "producer bitmap without a verified QC blob must never hand over seats"
         );
+    }
+
+    #[test]
+    fn bud3_symbols_persist_across_blockchain_reopen_and_refuse_disk_tampering() {
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::prepare_public_upload;
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, SymbolRangeRequest,
+        };
+        use crate::storage::bud3::view::view_from_network;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().to_str().expect("utf-8");
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload = b"durable verified bud3 blockchain storage test";
+        let up = prepare_public_upload(payload, &profile, &Bud3Limits::default(), 8).unwrap();
+        let obj = up.record.commitment;
+        let holder_a = [0x61u8; 32];
+        let holder_b = [0x62u8; 32];
+        let leaves: Vec<(u32, [u8; 32])> = up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves,
+            &up.segments[0][0..4],
+        )
+        .unwrap()
+        .items;
+        let items_b = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj,
+                segment: 0,
+                first_esi: 4,
+                count: 4,
+            },
+            &leaves,
+            &up.segments[0][4..8],
+        )
+        .unwrap()
+        .items;
+
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_a,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_b,
+                    class: Class::Full,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+
+        let storage = Storage::new(db_path).expect("storage");
+        let mut chain = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(storage),
+            45262,
+            None,
+        );
+        let root_before = chain.state.calculate_state_root();
+        chain
+            .state
+            .bud3_registry
+            .register_object([0x05u8; 32], up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        let root_after_reg = chain.state.calculate_state_root();
+        assert_ne!(root_before, root_after_reg);
+
+        assert_eq!(
+            chain
+                .store_verified_bud3_symbols(&holder_a, &obj, 0, &items_a)
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            chain
+                .store_verified_bud3_symbols(&holder_b, &obj, 0, &items_b)
+                .unwrap(),
+            4
+        );
+        // Node-local symbol ingestion never perturbs consensus state_root.
+        assert_eq!(chain.state.calculate_state_root(), root_after_reg);
+
+        // Reconstruct directly from verified symbol source.
+        let recovered = {
+            let src = chain.bud3_symbol_source();
+            view_from_network(&chain.state.bud3_registry, &obj, None, &src).unwrap()
+        };
+        assert_eq!(recovered, payload);
+        drop(chain);
+
+        // Fresh node opening the same sled DB (empty in-memory cache) reads from disk & verifies.
+        let reopened = Storage::new(db_path).expect("reopen storage");
+        let mut chain2 = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(reopened.clone()),
+            45262,
+            None,
+        );
+        chain2
+            .state
+            .bud3_registry
+            .register_object([0x05u8; 32], up.record, shares, 0, 50)
+            .unwrap();
+        let fetched = chain2
+            .fetch_verified_bud3_symbols(&holder_a, &obj, 0, 0, 4)
+            .unwrap();
+        assert_eq!(fetched.items.len(), 4);
+        assert_eq!(
+            view_from_network(
+                &chain2.state.bud3_registry,
+                &obj,
+                None,
+                &chain2.bud3_symbol_source()
+            )
+            .unwrap(),
+            payload
+        );
+
+        // Tamper one persisted item in sled directly; read must refuse rather than serve forged bytes.
+        let mut bad_items = items_a;
+        bad_items[0].symbol.data[80] ^= 0xFF;
+        reopened
+            .put_bud3_verified_symbols(&holder_a, &obj, 0, &bad_items[..1])
+            .unwrap();
+        let err = chain2
+            .fetch_verified_bud3_symbols(&holder_a, &obj, 0, 0, 4)
+            .unwrap_err();
+        assert!(err.contains("Merkle verification"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn bud3_persisted_symbols_prune_unconfirmed_expired_objects_on_epoch_and_restart() {
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, SymbolRangeRequest,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().to_str().expect("utf-8");
+        let payload = b"unconfirmed expired object persisted symbols cleanup".repeat(4);
+        let holder_a = [0x61u8; 32];
+        let holder_b = [0x62u8; 32];
+        let p = crate::storage::bud3::limits::Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let up = crate::storage::bud3::pipeline::prepare_public_upload(
+            &payload,
+            &p,
+            &crate::storage::bud3::limits::Bud3Limits::default(),
+            8,
+        )
+        .expect("prepare upload");
+        let obj = up.record.commitment;
+        let shares = vec![
+            (
+                0,
+                crate::storage::bud3::placement::Share {
+                    validator: holder_a,
+                    class: crate::storage::bud3::placement::Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                crate::storage::bud3::placement::Share {
+                    validator: holder_b,
+                    class: crate::storage::bud3::placement::Class::Full,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+        let leaves: Vec<(u32, [u8; 32])> = up.segments[0]
+            .iter()
+            .map(|s| (s.esi, crate::storage::bud3::custody::symbol_leaf(&s.data)))
+            .collect();
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves,
+            &up.segments[0][0..4],
+        )
+        .expect("build range")
+        .items;
+
+        let storage = Storage::new(db_path).expect("open sled");
+        let mut chain = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(storage.clone()),
+            45262,
+            None,
+        );
+        // Produce one real block so persisted chain length > 1 across restart.
+        chain
+            .produce_block(Address::from([0x99u8; 32]))
+            .expect("produce block");
+        // Register unconfirmed object expiring at epoch 1 and store symbols to sled directly
+        // (simulating symbols persisted before a node restart wiped in-memory `bud3_symbols`).
+        chain
+            .state
+            .bud3_registry
+            .register_object([0x07u8; 32], up.record, shares, 0, 1)
+            .expect("register");
+        storage
+            .put_bud3_verified_symbols(&holder_a, &obj, 0, &items_a)
+            .expect("put symbols");
+        assert_eq!(storage.list_bud3_symbol_objects().expect("list"), vec![obj]);
+
+        // 1) Advance past expiry without custody confirmation -> no tombstone is written,
+        // yet epoch advancement triggers persisted sled cleanup.
+        chain.state.bud3_registry.expire(2);
+        assert!(chain.state.bud3_registry.object(&obj).is_none());
+        assert!(!chain.state.bud3_registry.is_tombstoned(&obj));
+        chain.state.epoch_index = 2;
+        chain.prune_unregistered_bud3_symbols();
+        assert!(storage.list_bud3_symbol_objects().expect("list").is_empty());
+
+        // 2) Re-seed stale symbols on disk and verify startup prunes unregistered
+        // objects when reopening a multi-block persisted chain.
+        storage
+            .put_bud3_verified_symbols(&holder_a, &obj, 0, &items_a)
+            .expect("put stale symbols");
+        assert_eq!(storage.list_bud3_symbol_objects().expect("list"), vec![obj]);
+        drop(storage);
+        drop(chain);
+
+        let reopened_storage = Storage::new(db_path).expect("reopen sled");
+        let _reopened = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(reopened_storage.clone()),
+            45262,
+            None,
+        );
+        assert!(reopened_storage
+            .list_bud3_symbol_objects()
+            .expect("list after restart")
+            .is_empty());
     }
 }

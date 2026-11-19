@@ -196,7 +196,9 @@ impl BudlumClient {
     #[must_use]
     pub fn new(url: String) -> Self {
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { url, client }
@@ -293,7 +295,9 @@ impl EthClient {
     #[must_use]
     pub fn new(url: String, bridge_address: String) -> Self {
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -601,6 +605,21 @@ pub fn run_relayer(config: &RelayerConfig) -> Result<(), String> {
         return Err(
             "bridge-address is placeholder (0x0); set real Ethereum bridge contract".into(),
         );
+    }
+    // Strix B-0067: reject zero poll interval (infinite tight-spin DoS).
+    if config.poll_interval_secs == 0 {
+        return Err("poll-interval must be at least 1 second; 0 would spin in a tight loop".into());
+    }
+    // Strix B-0067: reject non-http(s) RPC URLs.
+    for (name, url) in [
+        ("eth-rpc", &config.eth_rpc_url),
+        ("budlum-rpc", &config.budlum_rpc_url),
+    ] {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(format!(
+                "{name} URL must start with http:// or https://, got: {url}"
+            ));
+        }
     }
     if let Err(e) = validate_relayer_address(&config.relayer_address) {
         // The submitting direction must name a real relayer. BudToEth submits
@@ -1385,5 +1404,34 @@ mod tests {
         };
         let err = client.build_deposit_proof(&event).unwrap_err();
         assert!(err.contains("not implemented"));
+    }
+
+    #[test]
+    fn run_relayer_rejects_zero_poll_interval() {
+        let mut config = RelayerConfig::default();
+        config.poll_interval_secs = 0;
+        config.bridge_address = "0x1234567890abcdef1234567890abcdef12345678".into();
+        let err = run_relayer(&config).unwrap_err();
+        assert!(err.contains("poll-interval"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn run_relayer_rejects_non_http_rpc_url() {
+        let mut config = RelayerConfig::default();
+        config.poll_interval_secs = 10;
+        config.bridge_address = "0x1234567890abcdef1234567890abcdef12345678".into();
+        config.eth_rpc_url = "ftp://not-http".into();
+        let err = run_relayer(&config).unwrap_err();
+        assert!(err.contains("http"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn run_relayer_rejects_file_url() {
+        let mut config = RelayerConfig::default();
+        config.poll_interval_secs = 10;
+        config.bridge_address = "0x1234567890abcdef1234567890abcdef12345678".into();
+        config.budlum_rpc_url = "file:///tmp/x".into();
+        let err = run_relayer(&config).unwrap_err();
+        assert!(err.contains("http"), "unexpected: {err}");
     }
 }

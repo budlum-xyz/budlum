@@ -99,9 +99,10 @@ impl ZkFinalityEvidence {
         // bounded by the payload cap. Same wire encoding as
         // `bincode::serialize`.
         use bincode::Options;
+        let byte_limit = u64::try_from(payload.len()).unwrap_or(MAX_PAYLOAD_BYTES as u64);
         let decoded: Self = bincode::options()
             .with_fixint_encoding()
-            .with_limit(MAX_PAYLOAD_BYTES as u64)
+            .with_limit(byte_limit)
             .reject_trailing_bytes()
             .deserialize(payload)
             .map_err(|e| AdapterError::Malformed {
@@ -929,5 +930,19 @@ mod tests {
             ),
             "empty Halt program must not forge a state root: {err:?}"
         );
+    }
+
+    #[test]
+    fn short_forged_zkvm_payload_cannot_trigger_megabyte_preallocation() {
+        // 32-byte payload declaring a forged 10 MiB vector length must fail
+        // immediately against the payload-derived byte limit without allocating.
+        let mut forged = Vec::with_capacity(32);
+        forged.extend_from_slice(&1u32.to_le_bytes());
+        forged.extend_from_slice(&(10u64 * 1024 * 1024).to_le_bytes());
+        forged.extend_from_slice(&[0u8; 20]);
+        assert!(matches!(
+            ZkFinalityEvidence::decode(&forged),
+            Err(AdapterError::Malformed { .. })
+        ));
     }
 }

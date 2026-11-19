@@ -212,17 +212,38 @@ impl Node {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        const MAX_INDEXER_RPC_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
         let body =
             serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
-        let value: serde_json::Value = self
+        let mut response = self
             .http
             .post(&self.url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("{method}: node unreachable: {e}"))?
-            .json()
+            .map_err(|e| format!("{method}: node unreachable: {e}"))?;
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_INDEXER_RPC_RESPONSE_BYTES as u64)
+        {
+            return Err(format!(
+                "{method}: node response exceeds {MAX_INDEXER_RPC_RESPONSE_BYTES}-byte limit"
+            ));
+        }
+        let mut raw = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
+            .map_err(|e| format!("{method}: failed reading node response: {e}"))?
+        {
+            if raw.len().saturating_add(chunk.len()) > MAX_INDEXER_RPC_RESPONSE_BYTES {
+                return Err(format!(
+                    "{method}: node response exceeds {MAX_INDEXER_RPC_RESPONSE_BYTES}-byte limit"
+                ));
+            }
+            raw.extend_from_slice(&chunk);
+        }
+        let value: serde_json::Value = serde_json::from_slice(&raw)
             .map_err(|e| format!("{method}: answer is not JSON: {e}"))?;
         if let Some(error) = value.get("error") {
             return Err(format!("{method}: {error}"));
@@ -690,7 +711,9 @@ async fn serve(cli: Cli) -> Result<(), String> {
         rates: Mutex::new(ClientRates::default()),
     });
     let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("HTTP client: {e}"))?;
     let node = Arc::new(Node {

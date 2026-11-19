@@ -63,7 +63,7 @@ fn two_hashes(digest: &[u8; 32]) -> [u64; 2] {
 }
 
 /// An integer mixer (a 64-bit finalizer). No floats on this path.
-fn mix(mut x: u64) -> u64 {
+const fn mix(mut x: u64) -> u64 {
     x ^= x >> 30;
     x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x ^= x >> 27;

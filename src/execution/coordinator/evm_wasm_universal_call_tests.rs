@@ -672,8 +672,13 @@ fn uel_pointer_holds_no_balance() {
         String::from("HomeCW"),
     )
     .expect("register asset");
-    let ptr_evm = deploy_asset_pointer(&mut state, &asset.asset_id, EeId::EVM)
-        .expect("deploy ERC-20 pointer");
+    let ptr_evm = deploy_asset_pointer(
+        &mut state,
+        sample_ctx().chain_id,
+        &asset.asset_id,
+        EeId::EVM,
+    )
+    .expect("deploy ERC-20 pointer");
     assert_eq!(state.execution_state.namespace_bytes(NS_EVM_STORAGE), 0);
 
     // 3. Call `transfer(bob_evm20, 120)` on the ERC-20 pointer from `alice`.
@@ -784,7 +789,13 @@ fn pointer_allowance_lives_at_home() {
         String::from("AllowanceHome"),
     )
     .expect("reg");
-    let ptr_erc20 = deploy_asset_pointer(&mut state, &asset_cw.asset_id, EeId::EVM).expect("ptr");
+    let ptr_erc20 = deploy_asset_pointer(
+        &mut state,
+        sample_ctx().chain_id,
+        &asset_cw.asset_id,
+        EeId::EVM,
+    )
+    .expect("ptr");
 
     let mut approve_cd = solidity_selector("approve(address,uint256)").to_vec();
     let mut sp_w = [0u8; 32];
@@ -879,7 +890,13 @@ fn pointer_allowance_lives_at_home() {
         String::from("NativeERC"),
     )
     .expect("reg erc20");
-    let ptr_cw20 = deploy_asset_pointer(&mut state, &asset_erc.asset_id, EeId::WASM).expect("ptr");
+    let ptr_cw20 = deploy_asset_pointer(
+        &mut state,
+        sample_ctx().chain_id,
+        &asset_erc.asset_id,
+        EeId::WASM,
+    )
+    .expect("ptr");
     let wasm_bytes_before = state.execution_state.namespace_bytes(NS_WASM_STORE);
 
     let cw_inc = serde_json::to_vec(&serde_json::json!({
@@ -981,7 +998,13 @@ fn svm_pointer_holds_no_balance() {
         String::from("HomeSvmAsset"),
     )
     .expect("reg");
-    let ptr_svm = deploy_asset_pointer(&mut state, &asset.asset_id, EeId::SVM).expect("svm ptr");
+    let ptr_svm = deploy_asset_pointer(
+        &mut state,
+        budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID,
+        &asset.asset_id,
+        EeId::SVM,
+    )
+    .expect("svm ptr");
     let svm_bytes_before = state.execution_state.namespace_bytes(NS_SVM_ACCOUNT);
 
     // 3. Alice transfers 250 units via SVM SPL pointer and approves Bob for 300.
@@ -1200,7 +1223,13 @@ fn move_pointer_holds_no_balance() {
         String::from("HomeMoveAsset"),
     )
     .expect("reg");
-    let ptr_move = deploy_asset_pointer(&mut state, &asset.asset_id, EeId::MOVE).expect("move ptr");
+    let ptr_move = deploy_asset_pointer(
+        &mut state,
+        budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID,
+        &asset.asset_id,
+        EeId::MOVE,
+    )
+    .expect("move ptr");
     let move_bytes_before = state.execution_state.namespace_bytes(NS_MOVE_STATE);
 
     // 3. Alice approves Bob 450 via Move pointer (`FungibleAsset` flavor),
@@ -1459,8 +1488,13 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
         String::from("HomeMove"),
     )
     .expect("reg move");
-    let ptr_wasm = deploy_asset_pointer(&mut state, &asset_move.asset_id, EeId::WASM)
-        .expect("deploy wasm ptr for move");
+    let ptr_wasm = deploy_asset_pointer(
+        &mut state,
+        sample_ctx().chain_id,
+        &asset_move.asset_id,
+        EeId::WASM,
+    )
+    .expect("deploy wasm ptr for move");
     let wasm_before = state.execution_state.namespace_bytes(NS_WASM_STORE);
 
     let cw_xfer = serde_json::to_vec(&serde_json::json!({
@@ -1593,8 +1627,13 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
         String::from("HomeSPL"),
     )
     .expect("reg svm");
-    let ptr_evm = deploy_asset_pointer(&mut state, &asset_svm.asset_id, EeId::EVM)
-        .expect("deploy evm ptr for svm");
+    let ptr_evm = deploy_asset_pointer(
+        &mut state,
+        sample_ctx().chain_id,
+        &asset_svm.asset_id,
+        EeId::EVM,
+    )
+    .expect("deploy evm ptr for svm");
     let evm_before = state.execution_state.namespace_bytes(NS_EVM_STORAGE);
 
     let mut xfer_cd = solidity_selector("transfer(address,uint256)").to_vec();

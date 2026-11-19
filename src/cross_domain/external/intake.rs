@@ -35,6 +35,7 @@
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
+use crate::cross_domain::external::bitcoin_spv::{BitcoinSpvAdapter, PinnedBitcoinAnchor};
 use crate::cross_domain::external::ethereum::{BlsVerifier, EthereumSyncAdapter};
 use crate::cross_domain::external::intake_quorum::{
     QuorumRounds, RoundEntry, RoundError, RoundKey, RoundState,
@@ -51,6 +52,7 @@ use crate::cross_domain::external::spec::{
     AdapterDescriptor, DomainKey, ExternalFinalityAdapter, FinalityAttestation,
     RawConsensusEvidence, VerificationPolicy,
 };
+use crate::cross_domain::external::tendermint::TendermintFinalityAdapter;
 use crate::cross_domain::external::versioning::VersionPolicy;
 use crate::cross_domain::external::zkvm_proof::ZkVmFinalityAdapter;
 use serde::{Deserialize, Serialize};
@@ -164,15 +166,68 @@ pub enum AdapterSpec {
         #[serde(default)]
         chain_id: Option<u64>,
     },
+    /// Bitcoin SPV header-chain finality for one network, pinned to one
+    /// trusted checkpoint. APPENDED LAST: this enum is persisted in consensus
+    /// state through bincode, so inserting a variant in the middle would
+    /// reinterpret every stored registration (STRX-194-01). A spec without
+    /// an anchor is the closed admission state: `register_domain` refuses it.
+    BitcoinSpv {
+        network: String,
+        #[serde(default)]
+        anchor: Option<PinnedBitcoinAnchor>,
+    },
+    /// Tendermint/CometBFT commit finality for one network, pinned to one chain
+    /// id. APPENDED LAST, for the same bincode reason as `BitcoinSpv`: this
+    /// enum is persisted in consensus state, so inserting a variant in the
+    /// middle would reinterpret every stored registration. A spec with an
+    /// empty chain id is the closed admission state: `register_domain`
+    /// refuses it, because a commit's chain id is part of every sign byte and
+    /// an unpinned adapter would verify any chain's commit.
+    TendermintCommit {
+        network: String,
+        chain_id: String,
+        /// Canonical [`crate::cross_domain::external::tendermint::validator_set_commitment`]
+        /// pinned by governance for `network`. `None` is the closed admission state.
+        #[serde(default)]
+        validator_set_hash: Option<[u8; 32]>,
+    },
+    /// Modular 2D Data-Availability Sampling (`DAS`) + Namespace Merkle Tree
+    /// (`NMT`) light-client finality bound to a governance-pinned namespace
+    /// and slashable attestation committee. APPENDED LAST (tag `4`).
+    DataAvailability {
+        network: String,
+        #[serde(default)]
+        committee: Option<crate::cross_domain::external::da_sampling::PinnedDaCommittee>,
+    },
+    /// Linear chained BFT (`HotStuff` 3-chain QC rule) finality bound to a
+    /// governance-pinned epoch validator set. APPENDED LAST (tag `5`).
+    HotStuffQc {
+        network: String,
+        #[serde(default)]
+        committee: Option<crate::cross_domain::external::hotstuff::PinnedHotStuffCommittee>,
+    },
+    /// Stake-weighted round-DAG BFT (`Bullshark` anchor + wave-commit quorum)
+    /// finality bound to a governance-pinned epoch committee. APPENDED LAST (tag `6`).
+    DagCertificate {
+        network: String,
+        #[serde(default)]
+        committee: Option<crate::cross_domain::external::dag_bft::PinnedDagCommittee>,
+    },
 }
 
 impl AdapterSpec {
-    /// The network this spec serves. Both variants carry one; the accessor
+    /// The network this spec serves. Every variant carries one; the accessor
     /// exists so the intake can index registrations without matching.
     #[must_use]
     pub fn network(&self) -> &str {
         match self {
-            Self::EthereumSync { network, .. } | Self::ZkVm { network, .. } => network,
+            Self::EthereumSync { network, .. }
+            | Self::ZkVm { network, .. }
+            | Self::BitcoinSpv { network, .. }
+            | Self::TendermintCommit { network, .. }
+            | Self::DataAvailability { network, .. }
+            | Self::HotStuffQc { network, .. }
+            | Self::DagCertificate { network, .. } => network,
         }
     }
 
@@ -203,6 +258,62 @@ impl AdapterSpec {
                 chain_id,
             } => {
                 let adapter = ZkVmFinalityAdapter::new(network, *program_hash, *chain_id);
+                let adapter = match golden {
+                    Some(g) => adapter.with_golden(g),
+                    None => adapter,
+                };
+                Box::new(adapter)
+            }
+            Self::BitcoinSpv { network, anchor } => {
+                let adapter = BitcoinSpvAdapter::new(network, anchor.clone());
+                let adapter = match golden {
+                    Some(g) => adapter.with_golden(g),
+                    None => adapter,
+                };
+                Box::new(adapter)
+            }
+            Self::TendermintCommit {
+                network,
+                chain_id,
+                validator_set_hash,
+            } => {
+                let adapter =
+                    TendermintFinalityAdapter::new_pinned(network, chain_id, *validator_set_hash);
+                let adapter = match golden {
+                    Some(g) => adapter.with_golden(g),
+                    None => adapter,
+                };
+                Box::new(adapter)
+            }
+            Self::DataAvailability { network, committee } => {
+                let adapter =
+                    crate::cross_domain::external::da_sampling::DataAvailabilityAdapter::new(
+                        network,
+                        committee.clone(),
+                    );
+                let adapter = match golden {
+                    Some(g) => adapter.with_golden(g),
+                    None => adapter,
+                };
+                Box::new(adapter)
+            }
+            Self::HotStuffQc { network, committee } => {
+                let adapter =
+                    crate::cross_domain::external::hotstuff::HotStuffThreeChainAdapter::new(
+                        network,
+                        committee.clone(),
+                    );
+                let adapter = match golden {
+                    Some(g) => adapter.with_golden(g),
+                    None => adapter,
+                };
+                Box::new(adapter)
+            }
+            Self::DagCertificate { network, committee } => {
+                let adapter = crate::cross_domain::external::dag_bft::BullsharkDagAdapter::new(
+                    network,
+                    committee.clone(),
+                );
                 let adapter = match golden {
                     Some(g) => adapter.with_golden(g),
                     None => adapter,
@@ -286,6 +397,166 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::ethereum::PinnedCommittee,
     >,
+    /// Governance-pinned Bitcoin SPV checkpoints keyed by external network.
+    #[serde(default)]
+    pub pinned_bitcoin_anchors: std::collections::BTreeMap<String, PinnedBitcoinAnchor>,
+    /// Governance-pinned Tendermint `(chain_id, validator_set_hash)` anchors keyed by network.
+    #[serde(default)]
+    pub pinned_tendermint_anchors: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::tendermint::PinnedTendermintAnchor,
+    >,
+    /// Governance-pinned modular DA sampling committees keyed by external network.
+    #[serde(default)]
+    pub pinned_da_committees: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::da_sampling::PinnedDaCommittee,
+    >,
+    /// Governance-pinned HotStuff 3-chain epoch validator committees keyed by external network.
+    #[serde(default)]
+    pub pinned_hotstuff_committees: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::hotstuff::PinnedHotStuffCommittee,
+    >,
+    /// Governance-pinned Bullshark round-DAG BFT committees keyed by external network.
+    #[serde(default)]
+    pub pinned_dag_committees: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::dag_bft::PinnedDagCommittee,
+    >,
+}
+
+/// Which anchor map an external-domain adapter family reads.
+///
+/// The four families that verify against a pinned trust anchor keep separate
+/// maps in [`IntakeState`], keyed by network name. A network name alone is not
+/// a key: `"mainnet"` denotes an Ethereum sync committee in one map and a
+/// Bitcoin checkpoint in another, so every lookup and every vote names the
+/// family too.
+///
+/// WIRING: `src/execution/executor.rs` reaches this type only through
+/// `PinnedExternalAnchor::family()`'s return value (`anchor.family()`), never
+/// by naming `AnchorFamily` itself, so the call site records the door here
+/// instead of leaving the type looking unused from outside this file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum AnchorFamily {
+    Ethereum,
+    Bitcoin,
+    Tendermint,
+    Da,
+}
+
+impl AnchorFamily {
+    /// The family's name as it appears in a proposal and in a refusal.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ethereum => "ethereum",
+            Self::Bitcoin => "bitcoin",
+            Self::Tendermint => "tendermint",
+            Self::Da => "da",
+        }
+    }
+}
+
+/// A trust anchor as consensus installs it.
+///
+/// Until this existed, the four anchor maps in [`IntakeState`] had no writer
+/// outside this crate's tests: every anchored adapter was closed on every
+/// chain, because "governance pins a committee" named a vote that could not
+/// happen. The anchors are inside `external_intake_root`
+/// ([`IntakeState::state_digest`] hashes the whole state), so an operator-side
+/// RPC or a node-local flag could not have written one without forking the
+/// chain: the value is consensus state, and only a block may move it.
+///
+/// This is the value a `ProposalType::PinExternalAnchor` vote carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PinnedExternalAnchor {
+    Ethereum(crate::cross_domain::external::ethereum::PinnedCommittee),
+    Bitcoin(PinnedBitcoinAnchor),
+    Tendermint(crate::cross_domain::external::tendermint::PinnedTendermintAnchor),
+    Da(crate::cross_domain::external::da_sampling::PinnedDaCommittee),
+}
+
+impl PinnedExternalAnchor {
+    /// Which map this anchor belongs in.
+    #[must_use]
+    pub const fn family(&self) -> AnchorFamily {
+        match self {
+            Self::Ethereum(_) => AnchorFamily::Ethereum,
+            Self::Bitcoin(_) => AnchorFamily::Bitcoin,
+            Self::Tendermint(_) => AnchorFamily::Tendermint,
+            Self::Da(_) => AnchorFamily::Da,
+        }
+    }
+
+    /// Whether the anchor is a real trust root rather than a placeholder.
+    ///
+    /// A vote installs a value that is trusted without being proved, so the
+    /// cheapest sanity check belongs at proposal time: an all-zero hash or an
+    /// empty set is not an anchor, it is the shape of one.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the field that is empty.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Ethereum(committee) => {
+                if committee.aggregate_pubkey.is_empty() {
+                    return Err("the pinned Ethereum committee has no aggregate key".into());
+                }
+                if committee.next_committee_root == [0u8; 32] {
+                    return Err(
+                        "the pinned Ethereum committee's next_committee_root is all zeroes".into(),
+                    );
+                }
+            }
+            Self::Bitcoin(checkpoint) => {
+                if checkpoint.height == 0 {
+                    return Err("the pinned Bitcoin checkpoint is at height 0".into());
+                }
+                if checkpoint.block_hash == [0u8; 32] {
+                    return Err("the pinned Bitcoin checkpoint's block hash is all zeroes".into());
+                }
+            }
+            Self::Tendermint(anchor) => {
+                if anchor.chain_id.is_empty() {
+                    return Err("the pinned Tendermint anchor has no chain id".into());
+                }
+                if anchor.validator_set_hash == [0u8; 32] {
+                    return Err(
+                        "the pinned Tendermint anchor's validator-set root is all zeroes".into(),
+                    );
+                }
+            }
+            Self::Da(committee) => {
+                if committee.members.is_empty() {
+                    return Err("the pinned DA committee has no members".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The anchor's own digest, over a family-tagged encoding.
+    ///
+    /// A vote that replaces an anchor names the digest it expects to find,
+    /// the same shape as `UnfreezeConsensusDomain`'s expected validator-set
+    /// hash: without it, a vote taken against one checkpoint could be applied
+    /// to whatever occupies the slot when it activates.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's message when the anchor cannot be encoded, which
+    /// for these types means a `Vec` length the encoder refuses.
+    pub fn digest(&self) -> Result<[u8; 32], String> {
+        let bytes = bincode::serialize(self).map_err(|e| e.to_string())?;
+        Ok(crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_EXTERNAL_ANCHOR_V1",
+            self.family().as_str().as_bytes(),
+            &bytes,
+        ]))
+    }
 }
 
 /// The clock `max_age` measures against at submission: the domain's most
@@ -334,6 +605,29 @@ pub enum IntakeError {
     InvalidQuorumPolicy { reason: &'static str },
     #[error("an agreed quorum round holds no entry that carried the winning claim")]
     MissingCarrier,
+    #[error("a prover cannot challenge its own accepted attestation")]
+    SelfChallengeForbidden,
+    #[error("contradiction proof refused: {reason}")]
+    InvalidContradiction { reason: String },
+}
+
+/// Verified receipt emitted by [`IntakeState::slash_on_contradiction`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContradictionSlashOutcome {
+    /// External domain whose attestation was contradicted and frozen.
+    pub domain: DomainKey,
+    /// Bonded carrier of the withdrawn false attestation.
+    pub slashed_prover: Address,
+    /// Digest of the withdrawn false attestation.
+    pub contradicted_digest: [u8; 32],
+    /// External height at which the conflicting finality proofs verified.
+    pub height: u64,
+    /// Evidence format version shared by both proofs.
+    pub evidence_version: u32,
+    /// Total collateral slashed from `slashed_prover` (in atoms).
+    pub slashed_atoms: u128,
+    /// Portion of `slashed_atoms` awarded to the challenger (`<= slashed_atoms`).
+    pub challenger_reward_atoms: u128,
 }
 
 /// The first prover in arrival order whose entry carries `state_root`.
@@ -379,6 +673,193 @@ impl IntakeState {
     ) {
         self.pinned_ethereum_committees
             .insert(network.into(), committee);
+    }
+
+    /// Installs or updates the consensus-pinned Bitcoin SPV checkpoint for `network`.
+    /// WIRING: governance/genesis checkpoint installation surface paired with `register_domain`.
+    pub fn pin_bitcoin_anchor(&mut self, network: impl Into<String>, anchor: PinnedBitcoinAnchor) {
+        self.pinned_bitcoin_anchors.insert(network.into(), anchor);
+    }
+
+    /// Installs or updates the consensus-pinned Tendermint commit anchor for `network`.
+    /// WIRING: governance/genesis validator-set anchor surface paired with `register_domain`.
+    pub fn pin_tendermint_anchor(
+        &mut self,
+        network: impl Into<String>,
+        anchor: crate::cross_domain::external::tendermint::PinnedTendermintAnchor,
+    ) {
+        self.pinned_tendermint_anchors
+            .insert(network.into(), anchor);
+    }
+
+    /// Advance a pinned Tendermint light-client anchor across a validator-set
+    /// rotation by verifying an IBC-style skipping or adjacent commit (`>1/3`
+    /// trusted overlap + `>=2/3 + 1` target quorum + RFC-6962 header proofs).
+    ///
+    /// # Errors
+    ///
+    /// Refuses unpinned networks, chain-id or trusted-set mismatches, expired
+    /// trusting periods, insufficient trusted overlap, or forged header proofs.
+    ///
+    /// WIRING: Light-client Tendermint validator-set rotation advancing `pinned_tendermint_anchors`.
+    pub fn rotate_tendermint_anchor(
+        &mut self,
+        network: &str,
+        trusted: &crate::cross_domain::external::tendermint::TrustedTendermintState,
+        update: &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+        next_validators_proof: Option<(
+            [u8; 32],
+            &crate::cross_domain::external::tendermint::Rfc6962Proof,
+        )>,
+        now_unix_secs: u64,
+    ) -> Result<crate::cross_domain::external::tendermint::VerifiedTendermintSkip, IntakeError>
+    {
+        use subtle::ConstantTimeEq;
+
+        let Some(pinned) = self.pinned_tendermint_anchors.get(network) else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        if pinned.chain_id != trusted.chain_id {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
+        let trusted_hash = crate::cross_domain::external::tendermint::validator_set_commitment(
+            &trusted.validators,
+        );
+        if !bool::from(trusted_hash.ct_eq(&pinned.validator_set_hash)) {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
+        let skip = crate::cross_domain::external::tendermint::verify_skipping_commit(
+            trusted,
+            update,
+            None,
+            next_validators_proof,
+            now_unix_secs,
+        )
+        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let new_hash = skip.next_validators_hash.unwrap_or(skip.validator_set_hash);
+        self.pinned_tendermint_anchors.insert(
+            network.to_string(),
+            crate::cross_domain::external::tendermint::PinnedTendermintAnchor {
+                chain_id: trusted.chain_id.clone(),
+                validator_set_hash: new_hash,
+            },
+        );
+        Ok(skip)
+    }
+
+    /// Installs or updates the consensus-pinned modular DA committee for `network`.
+    /// WIRING: governance/genesis DA committee surface paired with `register_domain`.
+    pub fn pin_da_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::da_sampling::PinnedDaCommittee,
+    ) {
+        self.pinned_da_committees.insert(network.into(), committee);
+    }
+
+    /// Installs or updates the consensus-pinned HotStuff epoch committee for `network`.
+    /// WIRING: governance/genesis HotStuff validator-set surface paired with `register_domain`.
+    pub fn pin_hotstuff_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::hotstuff::PinnedHotStuffCommittee,
+    ) {
+        self.pinned_hotstuff_committees
+            .insert(network.into(), committee);
+    }
+
+    /// Installs or updates the consensus-pinned Bullshark DAG-BFT committee for `network`.
+    /// WIRING: governance/genesis DAG-BFT validator-set surface paired with `register_domain`.
+    pub fn pin_dag_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::dag_bft::PinnedDagCommittee,
+    ) {
+        self.pinned_dag_committees.insert(network.into(), committee);
+    }
+
+    /// Installs or replaces a family's trust anchor for `network`.
+    ///
+    /// The consensus door: `GovernanceAction::PinExternalAnchor` in block
+    /// execution is the only production caller. The four `pin_*` helpers above
+    /// remain the genesis/test initializers; anything that can be reached from
+    /// an operator RPC or a node-local flag would fork the chain, because these
+    /// maps are inside `state_digest`. (HotStuff and DAG-BFT committees are not
+    /// yet part of `PinnedExternalAnchor`/`AnchorFamily`; they stay genesis/test
+    /// -only until their own governance door is added.)
+    pub fn install_pinned_anchor(&mut self, network: &str, anchor: PinnedExternalAnchor) {
+        match anchor {
+            PinnedExternalAnchor::Ethereum(committee) => {
+                self.pinned_ethereum_committees
+                    .insert(network.to_string(), committee);
+            }
+            PinnedExternalAnchor::Bitcoin(checkpoint) => {
+                self.pinned_bitcoin_anchors
+                    .insert(network.to_string(), checkpoint);
+            }
+            PinnedExternalAnchor::Tendermint(anchor) => {
+                self.pinned_tendermint_anchors
+                    .insert(network.to_string(), anchor);
+            }
+            PinnedExternalAnchor::Da(committee) => {
+                self.pinned_da_committees
+                    .insert(network.to_string(), committee);
+            }
+        }
+    }
+
+    /// The anchor installed for `family` on `network`, if any.
+    ///
+    /// WIRING: the production door is `pinned_anchor_digest` in this file,
+    /// which `src/execution/executor.rs` calls; this lookup is its shared
+    /// implementation (also exercised directly by this file's tests), not a
+    /// second entry point.
+    #[must_use]
+    pub fn pinned_anchor(
+        &self,
+        family: AnchorFamily,
+        network: &str,
+    ) -> Option<PinnedExternalAnchor> {
+        match family {
+            AnchorFamily::Ethereum => self
+                .pinned_ethereum_committees
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Ethereum),
+            AnchorFamily::Bitcoin => self
+                .pinned_bitcoin_anchors
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Bitcoin),
+            AnchorFamily::Tendermint => self
+                .pinned_tendermint_anchors
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Tendermint),
+            AnchorFamily::Da => self
+                .pinned_da_committees
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Da),
+        }
+    }
+
+    /// The digest of the anchor installed for `family` on `network`.
+    ///
+    /// `None` means the slot is empty. The executor compares this against the
+    /// `expected_previous` a vote named before it installs a replacement.
+    ///
+    /// # Errors
+    ///
+    /// The encoder's message when the installed anchor cannot be encoded.
+    pub fn pinned_anchor_digest(
+        &self,
+        family: AnchorFamily,
+        network: &str,
+    ) -> Result<Option<[u8; 32]>, String> {
+        self.pinned_anchor(family, network)
+            .map(|anchor| anchor.digest())
+            .transpose()
     }
 
     /// Drives the registry clock from the block-import path. Called on every
@@ -447,6 +928,66 @@ impl IntakeState {
         } = &spec
         {
             if program_hash.is_none() || chain_id.is_none() {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // BitcoinSpv admission requires a governance-pinned checkpoint for `network`
+        // so a permissionless registrant cannot install a low-work regtest anchor.
+        if let AdapterSpec::BitcoinSpv { network, anchor } = &spec {
+            let Some(pinned) = self.pinned_bitcoin_anchors.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if anchor.as_ref() != Some(pinned) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // TendermintCommit admission requires both a non-empty chain_id and a
+        // governance-pinned validator_set_hash so an attacker cannot self-sign
+        // an arbitrary commit with freshly generated Ed25519 keys.
+        if let AdapterSpec::TendermintCommit {
+            network,
+            chain_id,
+            validator_set_hash,
+        } = &spec
+        {
+            if chain_id.trim().is_empty() {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+            let Some(pinned) = self.pinned_tendermint_anchors.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if pinned.chain_id != *chain_id
+                || pinned.validator_set_hash == [0u8; 32]
+                || *validator_set_hash != Some(pinned.validator_set_hash)
+            {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // DataAvailability admission requires a governance-pinned namespace and
+        // slashable attestation committee for `network`.
+        if let AdapterSpec::DataAvailability { network, committee } = &spec {
+            let Some(pinned) = self.pinned_da_committees.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if committee.as_ref() != Some(pinned) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // HotStuffQc admission requires a governance-pinned epoch validator set.
+        if let AdapterSpec::HotStuffQc { network, committee } = &spec {
+            let Some(pinned) = self.pinned_hotstuff_committees.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if committee.as_ref() != Some(pinned) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // DagCertificate admission requires a governance-pinned round-DAG committee.
+        if let AdapterSpec::DagCertificate { network, committee } = &spec {
+            let Some(pinned) = self.pinned_dag_committees.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if committee.as_ref() != Some(pinned) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -554,6 +1095,169 @@ impl IntakeState {
         }
         let attestation = self.registry.submit(adapter.as_ref(), evidence, &policy)?;
         Ok(attestation)
+    }
+
+    /// Cryptographically verify a contradicting finality proof against the same
+    /// domain adapter at an already-accepted `(height, evidence_version)` and,
+    /// when it certifies a distinct `state_root`, atomically withdraw the false
+    /// attestation, slash its bonded carrier at the domain's routing ceiling,
+    /// and transition the domain to [`crate::cross_domain::external::profile::DomainState::Faulted`].
+    ///
+    /// Security invariants:
+    /// 1. The contradicting evidence MUST pass full cryptographic adapter
+    ///    verification with `max_age = 0` (so historic equivocations remain
+    ///    slashable after time advances) and `require_declared_match = true`.
+    /// 2. The evidence format version MUST lie inside the domain's declared
+    ///    version window for `height`.
+    /// 3. Self-challenge (`challenger == carrier`) is unconditionally forbidden
+    ///    so a dishonest prover cannot reclaim the challenger reward share.
+    /// 4. State-root divergence is evaluated via [`subtle::ConstantTimeEq`].
+    /// 5. For PoW domains, the contradicting proof must carry at least the
+    ///    accumulated difficulty bits of the accepted attestation.
+    /// 6. The penalty is always computed at `economics.routing_ceiling_atoms`
+    ///    so a colluding front-runner cannot dust-slash for 1 atom.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] leaving `self` unchanged if any check fails.
+    pub fn slash_on_contradiction(
+        &mut self,
+        contradicting: &RawConsensusEvidence,
+        challenger: Address,
+        bls: Option<Box<dyn BlsVerifier>>,
+    ) -> Result<ContradictionSlashOutcome, IntakeError> {
+        use crate::cross_domain::external::spec::SecurityBacking;
+        use subtle::ConstantTimeEq;
+
+        if contradicting.submitter != challenger {
+            return Err(IntakeError::InvalidContradiction {
+                reason: "contradiction evidence submitter must match challenger".to_string(),
+            });
+        }
+        let key = DomainKey::from_parts(&contradicting.adapter, &contradicting.network);
+        let Some(entry) = self.entries.get(&key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        if matches!(entry.spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
+            return Err(IntakeError::MissingBlsVerifier);
+        }
+        if matches!(entry.spec, AdapterSpec::EthereumSync { .. })
+            && bls.as_ref().is_some_and(|v| v.sync_committee_closed())
+        {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
+        let Some(reg) = self.registry.domain(&key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        let slot = (
+            contradicting.declared_height,
+            contradicting.evidence_version,
+        );
+        let Some(existing) = reg.attestations.get(&slot).cloned() else {
+            return Err(IntakeError::InvalidContradiction {
+                reason: format!(
+                    "no accepted attestation at external height {} version {}",
+                    slot.0, slot.1
+                ),
+            });
+        };
+        let Some(slashed_prover) = reg
+            .attestation_provers
+            .get(&existing.evidence_digest)
+            .copied()
+        else {
+            return Err(IntakeError::MissingCarrier);
+        };
+        if slashed_prover == Address::zero() {
+            return Err(IntakeError::MissingCarrier);
+        }
+        if slashed_prover == challenger {
+            return Err(IntakeError::SelfChallengeForbidden);
+        }
+        reg.versions
+            .gate(
+                contradicting.evidence_version,
+                contradicting.declared_height,
+            )
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let value_atoms = reg.economics.routing_ceiling_atoms;
+
+        let adapter = entry.spec.build(bls, None);
+        let mut challenge_policy = entry.policy.clone();
+        challenge_policy.max_age = 0;
+        challenge_policy.require_declared_match = true;
+        let verified = adapter
+            .verify(contradicting, &challenge_policy)
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+
+        if verified.domain != existing.domain
+            || verified.adapter != existing.adapter
+            || verified.height != existing.height
+            || verified.evidence_version != existing.evidence_version
+        {
+            return Err(IntakeError::InvalidContradiction {
+                reason: "verified challenge attestation does not target the same domain slot"
+                    .to_string(),
+            });
+        }
+        if bool::from(verified.state_root.ct_eq(&existing.state_root)) {
+            return Err(IntakeError::InvalidContradiction {
+                reason: "challenge attestation commits the identical state_root".to_string(),
+            });
+        }
+        if let SecurityBacking::Work {
+            difficulty_bits: accepted_bits,
+        } = existing.security
+        {
+            match verified.security {
+                SecurityBacking::Work {
+                    difficulty_bits: challenge_bits,
+                } if challenge_bits >= accepted_bits => {}
+                _ => {
+                    return Err(IntakeError::InvalidContradiction {
+                        reason: format!(
+                            "PoW contradiction must carry at least {accepted_bits} difficulty bits"
+                        ),
+                    });
+                }
+            }
+        }
+
+        let registry_before = self.registry.clone();
+        let (slashed_atoms, challenger_reward_atoms) =
+            match self.registry.slash_verified_contradiction(
+                &key,
+                slashed_prover,
+                existing.evidence_digest,
+                value_atoms,
+                challenger,
+            ) {
+                Ok(amounts) => amounts,
+                Err(err) => {
+                    self.registry = registry_before;
+                    return Err(IntakeError::Registry(err));
+                }
+            };
+        if let Err(err) = self.registry.mark_faulted(
+            &key,
+            &format!(
+                "cryptographic contradiction proven at external height {} (version {})",
+                existing.height, existing.evidence_version
+            ),
+        ) {
+            self.registry = registry_before;
+            return Err(IntakeError::Registry(err));
+        }
+
+        Ok(ContradictionSlashOutcome {
+            domain: key,
+            slashed_prover,
+            contradicted_digest: existing.evidence_digest,
+            height: existing.height,
+            evidence_version: existing.evidence_version,
+            slashed_atoms,
+            challenger_reward_atoms,
+        })
     }
 
     /// The round path of [`Self::submit_evidence`]. Verifies without
@@ -1797,11 +2501,10 @@ mod tests {
         assert!(matches!(err, IntakeError::CommitteeNotPinned), "got: {err}");
     }
 
-    /// EthereumSync admission and evidence verification are open on Testnet
-    /// (`45261`) with pinned committee + `PairingBls`, while Mainnet (`45260`)
-    /// stays gated (`MainnetDisabled`).
+    /// EthereumSync remains available on devnet for cryptographic integration
+    /// tests, while public Testnet and Mainnet refuse the complete lifecycle.
     #[test]
-    fn ethereum_sync_committee_is_open_on_testnet() {
+    fn ethereum_sync_committee_is_closed_on_public_networks() {
         use crate::core::account::AccountState;
         use crate::core::chain_config::Network;
         use crate::cross_domain::external::ethereum::signing_root_v2;
@@ -1876,8 +2579,21 @@ mod tests {
             fee: 10,
             bls: IntakeState::production_bls,
         };
-        execute_external_domain_tx(&mut state, &ctx_testnet, &tx)
-            .expect("EthereumSync must succeed on testnet with real BLS signature");
+        let before = state.calculate_state_root();
+        let err = execute_external_domain_tx(&mut state, &ctx_testnet, &tx)
+            .expect_err("EthereumSync must remain closed on public testnet");
+        assert_eq!(err, ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+        assert_eq!(state.calculate_state_root(), before);
+        assert!(state.settlement.external_intake.entries.is_empty());
+
+        let ctx_devnet = ExternalDomainTxContext {
+            sender: poster,
+            chain_id: Network::Devnet.chain_id().value(),
+            fee: 10,
+            bls: IntakeState::production_bls,
+        };
+        execute_external_domain_tx(&mut state, &ctx_devnet, &tx)
+            .expect("EthereumSync implementation must remain testable on devnet");
         assert_eq!(state.settlement.external_intake.entries.len(), 1);
 
         let ctx_mainnet = ExternalDomainTxContext {
@@ -1889,5 +2605,215 @@ mod tests {
         let err = execute_external_domain_tx(&mut state, &ctx_mainnet, &tx)
             .expect_err("EthereumSync must stay closed on mainnet");
         assert_eq!(err, ExternalDomainTxError::MainnetDisabled);
+    }
+
+    #[test]
+    fn tendermint_commit_intake_refuses_unpinned_or_wrong_valset_and_admits_pinned_anchor() {
+        use crate::cross_domain::external::tendermint::{
+            validator_address_of, validator_set_commitment, vote_sign_bytes,
+            PinnedTendermintAnchor, TendermintCommitEvidence, TendermintSignature,
+            TendermintValidator,
+        };
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let sk = SigningKey::from_bytes(&[0x71u8; 32]);
+        let pk: [u8; 32] = sk.verifying_key().to_bytes();
+        let val_addr = validator_address_of(&pk);
+        let validators = vec![TendermintValidator {
+            address: val_addr,
+            public_key: pk,
+            voting_power: 100,
+        }];
+        let valset_hash = validator_set_commitment(&validators);
+        let app_hash = [0x5au8; 32];
+        let parts_hash = [0x3cu8; 32];
+        let mut commit = TendermintCommitEvidence {
+            chain_id: "noble-1".to_string(),
+            height: 100,
+            round: 0,
+            block_hash: [0u8; 32],
+            parts_total: 1,
+            parts_hash,
+            version_block: 11,
+            last_block_hash: [0x11u8; 32],
+            last_parts_total: 1,
+            last_parts_hash: [0x22u8; 32],
+            last_commit_hash: [0x33u8; 32],
+            data_hash: [0x44u8; 32],
+            validators_hash: valset_hash,
+            next_validators_hash: valset_hash,
+            consensus_hash: [0x55u8; 32],
+            app_hash,
+            last_results_hash: [0x66u8; 32],
+            evidence_hash: [0x77u8; 32],
+            proposer_address: val_addr,
+            commit_time: 1_700_000_000,
+            commit_time_nanos: 0,
+            validators,
+            signatures: Vec::new(),
+        };
+        // Seal the header first: the block id the validators sign is the
+        // header's own hash, so it cannot be chosen before the header exists.
+        commit.block_hash = commit.header_hash();
+        let block_hash = commit.block_hash;
+        let sign_bytes = vote_sign_bytes(
+            "noble-1",
+            100,
+            0,
+            &block_hash,
+            1,
+            &parts_hash,
+            (1_700_000_000, 0),
+        );
+        let sig = sk.sign(&sign_bytes);
+        commit.signatures = vec![TendermintSignature {
+            address: val_addr,
+            timestamp_seconds: 1_700_000_000,
+            timestamp_nanos: 0,
+            signature: sig.to_bytes().to_vec(),
+        }];
+        let payload = bincode::serialize(&commit).expect("encode commit");
+        let mk_req = |validator_set_hash: Option<[u8; 32]>| {
+            let spec = AdapterSpec::TendermintCommit {
+                network: "noble-testnet".to_string(),
+                chain_id: "noble-1".to_string(),
+                validator_set_hash,
+            };
+            let id = spec.build(None, None).descriptor().id;
+            RegistrationRequest {
+                golden: RawConsensusEvidence {
+                    adapter: id,
+                    evidence_version: crate::cross_domain::external::tendermint::EVIDENCE_VERSION,
+                    network: "noble-testnet".to_string(),
+                    payload: payload.clone(),
+                    declared_height: 100,
+                    declared_root: app_hash,
+                    submitter: addr(1),
+                },
+                versions: VersionPolicy::single(
+                    id,
+                    crate::cross_domain::external::tendermint::EVIDENCE_VERSION,
+                    0,
+                ),
+                economics: IntakeState::conservative_economics(1_000_000),
+                policy: VerificationPolicy::strict(1_700_000_010),
+                bond_atoms: economics_bond(),
+                poster: addr(1),
+                spec,
+            }
+        };
+
+        let mut intake = IntakeState::new();
+        assert!(
+            matches!(
+                intake.register_domain(mk_req(Some(valset_hash)), None),
+                Err(IntakeError::CommitteeNotPinned)
+            ),
+            "unpinned Tendermint network must be refused at intake"
+        );
+        intake.pinned_tendermint_anchors.insert(
+            "noble-testnet".to_string(),
+            PinnedTendermintAnchor {
+                chain_id: "noble-1".to_string(),
+                validator_set_hash: valset_hash,
+            },
+        );
+        assert!(
+            matches!(
+                intake.register_domain(mk_req(None), None),
+                Err(IntakeError::CommitteeNotPinned)
+            ),
+            "missing validator_set_hash must be refused even when network is pinned"
+        );
+        assert!(
+            matches!(
+                intake.register_domain(mk_req(Some([0x99u8; 32])), None),
+                Err(IntakeError::CommitteeNotPinned)
+            ),
+            "mismatched validator_set_hash must be refused"
+        );
+        let key = intake
+            .register_domain(mk_req(Some(valset_hash)), None)
+            .expect("pinned Tendermint anchor must admit cleanly");
+        assert!(intake.registry.domain(&key).is_some());
+    }
+
+    #[test]
+    fn a_governance_installed_anchor_is_what_registration_must_match() {
+        // The door a vote reaches: `install_pinned_anchor` writes the same map
+        // `register_domain` reads, so an anchor that arrived by vote admits a
+        // matching registration and refuses a mismatched one. Before this
+        // existed, only the tests could write the map and every anchored
+        // adapter was closed on every chain.
+        let mut intake = IntakeState::new();
+        assert_eq!(
+            intake.pinned_anchor(AnchorFamily::Tendermint, "noble-testnet"),
+            None,
+            "an untouched slot is empty, which is what `expected_previous: None` means"
+        );
+        let anchor = PinnedExternalAnchor::Tendermint(
+            crate::cross_domain::external::tendermint::PinnedTendermintAnchor {
+                chain_id: "noble-1".to_string(),
+                validator_set_hash: [0x11; 32],
+            },
+        );
+        intake.install_pinned_anchor("noble-testnet", anchor.clone());
+        assert_eq!(
+            intake.pinned_anchor(AnchorFamily::Tendermint, "noble-testnet"),
+            Some(anchor.clone())
+        );
+        assert_eq!(
+            intake.pinned_anchor_digest(AnchorFamily::Tendermint, "noble-testnet"),
+            Ok(Some(anchor.digest().expect("digest")))
+        );
+
+        // A replacement changes the digest, which is the value a vote binds:
+        // an expected_previous taken against the old anchor no longer matches.
+        let replacement = PinnedExternalAnchor::Tendermint(
+            crate::cross_domain::external::tendermint::PinnedTendermintAnchor {
+                chain_id: "noble-1".to_string(),
+                validator_set_hash: [0x22; 32],
+            },
+        );
+        let before = intake
+            .pinned_anchor_digest(AnchorFamily::Tendermint, "noble-testnet")
+            .expect("digest");
+        intake.install_pinned_anchor("noble-testnet", replacement.clone());
+        let after = intake
+            .pinned_anchor_digest(AnchorFamily::Tendermint, "noble-testnet")
+            .expect("digest");
+        assert_ne!(before, after);
+        assert_eq!(after, Some(replacement.digest().expect("digest")));
+
+        // Families do not collide: one network name denotes a different anchor
+        // in each map, and the digest names the family.
+        assert_eq!(
+            intake.pinned_anchor(AnchorFamily::Bitcoin, "noble-testnet"),
+            None
+        );
+        let bitcoin = PinnedExternalAnchor::Bitcoin(PinnedBitcoinAnchor {
+            height: 800_000,
+            block_hash: [0x33; 32],
+            bits: 0x1d00_ffff,
+        });
+        intake.install_pinned_anchor("noble-testnet", bitcoin.clone());
+        assert_ne!(
+            intake
+                .pinned_anchor_digest(AnchorFamily::Bitcoin, "noble-testnet")
+                .expect("digest"),
+            intake
+                .pinned_anchor_digest(AnchorFamily::Tendermint, "noble-testnet")
+                .expect("digest")
+        );
+
+        // And the anchors are inside the state root: two nodes that disagree
+        // about one cannot agree about the digest.
+        let mut other = IntakeState::new();
+        other.install_pinned_anchor("noble-testnet", anchor);
+        other.install_pinned_anchor("noble-testnet", bitcoin);
+        assert_ne!(
+            intake.state_digest().expect("digest"),
+            other.state_digest().expect("digest")
+        );
     }
 }

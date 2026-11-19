@@ -37,6 +37,8 @@ fn registry() -> Vec<(&'static str, &'static [&'static str])> {
         ("pq-core", super::pq_core_gate::TESTS),
         ("storage-provider", super::storage_provider_gate::TESTS),
         ("wallet-core", super::wallet_core_gate::TESTS),
+        ("garden-scenario", super::garden_scenario::TESTS),
+        ("garden-nat", super::garden_nat::TESTS),
     ]
 }
 

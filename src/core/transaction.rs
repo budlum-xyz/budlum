@@ -828,6 +828,12 @@ pub enum TransactionType {
     /// The B.U.D. 3.0 storage door (`StorageTx` v3). The signer is
     /// `tx.from`. Appended last because `bincode` encodes the variant index.
     StorageV3(Box<crate::storage::bud3::tx::StorageTxV3>),
+    /// Phase 5 split-STARK verification transaction. Carries commitments,
+    /// public values, and out-of-domain opened values (zero FRI proof bytes);
+    /// the corresponding `Claim::Poly` digest travels in `tx.claim_refs` and
+    /// the chain executes Stage 2 (`verify_algebra`) against `AirRegistry`.
+    /// Appended last because `bincode` encodes the variant index.
+    VerifyStark(Box<crate::aggregation::programs::pcs_claim::VerifyStarkTx>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2704,6 +2710,8 @@ impl Transaction {
             }
             // A registry write; a proof batch also hashes Merkle paths.
             TransactionType::StorageV3(_) => schedule.contract_call_gas * 2,
+            // Stage 2 (`verify_algebra`) constraint evaluation without FRI.
+            TransactionType::VerifyStark(_) => schedule.contract_call_gas,
             TransactionType::RoleBond { .. } => schedule.contract_call_gas,
             // A registry write that re-derives the manifest id over every
             // shard: priced like the registry arms beside it. Opening a deal
@@ -2736,7 +2744,8 @@ impl Transaction {
                 | crate::cross_domain::external::ExternalDomainTx::Readmit { .. },
             ) => schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8,
             TransactionType::ExternalDomain(
-                crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_),
+                crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_)
+                | crate::cross_domain::external::ExternalDomainTx::ChallengeContradiction(_),
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
             TransactionType::ExternalDomain(_) => schedule.contract_call_gas * 2,
             // Registration validates the domain record and escrows a bond; a
@@ -3216,6 +3225,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::BnsSetRecords => 76,
         TransactionType::BnsRemoveSubdomain => 77,
         TransactionType::BnsSetSubdomainContent => 79,
+        TransactionType::VerifyStark(_) => 80,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -4190,6 +4200,10 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_u8(out, 70);
             encode_storage_v3_tx(storage_tx, out);
         }
+        TransactionType::VerifyStark(verify_tx) => {
+            put_u8(out, 80);
+            encode_verify_stark_tx(verify_tx, out);
+        }
         TransactionType::ExternalDomain(external_tx) => {
             put_u8(out, 53);
             encode_external_domain_tx(external_tx, out);
@@ -4712,6 +4726,50 @@ fn encode_storage_v3_shred_auth(
     put_bytes(out, &auth.one_time_signature);
 }
 
+fn encode_verify_stark_tx(
+    tx: &crate::aggregation::programs::pcs_claim::VerifyStarkTx,
+    out: &mut Vec<u8>,
+) {
+    put_fixed(out, &tx.air_id);
+    put_u8(out, tx.degree_bits);
+    put_u64(out, tx.public_values.len() as u64);
+    for &pv in &tx.public_values {
+        put_u64(out, pv);
+    }
+    put_bytes(out, &tx.air_aux_data);
+    put_fixed(out, &tx.commitments.trace);
+    put_option_fixed32(out, tx.commitments.aux_trace);
+    put_fixed(out, &tx.commitments.quotient_chunks);
+    put_option_fixed32(out, tx.commitments.random);
+
+    let put_ext_slice = |out: &mut Vec<u8>, slice: &[[u64; 3]]| {
+        put_u64(out, slice.len() as u64);
+        for limbs in slice {
+            for &limb in limbs {
+                put_u64(out, limb);
+            }
+        }
+    };
+    let put_opt_ext_slice = |out: &mut Vec<u8>, opt: Option<&Vec<[u64; 3]>>| match opt {
+        Some(v) => {
+            put_u8(out, 1);
+            put_ext_slice(out, v);
+        }
+        None => put_u8(out, 0),
+    };
+    put_ext_slice(out, &tx.opened_values.trace_local);
+    put_opt_ext_slice(out, tx.opened_values.trace_next.as_ref());
+    put_opt_ext_slice(out, tx.opened_values.aux_trace_local.as_ref());
+    put_opt_ext_slice(out, tx.opened_values.aux_trace_next.as_ref());
+    put_opt_ext_slice(out, tx.opened_values.preprocessed_local.as_ref());
+    put_opt_ext_slice(out, tx.opened_values.preprocessed_next.as_ref());
+    put_u64(out, tx.opened_values.quotient_chunks.len() as u64);
+    for chunk in &tx.opened_values.quotient_chunks {
+        put_ext_slice(out, chunk);
+    }
+    put_opt_ext_slice(out, tx.opened_values.random.as_ref());
+}
+
 fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Vec<u8>) {
     use crate::storage::bud3::tx::StorageTxV3;
     match tx {
@@ -4973,6 +5031,11 @@ fn encode_external_domain_tx(
                 },
             );
         }
+        // Tag 6: cryptographic contradiction challenge, appended last.
+        ExternalDomainTx::ChallengeContradiction(evidence) => {
+            put_u8(out, 6);
+            encode_raw_evidence(evidence, out);
+        }
     }
 }
 
@@ -5004,6 +5067,110 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 Some(id) => {
                     put_u8(out, 1);
                     put_u64(out, *id);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 2: appended, never inserted. Tags 0 and 1 keep their bytes so
+        // every registration already signed under them stays verifiable.
+        AdapterSpec::BitcoinSpv { network, anchor } => {
+            put_u8(out, 2);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.height);
+                    put_fixed(out, &pin.block_hash);
+                    put_u32(out, pin.bits);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 3: appended, never inserted. Tags 0, 1 and 2 keep their bytes so
+        // every registration already signed under them stays verifiable.
+        AdapterSpec::TendermintCommit {
+            network,
+            chain_id,
+            validator_set_hash,
+        } => {
+            put_u8(out, 3);
+            put_string(out, network);
+            put_string(out, chain_id);
+            match validator_set_hash {
+                Some(hash) => {
+                    put_u8(out, 1);
+                    put_fixed(out, hash);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 4: modular 2D DAS + NMT data-availability adapter, appended last.
+        AdapterSpec::DataAvailability { network, committee } => {
+            put_u8(out, 4);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.namespace_id);
+                    put_u64(out, u64::from(pin.min_samples));
+                    put_u64(out, u64::from(pin.min_square_size));
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::da_sampling::DaCommitteeMember {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 5: linear chained BFT (HotStuff 3-chain QC) adapter, appended last.
+        AdapterSpec::HotStuffQc { network, committee } => {
+            put_u8(out, 5);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::hotstuff::HotStuffValidator {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 6: stake-weighted round-DAG BFT (Bullshark) adapter, appended last.
+        AdapterSpec::DagCertificate { network, committee } => {
+            put_u8(out, 6);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::dag_bft::DagBftValidator {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
                 }
                 None => put_u8(out, 0),
             }
