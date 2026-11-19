@@ -228,6 +228,11 @@ impl PoSEngine {
             .map_err(|_| ConsensusError("Failed to acquire read lock on checkpoints".into()))
     }
 
+    /// Record `block` as a committed PoS checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError`] when persisting the checkpoint fails.
     pub fn add_checkpoint(
         &self,
         block: &Block,
@@ -331,6 +336,10 @@ impl PoSEngine {
     /// VRF outputs and producer identities enter the transcript: block hashes,
     /// Timestamps and transaction ordering are deliberately excluded so a
     /// Proposer cannot grind future leadership by changing header fields.
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError`] when the epoch length is zero, the chain has no genesis
+    /// anchor, or the anchor is not height 0 on `chain_id`.
     pub fn epoch_randomness_from_chain(
         &self,
         chain_id: u64,
@@ -420,6 +429,11 @@ impl PoSEngine {
     /// rounds `0..MAX_LEADER_ROUNDS`, and each round draws a different VRF
     /// seed, so a slot with no eligible leader in round 0 re-rolls instead of
     /// stalling forever. Validation recovers the round from `block.nonce`.
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError`] when the epoch length is zero, the slot/epoch pair is
+    /// non-canonical, the round exceeds `MAX_LEADER_ROUNDS`, or the epoch randomness cannot
+    /// be derived (see [`Self::epoch_randomness_from_chain`]).
     pub fn calculate_seed_with_chain(
         &self,
         chain_id: u64,

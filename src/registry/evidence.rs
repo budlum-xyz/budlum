@@ -535,6 +535,12 @@ impl SlashingReport {
     }
 
     /// Domain-agnostic structural validation. Always safe to run anywhere.
+    /// # Errors
+    ///
+    /// Returns [`EvidenceError::ZeroOffender`] when the offender is the zero
+    /// address, [`EvidenceError::FieldTooLarge`] when the proof payload exceeds the
+    /// evidence data limit, and [`EvidenceError::InsufficientInvalidVoteCount`] when
+    /// an invalid-signature spam proof does not cross its own threshold.
     pub fn validate_shape(&self) -> Result<(), EvidenceError> {
         if self.offender == Address::zero() {
             return Err(EvidenceError::ZeroOffender);
@@ -646,6 +652,10 @@ impl SlashingReport {
     /// (`Unverified`) reports pass structural checks but are not actioned until
     /// The consensus layer confirms them - this is what keeps the permissionless
     /// `slash-evidence-submit` endpoint safe without a whitelist.
+    /// # Errors
+    ///
+    /// Returns any [`EvidenceError`] that [`Self::validate_shape`] produces, or
+    /// [`EvidenceError::Unverified`] when the provenance is not consensus-verified.
     pub fn is_actionable(&self) -> Result<(), EvidenceError> {
         self.validate_shape()?;
         match self.provenance {
