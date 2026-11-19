@@ -270,3 +270,7 @@ pub mod wallet_safety;
 // Bitcoin SPV: the Nakamoto branch end to end (registration -> admission -> bridge).
 #[cfg(test)]
 pub mod bitcoin_spv;
+
+// End-to-end success and refusal coverage for the bud_ai* JSON-RPC family.
+#[cfg(test)]
+pub mod rpc_ai_coverage;
