@@ -1,8 +1,9 @@
 //! Linear chained BFT (`HotStuff` / `Jolteon` / `DiemBFT` / `MonadBFT`)
 //! external finality adapter verifying the consecutive three-chain commit rule.
 //!
-//! WIRING: unwired - pacemaker timeout-certificate and double-vote equivocation
-//! verifiers land with their governance-gated external slashing intake door.
+//! WIRING: unwired - `verify_hotstuff_timeout_certificate` and
+//! `verify_hotstuff_equivocation` land with their governance-gated external
+//! slashing intake door; this module's test suite is their only caller.
 //!
 //! Under Yin et al. (PODC 2019), a block `B_0` at view `v` is deterministically
 //! committed once three certified blocks `(B_0, B_1, B_2)` form an unbroken

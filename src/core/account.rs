@@ -182,7 +182,7 @@ pub struct Account {
     /// the value while expecting the tag byte. An account persisted through
     /// `Storage::commit_durable_batch` was written 8 bytes and read back as
     /// `unexpected end of file`, which took `test_durable_commit_batch_and_recovery`
-    /// down with it. See B-0048.
+    /// down with it.
     #[serde(default)]
     pub auth_program_hash: Option<[u8; 32]>,
 }

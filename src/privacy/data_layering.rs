@@ -1,6 +1,12 @@
 //! Default-private `K1 / K2 / K3 / K4` cryptographic data-layering, post-quantum
 //! selective disclosure, and off-chain anchor registry.
 //!
+//! WIRING: unwired - the disclosure layers are re-exported by `crate::privacy`
+//! but no production path constructs them yet: shielded transfer stays
+//! fail-closed on the live network, and opening a disclosure lane before the
+//! private-transfer protocol is enabled would publish what the ledger is
+//! required to hide. Until then this module's test suite is its only caller.
+//!
 //! Layers:
 //! - `K1Public`: world-readable payload verified against its original commitment.
 //! - `K2Pseudonymous`: salted hiding commitment paired with an unlinkable stealth

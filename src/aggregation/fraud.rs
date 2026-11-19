@@ -1,4 +1,4 @@
-//! Bonded aggregator admission and segment fraud-proof slashing (`STRIX-AGG-01`).
+//! Bonded aggregator admission and segment fraud-proof slashing.
 //!
 //! `StarkBackend` (`AggFoldAir`) proves the postfix merge tree over
 //! `(tick_pi, merge_pi, master_pi)` and requires an ML-DSA-87 ownership

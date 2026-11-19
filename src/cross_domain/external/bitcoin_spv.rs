@@ -5,12 +5,12 @@
 //! helper and consensus limits are deliberately exposed for the pinned-mainnet
 //! test corpus and the canonical spec encoding; those callers do not name every
 //! helper in a production `.rs` file yet.
-//! WIRING: unwired - standalone SPV tx-inclusion and recursive header-STARK
-//! verifiers land with the BTC bridge redemption transaction door.
+//! WIRING: stripped-transaction inclusion is production-reachable through
+//! `VerifiedBitcoinChain::verify_confirmed_payment`, which enforces the
+//! confirmation depth and then calls `verify_spv_raw_tx_inclusion`.
 //!
-//! WIRING: unwired - `verify_bitcoin_header_chain_stark` and
-//! `VerifiedBitcoinChain::verify_confirmed_payment` require a STARK prover
-//! that is not part of the production build; they are exercised by the
+//! WIRING: unwired - `verify_bitcoin_header_chain_stark` requires a STARK
+//! prover that is not part of the production build; it is exercised by the
 //! pinned-mainnet test corpus and the canonical spec encoding only.
 //!
 //! # Why this adapter exists
