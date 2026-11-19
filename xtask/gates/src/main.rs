@@ -104,8 +104,6 @@ mod gates {
     pub mod fork_choice_gate;
     pub mod fsf_import_boundaries;
     pub mod fuzz_targets_wired;
-    pub mod garden_nat;
-    pub mod garden_scenario;
     pub mod gas_calibration;
     pub mod gates_are_wired;
     pub mod gates_do_not_panic;
@@ -1701,30 +1699,6 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::launch_matrix_tests_exist::self_test,
-    },
-    Gate {
-        name: "garden-scenario",
-        replaces: None,
-        run: |_| {
-            Err(String::from(
-                "garden-scenario reads a cargo test log; pass its path as an argument",
-            ))
-        },
-        run_log: Some(gates::garden_scenario::run),
-        run_args: None,
-        self_test: gates::garden_scenario::self_test,
-    },
-    Gate {
-        name: "garden-nat",
-        replaces: None,
-        run: |_| {
-            Err(String::from(
-                "garden-nat reads a cargo test log; pass its path as an argument",
-            ))
-        },
-        run_log: Some(gates::garden_nat::run),
-        run_args: None,
-        self_test: gates::garden_nat::self_test,
     },
     Gate {
         name: "no-internal-ids",

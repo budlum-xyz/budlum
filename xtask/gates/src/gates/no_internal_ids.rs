@@ -62,16 +62,22 @@ fn build_rules() -> Result<Vec<Rule>, String> {
         ("finding-b-id", format!(r"\b{}0\d{{3}}\b", "B-")),
         (
             "finding-blg-id",
-            format!(r"(?:\b{}\d{{2,4}}\b|\b{}\d{{2,4}})", "BLG-", "blg_"),
+            format!(
+                r"(?:\b{}\d{{2,4}}\b|(?:^|[^A-Za-z0-9]){}\d{{2,4}})",
+                "BLG-", "blg_"
+            ),
         ),
         (
             "task-id",
-            format!(r"(?:\b{}\d{{1,3}}\b|\b{}_?\d{{1,3}})", "GOREV-", "gorev"),
+            format!(
+                r"(?:\b{}\d{{1,3}}\b|(?:^|[^A-Za-z0-9]){}_?\d{{1,3}})",
+                "GOREV-", "gorev"
+            ),
         ),
         (
             "scanner-tag",
             format!(
-                r"(?:\b{}[A-Z0-9-]+|\b{}\b|\b{}[a-z0-9_]+)",
+                r"(?:\b{}[A-Z0-9-]+|\b{}\b|(?:^|[^A-Za-z0-9]){}[a-z0-9_]+)",
                 "STRIX-", "Strix", "strix_"
             ),
         ),
@@ -93,13 +99,13 @@ fn build_rules() -> Result<Vec<Rule>, String> {
         (
             "governance-id",
             format!(
-                r"(?:\b{}\d{{3}}\b|\b{}\d{{3}}\b|\b{}00[1-9]\b|\bS-\d{{3}}-\d{{2}}\b)",
+                r"(?:\b{}\d{{1,3}}\b|\b{}\d{{1,3}}\b|\b{}00[1-9]\b|\bS-\d{{3}}-\d{{2}}\b)",
                 "CEO-", "KARAR-", "RFC-"
             ),
         ),
         (
             "directive-name",
-            format!(r"(?:{}|{})", "THE BUDLUM DIREKTIF", "UST DIREKTIF"),
+            format!(r"(?:{}|{})", "THE[ _]BUDLUM[ _]DIREKTIF", "UST[ _]DIREKTIF"),
         ),
         (
             "workspace-ref",
@@ -137,6 +143,18 @@ fn commit_message_rules() -> Result<Vec<Rule>, String> {
         rules.push(Rule { label, regex });
     }
     Ok(rules)
+}
+
+/// Returns `true` when `(rel, label)` names the repository's own `.gitignore`
+/// and absence-lock test forbidding the external directive filename.
+fn is_exempt_finding(rel: &str, label: &str) -> bool {
+    label == "directive-name"
+        && matches!(
+            rel,
+            ".gitignore"
+                | "xtask/gates/src/gates/tree_is_english.rs"
+                | "xtask/gates/tests/repository_locks.rs"
+        )
 }
 
 fn is_exempt_rel_path(rel: &str) -> bool {
@@ -211,6 +229,9 @@ fn scan_tree(root: &Path, floor: usize, findings: &mut Vec<String>) -> Result<us
         scanned += 1;
         for (idx, line) in text.lines().enumerate() {
             for rule in &rules {
+                if is_exempt_finding(&rel, rule.label) {
+                    continue;
+                }
                 if let Some(m) = rule.regex.find(line) {
                     findings.push(format!(
                         "{rel}:{}: [{}] forbidden token `{}`",

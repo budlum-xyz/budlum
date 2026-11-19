@@ -154,10 +154,12 @@ pq_anchor.rs` both wait on; each item names its evidence owner:
 
 ## 6. What blocks where (dependency graph, one line each)
 
-- Bars 1/2/3 -> KARAR-7 (user decision: residual-risk posture of the
+- Bars 1/2/3 -> architecture sign-off ( residual-risk posture of the
   few-time term; SECURITY-ARGUMENT.md section 6).
-- Bar 3 (review call) can issue in parallel with KARAR-7; the call's
-  question 2 already subsumes it (`docs/BPQS_INDEPENDENT_REVIEW_CALL.md`).
+- Bar 3 (review call) can issue in parallel with architecture sign-off; the call's
+  question 2 already subsumes it (the review brief is
+  `crates/bpqs/SECURITY-ARGUMENT.md` section 6; the standalone
+  review-call document was retired).
 - Bar 4 (this document) -> posture (user decision;
   recommended) -> / implementation (a later milestone; chip work
   belongs to the BudZero tree, not crates/bpqs) -> VerifyMerkle
