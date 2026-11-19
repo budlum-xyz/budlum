@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: c3f84d2dbe4e96983915ea469829d1bd076c0954b8a6a6bb512fb15dd9fd886e
+digest: 3d9b336f64e274dbbebc26d9ffdfbb8f4ddef982888471e595aab1023d447f67
 files: 188
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -101,7 +101,7 @@ src/gates/metrics_are_written.rs	64cc47471ff7d0293f6ef3ae74e0b6fe9a4173c6e7d1e8b
 src/gates/minting_paths_are_counted.rs	324eefa4586c2c49e9e911e8de304364511bb25bb830303433403acdef1274c0
 src/gates/mobile_validator_apps.rs	be0ad969780f45decaf996fdf25b2758eaa1058b7845c85cedc3a28406c3b7ab
 src/gates/module_coverage.rs	8d58f7085e3b6b085a5c9a45168a3734c138989f146546354c629ea726e459d3
-src/gates/multi_ratio_consensus.rs	eb7c8735db452746f9ce0f4476cf9cfddcac7c49c533e51597b6e219710b3561
+src/gates/multi_ratio_consensus.rs	fa2242d025b406ce4cc75086ddd4daa333b9abcfff15bc36f91bfdb77f71159e
 src/gates/named_tests.rs	6cdcbf96778a3dea3f2e2d0b326ccc95c65fecb3b76ca02e89c8c9c95e84fff2
 src/gates/native_security_review.rs	f6ecec4d13e88232af7d3a59f7daf3df5b6e4aa7fe71455ccd7c6c92a0bd9cd1
 src/gates/network_hardening_gate.rs	384798c7afa377d7a1ca50c79b25cc008d14d7c44e5baa72a4da665ad6816966

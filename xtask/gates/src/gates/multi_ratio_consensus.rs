@@ -129,13 +129,100 @@ fn sayim(body: &str, list: &[(usize, String)], arms: usize) -> (usize, Vec<Strin
     (ok, problems)
 }
 
+/// The successor surface: B.U.D. 3.0's own module tree.
+const SUCCESSOR_ROOTS: [&str; 2] = ["src/storage/bud3", "src/storage"];
+
+/// Every `.rs` file under [`SUCCESSOR_ROOTS`], sorted, so the walk is
+/// deterministic and a canary tree is measured the same way as the real one.
+fn successor_sources(root: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for rel in SUCCESSOR_ROOTS {
+        let base = root.join(rel);
+        if !base.is_dir() {
+            continue;
+        }
+        walk_rs(&base, &mut out, &mut seen)?;
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+fn walk_rs(
+    dir: &Path,
+    out: &mut Vec<(String, String)>,
+    seen: &mut std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+        if kind.is_dir() {
+            walk_rs(&path, out, seen)?;
+        } else if path.extension().is_some_and(|x| x == "rs") {
+            let key = path.to_string_lossy().replace('\\', "/");
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            out.push((key, text));
+        }
+    }
+    Ok(())
+}
+
+/// The retired tree's absence must not retire the invariant.
+///
+/// The earlier `bud/`-only arm returned `Ok` as soon as the directory was gone.
+/// That made the gate pass by deletion: a generative or optical candidate list
+/// could reappear in the successor B.U.D. 3.0 tree and the gate would still
+/// report the ratio consensus as contained. The measurement below is the
+/// surviving half of the same claim - no candidate list may name a generative
+/// pipeline - and it reads the successor tree wherever the legacy one is gone.
 fn missing_bud_format(root: &Path, f: &Path) -> Result<String, String> {
-    if !root.join("bud").exists() {
-        return Ok(String::from(
-            "multi-ratio-consensus OK: standalone bud/ legacy ratio tree removed; B.U.D. 3.0 codecs are deterministic.",
+    if root.join("bud").exists() {
+        return Err(format!("no bud_format.rs at {}", f.display()));
+    }
+    let sources = successor_sources(root)?;
+    if sources.is_empty() {
+        return Err(String::from(
+            "the standalone bud/ ratio tree is gone and no successor B.U.D. 3.0 source \
+             (src/storage/bud3) was found; a ratio consensus that cannot be read is not \
+             a ratio consensus that was checked",
         ));
     }
-    Err(format!("no bud_format.rs at {}", f.display()))
+    let mut offenders: Vec<String> = Vec::new();
+    let mut candidate_lists = 0usize;
+    for (path, text) in &sources {
+        let lower = text.to_lowercase();
+        if lower.contains("ratiocandidate {") {
+            candidate_lists += 1;
+            for needle in FORBIDDEN {
+                if lower.contains(needle) {
+                    offenders.push(format!("{path} names `{needle}`"));
+                }
+            }
+        }
+    }
+    if let Some(first) = offenders.first() {
+        return Err(format!(
+            "the successor B.U.D. 3.0 ratio surface offers a pipeline a vote cannot \
+             reproduce ({first}); {} offending site(s) in {candidate_lists} candidate \
+             list(s)",
+            offenders.len()
+        ));
+    }
+    Ok(format!(
+        "multi-ratio-consensus OK: standalone bud/ legacy ratio tree removed; {} successor \
+         B.U.D. 3.0 source file(s) measured in src/storage/bud3, {candidate_lists} candidate \
+         list(s), none naming a generative or optical pipeline.",
+        sources.len()
+    ))
 }
 
 /// # Errors
@@ -273,6 +360,44 @@ pub fn self_test() -> Result<String, String> {
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a zero pipe id passed"));
+    }
+    // The retired tree must not retire the invariant. With `bud/` gone and the
+    // successor B.U.D. 3.0 tree present, a reappeared generative candidate has
+    // to fail - and an absent successor tree has to fail as unreadable rather
+    // than pass.
+    let successor = dir.join("src/storage/bud3");
+    std::fs::create_dir_all(&successor).map_err(|e| e.to_string())?;
+    std::fs::write(successor.join("pipeline.rs"), "pub struct Pipeline;\n")
+        .map_err(|e| e.to_string())?;
+    std::fs::remove_dir_all(dir.join("bud")).map_err(|e| e.to_string())?;
+    std::fs::remove_dir_all(&successor).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: with the legacy tree removed and no successor tree, the gate passed as \
+             unreadable",
+        ));
+    }
+    std::fs::create_dir_all(&successor).map_err(|e| e.to_string())?;
+    std::fs::write(successor.join("pipeline.rs"), "pub struct Pipeline;\n")
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a contained successor tree with no candidate list was refused",
+        ));
+    }
+    std::fs::write(
+        successor.join("ratio_choice.rs"),
+        "pub fn candidates() -> Vec<RatioCandidate> {\n    vec![RatioCandidate { pipe_id: 7, \
+         pipe_name: \"optical-carousel\", ratio: 12.0 }]\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a generative candidate reappearing in the successor tree passed",
+        ));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
