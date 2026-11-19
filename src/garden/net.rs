@@ -554,6 +554,7 @@ const MAX_PENDING_INCOMING_PER_SOURCE: usize = 2;
 pub enum SourceKey {
     V4([u8; 3]),
     V6([u8; 8]),
+    Relay(PeerId),
 }
 
 impl SourceKey {
@@ -572,29 +573,41 @@ impl SourceKey {
                     && octets[6] == 0
                     && octets[7] == 0
             }
+            Self::Relay(_) => false,
         }
     }
 }
 
 fn source_key(address: &Multiaddr) -> Option<SourceKey> {
-    address.iter().find_map(|part| match part {
-        libp2p::multiaddr::Protocol::Ip4(ip) => {
-            let octets = ip.octets();
-            Some(SourceKey::V4([octets[0], octets[1], octets[2]]))
-        }
-        libp2p::multiaddr::Protocol::Ip6(ip) => {
-            if let Some(mapped) = ip.to_ipv4_mapped() {
-                let octets = mapped.octets();
+    let mut last_peer = None;
+    let mut relay_peer = None;
+    for part in address {
+        match part {
+            libp2p::multiaddr::Protocol::Ip4(ip) => {
+                let octets = ip.octets();
                 return Some(SourceKey::V4([octets[0], octets[1], octets[2]]));
             }
-            let octets = ip.octets();
-            Some(SourceKey::V6([
-                octets[0], octets[1], octets[2], octets[3], octets[4], octets[5], octets[6],
-                octets[7],
-            ]))
+            libp2p::multiaddr::Protocol::Ip6(ip) => {
+                if let Some(mapped) = ip.to_ipv4_mapped() {
+                    let octets = mapped.octets();
+                    return Some(SourceKey::V4([octets[0], octets[1], octets[2]]));
+                }
+                let octets = ip.octets();
+                return Some(SourceKey::V6([
+                    octets[0], octets[1], octets[2], octets[3], octets[4], octets[5], octets[6],
+                    octets[7],
+                ]));
+            }
+            libp2p::multiaddr::Protocol::P2p(peer) => {
+                last_peer = Some(peer);
+            }
+            libp2p::multiaddr::Protocol::P2pCircuit if relay_peer.is_none() => {
+                relay_peer = last_peer;
+            }
+            _ => {}
         }
-        _ => None,
-    })
+    }
+    relay_peer.map(SourceKey::Relay)
 }
 
 /// Refuses a pending inbound handshake from a source prefix that already holds
@@ -2106,5 +2119,28 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn source_key_buckets_circuit_only_relay_multiaddr_by_relay_peer() {
+        let relay = PeerId::random();
+        let client_a = PeerId::random();
+        let client_b = PeerId::random();
+        let addr_a: Multiaddr = format!("/p2p/{relay}/p2p-circuit/p2p/{client_a}")
+            .parse()
+            .expect("valid circuit multiaddr");
+        let addr_b: Multiaddr = format!("/p2p/{relay}/p2p-circuit/p2p/{client_b}")
+            .parse()
+            .expect("valid circuit multiaddr");
+        let other_relay = PeerId::random();
+        let addr_c: Multiaddr = format!("/p2p/{other_relay}/p2p-circuit/p2p/{client_a}")
+            .parse()
+            .expect("valid circuit multiaddr");
+        let key_a = source_key(&addr_a).expect("circuit-only relay multiaddr must yield a key");
+        let key_b = source_key(&addr_b).expect("circuit-only relay multiaddr must yield a key");
+        let key_c = source_key(&addr_c).expect("distinct relay multiaddr must yield a key");
+        assert_eq!(key_a, key_b);
+        assert_ne!(key_a, key_c);
+        assert!(!key_a.is_loopback());
     }
 }

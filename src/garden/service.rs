@@ -376,18 +376,21 @@ impl GardenService {
     /// Fails when the validator stopped before it could answer.
     pub async fn status(&self) -> Result<Value, String> {
         let mut slot = self.slot.lock().await;
-        let stopped = match &*slot {
+        let (stopped, stopped_genesis) = match &*slot {
             Slot::Empty => return Ok(json!({ "garden": Value::Null })),
             Slot::Away(_, invite) => {
                 let budlum = match self.link() {
-                    Some(link) => link.view(invite.chain_id).await.map(|view| {
-                        json!({
-                            "linked": true,
-                            "domain_id": view.domain_id,
-                            "status": status_label(view.status),
-                            "finalized_height": view.last_committed_height,
-                        })
-                    }),
+                    Some(link) => link
+                        .view_for_genesis(invite.chain_id, invite.genesis_hash)
+                        .await
+                        .map(|view| {
+                            json!({
+                                "linked": true,
+                                "domain_id": view.domain_id,
+                                "status": status_label(view.status),
+                                "finalized_height": view.last_committed_height,
+                            })
+                        }),
                     None => None,
                 };
                 return Ok(json!({
@@ -400,14 +403,14 @@ impl GardenService {
             }
             Slot::Running(handle, _) => match handle.status().await {
                 Ok(status) => return Ok(json!({ "garden": status })),
-                Err(_) => handle.chain_id(),
+                Err(_) => (handle.chain_id(), handle.genesis_hash()),
             },
         };
         // The validator stopped on its own: the Garden ended without it.
         *slot = Slot::Empty;
         let budlum = match self.link() {
             Some(link) => link
-                .view(stopped)
+                .view_for_genesis(stopped, stopped_genesis)
                 .await
                 .map(|view| json!({ "status": status_label(view.status) })),
             None => None,
@@ -945,5 +948,57 @@ mod tests {
         stays.leave().await.unwrap();
         let left = host.leave().await.unwrap();
         assert_eq!(left["retired"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn garden_service_away_status_refuses_mismatched_genesis_record() {
+        let blockchain = Blockchain::new(
+            std::sync::Arc::new(PoWEngine::new(2)),
+            None,
+            Network::Devnet.chain_id().value(),
+            None,
+        );
+        let (actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            actor.run().await;
+        });
+        let service = GardenService::new(Some(chain), None);
+        service
+            .create("genesis-bound".into(), "host".into(), options())
+            .await
+            .unwrap();
+        let invite_json = service.invite().await.unwrap();
+        let genuine_invite = GardenInvite::parse(&text(&invite_json, "/invite")).unwrap();
+        let mut forged_invite = genuine_invite.clone();
+        forged_invite.genesis_hash[0] ^= 0xff;
+        // Swap into Away while the running Garden record stays Active on Budlum.
+        let running = {
+            let mut slot = service.slot.lock().await;
+            let previous = std::mem::replace(&mut *slot, Slot::Empty);
+            let Slot::Running(running, seat) = previous else {
+                panic!("expected running slot");
+            };
+            *slot = Slot::Away(seat, forged_invite);
+            running
+        };
+        let mismatched = service.status().await.unwrap();
+        assert!(
+            !mismatched["garden"]["budlum"].is_object(),
+            "away status must refuse a Budlum record whose genesis hash differs"
+        );
+        assert_eq!(mismatched.pointer("/garden/budlum"), Some(&Value::Null));
+        {
+            let mut slot = service.slot.lock().await;
+            if let Slot::Away(_, stored) = &mut *slot {
+                *stored = genuine_invite;
+            }
+        }
+        let matched = service.status().await.unwrap();
+        assert_eq!(
+            text(&matched, "/garden/budlum/status"),
+            "Active",
+            "away status must surface the matching genesis record"
+        );
+        let _ = running.leave().await;
     }
 }
