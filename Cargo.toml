@@ -434,6 +434,7 @@ expect_used = "deny"
 # ASan, TSan, and cargo-mutants.
 [profile.test]
 opt-level = 1
+debug = false
 
 [profile.dev.package.keccak]
 opt-level = 3

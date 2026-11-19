@@ -636,7 +636,7 @@ fn accept_reallocation(
         &terms,
         ctx.sender,
         now_unix_secs,
-        STORAGE_MIN_OPERATOR_BOND,
+        &crate::domain::storage_params::protocol_params(),
         payer_reserve,
     )
     .map(|_| ())
@@ -1054,7 +1054,7 @@ fn open_deal(
         &terms,
         ctx.sender,
         now_unix_secs,
-        STORAGE_MIN_OPERATOR_BOND,
+        &crate::domain::storage_params::protocol_params(),
         payer_reserve,
     )
     .map(|_| ())
@@ -2038,7 +2038,7 @@ mod tests {
             },
             payer,
             100,
-            STORAGE_MIN_OPERATOR_BOND,
+            &crate::domain::storage_params::protocol_params(),
             0,
         )
         .expect("the escrowed deal opens");
@@ -2265,7 +2265,7 @@ mod tests {
             },
             payer,
             100,
-            STORAGE_MIN_OPERATOR_BOND,
+            &crate::domain::storage_params::protocol_params(),
             0,
         )
         .unwrap();
@@ -2285,7 +2285,7 @@ mod tests {
             },
             payer,
             100,
-            STORAGE_MIN_OPERATOR_BOND,
+            &crate::domain::storage_params::protocol_params(),
             0,
         )
         .unwrap();
@@ -2383,7 +2383,7 @@ mod tests {
             },
             payer,
             100,
-            STORAGE_MIN_OPERATOR_BOND,
+            &crate::domain::storage_params::protocol_params(),
             0,
         )
         .unwrap();

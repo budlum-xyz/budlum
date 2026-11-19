@@ -213,7 +213,8 @@ fn merkle_root(items: &[Vec<u8>]) -> [u8; 32] {
         1 => merkle_leaf(&items[0]),
         len => {
             let split = split_point(len);
-            merkle_inner(&merkle_root(&items[..split]), &merkle_root(&items[split..]))
+            let (left, right) = items.split_at(split);
+            merkle_inner(&merkle_root(left), &merkle_root(right))
         }
     }
 }
@@ -1622,7 +1623,8 @@ mod tests {
             last_commit_hash: "602436BBD52533E93A01AA3195C50CBBE6C004B8DD83B347A5F2944F9155E530",
             data_hash: "FED88B2A455A8550D5B14A7B6CB10CE260751CEBACE81F1D444A84CEAE88B679",
             validators_hash: "ADAE13380ABD71F125A337AF16E06270E61B325F5945404A17324E62503B95C9",
-            next_validators_hash: "ADAE13380ABD71F125A337AF16E06270E61B325F5945404A17324E62503B95C9",
+            next_validators_hash:
+                "ADAE13380ABD71F125A337AF16E06270E61B325F5945404A17324E62503B95C9",
             consensus_hash: "20CA5E3F42E07A0CDB7BD986EFF1947A23FC27FF47204303E082BC44BB348E0B",
             app_hash: "B40E784CD0CC424FFA157D9C93FEDD47843D0A6D33C7B82515BFADE91444B069",
             last_results_hash: "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
@@ -1642,7 +1644,8 @@ mod tests {
             last_commit_hash: "A64C9820783852B09A3FF14D668FDC1F7DE11DC37C27E2492F15866E5D8EF843",
             data_hash: "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
             validators_hash: "E01ED3ED9D6434ECB8C36C5013560BF5D691F970C70A62EAFC1B3BBC438ACEF2",
-            next_validators_hash: "E01ED3ED9D6434ECB8C36C5013560BF5D691F970C70A62EAFC1B3BBC438ACEF2",
+            next_validators_hash:
+                "E01ED3ED9D6434ECB8C36C5013560BF5D691F970C70A62EAFC1B3BBC438ACEF2",
             consensus_hash: "2484BBA8B99E531E1A3F6422362E7D3EEB99A8325119968A355F05C09EEDD40B",
             app_hash: "AF5A1A6496C699BA1AD4A1618DF86A8002CF67B3B4BD82F7E83D1D382D73D4F9",
             last_results_hash: "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
@@ -1705,16 +1708,34 @@ mod tests {
         let commit = noble_commit();
         let original = commit.header_hash();
         let mutations: Vec<(&str, Box<dyn Fn(&mut TendermintCommitEvidence)>)> = vec![
-            ("chain_id", Box::new(|c: &mut TendermintCommitEvidence| c.chain_id = "noble-2".to_string())),
-            ("height", Box::new(|c: &mut TendermintCommitEvidence| c.height += 1)),
-            ("version", Box::new(|c: &mut TendermintCommitEvidence| c.version_block += 1)),
-            ("commit_time", Box::new(|c: &mut TendermintCommitEvidence| c.commit_time += 1)),
+            (
+                "chain_id",
+                Box::new(|c: &mut TendermintCommitEvidence| c.chain_id = "noble-2".to_string()),
+            ),
+            (
+                "height",
+                Box::new(|c: &mut TendermintCommitEvidence| c.height += 1),
+            ),
+            (
+                "version",
+                Box::new(|c: &mut TendermintCommitEvidence| c.version_block += 1),
+            ),
+            (
+                "commit_time",
+                Box::new(|c: &mut TendermintCommitEvidence| c.commit_time += 1),
+            ),
             (
                 "commit_time_nanos",
                 Box::new(|c: &mut TendermintCommitEvidence| c.commit_time_nanos += 1),
             ),
-            ("last_block_hash", Box::new(|c: &mut TendermintCommitEvidence| c.last_block_hash = [0xA1; 32])),
-            ("last_parts_total", Box::new(|c: &mut TendermintCommitEvidence| c.last_parts_total += 1)),
+            (
+                "last_block_hash",
+                Box::new(|c: &mut TendermintCommitEvidence| c.last_block_hash = [0xA1; 32]),
+            ),
+            (
+                "last_parts_total",
+                Box::new(|c: &mut TendermintCommitEvidence| c.last_parts_total += 1),
+            ),
             (
                 "last_parts_hash",
                 Box::new(|c: &mut TendermintCommitEvidence| c.last_parts_hash = [0xA2; 32]),
@@ -1723,7 +1744,10 @@ mod tests {
                 "last_commit_hash",
                 Box::new(|c: &mut TendermintCommitEvidence| c.last_commit_hash = [0xA3; 32]),
             ),
-            ("data_hash", Box::new(|c: &mut TendermintCommitEvidence| c.data_hash = [0xA4; 32])),
+            (
+                "data_hash",
+                Box::new(|c: &mut TendermintCommitEvidence| c.data_hash = [0xA4; 32]),
+            ),
             (
                 "next_validators_hash",
                 Box::new(|c: &mut TendermintCommitEvidence| c.next_validators_hash = [0xA5; 32]),
@@ -1732,7 +1756,10 @@ mod tests {
                 "consensus_hash",
                 Box::new(|c: &mut TendermintCommitEvidence| c.consensus_hash = [0xA6; 32]),
             ),
-            ("app_hash", Box::new(|c: &mut TendermintCommitEvidence| c.app_hash = [0xA7; 32])),
+            (
+                "app_hash",
+                Box::new(|c: &mut TendermintCommitEvidence| c.app_hash = [0xA7; 32]),
+            ),
             (
                 "last_results_hash",
                 Box::new(|c: &mut TendermintCommitEvidence| c.last_results_hash = [0xA8; 32]),
@@ -1859,11 +1886,11 @@ mod tests {
         // the one thing a consumer weighing this domain needs. The admitted
         // sample verified against the pin, so its seven validators are the
         // pinned set's seven validators.
-        let unpinned_size = |adapter: &TendermintFinalityAdapter| match adapter.descriptor().trust_model
-        {
-            TrustModel::HonestMajority { set_size } => Some(set_size),
-            _ => None,
-        };
+        let unpinned_size =
+            |adapter: &TendermintFinalityAdapter| match adapter.descriptor().trust_model {
+                TrustModel::HonestMajority { set_size } => Some(set_size),
+                _ => None,
+            };
         assert_eq!(unpinned_size(&adapter()), Some(0));
 
         let commit = noble_commit();

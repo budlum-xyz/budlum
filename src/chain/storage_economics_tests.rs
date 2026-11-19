@@ -45,7 +45,7 @@ mod tests {
                 terms,
                 payer,
                 now_unix_secs,
-                domain_params.min_operator_bond,
+                domain_params,
                 0,
             )
         }
@@ -62,7 +62,7 @@ mod tests {
                 terms,
                 payer,
                 now_unix_secs,
-                domain_params.min_operator_bond,
+                domain_params,
                 0,
             )
         }
@@ -420,7 +420,13 @@ mod tests {
             .storage_registry
             .register_manifest(&manifest);
         let shard_id = manifest.shards[0].shard_id;
-        let params = StorageDomainParams::default();
+        // The four acceptance tests below pin the *closed* merkle gate: a
+        // replacement carrying no envelope must be refused, so this fixture
+        // asks for the proof instead of relying on the protocol default.
+        let params = StorageDomainParams {
+            require_merkle_proof: true,
+            ..StorageDomainParams::default()
+        };
         let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard in manifest").size);
         let economics = StorageEconomicsParams {
             operator_bond: params.min_operator_bond,

@@ -47,6 +47,24 @@ pub const MAX_STORAGE_CHALLENGE_INTERVAL: u64 = 2_592_000;
 /// `deal_open::open_deal_escrowed`; that step follows this one.
 pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
 
+/// The protocol-level parameters for the in-block deal path.
+///
+/// A block carries no domain record, so the in-block executor has no
+/// `StorageDomainParams` to hand down. It uses this: the protocol bond floor and
+/// every other default, with the VerifyMerkle gate in its closed position -
+/// which is the position the profiles ship and the one the deal path is
+/// required to honour rather than silently demand an envelope regardless.
+#[must_use]
+pub fn protocol_params() -> StorageDomainParams {
+    StorageDomainParams {
+        chunk_size: 256,
+        max_committed_chunks: 1024,
+        challenge_interval: 100,
+        min_operator_bond: STORAGE_MIN_OPERATOR_BOND,
+        require_merkle_proof: false,
+    }
+}
+
 /// Per-domain parameters for a `StorageAttestation` domain.
 ///
 /// The vision document calls these `StorageDomainParams` in We follow

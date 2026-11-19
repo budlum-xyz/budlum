@@ -4573,6 +4573,64 @@ impl AccountState {
         }
     }
 
+    /// Queue or apply a PoA compliance freeze/unfreeze request for `address`.
+    ///
+    /// The domain's kind decides the authority model: a `PoA` domain accepts a
+    /// request from the domain's registered admin or its operator, a
+    /// permissionless domain goes through the permissionless path. Without this
+    /// split a permissionless domain's own operator could freeze an account on
+    /// a PoA admin's say-so, and a PoA admin could act on a domain they hold no
+    /// authority over.
+    ///
+    /// # Errors
+    ///
+    /// An unknown domain, an admin holding no authority there, or a refusal
+    /// from the compliance registry.
+    pub fn apply_poa_compliance_request(
+        &mut self,
+        domain_id: u32,
+        admin: Address,
+        address: Address,
+        reason_hash: [u8; 32],
+        unfreeze: bool,
+        height: u64,
+    ) -> Result<(), String> {
+        let domain = self
+            .settlement
+            .domains
+            .get(domain_id)
+            .ok_or_else(|| format!("unknown domain {domain_id}"))?;
+        let kind = if matches!(domain.kind, crate::domain::ConsensusKind::PoA) {
+            crate::registry::ComplianceDomainKind::PoA
+        } else {
+            crate::registry::ComplianceDomainKind::Permissionless
+        };
+        if kind == crate::registry::ComplianceDomainKind::PoA {
+            let admin_is_admin = self.poa_onboarding.registry().is_admin(domain_id, &admin);
+            let admin_is_operator = domain.operator == Some(admin);
+            if !admin_is_admin && !admin_is_operator {
+                return Err(format!(
+                    "admin {} holds no authority on domain {domain_id}",
+                    admin.to_hex()
+                ));
+            }
+        }
+        let result = if unfreeze {
+            self.poa_compliance
+                .unfreeze(kind, domain_id, admin, address, reason_hash, height)
+        } else {
+            self.poa_compliance.freeze_suspicious(
+                kind,
+                domain_id,
+                admin,
+                address,
+                reason_hash,
+                height,
+            )
+        };
+        result.map_err(|e| format!("{e:?}"))
+    }
+
     /// Deterministically drain governance-queued PoA compliance requests inside
     /// block execution (`apply_block_effects`), BEFORE `calculate_state_root`.
     ///
@@ -4584,46 +4642,60 @@ impl AccountState {
         let unfreezes = std::mem::take(&mut self.pending_poa_unfreezes);
         let mut applied = 0;
         for req in freezes {
+            if !self.poa_admin_may_act(req.domain_id, &req.admin) {
+                continue;
+            }
             if self
-                .poa_onboarding
-                .registry()
-                .is_admin(req.domain_id, &req.admin)
-                && self
-                    .poa_compliance
-                    .freeze_suspicious(
-                        crate::registry::ComplianceDomainKind::PoA,
-                        req.domain_id,
-                        req.admin,
-                        req.target,
-                        req.reason_hash,
-                        height,
-                    )
-                    .is_ok()
+                .poa_compliance
+                .freeze_suspicious(
+                    crate::registry::ComplianceDomainKind::PoA,
+                    req.domain_id,
+                    req.admin,
+                    req.target,
+                    req.reason_hash,
+                    height,
+                )
+                .is_ok()
             {
                 applied += 1;
             }
         }
         for req in unfreezes {
+            if !self.poa_admin_may_act(req.domain_id, &req.admin) {
+                continue;
+            }
             if self
-                .poa_onboarding
-                .registry()
-                .is_admin(req.domain_id, &req.admin)
-                && self
-                    .poa_compliance
-                    .unfreeze(
-                        crate::registry::ComplianceDomainKind::PoA,
-                        req.domain_id,
-                        req.admin,
-                        req.target,
-                        req.reason_hash,
-                        height,
-                    )
-                    .is_ok()
+                .poa_compliance
+                .unfreeze(
+                    crate::registry::ComplianceDomainKind::PoA,
+                    req.domain_id,
+                    req.admin,
+                    req.target,
+                    req.reason_hash,
+                    height,
+                )
+                .is_ok()
             {
                 applied += 1;
             }
         }
         applied
+    }
+
+    /// Whether `admin` may act on `domain_id` under the `PoA` compliance rules.
+    ///
+    /// Two conditions, both required: the domain is registered and its kind is
+    /// `PoA` (a permissionless or unknown domain has no PoA compliance door at
+    /// all, and a name in `poa_onboarding` must not conjure one), and `admin`
+    /// holds authority there as a registered admin or as the domain operator.
+    fn poa_admin_may_act(&self, domain_id: u32, admin: &Address) -> bool {
+        let Some(domain) = self.settlement.domains.get(domain_id) else {
+            return false;
+        };
+        if !matches!(domain.kind, crate::domain::ConsensusKind::PoA) {
+            return false;
+        }
+        self.poa_onboarding.registry().is_admin(domain_id, admin) || domain.operator == Some(*admin)
     }
 
     /// Apply a single registry parameter update if it parses and passes bounds.

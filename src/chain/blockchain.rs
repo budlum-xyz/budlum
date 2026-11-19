@@ -707,6 +707,16 @@ impl Blockchain {
             .collect()
     }
 
+    /// Signers currently eligible for the zero-fee duty lane.
+    ///
+    /// Test seam over [`AccountState::duty_lane_signers_for_chain`]: the
+    /// executor's duty-lane tests need the same view the mempool sync uses, so
+    /// they read it here rather than rebuilding the eligibility rule.
+    #[cfg(test)]
+    pub(crate) fn duty_validator_snapshot_for_test(&self) -> std::collections::BTreeSet<Address> {
+        self.state.duty_lane_signers_for_chain(self.chain_id)
+    }
+
     fn require_signed_startup_snapshot(
         chain_id: u64,
         snapshot: &crate::chain::snapshot::StateSnapshotV2,
@@ -6571,17 +6581,17 @@ impl Blockchain {
     pub fn mine_pending_transactions(&mut self, miner_address: Address) {
         self.produce_block(miner_address);
     }
+    /// Signers the pool may lift its floor for.
+    ///
+    /// Delegates to the state-level duty-lane rule: the lane is a
+    /// bond, not a directory entry. Listing every directory record here let an
+    /// unbonded or slashed validator reach the zero-fee lane the admission test
+    /// pins shut.
     fn active_duty_validators(&self) -> Vec<Address> {
-        let mut set = std::collections::BTreeSet::new();
-        for (addr, v) in &self.state.validators {
-            if v.active && !v.slashed && !v.jailed {
-                set.insert(*addr);
-            }
-        }
-        for rec in self.state.validator_directory.iter() {
-            set.insert(rec.owner);
-        }
-        set.into_iter().collect()
+        self.state
+            .duty_lane_signers_for_chain(self.chain_id)
+            .into_iter()
+            .collect()
     }
 
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
@@ -10194,7 +10204,7 @@ impl Blockchain {
             &terms,
             payer,
             now_unix_secs,
-            domain_params.min_operator_bond,
+            domain_params,
             0,
         )?;
         // Persistence rides the block commit: on this branch the door the
@@ -10254,7 +10264,7 @@ impl Blockchain {
             &terms,
             payer,
             now_unix_secs,
-            domain_params.min_operator_bond,
+            domain_params,
             0,
         )?;
         // Persistence rides the block commit; see `open_storage_deal_with_escrow`.
@@ -14574,7 +14584,7 @@ mod bond_and_reorg_tests {
             },
             client,
             0,
-            crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND,
+            &crate::domain::storage_params::protocol_params(),
             0,
         )
         .unwrap();
@@ -14599,7 +14609,7 @@ mod bond_and_reorg_tests {
             },
             self_deal_op,
             0,
-            crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND,
+            &crate::domain::storage_params::protocol_params(),
             0,
         )
         .unwrap();
@@ -15873,9 +15883,17 @@ mod bond_and_reorg_tests {
             )
             .expect("registration is the audited door");
 
+        // An undecodable child block: index 1, junk hash, empty payload. The
+        // engine's `full_validate` only prices a non-genesis block against a
+        // parent, so the door has to be handed one for the plugin to reach the
+        // hash check rather than short-circuit. The domain chain below is a
+        // stand-in parent; every gate this test is about reads the *candidate*,
+        // not the parent.
         let block = Block::new_with_chain_id(1, "0".repeat(64), vec![], 45262);
+        let parent = Block::new_with_chain_id(0, "0".repeat(64), vec![], 45262);
+        let domain_chain = [parent];
         let err = bc
-            .validate_domain_block_with_plugin(13, &block, &[], 0)
+            .validate_domain_block_with_plugin(13, &block, &domain_chain, 0)
             .expect_err("mismatched finality must be refused");
         assert!(
             err.contains("mismatched finality"),
@@ -15894,7 +15912,7 @@ mod bond_and_reorg_tests {
             )
             .expect("replace is the audited door");
         let err = bc
-            .validate_domain_block_with_plugin(13, &block, &[], 0)
+            .validate_domain_block_with_plugin(13, &block, &domain_chain, 0)
             .expect_err("the block itself is not a valid domain block");
         assert!(
             err.contains("refused by the registered plugin"),
