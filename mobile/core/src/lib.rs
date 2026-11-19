@@ -26,7 +26,9 @@ pub mod store;
 pub use custody::{Audit, CustodyProof, CustodyProofBatch, ProofContext};
 pub use duty::{Connection, CoreStatus, DutyTx, LastAudit, MobileCore, TESTNET_CHAIN_ID};
 pub use error::CoreError;
-pub use handover::{fetch_from_holders, Holder, ShareSource, SHARE_OWNER_TIMEOUT};
+pub use handover::{
+    fetch_from_holders, fetch_verified_from_holders, Holder, ShareSource, SHARE_OWNER_TIMEOUT,
+};
 pub use keys::{
     KeyVault, OperatorKey, SealedOperatorKey, VaultError, OPERATOR_KEY_LABEL, OPERATOR_KEY_SCHEME,
     OPERATOR_SEED_LEN,
