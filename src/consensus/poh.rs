@@ -304,8 +304,24 @@ impl ConsensusEngine for PohEngine {
             )));
         }
 
-        // Enforce monotonic timestamps along the PoH-ordered chain.
+        // Enforce strict contiguous block linkage and monotonic timestamps.
         if let Some(parent) = chain.last() {
+            let expected_index = parent
+                .index
+                .checked_add(1)
+                .ok_or_else(|| ConsensusError("PoH parent block index overflows u64".into()))?;
+            if block.index != expected_index {
+                return Err(ConsensusError(format!(
+                    "PoH block index {} does not follow parent index {} (expected {expected_index})",
+                    block.index, parent.index
+                )));
+            }
+            if block.previous_hash != parent.hash {
+                return Err(ConsensusError(format!(
+                    "PoH block previous_hash {} does not match parent hash {}",
+                    block.previous_hash, parent.hash
+                )));
+            }
             if block.timestamp < parent.timestamp {
                 return Err(ConsensusError(format!(
                     "PoH block timestamp {} regresses below parent timestamp {}",
@@ -321,11 +337,18 @@ impl ConsensusEngine for PohEngine {
         let (start_count, _steps, _end_hash) =
             self.verify_block_witness_against_ledger(&ledger, block)?;
 
-        // Prevent replaying a historical PoH witness (for example step 0) on child blocks:
-        // when the parent block carries a PoH witness, the child must continue directly
-        // from the parent's exact `(end_count, end_hash)`.
+        // Prevent replaying or skipping PoH steps on every child block:
+        // - block 1 above genesis (`parent.index == 0`) must start at count 0;
+        // - every subsequent block (`parent.index > 0`) must continue directly
+        //   from the parent's exact `(end_count, end_hash)`.
         if let Some(parent) = chain.last() {
-            if parent.index > 0 {
+            if parent.index == 0 {
+                if start_count != 0 {
+                    return Err(ConsensusError(format!(
+                        "PoH height-1 block start_count {start_count} must anchor at genesis count 0"
+                    )));
+                }
+            } else {
                 let (parent_start, parent_steps, parent_end_hash) = decode_poh_witness(parent)?;
                 let expected_start = parent_start
                     .checked_add(parent_steps)
@@ -382,6 +405,16 @@ impl ConsensusEngine for PohEngine {
             return Ok(());
         }
 
+        // Refuse partial-overlap forks (`start_count < head < end_count`) and
+        // unanchored gaps (`start_count > head`) so canonical PoH checkpoints
+        // can never be overwritten or rolled across a fork boundary.
+        if start_count != ledger.state.hash_count {
+            return Err(ConsensusError(format!(
+                "PoH commit start_count {start_count} does not continue canonical head {} (end_count={end_count})",
+                ledger.state.hash_count
+            )));
+        }
+
         let Some(anchor_hash) = Self::checkpoint_at(&ledger, start_count) else {
             return Err(ConsensusError(
                 "PoH witness anchor unavailable during commit".into(),
@@ -419,7 +452,24 @@ impl ConsensusEngine for PohEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
-        chain.last().map_or(0, |b| u128::from(b.index))
+        let Some(first) = chain.first() else {
+            return 0;
+        };
+        let mut verified_tip = first;
+        for blk in chain.iter().skip(1) {
+            if Some(blk.index) != verified_tip.index.checked_add(1)
+                || blk.previous_hash != verified_tip.hash
+                || blk.timestamp < verified_tip.timestamp
+            {
+                break;
+            }
+            verified_tip = blk;
+        }
+        // Refuse single-block unanchored high-index inflation (must start at genesis 0).
+        if first.index != 0 {
+            return 0;
+        }
+        u128::from(verified_tip.index)
     }
 
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
@@ -573,5 +623,94 @@ mod tests {
         assert!(engine
             .validate_block(&b2, &[b1], &AccountState::new())
             .is_ok());
+    }
+
+    #[test]
+    fn b0100_poh_enforces_parent_link_genesis_start_overlap_refusal_and_contiguous_score() {
+        let config = PohConfig {
+            hashes_per_slot: 8,
+            ..PohConfig::default()
+        };
+        let engine = PohEngine::new(config);
+        let zero = "0".repeat(64);
+        let mut genesis = make_block(0, &zero);
+        genesis.hash = genesis.calculate_hash();
+
+        // 1. Height gap (index 2 on top of genesis 0) and wrong previous_hash are refused.
+        let mut gapped = make_block(2, &genesis.hash);
+        gapped.timestamp = genesis.timestamp;
+        engine
+            .prepare_block(&mut gapped, &AccountState::new())
+            .unwrap();
+        assert!(engine
+            .validate_block(
+                &gapped,
+                std::slice::from_ref(&genesis),
+                &AccountState::new()
+            )
+            .is_err());
+
+        let mut bad_parent = make_block(1, &"f".repeat(64));
+        bad_parent.timestamp = genesis.timestamp;
+        engine
+            .prepare_block(&mut bad_parent, &AccountState::new())
+            .unwrap();
+        assert!(engine
+            .validate_block(
+                &bad_parent,
+                std::slice::from_ref(&genesis),
+                &AccountState::new()
+            )
+            .is_err());
+
+        // 2. Commit honest height-1 block (0 -> 8), then refuse height-1 block starting at 8.
+        let mut b1 = make_block(1, &genesis.hash);
+        b1.timestamp = genesis.timestamp + 1;
+        engine.prepare_block(&mut b1, &AccountState::new()).unwrap();
+        engine
+            .validate_block(&b1, std::slice::from_ref(&genesis), &AccountState::new())
+            .unwrap();
+        engine.record_block(&b1, None).unwrap();
+        assert_eq!(engine.state().hash_count, 8);
+
+        let mut skipped_h1 = make_block(1, &genesis.hash);
+        skipped_h1.timestamp = genesis.timestamp + 2;
+        engine
+            .prepare_block(&mut skipped_h1, &AccountState::new())
+            .unwrap();
+        assert!(engine
+            .validate_block(
+                &skipped_h1,
+                std::slice::from_ref(&genesis),
+                &AccountState::new()
+            )
+            .is_err());
+
+        // 3. Partial-overlap fork (start_count=4 < head=8 < end_count=16) must not corrupt head.
+        let anchor_4 = {
+            let l = engine.ledger.read().unwrap();
+            *l.checkpoints.get(&4).unwrap()
+        };
+        let mut h = anchor_4;
+        for step in 0..12u64 {
+            h = poh_step(&h, 4 + step);
+        }
+        let mut overlap = make_block(2, &b1.hash);
+        overlap.timestamp = b1.timestamp + 1;
+        overlap.vrf_output = h.to_vec();
+        overlap.vrf_proof = encode_poh_witness(4, 12);
+        overlap.hash = overlap.calculate_hash();
+        let err = engine.record_block(&overlap, None).unwrap_err();
+        assert!(err.0.contains("does not continue canonical head"));
+        assert_eq!(engine.state().hash_count, 8);
+
+        // 4. fork_choice_score rejects unanchored forged high-index chain.
+        let mut forged = make_block(999_999, &zero);
+        forged.hash = forged.calculate_hash();
+        assert_eq!(engine.fork_choice_score(&[forged.clone()]), 0);
+        assert_eq!(
+            engine.fork_choice_score(&[genesis.clone(), b1.clone(), forged]),
+            1
+        );
     }
 }

@@ -90,10 +90,12 @@ pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
 pub mod external_tx;
+pub mod heterogeneous_multiprover;
 pub mod hotstuff;
 pub mod intake;
 pub mod intake_quorum;
 pub mod mina_recursive;
+pub mod nipopow;
 pub mod ouroboros_mithril;
 pub mod phase_a_dual;
 pub mod pospace_vdf;
@@ -103,6 +105,7 @@ pub mod quorum;
 pub mod registry;
 pub mod restaking_avs;
 pub mod selftest;
+pub mod sentry;
 pub mod simplex_bft;
 pub mod solana_tower_bft;
 pub mod spec;
@@ -148,7 +151,17 @@ pub use evm_hybrid::{
 pub use external_tx::{
     execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext, ExternalDomainTxError,
 };
-pub use hotstuff::{HotStuffThreeChainAdapter, HotStuffValidator, PinnedHotStuffCommittee};
+pub use heterogeneous_multiprover::{
+    detect_prover_disagreement, AttestedCommitteeLeg, FaultWindowLeg,
+    HeterogeneousMultiProverAdapter, MultiProverCommitteeMember, MultiProverDisagreement,
+    MultiProverEvidence, PinnedFaultProposer, PinnedMultiProverConfig, ProverFamily,
+    RollupBatchClaim, StarkProverLeg,
+};
+pub use hotstuff::{
+    verify_hotstuff_equivocation, verify_hotstuff_timeout_certificate, HotStuffEquivocationProof,
+    HotStuffThreeChainAdapter, HotStuffTimeoutCertificate, HotStuffTimeoutVote, HotStuffValidator,
+    HotStuffVoteSig, PinnedHotStuffCommittee,
+};
 pub(crate) use intake::live_policy_clock;
 pub use intake::{
     AdapterSpec, ContradictionSlashOutcome, IntakeEntry, IntakeError, IntakeState,
@@ -159,6 +172,10 @@ pub use intake_quorum::{
     ROUND_RETENTION_BLOCKS,
 };
 pub use mina_recursive::{PinnedSuccinctGenesis, SuccinctRecursiveAdapter};
+pub use nipopow::{
+    best_superchain_score, superblock_level, InterlinkHop, InterlinkMerkleStep, NipopowAdapter,
+    NipopowEvidence, NipopowHeader, PinnedNipopowGenesis,
+};
 pub use ouroboros_mithril::{
     mithril_certificate_message, mithril_threshold, praos_vote_message, proof_of_equivocation,
     EpochSigner, EpochStake, MithrilEvidence, MithrilSignature, OuroborosMithrilAdapter,
@@ -185,6 +202,11 @@ pub use restaking_avs::{
 pub use selftest::{
     admit, admit_observed, apply_patch, run_probe, AdmissionReport, BytePatch, ExpectedRefusal,
     FaultProbe, ProbeOutcome, RefusalKind,
+};
+pub use sentry::{
+    evaluate_testnet_readiness, ConsensusSentry, DomainQuantumPosture, SentryAction, SentryAlert,
+    SentryCircuitState, SentryDomainPolicy, SentryError, SentryFindingKind, SentryObservation,
+    SentrySeverity, TestnetLaunchVerdict, TestnetReadinessSnapshot, WatchedDomainState,
 };
 pub use simplex_bft::{
     NoEndorsementCertificate, PinnedSimplexCommittee, SimplexBftAdapter, SimplexSlashingProof,

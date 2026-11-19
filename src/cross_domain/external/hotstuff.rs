@@ -1,6 +1,9 @@
 //! Linear chained BFT (`HotStuff` / `Jolteon` / `DiemBFT` / `MonadBFT`)
 //! external finality adapter verifying the consecutive three-chain commit rule.
 //!
+//! WIRING: unwired - pacemaker timeout-certificate and double-vote equivocation
+//! verifiers land with their governance-gated external slashing intake door.
+//!
 //! Under Yin et al. (PODC 2019), a block `B_0` at view `v` is deterministically
 //! committed once three certified blocks `(B_0, B_1, B_2)` form an unbroken
 //! parent chain across three strictly consecutive views `(v, v + 1, v + 2)`:
@@ -105,9 +108,10 @@ impl HotStuffBlock {
     }
 }
 
-/// One validator's vote inside a HotStuff quorum certificate.
+/// One validator's vote inside a HotStuff quorum certificate or equivocation proof.
+/// WIRING: exposed for HotStuff equivocation slashing submission surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct HotStuffVoteSig {
+pub struct HotStuffVoteSig {
     pub signer_pubkey: [u8; 32],
     pub ed25519_sig: Vec<u8>,
     #[serde(default)]
@@ -266,7 +270,11 @@ fn verify_single_qc(
                 what: format!("invalid ML-DSA-65 co-signature in HotStuff {phase} QC"),
             })?;
         }
-        signed_stake = signed_stake.saturating_add(u128::from(member.voting_weight));
+        signed_stake = signed_stake
+            .checked_add(u128::from(member.voting_weight))
+            .ok_or_else(|| AdapterError::ConsensusRule {
+                rule: format!("HotStuff {phase} QC signed stake overflows u128"),
+            })?;
     }
 
     if signed_stake.saturating_mul(3) <= total_stake.saturating_mul(2) {
@@ -277,6 +285,276 @@ fn verify_single_qc(
         });
     }
     Ok((seen.len() as u64, all_pq))
+}
+
+/// Domain-separation tag for HotStuff/Jolteon pacemaker timeout votes.
+/// WIRING: exposed for external HotStuff pacemaker timeout signers and verifiers.
+pub const DOMAIN_HOTSTUFF_TIMEOUT: &[u8] = b"BDLM_HOTSTUFF_TIMEOUT_V1";
+
+/// Canonical timeout-vote signing digest binding `(network, epoch, view, high_qc_view)`.
+///
+/// Convenience: exposed for HotStuff pacemaker signers and TC verifiers.
+#[must_use]
+pub fn hotstuff_timeout_sign_bytes(
+    network: &str,
+    epoch: u64,
+    view: u64,
+    high_qc_view: u64,
+) -> [u8; 32] {
+    crate::core::hash::hash_fields_bytes(&[
+        DOMAIN_HOTSTUFF_TIMEOUT,
+        network.as_bytes(),
+        &epoch.to_le_bytes(),
+        &view.to_le_bytes(),
+        &high_qc_view.to_le_bytes(),
+    ])
+}
+
+/// Individual validator timeout vote carrying its highest locked QC view.
+/// WIRING: exposed for HotStuff pacemaker view-change intake surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotStuffTimeoutVote {
+    /// Validator Ed25519 public key.
+    pub signer_pubkey: [u8; 32],
+    /// Highest certified QC view reported by this validator (`< timeout.view`).
+    pub high_qc_view: u64,
+    /// Ed25519 signature over `hotstuff_timeout_sign_bytes`.
+    pub ed25519_sig: Vec<u8>,
+    /// Mandatory ML-DSA-65 co-signature when the validator enrolled a PQ key.
+    pub pq_sig: Vec<u8>,
+}
+
+/// Jolteon / DiemBFT / AptosBFT `TimeoutCertificate` authorizing a safe jump
+/// past a stalled view while preserving the highest locked QC across `> 2/3` stake.
+/// WIRING: exposed for HotStuff pacemaker view-change verification surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotStuffTimeoutCertificate {
+    /// Committee epoch.
+    pub epoch: u64,
+    /// Timed-out view number.
+    pub view: u64,
+    /// Claimed `max(vote.high_qc_view)` across all included votes.
+    pub max_high_qc_view: u64,
+    /// Distinct committee timeout votes summing to strictly greater than `2/3` stake.
+    pub votes: Vec<HotStuffTimeoutVote>,
+}
+
+/// Verify a `HotStuffTimeoutCertificate` against `pinned` and return the
+/// verified `(max_high_qc_view, signed_stake, all_pq)` tuple.
+///
+/// Convenience: exposed for HotStuff view-change safety auditing and bridges.
+pub fn verify_hotstuff_timeout_certificate(
+    network: &str,
+    pinned: &PinnedHotStuffCommittee,
+    tc: &HotStuffTimeoutCertificate,
+) -> Result<(u64, u128, bool), AdapterError> {
+    if tc.epoch != pinned.epoch {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff TC epoch mismatches pinned committee epoch".into(),
+        });
+    }
+    if tc.view == 0 {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff TC view must be non-zero".into(),
+        });
+    }
+    if pinned.members.is_empty() || pinned.members.len() > MAX_HOTSTUFF_COMMITTEE {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff committee size outside valid bounds".into(),
+        });
+    }
+    if tc.votes.is_empty() || tc.votes.len() > pinned.members.len() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff TC vote count outside [1, committee.len()]".into(),
+        });
+    }
+    let mut member_map = BTreeMap::new();
+    let mut total_stake = 0u128;
+    for m in &pinned.members {
+        if m.ed25519_pubkey == [0u8; 32] || m.voting_weight == 0 {
+            return Err(AdapterError::ConsensusRule {
+                rule: "HotStuff committee contains zero pubkey or zero weight".into(),
+            });
+        }
+        if member_map.insert(m.ed25519_pubkey, m).is_some() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "HotStuff committee contains duplicate pubkey".into(),
+            });
+        }
+        total_stake = total_stake
+            .checked_add(u128::from(m.voting_weight))
+            .ok_or_else(|| AdapterError::ConsensusRule {
+                rule: "HotStuff committee total stake overflows u128".into(),
+            })?;
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut signed_stake = 0u128;
+    let mut observed_max_high_qc = 0u64;
+    let mut all_pq = true;
+
+    for v in &tc.votes {
+        if !seen.insert(v.signer_pubkey) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "duplicate signer in HotStuff TimeoutCertificate".into(),
+            });
+        }
+        if v.high_qc_view >= tc.view {
+            return Err(AdapterError::ConsensusRule {
+                rule: "HotStuff timeout vote high_qc_view must be strictly below timed-out view"
+                    .into(),
+            });
+        }
+        let member =
+            member_map
+                .get(&v.signer_pubkey)
+                .ok_or_else(|| AdapterError::ConsensusRule {
+                    rule: "non-committee signer in HotStuff TimeoutCertificate".into(),
+                })?;
+        let digest = hotstuff_timeout_sign_bytes(network, tc.epoch, tc.view, v.high_qc_view);
+        crate::crypto::primitives::verify_signature(&digest, &v.ed25519_sig, &v.signer_pubkey)
+            .map_err(|_| AdapterError::Crypto {
+                what: "invalid Ed25519 signature in HotStuff TimeoutCertificate".into(),
+            })?;
+        if member.pq_pubkey.is_empty() {
+            all_pq = false;
+        } else {
+            if v.pq_sig.is_empty() {
+                return Err(AdapterError::Crypto {
+                    what: "missing mandatory ML-DSA-65 co-signature in HotStuff TC".into(),
+                });
+            }
+            crate::crypto::primitives::PqKeyPair::verify(
+                &member.pq_pubkey,
+                crate::crypto::ctx::CROSS_DOMAIN_V1,
+                &digest,
+                &v.pq_sig,
+            )
+            .map_err(|_| AdapterError::Crypto {
+                what: "invalid ML-DSA-65 co-signature in HotStuff TC".into(),
+            })?;
+        }
+        observed_max_high_qc = observed_max_high_qc.max(v.high_qc_view);
+        signed_stake = signed_stake
+            .checked_add(u128::from(member.voting_weight))
+            .ok_or_else(|| AdapterError::ConsensusRule {
+                rule: "HotStuff TC signed stake overflows u128".into(),
+            })?;
+    }
+
+    if observed_max_high_qc != tc.max_high_qc_view {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff TC declared max_high_qc_view mismatches signed votes".into(),
+        });
+    }
+    if signed_stake.saturating_mul(3) <= total_stake.saturating_mul(2) {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff TC signed stake does not exceed strict 2/3".into(),
+        });
+    }
+    Ok((observed_max_high_qc, signed_stake, all_pq))
+}
+
+/// Cryptographic misbehaviour bundle proving that a HotStuff validator signed
+/// two distinct blocks in the exact same `(epoch, view)`.
+/// WIRING: exposed for HotStuff double-vote slashing intake surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotStuffEquivocationProof {
+    /// Shared epoch of the double-vote.
+    pub epoch: u64,
+    /// Shared view of the double-vote.
+    pub view: u64,
+    /// First voted block hash (non-zero, distinct from `block_hash_b`).
+    pub block_hash_a: [u8; 32],
+    /// Second voted block hash (non-zero, distinct from `block_hash_a`).
+    pub block_hash_b: [u8; 32],
+    /// Vote signature on `block_hash_a`.
+    pub vote_a: HotStuffVoteSig,
+    /// Vote signature on `block_hash_b` by the exact same validator.
+    pub vote_b: HotStuffVoteSig,
+}
+
+/// Verify a `HotStuffEquivocationProof` (including mandatory ML-DSA-65 co-sigs
+/// so a classical forgery cannot frame a PQ-enrolled validator) and return the
+/// slashable `(validator_pubkey, voting_weight)`.
+///
+/// Convenience: exposed for HotStuff slashing and `ConsensusSentry` freeze hooks.
+pub fn verify_hotstuff_equivocation(
+    network: &str,
+    pinned: &PinnedHotStuffCommittee,
+    proof: &HotStuffEquivocationProof,
+) -> Result<([u8; 32], u64), AdapterError> {
+    if proof.epoch != pinned.epoch {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff equivocation proof epoch mismatches pinned committee".into(),
+        });
+    }
+    if proof.block_hash_a == [0u8; 32] || proof.block_hash_b == [0u8; 32] {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff equivocation proof contains zero block_hash".into(),
+        });
+    }
+    if bool::from(proof.block_hash_a.ct_eq(&proof.block_hash_b)) {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff equivocation proof names identical block hashes".into(),
+        });
+    }
+    if !bool::from(
+        proof
+            .vote_a
+            .signer_pubkey
+            .ct_eq(&proof.vote_b.signer_pubkey),
+    ) {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff equivocation votes belong to different validators".into(),
+        });
+    }
+    let member = pinned
+        .members
+        .iter()
+        .find(|m| bool::from(m.ed25519_pubkey.ct_eq(&proof.vote_a.signer_pubkey)))
+        .ok_or_else(|| AdapterError::ConsensusRule {
+            rule: "HotStuff equivocation signer is not in pinned committee".into(),
+        })?;
+    if member.ed25519_pubkey == [0u8; 32] || member.voting_weight == 0 {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff equivocation committee record has zero key or weight".into(),
+        });
+    }
+
+    for (blk_hash, vote) in [
+        (&proof.block_hash_a, &proof.vote_a),
+        (&proof.block_hash_b, &proof.vote_b),
+    ] {
+        let msg = hotstuff_vote_sign_bytes(network, proof.epoch, proof.view, blk_hash);
+        crate::crypto::primitives::verify_signature(
+            &msg,
+            &vote.ed25519_sig,
+            &member.ed25519_pubkey,
+        )
+        .map_err(|_| AdapterError::Crypto {
+            what: "invalid Ed25519 signature in HotStuff equivocation proof".into(),
+        })?;
+        if !member.pq_pubkey.is_empty() {
+            if vote.pq_sig.is_empty() {
+                return Err(AdapterError::Crypto {
+                    what: "missing mandatory ML-DSA-65 co-signature in HotStuff equivocation"
+                        .into(),
+                });
+            }
+            crate::crypto::primitives::PqKeyPair::verify(
+                &member.pq_pubkey,
+                crate::crypto::ctx::CROSS_DOMAIN_V1,
+                &msg,
+                &vote.pq_sig,
+            )
+            .map_err(|_| AdapterError::Crypto {
+                what: "invalid ML-DSA-65 co-signature in HotStuff equivocation".into(),
+            })?;
+        }
+    }
+
+    Ok((member.ed25519_pubkey, member.voting_weight))
 }
 
 /// External finality adapter for linear chained BFT (`HotStuff` 3-chain rule).
@@ -829,6 +1107,99 @@ mod tests {
         assert!(matches!(
             adapter.verify(&stripped_ev, &policy),
             Err(AdapterError::Crypto { .. })
+        ));
+    }
+
+    #[test]
+    fn strix_hotstuff_verifies_pacemaker_timeout_certificate_and_double_vote_equivocation() {
+        let keys: Vec<(KeyPair, PqKeyPair)> = (0..4)
+            .map(|_| (KeyPair::generate().unwrap(), PqKeyPair::generate()))
+            .collect();
+        let pinned = PinnedHotStuffCommittee {
+            epoch: 7,
+            members: keys
+                .iter()
+                .map(|(ed, pq)| HotStuffValidator {
+                    ed25519_pubkey: ed.public_key_bytes(),
+                    pq_pubkey: pq.public_key_bytes().to_vec(),
+                    voting_weight: 25,
+                })
+                .collect(),
+        };
+
+        // 1. Valid >2/3 TimeoutCertificate at view 50 preserving max_high_qc_view = 48.
+        let high_qcs = [46u64, 48, 47];
+        let votes: Vec<HotStuffTimeoutVote> = keys
+            .iter()
+            .take(3)
+            .zip(high_qcs)
+            .map(|((ed, pq), hqc)| {
+                let d = hotstuff_timeout_sign_bytes("aptos-jolteon-1", 7, 50, hqc);
+                HotStuffTimeoutVote {
+                    signer_pubkey: ed.public_key_bytes(),
+                    high_qc_view: hqc,
+                    ed25519_sig: ed.sign(&d).to_vec(),
+                    pq_sig: pq.sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &d).unwrap(),
+                }
+            })
+            .collect();
+        let tc = HotStuffTimeoutCertificate {
+            epoch: 7,
+            view: 50,
+            max_high_qc_view: 48,
+            votes,
+        };
+        let (max_hqc, stake, all_pq) =
+            verify_hotstuff_timeout_certificate("aptos-jolteon-1", &pinned, &tc).unwrap();
+        assert_eq!(max_hqc, 48);
+        assert_eq!(stake, 75);
+        assert!(all_pq);
+
+        // Lying about max_high_qc_view (safety-lock downgrade attack) is refused.
+        let mut downgraded_tc = tc;
+        downgraded_tc.max_high_qc_view = 46;
+        assert!(matches!(
+            verify_hotstuff_timeout_certificate("aptos-jolteon-1", &pinned, &downgraded_tc),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("max_high_qc_view")
+        ));
+
+        // 2. Slashable same-view double-vote equivocation extracts exact culprit & weight,
+        //    and refuses classical-only framing lacking ML-DSA-65 co-signature.
+        let (culprit_ed, culprit_pq) = &keys[1];
+        let ha = [0xA1; 32];
+        let hb = [0xB2; 32];
+        let ma = hotstuff_vote_sign_bytes("aptos-jolteon-1", 7, 51, &ha);
+        let mb = hotstuff_vote_sign_bytes("aptos-jolteon-1", 7, 51, &hb);
+        let eq_proof = HotStuffEquivocationProof {
+            epoch: 7,
+            view: 51,
+            block_hash_a: ha,
+            block_hash_b: hb,
+            vote_a: HotStuffVoteSig {
+                signer_pubkey: culprit_ed.public_key_bytes(),
+                ed25519_sig: culprit_ed.sign(&ma).to_vec(),
+                pq_sig: culprit_pq
+                    .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &ma)
+                    .unwrap(),
+            },
+            vote_b: HotStuffVoteSig {
+                signer_pubkey: culprit_ed.public_key_bytes(),
+                ed25519_sig: culprit_ed.sign(&mb).to_vec(),
+                pq_sig: culprit_pq
+                    .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &mb)
+                    .unwrap(),
+            },
+        };
+        let (slashed_pk, weight) =
+            verify_hotstuff_equivocation("aptos-jolteon-1", &pinned, &eq_proof).unwrap();
+        assert_eq!(slashed_pk, culprit_ed.public_key_bytes());
+        assert_eq!(weight, 25);
+
+        let mut framed = eq_proof;
+        framed.vote_b.pq_sig.clear();
+        assert!(matches!(
+            verify_hotstuff_equivocation("aptos-jolteon-1", &pinned, &framed),
+            Err(AdapterError::Crypto { ref what }) if what.contains("ML-DSA-65")
         ));
     }
 }

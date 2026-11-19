@@ -1,6 +1,9 @@
 //! Tendermint and CometBFT commit finality: the adapter for the family whose
 //! finality is a signed commit.
 //!
+//! WIRING: unwired - standalone ICS-07 bisection header-skip verifier lands
+//! with the non-adjacent Tendermint anchor rotation transaction door.
+//!
 //! # What this adapter verifies, and what it refuses to assume
 //!
 //! A Tendermint commit is a set of Ed25519 precommits over a canonical vote:
@@ -824,7 +827,7 @@ const MAX_STORED_CONSENSUS_STATES: usize = 256;
 /// Forward is unbounded at the raw anchor floor (while ICS-07 light-client and
 /// era-pinned transitions additionally enforce strict forward drift bounds via
 /// `height_within_forward_drift`); backward is bounded by [`MAX_HEIGHT_DRIFT`].
-/// WIRING: `B-0063` pinned-era guard consumed by [`TendermintAdapter::verify`] and intake callers.
+/// WIRING: `B-0063` pinned-era guard consumed by [`TendermintFinalityAdapter::verify`] and intake callers.
 #[must_use]
 pub const fn height_within_pinned_era(pinned_height: u64, height: u64) -> bool {
     height.saturating_add(MAX_HEIGHT_DRIFT) >= pinned_height
