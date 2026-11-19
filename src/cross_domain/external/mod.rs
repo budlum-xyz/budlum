@@ -83,8 +83,10 @@ pub mod algorand_stateproof;
 pub mod arweave_spora;
 pub mod auxpow_pop;
 pub mod babylon_eots;
+pub mod aptos_jolteon_bft;
 pub mod based_preconf;
 pub mod bitcoin_spv;
+pub mod chain_key_ni_dkg;
 pub mod da_sampling;
 pub mod dag_bft;
 pub mod domain_bridge;
@@ -133,10 +135,22 @@ pub use babylon_eots::{
     DEFAULT_REQUIRED_BTC_CONFIRMATIONS, EVIDENCE_VERSION as EOTS_EVIDENCE_VERSION,
     SCHNORR_PUBLIC_KEY_LEN, SCHNORR_SIGNATURE_LEN,
 };
+pub use aptos_jolteon_bft::{
+    encode_jolteon_evidence, jolteon_tc_sign_bytes, jolteon_vote_sign_bytes,
+    verify_jolteon_equivocation, AptosJolteonAdapter, JolteonBlock, JolteonEquivocationProof,
+    JolteonQuorumCert, JolteonTimeoutCert, JolteonTwoChainEvidence, JolteonValidator,
+    JolteonValidatorSig, PinnedJolteonEpochState, APTOS_JOLTEON_ADAPTER_NAME,
+};
+};
 pub use based_preconf::{BasedPreconfAdapter, BasedPreconfValidator, PinnedBasedPreconfCommittee};
 pub use bitcoin_spv::{
     sha256d, BitcoinHeader, BitcoinSpvAdapter, PinnedBitcoinAnchor, EVIDENCE_VERSION, HEADER_LEN,
     MAX_FUTURE_SECONDS, MAX_HEADERS, REQUIRED_DEPTH,
+};
+pub use chain_key_ni_dkg::{
+    compute_nidkg_transcript_digest, cup_signing_digest, delegation_signing_digest,
+    encode_chain_key_evidence, ChainKeyCatchUpPackage, ChainKeyEvidenceBundle,
+    ChainKeyNiDkgAdapter, ChainKeySubnetDelegation, PinnedChainKeyRoot, CHAIN_KEY_ADAPTER_NAME,
 };
 pub use dag_bft::{BullsharkDagAdapter, DagBftValidator, PinnedDagCommittee};
 pub use domain_bridge::{

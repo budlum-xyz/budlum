@@ -8,6 +8,11 @@
 //! WIRING: unwired - standalone SPV tx-inclusion and recursive header-STARK
 //! verifiers land with the BTC bridge redemption transaction door.
 //!
+//! WIRING: unwired - `verify_bitcoin_header_chain_stark` and
+//! `VerifiedBitcoinChain::verify_confirmed_payment` require a STARK prover
+//! that is not part of the production build; they are exercised by the
+//! pinned-mainnet test corpus and the canonical spec encoding only.
+//!
 //! # Why this adapter exists
 //!
 //! The external-domain framework declared [`SecurityBacking::Work`] and the
