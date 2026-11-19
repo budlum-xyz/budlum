@@ -679,6 +679,27 @@ impl TendermintCommitEvidence {
     }
 }
 
+/// How far below a pinned anchor's height a commit may still be accepted.
+///
+/// A pin is a claim about the era a domain is anchored in, not about one height.
+/// Unbounded, a commit from any past height of that chain verifies against the
+/// same pin - validator sets rarely change - so an operator could hand in a
+/// two-year-old commit and the attestation would read as a statement about now.
+/// One hundred thousand blocks is roughly two weeks on Cosmos chains: generous,
+/// and the point is only that "old" becomes a refusal instead of a stale fact
+/// nobody notices.
+pub const MAX_HEIGHT_DRIFT: u64 = 100_000;
+
+/// Whether a commit's height is inside the era a pinned anchor may speak for.
+///
+/// Forward is unbounded: the chain is allowed to have advanced since the pin was
+/// taken, and refusing that would make every pin stale the moment it is written.
+/// Backward is bounded by [`MAX_HEIGHT_DRIFT`].
+#[must_use]
+pub fn height_within_pinned_era(pinned_height: u64, height: u64) -> bool {
+    height.saturating_add(MAX_HEIGHT_DRIFT) >= pinned_height
+}
+
 /// `2 * total / 3 + 1`, in integer arithmetic.
 #[must_use]
 pub fn quorum_threshold(total_voting_power: u128) -> u128 {
@@ -837,7 +858,8 @@ pub struct VerifiedTendermintSkip {
 ///   `trusted.trusting_period_secs`.
 /// - When `app_hash_proof` is supplied, cryptographically proves `target.app_hash`
 ///   at [`COMETBFT_HEADER_APP_HASH_INDEX`] inside signed `target.block_hash`;
-///   otherwise fails closed unless `target.app_hash == target.block_hash`.
+///   otherwise fails closed unless `target.header_hash() == target.block_hash`,
+///   i.e. the header supplied is the one the validators signed.
 /// - When `next_validators` is supplied, proves the rotated `next_validators_hash`
 ///   at [`COMETBFT_HEADER_NEXT_VALIDATORS_INDEX`] inside signed `target.block_hash`.
 ///
@@ -1005,13 +1027,20 @@ pub fn verify_skipping_commit(
         }
         target.app_hash
     } else if bool::from(subtle::ConstantTimeEq::ct_eq(
-        target.app_hash.as_slice(),
+        target.header_hash().as_slice(),
         target.block_hash.as_slice(),
     )) {
-        target.block_hash
+        // No inclusion proof, so the header hash itself is the proof. If the
+        // header the caller supplied rebuilds the signed `block_hash`, then every
+        // field in it - `app_hash` included - is covered by the same signatures,
+        // and no separate RFC-6962 path is needed. The rule this replaces
+        // compared `app_hash` to `block_hash`, which is true of no real chain:
+        // it only ever held for hand-built payloads, so the path was a closed
+        // door that looked like an open one.
+        target.app_hash
     } else {
         return Err(rule(
-            "skipping commit with distinct app_hash requires a valid RFC-6962 header proof",
+            "skipping commit neither rebuilds its signed block_hash nor carries an RFC-6962 app_hash proof",
         ));
     };
 
@@ -3310,5 +3339,67 @@ mod tests {
             verify_skipping_commit(&trusted, &valid_skip, Some(&app_proof), None, 1_750_100_000),
             Err(AdapterError::Stale { .. })
         ));
+    }
+
+    #[test]
+    fn a_skipping_commit_that_rebuilds_its_header_needs_no_app_hash_proof() {
+        // The skipping path used to demand either an RFC-6962 app-hash proof or
+        // `app_hash == block_hash` - and the second is true of no real chain, so
+        // the path was closed while looking open. A header that rebuilds the
+        // signed block id is the proof: the app hash is one of its leaves.
+        let chain_id = "noble-1";
+        let keyring = keys(4);
+        let trusted_vals: Vec<TendermintValidator> = keyring
+            .iter()
+            .map(|key| TendermintValidator {
+                address: validator_address_of(&key.public_key_bytes()),
+                public_key: key.public_key_bytes(),
+                voting_power: 100,
+            })
+            .collect();
+        let target_vals = trusted_vals.clone();
+        let mut target = synthetic_commit(&[100, 100, 100, 100], 3);
+        target.chain_id = chain_id.to_string();
+        target.height = 101;
+        target.validators_hash = validator_set_hash(&target_vals);
+        target.next_validators_hash = validator_set_hash(&target_vals);
+        target.validators = target_vals.clone();
+        target.block_hash = target.header_hash();
+        resign(&mut target, &keyring);
+
+        let trusted = TrustedTendermintState {
+            chain_id: chain_id.to_string(),
+            height: 100,
+            time_secs: 1_750_000_000,
+            trusting_period_secs: 86_400,
+            validators: trusted_vals,
+            next_validators_hash: validator_set_hash(&target_vals),
+        };
+        let verified = verify_skipping_commit(&trusted, &target, None, None, 1_750_010_010)
+            .expect("a header that rebuilds the signed block id proves its own app hash");
+        assert_eq!(verified.app_hash, target.app_hash);
+
+        // And a header that does not rebuild it is still refused: the reason the
+        // fallback is a check rather than a shortcut.
+        let mut tampered = target.clone();
+        tampered.app_hash = [0x5cu8; 32];
+        assert!(matches!(
+            verify_skipping_commit(&trusted, &tampered, None, None, 1_750_010_010),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+    }
+
+    #[test]
+    fn the_pinned_era_bound_is_asymmetric_and_bounded() {
+        // Forward is free: a pin is a floor on the era, not a ceiling on the
+        // chain's progress. Backward is bounded, or a two-year-old commit would
+        // verify against today's pin.
+        const PIN: u64 = 200_000;
+        assert!(height_within_pinned_era(PIN, PIN));
+        assert!(height_within_pinned_era(PIN, PIN + MAX_HEIGHT_DRIFT));
+        assert!(height_within_pinned_era(PIN, 5_000_000));
+        assert!(height_within_pinned_era(PIN, PIN - MAX_HEIGHT_DRIFT));
+        assert!(!height_within_pinned_era(PIN, PIN - MAX_HEIGHT_DRIFT - 1));
+        assert!(!height_within_pinned_era(u64::MAX, 0));
     }
 }
