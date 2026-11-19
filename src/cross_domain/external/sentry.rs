@@ -1508,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    fn testnet_readiness_evaluator_fails_closed_on_every_unmet_tlg_gate() {
+    fn testnet_readiness_evaluator_fails_closed_on_every_unmet_launch_gate() {
         let ok = evaluate_testnet_readiness(&green_snapshot());
         assert!(ok.ready);
         assert!(ok.blockers.is_empty());

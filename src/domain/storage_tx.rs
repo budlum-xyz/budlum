@@ -2977,36 +2977,34 @@ mod tests {
 
     #[test]
     fn open_challenge_refuses_too_short_response_window() {
-        let (mut state, opener, operator, _manifest) = setup_challenge_env();
-        let deal_id = open_deal_for_challenge(&mut state, &opener, &operator);
-        // deadline_epoch = current_epoch + 1 (window of 1, below MIN_AUDIT_RESPONSE_WINDOW_EPOCHS)
+        let mut state = AccountState::new();
+        let (_operator, opener, deal_id) = challengeable(&mut state);
+        // deadline_epoch = current_epoch + 1 (below minimum response window)
         let tx = StorageTx::OpenChallenge {
             deal_id,
-            range_len: 1024,
+            range_len: 16,
             deadline_epoch: state.epoch_index + 1,
             opener_bond: 100,
         };
         let err = execute_storage_tx(&mut state, &ctx(opener), &tx).unwrap_err();
         assert!(
-            err.to_string().contains("response window"),
+            matches!(err, StorageTxError::ChallengeRefused(_)),
             "unexpected: {err}"
         );
     }
 
     #[test]
     fn open_challenge_refuses_deadline_past_deal_expiry() {
-        let (mut state, opener, operator, _manifest) = setup_challenge_env();
-        let deal_id = open_deal_for_challenge(&mut state, &opener, &operator);
-        // Get deal end_epoch
+        let mut state = AccountState::new();
+        let (_operator, opener, deal_id) = challengeable(&mut state);
         let deal_end = state
             .storage_registry
             .get_deal(deal_id)
             .unwrap()
             .deal_end_epoch;
-        // deadline_epoch past deal end
         let tx = StorageTx::OpenChallenge {
             deal_id,
-            range_len: 1024,
+            range_len: 16,
             deadline_epoch: deal_end + 10,
             opener_bond: 100,
         };

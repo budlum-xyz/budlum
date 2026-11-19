@@ -335,11 +335,10 @@ pub fn execute_liquidation(
         let collateral_value_x = pos.collateral_y.saturating_mul(scale) / twap_price.max(1);
 
         // health_bps = collateral_value_x * 10000 / debt_x
-        let health_bps = if pos.debt_x > 0 {
-            collateral_value_x.saturating_mul(BPS_DEN as u128) / pos.debt_x
-        } else {
-            u64::MAX as u128
-        };
+        let health_bps = collateral_value_x
+            .saturating_mul(u128::from(BPS_DEN))
+            .checked_div(pos.debt_x)
+            .unwrap_or(u128::from(u64::MAX));
 
         if health_bps > pos.maintenance_threshold_bps as u128 {
             // Position is healthy, skip.
@@ -381,12 +380,13 @@ mod tests {
 
     #[test]
     fn valid_liquidation_seizes_correct_collateral() {
-        // price Y/X = 2.0 (reserve_y=200, reserve_x=100)
+        // price Y/X = 2.0 (reserve_y=200, reserve_x=100); debt_x=1000 costs 2000 Y,
+        // so collateral_y=2500 has health factor 12_500 bps (< 15_000 bps threshold).
         let obs = make_observations(&[(1, 100, 200), (2, 100, 200), (3, 100, 200)]);
         let positions = vec![LiquidationPosition {
             position_id: 1,
             debt_x: 1000,
-            collateral_y: 5000,
+            collateral_y: 2500,
             maintenance_threshold_bps: 15_000, // 1.5x
         }];
         let outcomes = execute_liquidation(&obs, &positions).expect("liquidation");
@@ -396,7 +396,7 @@ mod tests {
         // debt_in_y = 1000 * 2e18 * 10500 / (1e18 * 10000) = 1000 * 2 * 1.05 = 2100
         assert_eq!(o.debt_repaid_x, 1000);
         assert_eq!(o.seized_collateral_y, 2100);
-        assert_eq!(o.remainder_y, 5000 - 2100);
+        assert_eq!(o.remainder_y, 2500 - 2100);
     }
 
     #[test]

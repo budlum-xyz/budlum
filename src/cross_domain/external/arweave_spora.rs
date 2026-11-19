@@ -1,34 +1,39 @@
-//! Arweave SPoRA (Storage Price Oracle) / Recall-Weave permanent storage
-//! external finality adapter.
+//! Arweave SPoRA / Recall-Weave permanent storage external finality adapter.
 //!
-//! Arweave provides permanent data storage via an endowment-funded model:
-//! storage fees are deposited into a pool that pays miners over time. The
-//! SPoRA mechanism provides oracle attestations of storage state, and
-//! Recall-Weave extends this with user-controlled permanent recall rights.
+//! Arweave funds permanent storage through an on-chain endowment pool paired
+//! with Succinct Proofs of Random Access (SPoRA). This adapter verifies external
+//! Arweave storage-recall evidence under four fail-closed rules:
 //!
-//! This adapter attests Arweave storage state under four rules:
+//! 1. **Domain-separated Merkle inclusion**: reconstructs the canonical weave
+//!    root from the chunk leaf `(chunk_id, chunk_offset, chunk_size,
+//!    chunk_data_hash)` and bounded sibling path using distinct `leaf` and
+//!    `node` domain separators and path bits derived from the chunk index, and
+//!    compares it in constant time against the non-zero `weave_root`.
+//! 2. **Overflow-safe contamination ceiling**: enforces
+//!    `encumbered_endowment * 10_000 <= 3_000 * gross_endowment` using exact
+//!    256-bit unsigned multiplication so large `u128` values never saturate
+//!    into a false pass.
+//! 3. **Checked endowment solvency**: verifies `free_endowment >= chunk_size *
+//!    spora_rate * MIN_SUSTAINANCE_EPOCHS` with checked arithmetic (overflow
+//!    fails closed).
+//! 4. **Authenticated hybrid operator signature**: verifies both a strict
+//!    Ed25519 signature and a FIPS 204 ML-DSA-65 post-quantum signature under
+//!    [`crate::crypto::ctx::CROSS_DOMAIN_V1`] over the canonical
+//!    domain-separated attestation digest binding the network, height, epoch,
+//!    weave root, chunk commitment and endowment parameters.
 //!
-//! 1. **Non-seizable unique slashable collateral**: each storage commitment
-//!    is backed by a unique, non-fungible collateral token. The adapter
-//!    computes `free_collateral = gross - encumbered` with the same 30%
-//!    contamination cap as the Symbiotic adapter, because the economic
-//!    soundness argument is identical.
-//! 2. **Permanent storage proof**: the evidence includes a Merkle proof
-//!    that the data chunk exists in the Arweave weave at the claimed
-//!    offset, verified against the weave's Merkle root.
-//! 3. **Endowment solvency check**: the adapter verifies that the storage
-//!    endowment has sufficient remaining balance to sustain the claimed
-//!    data for at least `MIN_SUSTAINANCE_EPOCHS` at the current SPoRA rate.
-//! 4. **Equivocation slashability**: two attestations for the same
-//!    `(chunk_id, epoch)` with different Merkle roots constitute
-//!    slashable equivocation.
-//!
-//! WIRING: implements [`ExternalFinalityAdapter`] for
-//! [`super::ExternalDomainRegistry`] admission and slashing.
+//! WIRING: unwired - external Arweave SPoRA recall adapter awaits `AdapterSpec`
+//! variant binding in `external_tx` domain intake.
 
-use crate::crypto::facts::ObservedScheme;
-use crate::domain::types::Hash32;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
+
+use crate::core::hash::hash_fields_bytes;
+use crate::crypto::facts::{CryptoObserver, ObservedScheme};
+use crate::crypto::pq;
+use crate::crypto::primitives::verify_signature;
+use crate::crypto::scheme::SchemeId;
+use crate::domain::types::Hash32;
 
 use super::selftest::{BytePatch, ExpectedRefusal, FaultProbe, RefusalKind};
 use super::spec::{
@@ -44,9 +49,11 @@ const EVIDENCE_VERSION: u32 = 1;
 const PAYLOAD_MAGIC: &[u8; 8] = b"BDLARA01";
 const MAX_PAYLOAD_BYTES: usize = 512 * 1024;
 const MAX_CHUNK_ID_LEN: usize = 128;
-/// 30% contamination cap, same argument as Symbiotic.
-const CONTAMINATION_CAP_BPS: u64 = 3_000;
-const BPS_DENOMINATOR: u64 = 10_000;
+const ED25519_PK_LEN: usize = 32;
+const ED25519_SIG_LEN: usize = 64;
+/// 30% contamination ceiling in basis points.
+const CONTAMINATION_CAP_BPS: u128 = 3_000;
+const BPS_DENOMINATOR: u128 = 10_000;
 /// Minimum endowment sustenance in Arweave epochs (~2 weeks each).
 const MIN_SUSTAINANCE_EPOCHS: u64 = 26;
 const MAX_MERKLE_PROOF_DEPTH: usize = 64;
@@ -54,38 +61,101 @@ const MAX_MERKLE_PROOF_DEPTH: usize = 64;
 /// Arweave SPoRA storage attestation evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArweaveSpOraEvidence {
-    /// Protocol magic.
+    /// Protocol magic (`b"BDLARA01"`).
     pub magic: [u8; 8],
-    /// Data chunk identifier (base64url-encoded Arweave tx id).
+    /// Data chunk identifier (printable ASCII base64url Arweave chunk id).
     pub chunk_id: Vec<u8>,
+    /// Canonical 32-byte digest of the stored recall chunk bytes.
+    pub chunk_data_hash: [u8; 32],
     /// Arweave block height.
     pub block_height: u64,
     /// Current Arweave epoch.
     pub epoch: u64,
-    /// Weave Merkle root at this height.
+    /// Non-zero weave Merkle root at this height.
     pub weave_root: [u8; 32],
-    /// Merkle proof path from chunk to weave root.
+    /// Non-empty Merkle sibling path from chunk leaf to `weave_root`.
     pub merkle_proof: Vec<[u8; 32]>,
-    /// Chunk offset within the weave.
+    /// Byte offset of the chunk within the weave (multiple of `chunk_size`).
     pub chunk_offset: u64,
-    /// Chunk size in bytes.
+    /// Non-zero chunk size in bytes.
     pub chunk_size: u64,
     /// Gross storage endowment balance in winston.
     pub gross_endowment: u128,
-    /// Encumbered endowment (committed to future storage payments).
+    /// Encumbered endowment committed to existing storage obligations.
     pub encumbered_endowment: u128,
-    /// Current SPoRA storage rate in winston/byte/epoch.
+    /// Current SPoRA storage rate in winston per byte per epoch.
     pub spora_rate: u128,
-    /// Operator attestation signature (Arweave wallet, 512 bytes RSA-PSS).
+    /// Classical Ed25519 operator signature over [`Self::signing_digest`].
     pub operator_signature: Vec<u8>,
-    /// Operator public key (Arweave wallet, 512 bytes RSA).
+    /// Classical 32-byte Ed25519 operator public key.
     pub operator_key: Vec<u8>,
+    /// Post-quantum FIPS 204 ML-DSA-65 operator signature over [`Self::signing_digest`].
+    pub operator_pq_signature: Vec<u8>,
+    /// Post-quantum FIPS 204 ML-DSA-65 operator public key.
+    pub operator_pq_key: Vec<u8>,
+}
+
+/// Compute the canonical domain-separated leaf digest for a weave chunk.
+#[must_use]
+pub fn compute_weave_leaf(
+    chunk_id: &[u8],
+    chunk_data_hash: &Hash32,
+    chunk_offset: u64,
+    chunk_size: u64,
+) -> Hash32 {
+    let off = chunk_offset.to_le_bytes();
+    let sz = chunk_size.to_le_bytes();
+    hash_fields_bytes(&[
+        b"BDLM_ARWEAVE_SPORA_V1",
+        b"leaf",
+        chunk_id,
+        chunk_data_hash,
+        &off,
+        &sz,
+    ])
+}
+
+/// Fold a leaf digest and sibling path using direction bits from `leaf_index`
+/// with distinct internal-node domain separation.
+#[must_use]
+pub fn fold_weave_merkle_path(leaf: Hash32, leaf_index: u64, proof: &[Hash32]) -> Hash32 {
+    let mut acc = leaf;
+    for (depth, sibling) in proof.iter().enumerate() {
+        let level = (depth as u32).to_le_bytes();
+        let is_right = depth < 64 && ((leaf_index >> depth) & 1) == 1;
+        let (left, right) = if is_right {
+            (sibling, &acc)
+        } else {
+            (&acc, sibling)
+        };
+        acc = hash_fields_bytes(&[b"BDLM_ARWEAVE_SPORA_V1", b"node", &level, left, right]);
+    }
+    acc
+}
+
+fn wide_mul_u128(x: u128, y: u128) -> (u128, u128) {
+    let mask = u128::from(u64::MAX);
+    let x0 = x & mask;
+    let x1 = x >> 64;
+    let y0 = y & mask;
+    let y1 = y >> 64;
+
+    let p0 = x0 * y0;
+    let p1 = x0 * y1;
+    let p2 = x1 * y0;
+    let p3 = x1 * y1;
+
+    let mid = (p0 >> 64) + (p1 & mask) + (p2 & mask);
+    let hi = p3 + (p1 >> 64) + (p2 >> 64) + (mid >> 64);
+    let lo = (p0 & mask) | (mid << 64);
+    (hi, lo)
 }
 
 impl ArweaveSpOraEvidence {
-    /// Canonical domain-separated digest.
+    /// Canonical domain-separated message signed by the operator's Ed25519 and
+    /// ML-DSA-65 keys for `network`.
     #[must_use]
-    pub fn digest(&self) -> Hash32 {
+    pub fn signing_digest(&self, network: &str) -> Hash32 {
         let block_height = self.block_height.to_le_bytes();
         let epoch = self.epoch.to_le_bytes();
         let chunk_offset = self.chunk_offset.to_le_bytes();
@@ -95,8 +165,11 @@ impl ArweaveSpOraEvidence {
         let spora_rate = self.spora_rate.to_le_bytes();
         let mut fields: Vec<&[u8]> = vec![
             b"BDLM_ARWEAVE_SPORA_V1",
+            b"attest",
+            network.as_bytes(),
             &self.magic,
             &self.chunk_id,
+            &self.chunk_data_hash,
             &block_height,
             &epoch,
             &self.weave_root,
@@ -105,11 +178,26 @@ impl ArweaveSpOraEvidence {
             &gross_endowment,
             &encumbered_endowment,
             &spora_rate,
+            &self.operator_key,
+            &self.operator_pq_key,
         ];
         for node in &self.merkle_proof {
             fields.push(node);
         }
-        crate::core::hash::hash_fields_bytes(&fields)
+        hash_fields_bytes(&fields)
+    }
+
+    /// Canonical domain-separated digest of the complete evidence envelope.
+    #[must_use]
+    pub fn digest(&self) -> Hash32 {
+        let signing = self.signing_digest("");
+        hash_fields_bytes(&[
+            b"BDLM_ARWEAVE_SPORA_V1",
+            b"bundle",
+            &signing,
+            &self.operator_signature,
+            &self.operator_pq_signature,
+        ])
     }
 }
 
@@ -122,25 +210,71 @@ fn validate_evidence_fields(ev: &ArweaveSpOraEvidence) -> Result<(), AdapterErro
             ),
         });
     }
-    if ev.chunk_id.is_empty() || ev.chunk_id.len() > MAX_CHUNK_ID_LEN {
+    if ev.chunk_id.is_empty()
+        || ev.chunk_id.len() > MAX_CHUNK_ID_LEN
+        || !ev.chunk_id.iter().all(|b| b.is_ascii_graphic())
+    {
         return Err(AdapterError::ConsensusRule {
             rule: format!(
-                "Arweave chunk_id length {} outside 1..={MAX_CHUNK_ID_LEN}",
+                "Arweave chunk_id invalid or length {} outside 1..={MAX_CHUNK_ID_LEN}",
                 ev.chunk_id.len()
             ),
         });
     }
-    if ev.merkle_proof.len() > MAX_MERKLE_PROOF_DEPTH {
+    if ev.chunk_data_hash == [0u8; 32] {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Arweave chunk_data_hash must be non-zero".into(),
+        });
+    }
+    if ev.weave_root == [0u8; 32] {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Arweave weave_root must be non-zero".into(),
+        });
+    }
+    if ev.chunk_size == 0 {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Arweave chunk_size must be non-zero".into(),
+        });
+    }
+    if !ev.chunk_offset.is_multiple_of(ev.chunk_size) {
         return Err(AdapterError::ConsensusRule {
             rule: format!(
-                "Arweave merkle_proof depth {} exceeds {MAX_MERKLE_PROOF_DEPTH}",
+                "Arweave chunk_offset {} not aligned to chunk_size {}",
+                ev.chunk_offset, ev.chunk_size
+            ),
+        });
+    }
+    if ev.merkle_proof.is_empty() || ev.merkle_proof.len() > MAX_MERKLE_PROOF_DEPTH {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!(
+                "Arweave merkle_proof depth {} outside 1..={MAX_MERKLE_PROOF_DEPTH}",
                 ev.merkle_proof.len()
             ),
         });
     }
-    if ev.operator_key.is_empty() || ev.operator_signature.is_empty() {
+    Ok(())
+}
+
+fn verify_weave_inclusion(ev: &ArweaveSpOraEvidence) -> Result<(), AdapterError> {
+    let leaf = compute_weave_leaf(
+        &ev.chunk_id,
+        &ev.chunk_data_hash,
+        ev.chunk_offset,
+        ev.chunk_size,
+    );
+    let leaf_index = ev.chunk_offset / ev.chunk_size;
+    if ev.merkle_proof.len() < 64 && (leaf_index >> ev.merkle_proof.len()) != 0 {
         return Err(AdapterError::ConsensusRule {
-            rule: "Arweave evidence missing operator key or signature".into(),
+            rule: format!(
+                "Arweave leaf_index {leaf_index} exceeds 2^{} tree capacity",
+                ev.merkle_proof.len()
+            ),
+        });
+    }
+    let derived = fold_weave_merkle_path(leaf, leaf_index, &ev.merkle_proof);
+    if !bool::from(derived.ct_eq(&ev.weave_root)) {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Arweave Merkle proof does not reconstruct weave_root".into(),
         });
     }
     Ok(())
@@ -156,10 +290,8 @@ fn validate_contamination(ev: &ArweaveSpOraEvidence) -> Result<u128, AdapterErro
         });
     }
     if ev.gross_endowment > 0
-        && ev
-            .encumbered_endowment
-            .saturating_mul(BPS_DENOMINATOR as u128)
-            > (CONTAMINATION_CAP_BPS as u128).saturating_mul(ev.gross_endowment)
+        && wide_mul_u128(ev.encumbered_endowment, BPS_DENOMINATOR)
+            > wide_mul_u128(ev.gross_endowment, CONTAMINATION_CAP_BPS)
     {
         return Err(AdapterError::ConsensusRule {
             rule: format!("Arweave contamination exceeds cap {CONTAMINATION_CAP_BPS} bps"),
@@ -168,25 +300,83 @@ fn validate_contamination(ev: &ArweaveSpOraEvidence) -> Result<u128, AdapterErro
     Ok(ev.gross_endowment.saturating_sub(ev.encumbered_endowment))
 }
 
-fn validate_endowment_solvency(ev: &ArweaveSpOraEvidence) -> Result<(), AdapterError> {
+fn validate_endowment_solvency(ev: &ArweaveSpOraEvidence, free: u128) -> Result<(), AdapterError> {
     if ev.spora_rate == 0 {
         return Err(AdapterError::ConsensusRule {
             rule: "Arweave SPoRA rate is zero".into(),
         });
     }
-    let free = ev.gross_endowment.saturating_sub(ev.encumbered_endowment);
-    // Cost to sustain chunk_size bytes for MIN_SUSTAINANCE_EPOCHS
-    let sustain_cost = (ev.chunk_size as u128)
-        .saturating_mul(ev.spora_rate)
-        .saturating_mul(MIN_SUSTAINANCE_EPOCHS as u128);
+    let sustain_cost = u128::from(ev.chunk_size)
+        .checked_mul(ev.spora_rate)
+        .and_then(|v| v.checked_mul(u128::from(MIN_SUSTAINANCE_EPOCHS)))
+        .ok_or_else(|| AdapterError::ConsensusRule {
+            rule: "Arweave sustenance cost overflows u128".into(),
+        })?;
     if free < sustain_cost {
         return Err(AdapterError::ConsensusRule {
             rule: format!(
-                "Arweave endowment insufficient: free={free}, need={sustain_cost} for {} epochs",
-                MIN_SUSTAINANCE_EPOCHS
+                "Arweave endowment insufficient: free={free}, need={sustain_cost} for {MIN_SUSTAINANCE_EPOCHS} epochs"
             ),
         });
     }
+    Ok(())
+}
+
+fn verify_operator_signatures(
+    ev: &ArweaveSpOraEvidence,
+    network: &str,
+    pinned_keys: Option<(&[u8; ED25519_PK_LEN], &[u8])>,
+) -> Result<(), AdapterError> {
+    let pk_arr: [u8; ED25519_PK_LEN] =
+        ev.operator_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| AdapterError::Crypto {
+                what: format!(
+                    "Arweave operator Ed25519 key length {} != {ED25519_PK_LEN}",
+                    ev.operator_key.len()
+                ),
+            })?;
+    let sig_arr: [u8; ED25519_SIG_LEN] =
+        ev.operator_signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| AdapterError::Crypto {
+                what: format!(
+                    "Arweave operator Ed25519 signature length {} != {ED25519_SIG_LEN}",
+                    ev.operator_signature.len()
+                ),
+            })?;
+    if let Some((expected_ed, expected_pq)) = pinned_keys {
+        if !bool::from(pk_arr.ct_eq(expected_ed))
+            || ev.operator_pq_key.len() != expected_pq.len()
+            || !bool::from(ev.operator_pq_key.as_slice().ct_eq(expected_pq))
+        {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Arweave operator key does not match pinned oracle anchor".into(),
+            });
+        }
+    }
+    pq::validate_public_key(SchemeId::ML_DSA_65, &ev.operator_pq_key).map_err(|e| {
+        AdapterError::Crypto {
+            what: format!("Arweave invalid ML-DSA-65 operator key: {e}"),
+        }
+    })?;
+
+    let msg = ev.signing_digest(network);
+    verify_signature(&msg, &sig_arr, &pk_arr).map_err(|e| AdapterError::Crypto {
+        what: format!("Arweave operator Ed25519 signature verification failed: {e}"),
+    })?;
+    pq::verify(
+        SchemeId::ML_DSA_65,
+        &ev.operator_pq_key,
+        &msg,
+        crate::crypto::ctx::CROSS_DOMAIN_V1,
+        &ev.operator_pq_signature,
+    )
+    .map_err(|e| AdapterError::Crypto {
+        what: format!("Arweave operator ML-DSA-65 signature verification failed: {e}"),
+    })?;
     Ok(())
 }
 
@@ -194,6 +384,7 @@ fn validate_endowment_solvency(ev: &ArweaveSpOraEvidence) -> Result<(), AdapterE
 #[derive(Debug, Clone)]
 pub struct ArweaveSpOraAdapter {
     network: String,
+    pinned_operator: Option<([u8; ED25519_PK_LEN], Vec<u8>)>,
 }
 
 impl ArweaveSpOraAdapter {
@@ -202,14 +393,42 @@ impl ArweaveSpOraAdapter {
     pub fn new(network: impl Into<String>) -> Self {
         Self {
             network: network.into(),
+            pinned_operator: None,
         }
     }
 
-    /// Verify storage evidence and return free endowment.
+    /// Pin the expected hybrid operator keys (Ed25519 + ML-DSA-65) so unpinned
+    /// self-signed storage claims fail closed.
+    ///
+    /// WIRING: consumed by operator-pinned weave intake and adversarial tests.
+    #[must_use]
+    pub fn with_pinned_operator(
+        mut self,
+        ed25519_pk: [u8; ED25519_PK_LEN],
+        pq_pk: Vec<u8>,
+    ) -> Self {
+        self.pinned_operator = Some((ed25519_pk, pq_pk));
+        self
+    }
+
+    /// Verify field bounds, Merkle weave inclusion, contamination ceiling,
+    /// checked endowment solvency, and hybrid Ed25519 + ML-DSA-65 operator
+    /// signatures, returning non-encumbered endowment in winston.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] if any structural, Merkle, solvency, or
+    /// cryptographic signature check fails.
     pub fn verify_storage(&self, evidence: &ArweaveSpOraEvidence) -> Result<u128, AdapterError> {
         validate_evidence_fields(evidence)?;
+        verify_weave_inclusion(evidence)?;
         let free = validate_contamination(evidence)?;
-        validate_endowment_solvency(evidence)?;
+        validate_endowment_solvency(evidence, free)?;
+        let pinned = self
+            .pinned_operator
+            .as_ref()
+            .map(|(ed, pq_pk)| (ed, pq_pk.as_slice()));
+        verify_operator_signatures(evidence, &self.network, pinned)?;
         Ok(free)
     }
 }
@@ -272,20 +491,29 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
         }
 
         let state_root = ev.weave_root;
-        let digest = evidence.digest();
-
-        if policy.require_declared_match && evidence.declared_root != state_root {
-            return Err(AdapterError::ConsensusRule {
-                rule: format!(
-                    "Arweave declared_root mismatch: index={}, evidence={}",
-                    hex::encode(evidence.declared_root),
-                    hex::encode(state_root)
-                ),
-            });
+        if policy.require_declared_match {
+            if evidence.declared_height != ev.block_height {
+                return Err(AdapterError::ConsensusRule {
+                    rule: format!(
+                        "Arweave declared_height mismatch: declared={}, block_height={}",
+                        evidence.declared_height, ev.block_height
+                    ),
+                });
+            }
+            if evidence.declared_root != state_root {
+                return Err(AdapterError::ConsensusRule {
+                    rule: format!(
+                        "Arweave declared_root mismatch: index={}, evidence={}",
+                        hex::encode(evidence.declared_root),
+                        hex::encode(state_root)
+                    ),
+                });
+            }
         }
 
+        let digest = ev.digest();
         let backing = SecurityBacking::SignatureSet {
-            scheme: ObservedScheme::Secp256k1,
+            scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
             signers: 1,
             required: 1,
             total_weight: free_endowment,
@@ -295,7 +523,7 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
         Ok(FinalityAttestation {
             adapter: self.descriptor().id,
             domain: DomainKey::from_parts(&self.descriptor().id, &evidence.network),
-            height: evidence.declared_height,
+            height: ev.block_height,
             state_root,
             finalized_at: ev.block_height,
             time_unit: TimeUnit::Height,
@@ -307,6 +535,18 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             attested_event_root: None,
             attested_tx_root: None,
         })
+    }
+
+    fn verify_observed(
+        &self,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+        observer: &mut dyn CryptoObserver,
+    ) -> Result<FinalityAttestation, AdapterError> {
+        let attestation = self.verify(evidence, policy)?;
+        observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
+        observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
+        Ok(attestation)
     }
 
     fn fault_probes(&self) -> Vec<FaultProbe> {
@@ -338,27 +578,87 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
                 patch: BytePatch::DeclaredRoot { value: [0xEE; 32] },
                 expect: ExpectedRefusal::Any,
             },
+            FaultProbe {
+                name: "corrupt-declared-height".to_string(),
+                patch: BytePatch::DeclaredHeight { value: 1 },
+                expect: ExpectedRefusal::Any,
+            },
         ]
     }
 }
 
 #[cfg(test)]
-fn sample_evidence() -> ArweaveSpOraEvidence {
-    ArweaveSpOraEvidence {
+struct TestOperator {
+    ed: crate::crypto::primitives::KeyPair,
+    pq: crate::crypto::primitives::PqKeyPair,
+}
+
+#[cfg(test)]
+impl TestOperator {
+    fn generate() -> Self {
+        Self {
+            ed: crate::crypto::primitives::KeyPair::from_seed(&[0x47; 32]).expect("ed25519 seed"),
+            pq: crate::crypto::primitives::PqKeyPair::generate(),
+        }
+    }
+
+    fn sign(&self, network: &str, ev: &mut ArweaveSpOraEvidence) {
+        ev.operator_key = self.ed.public_key_bytes().to_vec();
+        ev.operator_pq_key = self.pq.public_key_bytes().to_vec();
+        let msg = ev.signing_digest(network);
+        ev.operator_signature = self.ed.sign(&msg).to_vec();
+        ev.operator_pq_signature = self
+            .pq
+            .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &msg)
+            .expect("mldsa65 sign");
+    }
+}
+
+#[cfg(test)]
+fn recompute_and_sign(network: &str, op: &TestOperator, ev: &mut ArweaveSpOraEvidence) {
+    let leaf = compute_weave_leaf(
+        &ev.chunk_id,
+        &ev.chunk_data_hash,
+        ev.chunk_offset,
+        ev.chunk_size,
+    );
+    let idx = if ev.chunk_size > 0 {
+        ev.chunk_offset / ev.chunk_size
+    } else {
+        0
+    };
+    ev.weave_root = fold_weave_merkle_path(leaf, idx, &ev.merkle_proof);
+    op.sign(network, ev);
+}
+
+#[cfg(test)]
+fn sample_evidence_with_operator(network: &str) -> (ArweaveSpOraEvidence, TestOperator) {
+    let op = TestOperator::generate();
+    let chunk_id = b"arweave-chunk-abc123".to_vec();
+    let chunk_data_hash = [0x5A; 32];
+    let chunk_size = 256 * 1024;
+    let chunk_offset = 262_144; // leaf_index = 1 (right child at depth 0)
+    let merkle_proof = vec![[0x01; 32], [0x02; 32], [0x03; 32]];
+    let mut ev = ArweaveSpOraEvidence {
         magic: *PAYLOAD_MAGIC,
-        chunk_id: b"arweave-chunk-abc123".to_vec(),
+        chunk_id,
+        chunk_data_hash,
         block_height: 1_200_000,
-        epoch: 5000,
-        weave_root: [0xCD; 32],
-        merkle_proof: vec![[0x01; 32], [0x02; 32], [0x03; 32]],
-        chunk_offset: 262_144,
-        chunk_size: 256 * 1024,
-        gross_endowment: 10_000_000_000_000, // 10 AR in winston
+        epoch: 5_000,
+        weave_root: [0u8; 32],
+        merkle_proof,
+        chunk_offset,
+        chunk_size,
+        gross_endowment: 10_000_000_000_000,
         encumbered_endowment: 1_000_000_000_000,
         spora_rate: 1_000,
-        operator_signature: vec![0xAA; 512],
-        operator_key: vec![0xBB; 512],
-    }
+        operator_signature: Vec::new(),
+        operator_key: Vec::new(),
+        operator_pq_signature: Vec::new(),
+        operator_pq_key: Vec::new(),
+    };
+    recompute_and_sign(network, &op, &mut ev);
+    (ev, op)
 }
 
 #[cfg(test)]
@@ -369,97 +669,125 @@ pub(crate) fn encode_arweave_spora_evidence(ev: &ArweaveSpOraEvidence) -> Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cross_domain::external::spec::{AdapterError, VerificationPolicy};
-
-    fn default_policy() -> VerificationPolicy {
-        VerificationPolicy::strict(0)
-    }
+    use crate::crypto::facts::CryptoFacts;
 
     #[test]
-    fn valid_storage_evidence_passes() {
-        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet");
-        let ev = sample_evidence();
-        let free = adapter.verify_storage(&ev).expect("valid evidence");
-        assert!(free > 0);
-        assert_eq!(free, ev.gross_endowment - ev.encumbered_endowment);
-    }
+    fn valid_merkle_and_hybrid_signed_evidence_verifies() {
+        let (ev, op) = sample_evidence_with_operator("arweave-mainnet");
+        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet")
+            .with_pinned_operator(op.ed.public_key_bytes(), op.pq.public_key_bytes().to_vec());
+        let free = adapter.verify_storage(&ev).expect("valid evidence passes");
+        assert_eq!(free, 9_000_000_000_000);
 
-    #[test]
-    fn contamination_above_cap_is_refused() {
-        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet");
-        let mut ev = sample_evidence();
-        // 31% contamination
-        ev.encumbered_endowment = ev.gross_endowment * 31 / 100;
-        let err = adapter.verify_storage(&ev).unwrap_err();
-        match err {
-            AdapterError::ConsensusRule { rule } => {
-                assert!(rule.contains("contamination"), "unexpected: {rule}");
-            }
-            other => panic!("expected ConsensusRule, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn insufficient_endowment_for_sustainment_is_refused() {
-        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet");
-        let mut ev = sample_evidence();
-        // Reduce endowment to make sustainment impossible
-        ev.gross_endowment = 100;
-        ev.encumbered_endowment = 0;
-        let err = adapter.verify_storage(&ev).unwrap_err();
-        match err {
-            AdapterError::ConsensusRule { rule } => {
-                assert!(rule.contains("endowment"), "unexpected: {rule}");
-            }
-            other => panic!("expected ConsensusRule, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn zero_spora_rate_is_refused() {
-        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet");
-        let mut ev = sample_evidence();
-        ev.spora_rate = 0;
-        let err = adapter.verify_storage(&ev).unwrap_err();
-        match err {
-            AdapterError::ConsensusRule { rule } => {
-                assert!(rule.contains("SPoRA rate"), "unexpected: {rule}");
-            }
-            other => panic!("expected ConsensusRule, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn bad_magic_is_refused() {
-        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet");
-        let mut ev = sample_evidence();
-        ev.magic = [0xFF; 8];
-        let err = adapter.verify_storage(&ev).unwrap_err();
-        match err {
-            AdapterError::ConsensusRule { rule } => {
-                assert!(rule.contains("magic"), "unexpected: {rule}");
-            }
-            other => panic!("expected ConsensusRule, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn full_verify_roundtrip_produces_attestation() {
-        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet");
-        let ev = sample_evidence();
-        let payload = encode_arweave_spora_evidence(&ev);
         let raw = RawConsensusEvidence {
             adapter: adapter.descriptor().id,
             evidence_version: EVIDENCE_VERSION,
             network: "arweave-mainnet".to_string(),
-            payload,
+            payload: encode_arweave_spora_evidence(&ev),
             declared_height: ev.block_height,
             declared_root: ev.weave_root,
             submitter: crate::core::address::Address([0; 32]),
         };
-        let policy = default_policy();
-        let att = adapter.verify(&raw, &policy).expect("full verify");
+        let mut facts = CryptoFacts::default();
+        let att = adapter
+            .verify_observed(&raw, &VerificationPolicy::strict(0), &mut facts)
+            .expect("full verify");
         assert_eq!(att.state_root, ev.weave_root);
-        assert_eq!(att.height, ev.block_height);
+        assert_eq!(att.height, 1_200_000);
+        assert!(facts
+            .observed()
+            .iter()
+            .any(|c| c.scheme == ObservedScheme::Scheme(SchemeId::ED25519)));
+        assert!(facts
+            .observed()
+            .iter()
+            .any(|c| c.scheme == ObservedScheme::Scheme(SchemeId::ML_DSA_65)));
+    }
+
+    #[test]
+    fn tampered_merkle_path_or_chunk_offset_is_refused_even_when_resigned() {
+        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet");
+        let (mut bad_sibling, op) = sample_evidence_with_operator("arweave-mainnet");
+        bad_sibling.merkle_proof[1][0] ^= 0x01;
+        op.sign("arweave-mainnet", &mut bad_sibling);
+        assert!(
+            matches!(adapter.verify_storage(&bad_sibling).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("Merkle"))
+        );
+
+        let (mut swapped_branch, op2) = sample_evidence_with_operator("arweave-mainnet");
+        swapped_branch.chunk_offset = 0; // flips direction bit 0
+        op2.sign("arweave-mainnet", &mut swapped_branch);
+        assert!(
+            matches!(adapter.verify_storage(&swapped_branch).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("Merkle"))
+        );
+    }
+
+    #[test]
+    fn forged_ed25519_pq_or_unpinned_operator_signature_is_refused() {
+        let (ev, op) = sample_evidence_with_operator("arweave-mainnet");
+        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet")
+            .with_pinned_operator(op.ed.public_key_bytes(), op.pq.public_key_bytes().to_vec());
+
+        let mut bad_ed = ev.clone();
+        bad_ed.operator_signature[4] ^= 0x40;
+        assert!(matches!(
+            adapter.verify_storage(&bad_ed).unwrap_err(),
+            AdapterError::Crypto { .. }
+        ));
+
+        let mut bad_pq = ev;
+        bad_pq.operator_pq_signature[9] ^= 0x20;
+        assert!(matches!(
+            adapter.verify_storage(&bad_pq).unwrap_err(),
+            AdapterError::Crypto { .. }
+        ));
+
+        let (foreign, _) = sample_evidence_with_operator("arweave-mainnet");
+        assert!(
+            matches!(adapter.verify_storage(&foreign).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("pinned"))
+        );
+    }
+
+    #[test]
+    fn contamination_solvency_overflow_and_declared_mismatches_fail_closed() {
+        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet");
+
+        let (mut contam, op) = sample_evidence_with_operator("arweave-mainnet");
+        contam.encumbered_endowment = 3_000_000_000_001;
+        op.sign("arweave-mainnet", &mut contam);
+        assert!(
+            matches!(adapter.verify_storage(&contam).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("contamination"))
+        );
+
+        let (mut insolvent, op) = sample_evidence_with_operator("arweave-mainnet");
+        insolvent.gross_endowment = 100;
+        insolvent.encumbered_endowment = 0;
+        op.sign("arweave-mainnet", &mut insolvent);
+        assert!(
+            matches!(adapter.verify_storage(&insolvent).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("insufficient"))
+        );
+
+        let (mut overflow, op) = sample_evidence_with_operator("arweave-mainnet");
+        overflow.spora_rate = u128::MAX;
+        overflow.gross_endowment = u128::MAX;
+        overflow.encumbered_endowment = 0;
+        op.sign("arweave-mainnet", &mut overflow);
+        assert!(
+            matches!(adapter.verify_storage(&overflow).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("overflow"))
+        );
+
+        let (ev, _) = sample_evidence_with_operator("arweave-mainnet");
+        let raw_bad_height = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: EVIDENCE_VERSION,
+            network: "arweave-mainnet".to_string(),
+            payload: encode_arweave_spora_evidence(&ev),
+            declared_height: ev.block_height + 1,
+            declared_root: ev.weave_root,
+            submitter: crate::core::address::Address([0; 32]),
+        };
+        assert!(
+            matches!(adapter.verify(&raw_bad_height, &VerificationPolicy::strict(0)).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("declared_height"))
+        );
     }
 }

@@ -1,7 +1,7 @@
 //! Tendermint and CometBFT commit finality: the adapter for the family whose
 //! finality is a signed commit.
 //!
-//! WIRING: unwired - standalone ICS-07 bisection header-skip verifier lands
+//! WIRING: standalone ICS-07 bisection header-skip verifier lands
 //! with the non-adjacent Tendermint anchor rotation transaction door.
 //!
 //! # What this adapter verifies, and what it refuses to assume
@@ -1730,40 +1730,6 @@ impl TendermintLightClient {
         Ok(verified)
     }
 
-    /// Atomically verify an ascending chain of intermediate bisection commits
-    /// (`1..=MAX_BISECTION_STEPS`) bridging arbitrary validator-set turnover or
-    /// multi-era height spans without mutating state on partial failure.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AdapterError`] if the client is frozen, `steps` is empty or
-    /// exceeds [`MAX_BISECTION_STEPS`], or any step fails verification.
-    ///
-    /// Convenience: kept for the CLI and IBC relayer bisection submission.
-    pub fn verify_bisection(
-        &mut self,
-        steps: &[TendermintCommitEvidence],
-        now_secs: u64,
-    ) -> Result<VerifiedTendermintSkip, AdapterError> {
-        if self.is_frozen() {
-            return Err(rule("Tendermint light client is permanently frozen"));
-        }
-        if steps.is_empty() || steps.len() > MAX_BISECTION_STEPS {
-            return Err(rule(format!(
-                "bisection step count {} outside 1..={MAX_BISECTION_STEPS}",
-                steps.len()
-            )));
-        }
-        let mut staged = self.clone();
-        let mut last_skip: Option<VerifiedTendermintSkip> = None;
-        for step in steps {
-            last_skip = Some(staged.update(step, now_secs)?);
-        }
-        let final_skip = last_skip.ok_or_else(|| rule("bisection produced no step"))?;
-        *self = staged;
-        Ok(final_skip)
-    }
-
     /// Verify [`TendermintMisbehaviour`], permanently freeze this light client
     /// fail-closed, and return culpable validators for shared-security slashing.
     ///
@@ -1826,6 +1792,9 @@ fn rule(reason: impl Into<String>) -> AdapterError {
         rule: reason.into(),
     }
 }
+
+#[path = "tendermint_bisection.rs"]
+mod bisection;
 
 // ---------------------------------------------------------------------------
 // The canonical encoding

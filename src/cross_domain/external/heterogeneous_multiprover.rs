@@ -1,3 +1,4 @@
+//! WIRING: unwired - external 2-of-3 multi-prover adapter awaits `AdapterSpec` variant registration in `external_tx`.
 //! Endgame `2-of-3` Heterogeneous Multi-Prover external finality adapter
 //! (`multiprover-2of3-v1`).
 //!

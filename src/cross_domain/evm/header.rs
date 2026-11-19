@@ -320,7 +320,7 @@ pub fn verify_chain(
         prev_hash = hdr.hash;
         prev_number = hdr.number;
     }
-    // (karar B with A interim): the chain must touch the
+    // (design option B with A interim): the chain must touch the
     // trusted checkpoint it claims to descend from. Links alone prove only
     // self-consistency - a relayer can build a perfectly linked fantasy.
     if !anchored {

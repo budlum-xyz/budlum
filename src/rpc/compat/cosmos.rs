@@ -145,7 +145,7 @@ impl CosmosCompatGateway {
                         ),
                     );
                 }
-                if data_hex.len() % 2 != 0 {
+                if !data_hex.len().is_multiple_of(2) {
                     return JsonRpcResponse::err(
                         id,
                         JSONRPC_INVALID_PARAMS,
@@ -377,18 +377,19 @@ mod tests {
     #[test]
     fn abci_query_rejects_oversized_hex_payload() {
         let state = AccountState::new();
-        let gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
+        let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
         let oversized_hex = "ab".repeat(MAX_HEX_PAYLOAD_CHARS + 16);
         let req = JsonRpcRequest {
             jsonrpc: String::from("2.0"),
             id: serde_json::json!(1),
             method: String::from("abci_query"),
             params: serde_json::json!({
-                "path": "/cosmwasm.wasm.v1.Query/ContractState",
+                "path": ABCI_QUERY_PATHS[0],
                 "data": oversized_hex,
             }),
         };
         let resp = gw.handle_rpc_for_peer("peer-a", &req, &state);
+        assert!(!resp.error.is_none());
         assert_eq!(
             resp.error.as_ref().map(|e| e.code),
             Some(JSONRPC_INVALID_PARAMS)
@@ -404,17 +405,18 @@ mod tests {
     #[test]
     fn abci_query_rejects_odd_length_hex() {
         let state = AccountState::new();
-        let gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
+        let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
         let req = JsonRpcRequest {
             jsonrpc: String::from("2.0"),
             id: serde_json::json!(1),
             method: String::from("abci_query"),
             params: serde_json::json!({
-                "path": "/cosmwasm.wasm.v1.Query/ContractState",
+                "path": ABCI_QUERY_PATHS[0],
                 "data": "abc",
             }),
         };
         let resp = gw.handle_rpc_for_peer("peer-a", &req, &state);
+        assert!(!resp.error.is_none());
         assert_eq!(
             resp.error.as_ref().map(|e| e.code),
             Some(JSONRPC_INVALID_PARAMS)
@@ -425,17 +427,18 @@ mod tests {
     #[test]
     fn abci_query_rejects_non_hex_characters() {
         let state = AccountState::new();
-        let gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
+        let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
         let req = JsonRpcRequest {
             jsonrpc: String::from("2.0"),
             id: serde_json::json!(1),
             method: String::from("abci_query"),
             params: serde_json::json!({
-                "path": "/cosmwasm.wasm.v1.Query/ContractState",
+                "path": ABCI_QUERY_PATHS[0],
                 "data": "ghij",
             }),
         };
         let resp = gw.handle_rpc_for_peer("peer-a", &req, &state);
+        assert!(!resp.error.is_none());
         assert_eq!(
             resp.error.as_ref().map(|e| e.code),
             Some(JSONRPC_INVALID_PARAMS)
@@ -446,7 +449,7 @@ mod tests {
     #[test]
     fn abci_query_path_rejects_control_bytes() {
         let state = AccountState::new();
-        let gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
+        let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
         let req = JsonRpcRequest {
             jsonrpc: String::from("2.0"),
             id: serde_json::json!(1),
@@ -457,6 +460,7 @@ mod tests {
             }),
         };
         let resp = gw.handle_rpc_for_peer("peer-a", &req, &state);
+        assert!(!resp.error.is_none());
         assert_eq!(
             resp.error.as_ref().map(|e| e.code),
             Some(JSONRPC_INVALID_PARAMS)

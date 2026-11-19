@@ -898,9 +898,9 @@ pub fn rotate_period_with_branch(
 ///
 /// # Errors
 ///
-/// Returns [`SyncCommitteeError::ForkGindexMismatch`] if `gindex` does not
-/// match `params`, or forwards any error from [`rotate_period_with_branch`].
-#[allow(clippy::too_many_arguments)]
+/// Returns [`SyncCommitteeError::ForkGindexMismatch`] if `branch_and_gindex.1`
+/// does not match `params`, or forwards any error from
+/// [`rotate_period_with_branch`].
 pub fn rotate_period_for_fork(
     state: &mut SyncCommitteeState,
     params: &BeaconChainParams,
@@ -908,9 +908,9 @@ pub fn rotate_period_for_fork(
     finalized_state_root: &[u8; 32],
     new_next_committee: [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
     new_next_aggregate_pubkey: &[u8; BLS_PUBKEY_LEN],
-    next_sync_committee_branch: &[[u8; 32]],
-    gindex: u64,
+    branch_and_gindex: (&[[u8; 32]], u64),
 ) -> Result<(), SyncCommitteeError> {
+    let (next_sync_committee_branch, gindex) = branch_and_gindex;
     let expected = params.next_sync_committee_gindex()?;
     if gindex != expected {
         return Err(SyncCommitteeError::ForkGindexMismatch {
@@ -1893,8 +1893,10 @@ impl EthereumExecutionLightClient {
             &rotation.finalized_header.state_root,
             rotation.next_sync_committee,
             &rotation.next_sync_committee_aggregate,
-            &rotation.next_sync_committee_branch,
-            rotation.next_sync_committee_gindex,
+            (
+                &rotation.next_sync_committee_branch,
+                rotation.next_sync_committee_gindex,
+            ),
         )?;
 
         self.committee_state = staged;
