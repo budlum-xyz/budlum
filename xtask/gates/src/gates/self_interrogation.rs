@@ -90,11 +90,7 @@ fn read_prod(root: &Path, rel: &str) -> Result<String, String> {
     Ok(strip_test_mods(&raw))
 }
 
-fn check_pointer_and_deploy_guards(
-    root: &Path,
-    checked: &mut usize,
-    errors: &mut Vec<String>,
-) {
+fn check_pointer_and_deploy_guards(root: &Path, checked: &mut usize, errors: &mut Vec<String>) {
     match read_prod(root, "src/execution/coordinator/assets/mod.rs") {
         Ok(assets_src) => {
             *checked += 1;
@@ -148,11 +144,7 @@ fn check_pointer_and_deploy_guards(
     }
 }
 
-fn check_caller_randomness_uer_and_cli(
-    root: &Path,
-    checked: &mut usize,
-    errors: &mut Vec<String>,
-) {
+fn check_caller_randomness_uer_and_cli(root: &Path, checked: &mut usize, errors: &mut Vec<String>) {
     match read_prod(root, "src/execution/budzero_ee/mod.rs") {
         Ok(bz_src) => {
             *checked += 1;
@@ -315,10 +307,8 @@ fn build_valid_fixture(base: &Path) -> Result<(), String> {
 }
 
 fn scratch_dir() -> Result<PathBuf, String> {
-    let base = std::env::temp_dir().join(format!(
-        "budlum-self-interrogation-{}",
-        std::process::id()
-    ));
+    let base =
+        std::env::temp_dir().join(format!("budlum-self-interrogation-{}", std::process::id()));
     for idx in 0..64u32 {
         let cand = base.with_extension(format!("run{idx}"));
         if !cand.exists() {
@@ -326,7 +316,9 @@ fn scratch_dir() -> Result<PathBuf, String> {
             return Ok(cand);
         }
     }
-    Err(String::from("unable to allocate scratch dir for self_interrogation self_test"))
+    Err(String::from(
+        "unable to allocate scratch dir for self_interrogation self_test",
+    ))
 }
 
 /// # Errors
@@ -346,7 +338,9 @@ pub fn self_test() -> Result<String, String> {
             "fn bad() { is_pointer_bytecode_prefixed(&[]); verify_canonical_pointer_bytecode(); decode_pointer_bytecode(&[]); }\n",
         )?;
         if check_root(&dir).is_ok() {
-            return Err(String::from("canary 1 failed: accepted decode_pointer_bytecode in wasm_ee.rs"));
+            return Err(String::from(
+                "canary 1 failed: accepted decode_pointer_bytecode in wasm_ee.rs",
+            ));
         }
 
         // Negative 2: BudZeroEe truncates caller_id[..32].
@@ -357,7 +351,9 @@ pub fn self_test() -> Result<String, String> {
             "fn bad(caller_id: &[u8]) { is_pointer_bytecode_prefixed(&[]); let _ = caller_id.len().min(32); }\n",
         )?;
         if check_root(&dir).is_ok() {
-            return Err(String::from("canary 2 failed: accepted truncated caller_id in budzero_ee"));
+            return Err(String::from(
+                "canary 2 failed: accepted truncated caller_id in budzero_ee",
+            ));
         }
 
         // Negative 3: UER-1 missing odd-leaf promotion tag.
@@ -368,7 +364,9 @@ pub fn self_test() -> Result<String, String> {
             "const TAGS: &[&[u8]] = &[b\"BDLM_UER_RECEIPT_V1\", b\"BDLM_UER_LEAF_V1\", b\"BDLM_UER_NODE_V1\"];\n",
         )?;
         if check_root(&dir).is_ok() {
-            return Err(String::from("canary 3 failed: accepted UER-1 without BDLM_UER_ODD_PROMOTE_V1"));
+            return Err(String::from(
+                "canary 3 failed: accepted UER-1 without BDLM_UER_ODD_PROMOTE_V1",
+            ));
         }
 
         // Negative 4: Legacy CLI maps unknown consensus to None.
@@ -379,7 +377,9 @@ pub fn self_test() -> Result<String, String> {
             "fn apply_legacy_config(s: &str) { let _ = match s { \"pos\" => Some(1), _ => None }; }\n",
         )?;
         if check_root(&dir).is_ok() {
-            return Err(String::from("canary 4 failed: accepted fail-open _ => None in apply_legacy_config"));
+            return Err(String::from(
+                "canary 4 failed: accepted fail-open _ => None in apply_legacy_config",
+            ));
         }
 
         Ok(String::from(
