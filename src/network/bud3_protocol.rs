@@ -433,6 +433,7 @@ mod tests {
             root: symbol_root(&leaves),
             first_esi: 0,
             count: 4,
+            settled: false,
         };
         (syms, leaves, root)
     }
@@ -598,6 +599,7 @@ mod tests {
             root: symbol_root(&leaves),
             first_esi: 10,
             count: 4,
+            settled: false,
         };
         let req = Bud3SymbolsRequest {
             holder: [7; 32],

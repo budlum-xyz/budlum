@@ -1202,12 +1202,10 @@ impl NodeConfig {
             self.network = network_named("the legacy config file", name);
         }
         if let Some(raw_type) = legacy.consensus.as_deref() {
-            let parsed = match raw_type {
-                "pow" => ConsensusType::PoW,
-                "pos" => ConsensusType::PoS,
-                "poa" => ConsensusType::PoA,
-                other => {
-                    eprintln!("CRITICAL: Invalid consensus '{other}' in legacy config file");
+            let parsed = match parse_legacy_consensus_type(raw_type) {
+                Ok(kind) => kind,
+                Err(msg) => {
+                    eprintln!("{msg}");
                     std::process::exit(1);
                 }
             };
@@ -2312,32 +2310,34 @@ mod persona_config_tests {
 
     #[test]
     fn legacy_config_rejects_unknown_consensus_type() {
-        const CHILD_ENV: &str = "CLI_LEGACY_CONSENSUS_CHILD_PROBE";
-        if std::env::var_os(CHILD_ENV).is_some() {
-            let legacy: super::LegacyFileConfig =
-                toml::from_str("consensus = \"poss\"\n").expect("parse legacy config");
-            let mut cfg = NodeConfig::default();
-            cfg.apply_legacy_config(legacy);
-            return;
-        }
-        let exe = std::env::current_exe().expect("current test binary");
-        let output = std::process::Command::new(exe)
-            .arg("--exact")
-            .arg(
-                "cli::commands::persona_config_tests::legacy_config_rejects_unknown_consensus_type",
-            )
-            .arg("--nocapture")
-            .env(CHILD_ENV, "1")
-            .output()
-            .expect("spawn child test");
-        assert!(
-            !output.status.success(),
-            "legacy config with invalid consensus must fail closed instead of falling back to default"
+        assert_eq!(
+            super::parse_legacy_consensus_type("pow"),
+            Ok(super::ConsensusType::PoW)
         );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("CRITICAL: Invalid consensus"),
-            "unexpected stderr: {stderr}"
+        assert_eq!(
+            super::parse_legacy_consensus_type("pos"),
+            Ok(super::ConsensusType::PoS)
         );
+        assert_eq!(
+            super::parse_legacy_consensus_type("poa"),
+            Ok(super::ConsensusType::PoA)
+        );
+        let err = super::parse_legacy_consensus_type("poss")
+            .expect_err("legacy config with invalid consensus must fail closed");
+        assert!(
+            err.contains("CRITICAL: Invalid consensus 'poss'"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+fn parse_legacy_consensus_type(raw: &str) -> Result<ConsensusType, String> {
+    match raw {
+        "pow" => Ok(ConsensusType::PoW),
+        "pos" => Ok(ConsensusType::PoS),
+        "poa" => Ok(ConsensusType::PoA),
+        other => Err(format!(
+            "CRITICAL: Invalid consensus '{other}' in legacy config file"
+        )),
     }
 }

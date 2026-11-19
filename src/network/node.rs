@@ -6982,7 +6982,9 @@ impl Node {
                                                 Ok(NetworkMessage::Handshake { .. })
                                                     | Ok(NetworkMessage::HandshakeAck { .. })
                                             );
-                                            if !is_handshake && !already_handshaked {
+                                            if !(is_handshake
+                                                || self.peer_manager_lock().is_handshaked(&peer))
+                                            {
                                                 warn!("Rejected sync request from unhandshaked peer {peer}");
                                                 let _ = self
                                                     .swarm
