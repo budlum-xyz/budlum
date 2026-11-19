@@ -97,6 +97,7 @@ pub mod prover;
 pub mod quorum;
 pub mod registry;
 pub mod selftest;
+pub mod solana_tower_bft;
 pub mod spec;
 pub mod stellar_fba;
 pub mod tendermint;
@@ -154,6 +155,7 @@ pub use selftest::{
     admit, admit_observed, apply_patch, run_probe, AdmissionReport, BytePatch, ExpectedRefusal,
     FaultProbe, ProbeOutcome, RefusalKind,
 };
+pub use solana_tower_bft::{PinnedSolEpoch, SolanaTowerBftAdapter, SolanaValidator};
 pub use spec::{
     AdapterDescriptor, AdapterError, AdapterId, DomainKey, ExternalFinalityAdapter,
     FinalityAttestation, FinalityKind, ProofSystem, RawConsensusEvidence, SecurityBacking,
