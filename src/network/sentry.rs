@@ -754,6 +754,20 @@ impl SentryPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Polling budget for the live-failover test: 400 x 50 ms = 20 s.
+    ///
+    /// A sentry rotation is an asynchronous dial, so the only thing a wait can
+    /// mean is "give the dial time to land". The previous budget was 40 steps
+    /// (2 s), which encoded the idle-machine number: the happy path converges in
+    /// about 0.35 s, and the same run under load needs more than 2 s. Twenty
+    /// seconds is a convergence deadline, not a performance claim, and a passing
+    /// run breaks out of the loop on the first observed rotation.
+    ///
+    /// This does not make the test deterministic on its own: after 20 s the
+    /// residual failure still reports `configured = [B]`, `connected = []`, i.e.
+    /// the dial to the rotated sentry never lands at all. That is a defect in the
+    /// rotation path, not a deadline problem.
+    const SENTRY_FAILOVER_WAIT_STEPS: usize = 400;
 
     fn random_peer() -> PeerId {
         PeerId::random()
@@ -1026,9 +1040,10 @@ mod tests {
         let h_att = tokio::spawn(async move { attacker.run().await });
         let h_val = tokio::spawn(async move { validator.run().await });
 
-        // Wait for Validator <-> Sentry A connection to come up.
+        // Wait for Validator <-> Sentry A connection to come up. See
+        // `SENTRY_FAILOVER_WAIT_STEPS` for why the budget is generous.
         let mut connected_a = false;
-        for _ in 0..40 {
+        for _ in 0..SENTRY_FAILOVER_WAIT_STEPS {
             let st = val_client.admin_sentry_status().await.expect("status");
             if st.connected_sentries == vec![sentry_a_id.to_string()] {
                 connected_a = true;
@@ -1065,7 +1080,11 @@ mod tests {
         assert_eq!(diff.added[0].0, sentry_b_id);
 
         let mut connected_b = false;
-        for _ in 0..40 {
+        // Keep the last snapshot: a bare `assert!` here says the failover did
+        // not finish and nothing about where it stopped, so a flake has to be
+        // reproduced by hand. Configured-vs-connected is the whole state.
+        let mut last_status = None;
+        for _ in 0..SENTRY_FAILOVER_WAIT_STEPS {
             let st = val_client
                 .admin_sentry_status()
                 .await
@@ -1074,9 +1093,14 @@ mod tests {
                 connected_b = true;
                 break;
             }
+            last_status = Some(st);
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(connected_b, "validator should fail over live to Sentry B");
+        assert!(
+            connected_b,
+            "validator should fail over live to Sentry B; last status: {:?}",
+            last_status.map(|st| (st.configured_sentries, st.connected_sentries))
+        );
         let sb_status = sb_client
             .admin_sentry_status()
             .await
