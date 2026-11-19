@@ -618,10 +618,10 @@ mod tests {
         chain_id: u64,
         record_id: &[u8; 32],
         nonce: u64,
-        from: DataPrivacyLayer,
-        to: DataPrivacyLayer,
+        hop: (DataPrivacyLayer, DataPrivacyLayer),
         binding: &[u8; 32],
     ) -> LayerOwnerAuth {
+        let (from, to) = hop;
         let digest = layer_transition_digest(chain_id, record_id, nonce, from, to, binding);
         let sig = ml_dsa_sign(
             SchemeId::ML_DSA_65,
@@ -670,8 +670,10 @@ mod tests {
             CHAIN_ID,
             &record_id,
             0,
-            DataPrivacyLayer::K3Confidential,
-            DataPrivacyLayer::K3Confidential,
+            (
+                DataPrivacyLayer::K3Confidential,
+                DataPrivacyLayer::K3Confidential,
+            ),
             &grant_tag,
         );
         assert_eq!(
@@ -684,8 +686,10 @@ mod tests {
             CHAIN_ID,
             &record_id,
             0,
-            DataPrivacyLayer::K3Confidential,
-            DataPrivacyLayer::K3Confidential,
+            (
+                DataPrivacyLayer::K3Confidential,
+                DataPrivacyLayer::K3Confidential,
+            ),
             &grant_tag,
         );
         reg.issue_confidential_grant(&record_id, grant_tag, &grant_auth)
@@ -706,8 +710,10 @@ mod tests {
             CHAIN_ID,
             &record_id,
             1,
-            DataPrivacyLayer::K3Confidential,
-            DataPrivacyLayer::K2Pseudonymous,
+            (
+                DataPrivacyLayer::K3Confidential,
+                DataPrivacyLayer::K2Pseudonymous,
+            ),
             &expected_stealth,
         );
         let tag = reg
@@ -729,8 +735,7 @@ mod tests {
             CHAIN_ID,
             &record_id,
             2,
-            DataPrivacyLayer::K2Pseudonymous,
-            DataPrivacyLayer::K1Public,
+            (DataPrivacyLayer::K2Pseudonymous, DataPrivacyLayer::K1Public),
             &fake_digest,
         );
         assert_eq!(
@@ -745,8 +750,7 @@ mod tests {
             CHAIN_ID,
             &record_id,
             2,
-            DataPrivacyLayer::K2Pseudonymous,
-            DataPrivacyLayer::K1Public,
+            (DataPrivacyLayer::K2Pseudonymous, DataPrivacyLayer::K1Public),
             &secret_digest,
         );
         reg.declassify_to_public(&record_id, secret.to_vec(), Some(&salt), &k1_auth)
@@ -791,8 +795,10 @@ mod tests {
             CHAIN_ID,
             &record_id,
             0,
-            DataPrivacyLayer::K4OffChainAnchored,
-            DataPrivacyLayer::K1Public,
+            (
+                DataPrivacyLayer::K4OffChainAnchored,
+                DataPrivacyLayer::K1Public,
+            ),
             &digest,
         );
         reg.declassify_to_public(&record_id, offchain_blob.to_vec(), None, &auth)

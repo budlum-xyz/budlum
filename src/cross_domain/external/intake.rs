@@ -1293,6 +1293,171 @@ impl IntakeState {
         })
     }
 
+    /// Refute an accepted attestation with the successor that descends from a
+    /// different parent.
+    ///
+    /// [`Self::slash_on_contradiction`] can only answer a challenge aimed at the
+    /// slot the false claim occupies, so a claim whose slot the external chain
+    /// has moved past - an abandoned branch - stays in the book and its carrier
+    /// keeps the bond. This door takes the successor instead: evidence its own
+    /// adapter accepts, one height above the challenged slot, whose verified
+    /// parent digest disagrees with the block the challenged slot attested.
+    ///
+    /// Idempotency has two independent mechanisms. A first refutation withdraws
+    /// the predecessor from the book, so a replay finds no accepted attestation
+    /// at that slot; and every ruling is tombstoned in
+    /// [`IntakeGuard::record_contradiction`] under the challenged claim digest.
+    ///
+    /// # Errors
+    ///
+    /// [`IntakeError::UnknownDomain`], [`IntakeError::MissingCarrier`],
+    /// [`IntakeError::SelfChallengeForbidden`], [`IntakeError::CommitteeNotPinned`],
+    /// [`IntakeError::MissingBlsVerifier`], a registry or adapter refusal, or
+    /// [`IntakeError::InvalidContradiction`] naming the rule the witness failed.
+    pub fn adjudicate_ancestry(
+        &mut self,
+        successor: &RawConsensusEvidence,
+        challenger: Address,
+        bls: Option<Box<dyn BlsVerifier>>,
+    ) -> Result<ContradictionSlashOutcome, IntakeError> {
+        if successor.submitter != challenger {
+            return Err(IntakeError::InvalidContradiction {
+                reason: "ancestry witness submitter must match challenger".to_string(),
+            });
+        }
+        let key = DomainKey::from_parts(&successor.adapter, &successor.network);
+        let Some((spec, policy)) = self
+            .entries
+            .get(&key)
+            .map(|entry| (entry.spec.clone(), entry.policy.clone()))
+        else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        if matches!(spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
+            return Err(IntakeError::MissingBlsVerifier);
+        }
+        if matches!(spec, AdapterSpec::EthereumSync { .. })
+            && bls.as_ref().is_some_and(|v| v.sync_committee_closed())
+        {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
+        let Some(reg) = self.registry.domain(&key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        let value_atoms = reg.economics.routing_ceiling_atoms;
+
+        let adapter = spec.build(bls, None);
+        let mut challenge_policy = policy;
+        challenge_policy.max_age = 0;
+        challenge_policy.require_declared_match = true;
+        let verified = adapter
+            .verify(successor, &challenge_policy)
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        if verified.height == 0 {
+            return Err(IntakeError::InvalidContradiction {
+                reason: "an ancestry witness needs a predecessor height".to_string(),
+            });
+        }
+        let parent = adapter.attested_parent(successor);
+
+        let predecessor_slot = (verified.height - 1, verified.evidence_version);
+        let Some(predecessor) = reg.attestations.get(&predecessor_slot).cloned() else {
+            return Err(IntakeError::InvalidContradiction {
+                reason: format!(
+                    "no accepted attestation at predecessor height {} version {}",
+                    predecessor_slot.0, predecessor_slot.1
+                ),
+            });
+        };
+        let Some(slashed_prover) = reg
+            .attestation_provers
+            .get(&predecessor.evidence_digest)
+            .copied()
+        else {
+            return Err(IntakeError::MissingCarrier);
+        };
+        if slashed_prover == Address::zero() {
+            return Err(IntakeError::MissingCarrier);
+        }
+        reg.versions
+            .gate(verified.evidence_version, verified.height)
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+
+        let book_slot = crate::cross_domain::external::falsity::BookSlot {
+            domain: predecessor.domain,
+            adapter: predecessor.adapter,
+            height: predecessor.height,
+            evidence_version: predecessor.evidence_version,
+            evidence_digest: predecessor.evidence_digest,
+            carrier: slashed_prover,
+            attested_block_hash: predecessor.attested_block_hash,
+        };
+        let witness = crate::cross_domain::external::falsity::SuccessorView {
+            domain: verified.domain,
+            adapter: verified.adapter,
+            height: verified.height,
+            evidence_version: verified.evidence_version,
+            evidence_digest: verified.evidence_digest,
+            carrier: successor.submitter,
+            attested_parent: parent,
+        };
+        let ruling = crate::cross_domain::external::falsity::adjudicate(
+            &witness,
+            &book_slot,
+            challenger,
+            &std::collections::BTreeSet::new(),
+        );
+        if let crate::cross_domain::external::falsity::Ruling::Refused(refusal) = ruling {
+            return Err(IntakeError::InvalidContradiction {
+                reason: refusal.reason().to_string(),
+            });
+        }
+
+        let registry_before = self.registry.clone();
+        let (slashed_atoms, challenger_reward_atoms) =
+            match self.registry.slash_verified_contradiction(
+                &key,
+                slashed_prover,
+                predecessor.evidence_digest,
+                value_atoms,
+                challenger,
+            ) {
+                Ok(amounts) => amounts,
+                Err(err) => {
+                    self.registry = registry_before;
+                    return Err(IntakeError::Registry(err));
+                }
+            };
+        if let Err(err) = self.registry.mark_faulted(
+            &key,
+            &format!(
+                "ancestry refutation at external height {} (successor {})",
+                predecessor.height, verified.height
+            ),
+        ) {
+            self.registry = registry_before;
+            return Err(IntakeError::Registry(err));
+        }
+        let local_height = self.registry.height();
+        let _cooldown_until = self.guard.record_contradiction(
+            key,
+            predecessor.height,
+            predecessor.evidence_version,
+            predecessor.claim_digest(),
+            local_height,
+        );
+
+        Ok(ContradictionSlashOutcome {
+            domain: key,
+            slashed_prover,
+            contradicted_digest: predecessor.evidence_digest,
+            height: predecessor.height,
+            evidence_version: predecessor.evidence_version,
+            slashed_atoms,
+            challenger_reward_atoms,
+        })
+    }
+
     /// The round path of [`Self::submit_evidence`]. Verifies without
     /// committing, folds the verdict into the round, and acts on what the
     /// round became:

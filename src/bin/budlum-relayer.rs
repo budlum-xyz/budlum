@@ -1408,29 +1408,35 @@ mod tests {
 
     #[test]
     fn run_relayer_rejects_zero_poll_interval() {
-        let mut config = RelayerConfig::default();
-        config.poll_interval_secs = 0;
-        config.bridge_address = "0x1234567890abcdef1234567890abcdef12345678".into();
+        let config = RelayerConfig {
+            poll_interval_secs: 0,
+            bridge_address: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            ..RelayerConfig::default()
+        };
         let err = run_relayer(&config).unwrap_err();
         assert!(err.contains("poll-interval"), "unexpected: {err}");
     }
 
     #[test]
     fn run_relayer_rejects_non_http_rpc_url() {
-        let mut config = RelayerConfig::default();
-        config.poll_interval_secs = 10;
-        config.bridge_address = "0x1234567890abcdef1234567890abcdef12345678".into();
-        config.eth_rpc_url = "ftp://not-http".into();
+        let config = RelayerConfig {
+            poll_interval_secs: 10,
+            bridge_address: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            eth_rpc_url: "ftp://not-http".into(),
+            ..RelayerConfig::default()
+        };
         let err = run_relayer(&config).unwrap_err();
         assert!(err.contains("http"), "unexpected: {err}");
     }
 
     #[test]
     fn run_relayer_rejects_file_url() {
-        let mut config = RelayerConfig::default();
-        config.poll_interval_secs = 10;
-        config.bridge_address = "0x1234567890abcdef1234567890abcdef12345678".into();
-        config.budlum_rpc_url = "file:///tmp/x".into();
+        let config = RelayerConfig {
+            poll_interval_secs: 10,
+            bridge_address: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            budlum_rpc_url: "file:///tmp/x".into(),
+            ..RelayerConfig::default()
+        };
         let err = run_relayer(&config).unwrap_err();
         assert!(err.contains("http"), "unexpected: {err}");
     }
