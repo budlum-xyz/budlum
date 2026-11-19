@@ -68,6 +68,11 @@ pub trait HomeStipendVerifier {
 ///
 /// Returns [`Refusal::Overflow`] if postcard serialization fails.
 pub fn home_stipend_action_digest(action: &ObjectLayerTx) -> Result<Hash32, Refusal> {
+    // Reject nested `HomeStipendCall` envelopes before serialization so a
+    // deeply nested action tree cannot cause recursion or privilege smuggling.
+    if matches!(action, ObjectLayerTx::HomeStipendCall { .. }) {
+        return Err(Refusal::NotAuthorized);
+    }
     let encoded = postcard::to_allocvec(action).map_err(|_| Refusal::Overflow)?;
     Ok(hash_fields_bytes(&[
         b"BDLM_UOL_HOME_STIPEND_ACTION_V1",

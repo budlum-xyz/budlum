@@ -1553,3 +1553,51 @@ fn register_class_verified_rejects_operatorless_charter_when_home_proof_required
         Err(Refusal::UnprovenEvent)
     );
 }
+
+#[test]
+fn charter_refuses_blank_chain_or_endpoint_verifier_collision_and_nested_stipend() {
+    use crate::object_layer::charter::{check_charter, CharterRefusal};
+    use crate::object_layer::family::evm::fixture::EvmFixture;
+    use crate::object_layer::tx::{home_stipend_action_digest, HomeKeyScheme, HomeKeyStipendAuth};
+
+    let canon = CanonicalCodeHashes {
+        endpoint: CANON_ENDPOINT,
+        verifier: CANON_VERIFIER,
+    };
+    let base = charter_for(HomeVmFamily::Evm, &EvmFixture);
+    assert_eq!(
+        check_charter(&base, &good_proof(), Some(&canon), true),
+        Ok(())
+    );
+
+    let mut blank_chain = base.clone();
+    blank_chain.chain_reference = String::from("   ");
+    assert_eq!(
+        check_charter(&blank_chain, &good_proof(), Some(&canon), true),
+        Err(CharterRefusal::BadAddress)
+    );
+
+    let mut same_addr = base;
+    same_addr.verifier.clone_from(&same_addr.endpoint);
+    assert_eq!(
+        check_charter(&same_addr, &good_proof(), Some(&canon), true),
+        Err(CharterRefusal::BadAddress)
+    );
+
+    let nested = ObjectLayerTx::HomeStipendCall {
+        domain: DOMAIN,
+        auth: HomeKeyStipendAuth {
+            scheme: HomeKeyScheme::EthereumSecp256k1,
+            home_address: vec![0x11; 20],
+            signer_pubkey: vec![0x02; 33],
+            signature: vec![0x33; 65],
+            nonce: 0,
+            requested_stipend_attos: 1,
+        },
+        action: Box::new(ObjectLayerTx::SetTentativeConsent { consent: true }),
+    };
+    assert_eq!(
+        home_stipend_action_digest(&nested),
+        Err(Refusal::NotAuthorized)
+    );
+}

@@ -28,6 +28,7 @@ use bud_proof::predicates::{
 use bud_vm::{field_add_goldilocks, field_sub_goldilocks, poseidon4_hash4, GOLDILOCKS_P};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use zeroize::Zeroize;
 
 /// Domain tag for deriving the per-object XChaCha20-Poly1305 key.
 pub const SEAL_KEY_TAG: &[u8] = b"BDLM_BUD3_SEAL_KEY_V1";
@@ -266,18 +267,20 @@ pub fn seal_object(
         inner.resize(bucket_len, 0u8);
     }
 
-    let (aead_key, nonce_bytes) = derive_aead_key_and_nonce(content_key, &object_salt);
+    let (mut aead_key, mut nonce_bytes) = derive_aead_key_and_nonce(content_key, &object_salt);
     let cipher = XChaCha20Poly1305::new((&aead_key).into());
+    aead_key.zeroize();
     let aad = sealed_aad(&cid.digest);
-    let ciphertext = cipher
-        .encrypt(
-            &XNonce::from(nonce_bytes),
-            Payload {
-                msg: &inner,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| SealBud3Error::EncryptFailed)?;
+    let enc_res = cipher.encrypt(
+        &XNonce::from(nonce_bytes),
+        Payload {
+            msg: &inner,
+            aad: &aad,
+        },
+    );
+    nonce_bytes.zeroize();
+    inner.zeroize();
+    let ciphertext = enc_res.map_err(|_| SealBud3Error::EncryptFailed)?;
 
     let mut payload = Vec::with_capacity(SEAL_SALT_LEN.saturating_add(ciphertext.len()));
     payload.extend_from_slice(&object_salt);
@@ -315,6 +318,7 @@ pub fn open_sealed_object(
     if !object.header.is_sealed()
         || object.header.content_len != 0
         || object.header.codec != CODEC_RAW
+        || object.header.payload_len != object.payload.len() as u64
     {
         return Err(SealBud3Error::NotSealedObject);
     }
@@ -337,64 +341,22 @@ pub fn open_sealed_object(
     let mut salt = [0u8; SEAL_SALT_LEN];
     salt.copy_from_slice(salt_slice);
 
-    let (aead_key, nonce_bytes) = derive_aead_key_and_nonce(content_key, &salt);
+    let (mut aead_key, mut nonce_bytes) = derive_aead_key_and_nonce(content_key, &salt);
     let cipher = XChaCha20Poly1305::new((&aead_key).into());
+    aead_key.zeroize();
     let aad = sealed_aad(&object.header.content_digest);
-    let inner = cipher
-        .decrypt(
-            &XNonce::from(nonce_bytes),
-            Payload {
-                msg: ciphertext,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| SealBud3Error::DecryptFailed)?;
-
-    let expected_bucket = padme_padded_len(inner.len() as u64);
-    if expected_bucket != inner.len() as u64 {
-        return Err(SealBud3Error::MalformedInnerFrame);
-    }
-
-    let (real_len, used1) =
-        varint::read(&inner, 9).map_err(|_| SealBud3Error::MalformedInnerFrame)?;
-    let rest1 = inner
-        .get(used1..)
-        .ok_or(SealBud3Error::MalformedInnerFrame)?;
-    let (codec_u64, used2) =
-        varint::read(rest1, 2).map_err(|_| SealBud3Error::MalformedInnerFrame)?;
-    let inner_codec =
-        CodecId::try_from(codec_u64).map_err(|_| SealBud3Error::MalformedInnerFrame)?;
-    let rest2 = rest1
-        .get(used2..)
-        .ok_or(SealBud3Error::MalformedInnerFrame)?;
-    let (comp_len_u64, used3) =
-        varint::read(rest2, 9).map_err(|_| SealBud3Error::MalformedInnerFrame)?;
-    let comp_len = usize::try_from(comp_len_u64).map_err(|_| SealBud3Error::MalformedInnerFrame)?;
-    let after_vars = rest2
-        .get(used3..)
-        .ok_or(SealBud3Error::MalformedInnerFrame)?;
-    let compressed = after_vars
-        .get(..comp_len)
-        .ok_or(SealBud3Error::MalformedInnerFrame)?;
-    let padding = after_vars
-        .get(comp_len..)
-        .ok_or(SealBud3Error::MalformedInnerFrame)?;
-    if padding.iter().any(|b| *b != 0) {
-        return Err(SealBud3Error::MalformedInnerFrame);
-    }
-
-    meter.charge_bytes(real_len)?;
-    let plaintext = bud_codec::decode(inner_codec, compressed, real_len)
-        .map_err(|_| SealBud3Error::InnerCodecMismatch)?;
-    let check_id = ContentId {
-        kind: super::content_id::ContentIdKind::Sealed,
-        digest: object.header.content_digest,
-        len: real_len,
-    };
-    if !check_id.matches_sealed(content_key, &plaintext) {
-        return Err(SealBud3Error::ContentIdMismatch);
-    }
-    Ok(plaintext)
+    let dec_res = cipher.decrypt(
+        &XNonce::from(nonce_bytes),
+        Payload {
+            msg: ciphertext,
+            aad: &aad,
+        },
+    );
+    nonce_bytes.zeroize();
+    let mut inner = dec_res.map_err(|_| SealBud3Error::DecryptFailed)?;
+    let decoded = decode_inner_padme(&inner, object.header.content_digest, content_key, meter);
+    inner.zeroize();
+    decoded
 }
 
 fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
@@ -430,10 +392,12 @@ fn derive_field_keystream_word(
     salt: &[u8; SEAL_SALT_LEN],
     word_index: u64,
 ) -> u64 {
-    let k_digest = hash_fields_bytes(&[FIELD_KEY_STREAM_TAG, &content_key.0, salt]);
-    let n_digest = hash_fields_bytes(&[FIELD_NONCE_TAG, salt, &word_index.to_le_bytes()]);
+    let mut k_digest = hash_fields_bytes(&[FIELD_KEY_STREAM_TAG, &content_key.0, salt]);
+    let mut n_digest = hash_fields_bytes(&[FIELD_NONCE_TAG, salt, &word_index.to_le_bytes()]);
     let (k0, k1) = field_limbs_from_digest(&k_digest);
     let (n0, n1) = field_limbs_from_digest(&n_digest);
+    k_digest.zeroize();
+    n_digest.zeroize();
     poseidon4_hash4(k0, k1, n0, n1) % GOLDILOCKS_P
 }
 
@@ -539,8 +503,14 @@ fn seal_object_field_native(
     object_salt: [u8; SEAL_SALT_LEN],
 ) -> Result<Object, SealBud3Error> {
     let cid = ContentId::sealed(content_key, content);
-    let inner = encode_inner_padme(content, &cid)?;
-    let inner_len_u64 = u64::try_from(inner.len()).map_err(|_| SealBud3Error::EncryptFailed)?;
+    let mut inner = encode_inner_padme(content, &cid)?;
+    let inner_len_u64 = match u64::try_from(inner.len()) {
+        Ok(v) => v,
+        Err(_) => {
+            inner.zeroize();
+            return Err(SealBud3Error::EncryptFailed);
+        }
+    };
 
     let mut ciphertext_words = Vec::with_capacity((1 + inner.len().div_ceil(7)) * 8);
     let len_ks = derive_field_keystream_word(content_key, &object_salt, 0);
@@ -548,12 +518,16 @@ fn seal_object_field_native(
     ciphertext_words.extend_from_slice(&enc_len.to_le_bytes());
 
     for (idx, chunk) in inner.chunks(7).enumerate() {
-        let word_idx = u64::try_from(idx + 1).map_err(|_| SealBud3Error::EncryptFailed)?;
+        let Ok(word_idx) = u64::try_from(idx + 1) else {
+            inner.zeroize();
+            return Err(SealBud3Error::EncryptFailed);
+        };
         let ks = derive_field_keystream_word(content_key, &object_salt, word_idx);
         let plain_word = le_u64_from_chunk(chunk);
         let cipher_word = field_add_goldilocks(plain_word, ks);
         ciphertext_words.extend_from_slice(&cipher_word.to_le_bytes());
     }
+    inner.zeroize();
 
     let mac = compute_field_mac(content_key, &object_salt, &cid.digest, &ciphertext_words);
     let mut payload = Vec::with_capacity(
@@ -591,6 +565,7 @@ fn open_sealed_object_field_native(
     if !object.header.is_sealed()
         || object.header.content_len != 0
         || object.header.codec != CODEC_RAW
+        || object.header.payload_len != object.payload.len() as u64
     {
         return Err(SealBud3Error::NotSealedObject);
     }
@@ -655,7 +630,10 @@ fn open_sealed_object_field_native(
         .get(8..)
         .ok_or(SealBud3Error::MalformedInnerFrame)?;
     let expected_chunks = inner_len.div_ceil(7);
-    if body_words.len() != expected_chunks.saturating_mul(8) {
+    let expected_body_len = expected_chunks
+        .checked_mul(8)
+        .ok_or(SealBud3Error::MalformedInnerFrame)?;
+    if body_words.len() != expected_body_len {
         return Err(SealBud3Error::MalformedInnerFrame);
     }
 
@@ -665,12 +643,17 @@ fn open_sealed_object_field_native(
         word_arr.copy_from_slice(word_bytes);
         let cipher_word = u64::from_le_bytes(word_arr);
         if cipher_word >= GOLDILOCKS_P {
+            decoded.zeroize();
             return Err(SealBud3Error::DecryptFailed);
         }
-        let word_idx = u64::try_from(idx + 1).map_err(|_| SealBud3Error::MalformedInnerFrame)?;
+        let Ok(word_idx) = u64::try_from(idx + 1) else {
+            decoded.zeroize();
+            return Err(SealBud3Error::MalformedInnerFrame);
+        };
         let ks = derive_field_keystream_word(content_key, &salt, word_idx);
         let plain_word = field_sub_goldilocks(cipher_word, ks);
         if plain_word >= (1u64 << 56) {
+            decoded.zeroize();
             return Err(SealBud3Error::DecryptFailed);
         }
         let le = plain_word.to_le_bytes();
@@ -679,17 +662,20 @@ fn open_sealed_object_field_native(
         }
     }
 
-    let tail = decoded
-        .get(inner_len..)
-        .ok_or(SealBud3Error::MalformedInnerFrame)?;
-    if tail.iter().any(|b| *b != 0) {
-        return Err(SealBud3Error::MalformedInnerFrame);
-    }
-    let inner = decoded
-        .get(..inner_len)
-        .ok_or(SealBud3Error::MalformedInnerFrame)?;
-
-    decode_inner_padme(inner, object.header.content_digest, content_key, meter)
+    let out = (|| -> Result<Vec<u8>, SealBud3Error> {
+        let tail = decoded
+            .get(inner_len..)
+            .ok_or(SealBud3Error::MalformedInnerFrame)?;
+        if tail.iter().any(|b| *b != 0) {
+            return Err(SealBud3Error::MalformedInnerFrame);
+        }
+        let inner = decoded
+            .get(..inner_len)
+            .ok_or(SealBud3Error::MalformedInnerFrame)?;
+        decode_inner_padme(inner, object.header.content_digest, content_key, meter)
+    })();
+    decoded.zeroize();
+    out
 }
 
 /// Seal `content` under either [`CipherProfile::Aead`] or [`CipherProfile::FieldNative`]
@@ -697,7 +683,7 @@ fn open_sealed_object_field_native(
 ///
 /// # Errors
 ///
-/// Returns [`SealBud3Error`] if sealing fails.
+/// Returns [`SealBud3Error`] if sealing fails or `visibility` claims `Public`.
 pub fn seal_object_with_profile(
     content: &[u8],
     content_key: &ContentKey,
@@ -706,6 +692,9 @@ pub fn seal_object_with_profile(
     cipher_profile: CipherProfile,
     object_salt: [u8; SEAL_SALT_LEN],
 ) -> Result<(Object, SealedObjectManifest), SealBud3Error> {
+    if visibility == ObjectVisibility::Public {
+        return Err(SealBud3Error::ManifestMismatch);
+    }
     let (object, hash_suite) = match cipher_profile {
         CipherProfile::Aead => (seal_object(content, content_key, object_salt)?, 1u8),
         CipherProfile::FieldNative => (
@@ -746,8 +735,10 @@ pub fn open_sealed_object_with_profile(
         CipherProfile::FieldNative => 2u8,
     };
     if manifest.version != 1
+        || manifest.visibility == ObjectVisibility::Public
         || manifest.hash_suite != expected_suite
         || manifest.padded_len != object.header.payload_len
+        || object.header.payload_len != object.payload.len() as u64
         || !ct_eq_32(&manifest.object_commitment, &object.header.content_digest)
         || !ct_eq_32(
             &manifest.key_commitment,
@@ -961,6 +952,33 @@ mod tests {
         let wrong_key = ContentKey([0x56u8; 32]);
         let owner_secret = [0xAAu8; 32];
         let salt = [0x33u8; SEAL_SALT_LEN];
+
+        let mut meter = Meter::for_object(1 << 20);
+        assert_eq!(
+            seal_object_with_profile(
+                payload,
+                &key,
+                &owner_secret,
+                ObjectVisibility::Public,
+                CipherProfile::Aead,
+                salt,
+            ),
+            Err(SealBud3Error::ManifestMismatch)
+        );
+        let (mut obj_bad_hdr, _) = seal_object_with_profile(
+            payload,
+            &key,
+            &owner_secret,
+            ObjectVisibility::Sealed,
+            CipherProfile::Aead,
+            salt,
+        )
+        .unwrap();
+        obj_bad_hdr.header.payload_len = obj_bad_hdr.header.payload_len.saturating_add(1);
+        assert_eq!(
+            open_sealed_object(&obj_bad_hdr, &key, &mut meter),
+            Err(SealBud3Error::NotSealedObject)
+        );
 
         for profile in [CipherProfile::Aead, CipherProfile::FieldNative] {
             let (mut obj, manifest) = seal_object_with_profile(

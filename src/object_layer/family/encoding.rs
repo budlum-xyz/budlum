@@ -208,17 +208,25 @@ pub fn abi_u128(word: &[u8; 32]) -> Result<u128, WireError> {
 ///
 /// Returns an error if the operation fails.
 pub fn abi_bytes(data: &[u8], head_index: usize) -> Result<Vec<u8>, WireError> {
+    let min_head_len = head_index
+        .checked_add(1)
+        .and_then(|words| words.checked_mul(32))
+        .ok_or(WireError("word overflow"))?;
     let offset = usize::try_from(abi_u128(&abi_word(data, head_index)?)?)
         .map_err(|_| WireError("offset too large"))?;
-    if offset % 32 != 0 {
-        return Err(WireError("unaligned bytes offset"));
+    if offset != min_head_len {
+        return Err(WireError("non-canonical or overlapping bytes offset"));
     }
     let len = usize::try_from(abi_u128(&abi_word(data, offset / 32)?)?)
         .map_err(|_| WireError("length too large"))?;
+    let body_start = offset.checked_add(32).ok_or(WireError("offset overflow"))?;
     let mut r = Reader::new(data);
-    r.take(offset + 32)?;
+    r.take(body_start)?;
     let value = r.take(len)?.to_vec();
-    let padded = len.div_ceil(32) * 32;
+    let padded = len
+        .div_ceil(32)
+        .checked_mul(32)
+        .ok_or(WireError("length overflow"))?;
     let padding = r.take(padded - len)?;
     if padding.iter().any(|b| *b != 0) {
         return Err(WireError("dirty bytes padding"));
@@ -479,5 +487,12 @@ mod tests {
         let last = data.len() - 1;
         data[last] = 1;
         assert!(abi_bytes(&data, 0).is_err());
+
+        // Head-overlapping offset (`offset = 32 < min_head_len = 96` for `head_index = 2`)
+        // that previously decoded `word[2]` simultaneously as offset and payload is refused.
+        let mut smuggled = vec![0u8; 96];
+        smuggled[63] = 0x20; // word[1] = 32 (forged len)
+        smuggled[95] = 0x20; // word[2] = 32 (offset pointing back into word[1])
+        assert!(abi_bytes(&smuggled, 2).is_err());
     }
 }
