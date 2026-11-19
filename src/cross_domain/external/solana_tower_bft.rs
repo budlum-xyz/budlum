@@ -631,9 +631,9 @@ impl ExternalFinalityAdapter for SolanaTowerBftAdapter {
                 expect: ExpectedRefusal::Kind(RefusalKind::Malformed),
             },
             FaultProbe {
-                name: "refuses tampered Solana bank slot breaking header hash".into(),
+                name: "refuses tampered Solana parent_bank_hash breaking header hash".into(),
                 patch: BytePatch::InPayload {
-                    offset: 17,
+                    offset: 64,
                     bytes: vec![0xFF, 0x7F],
                 },
                 expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
@@ -833,7 +833,7 @@ mod tests {
             att.security,
             SecurityBacking::SignatureSet {
                 signers: 3,
-                required: 68,
+                required: 67,
                 total_weight: 100,
                 slashable: false,
                 ..
@@ -1018,6 +1018,7 @@ mod tests {
 
         // 4. Bank slot outside the pinned epoch schedule is refused.
         bundle.bank.slot = FIRST_SLOT - 1;
+        bundle.bank.parent_slot = FIRST_SLOT - 2;
         bundle.bank.header_hash = bundle.bank.compute_hash(&net_hash);
         ev.declared_height = bundle.bank.slot;
         ev.payload = encode_sol_evidence(&bundle).unwrap();
