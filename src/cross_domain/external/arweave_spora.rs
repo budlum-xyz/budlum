@@ -156,9 +156,7 @@ fn validate_contamination(ev: &ArweaveSpOraEvidence) -> Result<u128, AdapterErro
             > (CONTAMINATION_CAP_BPS as u128).saturating_mul(ev.gross_endowment)
     {
         return Err(AdapterError::ConsensusRule {
-            rule: format!(
-                "Arweave contamination exceeds cap {CONTAMINATION_CAP_BPS} bps"
-            ),
+            rule: format!("Arweave contamination exceeds cap {CONTAMINATION_CAP_BPS} bps"),
         });
     }
     Ok(ev.gross_endowment.saturating_sub(ev.encumbered_endowment))
@@ -202,10 +200,7 @@ impl ArweaveSpOraAdapter {
     }
 
     /// Verify storage evidence and return free endowment.
-    pub fn verify_storage(
-        &self,
-        evidence: &ArweaveSpOraEvidence,
-    ) -> Result<u128, AdapterError> {
+    pub fn verify_storage(&self, evidence: &ArweaveSpOraEvidence) -> Result<u128, AdapterError> {
         validate_evidence_fields(evidence)?;
         let free = validate_contamination(evidence)?;
         validate_endowment_solvency(evidence)?;

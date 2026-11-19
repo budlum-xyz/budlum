@@ -608,9 +608,7 @@ pub fn run_relayer(config: &RelayerConfig) -> Result<(), String> {
     }
     // Strix B-0067: reject zero poll interval (infinite tight-spin DoS).
     if config.poll_interval_secs == 0 {
-        return Err(
-            "poll-interval must be at least 1 second; 0 would spin in a tight loop".into(),
-        );
+        return Err("poll-interval must be at least 1 second; 0 would spin in a tight loop".into());
     }
     // Strix B-0067: reject non-http(s) RPC URLs.
     for (name, url) in [

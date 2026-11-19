@@ -3010,9 +3010,6 @@ mod tests {
             opener_bond: 100,
         };
         let err = execute_storage_tx(&mut state, &ctx(opener), &tx).unwrap_err();
-        assert!(
-            err.to_string().contains("deal term"),
-            "unexpected: {err}"
-        );
+        assert!(err.to_string().contains("deal term"), "unexpected: {err}");
     }
 }

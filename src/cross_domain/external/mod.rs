@@ -110,6 +110,7 @@ pub mod ton_catchain;
 pub mod versioning;
 pub mod zkvm_proof;
 
+pub use arweave_spora::{ArweaveSpOraAdapter, ArweaveSpOraEvidence};
 pub use babylon_eots::{
     epoch_vote_message, BabylonEotsAdapter, BtcCheckpoint, BtcWeakSubjectivityAnchor,
     EotsEquivocationProof, EotsEvidence, EotsPublicKey, EotsVote, PostQuantumHalf,
@@ -181,7 +182,6 @@ pub use spec::{
     FinalityAttestation, FinalityKind, ProofSystem, RawConsensusEvidence, SecurityBacking,
     TimeUnit, TrustModel, VerificationPolicy,
 };
-pub use arweave_spora::{ArweaveSpOraAdapter, ArweaveSpOraEvidence};
 pub use stellar_fba::{PinnedScpTier, ScpQuorumSet, ScpValidatorNode, StellarScpAdapter};
 pub use symbiotic_vault::{SymbioticVaultAdapter, SymbioticVaultEvidence};
 pub use tendermint::{

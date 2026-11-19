@@ -152,10 +152,7 @@ impl core::fmt::Display for LiquidationError {
                 position_id,
                 health_bps,
             } => {
-                write!(
-                    f,
-                    "position {position_id} healthy at {health_bps} bps"
-                )
+                write!(f, "position {position_id} healthy at {health_bps} bps")
             }
             Self::BatchTooLarge { got, max } => {
                 write!(f, "batch size {got} exceeds max {max}")
@@ -167,9 +164,7 @@ impl core::fmt::Display for LiquidationError {
 }
 
 /// Validate that a TWAP observation sequence is well-formed.
-fn validate_observations(
-    observations: &[AmmReserveSnapshot],
-) -> Result<(), LiquidationError> {
+fn validate_observations(observations: &[AmmReserveSnapshot]) -> Result<(), LiquidationError> {
     let n = observations.len();
     if (n as u64) < MIN_TWAP_EPOCHS {
         return Err(LiquidationError::InsufficientObservations {
@@ -212,7 +207,9 @@ fn instant_price_scaled(reserve_x: u128, reserve_y: u128) -> Result<u128, Liquid
 }
 
 /// Validate that the TWAP price is a rational number (non-zero reserves).
-fn validate_twap_rational_price(observations: &[AmmReserveSnapshot]) -> Result<(), LiquidationError> {
+fn validate_twap_rational_price(
+    observations: &[AmmReserveSnapshot],
+) -> Result<(), LiquidationError> {
     for obs in observations {
         if obs.reserve_x == 0 || obs.reserve_y == 0 {
             return Err(LiquidationError::ZeroReserve { epoch: obs.epoch });
@@ -241,7 +238,9 @@ fn compute_twap_price(observations: &[AmmReserveSnapshot]) -> Result<u128, Liqui
             1u128 // Current observation counts as 1 unit
         };
         weighted_sum = weighted_sum.saturating_add(
-            price.checked_mul(duration).ok_or(LiquidationError::PriceOverflow)?,
+            price
+                .checked_mul(duration)
+                .ok_or(LiquidationError::PriceOverflow)?,
         );
         total_duration = total_duration.saturating_add(duration);
     }
@@ -319,10 +318,7 @@ pub fn execute_liquidation(
     }
 
     let twap_price = compute_twap_price(observations)?;
-    let twap_epoch = observations
-        .last()
-        .map(|o| o.epoch)
-        .unwrap_or(0);
+    let twap_epoch = observations.last().map(|o| o.epoch).unwrap_or(0);
 
     let mut outcomes = Vec::new();
     let scale: u128 = 1_000_000_000_000_000_000; // 1e18
@@ -336,16 +332,11 @@ pub fn execute_liquidation(
 
         // Health factor = (collateral_y * scale / twap_price) / debt_x * 10000
         // = collateral_y * scale * 10000 / (twap_price * debt_x)
-        let collateral_value_x = pos
-            .collateral_y
-            .saturating_mul(scale)
-            / twap_price.max(1);
+        let collateral_value_x = pos.collateral_y.saturating_mul(scale) / twap_price.max(1);
 
         // health_bps = collateral_value_x * 10000 / debt_x
         let health_bps = if pos.debt_x > 0 {
-            collateral_value_x
-                .saturating_mul(BPS_DEN as u128)
-                / pos.debt_x
+            collateral_value_x.saturating_mul(BPS_DEN as u128) / pos.debt_x
         } else {
             u64::MAX as u128
         };
@@ -391,11 +382,7 @@ mod tests {
     #[test]
     fn valid_liquidation_seizes_correct_collateral() {
         // price Y/X = 2.0 (reserve_y=200, reserve_x=100)
-        let obs = make_observations(&[
-            (1, 100, 200),
-            (2, 100, 200),
-            (3, 100, 200),
-        ]);
+        let obs = make_observations(&[(1, 100, 200), (2, 100, 200), (3, 100, 200)]);
         let positions = vec![LiquidationPosition {
             position_id: 1,
             debt_x: 1000,
@@ -426,7 +413,10 @@ mod tests {
             maintenance_threshold_bps: 15_000,
         }];
         let outcomes = execute_liquidation(&obs, &positions).expect("no crash");
-        assert!(outcomes.is_empty(), "healthy position should not be liquidated");
+        assert!(
+            outcomes.is_empty(),
+            "healthy position should not be liquidated"
+        );
     }
 
     #[test]
@@ -457,7 +447,10 @@ mod tests {
         let err = execute_liquidation(&obs, &positions).unwrap_err();
         assert!(matches!(
             err,
-            LiquidationError::NonMonotonicEpochs { prev: 3, current: 2 }
+            LiquidationError::NonMonotonicEpochs {
+                prev: 3,
+                current: 2
+            }
         ));
     }
 
@@ -476,11 +469,7 @@ mod tests {
 
     #[test]
     fn zero_debt_position_is_refused() {
-        let obs = make_observations(&[
-            (1, 100, 200),
-            (2, 100, 200),
-            (3, 100, 200),
-        ]);
+        let obs = make_observations(&[(1, 100, 200), (2, 100, 200), (3, 100, 200)]);
         let positions = vec![LiquidationPosition {
             position_id: 1,
             debt_x: 0,
@@ -493,11 +482,7 @@ mod tests {
 
     #[test]
     fn batch_too_large_is_refused() {
-        let obs = make_observations(&[
-            (1, 100, 200),
-            (2, 100, 200),
-            (3, 100, 200),
-        ]);
+        let obs = make_observations(&[(1, 100, 200), (2, 100, 200), (3, 100, 200)]);
         let positions = (0..=MAX_BATCH_SIZE)
             .map(|i| LiquidationPosition {
                 position_id: i as u64,
@@ -507,21 +492,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let err = execute_liquidation(&obs, &positions).unwrap_err();
-        assert!(matches!(
-            err,
-            LiquidationError::BatchTooLarge { .. }
-        ));
+        assert!(matches!(err, LiquidationError::BatchTooLarge { .. }));
     }
 
     #[test]
     fn collateral_capped_at_position_balance() {
         // debt=1000, price=2.0, penalty=5% => debt_in_y = 2100
         // but collateral_y = 1500 < 2100, so seize only 1500
-        let obs = make_observations(&[
-            (1, 100, 200),
-            (2, 100, 200),
-            (3, 100, 200),
-        ]);
+        let obs = make_observations(&[(1, 100, 200), (2, 100, 200), (3, 100, 200)]);
         let positions = vec![LiquidationPosition {
             position_id: 1,
             debt_x: 1000,
@@ -540,11 +518,7 @@ mod tests {
         // Epoch 2: price = 400/100 = 4.0
         // Epoch 3: price = 300/100 = 3.0
         // TWAP = (2.0 * 1 + 4.0 * 1 + 3.0) / 3 = (2 + 4 + 3) / 3 = 3.0
-        let obs = make_observations(&[
-            (1, 100, 200),
-            (2, 100, 400),
-            (3, 100, 300),
-        ]);
+        let obs = make_observations(&[(1, 100, 200), (2, 100, 400), (3, 100, 300)]);
         let positions = vec![LiquidationPosition {
             position_id: 1,
             debt_x: 100,
@@ -559,11 +533,7 @@ mod tests {
 
     #[test]
     fn empty_positions_returns_empty() {
-        let obs = make_observations(&[
-            (1, 100, 200),
-            (2, 100, 200),
-            (3, 100, 200),
-        ]);
+        let obs = make_observations(&[(1, 100, 200), (2, 100, 200), (3, 100, 200)]);
         let outcomes = execute_liquidation(&obs, &[]).expect("ok");
         assert!(outcomes.is_empty());
     }

@@ -195,7 +195,9 @@ fn validate_contamination(ev: &SymbioticVaultEvidence) -> Result<u128, AdapterEr
             / ev.gross_collateral;
         // encumbered/gross > CONTAMINATION_CAP_BPS/BPS_DENOMINATOR
         // i.e. encumbered * BPS_DENOMINATOR > cap * gross
-        if ev.encumbered_collateral.saturating_mul(BPS_DENOMINATOR as u128)
+        if ev
+            .encumbered_collateral
+            .saturating_mul(BPS_DENOMINATOR as u128)
             > (CONTAMINATION_CAP_BPS as u128).saturating_mul(ev.gross_collateral)
         {
             return Err(AdapterError::ConsensusRule {
@@ -280,11 +282,11 @@ impl SymbioticVaultAdapter {
                 let ev = sample_evidence(&self.network);
                 let mut patched = ev.clone();
                 patched.magic = [0xFF; 8];
-                self.verify_collateral(&patched)
-                    .map(drop)
-                    .map_err(|_| AdapterError::ConsensusRule {
+                self.verify_collateral(&patched).map(drop).map_err(|_| {
+                    AdapterError::ConsensusRule {
                         rule: "probe accepted bad magic".into(),
-                    })
+                    }
+                })
             }
             RefusalKind::CorruptSignature => {
                 let ev = sample_evidence(&self.network);
@@ -292,11 +294,11 @@ impl SymbioticVaultAdapter {
                 if let Some(sig) = patched.classical_signatures.first_mut() {
                     sig.signature = vec![0; 32];
                 }
-                self.verify_collateral(&patched)
-                    .map(drop)
-                    .map_err(|_| AdapterError::ConsensusRule {
+                self.verify_collateral(&patched).map(drop).map_err(|_| {
+                    AdapterError::ConsensusRule {
                         rule: "probe accepted corrupt signature".into(),
-                    })
+                    }
+                })
             }
             _ => Err(AdapterError::ConsensusRule {
                 rule: format!("unsupported probe kind: {:?}", probe.kind),
@@ -316,9 +318,7 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
             finality_kind: FinalityKind::EconomicFinality,
             required_depth: 1,
             time_unit: TimeUnit::Epoch,
-            trust_model: TrustModel::HonestMajority {
-                set_size: 64,
-            },
+            trust_model: TrustModel::HonestMajority { set_size: 64 },
         }
     }
 
@@ -437,12 +437,10 @@ fn sample_evidence(network: &str) -> SymbioticVaultEvidence {
         gross_collateral: 1_000_000,
         encumbered_collateral: 200_000,
         collateral_root: [0xAB; 32],
-        classical_signatures: vec![
-            SymbioticSignature {
-                signer_index: 0,
-                signature: vec![1; 64],
-            },
-        ],
+        classical_signatures: vec![SymbioticSignature {
+            signer_index: 0,
+            signature: vec![1; 64],
+        }],
         classical_threshold: 1,
         pq_signatures: vec![SymbioticSignature {
             signer_index: 0,

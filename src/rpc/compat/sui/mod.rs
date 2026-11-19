@@ -102,10 +102,7 @@ pub fn handle_sui_rpc(
         return SuiRpcResponse::err(
             req.id,
             -32600,
-            &format!(
-                "Sui RPC requires jsonrpc \"2.0\", got {:?}",
-                req.jsonrpc
-            ),
+            &format!("Sui RPC requires jsonrpc \"2.0\", got {:?}", req.jsonrpc),
         );
     }
     match req.method.as_str() {
