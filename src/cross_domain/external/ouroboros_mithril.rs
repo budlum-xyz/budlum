@@ -52,7 +52,7 @@
 //!
 //! - **No stake distribution inference.** The distribution is pinned per
 //!   epoch. In this tree, reading a distribution off a ledger is
-//!   [`super::rust`]-free by design: the adapter takes what the registration
+//!   `super::rust`-free by design: the adapter takes what the registration
 //!   pinned and refuses when the epoch is not pinned.
 //! - **No VRF evaluation by us.** Cardano's VRF is ECVRF-ED25519-SHA512 with a
 //!   Praos-specific domain; Budlum does not implement a second one. The

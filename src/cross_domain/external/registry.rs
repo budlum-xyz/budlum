@@ -1036,6 +1036,8 @@ impl ExternalDomainRegistry {
     /// Returns [`RegistryError::AlreadySlashed`] if the evidence digest was
     /// already slashed, or [`RegistryError::UnknownDomain`] /
     /// [`RegistryError::UnknownProver`] if the domain or prover is not found.
+    /// WIRING: external Symbiotic vault equivocation slash entry point.
+    /// Convenience: exposed for the governance-gated Symbiotic slashing intake door.
     pub fn slash_symbiotic_equivocation(
         &mut self,
         domain: &DomainKey,

@@ -812,7 +812,7 @@ pub struct UlpMetrics {
     pub vm_trace_steps: usize,
 }
 
-/// Verified header extracted after [`verify_universal_light_proof`] succeeds.
+/// Verified header extracted after `verify_universal_light_proof` succeeds.
 ///
 /// Subsequent per-domain inclusion checks run against `domains_merkle_root` in
 /// strictly `O(log D)` hashes with zero further STARK verification.

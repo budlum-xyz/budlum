@@ -30,7 +30,7 @@ use crate::crypto::facts::ObservedScheme;
 use crate::domain::types::Hash32;
 use serde::{Deserialize, Serialize};
 
-use super::selftest::{FaultProbe, RefusalKind};
+use super::selftest::{BytePatch, ExpectedRefusal, FaultProbe, RefusalKind};
 use super::spec::{
     AdapterDescriptor, AdapterError, AdapterId, DomainKey, ExternalFinalityAdapter,
     FinalityAttestation, FinalityKind, RawConsensusEvidence, SecurityBacking, TimeUnit, TrustModel,
@@ -50,7 +50,6 @@ const BPS_DENOMINATOR: u64 = 10_000;
 /// Minimum endowment sustenance in Arweave epochs (~2 weeks each).
 const MIN_SUSTAINANCE_EPOCHS: u64 = 26;
 const MAX_MERKLE_PROOF_DEPTH: usize = 64;
-const ARWEAVE_BLOCK_TIME_SECS: u64 = 120;
 
 /// Arweave SPoRA storage attestation evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,18 +86,25 @@ impl ArweaveSpOraEvidence {
     /// Canonical domain-separated digest.
     #[must_use]
     pub fn digest(&self) -> Hash32 {
+        let block_height = self.block_height.to_le_bytes();
+        let epoch = self.epoch.to_le_bytes();
+        let chunk_offset = self.chunk_offset.to_le_bytes();
+        let chunk_size = self.chunk_size.to_le_bytes();
+        let gross_endowment = self.gross_endowment.to_le_bytes();
+        let encumbered_endowment = self.encumbered_endowment.to_le_bytes();
+        let spora_rate = self.spora_rate.to_le_bytes();
         let mut fields: Vec<&[u8]> = vec![
             b"BDLM_ARWEAVE_SPORA_V1",
             &self.magic,
             &self.chunk_id,
-            &self.block_height.to_le_bytes(),
-            &self.epoch.to_le_bytes(),
+            &block_height,
+            &epoch,
             &self.weave_root,
-            &self.chunk_offset.to_le_bytes(),
-            &self.chunk_size.to_le_bytes(),
-            &self.gross_endowment.to_le_bytes(),
-            &self.encumbered_endowment.to_le_bytes(),
-            &self.spora_rate.to_le_bytes(),
+            &chunk_offset,
+            &chunk_size,
+            &gross_endowment,
+            &encumbered_endowment,
+            &spora_rate,
         ];
         for node in &self.merkle_proof {
             fields.push(node);
@@ -206,33 +212,6 @@ impl ArweaveSpOraAdapter {
         validate_endowment_solvency(evidence)?;
         Ok(free)
     }
-
-    /// Self-test fault probes.
-    pub fn run_probe(&self, probe: &FaultProbe) -> Result<(), AdapterError> {
-        match probe.kind {
-            RefusalKind::BadMagic => {
-                let mut ev = sample_evidence();
-                ev.magic = [0xFF; 8];
-                self.verify_storage(&ev)
-                    .map(drop)
-                    .map_err(|_| AdapterError::ConsensusRule {
-                        rule: "probe accepted bad magic".into(),
-                    })
-            }
-            RefusalKind::CorruptSignature => {
-                let mut ev = sample_evidence();
-                ev.operator_signature = vec![0; 32];
-                self.verify_storage(&ev)
-                    .map(drop)
-                    .map_err(|_| AdapterError::ConsensusRule {
-                        rule: "probe accepted corrupt signature".into(),
-                    })
-            }
-            _ => Err(AdapterError::ConsensusRule {
-                rule: format!("unsupported probe kind: {:?}", probe.kind),
-            }),
-        }
-    }
 }
 
 impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
@@ -245,7 +224,7 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             consensus_kind: "arweave-spora-recall".to_string(),
             finality_kind: FinalityKind::EconomicFinality,
             required_depth: 1,
-            time_unit: TimeUnit::Block,
+            time_unit: TimeUnit::Height,
             trust_model: TrustModel::HonestMajority { set_size: 50 },
         }
     }
@@ -319,7 +298,7 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             height: evidence.declared_height,
             state_root,
             finalized_at: ev.block_height,
-            time_unit: TimeUnit::Block,
+            time_unit: TimeUnit::Height,
             security: backing,
             evidence_digest: digest,
             adapter_version: ADAPTER_VERSION,
@@ -328,6 +307,38 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             attested_event_root: None,
             attested_tx_root: None,
         })
+    }
+
+    fn fault_probes(&self) -> Vec<FaultProbe> {
+        vec![
+            FaultProbe {
+                name: "corrupt-payload-opening".to_string(),
+                patch: BytePatch::InPayload {
+                    offset: 0,
+                    bytes: vec![0xFF],
+                },
+                expect: ExpectedRefusal::Kind(RefusalKind::Malformed),
+            },
+            FaultProbe {
+                name: "wrong-evidence-version".to_string(),
+                patch: BytePatch::EvidenceVersion {
+                    value: EVIDENCE_VERSION + 1,
+                },
+                expect: ExpectedRefusal::Any,
+            },
+            FaultProbe {
+                name: "wrong-network".to_string(),
+                patch: BytePatch::Network {
+                    value: "arweave-wrongnet".to_string(),
+                },
+                expect: ExpectedRefusal::Any,
+            },
+            FaultProbe {
+                name: "corrupt-declared-root".to_string(),
+                patch: BytePatch::DeclaredRoot { value: [0xEE; 32] },
+                expect: ExpectedRefusal::Any,
+            },
+        ]
     }
 }
 

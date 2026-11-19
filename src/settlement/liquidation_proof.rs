@@ -63,12 +63,15 @@ impl AmmReserveSnapshot {
     /// Canonical digest of this snapshot.
     #[must_use]
     pub fn digest(&self) -> Hash32 {
+        let epoch = self.epoch.to_le_bytes();
+        let reserve_x = self.reserve_x.to_le_bytes();
+        let reserve_y = self.reserve_y.to_le_bytes();
         let mut fields: Vec<&[u8]> = vec![
             b"BDLM_LIQ_RESERVE_V1",
             &self.state_root,
-            &self.epoch.to_le_bytes(),
-            &self.reserve_x.to_le_bytes(),
-            &self.reserve_y.to_le_bytes(),
+            &epoch,
+            &reserve_x,
+            &reserve_y,
         ];
         for node in &self.proof {
             fields.push(node);
@@ -226,17 +229,14 @@ fn compute_twap_price(observations: &[AmmReserveSnapshot]) -> Result<u128, Liqui
     // Time-weighted average: sum(price_i * duration_i) / sum(duration_i)
     // Duration of each observation is (next_epoch - this_epoch), except the
     // last which has duration 1 (it's the current price).
-    let n = observations.len();
     let mut weighted_sum: u128 = 0;
     let mut total_duration: u128 = 0;
 
     for (i, obs) in observations.iter().enumerate() {
         let price = instant_price_scaled(obs.reserve_x, obs.reserve_y)?;
-        let duration = if i + 1 < n {
-            (observations[i + 1].epoch - obs.epoch) as u128
-        } else {
-            1u128 // Current observation counts as 1 unit
-        };
+        let duration = observations.get(i + 1).map_or(1u128, |next| {
+            u128::from(next.epoch.saturating_sub(obs.epoch))
+        });
         weighted_sum = weighted_sum.saturating_add(
             price
                 .checked_mul(duration)

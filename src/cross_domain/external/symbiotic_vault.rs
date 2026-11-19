@@ -27,12 +27,9 @@
 //! WIRING: implements [`ExternalFinalityAdapter`] for
 //! [`super::ExternalDomainRegistry`] admission and slashing.
 
-use crate::crypto::facts::{CryptoObserver, ObservedScheme};
-use crate::crypto::scheme::SchemeId;
+use crate::crypto::facts::ObservedScheme;
 use crate::domain::types::Hash32;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use subtle::ConstantTimeEq;
 
 use super::selftest::{BytePatch, ExpectedRefusal, FaultProbe, RefusalKind};
 use super::spec::{
@@ -101,24 +98,39 @@ impl SymbioticVaultEvidence {
     /// Canonical domain-separated digest of this evidence.
     #[must_use]
     pub fn digest(&self) -> Hash32 {
+        let epoch = self.epoch.to_le_bytes();
+        let gross_collateral = self.gross_collateral.to_le_bytes();
+        let encumbered_collateral = self.encumbered_collateral.to_le_bytes();
+        let classical_threshold = self.classical_threshold.to_le_bytes();
+        let pq_threshold = self.pq_threshold.to_le_bytes();
+        let c_indices: Vec<[u8; 4]> = self
+            .classical_signatures
+            .iter()
+            .map(|s| s.signer_index.to_le_bytes())
+            .collect();
+        let pq_indices: Vec<[u8; 4]> = self
+            .pq_signatures
+            .iter()
+            .map(|s| s.signer_index.to_le_bytes())
+            .collect();
         let mut fields: Vec<&[u8]> = vec![
             b"BDLM_SYMBIOTIC_VAULT_V1",
             &self.magic,
             &self.vault_id,
             &self.asset_symbol,
-            &self.epoch.to_le_bytes(),
-            &self.gross_collateral.to_le_bytes(),
-            &self.encumbered_collateral.to_le_bytes(),
+            &epoch,
+            &gross_collateral,
+            &encumbered_collateral,
             &self.collateral_root,
-            &(self.classical_threshold.to_le_bytes()),
-            &(self.pq_threshold.to_le_bytes()),
+            &classical_threshold,
+            &pq_threshold,
         ];
-        for sig in &self.classical_signatures {
-            fields.push(&sig.signer_index.to_le_bytes());
+        for (idx, sig) in c_indices.iter().zip(&self.classical_signatures) {
+            fields.push(idx);
             fields.push(&sig.signature);
         }
-        for sig in &self.pq_signatures {
-            fields.push(&sig.signer_index.to_le_bytes());
+        for (idx, sig) in pq_indices.iter().zip(&self.pq_signatures) {
+            fields.push(idx);
             fields.push(&sig.signature);
         }
         crate::core::hash::hash_fields_bytes(&fields)
@@ -274,37 +286,6 @@ impl SymbioticVaultAdapter {
         )?;
         validate_contamination(evidence)
     }
-
-    /// Self-test fault probes.
-    pub fn run_probe(&self, probe: &FaultProbe) -> Result<(), AdapterError> {
-        match probe.kind {
-            RefusalKind::BadMagic => {
-                let ev = sample_evidence(&self.network);
-                let mut patched = ev.clone();
-                patched.magic = [0xFF; 8];
-                self.verify_collateral(&patched).map(drop).map_err(|_| {
-                    AdapterError::ConsensusRule {
-                        rule: "probe accepted bad magic".into(),
-                    }
-                })
-            }
-            RefusalKind::CorruptSignature => {
-                let ev = sample_evidence(&self.network);
-                let mut patched = ev.clone();
-                if let Some(sig) = patched.classical_signatures.first_mut() {
-                    sig.signature = vec![0; 32];
-                }
-                self.verify_collateral(&patched).map(drop).map_err(|_| {
-                    AdapterError::ConsensusRule {
-                        rule: "probe accepted corrupt signature".into(),
-                    }
-                })
-            }
-            _ => Err(AdapterError::ConsensusRule {
-                rule: format!("unsupported probe kind: {:?}", probe.kind),
-            }),
-        }
-    }
 }
 
 impl ExternalFinalityAdapter for SymbioticVaultAdapter {
@@ -356,7 +337,7 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
                 offset: 0,
                 reason: e.to_string(),
             })?;
-        let free_collateral = self.verify_collateral(&ev)?;
+        let _free_collateral = self.verify_collateral(&ev)?;
 
         if policy.min_depth > 1 {
             return Err(AdapterError::ConsensusRule {
@@ -397,6 +378,38 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
             backing,
             digest,
         ))
+    }
+
+    fn fault_probes(&self) -> Vec<FaultProbe> {
+        vec![
+            FaultProbe {
+                name: "corrupt-payload-opening".to_string(),
+                patch: BytePatch::InPayload {
+                    offset: 0,
+                    bytes: vec![0xFF],
+                },
+                expect: ExpectedRefusal::Kind(RefusalKind::Malformed),
+            },
+            FaultProbe {
+                name: "wrong-evidence-version".to_string(),
+                patch: BytePatch::EvidenceVersion {
+                    value: EVIDENCE_VERSION + 1,
+                },
+                expect: ExpectedRefusal::Any,
+            },
+            FaultProbe {
+                name: "wrong-network".to_string(),
+                patch: BytePatch::Network {
+                    value: "symbiotic-wrongnet".to_string(),
+                },
+                expect: ExpectedRefusal::Any,
+            },
+            FaultProbe {
+                name: "corrupt-declared-root".to_string(),
+                patch: BytePatch::DeclaredRoot { value: [0xEE; 32] },
+                expect: ExpectedRefusal::Any,
+            },
+        ]
     }
 }
 
