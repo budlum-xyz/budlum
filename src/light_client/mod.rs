@@ -1,7 +1,7 @@
-//! WIRING: unwired - `RemoteStateView::verify_for_chain` has no production caller yet.
-//! The rest is reached: `settlement::app_binding` verifies payment proofs
-//! through `LightClient::verify_global_header`, and the `budlum-light` binary
-//! drives the sync.
+//! WIRING: unwired - `RemoteStateView::verify_for_chain` and `ULP-1` routing await RPC hookup.
+//!
+//! `settlement::app_binding` verifies payment proofs via `LightClient::verify_global_header`,
+//! and the `budlum-light` binary drives header and checkpoint sync.
 //!
 //! Succinct light-client verification.
 //!
@@ -35,6 +35,98 @@ use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
 use crate::consensus::qc::QcBlob;
 use crate::core::block::BlockHeader;
 use crate::network::protocol::is_canonical_hash;
+
+/// Maximum number of verified un-advanced headers cached in [`LightClient::linked`].
+///
+/// Caps light-client memory against unbounded header-segment downloads between
+/// checkpoint advances while keeping full multi-epoch sync segments admissible.
+pub const MAX_LINKED_HEADERS: usize = 8_192;
+
+/// Maximum hop count permitted inside a single [`UniversalLightPacket`].
+pub const MAX_UNIVERSAL_ROUTE_HOPS: usize = 4;
+
+/// Routing safety policy enforced by [`LightClient::verify_multi_hop_light_route`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UniversalRoutePolicy {
+    /// Maximum hop count permitted in a single multi-hop route (`1..=4`).
+    pub max_hops: usize,
+    /// Cumulative and per-hop outflow ceiling in basis points (`<= 2_500`).
+    pub max_outflow_bps: u16,
+    /// Minimum verified security weight required on every traversed domain.
+    pub min_security_weight: u64,
+    /// Whether the settlement hub's CRQC Frost Alarm emergency gate is active.
+    pub crqc_alarm_active: bool,
+    /// Require every traversed domain to hold post-quantum attestation under Frost Alarm.
+    pub require_pq_on_crqc_alarm: bool,
+}
+
+impl UniversalRoutePolicy {
+    /// Strict production value-routing policy: at most 4 hops, hard 25%
+    /// (`2_500` bps) outflow ceiling, positive security weight, and fail-closed
+    /// post-quantum enforcement whenever `crqc_alarm_active` is set.
+    /// Convenience: kept for the CLI and strict light-client route callers.
+    #[must_use]
+    pub const fn strict_value(crqc_alarm_active: bool) -> Self {
+        Self {
+            max_hops: MAX_UNIVERSAL_ROUTE_HOPS,
+            max_outflow_bps: crate::aggregation::universal_light_proof::MAX_ULP_OUTFLOW_BPS,
+            min_security_weight: 1,
+            crqc_alarm_active,
+            require_pq_on_crqc_alarm: true,
+        }
+    }
+}
+
+/// One cross-domain hop `source -> destination` verified against a `ULP-1` root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniversalRouteHop {
+    /// Finalized origin domain snapshot for this hop.
+    pub source: crate::aggregation::universal_light_proof::UlpDomainSnapshot,
+    /// `O(log D)` Merkle inclusion proof for `source`.
+    pub source_proof: crate::aggregation::universal_light_proof::UlpDomainInclusionProof,
+    /// Finalized destination domain snapshot for this hop.
+    pub destination: crate::aggregation::universal_light_proof::UlpDomainSnapshot,
+    /// `O(log D)` Merkle inclusion proof for `destination`.
+    pub destination_proof: crate::aggregation::universal_light_proof::UlpDomainInclusionProof,
+    /// Canonical non-zero packet commitment rooted in `source.event_root`.
+    pub packet_commitment: crate::domain::types::Hash32,
+    /// Monotonic packet sequence number along the route.
+    pub sequence: u64,
+    /// Value outflow moved by this hop in basis points of the domain cap.
+    pub amount_bps: u16,
+}
+
+/// Multi-hop cross-domain light-client packet backed by one `ULP-1` bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniversalLightPacket {
+    /// Succinct multi-domain `ULP-1` proof bundle anchored at the hub checkpoint.
+    pub ulp_bundle: crate::aggregation::universal_light_proof::UniversalLightProofBundle,
+    /// Governance-pinned `ULP-1` circuit program hash.
+    pub expected_program_hash: crate::domain::types::Hash32,
+    /// Contiguous sequence of cross-domain hops (`A -> B -> C ...`).
+    pub hops: Vec<UniversalRouteHop>,
+}
+
+/// Verified receipt produced by [`LightClient::verify_multi_hop_light_route`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedUniversalRoute {
+    /// Finalized settlement hub checkpoint height.
+    pub hub_height: u64,
+    /// Settlement epoch bound inside `ULP-1`.
+    pub settlement_epoch: u64,
+    /// Origin domain of the first hop.
+    pub origin_domain: crate::domain::types::DomainId,
+    /// Terminal destination domain of the last hop.
+    pub terminal_domain: crate::domain::types::DomainId,
+    /// Number of verified hops.
+    pub hop_count: usize,
+    /// Exact sum of `amount_bps` across all hops (`<= max_outflow_bps`).
+    pub cumulative_outflow_bps: u16,
+    /// Whether every traversed domain carried verified post-quantum security.
+    pub post_quantum_clean: bool,
+    /// Domain-separated commitment over the entire verified multi-hop path.
+    pub route_digest: crate::domain::types::Hash32,
+}
 
 /// The single trust anchor a light client is bootstrapped from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -513,12 +605,18 @@ impl LightClient {
     /// disconnected segment and [`LightClientError::NotForward`] for a header
     /// at or below the anchor.
     pub fn verify_header_chain(&mut self, headers: &[BlockHeader]) -> Result<(), LightClientError> {
-        if headers.is_empty() {
+        let Some(first) = headers.first() else {
             return Err(LightClientError::HeaderChain(
                 "no headers supplied".to_string(),
             ));
+        };
+        if headers.len() > MAX_LINKED_HEADERS {
+            return Err(LightClientError::HeaderChain(format!(
+                "header segment length {} exceeds MAX_LINKED_HEADERS ({MAX_LINKED_HEADERS})",
+                headers.len()
+            )));
         }
-        let first = &headers[0];
+        let mut new_heights = 0usize;
         for header in headers {
             if !is_canonical_hash(&header.hash) || header.hash != header.calculate_hash() {
                 return Err(LightClientError::HeaderChain(format!(
@@ -532,6 +630,21 @@ impl LightClient {
                     candidate: header.index,
                 });
             }
+            if let Some(existing) = self.linked.get(&header.index) {
+                if existing != &header.hash {
+                    return Err(LightClientError::HeaderChain(format!(
+                        "conflicting header at height {}: {} != already-linked {}",
+                        header.index, header.hash, existing
+                    )));
+                }
+            } else {
+                new_heights = new_heights.saturating_add(1);
+            }
+        }
+        if self.linked.len().saturating_add(new_heights) > MAX_LINKED_HEADERS {
+            return Err(LightClientError::HeaderChain(format!(
+                "linked header cache would exceed MAX_LINKED_HEADERS ({MAX_LINKED_HEADERS})"
+            )));
         }
         if first.index != self.trusted.height.saturating_add(1) {
             return Err(LightClientError::HeaderChain(format!(
@@ -546,13 +659,13 @@ impl LightClient {
             )));
         }
         for pair in headers.windows(2) {
-            if pair[1].index != pair[0].index.saturating_add(1)
-                || pair[1].previous_hash != pair[0].hash
-            {
-                return Err(LightClientError::HeaderChain(format!(
-                    "headers {} and {} are not contiguous and parent-linked",
-                    pair[0].index, pair[1].index
-                )));
+            if let [prev, curr] = pair {
+                if curr.index != prev.index.saturating_add(1) || curr.previous_hash != prev.hash {
+                    return Err(LightClientError::HeaderChain(format!(
+                        "headers {} and {} are not contiguous and parent-linked",
+                        prev.index, curr.index
+                    )));
+                }
             }
         }
         for header in headers {
@@ -674,7 +787,7 @@ impl LightClient {
             epoch_randomness,
         )
         .map_err(|e| LightClientError::VerificationFailed(e.to_string()))?;
-        self.trusted.set_hash = last.set_hash.clone();
+        self.trusted.set_hash.clone_from(&last.set_hash);
         self.require_pq = true;
         Ok(epoch)
     }
@@ -800,7 +913,12 @@ impl LightClient {
     where
         F: Fn(&bud_proof::sigagg::SignerSignature, &[u8; 32]) -> bool,
     {
-        let _ = &self.trusted;
+        self.ensure_checkpoint_bound_to_trust(checkpoint)?;
+        if !is_canonical_hash(&checkpoint.block_hash) {
+            return Err(LightClientError::MalformedHash(
+                checkpoint.block_hash.clone(),
+            ));
+        }
         let hash_bytes = hex::decode(&checkpoint.block_hash)
             .map_err(|_| LightClientError::MalformedHash(checkpoint.block_hash.clone()))?;
         if hash_bytes.as_slice() != batch.message_digest.as_slice() {
@@ -810,6 +928,226 @@ impl LightClient {
             ));
         }
         Self::verify_committee_batch(batch, committee, required_weight, verify_signature)
+    }
+
+    /// Ensures `checkpoint` carries the trusted validator-set hash and names
+    /// either the current trust anchor itself or a strictly forward header
+    /// previously linked to that anchor via [`Self::verify_header_chain`].
+    fn ensure_checkpoint_bound_to_trust(
+        &self,
+        checkpoint: &VerifiedCheckpoint,
+    ) -> Result<(), LightClientError> {
+        if checkpoint.set_hash != self.trusted.set_hash {
+            return Err(LightClientError::TrustBinding(format!(
+                "checkpoint set hash {} != trusted set hash {}",
+                checkpoint.set_hash, self.trusted.set_hash
+            )));
+        }
+        if checkpoint.height < self.trusted.height {
+            return Err(LightClientError::NotForward {
+                trusted: self.trusted.height,
+                candidate: checkpoint.height,
+            });
+        }
+        if checkpoint.height == self.trusted.height {
+            if checkpoint.block_hash != self.trusted.block_hash {
+                return Err(LightClientError::TrustBinding(format!(
+                    "checkpoint block hash {} != trusted block hash {} at height {}",
+                    checkpoint.block_hash, self.trusted.block_hash, checkpoint.height
+                )));
+            }
+            return Ok(());
+        }
+        if self.linked.get(&checkpoint.height) != Some(&checkpoint.block_hash) {
+            return Err(LightClientError::HeaderChain(format!(
+                "checkpoint {} at height {} is not linked to the trust anchor",
+                checkpoint.block_hash, checkpoint.height
+            )));
+        }
+        Ok(())
+    }
+
+    /// Verifies a multi-hop cross-domain light-client route (`A -> B -> C ...`)
+    /// anchored at `checkpoint` + `global_header` through a single succinct
+    /// `ULP-1` proof bundle (`GOREV-21` / `RFC-001`).
+    ///
+    /// Verification complexity is `O(1)` STARK verification plus `O(log C)`
+    /// claim-inclusion checks and `O(hops * log D)` domain-inclusion checks,
+    /// independent of the total claim set `C` and external domain count `D`.
+    /// Under an active CRQC Frost Alarm emergency (`policy.crqc_alarm_active`),
+    /// any route traversing a domain without verified post-quantum security is
+    /// rejected fail-closed before acceptance.
+    ///
+    /// Convenience: exposed for multi-hop universal light-client callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LightClientError`] if checkpoint trust binding, global-header
+    /// opening, `ULP-1` proof verification, domain Merkle inclusion, hop
+    /// continuity, cycle prevention, outflow ceiling (`<= 25%`), or Frost Alarm
+    /// post-quantum policy fails.
+    pub fn verify_multi_hop_light_route(
+        &self,
+        checkpoint: &VerifiedCheckpoint,
+        state_root_body: &crate::domain::types::Hash32,
+        global_header: &crate::settlement::GlobalBlockHeader,
+        packet: &UniversalLightPacket,
+        policy: &UniversalRoutePolicy,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    ) -> Result<VerifiedUniversalRoute, LightClientError> {
+        use crate::aggregation::universal_light_proof::{
+            open_universal_light_proof, MAX_ULP_OUTFLOW_BPS,
+        };
+
+        self.ensure_checkpoint_bound_to_trust(checkpoint)?;
+        Self::verify_global_header(checkpoint, state_root_body, global_header)?;
+
+        if policy.max_hops == 0 || policy.max_hops > MAX_UNIVERSAL_ROUTE_HOPS {
+            return Err(LightClientError::VerificationFailed(
+                "ULP-1 route policy max_hops out of bounds".into(),
+            ));
+        }
+        let effective_ceiling = policy.max_outflow_bps.min(MAX_ULP_OUTFLOW_BPS);
+        if packet.hops.is_empty() || packet.hops.len() > policy.max_hops {
+            return Err(LightClientError::VerificationFailed(format!(
+                "ULP-1 hop count {} outside 1..={}",
+                packet.hops.len(),
+                policy.max_hops
+            )));
+        }
+
+        let hub_root = global_header.calculate_hash_bytes();
+        let ulp_header = open_universal_light_proof(
+            &packet.ulp_bundle,
+            &packet.expected_program_hash,
+            packet.ulp_bundle.hub_chain_id,
+            &hub_root,
+            registry,
+        )
+        .map_err(|e| LightClientError::VerificationFailed(e.to_string()))?;
+
+        if ulp_header.max_outflow_bps > effective_ceiling {
+            return Err(LightClientError::VerificationFailed(format!(
+                "ULP-1 bundle max_outflow_bps {} exceeds policy ceiling {}",
+                ulp_header.max_outflow_bps, effective_ceiling
+            )));
+        }
+
+        let mut visited = std::collections::BTreeSet::new();
+        let mut cumulative_outflow_bps = 0u16;
+        let mut post_quantum_clean = true;
+        let mut route_acc = hub_root;
+        let mut prev_dest: Option<&crate::aggregation::universal_light_proof::UlpDomainSnapshot> =
+            None;
+        let mut prev_seq: Option<u64> = None;
+
+        for (hop_idx, hop) in packet.hops.iter().enumerate() {
+            if hop.source.domain_id == hop.destination.domain_id {
+                return Err(LightClientError::VerificationFailed(
+                    "ULP-1 self-loop hop refused".into(),
+                ));
+            }
+            if hop.packet_commitment == [0u8; 32] || hop.source.event_root == [0u8; 32] {
+                return Err(LightClientError::VerificationFailed(
+                    "ULP-1 hop missing packet_commitment or source event_root".into(),
+                ));
+            }
+            if let Some(prev) = prev_dest {
+                if hop.source != *prev {
+                    return Err(LightClientError::VerificationFailed(format!(
+                        "ULP-1 route discontinuity at hop {hop_idx}: source domain {} does not match prior destination {}",
+                        hop.source.domain_id, prev.domain_id
+                    )));
+                }
+            } else {
+                visited.insert(hop.source.domain_id);
+            }
+            if !visited.insert(hop.destination.domain_id) {
+                return Err(LightClientError::VerificationFailed(format!(
+                    "ULP-1 route cycle detected at domain {}",
+                    hop.destination.domain_id
+                )));
+            }
+            if let Some(last_seq) = prev_seq {
+                if hop.sequence <= last_seq {
+                    return Err(LightClientError::VerificationFailed(
+                        "ULP-1 hop sequence must strictly increase".into(),
+                    ));
+                }
+            }
+            prev_seq = Some(hop.sequence);
+
+            // O(log D) Merkle inclusion proofs against the verified ULP-1 domain root.
+            hop.source_proof
+                .verify(&hop.source, &ulp_header.domains_merkle_root)
+                .map_err(|e| LightClientError::VerificationFailed(e.to_string()))?;
+            hop.destination_proof
+                .verify(&hop.destination, &ulp_header.domains_merkle_root)
+                .map_err(|e| LightClientError::VerificationFailed(e.to_string()))?;
+
+            for endpoint in [&hop.source, &hop.destination] {
+                if endpoint.security_weight < policy.min_security_weight {
+                    return Err(LightClientError::VerificationFailed(format!(
+                        "ULP-1 domain {} security_weight {} below minimum {}",
+                        endpoint.domain_id, endpoint.security_weight, policy.min_security_weight
+                    )));
+                }
+                if endpoint.outflow_bps > effective_ceiling {
+                    return Err(LightClientError::VerificationFailed(format!(
+                        "ULP-1 domain {} outflow {} bps exceeds ceiling {} bps",
+                        endpoint.domain_id, endpoint.outflow_bps, effective_ceiling
+                    )));
+                }
+                let endpoint_pq = endpoint.kind.is_post_quantum_safe(endpoint.pq_attested);
+                post_quantum_clean &= endpoint_pq;
+                if policy.crqc_alarm_active && policy.require_pq_on_crqc_alarm && !endpoint_pq {
+                    return Err(LightClientError::VerificationFailed(format!(
+                        "ULP-1 Frost Alarm refused non-PQ domain {} ({:?})",
+                        endpoint.domain_id, endpoint.kind
+                    )));
+                }
+            }
+
+            if hop.amount_bps == 0 || hop.amount_bps > effective_ceiling {
+                return Err(LightClientError::VerificationFailed(format!(
+                    "ULP-1 hop {hop_idx} amount {} bps outside 1..={effective_ceiling}",
+                    hop.amount_bps
+                )));
+            }
+            cumulative_outflow_bps = cumulative_outflow_bps
+                .checked_add(hop.amount_bps)
+                .filter(|&sum| sum <= effective_ceiling)
+                .ok_or_else(|| {
+                    LightClientError::VerificationFailed(format!(
+                        "ULP-1 cumulative route outflow exceeds 25% ceiling ({effective_ceiling} bps)"
+                    ))
+                })?;
+
+            route_acc = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_ULP_OUTPUT_V1",
+                &route_acc,
+                &hop.source.domain_id.to_be_bytes(),
+                &hop.destination.domain_id.to_be_bytes(),
+                &hop.sequence.to_be_bytes(),
+                &hop.amount_bps.to_be_bytes(),
+                &hop.packet_commitment,
+            ]);
+            prev_dest = Some(&hop.destination);
+        }
+
+        let origin_domain = packet.hops.first().map_or(0, |h| h.source.domain_id);
+        let terminal_domain = packet.hops.last().map_or(0, |h| h.destination.domain_id);
+
+        Ok(VerifiedUniversalRoute {
+            hub_height: checkpoint.height,
+            settlement_epoch: ulp_header.settlement_epoch,
+            origin_domain,
+            terminal_domain,
+            hop_count: packet.hops.len(),
+            cumulative_outflow_bps,
+            post_quantum_clean,
+            route_digest: route_acc,
+        })
     }
 
     /// Evaluates Phase-A dual finality parity between the native finality path
@@ -1837,5 +2175,457 @@ mod tests {
             Err(LightClientError::VerificationFailed(reason))
                 if reason.contains("not bound to the committed state leaf")
         ));
+    }
+
+    #[test]
+    fn verify_header_chain_refuses_conflicting_fork_and_committee_batch_binds_trust() {
+        use bud_proof::sigagg::{
+            aggregate_signatures, compute_committee_root, CommitteeMember, SignatureScheme,
+            SignerSignature,
+        };
+
+        let h0 = make_block_header_at(0, TEST_CHAIN_ID);
+        let trusted_set = "ab".repeat(32);
+        let mut client = LightClient::new(TrustedCheckpoint {
+            height: 0,
+            block_hash: h0.hash.clone(),
+            set_hash: trusted_set.clone(),
+        })
+        .unwrap();
+
+        let b1_a = Block::new_with_chain_id(1, h0.hash.clone(), Vec::new(), TEST_CHAIN_ID);
+        let h1_a = BlockHeader::from_block(&b1_a);
+        client
+            .verify_header_chain(std::slice::from_ref(&h1_a))
+            .expect("initial honest segment links");
+        // Idempotent replay of the exact same header stays accepted.
+        client
+            .verify_header_chain(std::slice::from_ref(&h1_a))
+            .expect("identical header replay stays accepted");
+
+        // Conflicting fork header at already-linked height 1 MUST be refused (B-0150).
+        let mut h1_fork = h1_a.clone();
+        h1_fork.state_root = "44".repeat(32);
+        h1_fork.hash = h1_fork.calculate_hash();
+        let err = client
+            .verify_header_chain(&[h1_fork])
+            .expect_err("conflicting fork header must not overwrite linked entry");
+        assert!(matches!(err, LightClientError::HeaderChain(_)));
+
+        // Over-cap segment (> MAX_LINKED_HEADERS) is refused immediately.
+        let oversized = vec![h1_a.clone(); MAX_LINKED_HEADERS + 1];
+        assert!(matches!(
+            client.verify_header_chain(&oversized),
+            Err(LightClientError::HeaderChain(_))
+        ));
+
+        // `apply_committee_batch_checkpoint` enforces trusted set_hash and linked header binding.
+        let committee: Vec<CommitteeMember> = vec![(0, 100, SignatureScheme::MlDsa87, [0x55; 32])];
+        let linked_hash_bytes: [u8; 32] = hex::decode(&h1_a.hash).unwrap().try_into().unwrap();
+        let batch = aggregate_signatures(
+            linked_hash_bytes,
+            compute_committee_root(&committee),
+            vec![SignerSignature {
+                signer_index: 0,
+                weight: 100,
+                scheme: SignatureScheme::MlDsa87,
+                public_key_digest: [0x55; 32],
+                signature: vec![0x01; SignatureScheme::MlDsa87.min_signature_len()],
+                threshold_witness: None,
+            }],
+        )
+        .unwrap();
+        let good_cp = VerifiedCheckpoint {
+            height: 1,
+            block_hash: h1_a.hash.clone(),
+            set_hash: trusted_set.clone(),
+            epoch: 0,
+            state_root: h1_a.state_root.clone(),
+        };
+        client
+            .apply_committee_batch_checkpoint(&good_cp, &batch, &committee, 100, |_, _| true)
+            .expect("linked checkpoint with trusted set_hash passes");
+
+        // Foreign validator set_hash rejected.
+        let wrong_set = VerifiedCheckpoint {
+            set_hash: "cd".repeat(32),
+            ..good_cp.clone()
+        };
+        assert!(matches!(
+            client.apply_committee_batch_checkpoint(
+                &wrong_set,
+                &batch,
+                &committee,
+                100,
+                |_, _| true,
+            ),
+            Err(LightClientError::TrustBinding(_))
+        ));
+
+        // Unlinked height 99 rejected even with matching message_digest.
+        let unlinked = VerifiedCheckpoint {
+            height: 99,
+            ..good_cp
+        };
+        assert!(matches!(
+            client
+                .apply_committee_batch_checkpoint(&unlinked, &batch, &committee, 100, |_, _| true,),
+            Err(LightClientError::HeaderChain(_))
+        ));
+    }
+
+    #[test]
+    fn ulp_v1_multi_domain_scaling_and_multi_hop_frost_alarm_and_outflow_enforcement() {
+        use std::time::Instant;
+
+        use crate::aggregation::universal_light_proof::{
+            compile_ulp_program, prove_ulp_domain_inclusion, prove_universal_light_proof,
+            UlpDomainKind, UlpDomainSnapshot,
+        };
+        use crate::core::account::AccountState;
+        use crate::crypto::scheme::SchemeStatusRegistry;
+        use crate::settlement::GlobalBlockHeader;
+
+        let registry = SchemeStatusRegistry::genesis();
+        let hub_chain_id: u32 = 45_262;
+        let agg_seed = [0x42u8; 32];
+
+        // Anchor checkpoint + finalized GlobalBlockHeader on a real LightClient.
+        let mut state = AccountState::new();
+        let global_header = GlobalBlockHeader {
+            version: 2,
+            global_height: 25,
+            previous_global_hash: [0x10; 32],
+            chain_id: u64::from(hub_chain_id),
+            timestamp_ms: 1_795_000_000_000,
+            domain_registry_root: [0x19; 32],
+            domain_commitment_root: [0x20; 32],
+            message_root: [0x30; 32],
+            bridge_state_root: [0x40; 32],
+            replay_nonce_root: [0x50; 32],
+            proposer: None,
+            settlement_finality_root: [0x60; 32],
+            storage_root: None,
+            ai_root: None,
+            identity_root: None,
+            checkpoint_height: 25,
+            external_intake_root: Some([0x70; 32]),
+            app_binding_root: None,
+            delegation_root: None,
+            object_layer_root: None,
+            proof_root: Some([0x80; 32]),
+            proven_height: 25,
+        };
+        let hub_root = global_header.calculate_hash_bytes();
+        state.global_header_summary = hub_root;
+        let state_body = state.state_root_body();
+        let anchor_block_hash = "aa".repeat(32);
+        let anchor_set_hash = "bb".repeat(32);
+        let checkpoint = VerifiedCheckpoint {
+            height: 25,
+            block_hash: anchor_block_hash.clone(),
+            set_hash: anchor_set_hash.clone(),
+            epoch: 5,
+            state_root: state.calculate_state_root(),
+        };
+        let client = LightClient::new(TrustedCheckpoint {
+            height: 25,
+            block_hash: anchor_block_hash,
+            set_hash: anchor_set_hash,
+        })
+        .unwrap();
+
+        let all_six = vec![
+            UlpDomainSnapshot {
+                domain_id: 1,
+                external_chain_id: 1_001,
+                kind: UlpDomainKind::BitcoinSpv,
+                prev_height: 870_000,
+                finalized_height: 870_006,
+                state_root: [0x11; 32],
+                event_root: [0x21; 32],
+                anchor_hash: [0x31; 32],
+                security_weight: 500_000,
+                pq_attested: true,
+                outflow_bps: 800,
+            },
+            UlpDomainSnapshot {
+                domain_id: 2,
+                external_chain_id: 2_002,
+                kind: UlpDomainKind::SuccinctRecursive,
+                prev_height: 410_000,
+                finalized_height: 410_012,
+                state_root: [0x12; 32],
+                event_root: [0x22; 32],
+                anchor_hash: [0x32; 32],
+                security_weight: 300_000,
+                pq_attested: true,
+                outflow_bps: 700,
+            },
+            UlpDomainSnapshot {
+                domain_id: 3,
+                external_chain_id: 3_003,
+                kind: UlpDomainKind::PoSpaceVdf,
+                prev_height: 5_200_000,
+                finalized_height: 5_200_008,
+                state_root: [0x13; 32],
+                event_root: [0x23; 32],
+                anchor_hash: [0x33; 32],
+                security_weight: 450_000,
+                pq_attested: true,
+                outflow_bps: 600,
+            },
+            UlpDomainSnapshot {
+                domain_id: 4,
+                external_chain_id: 1,
+                kind: UlpDomainKind::EthereumSync,
+                prev_height: 11_000_000,
+                finalized_height: 11_000_032,
+                state_root: [0x14; 32],
+                event_root: [0x24; 32],
+                anchor_hash: [0x34; 32],
+                security_weight: 900_000,
+                pq_attested: false, // classical BLS12-381 sync committee
+                outflow_bps: 900,
+            },
+            UlpDomainSnapshot {
+                domain_id: 5,
+                external_chain_id: 5_005,
+                kind: UlpDomainKind::TendermintBft,
+                prev_height: 22_000_000,
+                finalized_height: 22_000_001,
+                state_root: [0x15; 32],
+                event_root: [0x25; 32],
+                anchor_hash: [0x35; 32],
+                security_weight: 250_000,
+                pq_attested: false, // classical Ed25519 committee
+                outflow_bps: 500,
+            },
+            UlpDomainSnapshot {
+                domain_id: 6,
+                external_chain_id: 6_006,
+                kind: UlpDomainKind::DagBft,
+                prev_height: 9_100_000,
+                finalized_height: 9_100_005,
+                state_root: [0x16; 32],
+                event_root: [0x26; 32],
+                anchor_hash: [0x36; 32],
+                security_weight: 380_000,
+                pq_attested: true,
+                outflow_bps: 400,
+            },
+        ];
+
+        // Benchmark real ULP-1 proving & verification across D = 1, 3, 6 domains.
+        let mut six_bundle_opt = None;
+        for d in [1usize, 3, 6] {
+            let subset = all_six.get(..d).unwrap();
+            let compiled = compile_ulp_program(hub_chain_id, d).unwrap();
+            let (bundle, sorted, metrics) = prove_universal_light_proof(
+                &compiled, 5, hub_root, subset, &agg_seed, d as u64, &registry,
+            )
+            .expect("ULP-1 prove succeeds");
+            let inc = prove_ulp_domain_inclusion(&sorted, 1).unwrap();
+            let t_ver = Instant::now();
+            let hdr = crate::aggregation::universal_light_proof::open_universal_light_proof(
+                &bundle,
+                &compiled.program_hash,
+                hub_chain_id,
+                &hub_root,
+                &registry,
+            )
+            .expect("ULP-1 verify succeeds");
+            inc.verify(sorted.first().unwrap(), &hdr.domains_merkle_root)
+                .expect("O(log D) leaf verify succeeds");
+            let verify_us = t_ver.elapsed().as_micros();
+            println!(
+                "ULP_METRIC domains={d} vm_steps={} prove_ms={} verify_us={verify_us} stark_obj_bytes={} pcs_obj_bytes={} verify_stark_tx_bytes={} master_frame_bytes={} domain_merkle_bytes={}",
+                metrics.vm_trace_steps,
+                metrics.prove_ms,
+                metrics.stark_object_bytes,
+                metrics.pcs_object_bytes,
+                metrics.verify_stark_tx_bytes,
+                metrics.master_frame_bytes,
+                inc.encoded_len(),
+            );
+            assert!(
+                metrics.verify_stark_tx_bytes < metrics.pcs_object_bytes,
+                "Phase 5 split-STARK statement must be strictly smaller than full FRI PCS object"
+            );
+            if d == 6 {
+                six_bundle_opt = Some((compiled.program_hash, bundle, sorted));
+            }
+        }
+
+        let (prog_hash, bundle6, sorted6) = six_bundle_opt.unwrap();
+        let snap = |id: u32| sorted6.iter().find(|s| s.domain_id == id).unwrap().clone();
+        let proof = |id: u32| prove_ulp_domain_inclusion(&sorted6, id).unwrap();
+
+        // 1. 2-hop post-quantum-clean route (BitcoinSpv -> SuccinctRecursive -> PoSpaceVdf)
+        //    succeeds even under active CRQC Frost Alarm (`strict_value(true)`).
+        let pq_route = UniversalLightPacket {
+            ulp_bundle: bundle6.clone(),
+            expected_program_hash: prog_hash,
+            hops: vec![
+                UniversalRouteHop {
+                    source: snap(1),
+                    source_proof: proof(1),
+                    destination: snap(2),
+                    destination_proof: proof(2),
+                    packet_commitment: [0xA1; 32],
+                    sequence: 10,
+                    amount_bps: 1_200,
+                },
+                UniversalRouteHop {
+                    source: snap(2),
+                    source_proof: proof(2),
+                    destination: snap(3),
+                    destination_proof: proof(3),
+                    packet_commitment: [0xA2; 32],
+                    sequence: 11,
+                    amount_bps: 1_300, // cumulative 2_500 bps == exact 25% cap
+                },
+            ],
+        };
+        let t_hop = Instant::now();
+        let verified = client
+            .verify_multi_hop_light_route(
+                &checkpoint,
+                &state_body,
+                &global_header,
+                &pq_route,
+                &UniversalRoutePolicy::strict_value(true),
+                &registry,
+            )
+            .expect("PQ-clean multi-hop route passes under Frost Alarm");
+        println!(
+            "ULP_METRIC multi_hop=3_domains_2_hops verify_us={} cumulative_bps={} pq_clean={}",
+            t_hop.elapsed().as_micros(),
+            verified.cumulative_outflow_bps,
+            verified.post_quantum_clean
+        );
+        assert_eq!(verified.origin_domain, 1);
+        assert_eq!(verified.terminal_domain, 3);
+        assert_eq!(verified.hop_count, 2);
+        assert_eq!(verified.cumulative_outflow_bps, 2_500);
+        assert!(verified.post_quantum_clean);
+
+        // 2. Classical hop (EthereumSync domain 4, pq_attested = false) succeeds in
+        //    peacetime (`strict_value(false)`) with `post_quantum_clean == false`,
+        //    and FAILS CLOSED under Frost Alarm (`strict_value(true)`).
+        let mixed_route = UniversalLightPacket {
+            ulp_bundle: bundle6.clone(),
+            expected_program_hash: prog_hash,
+            hops: vec![
+                UniversalRouteHop {
+                    source: snap(1),
+                    source_proof: proof(1),
+                    destination: snap(4),
+                    destination_proof: proof(4),
+                    packet_commitment: [0xB1; 32],
+                    sequence: 20,
+                    amount_bps: 500,
+                },
+                UniversalRouteHop {
+                    source: snap(4),
+                    source_proof: proof(4),
+                    destination: snap(3),
+                    destination_proof: proof(3),
+                    packet_commitment: [0xB2; 32],
+                    sequence: 21,
+                    amount_bps: 500,
+                },
+            ],
+        };
+        let peacetime = client
+            .verify_multi_hop_light_route(
+                &checkpoint,
+                &state_body,
+                &global_header,
+                &mixed_route,
+                &UniversalRoutePolicy::strict_value(false),
+                &registry,
+            )
+            .expect("mixed route passes when Frost Alarm is inactive");
+        assert!(!peacetime.post_quantum_clean);
+        let alarm_err = client
+            .verify_multi_hop_light_route(
+                &checkpoint,
+                &state_body,
+                &global_header,
+                &mixed_route,
+                &UniversalRoutePolicy::strict_value(true),
+                &registry,
+            )
+            .expect_err("Frost Alarm must reject non-PQ hop fail-closed");
+        assert!(alarm_err.to_string().contains("Frost Alarm"));
+
+        // 3. Exceeding 25% outflow ceiling (2_501 bps) is rejected fail-closed.
+        let mut over_cap = pq_route.clone();
+        if let Some(last) = over_cap.hops.last_mut() {
+            last.amount_bps = 1_301;
+        }
+        assert!(client
+            .verify_multi_hop_light_route(
+                &checkpoint,
+                &state_body,
+                &global_header,
+                &over_cap,
+                &UniversalRoutePolicy::strict_value(false),
+                &registry,
+            )
+            .is_err());
+
+        // 4. Forged destination state_root breaks O(log D) domain Merkle proof.
+        let mut forged_leaf = pq_route.clone();
+        if let Some(first) = forged_leaf.hops.first_mut() {
+            first.destination.state_root[0] ^= 0xFF;
+        }
+        assert!(client
+            .verify_multi_hop_light_route(
+                &checkpoint,
+                &state_body,
+                &global_header,
+                &forged_leaf,
+                &UniversalRoutePolicy::strict_value(false),
+                &registry,
+            )
+            .is_err());
+
+        // 5. Cycle A -> B -> A is rejected.
+        let cycle_route = UniversalLightPacket {
+            ulp_bundle: bundle6,
+            expected_program_hash: prog_hash,
+            hops: vec![
+                UniversalRouteHop {
+                    source: snap(1),
+                    source_proof: proof(1),
+                    destination: snap(2),
+                    destination_proof: proof(2),
+                    packet_commitment: [0xC1; 32],
+                    sequence: 1,
+                    amount_bps: 100,
+                },
+                UniversalRouteHop {
+                    source: snap(2),
+                    source_proof: proof(2),
+                    destination: snap(1),
+                    destination_proof: proof(1),
+                    packet_commitment: [0xC2; 32],
+                    sequence: 2,
+                    amount_bps: 100,
+                },
+            ],
+        };
+        assert!(client
+            .verify_multi_hop_light_route(
+                &checkpoint,
+                &state_body,
+                &global_header,
+                &cycle_route,
+                &UniversalRoutePolicy::strict_value(false),
+                &registry,
+            )
+            .is_err());
     }
 }

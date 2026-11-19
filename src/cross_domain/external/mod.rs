@@ -92,6 +92,7 @@ pub mod intake;
 pub mod intake_quorum;
 pub mod mina_recursive;
 pub mod phase_a_dual;
+pub mod pospace_vdf;
 pub mod profile;
 pub mod prover;
 pub mod quorum;
@@ -141,6 +142,10 @@ pub use intake_quorum::{
     ROUND_RETENTION_BLOCKS,
 };
 pub use mina_recursive::{PinnedSuccinctGenesis, SuccinctRecursiveAdapter};
+pub use pospace_vdf::{
+    verify_double_signage_equivocation, PinnedPoSpaceAnchor, PoSpaceEquivocationProof,
+    PoSpaceVdfAdapter, PoSpaceVdfBlock, PoSpaceVdfEvidence, SignedPoSpaceSignage,
+};
 pub use profile::{profile_of, DomainProfile, DomainRecord, DomainState, StateEvent, BOND_UNIT};
 pub use prover::{
     honesty_is_cheaper, required_bond_atoms, ChallengeReward, DomainEconomics, ProverBond,

@@ -51,6 +51,15 @@ pub struct TxFacts {
 pub trait TxLookup {
     /// The facts of a valid pending transaction, by its hash.
     fn tx_facts(&self, tx_hash: &Hash32) -> Option<TxFacts>;
+
+    /// Whether `tx_hash` explicitly authorizes or references `claim_digest`.
+    /// Defaults to `true` for standalone signature-only test maps; [`super::node::AggNode`]
+    /// enforces exact binding to `tx.auth_claim` (on initial admission) or
+    /// `tx.claim_refs` (on companion Phase 4/5 object admission).
+    fn accepts_claim(&self, tx_hash: &Hash32, claim_digest: &Hash32) -> bool {
+        let _ = (tx_hash, claim_digest);
+        true
+    }
 }
 
 /// What happened to a submitted object.
@@ -269,7 +278,7 @@ impl ObjectPool {
             );
             return Ok(Admission::Waiting(object_id));
         };
-        self.admit_known(object_id, envelope, tx, registry)
+        self.admit_known(object_id, envelope, tx, txs, registry)
             .map(|()| Admission::Accepted(object_id))
     }
 
@@ -280,6 +289,7 @@ impl ObjectPool {
         object_id: Hash32,
         envelope: Envelope,
         tx: TxFacts,
+        txs: &impl TxLookup,
         registry: &SchemeStatusRegistry,
     ) -> Result<(), Rejection> {
         // Rule 6.
@@ -305,11 +315,15 @@ impl ObjectPool {
                 return Err(Rejection::NotTheSender);
             }
         }
+        let digest = claim.digest(self.domain);
+        if !txs.accepts_claim(&envelope.tx_hash, &digest) {
+            self.remember(object_id);
+            return Err(Rejection::NotTheSender);
+        }
         // Rule 3: the fee covers the claim.
         if tx.fee < claim_fee(&self.params, &claim) {
             return Err(Rejection::FeeTooLow);
         }
-        let digest = claim.digest(self.domain);
         if self.claims.contains_key(&digest) {
             self.remember(object_id);
             return Err(Rejection::ClaimKnown);
@@ -409,7 +423,7 @@ impl ObjectPool {
             self.bytes = self.bytes.saturating_sub(entry.bytes);
             if let Some(tx) = txs.tx_facts(&entry.envelope.tx_hash) {
                 // A rejection here drops the object, as at first admission.
-                let _ = self.admit_known(object_id, entry.envelope, tx, registry);
+                let _ = self.admit_known(object_id, entry.envelope, tx, txs, registry);
                 continue;
             }
             entry.ticks_left = entry.ticks_left.saturating_sub(1);
