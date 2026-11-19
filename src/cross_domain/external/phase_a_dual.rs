@@ -116,10 +116,23 @@ pub fn fold_segment_tree(segments: &[SegmentBoundary]) -> Result<RecursiveAggreg
                 if left.final_state_root != right.initial_state_root {
                     return Err("segment state_root boundary mismatch (TS9)");
                 }
+                let first_seg = left.first_segment.to_le_bytes();
+                let seam_seg = left.last_segment.to_le_bytes();
+                let last_seg = right.last_segment.to_le_bytes();
+                let spc = left.start_pc.to_le_bytes();
+                let seam_pc = left.end_pc.to_le_bytes();
+                let epc = right.end_pc.to_le_bytes();
                 let digest = hash_fields_bytes(&[
                     b"budlum/zkvm/recursion-node/v1",
                     &left.program_hash,
+                    &first_seg,
+                    &seam_seg,
+                    &last_seg,
+                    &spc,
+                    &seam_pc,
+                    &epc,
                     &left.initial_state_root,
+                    &left.final_state_root,
                     &right.final_state_root,
                     &left.aggregate_digest,
                     &right.aggregate_digest,
@@ -135,7 +148,21 @@ pub fn fold_segment_tree(segments: &[SegmentBoundary]) -> Result<RecursiveAggreg
                     aggregate_digest: digest,
                 });
             } else {
-                next_layer.push(left);
+                let first_seg = left.first_segment.to_le_bytes();
+                let last_seg = left.last_segment.to_le_bytes();
+                let odd_digest = hash_fields_bytes(&[
+                    b"budlum/zkvm/recursion-odd/v1",
+                    &left.program_hash,
+                    &first_seg,
+                    &last_seg,
+                    &left.initial_state_root,
+                    &left.final_state_root,
+                    &left.aggregate_digest,
+                ]);
+                next_layer.push(RecursiveAggregate {
+                    aggregate_digest: odd_digest,
+                    ..left
+                });
             }
         }
         layer = next_layer;
@@ -185,20 +212,32 @@ pub struct BlockBatchProof {
     pub proof_root: Hash32,
 }
 
+const MAX_BATCH_INNER_PROOFS: usize = 65_536;
+
+fn ct_eq_hash32(a: &Hash32, b: &Hash32) -> bool {
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (lhs, rhs)| acc | (lhs ^ rhs))
+        == 0
+}
+
 impl BlockBatchProof {
     /// Assemble a `BlockBatchProof` over `[start_height..=proven_height]` (`TA4`).
     ///
     /// # Errors
     ///
-    /// Refuses empty inner digest lists or `proven_height < start_height`.
+    /// Refuses empty or oversized inner digest lists or `proven_height < start_height`.
     /// WIRING: staged for block proof-market batch sealing ( Step 6).
     pub fn seal(
         start_height: u64,
         proven_height: u64,
         inner_proof_digests: Vec<Hash32>,
     ) -> Result<Self, &'static str> {
-        if inner_proof_digests.is_empty() || proven_height < start_height {
-            return Err("invalid BlockBatchProof height range or empty inner proofs");
+        if inner_proof_digests.is_empty()
+            || inner_proof_digests.len() > MAX_BATCH_INNER_PROOFS
+            || proven_height < start_height
+        {
+            return Err("invalid BlockBatchProof height range or inner proof count");
         }
         let proof_root = Self::compute_root(start_height, proven_height, &inner_proof_digests);
         Ok(Self {
@@ -210,7 +249,7 @@ impl BlockBatchProof {
     }
 
     fn compute_root(start_height: u64, proven_height: u64, digests: &[Hash32]) -> Hash32 {
-        let mut flat = Vec::with_capacity(digests.len() * 32);
+        let mut flat = Vec::with_capacity(digests.len().saturating_mul(32));
         for d in digests {
             flat.extend_from_slice(d);
         }
@@ -231,12 +270,16 @@ impl BlockBatchProof {
     #[must_use]
     pub fn matches_root(&self) -> bool {
         !self.inner_proof_digests.is_empty()
+            && self.inner_proof_digests.len() <= MAX_BATCH_INNER_PROOFS
             && self.proven_height >= self.start_height
-            && Self::compute_root(
-                self.start_height,
-                self.proven_height,
-                &self.inner_proof_digests,
-            ) == self.proof_root
+            && ct_eq_hash32(
+                &Self::compute_root(
+                    self.start_height,
+                    self.proven_height,
+                    &self.inner_proof_digests,
+                ),
+                &self.proof_root,
+            )
     }
 }
 
@@ -358,5 +401,42 @@ mod tests {
             evaluate_phase_a_dual(7, (false, root), Some((true, root))),
             PhaseAVerdict::FreezeAndAlarm { domain_id: 7 }
         );
+
+        // Oversized inner-proof batches fail closed before unbounded root hashing.
+        assert!(BlockBatchProof::seal(1, 2, vec![[0xAA; 32]; MAX_BATCH_INNER_PROOFS + 1]).is_err());
+
+        // Three-segment odd fold binds the unpaired leaf under a distinct odd tag.
+        let s0 = SegmentBoundary {
+            program_hash: [0x33; 32],
+            segment_index: 0,
+            row_count: 16,
+            start_pc: 0,
+            next_pc: 10,
+            pre_state_root: [0x01; 32],
+            post_state_root: [0x02; 32],
+            inner_proof_digest: [0xD0; 32],
+        };
+        let s1 = SegmentBoundary {
+            segment_index: 1,
+            start_pc: 10,
+            next_pc: 20,
+            pre_state_root: [0x02; 32],
+            post_state_root: [0x03; 32],
+            inner_proof_digest: [0xD1; 32],
+            ..s0
+        };
+        let s2 = SegmentBoundary {
+            segment_index: 2,
+            start_pc: 20,
+            next_pc: 30,
+            pre_state_root: [0x03; 32],
+            post_state_root: [0x04; 32],
+            inner_proof_digest: [0xD2; 32],
+            ..s0
+        };
+        let odd_agg = fold_segment_tree(&[s0, s1, s2]).unwrap();
+        assert_eq!(odd_agg.last_segment, 2);
+        assert_eq!(odd_agg.final_state_root, [0x04; 32]);
+        assert_ne!(odd_agg.aggregate_digest, s2.commitment());
     }
 }
