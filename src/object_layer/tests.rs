@@ -1500,3 +1500,56 @@ fn register_class_verified_rejects_unrelated_registrant_when_charter_binds_opera
     );
     assert!(reg.register_class(operator, class_reg).is_ok());
 }
+
+#[test]
+fn register_class_verified_rejects_operatorless_charter_when_home_proof_required() {
+    let family = HomeVmFamily::CosmWasm;
+    let fx = fixture_for(family);
+    let attacker = Address([0x99; 32]);
+    let mut reg = ObjectLayerRegistry::with_params(params(family));
+    let ch = charter_for(family, fx);
+    let chain_ref = ch.chain_reference.clone();
+    assert!(ch.operator.is_none());
+    assert_eq!(reg.charter(DOMAIN, ch, &good_proof(), true), Ok(true));
+
+    let mut slice = ClassSlice::new();
+    slice.insert(
+        profile_for(family).upgrade_authority_field().into(),
+        vec![1],
+    );
+    let contract = fx.address(0x55);
+    let mut class_reg = registration(family, AssetKind::Unique, contract, slice);
+    let state_root = class_reg
+        .state_proof
+        .as_ref()
+        .map(|p| p.state_root)
+        .unwrap_or([0xAA; 32]);
+    // Even with a valid slice proof, an unbound charter must fail closed when
+    // home proofs are required so arbitrary signers cannot claim classes.
+    assert_eq!(
+        reg.register_class_verified(attacker, class_reg.clone(), Some(state_root), true),
+        Err(Refusal::NotAuthorized)
+    );
+    // Oversized Merkle sibling path must also be refused before deep hashing.
+    let deep = crate::cross_domain::event_tree::MerkleProof {
+        leaf: [0x11; 32],
+        index: 0,
+        siblings: vec![[0x22; 32]; 65],
+    };
+    class_reg.state_proof = Some(crate::object_layer::registry::HomeSliceProof {
+        state_root: [0x33; 32],
+        contract_account_proof: vec![bincode::serialize(&deep).expect("serialize proof")],
+        storage_proofs: Vec::new(),
+    });
+    assert_eq!(
+        crate::object_layer::registry::verify_home_slice_proof(
+            family,
+            &chain_ref,
+            &class_reg.contract,
+            &class_reg.slice,
+            class_reg.state_proof.as_ref().expect("proof"),
+            Some([0x33; 32]),
+        ),
+        Err(Refusal::UnprovenEvent)
+    );
+}
