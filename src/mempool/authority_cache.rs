@@ -14,7 +14,7 @@
 //! re-verification and nothing else.
 
 use sha3::{Digest, Sha3_256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 /// The default capacity, in entries.
 /// exposed for: mempool surface - admission paths read these with the mempool wiring.
@@ -23,10 +23,17 @@ pub const DEFAULT_CAPACITY: usize = 16_384;
 type Key = ([u8; 32], [u8; 32]);
 
 /// The digest that identifies one authorization: every byte string the verdict depends on,
-/// length prefixed.
+/// length prefixed, under a domain tag.
+///
+/// The tag is not decoration. Without it the preimage was a length-prefixed tuple of byte
+/// strings, which is exactly the shape any other Sha3-256 tuple hash in this node produces, so
+/// a digest minted elsewhere could be presented here as an accepted authorization and the cache
+/// would report a verification that never happened. The tag makes this digest speak for this
+/// cache only.
 #[must_use]
 pub fn authorization_digest(parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
+    hasher.update(b"AUTH_CACHE_V1\0");
     hasher.update((parts.len() as u64).to_le_bytes());
     for part in parts {
         hasher.update((part.len() as u64).to_le_bytes());
@@ -39,7 +46,7 @@ pub fn authorization_digest(parts: &[&[u8]]) -> [u8; 32] {
 #[derive(Debug, Clone)]
 pub struct AuthorityCache {
     capacity: usize,
-    entries: HashMap<Key, ()>,
+    entries: BTreeSet<Key>,
     order: VecDeque<Key>,
 }
 
@@ -49,7 +56,7 @@ impl AuthorityCache {
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity: capacity.max(1),
-            entries: HashMap::new(),
+            entries: BTreeSet::new(),
             order: VecDeque::new(),
         }
     }
@@ -57,13 +64,13 @@ impl AuthorityCache {
     /// Whether this authorization digest was accepted under this registry commitment.
     #[must_use]
     pub fn contains(&self, digest: &[u8; 32], registry_commitment: &[u8; 32]) -> bool {
-        self.entries.contains_key(&(*digest, *registry_commitment))
+        self.entries.contains(&(*digest, *registry_commitment))
     }
 
     /// Records an accepted authorization. Call it only after a verification succeeded.
     pub fn insert_accepted(&mut self, digest: [u8; 32], registry_commitment: [u8; 32]) {
         let key = (digest, registry_commitment);
-        if self.entries.contains_key(&key) {
+        if self.entries.contains(&key) {
             return;
         }
         if self.order.len() >= self.capacity {
@@ -71,7 +78,7 @@ impl AuthorityCache {
                 self.entries.remove(&oldest);
             }
         }
-        self.entries.insert(key, ());
+        self.entries.insert(key);
         self.order.push_back(key);
     }
 
@@ -150,5 +157,23 @@ mod tests {
         let mut cache = AuthorityCache::new(0);
         cache.insert_accepted([1; 32], [0; 32]);
         assert!(cache.contains(&[1; 32], &[0; 32]));
+    }
+
+    #[test]
+    fn authorization_digest_is_domain_separated_from_unprefixed_tuple_sha3() {
+        use sha3::{Digest, Sha3_256};
+        let parts: [&[u8]; 2] = [b"alpha", b"beta"];
+        let mut raw = Sha3_256::new();
+        raw.update((parts.len() as u64).to_le_bytes());
+        for part in parts {
+            raw.update((part.len() as u64).to_le_bytes());
+            raw.update(part);
+        }
+        let unprefixed: [u8; 32] = raw.finalize().into();
+        assert_ne!(
+            authorization_digest(&parts),
+            unprefixed,
+            "authorization_digest must carry an explicit domain-separation tag"
+        );
     }
 }
