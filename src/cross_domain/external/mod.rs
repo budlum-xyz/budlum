@@ -107,6 +107,7 @@ pub mod auxpow_pop;
 pub mod babylon_eots;
 pub mod based_preconf;
 pub mod bitcoin_spv;
+pub mod casper_ffg;
 pub mod chain_key_ni_dkg;
 pub mod da_sampling;
 pub mod dag_bft;
@@ -170,6 +171,10 @@ pub use based_preconf::{BasedPreconfAdapter, BasedPreconfValidator, PinnedBasedP
 pub use bitcoin_spv::{
     sha256d, BitcoinHeader, BitcoinSpvAdapter, PinnedBitcoinAnchor, EVIDENCE_VERSION, HEADER_LEN,
     MAX_FUTURE_SECONDS, MAX_HEADERS, REQUIRED_DEPTH,
+};
+pub use casper_ffg::{
+    CasperFfgAdapter, FfgValidator, PinnedFfgCommittee, CASPER_FFG_ADAPTER_NAME,
+    CASPER_FFG_VOTE_TAG,
 };
 pub use chain_key_ni_dkg::{
     compute_nidkg_transcript_digest, cup_signing_digest, delegation_signing_digest,
