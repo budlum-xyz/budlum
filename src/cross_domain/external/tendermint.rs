@@ -2875,7 +2875,10 @@ mod tests {
     fn every_header_field_is_covered_by_the_block_id() {
         let commit = noble_commit();
         let original = commit.header_hash();
-        let mutations: Vec<(&str, Box<dyn Fn(&mut TendermintCommitEvidence)>)> = vec![
+        // A named alias keeps the table readable: every entry is one field
+        // name and one closure that perturbs that field.
+        type FieldMutation<'a> = (&'a str, Box<dyn Fn(&mut TendermintCommitEvidence)>);
+        let mutations: Vec<FieldMutation<'_>> = vec![
             (
                 "chain_id",
                 Box::new(|c: &mut TendermintCommitEvidence| c.chain_id = "noble-2".to_string()),
