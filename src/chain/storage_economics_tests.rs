@@ -47,6 +47,7 @@ mod tests {
                 now_unix_secs,
                 domain_params.min_operator_bond,
                 0,
+                domain_params.require_merkle_proof,
             )
         }
 
@@ -64,6 +65,7 @@ mod tests {
                 now_unix_secs,
                 domain_params.min_operator_bond,
                 0,
+                domain_params.require_merkle_proof,
             )
         }
     }
@@ -614,6 +616,14 @@ mod tests {
     fn accept_reallocation_refunds_when_the_proof_is_missing() {
         let (mut blockchain, ticket_id, operator, payer, economics, params, _proof) =
             blockchain_with_never_placed_ticket();
+        // Same gate discipline as `deal_open_rejects_missing_merkle_proof`:
+        // with the domain's VerifyMerkle gate open, a missing envelope must
+        // be refused and the escrow untouched. Default (closed) domains are
+        // covered by the sibling tests.
+        let params = StorageDomainParams {
+            require_merkle_proof: true,
+            ..params
+        };
         let payer_before = blockchain.state.get_balance(&payer);
         let op_before = blockchain.state.get_balance(&operator);
 
