@@ -39,6 +39,7 @@ impl Pact {
     /// outside the `0..=2` range.
     // Not const: the nightly jobs (udeps, determinism) reject trait calls in
     // const fns with E0658; this fn was reverted from const in c72b911.
+    #[cfg(test)]
     #[allow(clippy::missing_const_for_fn)]
     pub fn new(
         id: [u8; 32],
@@ -112,10 +113,12 @@ impl Pact {
         Ok(())
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn is_pure_production(&self) -> bool {
         self.mode_flag == 0 && self.residual_commitment == [0u8; 32]
     }
+    #[cfg(test)]
     #[must_use]
     // Not const: the nightly jobs (udeps, determinism) reject trait calls in
     // const fns with E0658; this fn was reverted from const in c72b911.
@@ -158,6 +161,7 @@ impl PactRegistry {
     /// # Errors
     ///
     /// Returns an error when the id is already registered or the registry is full.
+    #[cfg(test)]
     pub(crate) fn add_pact(&mut self, pact: Pact) -> Result<(), &'static str> {
         if self.pacts.len() >= MAX_PACTS {
             return Err("storage pact: registry is full");
@@ -170,7 +174,8 @@ impl PactRegistry {
         Ok(())
     }
 
-    pub fn recompute_root(&mut self) {
+    #[cfg(test)]
+    pub(crate) fn recompute_root(&mut self) {
         self.root = self.computed_root();
     }
 
@@ -274,6 +279,8 @@ mod tests {
         let comm: [u8; 32] = h.finalize().into();
         let pact = Pact::new([1u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 10, 0).unwrap();
         assert!(pact.verify_commitment(payload).is_ok());
+        assert!(PactGates::kq_storage_pact(&pact, payload).is_ok());
+        assert!(PactGates::kq_storage_pact(&pact, b"tampered").is_err());
         assert!(pact.is_pure_production());
     }
     /// A fresh registry has to agree with its own root.
