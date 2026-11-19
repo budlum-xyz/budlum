@@ -59,7 +59,7 @@
 //!   never claims a secret it did not derive.
 //! - **No Bitcoin SPV.** The MMR root and the checkpoint hash are taken as the
 //!   target chain committed to them; proving them against Bitcoin's header
-//!   chain is [`super::bitcoin_spv`]'s job. A second, unreviewed SPV inside
+//!   chain is `super::bitcoin_spv`'s job. A second, unreviewed SPV inside
 //!   this adapter would be exactly the drift that module exists to prevent.
 //! - **No slashing.** The adapter reports; the registry prices.
 //! - **No default confirmation depth.** The number enforced is the one in the
@@ -928,9 +928,9 @@ fn signature_corruption(golden: &RawConsensusEvidence) -> Option<(usize, u8)> {
     Some((offset, first ^ 0x01))
 }
 
-/// The digest a vote is identified by: `H(EPOCH_VOTE_TAG || provider || height
-/// || epoch || state_root || checkpoint)`. Two votes over one claim share it; a
-/// conflicting pair does not.
+/// Convenience: the digest a vote is identified by: `H(EPOCH_VOTE_TAG ||
+/// provider || height || epoch || state_root || checkpoint)`. Two votes over
+/// one claim share it; a conflicting pair does not.
 #[must_use]
 pub fn vote_digest(vote: &EotsVote) -> [u8; 32] {
     crate::core::hash::hash_fields_bytes(&[
