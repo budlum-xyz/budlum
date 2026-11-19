@@ -33,14 +33,14 @@ pub const MNEMONIC_WORDS: usize = 24;
 /// PBKDF2 iterations for a new key file (OWASP 2023 figure for SHA-256).
 pub const DEFAULT_KDF_ITERATIONS: u32 = 600_000;
 /// Maximum PBKDF2 iteration count. Values above this are a
-/// DoS vector (tens of seconds per open on constrained hardware).
+/// `DoS` vector (tens of seconds per open on constrained hardware).
 ///
 /// WIRING: enforced by the key-file open path in this module; the constant is
 /// part of the public wallet-policy surface for operators tuning KDF params.
 pub const MAX_KDF_ITERATIONS: u32 = 10_000_000;
 /// Expected salt length in bytes (128-bit).
 const SALT_LEN: usize = 16;
-/// Expected nonce length in bytes (XChaCha20 nonce).
+/// Expected nonce length in bytes (`XChaCha20` nonce).
 const NONCE_LEN: usize = 24;
 /// Minimum ciphertext length: at least the Poly1305 tag (16 bytes).
 const MIN_CIPHERTEXT_LEN: usize = 16;

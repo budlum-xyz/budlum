@@ -509,7 +509,7 @@ mod tests {
         }
     }
 
-    /// The bridge enforces require_slashable for every
+    /// The bridge enforces `require_slashable` for every
     /// adapter - the fixture's backing is an unslashable signature set and
     /// must be refused under such a policy.
     #[test]

@@ -1633,7 +1633,7 @@ mod tests {
         }
     }
 
-    /// (security audit) the QcFaultProof surface end-to-end: detection
+    /// (security audit) the `QcFaultProof` surface end-to-end: detection
     /// still reports a broken entry, and verification refuses to issue a
     /// verdict on it (a failing signature is not evidence against
     /// the named validator). This is the contract `bud_submitQcFaultProof`

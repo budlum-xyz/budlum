@@ -410,7 +410,7 @@ impl SlashingReport {
     }
 
     /// A relayer invalid proof - griefing, fronting or a wrong relay.
-    /// Uses `Other` with tag `relayer_invalid_proof` and maps to MaliciousBehaviour (100% slash in default params).
+    /// Uses `Other` with tag `relayer_invalid_proof` and maps to `MaliciousBehaviour` (100% slash in default params).
     /// Per decision `reuse_malicious` to avoid semver break.
     #[cfg(test)]
     pub fn consensus_invalid_relay_proof(
@@ -511,7 +511,7 @@ impl SlashingReport {
         )
     }
 
-    /// Content validator invalid validation - SocialFi content forgery.
+    /// Content validator invalid validation - `SocialFi` content forgery.
     pub fn consensus_invalid_content_validation(
         offender: Address,
         reason: String,
@@ -844,9 +844,9 @@ mod tests {
     /// The two helpers (`consensus_double_sign`,
     /// `consensus_liveness`) never cross-wire the proof kind and
     /// The condition label. A regression in either direction
-    /// Would either under-slash (DoubleSign labeled as
-    /// LivenessFault would slash 1% instead of 50%) or over-slash
-    /// (Liveness labeled as DoubleSign would slash 50% instead of
+    /// Would either under-slash (`DoubleSign` labeled as
+    /// `LivenessFault` would slash 1% instead of 50%) or over-slash
+    /// (Liveness labeled as `DoubleSign` would slash 50% instead of
     /// 1%).
     #[test]
     fn slashing_proof_condition_invariant_double_sign_vs_liveness() {
@@ -1152,7 +1152,7 @@ mod tests {
     }
 
     /// The promotion flow is real - a report only earns
-    /// ConsensusVerified by opening its own double-sign signatures. Junk
+    /// `ConsensusVerified` by opening its own double-sign signatures. Junk
     /// signatures refuse and the report stays Unverified.
     #[test]
     fn promotion_needs_a_self_contained_proof() {

@@ -526,9 +526,9 @@ mod tests {
         assert!(sovereign.templates.contains_key(&7));
     }
 
-    /// A template presenting a PoS-registered domain as PoA must be refused.
+    /// A template presenting a PoS-registered domain as `PoA` must be refused.
     ///
-    /// The template is valid on its own (PoA plus KYC) and so is the domain;
+    /// The template is valid on its own (`PoA` plus KYC) and so is the domain;
     /// together they lie. Without the binding, a document telling an auditor
     /// "this domain is permissioned and KYC'd" could be produced.
     #[test]

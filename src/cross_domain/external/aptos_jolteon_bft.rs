@@ -209,7 +209,7 @@ pub struct JolteonTwoChainEvidence {
     pub ordered_block: JolteonBlock,
     /// Quorum certificate `QC_0` over `B_0`.
     pub ordered_qc: JolteonQuorumCert,
-    /// Optional TimeoutCertificate justifying `B_0.round > B_0.parent_round + 1`.
+    /// Optional `TimeoutCertificate` justifying `B_0.round > B_0.parent_round + 1`.
     pub round_skip_tc: Option<JolteonTimeoutCert>,
     /// Direct child block `B_1` at round `r_0 + 1` (`B_1.parent_hash == B_0.block_hash`).
     pub commit_block: JolteonBlock,

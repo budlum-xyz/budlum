@@ -361,7 +361,7 @@ mod equal_weight_resolves_in_every_family {
         })
     }
 
-    /// PoW refused the reorg in both directions on equal work, so the
+    /// `PoW` refused the reorg in both directions on equal work, so the
     /// winner was whichever tip a node adopted first: two honest nodes
     /// diverged permanently. The resolver must pick exactly one side,
     /// stably under repeated evaluation.
@@ -384,7 +384,7 @@ mod equal_weight_resolves_in_every_family {
         assert_eq!(a_beats_b, engine.is_better_chain(&a, &b));
     }
 
-    /// PoA had no override at all: the trait's strict `>` on the length
+    /// `PoA` had no override at all: the trait's strict `>` on the length
     /// score left equal-length competing tails to arrival order.
     #[test]
     fn poa_equal_length_picks_one_side_in_both_directions() {

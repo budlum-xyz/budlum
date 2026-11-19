@@ -392,7 +392,7 @@ pub enum ChainCommand {
         verifier: crate::core::address::Address,
         response: oneshot::Sender<Option<crate::ai::types::AiExecutionProof>>,
     },
-    /// Get QoS metrics for a verifier.
+    /// Get `QoS` metrics for a verifier.
     GetAiVerifierQos {
         verifier: crate::core::address::Address,
         response: oneshot::Sender<Option<crate::ai::types::AiVerifierQos>>,
@@ -700,7 +700,7 @@ pub enum ChainCommand {
     HubGetApps {
         response: oneshot::Sender<Vec<crate::budlumxyz::types::AppRecord>>,
     },
-    /// The AppBinding applications, listed beside the native apps.
+    /// The `AppBinding` applications, listed beside the native apps.
     HubGetAppBindingApps {
         response: oneshot::Sender<Vec<crate::settlement::app_binding::AppBindingApp>>,
     },
@@ -2461,7 +2461,7 @@ impl ChainHandle {
         rx.await.ok().flatten()
     }
 
-    /// Get QoS metrics for a verifier.
+    /// Get `QoS` metrics for a verifier.
     pub async fn get_ai_verifier_qos(
         &self,
         verifier: crate::core::address::Address,
@@ -3100,9 +3100,9 @@ impl ChainActor {
     /// After a successful reorg the old tip's finality
     /// round is dead (0186 invalidated it), but nobody restarted voting - the
     /// node just sat there and the post-fork chain finalized nothing until the
-    /// NEXT checkpoint block happened to arrive through AddBlock. Resume the
+    /// NEXT checkpoint block happened to arrive through `AddBlock`. Resume the
     /// prevote task on the new tip when it is itself a checkpoint height,
-    /// mirroring ValidateAndAddBlock. Shared by both reorg entry points.
+    /// mirroring `ValidateAndAddBlock`. Shared by both reorg entry points.
     fn resume_finality_after_reorg(&mut self, outcome: &Result<bool, String>) {
         if !matches!(outcome, Ok(true)) {
             return;

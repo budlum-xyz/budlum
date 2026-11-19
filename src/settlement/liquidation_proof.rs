@@ -1,4 +1,4 @@
-//! ProofCarryingLiquidation: oracle-free AMM/TWAP state-root-proven
+//! `ProofCarryingLiquidation`: oracle-free AMM/TWAP state-root-proven
 //! cross-domain liquidation engine.
 //!
 //! This module implements a liquidation mechanism that does not depend on
@@ -256,7 +256,7 @@ fn compute_twap_price(observations: &[AmmReserveSnapshot]) -> Result<u128, Liqui
 }
 
 /// Compute the amount of collateral to seize for a liquidation.
-/// Returns (seized, debt_repaid, remainder).
+/// Returns (seized, `debt_repaid`, remainder).
 fn compute_seized_collateral(
     debt_x: u128,
     collateral_y: u128,

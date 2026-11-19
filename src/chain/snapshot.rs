@@ -2670,7 +2670,7 @@ mod tests {
         );
     }
 
-    /// The PoA admission records and the compliance ledger cross the wire
+    /// The `PoA` admission records and the compliance ledger cross the wire
     /// INSIDE the digest: a peer that empties an
     /// admission set or drops a freeze invalidates the snapshot instead of
     /// quietly unpermissioning a domain or clearing a gate.
@@ -2811,7 +2811,7 @@ mod tests {
     /// Only the keys of the schema-4 change.
     const SCHEMA4_ONLY_KEYS: &[&str] = &["manifest_signer", "manifest_signature", "trust_policy"];
 
-    /// PoA admission records: a field added with `#[serde(default)]`.
+    /// `PoA` admission records: a field added with `#[serde(default)]`.
     ///
     /// It shipped WITHOUT a version bump, on the argument that absence
     /// defaults to an empty record ("not permissioned"), which is the truth
@@ -3277,11 +3277,11 @@ mod tests {
         assert_eq!(rebuilt.timed_burn.years_burned, 2);
     }
 
-    /// A blob without PoA admission records (still a valid schema-4 snapshot,
+    /// A blob without `PoA` admission records (still a valid schema-4 snapshot,
     /// because the version was not bumped).
     ///
     /// What this migration path must lock is not a data move but a
-    /// **security assumption**: when a snapshot carrying no PoA admission
+    /// **security assumption**: when a snapshot carrying no `PoA` admission
     /// record is restored, the domain **must not be treated as permissioned**.
     /// Otherwise a chain opened from an old snapshot looks like a permissioned
     /// domain where nobody has been admitted, and can never produce a block.

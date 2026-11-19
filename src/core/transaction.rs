@@ -88,7 +88,7 @@ pub const MAX_V8_SIGNERS: usize = 16;
 /// admission instead of being guessed from key length.
 ///
 /// WIRING: consumed cross-file by the identity verification-method encoding
-/// (`registry::identity`, MethodKind::MlDsa87) when the identity transaction
+/// (`registry::identity`, `MethodKind::MlDsa87`) when the identity transaction
 /// door lands; until then the account-identity absorb in this file pins it.
 pub const ML_DSA_87_SCHEME_ID: &str = "ml-dsa-87-fips204-v1";
 
@@ -608,24 +608,24 @@ pub enum TransactionType {
     AiInferenceRequest(crate::ai::types::AiInferenceRequest),
     /// Submit an AI inference layer inference result by an active bonded RoleId(8) operator.
     AiInferenceResult(crate::ai::types::AiInferenceResult),
-    /// Reclaim escrowed max_fee for expired unfinalized AI request.
+    /// Reclaim escrowed `max_fee` for expired unfinalized AI request.
     AiFeeReclaim(crate::ai::types::AiRequestId),
     /// Deactivate an AI model (owner-only, prevents new requests).
     AiModelDeactivate(crate::ai::types::AiModelId),
     /// Reactivate a previously deactivated AI model.
     AiModelReactivate(crate::ai::types::AiModelId),
     /// Cancel a pending AI inference request (requester-only).
-    /// Returns escrowed max_fee for refund by the executor layer.
+    /// Returns escrowed `max_fee` for refund by the executor layer.
     AiRequestCancel(crate::ai::types::AiRequestId),
-    /// Register a Pollen DataAsset (owner-submitted).
+    /// Register a Pollen `DataAsset` (owner-submitted).
     PollenRegisterDataAsset(crate::pollen::DataAsset),
-    /// Register a seller/owner sale authorization for DataAsset pollen.
+    /// Register a seller/owner sale authorization for `DataAsset` pollen.
     PollenAuthorizeSale(crate::pollen::SaleAuthorization),
-    /// Register an owner-submitted AccessGrant.
+    /// Register an owner-submitted `AccessGrant`.
     PollenGrantAccess(crate::pollen::AccessGrant),
-    /// Revoke a Pollen AccessGrant by id (owner-only in executor).
+    /// Revoke a Pollen `AccessGrant` by id (owner-only in executor).
     PollenRevokeGrant(crate::pollen::GrantId),
-    /// Revoke a Pollen DataAsset by id (owner-only in executor).
+    /// Revoke a Pollen `DataAsset` by id (owner-only in executor).
     PollenRevokeDataAsset(crate::pollen::AssetId),
     /// Slash a verifier for equivocation.
     AiDisputeSlash {
@@ -646,20 +646,20 @@ pub enum TransactionType {
     PrivateTransferSubmit(crate::privacy::PrivateTransferSubmit),
     /// Faucet/test helper - insert a live note commitment (governance/tests).
     PrivacyNoteInsert([u8; 32]),
-    /// AI execution layer: attach BudZKVM execution proof to a result
+    /// AI execution layer: attach `BudZKVM` execution proof to a result
     /// (active RoleId(8) operator-submitted; structural verify on the chain).
     AiAttachExecutionProof {
         request_id: crate::ai::types::AiRequestId,
         proof: crate::ai::types::AiExecutionProof,
     },
     /// AI inference layer production onboarding: bond `amount` from the signed sender into
-    /// The permissionless AI_OPERATOR role (RoleId 8).
+    /// The permissionless `AI_OPERATOR` role (`RoleId` 8).
     AiOperatorBond,
     /// Begin RoleId(8) unbonding after all observable tasks/disputes close.
     AiOperatorUnbond,
     /// Withdraw the complete RoleId(8) principal after the unbonding epoch.
     AiOperatorWithdraw,
-    /// Register the validator's consensus public keys and RFC 9380 BLS PoP.
+    /// Register the validator's consensus public keys and RFC 9380 BLS `PoP`.
     /// The outer Ed25519 transaction signature binds these keys to `from`.
     RegisterConsensusKeys(ConsensusKeyRegistration),
     /// Domain settlement: apply the nonce writes a verified domain commitment
@@ -676,7 +676,7 @@ pub enum TransactionType {
     ///
     /// Carries the registry's own `IdentityTx` and nothing else. No domain
     /// field is defined here: the executor's single arm supplies the kind
-    /// read from state, because a caller-declared "this is PoA" is authority
+    /// read from state, because a caller-declared "this is `PoA`" is authority
     /// fabrication - the same refusal the domain-freeze path applies in
     /// `chain/blockchain.rs`, applied at the identity door.
     Identity(crate::registry::IdentityTx),
@@ -697,7 +697,7 @@ pub enum TransactionType {
     /// naming types: the signing gate reads the enum
     /// body's identifiers to resolve carried payload types.)
     Storage(crate::domain::storage_tx::StorageTx),
-    /// PoA admission door: a candidate applies for themselves, an admin of
+    /// `PoA` admission door: a candidate applies for themselves, an admin of
     /// the target domain decides, and the admin set changes only through
     /// admins or governance. Ids, a dossier commitment and reasons - no
     /// authority fields, because the sender IS the claimed actor at the one
@@ -3275,7 +3275,7 @@ fn encode_message(message: &crate::cross_domain::message::CrossDomainMessage, ou
         crate::cross_domain::message::quantum_class_code(message.source_quantum_class),
     );
 }
-/// Canonical preimage of a PoA admission transaction.
+/// Canonical preimage of a `PoA` admission transaction.
 ///
 /// Operation tag, domain id, and the addresses/commitments/reasons each arm
 /// carries - every field the execution body reads is under the signature, so

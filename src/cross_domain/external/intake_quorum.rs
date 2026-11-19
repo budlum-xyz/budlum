@@ -930,7 +930,7 @@ mod tests {
         assert_eq!(listed, vec![5, 9], "BTreeMap order is height order");
     }
     /// Unreadable bytes are not votes and open no round;
-    /// an AgreedRefusal censors only the bytes it actually answered.
+    /// an `AgreedRefusal` censors only the bytes it actually answered.
     #[test]
     fn garbage_bytes_never_vote_and_a_refusal_only_closes_its_own_bytes() {
         let mut rounds = QuorumRounds::default();

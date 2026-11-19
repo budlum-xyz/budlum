@@ -39,7 +39,7 @@ use super::spec::{
     VerificationPolicy,
 };
 
-/// Canonical adapter name for HotStuff three-chain finality.
+/// Canonical adapter name for `HotStuff` three-chain finality.
 const ADAPTER_NAME: &str = "hotstuff-3chain-v1";
 /// Adapter implementation version.
 const ADAPTER_VERSION: u32 = 1;
@@ -52,7 +52,7 @@ const PAYLOAD_MAGIC: &[u8; 8] = b"BDLMHS01";
 const MAX_HOTSTUFF_PAYLOAD_BYTES: usize = 512 * 1024;
 const MAX_HOTSTUFF_COMMITTEE: usize = 256;
 
-/// One bonded validator in a governance-pinned HotStuff epoch committee.
+/// One bonded validator in a governance-pinned `HotStuff` epoch committee.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotStuffValidator {
     /// Classical Ed25519 verifying key (32 bytes).
@@ -66,7 +66,7 @@ pub struct HotStuffValidator {
     pub pq_pubkey: Vec<u8>,
 }
 
-/// Governance-pinned epoch validator set for a HotStuff chain.
+/// Governance-pinned epoch validator set for a `HotStuff` chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinnedHotStuffCommittee {
     /// Consensus epoch served by this validator set.
@@ -75,7 +75,7 @@ pub struct PinnedHotStuffCommittee {
     pub members: Vec<HotStuffValidator>,
 }
 
-/// One proposed block in a HotStuff 3-chain bundle.
+/// One proposed block in a `HotStuff` 3-chain bundle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct HotStuffBlock {
     pub epoch: u64,
@@ -108,8 +108,8 @@ impl HotStuffBlock {
     }
 }
 
-/// One validator's vote inside a HotStuff quorum certificate or equivocation proof.
-/// WIRING: exposed for HotStuff equivocation slashing submission surfaces.
+/// One validator's vote inside a `HotStuff` quorum certificate or equivocation proof.
+/// WIRING: exposed for `HotStuff` equivocation slashing submission surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotStuffVoteSig {
     pub signer_pubkey: [u8; 32],
@@ -118,7 +118,7 @@ pub struct HotStuffVoteSig {
     pub pq_sig: Vec<u8>,
 }
 
-/// Quorum certificate over one HotStuff block at `(epoch, view)`.
+/// Quorum certificate over one `HotStuff` block at `(epoch, view)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct HotStuffQc {
     pub epoch: u64,
@@ -138,7 +138,7 @@ struct HotStuffThreeChainEvidence {
     pub commit_qc: HotStuffQc,
 }
 
-/// Canonical domain-separated signing digest for a HotStuff vote.
+/// Canonical domain-separated signing digest for a `HotStuff` vote.
 #[must_use]
 fn hotstuff_vote_sign_bytes(network: &str, epoch: u64, view: u64, block_hash: &Hash32) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[
@@ -288,12 +288,12 @@ fn verify_single_qc(
 }
 
 /// Domain-separation tag for HotStuff/Jolteon pacemaker timeout votes.
-/// WIRING: exposed for external HotStuff pacemaker timeout signers and verifiers.
+/// WIRING: exposed for external `HotStuff` pacemaker timeout signers and verifiers.
 pub const DOMAIN_HOTSTUFF_TIMEOUT: &[u8] = b"BDLM_HOTSTUFF_TIMEOUT_V1";
 
 /// Canonical timeout-vote signing digest binding `(network, epoch, view, high_qc_view)`.
 ///
-/// Convenience: exposed for HotStuff pacemaker signers and TC verifiers.
+/// Convenience: exposed for `HotStuff` pacemaker signers and TC verifiers.
 #[must_use]
 pub fn hotstuff_timeout_sign_bytes(
     network: &str,
@@ -311,7 +311,7 @@ pub fn hotstuff_timeout_sign_bytes(
 }
 
 /// Individual validator timeout vote carrying its highest locked QC view.
-/// WIRING: exposed for HotStuff pacemaker view-change intake surfaces.
+/// WIRING: exposed for `HotStuff` pacemaker view-change intake surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotStuffTimeoutVote {
     /// Validator Ed25519 public key.
@@ -324,9 +324,9 @@ pub struct HotStuffTimeoutVote {
     pub pq_sig: Vec<u8>,
 }
 
-/// Jolteon / DiemBFT / AptosBFT `TimeoutCertificate` authorizing a safe jump
+/// Jolteon / `DiemBFT` / `AptosBFT` `TimeoutCertificate` authorizing a safe jump
 /// past a stalled view while preserving the highest locked QC across `> 2/3` stake.
-/// WIRING: exposed for HotStuff pacemaker view-change verification surfaces.
+/// WIRING: exposed for `HotStuff` pacemaker view-change verification surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotStuffTimeoutCertificate {
     /// Committee epoch.

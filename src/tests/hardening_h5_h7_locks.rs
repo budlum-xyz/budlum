@@ -42,7 +42,7 @@ mod tests {
         }
     }
 
-    /// Eclipse /24 bound still enforced at PeerManager.
+    /// Eclipse /24 bound still enforced at `PeerManager`.
     #[test]
     fn eclipse_bound_still_active() {
         use crate::network::peer_manager::PeerManager;
@@ -87,7 +87,7 @@ mod tests {
         )
     }
 
-    /// H6.3: RequireSigned fails closed without signature.
+    /// H6.3: `RequireSigned` fails closed without signature.
     #[test]
     fn require_signed_fails_without_signature() {
         let mut snap = sample_snapshot();
@@ -124,7 +124,7 @@ mod tests {
         );
     }
 
-    /// Migration_report rejects ancient / future schemas; accepts current.
+    /// `Migration_report` rejects ancient / future schemas; accepts current.
     #[test]
     fn migration_report_bounds() {
         let mut snap = sample_snapshot();

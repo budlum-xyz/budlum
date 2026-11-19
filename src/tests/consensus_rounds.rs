@@ -1,6 +1,6 @@
 //! Consensus-round behaviour and the negative-validation batch.
 //!
-//! The round rule is shared by PoS and PoA: the block nonce carries the
+//! The round rule is shared by `PoS` and `PoA`: the block nonce carries the
 //! leader round, the round is capped at [`MAX_LEADER_ROUNDS`], and a round
 //! `r > 0` must sit at least `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
 //! after its parent. These tests pin the pieces the older suite never
@@ -9,7 +9,7 @@
 //! negative cases named by.
 
 /// Whether the engine refused because the leader round the producer claims has
-/// not elapsed at wall clock. PoS and PoA enforce the same rule and word the
+/// not elapsed at wall clock. `PoS` and `PoA` enforce the same rule and word the
 /// refusal differently; the suites ask the question, not the sentence.
 fn round_not_elapsed(error: &str) -> bool {
     error.contains("claimed before it elapsed") || error.contains("claimed ahead of wall clock")
@@ -29,7 +29,7 @@ mod consensus_round_tests {
     use crate::crypto::primitives::ValidatorKeys;
 
     /// A state holding exactly one fully consensus-ready validator (real VRF,
-    /// BLS + PoP and PQ keys), so validation reaches the round logic instead of
+    /// BLS + `PoP` and PQ keys), so validation reaches the round logic instead of
     /// failing at the key checks.
     fn ready_validator_state(keys: &ValidatorKeys) -> (AccountState, Address) {
         let address = Address::from(keys.sig_key.public_key_bytes());
@@ -52,7 +52,7 @@ mod consensus_round_tests {
         (state, address)
     }
 
-    /// A one-validator state with only what leader selection needs (PoA).
+    /// A one-validator state with only what leader selection needs (`PoA`).
     fn poa_state_with(addresses: &[Address]) -> AccountState {
         let mut state = AccountState::new();
         for address in addresses {
@@ -522,7 +522,7 @@ mod consensus_round_tests {
     }
 }
 
-/// PoA applies the same round pricing as PoS (CWE-807).
+/// `PoA` applies the same round pricing as `PoS` (CWE-807).
 ///
 /// The two engines duplicate the round rule; a fix in one of them is not a
 /// fix. An authority that leads round 0 must not be able to publish a valid
@@ -548,7 +548,7 @@ mod poa_round_pricing_tests {
         (state, address)
     }
 
-    /// The round rule prices a PoA claim identically on every node.
+    /// The round rule prices a `PoA` claim identically on every node.
     ///
     /// The price used to be read off "when this node saw the parent land".
     /// That is a value only one node has - its boot time for genesis, its load

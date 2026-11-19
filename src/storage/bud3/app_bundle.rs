@@ -526,7 +526,7 @@ impl AppBundle {
 /// The outside store a mirror attestation is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MirrorKind {
-    /// An IPFS CIDv1 payload digest.
+    /// An IPFS `CIDv1` payload digest.
     Ipfs = 1,
     /// An Arweave transaction id.
     Arweave = 2,
@@ -558,7 +558,7 @@ impl MirrorKind {
 pub struct MirrorLocator {
     /// Which outside store this is.
     pub kind: MirrorKind,
-    /// The locator digest: CIDv1 multihash digest, or Arweave tx id bytes.
+    /// The locator digest: `CIDv1` multihash digest, or Arweave tx id bytes.
     pub digest: [u8; 32],
 }
 

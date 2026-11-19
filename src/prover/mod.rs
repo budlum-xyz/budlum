@@ -475,7 +475,7 @@ mod tests {
     /// The cap refuses at the boundary and the refusal is total -
     /// the registry state is untouched, so a full registry still answers
     /// its recorded claims and still classifies duplicates correctly.
-    /// Filling 100k keys is a loop of BTreeMap inserts; keep it cheap by
+    /// Filling 100k keys is a loop of `BTreeMap` inserts; keep it cheap by
     /// testing the boundary: fill exactly to capacity with distinct keys.
     #[test]
     fn registry_refuses_past_the_cap() {

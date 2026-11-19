@@ -1152,7 +1152,7 @@ mod tests {
     /// applied. It holds because of the current numbers, not because of
     /// anything in the design, so it is asserted here.
     ///
-    /// Canary: lower this constant below 1_000_000 and the assertion fails.
+    /// Canary: lower this constant below `1_000_000` and the assertion fails.
     #[test]
     fn transport_block_ceiling_is_not_stricter_than_consensus() {
         // Both sides are `const`, so this is decidable at compile time. In a

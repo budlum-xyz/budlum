@@ -952,12 +952,8 @@ src/storage/manifest.rs	fn	overhead_per_mille
 src/storage/manifest.rs	fn	replication
 src/persistence/state_trie.rs	fn	bulk_insert
 src/persistence/state_trie.rs	fn	root_ref
-src/storage/pact_binding.rs	fn	add_pact
-src/storage/pact_binding.rs	fn	is_pure_production
-src/storage/pact_binding.rs	fn	is_residual_only
 src/storage/pact_binding.rs	fn	kq_pact_registry
 src/storage/pact_binding.rs	fn	kq_storage_bound
-src/storage/pact_binding.rs	fn	recompute_root
 src/storage/pact_binding.rs	struct	PactGates
 src/storage/provider.rs	fn	provider_challenge_id
 src/storage/provider.rs	struct	ProviderChallengeResult

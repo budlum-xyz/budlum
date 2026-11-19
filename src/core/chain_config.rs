@@ -31,7 +31,7 @@ impl Network {
     /// the chain id), so a signature could not have been replayed onto
     /// Ethereum. The cost was to users rather than to consensus: every EVM
     /// wallet resolves a chain id through that registry, so a Budlum RPC
-    /// announcing `1` presents itself to MetaMask as Ethereum Mainnet, and the
+    /// announcing `1` presents itself to `MetaMask` as Ethereum Mainnet, and the
     /// user is asked to approve what looks like an Ethereum transaction.
     ///
     /// 45260..=45262 are unassigned in the same registry. Changing this before

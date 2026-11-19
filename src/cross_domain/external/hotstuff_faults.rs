@@ -1,4 +1,4 @@
-//! WIRING: unwired - HotStuff pacemaker timeout-certificate and double-vote
+//! WIRING: unwired - `HotStuff` pacemaker timeout-certificate and double-vote
 //! equivocation verifiers await the governance-gated external slashing intake door.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,7 +21,7 @@ use crate::cross_domain::external::spec::AdapterError;
 /// uniqueness, Ed25519 or ML-DSA-65 signatures, `max_high_qc_view`, or the
 /// strict 2/3 stake threshold fail.
 ///
-/// Convenience: exposed for HotStuff view-change safety auditing and bridges.
+/// Convenience: exposed for `HotStuff` view-change safety auditing and bridges.
 pub fn verify_hotstuff_timeout_certificate(
     network: &str,
     pinned: &PinnedHotStuffCommittee,
@@ -134,10 +134,10 @@ pub fn verify_hotstuff_timeout_certificate(
     Ok((observed_max_high_qc, signed_stake, all_pq))
 }
 
-/// Cryptographic misbehaviour bundle proving that a HotStuff validator signed
+/// Cryptographic misbehaviour bundle proving that a `HotStuff` validator signed
 /// two distinct blocks in the exact same `(epoch, view)`.
 ///
-/// WIRING: exposed for HotStuff double-vote slashing intake surfaces.
+/// WIRING: exposed for `HotStuff` double-vote slashing intake surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotStuffEquivocationProof {
     /// Shared epoch of the double-vote.
@@ -164,7 +164,7 @@ pub struct HotStuffEquivocationProof {
 /// hashes are zero or equal, votes are from different or unknown signers, or
 /// any Ed25519 or ML-DSA-65 signature check fails.
 ///
-/// Convenience: exposed for HotStuff slashing and `ConsensusSentry` freeze hooks.
+/// Convenience: exposed for `HotStuff` slashing and `ConsensusSentry` freeze hooks.
 pub fn verify_hotstuff_equivocation(
     network: &str,
     pinned: &PinnedHotStuffCommittee,

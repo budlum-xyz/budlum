@@ -1000,7 +1000,7 @@ pub fn wallet_address_from_ml_dsa_87_public_key(
 ///
 /// The signature must be exactly 4627 bytes and the public key exactly 2592
 /// bytes. The check runs through the dual-verifier facade (`crypto::pq`,
-/// RustCrypto `ml-dsa` and `libcrux-ml-dsa` must both accept. This path
+/// `RustCrypto` `ml-dsa` and `libcrux-ml-dsa` must both accept. This path
 /// is intentionally separate from validator PQ signatures (ML-DSA-65): user
 /// wallets are pinned to ML-DSA-87 for Category 5 security.
 ///
@@ -1539,7 +1539,7 @@ fn test_mainnet_disk_keys_forbidden_when_plaintext_bls_pq_present() {
     assert!(keys.validate_mainnet_disk_policy(false).is_ok());
 }
 
-/// RFC 9380 PoP generation is bound to the canonical public key, the chain
+/// RFC 9380 `PoP` generation is bound to the canonical public key, the chain
 /// id and the account address it is registered under (R11).
 #[test]
 fn test_bls_proof_of_possession() {

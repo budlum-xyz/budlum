@@ -1,4 +1,4 @@
-//! WIRING: unwired - external NIPoPoW superblock adapter awaits `AdapterSpec` variant registration in `external_tx`.
+//! WIRING: unwired - external `NIPoPoW` superblock adapter awaits `AdapterSpec` variant registration in `external_tx`.
 //! Non-Interactive Proofs of Proof-of-Work (`NIPoPoW`, Kiayias-Miller-Zindros
 //! EUROCRYPT 2020) sublinear genesis-anchored external finality adapter.
 //!
@@ -22,10 +22,10 @@
 //!   (except the pinned genesis anchor, which sits at every interlink level).
 //! - Enforces the KMZ `(m, k)` predicate: at least `min_superblocks_m` verified
 //!   superblocks at a single level `mu >= min_level`, followed by a strictly
-//!   contiguous `k`-block PoW suffix `chi` burying the attested header `chi[0]`.
+//!   contiguous `k`-block `PoW` suffix `chi` burying the attested header `chi[0]`.
 //! - Pure hash security (`SchemeId::SHA2_256`): immune to Shor's algorithm.
 //!
-//! Convenience: exposed for external PoW light-client intake (Ergo/Kadena/velvet
+//! Convenience: exposed for external `PoW` light-client intake (Ergo/Kadena/velvet
 //! Bitcoin superblock domains) and self-test admission.
 
 use std::collections::BTreeSet;
@@ -67,10 +67,10 @@ pub const DOMAIN_NIPOPOW_INTERLINK_NODE: &[u8] = b"BDLM_NIPOPOW_INTERLINK_NODE_V
 /// Hard upper bound on serialized `NIPoPoW` evidence size (512 KiB).
 pub const MAX_NIPOPOW_PAYLOAD_BYTES: usize = 512 * 1024;
 
-/// Maximum superchain prefix headers accepted per proof (DoS bound).
+/// Maximum superchain prefix headers accepted per proof (`DoS` bound).
 pub const MAX_PREFIX_HEADERS: usize = 512;
 
-/// Maximum contiguous suffix headers accepted per proof (DoS bound).
+/// Maximum contiguous suffix headers accepted per proof (`DoS` bound).
 pub const MAX_SUFFIX_HEADERS: usize = 128;
 
 /// Maximum Merkle sibling depth accepted for an interlink pointer proof.
@@ -108,9 +108,9 @@ fn shift_right_256_be(value: &[u8; 32], bits: u8) -> [u8; 32] {
     out
 }
 
-/// Verify basic PoW target satisfaction (`block_id <= target` with `target != 0`)
+/// Verify basic `PoW` target satisfaction (`block_id <= target` with `target != 0`)
 /// and return `Some(mu)` where `mu` is the highest level satisfying
-/// `block_id <= (target >> mu)`, or `None` if the block fails level-0 PoW.
+/// `block_id <= (target >> mu)`, or `None` if the block fails level-0 `PoW`.
 ///
 /// Convenience: exposed for `NIPoPoW` prover tooling and superblock scoring.
 #[must_use]
@@ -190,7 +190,7 @@ pub fn verify_interlink_inclusion(
     bool::from(acc.ct_eq(interlink_root))
 }
 
-/// Canonical PoW block header carrying an authenticated `interlink_root`.
+/// Canonical `PoW` block header carrying an authenticated `interlink_root`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NipopowHeader {
     /// Block height (`0` for the pinned genesis header).
@@ -205,14 +205,14 @@ pub struct NipopowHeader {
     pub interlink_root: [u8; 32],
     /// Header timestamp in Unix seconds.
     pub timestamp_secs: u64,
-    /// 64-bit PoW grinding nonce driving `compute_id` below `target >> mu`.
+    /// 64-bit `PoW` grinding nonce driving `compute_id` below `target >> mu`.
     pub nonce: u64,
     /// Claimed canonical double-SHA-256 block identifier (recomputed on verify).
     pub block_id: [u8; 32],
 }
 
 impl NipopowHeader {
-    /// Deterministically compute the canonical double-SHA-256 PoW identifier
+    /// Deterministically compute the canonical double-SHA-256 `PoW` identifier
     /// bound to `network`.
     ///
     /// Convenience: exposed for header mining and verification helpers.
@@ -249,7 +249,7 @@ pub struct NipopowEvidence {
     pub prefix: Vec<NipopowHeader>,
     /// `prefix.len() - 1` authenticated interlink hops across `prefix`.
     pub prefix_hops: Vec<InterlinkHop>,
-    /// Contiguous `k`-block PoW suffix `chi`; `suffix[0]` is the finalized block.
+    /// Contiguous `k`-block `PoW` suffix `chi`; `suffix[0]` is the finalized block.
     pub suffix: Vec<NipopowHeader>,
 }
 
@@ -260,7 +260,7 @@ pub struct PinnedNipopowGenesis {
     pub genesis_id: [u8; 32],
     /// Canonical genesis height (typically `0`, or checkpoint height).
     pub genesis_height: u64,
-    /// Big-endian 256-bit level-0 PoW difficulty target (`id <= target`).
+    /// Big-endian 256-bit level-0 `PoW` difficulty target (`id <= target`).
     pub pow_target: [u8; 32],
     /// KMZ security parameter `m`: minimum count of verified superblocks at one level.
     pub min_superblocks_m: u32,

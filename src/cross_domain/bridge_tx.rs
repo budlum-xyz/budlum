@@ -133,7 +133,7 @@ pub struct BridgeTxContext {
 
 /// Why a bridge transaction was refused. A refused transaction changes
 /// nothing.
-/// exposed for execute_bridge_tx: the executor's Bridge arm reports it by its message, not by name.
+/// exposed for `execute_bridge_tx`: the executor's Bridge arm reports it by its message, not by name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BridgeTxError {
     #[error("only the operator of domain {0} may register its bridge assets")]

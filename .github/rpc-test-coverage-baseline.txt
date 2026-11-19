@@ -27,77 +27,12 @@
 
 # operator administration (6 rows)
 
-bud_adminBanPeer missing=success
-bud_adminListBannedPeers missing=success
-bud_adminSentryStatus missing=success
-bud_adminUnbanPeer missing=refusal
-bud_adminUnbanPeer missing=success
-bud_adminUpdateSentries missing=success
 
 # AI inference layer (34 rows)
 
 
 # record and wallet doors (59 rows)
 
-bud_appBindingPaymentProof missing=refusal
-bud_appBindingPaymentProof missing=success
-bud_atlasGetWalletContext missing=refusal
-bud_atlasGetWalletContext missing=success
-bud_gardenCreate missing=success
-bud_gatewayFetchContent missing=refusal
-bud_gatewayFetchContent missing=success
-bud_gatewayRenderContent missing=refusal
-bud_gatewayRenderContent missing=success
-bud_getAccountProof missing=success
-bud_getAppBindingApplication missing=refusal
-bud_getAppBindingApplication missing=success
-bud_getBlockByHash missing=refusal
-bud_getBlockByNumber missing=refusal
-bud_getCrossDomainMessage missing=refusal
-bud_getDomainInfo missing=refusal
-bud_getDomainInfo missing=success
-bud_getExternalDomainProfile missing=refusal
-bud_getExternalDomainProfile missing=success
-bud_getExternalDomainStatus missing=refusal
-bud_getExternalDomainStatus missing=success
-bud_getExternalQuorumRound missing=refusal
-bud_getExternalQuorumRound missing=success
-bud_getExternalQuorumRounds missing=refusal
-bud_getExternalQuorumRounds missing=success
-bud_getGlobalHeader missing=refusal
-bud_getGlobalHeaderProof missing=refusal
-bud_getGlobalHeaderProof missing=success
-bud_getRelayerIntent missing=refusal
-bud_getRelayerIntent missing=success
-bud_getSovereignTemplate missing=refusal
-bud_getSovereignTemplate missing=success
-bud_getStateSnapshot missing=refusal
-bud_getStateSnapshot missing=success
-bud_getTransactionByHash missing=refusal
-bud_getTransactionReceipt missing=refusal
-bud_getValidatorDelegations missing=refusal
-bud_hubPrepareRegister missing=refusal
-bud_hubPrepareRegister missing=success
-bud_identityCredential missing=refusal
-bud_identityVerifyPresentation missing=refusal
-bud_inspectEthereumUpdate missing=refusal
-bud_inspectEthereumUpdate missing=success
-bud_marketPrepareOffer missing=refusal
-bud_marketPrepareOffer missing=success
-bud_marketPreparePurchase missing=refusal
-bud_marketPreparePurchase missing=success
-bud_passportGetProfile missing=refusal
-bud_passportGetProfile missing=success
-bud_passportGetProofBundle missing=refusal
-bud_passportGetProofBundle missing=success
-bud_pruneStatus missing=success
-bud_requestPrune missing=success
-bud_sendTxBundle missing=refusal
-bud_sendTxBundle missing=success
-bud_submitQcFaultProof missing=refusal
-bud_submitSlashingReport missing=refusal
-bud_txPrecheck missing=refusal
-bud_validatorProfile missing=refusal
 
 # social layer (8 rows)
 

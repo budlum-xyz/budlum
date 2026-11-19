@@ -1787,7 +1787,7 @@ mod settlement_prod_tests {
     /// The dead `settlement_finality_hashes` input was closed by replacing
     /// the stored field with a derived window (see the twin test in
     /// `chain/blockchain.rs`). This module is still disabled pending the
-    /// devnet FinalityProof rewrite, so the derivation is pinned here only
+    /// devnet `FinalityProof` rewrite, so the derivation is pinned here only
     /// through the pure helper.
     #[test]
     fn settlement_finality_window_is_derived_not_stored() {
@@ -2103,7 +2103,7 @@ mod settlement_prod_tests {
     }
 }
 
-/// (Step 3) ZK finality now flows through the ProofClaimRegistry using a
+/// (Step 3) ZK finality now flows through the `ProofClaimRegistry` using a
 /// REAL STARK proof (produced by `execution::zkvm::prove_bytecode`) - replacing
 /// The deleted fake-hash acceptance test.
 #[cfg(test)]
@@ -2221,7 +2221,7 @@ mod zk_finality_real_proof {
         }
     }
 
-    /// Build a ZK commitment whose state_root matches `root`.
+    /// Build a ZK commitment whose `state_root` matches `root`.
     fn zk_commitment(dom: &crate::domain::ConsensusDomain, root: [u8; 32]) -> DomainCommitment {
         // Start from a block-derived commitment, then bind its state_root to the
         // Proven final_state_root and its consensus kind to Zk.

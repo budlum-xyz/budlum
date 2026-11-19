@@ -11,7 +11,7 @@
 //! the block contents, mines the header chain and binds the commitment to it
 //! (`domain::producer`). For a BFT domain `--bft-spec` signs the checkpoint
 //! with the validators' BLS keys (and their ML-DSA-65 keys for the QC half),
-//! and for a PoA domain `--poa-spec` signs with the authorities' composite
+//! and for a `PoA` domain `--poa-spec` signs with the authorities' composite
 //! keys; the keys come from a separate mode-0600 file (`--quorum-keys`).
 //! `--write-payload` stores the result without submitting it. The signer is a V5 wallet key
 //! file sealed with a password (`bud wallet create`); neither the key nor the
@@ -54,7 +54,7 @@ struct Cli {
     /// JSON `BftJob`: sign the checkpoint with the BFT validators' keys.
     #[arg(long, requires = "quorum_keys")]
     bft_spec: Option<PathBuf>,
-    /// JSON `PoaJob`: sign the block with the PoA authorities' keys.
+    /// JSON `PoaJob`: sign the block with the `PoA` authorities' keys.
     #[arg(long, requires = "quorum_keys")]
     poa_spec: Option<PathBuf>,
     /// A mode-0600 JSON file with the signing seeds (`QuorumKeys`).
@@ -166,7 +166,7 @@ struct PoaJob {
 }
 
 /// The signing seeds, hex. For BFT, `bls_seeds` (64 bytes) and optional
-/// `pq_seeds` (32 bytes) align with the job's members. For PoA, `composite`
+/// `pq_seeds` (32 bytes) align with the job's members. For `PoA`, `composite`
 /// holds one `[ml_dsa_65_seed, ed25519_seed]` pair (32 bytes each) per
 /// signing authority.
 #[derive(Debug, Default, serde::Deserialize)]

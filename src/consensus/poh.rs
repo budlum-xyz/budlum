@@ -1,6 +1,6 @@
-//! Proof of History (PoH) consensus engine.
+//! Proof of History (`PoH`) consensus engine.
 //!
-//! PoH orders events via a sequential domain-separated SHA-256 hash chain.
+//! `PoH` orders events via a sequential domain-separated SHA-256 hash chain.
 //! Each tick hashes `BDLM_POH_TICK_V1 || prev_hash || step_index`. Proposals
 //! bind their `(start_count, steps, end_hash)` witness into the block's
 //! hash-covered `vrf_proof` and `vrf_output` fields without mutating canonical
@@ -16,13 +16,13 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
-/// Maximum hash iterations allowed in a single PoH verification call.
+/// Maximum hash iterations allowed in a single `PoH` verification call.
 const MAX_POH_VERIFY_STEPS: u64 = 16_384;
 const MAX_POH_CHECKPOINTS: usize = 4_096;
 const POH_WITNESS_MAGIC: &[u8; 8] = b"BDLMPOH1";
 const POH_WITNESS_LEN: usize = 8 + 8 + 8;
 
-/// PoH configuration.
+/// `PoH` configuration.
 #[derive(Debug, Clone)]
 pub struct PohConfig {
     /// Number of hash iterations per slot.
@@ -40,7 +40,7 @@ impl Default for PohConfig {
     }
 }
 
-/// PoH chain state: current digest and total step count.
+/// `PoH` chain state: current digest and total step count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PohState {
     current_hash: [u8; 32],
@@ -52,7 +52,7 @@ struct PohLedger {
     checkpoints: BTreeMap<u64, [u8; 32]>,
 }
 
-/// Compute one domain-separated PoH hash transition.
+/// Compute one domain-separated `PoH` hash transition.
 #[must_use]
 fn poh_step(prev_hash: &[u8; 32], step_index: u64) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -107,7 +107,7 @@ fn decode_poh_witness(block: &Block) -> Result<(u64, u64, [u8; 32]), ConsensusEr
     ))
 }
 
-/// Verify a bounded forward PoH hash sequence from `start_hash` at `start_count`.
+/// Verify a bounded forward `PoH` hash sequence from `start_hash` at `start_count`.
 #[must_use]
 pub fn verify_poh_sequence(
     start_hash: &[u8; 32],
@@ -125,14 +125,14 @@ pub fn verify_poh_sequence(
     current == *expected_end_hash
 }
 
-/// PoH engine: sequential hash chain with bounded checkpoint verification.
+/// `PoH` engine: sequential hash chain with bounded checkpoint verification.
 pub struct PohEngine {
     pub config: PohConfig,
     ledger: RwLock<PohLedger>,
 }
 
 impl PohEngine {
-    /// Create a new PoH consensus engine seeded at step 0.
+    /// Create a new `PoH` consensus engine seeded at step 0.
     #[must_use]
     pub fn new(config: PohConfig) -> Self {
         let seed = config.seed;
@@ -182,7 +182,7 @@ impl PohEngine {
         }
     }
 
-    /// Advance the PoH clock by one tick.
+    /// Advance the `PoH` clock by one tick.
     ///
     /// # Errors
     ///
@@ -205,7 +205,7 @@ impl PohEngine {
         Ok(next_hash)
     }
 
-    /// Verify that `hash` is the exact PoH digest at `expected_count`.
+    /// Verify that `hash` is the exact `PoH` digest at `expected_count`.
     #[must_use]
     pub fn verify_hash(&self, hash: &[u8; 32], expected_count: u64) -> bool {
         let Ok(ledger) = self.ledger.read() else {

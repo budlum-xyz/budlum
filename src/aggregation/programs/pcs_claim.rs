@@ -51,7 +51,7 @@ pub const MAX_PCS_PUBLIC_VALUES: usize = 1024;
 pub struct WireCommitments {
     /// Commitment to the main execution trace matrix.
     pub trace: Hash32,
-    /// Optional commitment to the auxiliary (LogUp) trace matrix.
+    /// Optional commitment to the auxiliary (`LogUp`) trace matrix.
     pub aux_trace: Option<Hash32>,
     /// Commitment to the quotient chunk polynomials.
     pub quotient_chunks: Hash32,

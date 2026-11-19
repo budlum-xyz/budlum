@@ -1,4 +1,4 @@
-//! Operator-kill chaos skeleton for the B.U.D. all_three baraj.
+//! Operator-kill chaos skeleton for the B.U.D. `all_three` baraj.
 //!
 //! Dam (PLAN BY): "a mini network with 3 or more operators; when one operator dies
 //! the repair really opens." This file is the **in-tree** half of that claim: the registry path
@@ -8,7 +8,7 @@
 //!   - a multi-process network with real disks and bonds (baraj item 1),
 //!   - an adversarial suite (lazy / Sybil / outsourcing - baraj item 3).
 //!     Those stay open. A skeleton that pretends they are closed is a lie; the
-//!     module doc names the gap so a green test cannot be read as all_three.
+//!     module doc names the gap so a green test cannot be read as `all_three`.
 //!
 //! Wiring checked here:
 //! 1. Three operators hold distinct replica slots of one shard.
@@ -260,7 +260,7 @@ fn coded_object_kill_keeps_object_above_k_when_parity_remains() {
 }
 
 /// Bootstrap half of the repair band: a registered shard with no historic deal
-/// gets a NeverPlaced ticket, not a warn-and-walk log.
+/// gets a `NeverPlaced` ticket, not a warn-and-walk log.
 #[test]
 fn never_placed_shard_on_coded_object_is_ticketed() {
     let data: Vec<u8> = (0u8..=200).cycle().take(1200).collect();
@@ -324,7 +324,7 @@ fn never_placed_shard_on_coded_object_is_ticketed() {
     assert_eq!(reg.live_shard_count(&manifest.manifest_id), 6);
 }
 
-/// Explicit debt marker: all_three is not closed by this file alone.
+/// Explicit debt marker: `all_three` is not closed by this file alone.
 ///
 /// A test named "baraj" that only exercises the registry would be a false
 /// green. This one fails the build if someone deletes the module-level warning

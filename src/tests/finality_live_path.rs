@@ -10,7 +10,7 @@
 //! - **2.1 The epoch change**: the validator set is renewed at every epoch, and
 //!   the votes of the old epoch must not leak into the new aggregator.
 //! - **2.2 A late prevote (a height mismatch)**: inside the same epoch, a vote
-//!   cast for a different checkpoint_height has to be refused with a height
+//!   cast for a different `checkpoint_height` has to be refused with a height
 //!   mismatch.
 //! - **2.3 Double signing (the same voter in the same epoch)**: if a voter signs
 //!   twice in the same epoch and casts votes for two different hashes back to
@@ -53,7 +53,7 @@ fn addr_for(i: usize) -> Address {
     Address::from(b)
 }
 
-/// A snapshot of N validators, each carrying a real BLS key and a valid PoP.
+/// A snapshot of N validators, each carrying a real BLS key and a valid `PoP`.
 fn make_snapshot(n: usize, epoch: u64, stake_each: u64) -> (ValidatorSetSnapshot, Vec<Scalar>) {
     let mut sks = Vec::new();
     let validators: Vec<ValidatorEntry> = (0..n)
@@ -134,7 +134,7 @@ fn live_path_epoch_change_isolates_votes() {
 
 // 2.2 - A late prevote (a height mismatch)
 
-/// Inside the same epoch a vote cast for a DIFFERENT checkpoint_height is
+/// Inside the same epoch a vote cast for a DIFFERENT `checkpoint_height` is
 /// refused: the `checkpoint_height` of the aggregator is fixed, and a vote from
 /// another height is not accepted - the window does not leak.
 #[test]
@@ -239,7 +239,7 @@ fn live_path_snapshot_hash_distinguishes_sets() {
 /// Regression for the finality-dead bug: node.rs derived the periodic
 /// prevote epoch as `checkpoint_height / checkpoint_interval` while the
 /// receiving aggregator (`Blockchain::start_prevote_task`) derives it as
-/// `checkpoint_height / epoch_len`. On mainnet (interval 10, epoch_len 100)
+/// `checkpoint_height / epoch_len`. On mainnet (interval 10, `epoch_len` 100)
 /// every honest prevote was refused with "Prevote epoch mismatch", so the
 /// prevote quorum was never reached and native BLS finality never advanced
 /// on any network where the two divisors differ.

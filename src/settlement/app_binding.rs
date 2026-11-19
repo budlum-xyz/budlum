@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_app_binding_payment has no in-tree caller by design: bud_getapp_bindingPayment returns the proof to the caller, who verifies it against their own trust anchor (documented in rpc/api.rs).
+//! WIRING: unwired - `verify_app_binding_payment` has no in-tree caller by design: `bud_getapp_bindingPayment` returns the proof to the caller, who verifies it against their own trust anchor (documented in rpc/api.rs).
 //! WIRING: wired - registration, ownership claims, payments, solver intents,
 //! bids, fulfilment and refunds run in block through `SettlementTx::app_binding`;
 //! the Ethereum-side `app_bindingExecutor` contract is ().
@@ -1647,7 +1647,7 @@ fn settle_expired_intent(
     credit(state, &intent.owner, intent.max_payment)
 }
 
-/// Retire every AppBinding intent past its deadline, deterministically, at the block
+/// Retire every `AppBinding` intent past its deadline, deterministically, at the block
 /// height the transition is applying.
 ///
 /// Only `Fulfill` and `Refund` removed a row before this, and both need a
@@ -2479,7 +2479,7 @@ mod tests {
     }
 
     /// Adding the two replay watermarks is a consensus-state migration, not a
-    /// reason to rewrite every existing AppBinding commitment. Default fields are
+    /// reason to rewrite every existing `AppBinding` commitment. Default fields are
     /// omitted, so a pre-watermark application has the exact bincode bytes it
     /// had before this release; JSON snapshots without the fields restore both
     /// defaults explicitly.

@@ -311,7 +311,7 @@ fn coding_audit_column_is_bound_and_replay_derives_end_roots() {
     );
 }
 
-/// The NftBoost share distribution runs in u128, reports overflow as
+/// The `NftBoost` share distribution runs in u128, reports overflow as
 /// an error instead of aborting, and hands the rounding dust to an operator so
 /// no part of the share is lost.
 #[test]
@@ -501,7 +501,7 @@ fn reward_pool_is_paid_from_the_epoch_transition() {
 }
 
 /// The archive profile carries the testnet chain id (not 42), the
-/// shipped compose file runs PoS as it claims, and the Dockerfile is English.
+/// shipped compose file runs `PoS` as it claims, and the Dockerfile is English.
 #[test]
 fn archive_profile_compose_and_dockerfile_are_consistent() {
     let archive = include_str!("../../config/archive.toml");

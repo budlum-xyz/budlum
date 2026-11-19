@@ -1,6 +1,6 @@
 //! Consensus-round boundary behaviour and negative-validation tests.
 //!
-//! The round rule is shared by PoS and PoA: the block nonce carries the
+//! The round rule is shared by `PoS` and `PoA`: the block nonce carries the
 //! leader round, the round is capped at [`MAX_LEADER_ROUNDS`], and a round
 //! `r > 0` must sit at least `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
 //! after its parent. These tests pin the pieces the older suite never
@@ -21,7 +21,7 @@ mod consensus_round_boundary_tests {
     use crate::crypto::primitives::ValidatorKeys;
 
     /// A state holding exactly one fully consensus-ready validator (real VRF,
-    /// BLS + PoP and PQ keys), so validation reaches the round logic instead of
+    /// BLS + `PoP` and PQ keys), so validation reaches the round logic instead of
     /// failing at the key checks.
     fn ready_validator_state(keys: &ValidatorKeys) -> (AccountState, Address) {
         let address = Address::from(keys.sig_key.public_key_bytes());
@@ -44,7 +44,7 @@ mod consensus_round_boundary_tests {
         (state, address)
     }
 
-    /// A one-validator state with only what leader selection needs (PoA).
+    /// A one-validator state with only what leader selection needs (`PoA`).
     fn poa_state_with(addresses: &[Address]) -> AccountState {
         let mut state = AccountState::new();
         for address in addresses {
@@ -444,7 +444,7 @@ mod consensus_round_boundary_tests {
     }
 }
 
-/// PoA applies the same round pricing as PoS (CWE-807).
+/// `PoA` applies the same round pricing as `PoS` (CWE-807).
 ///
 /// The two engines duplicate the round rule; a fix in one of them is not a
 /// fix. An authority that leads round 0 must not be able to publish a valid
@@ -469,7 +469,7 @@ mod poa_round_pricing_tests {
         (state, address)
     }
 
-    /// The round rule prices a PoA claim identically on every node.
+    /// The round rule prices a `PoA` claim identically on every node.
     ///
     /// The price used to be read off "when this node saw the parent land".
     /// That is a value only one node has - its boot time for genesis, its load
@@ -585,7 +585,7 @@ mod poa_round_pricing_tests {
         );
     }
 
-    /// The PoS half of the same rule: one parent, one block, one verdict.
+    /// The `PoS` half of the same rule: one parent, one block, one verdict.
     #[test]
     fn pos_prices_round_16_from_the_shared_stamp_whatever_this_node_saw() {
         use crate::consensus::pos::{PoSConfig, PoSEngine};

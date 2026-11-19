@@ -16,7 +16,7 @@
 //! Budlum validator address and BLS key to it on Ethereum. The registrar
 //! contract emits one allocation event per change. Budlum reads that event
 //! only through an anchored external result, the same verified-evidence path
-//! the bridge, the relayer intents and AppBinding use: no trusted party reports
+//! the bridge, the relayer intents and `AppBinding` use: no trusted party reports
 //! Ethereum state.
 //!
 //! Two separate `PoS` systems keep running: Gasper on Ethereum and Budlum `PoS`

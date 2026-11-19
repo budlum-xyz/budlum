@@ -274,7 +274,7 @@ mod tests {
         );
     }
 
-    /// A PoS or BFT certificate signs the checkpoint hash and nothing else, so
+    /// A `PoS` or BFT certificate signs the checkpoint hash and nothing else, so
     /// the event root in such a commitment is whatever its submitter chose. A
     /// relayer that carries a genuine certificate can build a tree of its own
     /// and deliver a message the domain never emitted; the verifier refuses the

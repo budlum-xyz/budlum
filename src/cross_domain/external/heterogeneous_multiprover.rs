@@ -13,7 +13,7 @@
 //! under-constrained AIR circuit bug, while single-prover optimistic rollups
 //! inherit a multi-day withdrawal delay and L1 censorship surface. Combining
 //! three pairwise-independent verification families -
-//!   1. `HashStark`: canonical BudZKVM Plonky3 Goldilocks/FRI execution proof,
+//!   1. `HashStark`: canonical `BudZKVM` Plonky3 Goldilocks/FRI execution proof,
 //!   2. `FaultWindow`: bonded proposer state transition past its dispute window
 //!      with zero unresolved bisection challenges,
 //!   3. `PqAttestedCommittee`: strict `> 2/3` stake-weighted independent
@@ -148,10 +148,10 @@ impl RollupBatchClaim {
     }
 }
 
-/// Leg 1: Canonical BudZKVM Plonky3 FRI STARK proof over `(pre -> post)`.
+/// Leg 1: Canonical `BudZKVM` Plonky3 FRI STARK proof over `(pre -> post)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StarkProverLeg {
-    /// Verified BudZKVM canonical program bytecode.
+    /// Verified `BudZKVM` canonical program bytecode.
     pub program: Vec<u64>,
     /// Public inputs verified directly inside the Plonky3 AIR.
     pub inputs: ExecutionPublicInputs,
@@ -242,7 +242,7 @@ pub struct PinnedFaultProposer {
 /// Governance-pinned multi-prover trust anchor for a Stage-2 rollup domain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinnedMultiProverConfig {
-    /// Pinned canonical BudZKVM guest program hash for `HashStark`.
+    /// Pinned canonical `BudZKVM` guest program hash for `HashStark`.
     pub stark_program_hash: [u8; 32],
     /// Pinned target chain ID bound into `ExecutionPublicInputs::chain_id`.
     pub chain_id: u64,
@@ -256,7 +256,7 @@ pub struct PinnedMultiProverConfig {
     pub expected_measurement: [u8; 32],
     /// Pinned independent re-execution committee (`> 2/3` weight required).
     pub committee: Vec<MultiProverCommitteeMember>,
-    /// Whether `stark_leg` must also belong to BudZero's static 4-program
+    /// Whether `stark_leg` must also belong to `BudZero`'s static 4-program
     /// canonical set (`false` permits governance-pinned rollup batch guests).
     pub require_canonical_stark_set: bool,
     /// Require at least one agreeing leg to carry pure/hybrid PQ security.

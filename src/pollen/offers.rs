@@ -30,7 +30,7 @@ pub struct DataOffer {
 
 /// Receipt for an authorization-backed pollen purchase. This is not a LUM/DeFi
 /// Settlement: `payment_commitment` binds the buyer-side payment proof for a
-/// Future adapter while the DataAsset ownership remains with `seller`.
+/// Future adapter while the `DataAsset` ownership remains with `seller`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PollenPurchaseReceipt {
     pub receipt_id: GrantId,
@@ -825,7 +825,7 @@ impl MarketplaceRegistry {
         self.sale_authorizations.get(authorization_id)
     }
 
-    /// Strict AI gate. Returns `Ok(None)` for non-Pollen input_ref payloads
+    /// Strict AI gate. Returns `Ok(None)` for non-Pollen `input_ref` payloads
     /// (legacy prompt/opaque bytes). Returns `Err` for Pollen references that
     /// Lack a valid grant. There is no DAO/admin override.
     ///

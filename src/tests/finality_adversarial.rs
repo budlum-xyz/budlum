@@ -77,7 +77,7 @@ fn install_consensus_keys(
     validator.active = true;
 }
 
-/// A snapshot of `n` validators, each carrying a real BLS key and a valid PoP.
+/// A snapshot of `n` validators, each carrying a real BLS key and a valid `PoP`.
 fn make_snapshot_with_keys(n: usize, stake_each: u64) -> (ValidatorSetSnapshot, Vec<Scalar>) {
     let mut sks = Vec::new();
     let validators: Vec<ValidatorEntry> = (0..n)
@@ -287,7 +287,7 @@ fn finality_stays_pending_below_quorum() {
 /// signature brought down the whole aggregation (fail-closed).
 /// With Option A an invalid signature NEVER ENTERS THE AGGREGATE; it is refused at
 /// ingest. So the honest subset (3/4) can still finalize and a single
-/// bad actor cannot stall the round (DoS prevented).
+/// bad actor cannot stall the round (`DoS` prevented).
 #[test]
 fn finality_recovers_honest_subset_after_invalid_signature() {
     // 4 validators, quorum 3 (2667). Pass the prevote quorum with 4 honest prevotes.

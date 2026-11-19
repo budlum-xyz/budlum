@@ -758,7 +758,7 @@ fn budzero_stateful_storage_persists_across_blocks() {
     );
 }
 
-/// A BudZero contract's storage is its owner's to write. The owner is the account that deployed
+/// A `BudZero` contract's storage is its owner's to write. The owner is the account that deployed
 /// it, and a call from anyone else that carries a slot and a value is refused with the storage
 /// untouched.
 #[test]

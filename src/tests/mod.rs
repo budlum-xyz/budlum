@@ -282,3 +282,7 @@ pub mod rpc_door_solana;
 // Success and refusal RPC coverage for BNS, bridge, encoding/relayer, and role registry.
 #[cfg(test)]
 pub mod rpc_bridge_bns_registry_coverage;
+
+// Success and refusal RPC coverage for admin, sentry, settlement, wallet, gateway, and identity.
+#[cfg(test)]
+pub mod rpc_admin_wallet_identity_coverage;

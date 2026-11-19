@@ -51,7 +51,7 @@ pub struct PendingDomainTipReset {
     pub justification_hash: [u8; 32],
 }
 
-/// A governance-queued PoA compliance freeze/unfreeze,
+/// A governance-queued `PoA` compliance freeze/unfreeze,
 /// applied by `Blockchain::apply_pending_poa_compliance` where the domain
 /// kind can be read from the domain record (never from the transaction).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,9 +89,9 @@ pub enum BudEnvUnit {
     SvmLamport,
     /// Move octa (8 decimals, `10^10` attoBUD).
     MoveOcta,
-    /// CosmWasm `ubud` (6 decimals, `10^12` attoBUD = 1 atom).
+    /// `CosmWasm` `ubud` (6 decimals, `10^12` attoBUD = 1 atom).
     WasmUbud,
-    /// BudZero atom (6 decimals, `10^12` attoBUD = 1 atom).
+    /// `BudZero` atom (6 decimals, `10^12` attoBUD = 1 atom).
     BudZeroAtom,
 }
 
@@ -528,20 +528,20 @@ impl Account {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Validator {
     pub address: Address,
-    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
+    /// SIGNING: excluded - consensus state field on `account::Validator`; never carried on the wire.
     pub stake: u64,
     pub active: bool,
-    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
+    /// SIGNING: excluded - consensus state field on `account::Validator`; never carried on the wire.
     pub slashed: bool,
-    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
+    /// SIGNING: excluded - consensus state field on `account::Validator`; never carried on the wire.
     pub jailed: bool,
-    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
+    /// SIGNING: excluded - consensus state field on `account::Validator`; never carried on the wire.
     pub jail_until: u64,
-    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
+    /// SIGNING: excluded - consensus state field on `account::Validator`; never carried on the wire.
     pub last_proposed_block: Option<u64>,
-    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
+    /// SIGNING: excluded - consensus state field on `account::Validator`; never carried on the wire.
     pub votes_for: u64,
-    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
+    /// SIGNING: excluded - consensus state field on `account::Validator`; never carried on the wire.
     pub votes_against: u64,
     #[serde(default)]
     pub vrf_public_key: Vec<u8>,
@@ -554,23 +554,23 @@ pub struct Validator {
     /// Mikoriza restaked weight: written only by
     /// `settlement::shared_security::apply_restaked_weights` at the epoch
     /// boundary, already capped. Zero for a validator with no allocation.
-    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
+    /// SIGNING: excluded - consensus state field on `account::Validator`; never carried on the wire.
     #[serde(default)]
     pub restaked_weight: u64,
     /// Filiz Chain leader-election commitment: written by the
     /// `RegisterFiliz` door and advanced by each canonical block the
     /// validator produced. `None` until the validator registers a chain.
-    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
+    /// SIGNING: excluded - consensus state field on `account::Validator`; never carried on the wire.
     #[serde(default)]
     pub filiz: Option<crate::consensus::filiz::FilizRegistration>,
     /// Multi-role architecture: tracks which roles this validator has bonded for.
     /// A single validator can simultaneously serve as:
-    /// - VALIDATOR (RoleId 1): consensus block production + finality
-    /// - STORAGE_OPERATOR (RoleId 5): B.U.D. storage verification
-    /// - AI_OPERATOR (RoleId 8): AI inference layer AI compute provider
+    /// - VALIDATOR (`RoleId` 1): consensus block production + finality
+    /// - `STORAGE_OPERATOR` (`RoleId` 5): B.U.D. storage verification
+    /// - `AI_OPERATOR` (`RoleId` 8): AI inference layer AI compute provider
     ///
     /// Cross-role slashing: slashing any role jails ALL roles.
-    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
+    /// SIGNING: excluded - consensus state field on `account::Validator`; never carried on the wire.
     #[serde(default)]
     pub roles: BTreeSet<RoleId>,
 }
@@ -599,7 +599,7 @@ impl Validator {
         }
     }
 
-    /// Add a role to this validator (e.g. STORAGE_OPERATOR, AI_OPERATOR).
+    /// Add a role to this validator (e.g. `STORAGE_OPERATOR`, `AI_OPERATOR`).
     /// Returns true if the role was newly added, false if already present.
     pub fn add_role(&mut self, role: RoleId) -> bool {
         self.roles.insert(role)
@@ -683,7 +683,7 @@ impl Validator {
     /// Verify this validator's canonical IETF BLS proof of possession.
     /// Registration transaction verification calls the same implementation;
     /// Keeping it here provides one readiness/introspection API.
-    /// The PoP must be bound to this chain id (R11: a PoP over only the key
+    /// The `PoP` must be bound to this chain id (R11: a `PoP` over only the key
     /// replays across chains, so an operator slashed on one chain could
     /// re-register the same key elsewhere without a fresh possession proof).
     pub fn verify_pop_is_valid(&self, chain_id: u64) -> bool {
@@ -699,7 +699,7 @@ impl Validator {
         .is_ok()
     }
 
-    /// Full readiness check - VRF + BLS + PoP signature.
+    /// Full readiness check - VRF + BLS + `PoP` signature.
     /// Mainnet validators MUST pass this check before participating in
     /// Consensus. Returns list of missing key types.
     pub fn missing_consensus_keys(&self) -> Vec<&'static str> {
@@ -778,7 +778,7 @@ pub struct AccountState {
     /// transaction, never from a peer, and never snapshotted (each node
     /// re-derives it from its own engine, so sync cannot smuggle a kind in).
     /// The identity write gate consults this field, and it fails closed: a
-    /// state nobody wired is a plain PoS state, and the master registry
+    /// state nobody wired is a plain `PoS` state, and the master registry
     /// refuses writes there.
     pub execution_domain: crate::domain::ConsensusKind,
     pub marketplace: crate::pollen::MarketplaceRegistry,
@@ -788,7 +788,7 @@ pub struct AccountState {
     /// Parallel note subtree (privacy transfers).
     pub note_registry: crate::privacy::L1NoteRegistry,
     pub bridge_state: BridgeState,
-    /// PoA admission: who may act in each permissioned domain, and until when.
+    /// `PoA` admission: who may act in each permissioned domain, and until when.
     ///
     /// Lives in state, not on one node's engine, because a whitelist consensus
     /// gates on has to be something every node agrees about. Admission is
@@ -891,8 +891,8 @@ pub struct AccountState {
     /// Per validator per epoch so we can slash or jail on spam.
     pub invalid_votes: crate::registry::InvalidVoteTracker,
     /// F4: Accumulated B.U.D. boost share pending distribution to storage operators.
-    /// Populated by executor during NftBoost (4% of boost amount).
-    /// Distributed by blockchain after block commit via distribute_bud_boost_share.
+    /// Populated by executor during `NftBoost` (4% of boost amount).
+    /// Distributed by blockchain after block commit via `distribute_bud_boost_share`.
     pub pending_bud_boost_share: u64,
     /// Bridge burns this block applied, waiting for this node to enqueue their
     /// relay requests.
@@ -913,7 +913,7 @@ pub struct AccountState {
     /// Governance-controlled consensus-domain tip rollbacks awaiting deterministic
     /// application inside `apply_block_effects` before `calculate_state_root`.
     pub pending_domain_tip_resets: Vec<PendingDomainTipReset>,
-    /// The PoA compliance ledger (screening,
+    /// The `PoA` compliance ledger (screening,
     /// freeze, travel-rule) in consensus state - rooted and snapshotted
     /// with everything else that decides writes.
     pub poa_compliance: crate::registry::PoaComplianceRegistry,
@@ -1847,7 +1847,7 @@ impl AccountState {
         self.bond_independent_role(address, crate::registry::role::roles::PROVER, amount)
     }
 
-    /// Bond `amount` into the STORAGE_OPERATOR role (permissionless).
+    /// Bond `amount` into the `STORAGE_OPERATOR` role (permissionless).
     /// Used for B.U.D. operator reward eligibility and the removed legacy active-operators query.
     pub fn bond_storage_operator(
         &mut self,
@@ -2049,8 +2049,8 @@ impl AccountState {
 
     /// Bond into a permissionless application role at
     /// the registration floor. This is the production registration path for
-    /// the verifier family (VERIFIER/MASTER_VERIFIER, AI_VERIFIER, ATTESTER,
-    /// CONTENT_VALIDATOR) - RoleIds that had none, leaving the ATTESTER
+    /// the verifier family (`VERIFIER/MASTER_VERIFIER`, `AI_VERIFIER`, ATTESTER,
+    /// `CONTENT_VALIDATOR`) - `RoleIds` that had none, leaving the ATTESTER
     /// authority check in the storage-attestation path permanently at zero
     /// stake.
     pub fn bond_role(
@@ -2459,7 +2459,7 @@ impl AccountState {
     /// Legacy EIP-1559 distribution preview retained for API compatibility.
     ///
     /// This method is deliberately side-effect free. The live flat-fee protocol
-    /// Rejects `priority_fee`, and Executor::apply_block_checked is the only
+    /// Rejects `priority_fee`, and `Executor::apply_block_checked` is the only
     /// Authority that credits `fee - metabolic_burn` to the block producer.
     pub fn distribute_block_fees(
         &mut self,
@@ -4628,13 +4628,13 @@ impl AccountState {
         }
     }
 
-    /// Deterministically drain governance-queued PoA compliance requests inside
+    /// Deterministically drain governance-queued `PoA` compliance requests inside
     /// block execution (`apply_block_effects`), BEFORE `calculate_state_root`.
     ///
     /// Authority is verified purely against `self.poa_onboarding` so block
     /// producers, validators, startup replay, reorg rebuilds and snapshot
     /// rebuilds all derive the exact same `poa_compliance` state root.
-    /// Apply a PoA compliance freeze/unfreeze after verifying the domain record
+    /// Apply a `PoA` compliance freeze/unfreeze after verifying the domain record
     /// is genuinely `ConsensusKind::PoA` and `admin` holds domain authority.
     pub(crate) fn apply_poa_compliance_request(
         &mut self,
@@ -4838,7 +4838,7 @@ impl AccountState {
     }
 
     /// Checked balance addition that returns
-    /// An error on overflow instead of silently capping at u64::MAX.
+    /// An error on overflow instead of silently capping at `u64::MAX`.
     /// Use this in critical paths (bridge mint, transfer credit).
     pub fn try_add_balance(&mut self, public_key: &Address, amount: u64) -> Result<(), String> {
         let account = self.get_or_create(public_key);
@@ -5162,9 +5162,9 @@ impl AccountState {
     ///
     /// The cap denominator includes liquid accounts, canonical validator stake,
     /// Validator unbonding entries, and independently debited role bonds such as
-    /// AI_OPERATOR. Excluding role bonds would make a bond look like a supply
+    /// `AI_OPERATOR`. Excluding role bonds would make a bond look like a supply
     /// Burn and reopen false minting headroom. Delegation exits, proof-market
-    /// escrow, relayer-intent escrow and AppBinding intent escrow are counted for the
+    /// escrow, relayer-intent escrow and `AppBinding` intent escrow are counted for the
     /// same reason.
     fn non_liquid_committed_atoms(&self) -> u128 {
         let total = self
@@ -5573,7 +5573,7 @@ impl AccountState {
         self.accounts.iter().map(|(k, v)| (*k, v.nonce)).collect()
     }
 
-    /// Recompute the PoA admitted sets for every domain that has records.
+    /// Recompute the `PoA` admitted sets for every domain that has records.
     ///
     /// Called once per block from `apply_system_effects`. Two reasons it lives
     /// at block close rather than on the consensus read path:
@@ -5622,7 +5622,7 @@ impl AccountState {
         self.poa_admitted.get(&domain).cloned().unwrap_or_default()
     }
 
-    /// Live admitted PoA authorities for `domain` at `self.current_block_height`
+    /// Live admitted `PoA` authorities for `domain` at `self.current_block_height`
     /// (administratively approved and within KYC validity horizon).
     #[must_use]
     pub fn poa_live_admitted(&self, domain: crate::domain::types::DomainId) -> BTreeSet<Address> {
@@ -6602,8 +6602,8 @@ mod tests {
     /// The quorum denominator is ELIGIBLE stake (`get_total_stake`), while a
     /// vote carries the voter's raw stake. A validator that a report removes
     /// from the eligible set therefore had to lose its vote weight with it:
-    /// the same 1_000 stake is a quarter of a 4_000 total and a third of the
-    /// 3_000 that is left, so a deliberately self-inflicted jail let a
+    /// the same `1_000` stake is a quarter of a `4_000` total and a third of the
+    /// `3_000` that is left, so a deliberately self-inflicted jail let a
     /// minority reach a threshold it never held.
     #[test]
     fn a_slashed_voters_weight_leaves_the_proposal_it_voted_on() {
@@ -7479,11 +7479,11 @@ mod tests {
         );
     }
 
-    /// CWE-269: a governance proposal used to be able to put PoA admission
+    /// CWE-269: a governance proposal used to be able to put `PoA` admission
     /// control on a permissionless domain, which is the state the
     /// constitution's `PermissionlessCoreNoAdminWhitelist` forbids. The state
     /// machine cannot read the domain record, so it refuses the write unless
-    /// the chain itself is a PoA domain or the domain already carries admins.
+    /// the chain itself is a `PoA` domain or the domain already carries admins.
     #[test]
     fn governance_cannot_put_admission_control_on_a_permissionless_domain() {
         use crate::core::governance::{Proposal, ProposalType};
@@ -7741,7 +7741,7 @@ mod tests {
         assert_eq!(state.base_fee, 42);
     }
 
-    /// ParameterUpdate binds to RegistryParams with validation.
+    /// `ParameterUpdate` binds to `RegistryParams` with validation.
     #[test]
     fn parameter_update_registry_bounds() {
         use crate::core::governance::{Proposal, ProposalType};
@@ -7863,7 +7863,7 @@ mod tests {
         );
     }
 
-    /// The PoA gate state is ROOTED - an
+    /// The `PoA` gate state is ROOTED - an
     /// admission write or a compliance freeze moves the state root, so a
     /// node that skipped them diverges instead of agreeing silently.
     #[test]

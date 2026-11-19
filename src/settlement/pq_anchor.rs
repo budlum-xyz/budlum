@@ -41,7 +41,7 @@
 //! - **Anchor-break response: the cold committee signs the reserve anchor
 //!   directly** (3-of-6 SLH-DSA-SHAKE-256s devices, no on-chain vote required
 //!   in the emergency), via [`rotate_anchor_key_with_committee`].
-//! - **VerifyMerkle only on the `stark_root` path.** The anchor
+//! - **`VerifyMerkle` only on the `stark_root` path.** The anchor
 //!   signature covers a local SHA3 Merkle root, and `VerifyMerkle` does not run
 //!   on that path. Only an anchor that carries a `stark_root` depends on the
 //!   `VerifyMerkle` audit.
@@ -145,7 +145,7 @@ pub fn quantum_class_code(class: QuantumClass) -> u8 {
 }
 
 /// The quantum class of one domain by its consensus kind: the composite
-/// ML-DSA-65 plus Ed25519 blocks of PoS, BFT and PoA are lattice based, proof
+/// ML-DSA-65 plus Ed25519 blocks of `PoS`, BFT and `PoA` are lattice based, proof
 /// of work and zk proofs are hash based, and a kind the node cannot assess
 /// counts as classical (the weakest reading, never the strongest).
 #[must_use]
@@ -187,11 +187,11 @@ pub struct PqAnchor {
     /// The Merkle root over the leaf digests, leaf order as presented by the
     /// caller (domain-id ascending, by contract).
     pub aggregate_root: [u8; 32],
-    /// The STARK state-transition proof root, when the BudZero path bound
+    /// The STARK state-transition proof root, when the `BudZero` path bound
     /// one this height. Signed alongside, so one signature also answers
-    /// "was the computation correct". Only this path depends on VerifyMerkle.
+    /// "was the computation correct". Only this path depends on `VerifyMerkle`.
     pub stark_root: Option<[u8; 32]>,
-    /// The CrossDomainMessage commitment root, when messages were committed
+    /// The `CrossDomainMessage` commitment root, when messages were committed
     /// this height. Same one-umbrella rule as `stark_root`.
     pub crossdomain_root: Option<[u8; 32]>,
     /// The committee key epoch in force when this anchor was assembled.
@@ -665,7 +665,7 @@ pub struct EmissionRequest<'a> {
     pub height: u64,
     /// The finality leaves of the window.
     pub window_leaves: &'a [AnchorLeaf],
-    /// The STARK root, when the BudZero path bound one.
+    /// The STARK root, when the `BudZero` path bound one.
     pub stark_root: Option<[u8; 32]>,
     /// The cross-domain commitment root, when messages were committed.
     pub crossdomain_root: Option<[u8; 32]>,
