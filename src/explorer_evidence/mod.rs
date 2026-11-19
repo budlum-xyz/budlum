@@ -648,14 +648,17 @@ impl AtlasQueryEngine {
     pub fn process_bat3_evidence(
         &self,
         journal: &mut crate::bat3::Bat3Journal,
-        topic: &str,
-        canonical_text: &str,
+        entry: (&str, &str),
         attestation: &crate::cross_domain::external::spec::FinalityAttestation,
         k3_record: &crate::bat3::K3ShieldedRecord,
-        network: &str,
-        epoch_state: &crate::cross_domain::external::PinnedJolteonEpochState,
-        proof: &crate::cross_domain::external::JolteonEquivocationProof,
+        jolteon_fault: (
+            &str,
+            &crate::cross_domain::external::PinnedJolteonEpochState,
+            &crate::cross_domain::external::JolteonEquivocationProof,
+        ),
     ) -> Result<Bat3EvidenceBatch, String> {
+        let (topic, canonical_text) = entry;
+        let (network, epoch_state, proof) = jolteon_fault;
         let fact = self.anchor_bat3_evidence_fact(journal, topic, canonical_text, attestation)?;
         let (nullifiers, _) = Self::admit_bat3_k3_nullifier(k3_record)?;
         let slashing = Self::verify_jolteon_equivocation_evidence(network, epoch_state, proof)?;

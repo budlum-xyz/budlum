@@ -7,6 +7,7 @@
 
 use crate::core::hash::hash_fields_bytes;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 /// Maximum number of reconstruction steps in one blueprint.
 ///
@@ -83,7 +84,9 @@ impl Bat3Blueprint {
                 ceiling: MAX_BAT3_RECONSTRUCT_BYTES,
             });
         }
-        let expected_commitment = compute_reconstruct_commitment(&steps);
+        let out = expand_steps(&steps, declared_len)?;
+        let expected_commitment =
+            compute_blueprint_commitment(&steps, out.as_slice(), declared_len);
         Ok(Self {
             steps,
             declared_len,
@@ -201,23 +204,47 @@ pub fn compute_reconstruct_commitment(steps: &[ReconstructStep]) -> [u8; 32] {
     acc
 }
 
-/// Re-expands a blueprint to its canonical bytes and verifies the commitment.
-///
-/// # Errors
-///
-/// Returns [`Bat3ReconstructError::OutputExceedsCeiling`] if the actual
-/// output exceeds the ceiling, or [`Bat3ReconstructError::CommitmentMismatch`]
-/// if the reconstructed bytes do not match the declared commitment.
-pub fn reconstruct_and_verify(blueprint: &Bat3Blueprint) -> Result<Vec<u8>, Bat3ReconstructError> {
-    let mut out: Vec<u8> = Vec::with_capacity(
-        usize::try_from(blueprint.declared_len).unwrap_or(MAX_BAT3_RECONSTRUCT_BYTES),
-    );
-    for step in &blueprint.steps {
+fn compute_blueprint_commitment(
+    steps: &[ReconstructStep],
+    output: &[u8],
+    declared_len: u64,
+) -> [u8; 32] {
+    let step_chain_digest = compute_reconstruct_commitment(steps);
+    let out_hash = hash_fields_bytes(&[b"BDLM_BAT3_RECONSTRUCT_V1", &[0x10u8], output]);
+    hash_fields_bytes(&[
+        b"BDLM_BAT3_RECONSTRUCT_V1",
+        &[0x11u8],
+        &step_chain_digest,
+        &out_hash,
+        &declared_len.to_le_bytes(),
+    ])
+}
+
+fn expand_steps(
+    steps: &[ReconstructStep],
+    declared_len: u64,
+) -> Result<Vec<u8>, Bat3ReconstructError> {
+    if steps.len() > MAX_BAT3_BLUEPRINT_STEPS {
+        return Err(Bat3ReconstructError::TooManySteps);
+    }
+    let cap =
+        usize::try_from(declared_len).map_err(|_| Bat3ReconstructError::OutputExceedsCeiling {
+            declared: declared_len,
+            ceiling: MAX_BAT3_RECONSTRUCT_BYTES,
+        })?;
+    if cap > MAX_BAT3_RECONSTRUCT_BYTES {
+        return Err(Bat3ReconstructError::OutputExceedsCeiling {
+            declared: declared_len,
+            ceiling: MAX_BAT3_RECONSTRUCT_BYTES,
+        });
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(cap);
+    for step in steps {
         match step {
             ReconstructStep::LiteralSegment(bytes) => {
                 if out.len().saturating_add(bytes.len()) > MAX_BAT3_RECONSTRUCT_BYTES {
                     return Err(Bat3ReconstructError::OutputExceedsCeiling {
-                        declared: blueprint.declared_len,
+                        declared: declared_len,
                         ceiling: MAX_BAT3_RECONSTRUCT_BYTES,
                     });
                 }
@@ -230,13 +257,15 @@ pub fn reconstruct_and_verify(blueprint: &Bat3Blueprint) -> Result<Vec<u8>, Bat3
                 let total = u64::try_from(pattern.len())
                     .unwrap_or(u64::MAX)
                     .saturating_mul(*repeat_count);
-                if out
-                    .len()
-                    .saturating_add(usize::try_from(total).unwrap_or(MAX_BAT3_RECONSTRUCT_BYTES))
-                    > MAX_BAT3_RECONSTRUCT_BYTES
-                {
+                let total_usize = usize::try_from(total).map_err(|_| {
+                    Bat3ReconstructError::OutputExceedsCeiling {
+                        declared: declared_len,
+                        ceiling: MAX_BAT3_RECONSTRUCT_BYTES,
+                    }
+                })?;
+                if out.len().saturating_add(total_usize) > MAX_BAT3_RECONSTRUCT_BYTES {
                     return Err(Bat3ReconstructError::OutputExceedsCeiling {
-                        declared: blueprint.declared_len,
+                        declared: declared_len,
                         ceiling: MAX_BAT3_RECONSTRUCT_BYTES,
                     });
                 }
@@ -248,17 +277,34 @@ pub fn reconstruct_and_verify(blueprint: &Bat3Blueprint) -> Result<Vec<u8>, Bat3
                 back_offset,
                 length,
             } => {
-                let start = out.len().checked_sub(*back_offset as usize);
-                let Some(start) = start else {
+                let offset = usize::try_from(*back_offset)
+                    .map_err(|_| Bat3ReconstructError::CommitmentMismatch)?;
+                let copy_len = usize::try_from(*length).map_err(|_| {
+                    Bat3ReconstructError::OutputExceedsCeiling {
+                        declared: declared_len,
+                        ceiling: MAX_BAT3_RECONSTRUCT_BYTES,
+                    }
+                })?;
+                if offset == 0 || offset > out.len() {
                     return Err(Bat3ReconstructError::CommitmentMismatch);
-                };
-                let end = start
-                    .checked_add(*length as usize)
-                    .ok_or(Bat3ReconstructError::CommitmentMismatch)?;
-                let Some(copied) = out.get(start..end).map(<[u8]>::to_vec) else {
-                    return Err(Bat3ReconstructError::CommitmentMismatch);
-                };
-                out.extend_from_slice(&copied);
+                }
+                if out.len().saturating_add(copy_len) > MAX_BAT3_RECONSTRUCT_BYTES {
+                    return Err(Bat3ReconstructError::OutputExceedsCeiling {
+                        declared: declared_len,
+                        ceiling: MAX_BAT3_RECONSTRUCT_BYTES,
+                    });
+                }
+                for _ in 0..copy_len {
+                    let src = out
+                        .len()
+                        .checked_sub(offset)
+                        .ok_or(Bat3ReconstructError::CommitmentMismatch)?;
+                    let byte = out
+                        .get(src)
+                        .copied()
+                        .ok_or(Bat3ReconstructError::CommitmentMismatch)?;
+                    out.push(byte);
+                }
             }
             ReconstructStep::AffineByteRun {
                 seed,
@@ -266,33 +312,49 @@ pub fn reconstruct_and_verify(blueprint: &Bat3Blueprint) -> Result<Vec<u8>, Bat3
                 mask_byte,
                 length,
             } => {
-                if out.len().saturating_add(*length as usize) > MAX_BAT3_RECONSTRUCT_BYTES {
+                let run_len = usize::try_from(*length).map_err(|_| {
+                    Bat3ReconstructError::OutputExceedsCeiling {
+                        declared: declared_len,
+                        ceiling: MAX_BAT3_RECONSTRUCT_BYTES,
+                    }
+                })?;
+                if out.len().saturating_add(run_len) > MAX_BAT3_RECONSTRUCT_BYTES {
                     return Err(Bat3ReconstructError::OutputExceedsCeiling {
-                        declared: blueprint.declared_len,
+                        declared: declared_len,
                         ceiling: MAX_BAT3_RECONSTRUCT_BYTES,
                     });
                 }
                 let mut state = u32::from(*seed);
                 let stride_u = u32::from(*stride);
-                for _ in 0..*length {
-                    let b =
-                        ((state.wrapping_mul(0x9E3779B1) ^ stride_u) ^ u32::from(*mask_byte)) as u8;
+                for _ in 0..run_len {
+                    let b = ((state.wrapping_mul(0x9E37_79B1) ^ stride_u) ^ u32::from(*mask_byte))
+                        as u8;
                     out.push(b);
                     state = state.wrapping_add(stride_u);
                 }
             }
         }
     }
-    if out.len() != usize::try_from(blueprint.declared_len).unwrap_or(MAX_BAT3_RECONSTRUCT_BYTES) {
+    if out.len() != cap {
         return Err(Bat3ReconstructError::CommitmentMismatch);
     }
-    let out_hash = hash_fields_bytes(&[out.as_slice()]);
-    let commitment = hash_fields_bytes(&[
-        b"BDLM_BAT3_RECONSTRUCT_V1",
-        &out_hash,
-        &blueprint.declared_len.to_le_bytes(),
-    ]);
-    if commitment != blueprint.expected_commitment {
+    Ok(out)
+}
+
+/// Re-expands a blueprint to its canonical bytes and verifies the commitment.
+///
+/// # Errors
+///
+/// Returns [`Bat3ReconstructError::TooManySteps`] or
+/// [`Bat3ReconstructError::OutputExceedsCeiling`] if a wire-deserialized
+/// blueprint exceeds bounds, or [`Bat3ReconstructError::CommitmentMismatch`]
+/// if the reconstructed bytes or step commitment do not match the declared
+/// commitment.
+pub fn reconstruct_and_verify(blueprint: &Bat3Blueprint) -> Result<Vec<u8>, Bat3ReconstructError> {
+    let out = expand_steps(&blueprint.steps, blueprint.declared_len)?;
+    let commitment =
+        compute_blueprint_commitment(&blueprint.steps, out.as_slice(), blueprint.declared_len);
+    if !bool::from(commitment.ct_eq(&blueprint.expected_commitment)) {
         return Err(Bat3ReconstructError::CommitmentMismatch);
     }
     Ok(out)

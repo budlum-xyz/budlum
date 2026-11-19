@@ -1,3 +1,4 @@
+//! WIRING: unwired - external NIPoPoW superblock adapter awaits `AdapterSpec` variant registration in `external_tx`.
 //! Non-Interactive Proofs of Proof-of-Work (`NIPoPoW`, Kiayias-Miller-Zindros
 //! EUROCRYPT 2020) sublinear genesis-anchored external finality adapter.
 //!

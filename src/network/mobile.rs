@@ -1,4 +1,4 @@
-//! P12-9: Mobile Self - the mobile node profile, and hosting your own B.U.D.
+//! Mobile Self - the mobile node profile, and hosting your own B.U.D.
 //!
 //! Mobile Self lets people run a Budlum node on their own phone. This module
 //! defines the working profile that fits what a mobile device actually has:

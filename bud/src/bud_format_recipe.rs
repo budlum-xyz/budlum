@@ -1,4 +1,4 @@
-//! B.U.D. 2.0 - RECIPE MINING AND THE RECIPE MACHINE BOUND; ideas 3.0 items Y2
+//! B.U.D. 2.0 - RECIPE MINING AND THE RECIPE MACHINE BOUND
 //! and Y15.
 //!
 //! Y2: whoever finds a bit-exact short recipe for an organic, residual PACT

@@ -385,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn strix_threshold_escrow_rejects_zero_recipient_oversized_shares_and_binds_coalition() {
+    fn threshold_escrow_rejects_zero_recipient_oversized_shares_and_binds_coalition() {
         let (mut a, seeds) = make_escrow();
         let mut b = a.clone();
         let recipient = Address([0x55; 32]);

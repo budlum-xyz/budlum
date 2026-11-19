@@ -13346,7 +13346,7 @@ mod tests {
     }
 
     /// A vote naming an epoch far ahead of the chain
-    /// must not count and must not move the tracker - the F06 seam, pinned
+    /// must not count and must not move the tracker - the boundary pinned
     /// at the door that refuses it.
     #[test]
     fn a_vote_from_a_far_future_epoch_must_not_move_the_tracker() {

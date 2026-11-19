@@ -115,7 +115,9 @@ impl core::fmt::Display for BundleError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::WrongVersion(v) => write!(f, "bundle version {v} is not {APP_BUNDLE_VERSION}"),
-            Self::HashSuiteMismatch => f.write_str("manifest and bundle disagree on the hash suite"),
+            Self::HashSuiteMismatch => {
+                f.write_str("manifest and bundle disagree on the hash suite")
+            }
             Self::InvalidName => f.write_str("the bound name is not a .bud label"),
             Self::ManifestObjectMismatch => f.write_str("the manifest commits to another object"),
             Self::ManifestUnset => f.write_str("the manifest carries an unset commitment"),
@@ -207,12 +209,16 @@ impl AppIsolationPolicy {
                 || o.chars().any(|c| c.is_whitespace())
                 || o.chars().any(|c| c.is_uppercase())
         }) {
-            return Err(BundleError::Policy("origin is not lowercase without spaces"));
+            return Err(BundleError::Policy(
+                "origin is not lowercase without spaces",
+            ));
         }
         if self.allowed_origins.iter().any(|o| {
             o.as_str() != "self" && !o.starts_with("https://") && !o.starts_with("http://localhost")
         }) {
-            return Err(BundleError::Policy("origin is not self, https, or localhost"));
+            return Err(BundleError::Policy(
+                "origin is not self, https, or localhost",
+            ));
         }
         let mut sorted = self.allowed_origins.clone();
         sorted.sort();
@@ -224,20 +230,20 @@ impl AppIsolationPolicy {
             return Err(BundleError::Policy("quota is out of range"));
         }
         if self.rpc_methods.len() > MAX_POLICY_METHODS || self.rpc_methods.is_empty() {
-            return Err(BundleError::Policy("the RPC allowlist is empty or too long"));
+            return Err(BundleError::Policy(
+                "the RPC allowlist is empty or too long",
+            ));
         }
         if self.rpc_methods.iter().any(|m| !m.starts_with("bud_")) {
             return Err(BundleError::Policy("an allowed method is not a bud_* name"));
         }
-        if self.max_frame_bytes == 0
-            || u64::from(self.max_frame_bytes) > self.storage_quota_bytes
-        {
+        if self.max_frame_bytes == 0 || u64::from(self.max_frame_bytes) > self.storage_quota_bytes {
             return Err(BundleError::Policy("the frame cap is out of range"));
         }
         Ok(())
     }
 
-    /// Whether the policy lets the app call `method`.
+    /// Convenience: whether the policy lets the app call `method`.
     ///
     /// A policy entry is a prefix, so `bud_storage` allows
     /// `bud_storageMayView` and `bud_storageGetObject`.
@@ -267,7 +273,7 @@ pub struct NameInclusionProof {
 }
 
 impl NameInclusionProof {
-    /// Capture a path the tree produced.
+    /// Convenience: capture a path the tree produced.
     #[must_use]
     pub fn from_path(path: &Path) -> Self {
         let (terminal_kind, terminal_value, terminal_key) = match path.terminal {
@@ -469,9 +475,10 @@ impl AppBundle {
         }
         if self.name.is_empty()
             || self.name.len() > MAX_NAME_LEN
-            || !self.name.chars().all(|c| {
-                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.'
-            })
+            || !self
+                .name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
         {
             return Err(BundleError::InvalidName);
         }
@@ -709,13 +716,13 @@ pub enum SealedObjectVisibilityBytes {
 }
 
 impl SealedObjectVisibilityBytes {
-    /// Whether the object is readable without a grant.
+    /// Convenience: whether the object is readable without a grant.
     #[must_use]
     pub fn is_public(self) -> bool {
         matches!(self, Self::Public)
     }
 
-    /// Read the class from the manifest's own enum.
+    /// Convenience: read the class from the manifest's own enum.
     #[must_use]
     pub fn from_manifest(visibility: super::seal::ObjectVisibility) -> Self {
         match visibility {
@@ -893,10 +900,7 @@ mod tests {
     fn a_policy_with_unsorted_origins_is_refused() {
         let (mut bundle, _) = fixture();
         // "self" sorts after "https://app.bud", so this order is not canonical.
-        bundle.policy.allowed_origins = vec![
-            "self".to_string(),
-            "https://app.bud".to_string(),
-        ];
+        bundle.policy.allowed_origins = vec!["self".to_string(), "https://app.bud".to_string()];
         assert_eq!(
             bundle.verify(50),
             Err(BundleError::Policy("origins are not sorted and unique"))

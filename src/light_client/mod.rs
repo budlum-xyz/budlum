@@ -854,7 +854,7 @@ impl LightClient {
         Ok(())
     }
 
-    /// Checks an aggregated committee batch with `bud_proof::sigagg` (`BLG-239`) against the
+    /// Checks an aggregated committee batch with `bud_proof::sigagg` against the
     /// committee this light client trusts.
     ///
     /// A batch carries its own committee root, weights and key digests, so none of that
@@ -886,13 +886,13 @@ impl LightClient {
         )
         .map_err(|e| {
             LightClientError::VerificationFailed(format!(
-                "BLG-239 aggregated committee batch failed: {e:?}"
+                "aggregated committee batch failed: {e:?}"
             ))
         })
     }
 
     /// Verifies an aggregated committee batch against `checkpoint.block_hash`
-    /// and the trusted `committee`, ensuring `BLG-239` batch verification stays
+    /// and the trusted `committee`, ensuring aggregated committee batch verification stays
     /// wired on the production light-client path.
     ///
     /// Convenience: exposed for light-client checkpoint batch verification callers.
@@ -969,7 +969,7 @@ impl LightClient {
 
     /// Verifies a multi-hop cross-domain light-client route (`A -> B -> C ...`)
     /// anchored at `checkpoint` + `global_header` through a single succinct
-    /// `ULP-1` proof bundle (`GOREV-21` / `RFC-001`).
+    /// `ULP-1` proof bundle.
     ///
     /// Verification complexity is `O(1)` STARK verification plus `O(log C)`
     /// claim-inclusion checks and `O(hops * log D)` domain-inclusion checks,
@@ -1203,7 +1203,7 @@ pub struct RemoteMerkleStep {
     pub sibling_is_right: bool,
 }
 
-/// Verified cross-domain remote state view (`RemoteStateView`, section 1.2 / IP-60).
+/// Verified cross-domain remote state view (`RemoteStateView`).
 ///
 /// Binds an external domain's finalized `remote_state_root` to a checkpointed
 /// [`crate::settlement::GlobalBlockHeader`], verifies Merkle inclusion of
@@ -2203,7 +2203,7 @@ mod tests {
             .verify_header_chain(std::slice::from_ref(&h1_a))
             .expect("identical header replay stays accepted");
 
-        // Conflicting fork header at already-linked height 1 MUST be refused (B-0150).
+        // Conflicting fork header at already-linked height 1 MUST be refused.
         let mut h1_fork = h1_a.clone();
         h1_fork.state_root = "44".repeat(32);
         h1_fork.hash = h1_fork.calculate_hash();

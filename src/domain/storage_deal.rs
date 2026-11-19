@@ -2899,7 +2899,7 @@ impl StorageRegistry {
         // used to be three answers: the profiles said closed
         // (`[features] verify_merkle = false`), startup printed the value as
         // "not applied", and this function required the envelope anyway, so a
-        // client that followed the profile was refused. See B-0049.
+        // client that followed the profile was refused.
         //
         // Closed gate: the envelope is optional. A deal that carries none opens
         // and records `merkle_proof: None`, which says "no proof claimed".
@@ -6688,7 +6688,7 @@ mod tests {
 
     /// A closed `VerifyMerkle` gate means a deal opens without an envelope.
     ///
-    /// Before B-0049 every profile set `[features] verify_merkle = false`,
+    /// Previously every profile set `[features] verify_merkle = false`,
     /// startup printed the value as "not applied", and `open_deal` required the
     /// envelope anyway. A client that followed the profile was refused by the
     /// chain with `MerkleProofRequired` and had no way to find out why.

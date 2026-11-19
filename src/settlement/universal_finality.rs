@@ -147,7 +147,7 @@ impl FinalityGuarantee {
     /// Authority-weighted proof shapes (`PoA`, `PoAPq`, `Dag`, `DagPq`, `Poh`,
     /// `PohPq`, `Pospace`, `PospacePq`) are authenticated by revocable authority
     /// sets rather than escrowed slashable stake, so `slashable_backing` is
-    /// strictly `false` (`STRIX-COC-01`). Only bonded stake-weighted quorum
+    /// strictly `false`. Only bonded stake-weighted quorum
     /// proofs (`PoS`, `PoSPq`, `Bft`, `BftPq`) on a domain with a pinned
     /// non-zero `validator_set_hash` carry `slashable_backing = true`.
     ///
@@ -656,7 +656,7 @@ mod tests {
     fn universal_finality_classifies_all_consensus_families_and_enforces_weakest_link() {
         let hub = hub_guarantee();
 
-        // 1. STRIX-COC-01 regression: authority-weighted structural proofs
+        // 1. Regression: authority-weighted structural proofs
         //    (`DagPq`, `PohPq`, `PospacePq`, `PoAPq`) carry NO escrowed
         //    slashable stake, so `slashable_backing` and
         //    `admits_cross_domain_value()` MUST be strictly `false` even when

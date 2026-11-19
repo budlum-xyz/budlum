@@ -13,7 +13,7 @@ use crate::rpc::compat::{
 };
 
 const DEFAULT_COSMOS_MAX_REQUESTS_PER_WINDOW: u32 = 120;
-/// Maximum hex payload length for `abci_query` data field (Strix B-0062).
+/// Maximum hex payload length for `abci_query` data field.
 /// 64 KB covers any realistic CosmWasm query; larger payloads are a
 /// DoS vector that must be refused before hex decoding.
 const MAX_HEX_PAYLOAD_CHARS: usize = 64 * 1024;
@@ -145,7 +145,7 @@ impl CosmosCompatGateway {
                         ),
                     );
                 }
-                if data_hex.len() % 2 != 0 {
+                if !data_hex.len().is_multiple_of(2) {
                     return JsonRpcResponse::err(
                         id,
                         JSONRPC_INVALID_PARAMS,
@@ -377,14 +377,14 @@ mod tests {
     #[test]
     fn abci_query_rejects_oversized_hex_payload() {
         let state = AccountState::new();
-        let gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
+        let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
         let oversized_hex = "ab".repeat(MAX_HEX_PAYLOAD_CHARS + 16);
         let req = JsonRpcRequest {
             jsonrpc: String::from("2.0"),
             id: serde_json::json!(1),
             method: String::from("abci_query"),
             params: serde_json::json!({
-                "path": "/cosmwasm.wasm.v1.Query/ContractState",
+                "path": ABCI_QUERY_PATHS[0],
                 "data": oversized_hex,
             }),
         };
@@ -405,13 +405,13 @@ mod tests {
     #[test]
     fn abci_query_rejects_odd_length_hex() {
         let state = AccountState::new();
-        let gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
+        let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
         let req = JsonRpcRequest {
             jsonrpc: String::from("2.0"),
             id: serde_json::json!(1),
             method: String::from("abci_query"),
             params: serde_json::json!({
-                "path": "/cosmwasm.wasm.v1.Query/ContractState",
+                "path": ABCI_QUERY_PATHS[0],
                 "data": "abc",
             }),
         };
@@ -427,13 +427,13 @@ mod tests {
     #[test]
     fn abci_query_rejects_non_hex_characters() {
         let state = AccountState::new();
-        let gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
+        let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
         let req = JsonRpcRequest {
             jsonrpc: String::from("2.0"),
             id: serde_json::json!(1),
             method: String::from("abci_query"),
             params: serde_json::json!({
-                "path": "/cosmwasm.wasm.v1.Query/ContractState",
+                "path": ABCI_QUERY_PATHS[0],
                 "data": "ghij",
             }),
         };
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn abci_query_path_rejects_control_bytes() {
         let state = AccountState::new();
-        let gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
+        let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
         let req = JsonRpcRequest {
             jsonrpc: String::from("2.0"),
             id: serde_json::json!(1),

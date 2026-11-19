@@ -152,13 +152,13 @@ EXPOSE 4001 8545 8546 9090
 # `curl` is kept in the runtime image for this legitimate health check use.
 # If the container is up but the RPC port does not answer it is marked unhealthy.
 # The JSON form is hadolint DL3025's; the healthy/unhealthy decision is made by
-# curl's connect/timeout exit status, see P61-F03 below.
+# curl's connect/timeout exit status (see note below).
 # F-20: JSON-RPC probe on the public listener the image actually binds
 # (8545). Compose's operator listener (8546) is opt-in via
 # --rpc-operator-listener; a default `docker run` never opens it, so a
 # probe there would mark a live rpc-role node unhealthy. A bare GET of
 # / is not a JSON-RPC request.
-# P61-F03: no `-f`. The image and compose run with RPC auth required and the
+# Deliberately omit `-f`: The image and compose run with RPC auth required and the
 # probe carries no key, so the listener answers 401; `-f` turned that live
 # answer into an unhealthy container. Without it curl exits 0 on any HTTP
 # response and non-zero only when the port does not answer (connect failure

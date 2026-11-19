@@ -133,8 +133,8 @@ contract InspectingFraudVerifier is IExternalFraudProofVerifier {
 
 /// negative tests. The default profile runs on Cancun, which has
 /// neither the BLS nor the ML-DSA precompile: an attestation with no
-/// verification path at all is refused. The window tests (F02 pending, F05,
-/// F06) run under the `prague` profile, where the real EIP-2537 pairing
+/// verification path at all is refused. The pending-window, terminal-fraud, and single-pending-claim tests
+/// run under the `prague` profile, where the real EIP-2537 pairing
 /// precompile answers and ML-DSA is still absent - the BLS-only regime the
 /// challenge window exists for. Their BLS material is a valid fixture
 /// generated from the Rust side (chain::finality::sign_bls under the Budlum
@@ -301,7 +301,7 @@ contract BudlumFinalityVerifierTest is Harness {
         });
     }
 
-    // F01: the trust anchor is the constructor; zero hashes and an EOA fraud
+    // Trust anchor: the trust anchor is the constructor; zero hashes and an EOA fraud
     // verifier are refused.
     function test_F01_constructor_refuses_zero_key_hashes() public {
         vm.expectPartialRevert(BudlumFinalityVerifier.UntrustedKey.selector);
@@ -315,9 +315,9 @@ contract BudlumFinalityVerifierTest is Harness {
         );
     }
 
-    // F02: a missing precompile leaves the attestation pending, never accepted,
+    // Missing precompile: a missing precompile leaves the attestation pending, never accepted,
     // until the window closes.
-    // F02: a chain with no verification precompile for either half refuses
+    // Missing precompile: a chain with no verification precompile for either half refuses
     // the attestation outright; it does not open a window nothing could
     // ever have checked.
     function test_F02_an_attestation_with_no_verification_path_is_refused() public {
@@ -325,7 +325,7 @@ contract BudlumFinalityVerifierTest is Harness {
         verifier.verify(_attestation(42, bytes32(uint256(7))));
     }
 
-    // F02 (BLS-only regime): with the classical half verified and ML-DSA
+    // BLS-only regime: with the classical half verified and ML-DSA
     // still absent, the post-quantum half takes the window and settles after
     // it, the event's weaker guarantee made explicit by the pending state.
     function test_F02_a_chain_without_ml_dsa_keeps_the_attestation_pending() public {
@@ -340,13 +340,13 @@ contract BudlumFinalityVerifierTest is Harness {
         assertTrue(bls.heightFinal(42), "height final");
     }
 
-    // F03: the probes do not mistake an empty address for a precompile.
+    // Empty-address probe: the probes do not mistake an empty address for a precompile.
     function test_F03_probes_report_no_precompile_on_cancun() public view {
         assertTrue(!verifier.hasBlsPrecompile(), "no BLS precompile");
         assertTrue(!verifier.hasMlDsaPrecompile(), "no ML-DSA precompile");
     }
 
-    // F04: the attestation binds the chain and the pinned keys.
+    // Domain binding: the attestation binds the chain and the pinned keys.
     function test_F04_wrong_chain_is_refused() public {
         Attestation memory a = _attestation(42, bytes32(uint256(7)));
         a.chainId = CHAIN + 1;
@@ -361,7 +361,7 @@ contract BudlumFinalityVerifierTest is Harness {
         verifier.verify(a);
     }
 
-    // F05: a proven fraud is terminal: no settle, no re-verify.
+    // Terminal fraud: a proven fraud is terminal: no settle, no re-verify.
     function test_F05_a_proven_fraud_is_terminal() public {
         BudlumFinalityVerifier bls = verifier;
         Attestation memory a = _attestation(42, bytes32(uint256(7)));
@@ -382,7 +382,7 @@ contract BudlumFinalityVerifierTest is Harness {
         bls.challenge(digest, hex"01");
     }
 
-    // F06: one pending claim per height.
+    // Height uniqueness: one pending claim per height.
     function test_F06_a_second_root_for_a_pending_height_is_refused() public {
         BudlumFinalityVerifier bls = verifier;
         bls.verify(_attestation(42, bytes32(uint256(7))));

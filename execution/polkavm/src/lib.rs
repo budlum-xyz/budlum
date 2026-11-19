@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(out.output, b"POLKAVM_CLOSED_ON_TESTNET");
     }
 
-    /// Directive IP-53 conformance gate (1/5): `uel_conformance_polkavm`.
+    /// PolkaVM conformance gate: `uel_conformance_polkavm`.
     #[test]
     fn uel_conformance_polkavm() {
         let mut worker = PolkaVmWorker::with_activation_height(Some(0));

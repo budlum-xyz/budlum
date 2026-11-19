@@ -329,7 +329,7 @@ impl Default for ErasureScheme {
 /// `owner` among them. What each remaining field is or is not inside the
 /// commitment is recorded on the field itself.
 ///
-/// The `owner` field arrived with F01, so that data ownership is provable on
+/// The `owner` field was introduced for on-chain ownership proofs, so that data ownership is provable on
 /// chain, as a data owner identity. `#[serde(default)]` keeps older snapshots
 /// and JSON backward compatible, where a zero owner means "unspecified".
 ///
@@ -340,8 +340,8 @@ impl Default for ErasureScheme {
 #[serde(from = "ContentManifestWire")]
 pub struct ContentManifest {
     pub manifest_id: ContentId,
-    /// F01: the address of the content owner. A zero address marks an older,
-    /// pre-F01 manifest, kept for backward compatibility; new manifests carry a
+    /// Address of the content owner. A zero address marks a legacy
+    /// ownerless manifest, kept for backward compatibility; new manifests carry a
     /// real owner.
     ///
     /// IDENTITY: excluded - the id is content-addressed on purpose. Two
@@ -564,7 +564,7 @@ impl ContentManifest {
     ///
     /// Propagates `String` from the step that failed; its variants name the refused conditions.
     ///
-    /// `owner` defaults to the zero address, for F01 backward compatibility; a
+    /// `owner` defaults to the zero address, for legacy manifest backward compatibility; a
     /// caller can set the real owner with `with_owner`.
     pub fn from_shards(shards: Vec<ShardRef>) -> Result<Self, String> {
         if shards.is_empty() {
@@ -1130,9 +1130,9 @@ impl ContentManifest {
         self.encryption.is_encrypted()
     }
 
-    /// F01: set the real owner, after `from_shards`. If `manifest_id` were bound
+    /// Set the content owner, after `from_shards`. If `manifest_id` were bound
     /// to the owner it would have to be recomputed; for now `manifest_id` is
-    /// shards-only, which is F01 task 2.
+    /// shards-only, preserving shard-only content addressing.
     pub const fn with_owner(mut self, owner: crate::core::address::Address) -> Self {
         self.owner = owner;
         self
