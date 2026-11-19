@@ -3370,12 +3370,15 @@ mod tests {
         let trusted = TrustedTendermintState {
             chain_id: chain_id.to_string(),
             height: 100,
-            time_secs: 1_750_000_000,
+            // Synthetic commits are stamped 1_700_000_000; the trusted state has
+            // to sit behind that or the transition is refused as a BFT-time
+            // regression before the app hash is ever looked at.
+            time_secs: 1_699_999_000,
             trusting_period_secs: 86_400,
             validators: trusted_vals,
             next_validators_hash: validator_set_hash(&target_vals),
         };
-        let verified = verify_skipping_commit(&trusted, &target, None, None, 1_750_010_010)
+        let verified = verify_skipping_commit(&trusted, &target, None, None, 1_700_000_010)
             .expect("a header that rebuilds the signed block id proves its own app hash");
         assert_eq!(verified.app_hash, target.app_hash);
 
@@ -3384,7 +3387,7 @@ mod tests {
         let mut tampered = target.clone();
         tampered.app_hash = [0x5cu8; 32];
         assert!(matches!(
-            verify_skipping_commit(&trusted, &tampered, None, None, 1_750_010_010),
+            verify_skipping_commit(&trusted, &tampered, None, None, 1_700_000_010),
             Err(AdapterError::ConsensusRule { .. })
         ));
     }
