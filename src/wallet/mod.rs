@@ -32,6 +32,15 @@ mod bip39_wordlist;
 pub const MNEMONIC_WORDS: usize = 24;
 /// PBKDF2 iterations for a new key file (OWASP 2023 figure for SHA-256).
 pub const DEFAULT_KDF_ITERATIONS: u32 = 600_000;
+/// Maximum PBKDF2 iteration count. Strix B-0065: values above this are a
+/// DoS vector (tens of seconds per open on constrained hardware).
+pub const MAX_KDF_ITERATIONS: u32 = 10_000_000;
+/// Expected salt length in bytes (128-bit).
+const SALT_LEN: usize = 16;
+/// Expected nonce length in bytes (XChaCha20 nonce).
+const NONCE_LEN: usize = 24;
+/// Minimum ciphertext length: at least the Poly1305 tag (16 bytes).
+const MIN_CIPHERTEXT_LEN: usize = 16;
 /// The key-file format this module writes: the address is the Address V3 of
 /// account 0, index 0, derived from the entropy with an empty
 /// derivation password.
@@ -422,13 +431,39 @@ impl KeyFile {
                 self.version, self.kdf, self.cipher
             )));
         }
+        // Strix B-0065: PBKDF2 iteration floor and ceiling.
+        if self.iterations == 0 || self.iterations > MAX_KDF_ITERATIONS {
+            return Err(WalletError::Format(format!(
+                "PBKDF2 iterations {} outside 1..={MAX_KDF_ITERATIONS}",
+                self.iterations
+            )));
+        }
         let decode = |field: &str, text: &str| {
             hex::decode(text).map_err(|_| WalletError::Format(format!("{field} is not hex")))
         };
         let salt = decode("salt", &self.salt)?;
         let nonce = decode("nonce", &self.nonce)?;
         let ciphertext = decode("ciphertext", &self.ciphertext)?;
-        let key = pbkdf2_sha256(password.as_bytes(), &salt, self.iterations.max(1));
+        // Strix B-0065: exact envelope length validation.
+        if salt.len() != SALT_LEN {
+            return Err(WalletError::Format(format!(
+                "salt length {} != expected {SALT_LEN}",
+                salt.len()
+            )));
+        }
+        if nonce.len() != NONCE_LEN {
+            return Err(WalletError::Format(format!(
+                "nonce length {} != expected {NONCE_LEN}",
+                nonce.len()
+            )));
+        }
+        if ciphertext.len() < MIN_CIPHERTEXT_LEN {
+            return Err(WalletError::Format(format!(
+                "ciphertext length {} < minimum {MIN_CIPHERTEXT_LEN}",
+                ciphertext.len()
+            )));
+        }
+        let key = pbkdf2_sha256(password.as_bytes(), &salt, self.iterations);
         let cipher = XChaCha20Poly1305::new_from_slice(&key)
             .map_err(|_| WalletError::Format("cipher key".into()))?;
         let nonce_value = XNonce::try_from(nonce.as_slice())
@@ -635,5 +670,60 @@ mod tests {
         );
         tx.sign_v5(&key);
         assert!(tx.verify());
+    }
+
+    #[test]
+    fn open_rejects_zero_iterations() {
+        let entropy = generate_entropy();
+        let mut file = KeyFile::seal(&entropy, "password1234", 100).expect("seals");
+        file.iterations = 0;
+        assert!(matches!(
+            file.open("password1234"),
+            Err(WalletError::Format(msg)) if msg.contains("iterations")
+        ));
+    }
+
+    #[test]
+    fn open_rejects_iterations_above_ceiling() {
+        let entropy = generate_entropy();
+        let mut file = KeyFile::seal(&entropy, "password1234", 100).expect("seals");
+        file.iterations = MAX_KDF_ITERATIONS + 1;
+        assert!(matches!(
+            file.open("password1234"),
+            Err(WalletError::Format(msg)) if msg.contains("iterations")
+        ));
+    }
+
+    #[test]
+    fn open_rejects_wrong_salt_length() {
+        let entropy = generate_entropy();
+        let mut file = KeyFile::seal(&entropy, "password1234", 100).expect("seals");
+        file.salt = "aabb".to_string(); // 2 bytes instead of 16
+        assert!(matches!(
+            file.open("password1234"),
+            Err(WalletError::Format(msg)) if msg.contains("salt")
+        ));
+    }
+
+    #[test]
+    fn open_rejects_wrong_nonce_length() {
+        let entropy = generate_entropy();
+        let mut file = KeyFile::seal(&entropy, "password1234", 100).expect("seals");
+        file.nonce = "aabb".to_string(); // 2 bytes instead of 24
+        assert!(matches!(
+            file.open("password1234"),
+            Err(WalletError::Format(msg)) if msg.contains("nonce")
+        ));
+    }
+
+    #[test]
+    fn open_rejects_short_ciphertext() {
+        let entropy = generate_entropy();
+        let mut file = KeyFile::seal(&entropy, "password1234", 100).expect("seals");
+        file.ciphertext = "aa".to_string(); // 1 byte, below MIN_CIPHERTEXT_LEN
+        assert!(matches!(
+            file.open("password1234"),
+            Err(WalletError::Format(msg)) if msg.contains("ciphertext")
+        ));
     }
 }

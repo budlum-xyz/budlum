@@ -28,6 +28,11 @@ use crate::domain::storage_deal::{
     StorageError, StorageReallocationTicket, StorageRegistry,
 };
 use crate::domain::storage_params::{STORAGE_MIN_OPERATOR_BOND, STORAGE_REQUIRE_MERKLE_PROOF};
+
+/// Minimum epochs an operator must have to respond to a retrieval challenge.
+/// Strix B-0066: too-short windows make honest operators miss deadlines
+/// through no fault of their own and lose their bond.
+pub const MIN_AUDIT_RESPONSE_WINDOW_EPOCHS: u64 = 3;
 use crate::domain::Hash32;
 use crate::storage::{
     ConfidentialBodyCommit, ContentId, ContentManifest, GrantAuthorization, GrantIssueTerms,
@@ -661,6 +666,13 @@ fn open_challenge(
     let epoch = state.epoch_index;
     StorageRegistry::validate_challenge_window(epoch, deadline_epoch, epoch)
         .map_err(|e| StorageTxError::ChallengeRefused(e.to_string()))?;
+    // Strix B-0066: minimum operator response window.
+    let window = deadline_epoch.saturating_sub(epoch);
+    if window < MIN_AUDIT_RESPONSE_WINDOW_EPOCHS {
+        return Err(StorageTxError::ChallengeRefused(format!(
+            "response window {window} epochs < minimum {MIN_AUDIT_RESPONSE_WINDOW_EPOCHS}"
+        )));
+    }
     // A question about these bytes must be answerable inside the term it is
     // asked about. A deadline past the deal's own end holds the row `Active`
     // (the missed-answer slash needs it), blocking expiry, bond return, and
@@ -2960,5 +2972,47 @@ mod tests {
             &wrong_bytes,
         )
         .is_err());
+    }
+
+    #[test]
+    fn open_challenge_refuses_too_short_response_window() {
+        let (mut state, opener, operator, _manifest) = setup_challenge_env();
+        let deal_id = open_deal_for_challenge(&mut state, &opener, &operator);
+        // deadline_epoch = current_epoch + 1 (window of 1, below MIN_AUDIT_RESPONSE_WINDOW_EPOCHS)
+        let tx = StorageTx::OpenChallenge {
+            deal_id,
+            range_len: 1024,
+            deadline_epoch: state.epoch_index + 1,
+            opener_bond: 100,
+        };
+        let err = execute_storage_tx(&mut state, &ctx(opener), &tx).unwrap_err();
+        assert!(
+            err.to_string().contains("response window"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn open_challenge_refuses_deadline_past_deal_expiry() {
+        let (mut state, opener, operator, _manifest) = setup_challenge_env();
+        let deal_id = open_deal_for_challenge(&mut state, &opener, &operator);
+        // Get deal end_epoch
+        let deal_end = state
+            .storage_registry
+            .get_deal(deal_id)
+            .unwrap()
+            .deal_end_epoch;
+        // deadline_epoch past deal end
+        let tx = StorageTx::OpenChallenge {
+            deal_id,
+            range_len: 1024,
+            deadline_epoch: deal_end + 10,
+            opener_bond: 100,
+        };
+        let err = execute_storage_tx(&mut state, &ctx(opener), &tx).unwrap_err();
+        assert!(
+            err.to_string().contains("deal term"),
+            "unexpected: {err}"
+        );
     }
 }

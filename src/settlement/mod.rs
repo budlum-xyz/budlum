@@ -1,5 +1,6 @@
 pub mod anchor_ledger;
 pub mod anchor_production;
+pub mod liquidation_proof;
 pub mod app_binding;
 pub mod cold_quorum;
 pub mod cold_wallet;
@@ -60,6 +61,11 @@ pub use proof_verifier::{ProofVerificationError, SettlementProofVerifier, Verifi
 pub use registries::SettlementRegistries;
 pub use root_seal::{
     seal_due, RootSeal, RootSealLog, SealError, SealKeys, SoftwareSealSigner, ROOT_SEAL_INTERVAL,
+};
+pub use liquidation_proof::{
+    execute_liquidation, AmmReserveSnapshot, LiquidationError, LiquidationOutcome,
+    LiquidationPosition, LIQUIDATION_PENALTY_BPS, MAX_BATCH_SIZE, MAX_OBSERVATIONS,
+    MAX_TWAP_EPOCHS, MIN_TWAP_EPOCHS,
 };
 pub use universal_finality::{
     compose_cross_domain_route, EconomicSecurityBound, FinalityGuarantee, FinalityReversibility,

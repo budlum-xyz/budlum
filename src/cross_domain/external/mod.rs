@@ -79,6 +79,7 @@
 //! with their units attached. The judgement is the reader's, and the numbers it
 //! needs are in [`profile`].
 
+pub mod arweave_spora;
 pub mod babylon_eots;
 pub mod based_preconf;
 pub mod bitcoin_spv;
@@ -103,6 +104,7 @@ pub mod selftest;
 pub mod solana_tower_bft;
 pub mod spec;
 pub mod stellar_fba;
+pub mod symbiotic_vault;
 pub mod tendermint;
 pub mod ton_catchain;
 pub mod versioning;
@@ -179,7 +181,9 @@ pub use spec::{
     FinalityAttestation, FinalityKind, ProofSystem, RawConsensusEvidence, SecurityBacking,
     TimeUnit, TrustModel, VerificationPolicy,
 };
+pub use arweave_spora::{ArweaveSpOraAdapter, ArweaveSpOraEvidence};
 pub use stellar_fba::{PinnedScpTier, ScpQuorumSet, ScpValidatorNode, StellarScpAdapter};
+pub use symbiotic_vault::{SymbioticVaultAdapter, SymbioticVaultEvidence};
 pub use tendermint::{
     quorum_threshold, validator_address_of, validator_set_commitment, validator_set_hash,
     vote_sign_bytes, PinnedTendermintAnchor, TendermintCommitEvidence, TendermintFinalityAdapter,
