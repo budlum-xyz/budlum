@@ -1,6 +1,6 @@
 //! The Solana compatibility door, answered and refused on the real wire.
 //!
-//! `denetim/bulgular/B-0156` records 42 rows of this surface as coverage gaps
+//! The RPC coverage debt register records 42 rows of this surface as coverage gaps
 //! (`.github/rpc-test-coverage-baseline.txt`). Every row is closed here:
 //!
 //! * the four read rows answer a chain fact through the real handler,
