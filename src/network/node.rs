@@ -5841,16 +5841,23 @@ impl Node {
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                             continue;
                                         }
-                                        // A frame carries one object verification per claim on
-                                        // the chain actor, so charge the peer proportional to its
-                                        // claim count before dispatching to `self.chain`.
-                                        let objects = frame
-                                            .get(..4)
-                                            .and_then(|count| <[u8; 4]>::try_from(count).ok())
-                                            .map_or(usize::MAX, |count| {
-                                                usize::try_from(u32::from_be_bytes(count))
-                                                    .unwrap_or(usize::MAX)
-                                            });
+                                        // Each claim and each segment attestation costs native
+                                        // verification work on the chain actor. Reject malformed
+                                        // headers up front and charge the full verification count.
+                                        let Some(objects) =
+                                            NetworkMessage::agg_frame_verification_units(&frame)
+                                        else {
+                                            if gossip_authored {
+                                                let mut pm = self.peer_manager_lock();
+                                                pm.report_bad_behavior(&peer_id);
+                                            }
+                                            self.report_gossip(
+                                                &id,
+                                                &peer_id,
+                                                gossipsub::MessageAcceptance::Reject,
+                                            );
+                                            continue;
+                                        };
                                         let within_budget = {
                                             let mut pm = self.peer_manager_lock();
                                             pm.charge_agg_frame_from(&peer_id, gossip_authored, objects)
@@ -6956,15 +6963,26 @@ impl Node {
                                                     .send_response(channel, Vec::new());
                                                 continue;
                                             }
+                                            let already_handshaked =
+                                                self.peer_manager_lock().is_handshaked(&peer);
+                                            if !already_handshaked
+                                                && !NetworkMessage::wire_is_handshake(&request)
+                                            {
+                                                warn!("Rejected pre-handshake sync payload from {peer}");
+                                                let _ = self
+                                                    .swarm
+                                                    .behaviour_mut()
+                                                    .sync
+                                                    .send_response(channel, Vec::new());
+                                                continue;
+                                            }
                                             let parsed = NetworkMessage::from_bytes_validated(&request);
                                             let is_handshake = matches!(
                                                 parsed,
                                                 Ok(NetworkMessage::Handshake { .. })
                                                     | Ok(NetworkMessage::HandshakeAck { .. })
                                             );
-                                            let handshaked = is_handshake
-                                                || self.peer_manager_lock().is_handshaked(&peer);
-                                            if !handshaked {
+                                            if !is_handshake && !already_handshaked {
                                                 warn!("Rejected sync request from unhandshaked peer {peer}");
                                                 let _ = self
                                                     .swarm
@@ -9876,6 +9894,51 @@ mod finality_publish_tests {
             "a fresh unhandshaked peer must stay tracked until its deadline passes"
         );
     }
+
+    #[test]
+    fn non_banning_penalties_do_not_extend_handshaked_idle_slot() {
+        use super::{Duration, HashMap, PeerId, PeerManager};
+
+        let mut pm = PeerManager::new();
+        let noisy_squatter = PeerId::random();
+        let sync_contributor = PeerId::random();
+
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(noisy_squatter, None));
+        assert!(
+            pm.note_connected::<crate::network::peer_manager::SubnetKey>(sync_contributor, None)
+        );
+        pm.set_handshaked(&noisy_squatter, true);
+        pm.set_handshaked(&sync_contributor, true);
+
+        // Penalty paths refresh `last_seen` without banning; they must not
+        // count as valid protocol activity for holding an inbound slot.
+        pm.report_unjoined_block(&noisy_squatter);
+        pm.report_unanswered_request(&noisy_squatter);
+        let _ = pm.charge_agg_frame_from(&noisy_squatter, false, 320);
+        let _ = pm.charge_agg_frame_from(&noisy_squatter, false, 320);
+        assert!(!pm.is_banned(&noisy_squatter));
+        assert!(pm
+            .get_peer_info(&noisy_squatter)
+            .and_then(|s| s.last_seen)
+            .is_some());
+
+        // Delivering valid sync data refreshes `last_valid_at` and preserves the slot.
+        pm.report_sync_success(&sync_contributor);
+
+        let now = std::time::Instant::now();
+        let mut connected_at = HashMap::new();
+        connected_at.insert(noisy_squatter, now - Duration::from_secs(3_600));
+        connected_at.insert(sync_contributor, now - Duration::from_secs(3_600));
+
+        let expired = super::drain_expired_unhandshaked_peers(
+            &mut connected_at,
+            &pm,
+            now,
+            Duration::from_secs(30),
+        );
+        assert_eq!(expired, vec![noisy_squatter]);
+        assert!(connected_at.contains_key(&sync_contributor));
+    }
 }
 
 /// Identify connected peers that have held a connection for longer than the
@@ -9903,11 +9966,15 @@ fn drain_expired_unhandshaked_peers(
             spent.push(*peer);
             continue;
         }
-        let last_activity = pm
-            .get_peer_info(peer)
-            .and_then(|score| score.last_seen)
-            .map_or(*admitted, |seen| seen.max(*admitted));
-        let limit = if pm.is_handshaked(peer) {
+        let handshaked = pm.is_handshaked(peer);
+        let last_activity = if handshaked {
+            pm.get_peer_info(peer)
+                .and_then(|score| score.last_valid_at)
+                .map_or(*admitted, |seen| seen.max(*admitted))
+        } else {
+            *admitted
+        };
+        let limit = if handshaked {
             HANDSHAKED_IDLE_DEADLINE
         } else {
             deadline

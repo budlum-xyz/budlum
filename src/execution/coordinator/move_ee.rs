@@ -4,15 +4,18 @@
 //! - Strictly sequential Move execution (`block_stm_parallel = false`).
 //! - Move state persisted in `ee/move/state` keyed by canonical `StateKey` bytes.
 //! - Framework subset: `0x1::aptos_account`, `0x1::coin`, `0x1::fungible_asset`,
-//!   `0x1::randomness` (bound to `BlockContext.randao`, Budlum epoch randomness),
+//!   `0x1::randomness` (domain-separated length-prefixed hash over `BlockContext`,
+//!   `EeCall::tx_hash`, `EeCall::depth`, `signer`, `target`, `function_name`, and `args`),
 //!   and native `0x1::budlum_universal::call` (`1 octa = 10^10 attoBUD`).
 //! - Aptos staking and governance modules are explicitly refused (section 8.15).
 //!
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
+use crate::core::hash::hash_fields_bytes;
 use crate::execution::coordinator::assets::{
-    decode_pointer_bytecode, resolve_pointer_party_for_home, MovePointerFlavor, MovePointerOp,
-    PointerDescriptor, SplPointerOp,
+    is_pointer_bytecode_prefixed, resolve_pointer_party_for_home,
+    verify_canonical_pointer_bytecode, MovePointerFlavor, MovePointerOp, PointerDescriptor,
+    SplPointerOp,
 };
 use crate::execution::coordinator::evm_ee::solidity_selector;
 use crate::execution::coordinator::state::NS_MOVE_STATE;
@@ -610,6 +613,12 @@ impl ExecutionEnvironment for MoveEe {
                 code: RefusalCode::Denied,
                 message,
             })?;
+        if is_pointer_bytecode_prefixed(code) {
+            return Err(EeRefusal {
+                code: RefusalCode::InvalidCode,
+                message: String::from("system pointer bytecode prefix is reserved for uel/assets"),
+            });
+        }
         if code.len() < 4 || code.get(..4) != Some(&MOVE_BINARY_MAGIC) {
             return Err(EeRefusal {
                 code: RefusalCode::InvalidCode,
@@ -669,6 +678,18 @@ impl ExecutionEnvironment for MoveEe {
                     });
                 }
                 let k = state_key_module(&target32, "default");
+                let ptr_k = state_key_module(&target32, "pointer");
+                let admin_k = state_key_resource(&target32, "admin");
+                if matches!(host.read(&move_ns, &k), Ok(Some(_)))
+                    || matches!(host.read(&move_ns, &ptr_k), Ok(Some(_)))
+                    || matches!(host.read(&move_ns, &admin_k), Ok(Some(_)))
+                {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"Move module already deployed at target".to_vec(),
+                        gas_used: base_bgu,
+                    });
+                }
                 if host.write(&move_ns, &k, Some(&call.input)).is_err() {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
@@ -676,10 +697,7 @@ impl ExecutionEnvironment for MoveEe {
                         gas_used: base_bgu,
                     });
                 }
-                let admin_k = state_key_resource(&target32, "admin");
-                if !matches!(host.read(&move_ns, &admin_k), Ok(Some(_))) {
-                    let _ = host.write(&move_ns, &admin_k, Some(&signer32));
-                }
+                let _ = host.write(&move_ns, &admin_k, Some(&signer32));
                 Ok(EeOutcome {
                     status: OutcomeStatus::Success,
                     output: target32.to_vec(),
@@ -690,15 +708,25 @@ impl ExecutionEnvironment for MoveEe {
                 let (is_static, clean_input) = unwrap_static_universal_input(&call.input);
                 let ptr_key = state_key_module(&target32, "pointer");
                 if let Ok(Some(code)) = host.read(&move_ns, &ptr_key) {
-                    if let Some(ptr) = decode_pointer_bytecode(&code) {
-                        return Ok(execute_move_pointer(
-                            &ptr,
-                            &signer32,
-                            clean_input,
-                            is_static,
-                            call.gas_limit,
-                            host,
-                        ));
+                    match verify_canonical_pointer_bytecode(&code, EeId::MOVE, &target32) {
+                        Err(reason) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: reason.into_bytes(),
+                                gas_used: base_bgu,
+                            });
+                        }
+                        Ok(Some(ptr)) => {
+                            return Ok(execute_move_pointer(
+                                &ptr,
+                                &signer32,
+                                clean_input,
+                                is_static,
+                                call.gas_limit,
+                                host,
+                            ));
+                        }
+                        Ok(None) => {}
                     }
                 }
                 if let Ok(ptr_op) = serde_json::from_slice::<MovePointerOp>(clean_input) {
@@ -725,6 +753,14 @@ impl ExecutionEnvironment for MoveEe {
                         module_name,
                         bytecode,
                     } => {
+                        if module_name == "pointer" {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"Move module name 'pointer' is reserved for uel/assets"
+                                    .to_vec(),
+                                gas_used: base_bgu,
+                            });
+                        }
                         if let Err(r) = self.validate_deploy(&bytecode) {
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::InvalidCode,
@@ -733,6 +769,13 @@ impl ExecutionEnvironment for MoveEe {
                             });
                         }
                         let k = state_key_module(&signer32, &module_name);
+                        if matches!(host.read(&move_ns, &k), Ok(Some(_))) {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"Move module already published at signer address".to_vec(),
+                                gas_used: base_bgu,
+                            });
+                        }
                         let _ = host.write(&move_ns, &k, Some(&bytecode));
                         let admin_k = state_key_resource(&signer32, "admin");
                         if !matches!(host.read(&move_ns, &admin_k), Ok(Some(_))) {
@@ -758,13 +801,23 @@ impl ExecutionEnvironment for MoveEe {
                             });
                         }
                         if module_id == "0x1::randomness" {
-                            let mut h = Sha3_256::new();
-                            h.update(ctx.chain_id.to_le_bytes());
-                            h.update(ctx.height.to_le_bytes());
-                            h.update(ctx.timestamp_ms.to_le_bytes());
-                            h.update(signer32);
-                            h.update(function_name.as_bytes());
-                            let rbytes: [u8; 32] = h.finalize().into();
+                            let args_json = serde_json::to_vec(&args).unwrap_or_default();
+                            let chain_le = ctx.chain_id.to_le_bytes();
+                            let height_le = ctx.height.to_le_bytes();
+                            let ts_le = ctx.timestamp_ms.to_le_bytes();
+                            let depth_le = call.depth.to_le_bytes();
+                            let rbytes = hash_fields_bytes(&[
+                                b"BDLM_MOVE_RANDOMNESS_V1",
+                                &chain_le,
+                                &height_le,
+                                &ts_le,
+                                &call.tx_hash,
+                                &depth_le,
+                                &signer32,
+                                &target32,
+                                function_name.as_bytes(),
+                                &args_json,
+                            ]);
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::Success,
                                 output: rbytes.to_vec(),
@@ -793,8 +846,14 @@ impl ExecutionEnvironment for MoveEe {
                                     gas_used: base_bgu,
                                 });
                             };
-                            let amount: u128 =
-                                args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                            let Some(amount) = args.get(1).and_then(|s| s.parse::<u128>().ok())
+                            else {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"invalid Move mint amount".to_vec(),
+                                    gas_used: base_bgu,
+                                });
+                            };
                             let Ok(dst_vec) = hex::decode(dst_hex.trim_start_matches("0x")) else {
                                 return Ok(EeOutcome {
                                     status: OutcomeStatus::Revert,
@@ -808,6 +867,16 @@ impl ExecutionEnvironment for MoveEe {
                             } else {
                                 "fa"
                             };
+                            let sup_k =
+                                state_key_resource(&target32, &format!("{tag_prefix}:supply"));
+                            let cur_sup = read_move_u128(host, &move_ns, &sup_k);
+                            let Some(next_sup) = cur_sup.checked_add(amount) else {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"Move mint total supply overflow".to_vec(),
+                                    gas_used: base_bgu,
+                                });
+                            };
                             let bal_k = state_key_resource(
                                 &target32,
                                 &format!("{tag_prefix}:bal:{}", hex::encode(dst32)),
@@ -820,6 +889,7 @@ impl ExecutionEnvironment for MoveEe {
                                     gas_used: base_bgu,
                                 });
                             };
+                            let _ = host.write(&move_ns, &sup_k, Some(&next_sup.to_le_bytes()));
                             let _ = host.write(&move_ns, &bal_k, Some(&next.to_le_bytes()));
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::Success,
@@ -837,7 +907,14 @@ impl ExecutionEnvironment for MoveEe {
                                     gas_used: base_bgu,
                                 });
                             };
-                            let octas: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                            let Some(octas) = args.get(1).and_then(|s| s.parse::<u64>().ok())
+                            else {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"invalid Move transfer octas amount".to_vec(),
+                                    gas_used: base_bgu,
+                                });
+                            };
                             let Ok(dst_vec) = hex::decode(dst_hex.trim_start_matches("0x")) else {
                                 return Ok(EeOutcome {
                                     status: OutcomeStatus::Revert,

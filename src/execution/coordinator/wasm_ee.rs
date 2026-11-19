@@ -13,8 +13,9 @@
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::execution::coordinator::assets::{
-    decode_pointer_bytecode, resolve_pointer_party_for_home, AssetStandard, MovePointerFlavor,
-    MovePointerOp, PointerDescriptor, SplPointerOp,
+    is_pointer_bytecode_prefixed, resolve_pointer_party_for_home,
+    verify_canonical_pointer_bytecode, AssetStandard, MovePointerFlavor, MovePointerOp,
+    PointerDescriptor, SplPointerOp,
 };
 use crate::execution::coordinator::evm_ee::solidity_selector;
 use crate::execution::coordinator::state::{NS_WASM_CODE, NS_WASM_CONTRACT, NS_WASM_STORE};
@@ -169,9 +170,16 @@ fn scan_code_body_no_floats(body: &[u8]) -> Result<(), String> {
 }
 
 /// Validates a WebAssembly binary for UEL determinism, page limits, and CosmWasm rules.
+///
+/// # Errors
+///
+/// Returns an error if the bytecode uses a reserved pointer prefix, exceeds size or memory
+/// bounds, lacks valid WASM headers, uses floating-point instructions, or exports IBC symbols.
 pub fn validate_cosmwasm_bytecode(code: &[u8]) -> Result<(), String> {
-    if decode_pointer_bytecode(code).is_some() {
-        return Ok(());
+    if is_pointer_bytecode_prefixed(code) {
+        return Err(String::from(
+            "system pointer bytecode prefix is reserved for uel/assets",
+        ));
     }
     if code.len() > MAX_WASM_CODE_BYTES {
         return Err(String::from("WASM module exceeds 2 MiB size ceiling"));
@@ -1569,6 +1577,23 @@ impl ExecutionEnvironment for WasmEe {
                         gas_used: 15_000,
                     });
                 };
+                match host.read(&contract_ns, &call.target.id) {
+                    Ok(Some(_)) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"target CosmWasm contract already exists".to_vec(),
+                            gas_used: 15_000,
+                        });
+                    }
+                    Err(_) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"failed reading wasm contract meta".to_vec(),
+                            gas_used: 15_000,
+                        });
+                    }
+                    Ok(None) => {}
+                }
                 if host.write(&code_ns, &code_hash, Some(raw_in)).is_err() {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
@@ -1616,6 +1641,17 @@ impl ExecutionEnvironment for WasmEe {
                         gas_used: 15_000,
                     });
                 }
+                let verified_ptr =
+                    match verify_canonical_pointer_bytecode(&code, EeId::WASM, &call.target.id) {
+                        Ok(ptr) => ptr,
+                        Err(reason) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: reason.into_bytes(),
+                                gas_used: 15_000,
+                            });
+                        }
+                    };
                 let Ok(msg_json) = serde_json::from_slice::<serde_json::Value>(raw_in) else {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
@@ -1623,7 +1659,7 @@ impl ExecutionEnvironment for WasmEe {
                         gas_used: 15_000,
                     });
                 };
-                let res = if let Some(ptr) = decode_pointer_bytecode(&code) {
+                let res = if let Some(ptr) = verified_ptr {
                     if EeId(ptr.home_ee) == EeId::EVM {
                         execute_wasm_pointer_to_evm(
                             &ptr,

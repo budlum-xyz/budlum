@@ -11,9 +11,9 @@
 use bud_isa::{Instruction, MainnetActivation};
 use bud_vm::Vm;
 use budlum_uel_abi::{
-    BlockContext, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeLog, EeOutcome, EeQuery,
-    EeRefusal, ExecutionEnvironment, HostApi, HostError, HostRead, Namespace, OutcomeStatus,
-    RefusalCode,
+    BlockContext, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog, EeOutcome,
+    EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostError, HostRead, Namespace,
+    OutcomeStatus, RefusalCode,
 };
 
 use crate::core::hash::calculate_hash_bytes;
@@ -136,13 +136,19 @@ fn storage_key(target_id: &[u8], slot: u64) -> Vec<u8> {
     key
 }
 
-fn apply_caller_words(vm: &mut Vm, caller_id: &[u8]) {
-    let mut padded = [0u8; 32];
-    let copy_len = caller_id.len().min(32);
-    if let (Some(dst), Some(src)) = (padded.get_mut(..copy_len), caller_id.get(..copy_len)) {
-        dst.copy_from_slice(src);
-    }
-    vm.context.set_sender_bytes(&padded);
+fn apply_caller_words(vm: &mut Vm, caller: &EeIdentity) {
+    let sender_bytes = if caller.ee == EeId::BUDZERO && caller.id.len() == 32 {
+        let mut raw = [0u8; 32];
+        raw.copy_from_slice(&caller.id);
+        raw
+    } else {
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_UEL_FOREIGN_CALLER_V1",
+            &[caller.ee.0],
+            &caller.id,
+        ])
+    };
+    vm.context.set_sender_bytes(&sender_bytes);
 }
 
 /// Execution-only `BudZero` environment implementing [`ExecutionEnvironment`].
@@ -157,6 +163,30 @@ impl BudZeroEe {
     pub const fn new() -> Self {
         Self
     }
+
+    /// Projects a `BudZeroEe` worker [`EeOutcome`] and emitted logs into a canonical `UER-1` receipt.
+    ///
+    /// Convenience: exposed for proof-bound `BudZero` worker hosts and conformance verifiers.
+    #[must_use]
+    pub fn project_uer(
+        ctx: &BlockContext,
+        call: &EeCall,
+        tx_index: u32,
+        outcome: &EeOutcome,
+        logs: &[(EeId, EeLog)],
+        post_execution_root: [u8; 32],
+        zk_trace_commitment: Option<[u8; 32]>,
+    ) -> crate::execution::uer::UniversalExecutionReceipt {
+        crate::execution::uer::UniversalExecutionReceipt::from_ee_outcome(
+            ctx,
+            call,
+            tx_index,
+            outcome,
+            logs,
+            post_execution_root,
+            zk_trace_commitment,
+        )
+    }
 }
 
 impl ExecutionEnvironment for BudZeroEe {
@@ -165,6 +195,12 @@ impl ExecutionEnvironment for BudZeroEe {
     }
 
     fn validate_deploy(&self, code: &[u8]) -> Result<CodeInfo, EeRefusal> {
+        if crate::execution::coordinator::assets::is_pointer_bytecode_prefixed(code) {
+            return Err(EeRefusal {
+                code: RefusalCode::InvalidCode,
+                message: String::from("system pointer bytecode prefix is reserved for uel/assets"),
+            });
+        }
         let _ = decode_gated_program(code)?;
         Ok(CodeInfo {
             code_hash: calculate_hash_bytes(code),
@@ -195,12 +231,38 @@ impl ExecutionEnvironment for BudZeroEe {
 
         match call.kind {
             EeCallKind::Deploy => {
-                if decode_gated_program(&call.input).is_err() {
+                if crate::execution::coordinator::assets::is_pointer_bytecode_prefixed(&call.input)
+                    || decode_gated_program(&call.input).is_err()
+                {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::InvalidCode,
                         output: Vec::new(),
                         gas_used: call.gas_limit,
                     });
+                }
+                match host.read(&prog_ns, &call.target.id) {
+                    Ok(Some(_)) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"BudZero program already deployed at target".to_vec(),
+                            gas_used: 0,
+                        });
+                    }
+                    Err(HostError::OutOfGas) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::OutOfGas,
+                            output: Vec::new(),
+                            gas_used: call.gas_limit,
+                        });
+                    }
+                    Err(_) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: Vec::new(),
+                            gas_used: call.gas_limit,
+                        });
+                    }
+                    Ok(None) => {}
                 }
                 match host.write(&prog_ns, &call.target.id, Some(&call.input)) {
                     Ok(()) => Ok(EeOutcome {
@@ -257,7 +319,7 @@ impl ExecutionEnvironment for BudZeroEe {
                 // per step. The chain's own cap keeps a call at 2^14 rows.
                 let mut vm = Vm::with_mainnet_mode(BUDZERO_VM_MEMORY_BYTES, call.gas_limit, true)
                     .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
-                apply_caller_words(&mut vm, &call.caller.id);
+                apply_caller_words(&mut vm, &call.caller);
                 vm.context.block_height = ctx.height;
 
                 for slot in declared {
@@ -930,6 +992,195 @@ mod tests {
         let (call, query) = deploy_call_query(counter_loop(1_000), 1_000_000);
         assert_eq!(call, OutcomeStatus::Success);
         assert!(query.is_ok(), "{query:?}");
+    }
+
+    #[test]
+    fn foreign_and_long_wasm_callers_produce_collision_free_sender_words() {
+        let mut host = InMemoryHost::new(2_000_000);
+        let mut ee = BudZeroEe::new();
+        let ctx = BlockContext {
+            height: 1,
+            timestamp_ms: 1_700_000_000_000,
+            chain_id: 45_261,
+        };
+        let contract = EeIdentity::new(EeId::BUDZERO, vec![0xEE; 32]).unwrap();
+        let code = encode_instrs(&[
+            Instruction {
+                opcode: Opcode::Syscall,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 10,
+            },
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 1,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Syscall,
+                rd: 2,
+                rs1: 0,
+                rs2: 0,
+                imm: 11,
+            },
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 2,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Syscall,
+                rd: 3,
+                rs1: 0,
+                rs2: 0,
+                imm: 12,
+            },
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 3,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Syscall,
+                rd: 4,
+                rs1: 0,
+                rs2: 0,
+                imm: 13,
+            },
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 4,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+        ]);
+
+        let deployer = EeIdentity::new(EeId::BUDZERO, vec![0xAA; 32]).unwrap();
+        assert_eq!(
+            ee.execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Deploy,
+                    caller: deployer,
+                    target: contract.clone(),
+                    value: BudAmount(0),
+                    input: code,
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [9u8; 32],
+                },
+                &mut host,
+            )
+            .unwrap()
+            .status,
+            OutcomeStatus::Success
+        );
+
+        // Two distinct 62-byte CosmWasm bech32 contract addresses sharing the first 32 ASCII bytes.
+        let wasm_a = EeIdentity::new(
+            EeId::WASM,
+            b"bud1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqaaaaaaaaaaaaaaa11111111111".to_vec(),
+        )
+        .unwrap();
+        let wasm_b = EeIdentity::new(
+            EeId::WASM,
+            b"bud1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqbbbbbbbbbbbbbbb22222222222".to_vec(),
+        )
+        .unwrap();
+
+        let out_a = ee
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: wasm_a,
+                    target: contract.clone(),
+                    value: BudAmount(0),
+                    input: Vec::new(),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [10u8; 32],
+                },
+                &mut host,
+            )
+            .unwrap();
+        let out_b = ee
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: wasm_b,
+                    target: contract.clone(),
+                    value: BudAmount(0),
+                    input: Vec::new(),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [11u8; 32],
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_ne!(
+            out_a.output, out_b.output,
+            "62-byte WASM callers differing past byte 32 must not collide on sender_words"
+        );
+
+        // A 20-byte EVM caller must also be domain-separated from a 32-byte BudZero caller with trailing zeros.
+        let evm_caller = EeIdentity::new(EeId::EVM, vec![0x42; 20]).unwrap();
+        let mut padded_bz = vec![0x42; 20];
+        padded_bz.extend_from_slice(&[0u8; 12]);
+        let bz_caller = EeIdentity::new(EeId::BUDZERO, padded_bz).unwrap();
+        let out_evm = ee
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: evm_caller,
+                    target: contract.clone(),
+                    value: BudAmount(0),
+                    input: Vec::new(),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [12u8; 32],
+                },
+                &mut host,
+            )
+            .unwrap();
+        let out_bz = ee
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: bz_caller,
+                    target: contract,
+                    value: BudAmount(0),
+                    input: Vec::new(),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [13u8; 32],
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_ne!(
+            out_evm.output, out_bz.output,
+            "cross-EE EVM caller must not collide with native 32-byte BudZero caller"
+        );
     }
 }
 
