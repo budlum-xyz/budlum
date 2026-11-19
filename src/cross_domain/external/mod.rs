@@ -79,6 +79,7 @@
 //! with their units attached. The judgement is the reader's, and the numbers it
 //! needs are in [`profile`].
 
+pub mod babylon_eots;
 pub mod based_preconf;
 pub mod bitcoin_spv;
 pub mod da_sampling;
@@ -91,6 +92,7 @@ pub mod hotstuff;
 pub mod intake;
 pub mod intake_quorum;
 pub mod mina_recursive;
+pub mod ouroboros_mithril;
 pub mod phase_a_dual;
 pub mod pospace_vdf;
 pub mod profile;
@@ -106,6 +108,12 @@ pub mod ton_catchain;
 pub mod versioning;
 pub mod zkvm_proof;
 
+pub use babylon_eots::{
+    epoch_vote_message, BabylonEotsAdapter, BtcCheckpoint, BtcWeakSubjectivityAnchor,
+    EotsEquivocationProof, EotsEvidence, EotsPublicKey, EotsVote, PostQuantumHalf,
+    DEFAULT_REQUIRED_BTC_CONFIRMATIONS, EVIDENCE_VERSION as EOTS_EVIDENCE_VERSION,
+    SCHNORR_PUBLIC_KEY_LEN, SCHNORR_SIGNATURE_LEN,
+};
 pub use based_preconf::{BasedPreconfAdapter, BasedPreconfValidator, PinnedBasedPreconfCommittee};
 pub use bitcoin_spv::{
     sha256d, BitcoinHeader, BitcoinSpvAdapter, PinnedBitcoinAnchor, EVIDENCE_VERSION, HEADER_LEN,
@@ -142,6 +150,11 @@ pub use intake_quorum::{
     ROUND_RETENTION_BLOCKS,
 };
 pub use mina_recursive::{PinnedSuccinctGenesis, SuccinctRecursiveAdapter};
+pub use ouroboros_mithril::{
+    mithril_certificate_message, mithril_threshold, praos_vote_message, proof_of_equivocation,
+    EpochSigner, EpochStake, MithrilEvidence, MithrilSignature, OuroborosMithrilAdapter,
+    PraosEquivocationProof, PraosSlotProof, EVIDENCE_VERSION as PRAOS_EVIDENCE_VERSION,
+};
 pub use pospace_vdf::{
     verify_double_signage_equivocation, PinnedPoSpaceAnchor, PoSpaceEquivocationProof,
     PoSpaceVdfAdapter, PoSpaceVdfBlock, PoSpaceVdfEvidence, SignedPoSpaceSignage,
