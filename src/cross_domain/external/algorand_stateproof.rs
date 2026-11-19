@@ -43,7 +43,7 @@
 //!    slashable double-signing across overlapping round intervals.
 
 //!
-//! WIRING: unwired - implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`; `AdapterSpec` joins `intake.rs` in the follow-up merge.
+//! WIRING: implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`; `AdapterSpec` joins `intake.rs` in the follow-up merge.
 
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
 use crate::crypto::scheme::SchemeId;
