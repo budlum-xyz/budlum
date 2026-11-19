@@ -129,6 +129,49 @@ impl ExecutionEnvironment for CanonicalTestEe {
                     }),
                 }
             }
+            0x04 => {
+                // Child writes state and claims Success while reporting gas_used > budget.
+                host.write(&ns, b"overgas-key", Some(b"unpaid"))
+                    .expect("staged write");
+                Ok(EeOutcome {
+                    status: OutcomeStatus::Success,
+                    output: b"stole-gas".to_vec(),
+                    gas_used: call.gas_limit.saturating_add(1),
+                })
+            }
+            0x05 => {
+                let _ = host.charge(150);
+                let to_ee = EeId(call.input.get(1).copied().unwrap_or(EeId::WASM.0));
+                let is_static = call.input.get(2).copied() == Some(1);
+                let sub_input = call.input.get(3..).unwrap_or(&[]).to_vec();
+                let target = EeIdentity::new(to_ee, vec![0xCD; 32]).expect("target");
+                let ucall = UniversalCall {
+                    from: call.caller.clone(),
+                    to_ee,
+                    target,
+                    value: BudAmount(0),
+                    input: sub_input,
+                    gas_limit: 5_000,
+                    is_static,
+                };
+                match host.universal_call(ucall) {
+                    Ok(res) => Ok(EeOutcome {
+                        status: OutcomeStatus::Success,
+                        output: vec![u8::from(res.success)],
+                        gas_used: 150 + res.gas_used,
+                    }),
+                    Err(e) => Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: e.to_string().into_bytes(),
+                        gas_used: 250,
+                    }),
+                }
+            }
+            0x06 => Ok(EeOutcome {
+                status: OutcomeStatus::Success,
+                output: call.caller.id.clone(),
+                gas_used: 100,
+            }),
             _ => Ok(EeOutcome {
                 status: OutcomeStatus::InvalidCode,
                 output: Vec::new(),
@@ -1075,4 +1118,103 @@ fn unsigned_or_forged_uel_tx_is_refused_without_state_change() {
         .expect("valid ML-DSA-87 signed UelTx must succeed");
     assert_eq!(receipts[0].status, UelReceiptStatus::Success);
     assert_eq!(state.get_nonce(&alice), 1);
+}
+
+#[test]
+fn universal_call_rolls_back_overbudget_child_and_never_leaks_alias_on_static_or_revert() {
+    let (alice_seed, alice) = test_uel_signer(0x91);
+    let proposer = Address::from([0x92; 32]);
+    let mut state = funded_state(&[alice, proposer]);
+    let mut coord = ExecutionCoordinator::new();
+    coord.register_worker(WorkerEndpoint::in_process(|| {
+        Box::new(CanonicalTestEe {
+            ee: EeId::EVM,
+            ns: "ee/evm/storage",
+        })
+    }));
+    coord.register_worker(WorkerEndpoint::in_process(|| {
+        Box::new(CanonicalTestEe {
+            ee: EeId::WASM,
+            ns: "ee/wasm/store",
+        })
+    }));
+    let wasm_alias_key = super::alias::alias_storage_key(&alice, EeId::WASM);
+
+    // 1. Static cross-EE universal_call succeeds read-only without persisting Alice's WASM alias.
+    let static_tx = make_call_tx(
+        alice,
+        &alice_seed,
+        0,
+        EeId::EVM,
+        vec![0x05, EeId::WASM.0, 1, 0x06],
+    );
+    let r1 = state
+        .execute_uel_block(&mut coord, sample_ctx(), proposer, &[static_tx])
+        .unwrap();
+    assert_eq!(r1[0].status, UelReceiptStatus::Success);
+    assert_eq!(r1[0].output, vec![1]);
+    assert!(
+        state
+            .execution_state
+            .read(super::ALIAS_NAMESPACE, &wasm_alias_key)
+            .unwrap()
+            .is_none(),
+        "static cross-EE universal_call must not persist a new target-EE alias"
+    );
+
+    // 2. Reverted cross-EE universal_call must roll back the newly inserted target-EE alias.
+    let revert_tx = make_call_tx(
+        alice,
+        &alice_seed,
+        1,
+        EeId::EVM,
+        vec![0x05, EeId::WASM.0, 0, 0x01],
+    );
+    let r2 = state
+        .execute_uel_block(&mut coord, sample_ctx(), proposer, &[revert_tx])
+        .unwrap();
+    assert_eq!(r2[0].status, UelReceiptStatus::Success);
+    assert_eq!(r2[0].output, vec![0]);
+    assert!(
+        state
+            .execution_state
+            .read(super::ALIAS_NAMESPACE, &wasm_alias_key)
+            .unwrap()
+            .is_none(),
+        "reverted cross-EE universal_call must roll back Alice's WASM alias"
+    );
+
+    // 3. Over-budget child claiming OutcomeStatus::Success must roll back both state and alias.
+    let overgas_tx = make_call_tx(
+        alice,
+        &alice_seed,
+        2,
+        EeId::EVM,
+        vec![0x05, EeId::WASM.0, 0, 0x04],
+    );
+    let r3 = state
+        .execute_uel_block(&mut coord, sample_ctx(), proposer, &[overgas_tx])
+        .unwrap();
+    assert_eq!(r3[0].status, UelReceiptStatus::Success);
+    assert_eq!(
+        r3[0].output,
+        vec![0],
+        "child reporting gas_used > budget must fail"
+    );
+    assert!(
+        state
+            .execution_state
+            .read("ee/wasm/store", b"overgas-key")
+            .unwrap()
+            .is_none(),
+        "over-budget child write must never commit"
+    );
+    assert!(
+        state
+            .execution_state
+            .read(super::ALIAS_NAMESPACE, &wasm_alias_key)
+            .unwrap()
+            .is_none(),
+        "over-budget child must also roll back newly inserted alias"
+    );
 }

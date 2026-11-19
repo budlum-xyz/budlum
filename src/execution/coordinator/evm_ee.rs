@@ -2844,6 +2844,12 @@ fn prepare_evm_target(
         Ok(None) => {}
     }
     if let Some(spec) = decode_std_evm_token_code(&code) {
+        if is_delegated {
+            return Ok(PreparedTarget::Finished(
+                OutcomeStatus::Revert,
+                b"DELEGATECALL/CALLCODE to standard token forbidden".to_vec(),
+            ));
+        }
         let (st, out) =
             execute_std_evm_token(&spec, storage_addr, caller20, input, is_static, host)?;
         return Ok(PreparedTarget::Finished(st, out));
@@ -3677,10 +3683,15 @@ mod tests {
             PreparedTarget::Finished(OutcomeStatus::Revert, _)
         ));
 
-        // 3) DELEGATECALL / CALLCODE into a pointer token contract must revert.
-        let ptr_addr = [0x33u8; 20];
+        // 3) DELEGATECALL / CALLCODE into a canonical pointer token contract must revert,
+        // and direct user deployment of pointer-prefixed bytecode must be refused.
+        let asset_id = [0x44u8; 32];
+        let ptr_addr_vec =
+            crate::execution::coordinator::assets::derive_pointer_address(&asset_id, EeId::EVM)
+                .unwrap();
+        let ptr_addr: [u8; 20] = ptr_addr_vec.try_into().unwrap();
         let ptr_code = encode_pointer_bytecode(&PointerDescriptor {
-            asset_id: [0x44u8; 32],
+            asset_id,
             home_ee: EeId::WASM.0,
             home_ref: vec![0x55; 20],
             standard: AssetStandard::Fungible,
@@ -3689,9 +3700,19 @@ mod tests {
             name: "Test".to_string(),
         })
         .unwrap();
-        drop(host);
-        deploy(&mut mem_host, ptr_addr, ptr_code);
-        let mut host = EvmStackHost::new(&mut mem_host);
+        let code_hash: [u8; 32] = Keccak256::digest(&ptr_code).into();
+        let code_ns = Namespace::new(NS_EVM_CODE).unwrap();
+        host.write(&code_ns, &code_hash, Some(&ptr_code)).unwrap();
+        write_account_rec(
+            &mut host,
+            &ptr_addr,
+            &EvmAccountRecord {
+                nonce: 1,
+                code_hash: Some(hex::encode(code_hash)),
+                imported_from: None,
+            },
+        )
+        .unwrap();
 
         let prep_ptr = prepare_evm_target(
             &EvmTargetDispatch {

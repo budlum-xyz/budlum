@@ -198,7 +198,7 @@ jobs:
 
           # budzero is a separate workspace and its root is a VIRTUAL manifest (only
           # [workspace], no package). cargo-geiger refuses to run at such a root:
-          # reddediyor: "is a virtual manifest, but this command requires
+          # "is a virtual manifest, but this command requires
           # "running against an actual package". So until now this step had not
           # scanned a single crate of budzero - during the `|| true` era this passed
           # silently, and it surfaced once the gate became fail-closed.
