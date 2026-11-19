@@ -885,7 +885,7 @@ mod tests {
 
     #[test]
     fn validator_rejects_zero_int_and_bytes_returns() {
-        let mut worker = PlutusWorker::new();
+        let mut worker = PlutusWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(2_000_000);
         let Ok(alice) = EeIdentity::new(EeId::PLUTUS, vec![0x33; 32]) else {
             panic!("caller");

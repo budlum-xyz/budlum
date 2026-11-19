@@ -1415,7 +1415,7 @@ mod tests {
 
     #[test]
     fn publish_initial_coin_requires_backing_balance_and_self_merge_rolls_back() {
-        let mut worker = MoveSuiWorker::new();
+        let mut worker = MoveSuiWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(20_000_000);
         let who = EeIdentity {
             ee: EeId::MOVE_SUI,

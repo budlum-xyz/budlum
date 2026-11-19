@@ -53,10 +53,12 @@ pub use liquidation_proof::{
 };
 pub use pq_anchor::{
     aggregate_finality_roots, anchor_due, anchor_leaf_digest, anchor_payload_for, assemble_anchor,
-    build_anchor_for_height, emit_anchor_node_local, enforce_anchor_mode,
-    rotate_anchor_key_with_committee, verify_anchor_full, verify_anchor_light, AnchorError,
-    AnchorLeaf, AnchorMode, AnchorSignature, AnchorSignatureAlgorithm, AnchorSigner,
-    EmissionOutcome, EmissionRequest, HsmSignerStub, PqAnchor, SignerBackend, ANCHOR_INTERVAL,
+    build_anchor_for_height, build_anchor_inclusion_proof, emit_anchor_node_local,
+    enforce_anchor_mode, rotate_anchor_key_with_committee, verify_anchor_full,
+    verify_anchor_leaf_light, verify_anchor_light, AnchorError, AnchorInclusionProof, AnchorLeaf,
+    AnchorMode, AnchorSignature, AnchorSignatureAlgorithm, AnchorSigner, EmissionOutcome,
+    EmissionRequest, HsmSignerStub, PqAnchor, SignerBackend, ANCHOR_INTERVAL,
+    MAX_ANCHOR_MERKLE_DEPTH, MAX_ANCHOR_SIGNATURES,
 };
 pub use proof_market::{
     ProofMarketState, ProofMarketTx, ProofReceipt, ProofTask, ProofTaskKind, ProofTaskStatus,

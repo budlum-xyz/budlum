@@ -37,6 +37,7 @@ use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::cross_domain::external::bitcoin_spv::{BitcoinSpvAdapter, PinnedBitcoinAnchor};
 use crate::cross_domain::external::ethereum::{BlsVerifier, EthereumSyncAdapter};
+use crate::cross_domain::external::intake_guard::{IntakeGuard, IntakeGuardError};
 use crate::cross_domain::external::intake_quorum::{
     QuorumRounds, RoundEntry, RoundError, RoundKey, RoundState,
 };
@@ -424,6 +425,10 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::dag_bft::PinnedDagCommittee,
     >,
+    /// Deterministic, admin-keyless intake circuit breaker and contradiction
+    /// tombstone ledger, folded into [`Self::state_digest`].
+    #[serde(default)]
+    pub guard: IntakeGuard,
 }
 
 /// Which anchor map an external-domain adapter family reads.
@@ -609,6 +614,8 @@ pub enum IntakeError {
     SelfChallengeForbidden,
     #[error("contradiction proof refused: {reason}")]
     InvalidContradiction { reason: String },
+    #[error(transparent)]
+    Guard(#[from] IntakeGuardError),
 }
 
 /// Verified receipt emitted by [`IntakeState::slash_on_contradiction`].
@@ -630,16 +637,17 @@ pub struct ContradictionSlashOutcome {
     pub challenger_reward_atoms: u128,
 }
 
-/// The first prover in arrival order whose entry carries `state_root`.
+/// The first prover in arrival order whose entry carries `claim_digest`.
 fn first_carrier(
     round: &crate::cross_domain::external::intake_quorum::QuorumRound,
-    state_root: &[u8; 32],
+    claim_digest: &[u8; 32],
 ) -> Option<Address> {
+    use subtle::ConstantTimeEq;
     round
         .entries
         .iter()
         .find_map(|e: &RoundEntry| match &e.attestation {
-            Some(att) if &att.state_root == state_root => Some(e.prover),
+            Some(att) if bool::from(att.claim_digest().ct_eq(claim_digest)) => Some(e.prover),
             _ => None,
         })
 }
@@ -869,6 +877,7 @@ impl IntakeState {
     pub fn on_block_committed(&mut self, height: u64) {
         self.registry.set_height(height);
         self.quorum.sweep(height);
+        self.guard.sweep(height);
     }
 
     /// Registers an external domain end to end: build the adapter from its
@@ -1058,6 +1067,8 @@ impl IntakeState {
         let Some(entry) = self.entries.get(&key) else {
             return Err(IntakeError::UnknownDomain);
         };
+        let local_height = self.registry.height();
+        self.guard.check_submission(&key, local_height)?;
         if matches!(entry.spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
             return Err(IntakeError::MissingBlsVerifier);
         }
@@ -1093,8 +1104,21 @@ impl IntakeState {
                 None => Err(IntakeError::RoundPending),
             };
         }
-        let attestation = self.registry.submit(adapter.as_ref(), evidence, &policy)?;
-        Ok(attestation)
+        if self
+            .guard
+            .record_of(&key)
+            .is_some_and(|r| !r.contradicted_claims.is_empty())
+        {
+            if let Ok(candidate) = adapter.verify(evidence, &policy) {
+                self.guard.check_claim_allowed(
+                    &key,
+                    candidate.height,
+                    candidate.evidence_version,
+                    &candidate.claim_digest(),
+                )?;
+            }
+        }
+        Ok(self.registry.submit(adapter.as_ref(), evidence, &policy)?)
     }
 
     /// Cryptographically verify a contradicting finality proof against the same
@@ -1127,7 +1151,6 @@ impl IntakeState {
         bls: Option<Box<dyn BlsVerifier>>,
     ) -> Result<ContradictionSlashOutcome, IntakeError> {
         use crate::cross_domain::external::spec::SecurityBacking;
-        use subtle::ConstantTimeEq;
 
         if contradicting.submitter != challenger {
             return Err(IntakeError::InvalidContradiction {
@@ -1200,9 +1223,10 @@ impl IntakeState {
                     .to_string(),
             });
         }
-        if bool::from(verified.state_root.ct_eq(&existing.state_root)) {
+        if verified.commits_same_roots(&existing) {
             return Err(IntakeError::InvalidContradiction {
-                reason: "challenge attestation commits the identical state_root".to_string(),
+                reason: "challenge attestation commits identical state_root and attested sub-roots"
+                    .to_string(),
             });
         }
         if let SecurityBacking::Work {
@@ -1248,6 +1272,15 @@ impl IntakeState {
             self.registry = registry_before;
             return Err(IntakeError::Registry(err));
         }
+
+        let local_height = self.registry.height();
+        let _cooldown_until = self.guard.record_contradiction(
+            key,
+            existing.height,
+            existing.evidence_version,
+            existing.claim_digest(),
+            local_height,
+        );
 
         Ok(ContradictionSlashOutcome {
             domain: key,
@@ -1315,13 +1348,23 @@ impl IntakeState {
         let outcome = match state {
             RoundState::AgreedClaim { attestation, .. } => {
                 let winner = *attestation;
-                // The carrier is the first prover whose claim matches the
-                // winner. A missing one breaks a round invariant, so it is
-                // refused instead of crediting whoever closed the round.
+                let winner_claim = winner.claim_digest();
+                if let Err(err) = self.guard.check_claim_allowed(
+                    &key,
+                    winner.height,
+                    winner.evidence_version,
+                    &winner_claim,
+                ) {
+                    self.quorum = quorum_before;
+                    return Err(IntakeError::Guard(err));
+                }
+                // The carrier is the first prover whose full claim digest
+                // matches the winner. A missing one breaks a round invariant,
+                // so it is refused instead of crediting whoever closed the round.
                 let carrier = self
                     .quorum
                     .round_of(&key, evidence.declared_height)
-                    .and_then(|round| first_carrier(round, &winner.state_root));
+                    .and_then(|round| first_carrier(round, &winner_claim));
                 let carrier = match carrier {
                     Some(carrier) => carrier,
                     None => {
@@ -1352,6 +1395,8 @@ impl IntakeState {
                             .join(", ")
                     })
                     .unwrap_or_default();
+                let guard_before = self.guard.clone();
+                let _tripped = self.guard.record_adverse_round(key, local_height);
                 match self.registry.mark_faulted(
                     &key,
                     &format!(
@@ -1362,11 +1407,28 @@ impl IntakeState {
                     Ok(()) => Ok(None),
                     Err(err) => {
                         self.quorum = quorum_before;
+                        self.guard = guard_before;
                         Err(IntakeError::Registry(err))
                     }
                 }
             }
-            RoundState::AgreedRefusal { .. } | RoundState::Open => Ok(None),
+            RoundState::AgreedRefusal { .. } => {
+                let guard_before = self.guard.clone();
+                if self.guard.record_adverse_round(key, local_height) {
+                    if let Err(err) = self.registry.mark_faulted(
+                        &key,
+                        &format!(
+                            "intake guard tripped after repeated adverse quorum rounds at local block {local_height}"
+                        ),
+                    ) {
+                        self.quorum = quorum_before;
+                        self.guard = guard_before;
+                        return Err(IntakeError::Registry(err));
+                    }
+                }
+                Ok(None)
+            }
+            RoundState::Open => Ok(None),
         };
         outcome
     }
@@ -2286,12 +2348,12 @@ mod tests {
             .quorum
             .round_of(&key, a.declared_height)
             .expect("round exists");
-        let root = round.entries[0]
+        let claim = round.entries[0]
             .attestation
             .as_ref()
             .expect("claim")
-            .state_root;
-        assert_eq!(first_carrier(round, &root), Some(addr(2)));
+            .claim_digest();
+        assert_eq!(first_carrier(round, &claim), Some(addr(2)));
         assert_eq!(first_carrier(round, &[0x99; 32]), None);
     }
 
@@ -2815,5 +2877,75 @@ mod tests {
             intake.state_digest().expect("digest"),
             other.state_digest().expect("digest")
         );
+    }
+
+    #[test]
+    fn contradiction_arms_guard_cooldown_tombstones_false_claim_and_moves_digest() {
+        use crate::cross_domain::external::intake_guard::{IntakeGuardError, BASE_COOLDOWN_BLOCKS};
+
+        let mut state = IntakeState::new();
+        state.on_block_committed(100);
+        let key = register(&mut state);
+        let admission = state.entries.get(&key).expect("entry").admission.clone();
+        // Poster addr(9) is automatically bonded at registration time.
+        let spec = eth_spec();
+        let accepted = quorum_evidence(&spec, addr(9));
+        state
+            .submit_evidence(&accepted, Some(Box::new(StrictTestBls)))
+            .expect("first attestation accepted");
+
+        let digest_before = state.state_digest().expect("digest before slash");
+        let mut conflicting = quorum_evidence(&spec, addr(77));
+        crate::cross_domain::external::ethereum::set_deneb_state_root(
+            &mut conflicting.payload,
+            [0xDD; 32],
+        );
+        conflicting.declared_root = [0xDD; 32];
+
+        let outcome = state
+            .slash_on_contradiction(&conflicting, addr(77), Some(Box::new(StrictTestBls)))
+            .expect("conflicting root slashes carrier");
+        assert_eq!(outcome.slashed_prover, addr(9));
+        assert_ne!(
+            state.state_digest().expect("digest after slash"),
+            digest_before,
+            "guard cooldown and tombstone must fold into state_digest"
+        );
+
+        // Readmit domain while still inside the deterministic block cooldown ->
+        // IntakeGuard blocks new submissions without any admin pause key.
+        state
+            .registry
+            .readmit(&key, &admission, "committee rotated")
+            .expect("readmit");
+        state
+            .bond_prover(&key, addr(12), economics_bond())
+            .expect("bonds replacement prover");
+        let during_cooldown = quorum_evidence(&spec, addr(12));
+        assert!(matches!(
+            state.submit_evidence(&during_cooldown, Some(Box::new(StrictTestBls))),
+            Err(IntakeError::Guard(IntakeGuardError::CooldownActive { .. }))
+        ));
+
+        // Advance chain past BASE_COOLDOWN_BLOCKS -> cooldown opens automatically,
+        // yet replaying the withdrawn false claim stays permanently tombstoned.
+        state.on_block_committed(100 + BASE_COOLDOWN_BLOCKS);
+        assert!(matches!(
+            state.submit_evidence(&during_cooldown, Some(Box::new(StrictTestBls))),
+            Err(IntakeError::Guard(
+                IntakeGuardError::ContradictedClaimReplay { .. }
+            ))
+        ));
+
+        // The truthful conflicting root at the same height is accepted cleanly.
+        let mut truthful = quorum_evidence(&spec, addr(12));
+        crate::cross_domain::external::ethereum::set_deneb_state_root(
+            &mut truthful.payload,
+            [0xDD; 32],
+        );
+        truthful.declared_root = [0xDD; 32];
+        state
+            .submit_evidence(&truthful, Some(Box::new(StrictTestBls)))
+            .expect("honest replacement root settles once cooldown expires");
     }
 }

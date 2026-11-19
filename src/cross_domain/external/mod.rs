@@ -95,8 +95,10 @@ pub mod evm_hybrid;
 pub mod external_tx;
 pub mod ghostdag;
 pub mod heterogeneous_multiprover;
+pub mod honeybadger_bft;
 pub mod hotstuff;
 pub mod intake;
+pub mod intake_guard;
 pub mod intake_quorum;
 pub mod mina_recursive;
 pub mod near_doomslug;
@@ -114,6 +116,7 @@ pub mod sentry;
 pub mod simplex_bft;
 pub mod solana_tower_bft;
 pub mod spec;
+pub mod stark_validity_rollup;
 pub mod stellar_fba;
 pub mod symbiotic_vault;
 pub mod tendermint;
@@ -154,7 +157,7 @@ pub use chain_key_ni_dkg::{
 pub use dag_bft::{BullsharkDagAdapter, DagBftValidator, PinnedDagCommittee};
 pub use domain_bridge::{
     decode_external_evidence, encode_external_evidence, ExternalDomainFinalityBridge,
-    EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+    EXTERNAL_DOMAIN_FINALITY_ADAPTER, MAX_EXTERNAL_EVIDENCE_BYTES,
 };
 pub use ethereum::{
     bits_for, epoch_of_slot, has_supermajority, minimum_signers, parse_update, participation,
@@ -181,6 +184,11 @@ pub use heterogeneous_multiprover::{
     MultiProverEvidence, PinnedFaultProposer, PinnedMultiProverConfig, ProverFamily,
     RollupBatchClaim, StarkProverLeg,
 };
+pub use honeybadger_bft::{
+    acs_certificate_digest, derive_acs_roots, encode_honeybadger_evidence, required_acs_count,
+    verify_rbc_equivocation, AcsValidatorVote, HoneyBadgerBftAdapter, HoneyBadgerEvidence,
+    HoneyBadgerValidator, PinnedHoneyBadgerCommittee, RbcBatchContribution, RbcEquivocationProof,
+};
 pub use hotstuff::{
     verify_hotstuff_equivocation, verify_hotstuff_timeout_certificate, HotStuffEquivocationProof,
     HotStuffThreeChainAdapter, HotStuffTimeoutCertificate, HotStuffTimeoutVote, HotStuffValidator,
@@ -191,6 +199,7 @@ pub use intake::{
     AdapterSpec, ContradictionSlashOutcome, IntakeEntry, IntakeError, IntakeState,
     RegistrationRequest,
 };
+pub use intake_guard::{ContradictedClaim, DomainGuardRecord, IntakeGuard, IntakeGuardError};
 pub use intake_quorum::{
     QuorumRound, QuorumRounds, RoundEntry, RoundError, RoundKey, RoundProgress, RoundState,
     ROUND_RETENTION_BLOCKS,
@@ -245,6 +254,12 @@ pub use spec::{
     AdapterDescriptor, AdapterError, AdapterId, DomainKey, ExternalFinalityAdapter,
     FinalityAttestation, FinalityKind, ProofSystem, RawConsensusEvidence, SecurityBacking,
     TimeUnit, TrustModel, VerificationPolicy,
+};
+pub use stark_validity_rollup::{
+    advance_stark_rollup_anchor, batch_binding_context_words, compute_batch_da_binding,
+    compute_forced_queue_head, compute_state_diff_root, encode_stark_rollup_evidence,
+    ContractStateDiff, ForcedInclusionEntry, PinnedStarkRollupConfig, StarkRollupBatchHeader,
+    StarkRollupEvidence, StarkValidityRollupAdapter,
 };
 pub use stellar_fba::{PinnedScpTier, ScpQuorumSet, ScpValidatorNode, StellarScpAdapter};
 pub use symbiotic_vault::{SymbioticVaultAdapter, SymbioticVaultEvidence};
