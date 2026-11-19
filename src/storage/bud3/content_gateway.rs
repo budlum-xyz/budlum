@@ -147,11 +147,30 @@ impl Bud3ContentGateway {
         let (peer, link, now_sec) = peer_link;
         let (symbol_root, symbol_count, symbol_size) = root_meta;
         limiter.check_symbol_request(peer, req, now_sec)?;
-        let bytes = u64::from(req.count).saturating_mul(u64::from(symbol_size));
+        let max_items =
+            usize::try_from(req.count).map_err(|_| SymbolProtocolError::InvalidSymbolCount)?;
+        if resp.items.len() > max_items {
+            return Err(SymbolProtocolError::InvalidSymbolCount);
+        }
+        let end_esi = req
+            .first_esi
+            .checked_add(req.count)
+            .ok_or(SymbolProtocolError::InvalidSymbolCount)?;
+        if resp
+            .items
+            .iter()
+            .any(|item| item.symbol.esi < req.first_esi || item.symbol.esi >= end_esi)
+        {
+            return Err(SymbolProtocolError::BadMerkleProof);
+        }
+        verify_symbol_range_response(req.segment, symbol_root, symbol_count, symbol_size, resp)?;
+        let item_count = u64::try_from(resp.items.len()).unwrap_or(u64::MAX);
+        let bytes = item_count
+            .max(u64::from(req.count))
+            .saturating_mul(u64::from(symbol_size));
         if !mobile_policy.admit_serve(link, bytes) {
             return Ok(false);
         }
-        verify_symbol_range_response(req.segment, symbol_root, symbol_count, symbol_size, resp)?;
         Ok(true)
     }
 }
@@ -392,6 +411,99 @@ mod tests {
         assert_eq!(
             Bud3ContentGateway::decode_symbol_bundle(&bundle, None).unwrap(),
             payload
+        );
+    }
+
+    #[test]
+    fn symbol_exchange_enforces_requested_range_count_and_no_quota_burn_on_bad_proof() {
+        use super::super::custody::{symbol_leaf, symbol_root};
+        use super::super::symbol_protocol::build_symbol_range_response;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let up = prepare_public_upload(b"range bound check", &profile, &Bud3Limits::default(), 6)
+            .unwrap();
+        let syms = up.segments.first().unwrap();
+        let leaves: Vec<(u32, [u8; 32])> =
+            syms.iter().map(|s| (s.esi, symbol_leaf(&s.data))).collect();
+        let root = symbol_root(&leaves);
+        let peer = [0x42u8; 32];
+
+        // Build valid 4-symbol response for ESIs [0..4), then pair it with a 1-symbol request.
+        let wide_req = SymbolRangeRequest {
+            object: up.record.commitment,
+            segment: 0,
+            first_esi: 0,
+            count: 4,
+        };
+        let wide_resp = build_symbol_range_response(&wide_req, &leaves, syms).unwrap();
+        assert_eq!(wide_resp.items.len(), 4);
+
+        let narrow_req = SymbolRangeRequest {
+            object: up.record.commitment,
+            segment: 0,
+            first_esi: 0,
+            count: 1,
+        };
+        let mut limiter = SymbolPeerLimiter::default();
+        let mut policy = MobileServePolicy {
+            daily_cellular_cap_bytes: 256,
+            served_cellular_today_bytes: 0,
+        };
+        assert_eq!(
+            Bud3ContentGateway::serve_verified_symbol_exchange(
+                &mut limiter,
+                &mut policy,
+                (&peer, LinkMetering::MeteredCellular, 100),
+                &narrow_req,
+                &wide_resp,
+                (root, leaves.len() as u64, profile.symbol_size),
+            ),
+            Err(SymbolProtocolError::InvalidSymbolCount),
+            "response exceeding req.count must not slip past a 1-symbol cellular check"
+        );
+        assert_eq!(
+            policy.served_cellular_today_bytes, 0,
+            "refused exchange must not consume cellular quota"
+        );
+
+        // Response of length 1 for ESI 0 must be refused when req asks for ESI [2..3).
+        let esi0_resp = build_symbol_range_response(&narrow_req, &leaves, syms).unwrap();
+        let shifted_req = SymbolRangeRequest {
+            object: up.record.commitment,
+            segment: 0,
+            first_esi: 2,
+            count: 1,
+        };
+        assert_eq!(
+            Bud3ContentGateway::serve_verified_symbol_exchange(
+                &mut limiter,
+                &mut policy,
+                (&peer, LinkMetering::MeteredCellular, 100),
+                &shifted_req,
+                &esi0_resp,
+                (root, leaves.len() as u64, profile.symbol_size),
+            ),
+            Err(SymbolProtocolError::BadMerkleProof)
+        );
+        assert_eq!(policy.served_cellular_today_bytes, 0);
+
+        // Clock regression must not reset a peer's exhausted 16 req/s window.
+        let mut clock_limiter = SymbolPeerLimiter::default();
+        for _ in 0..super::super::symbol_protocol::MAX_SYMBOL_REQUESTS_PER_SEC {
+            clock_limiter
+                .check_symbol_request(&peer, &narrow_req, 500)
+                .unwrap();
+        }
+        assert_eq!(
+            clock_limiter.check_symbol_request(&peer, &narrow_req, 499),
+            Err(SymbolProtocolError::RateLimited),
+            "backward clock step must not reset per-second peer request quota"
         );
     }
 }
