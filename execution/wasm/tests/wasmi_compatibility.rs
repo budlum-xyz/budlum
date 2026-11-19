@@ -221,10 +221,12 @@ fn fuel_metering_is_byte_and_fuel_deterministic_across_runs() {
         "#,
     );
 
-    // The first call in a fresh process costs a one-off amount more than every
-    // later call (measured here: 266 fuel for this body), so a run is only
-    // comparable once that cold path has been taken. Warm it up, then compare
-    // independent stores.
+    // The first call on a fresh `Engine` costs a one-off amount more than later
+    // calls on the same engine (measured here: 266 fuel for this body; 245 for a
+    // simpler one). `WasmWorker` builds an engine per operation, so every call
+    // pays it once and the charge stays equal across nodes; this test warms the
+    // engine up so the comparison is between steady-state metering, then runs
+    // three independent stores.
     let _ = call_once(&engine, &module, 8);
 
     let mut observed = None;
