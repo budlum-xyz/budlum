@@ -356,6 +356,8 @@ pub enum StorageFabricError {
     NotFound(String),
     #[error("no live replicas available for URI `{0}` meeting minimum verification strength")]
     NoEligibleReplica(String),
+    #[error("caller is not authorized to mutate owner-locked `{0}`")]
+    UnauthorizedOwner(String),
 }
 
 /// In-core unified registry coordinating B.U.D. 3.0, IPFS, Arweave, Filecoin,
@@ -366,6 +368,10 @@ pub struct UnifiedStorageFabric {
     objects: BTreeMap<Hash32, UnifiedContentRecord>,
     locator_index: BTreeMap<String, Hash32>,
     bns_bindings: BTreeMap<String, Hash32>,
+    #[serde(default, with = "crate::core::map_keys")]
+    object_owners: BTreeMap<Hash32, Hash32>,
+    #[serde(default)]
+    bns_owners: BTreeMap<String, Hash32>,
 }
 
 impl UnifiedStorageFabric {
@@ -385,6 +391,35 @@ impl UnifiedStorageFabric {
         &mut self,
         record: UnifiedContentRecord,
     ) -> Result<Hash32, StorageFabricError> {
+        self.insert_object_checked(None, record)
+    }
+
+    /// Registers or updates a content object authenticated by a non-zero
+    /// `owner_id`. Once bound to `owner_id`, neither unauthenticated callers nor
+    /// any other owner may overwrite or downgrade its replica set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageFabricError`] if `owner_id` is zero, the object is owned
+    /// by another principal, or metadata/capacity validation fails.
+    pub fn register_owned_object(
+        &mut self,
+        owner_id: Hash32,
+        record: UnifiedContentRecord,
+    ) -> Result<Hash32, StorageFabricError> {
+        if owner_id == [0u8; 32] {
+            return Err(StorageFabricError::InvalidMetadata(String::from(
+                "owner_id must be non-zero",
+            )));
+        }
+        self.insert_object_checked(Some(owner_id), record)
+    }
+
+    fn insert_object_checked(
+        &mut self,
+        caller_owner: Option<Hash32>,
+        record: UnifiedContentRecord,
+    ) -> Result<Hash32, StorageFabricError> {
         validate_safe_label("content_type", &record.content_type, 96)
             .map_err(StorageFabricError::InvalidMetadata)?;
         if record.sha3_256_digest == [0u8; 32] || record.sha256_digest == [0u8; 32] {
@@ -396,6 +431,11 @@ impl UnifiedStorageFabric {
             return Err(StorageFabricError::ReplicaLimitExceeded);
         }
         let digest = record.sha3_256_digest;
+        if let Some(&existing_owner) = self.object_owners.get(&digest) {
+            if caller_owner != Some(existing_owner) {
+                return Err(StorageFabricError::UnauthorizedOwner(hex::encode(digest)));
+            }
+        }
         let mut seen_uris: BTreeSet<String> = BTreeSet::new();
         for replica in &record.replicas {
             if replica.domain_id == 0 {
@@ -437,6 +477,9 @@ impl UnifiedStorageFabric {
         for replica in &record.replicas {
             self.locator_index.insert(replica.uri(), digest);
         }
+        if let Some(owner) = caller_owner {
+            self.object_owners.insert(digest, owner);
+        }
         self.objects.insert(digest, record);
         Ok(record_hash)
     }
@@ -461,11 +504,46 @@ impl UnifiedStorageFabric {
         bns_name: &str,
         digest: Hash32,
     ) -> Result<(), StorageFabricError> {
+        self.bind_bns_checked(None, bns_name, digest)
+    }
+
+    /// Binds a `bns://name.bud` Web3 name to a registered `digest` under
+    /// authenticated `owner_id`. Rejects hijacks by foreign or unauthenticated callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageFabricError`] if `owner_id` is zero, `bns_name` is already
+    /// locked by another owner, `bns_name` is malformed, or `digest` is unregistered.
+    pub fn bind_owned_bns_name(
+        &mut self,
+        owner_id: Hash32,
+        bns_name: &str,
+        digest: Hash32,
+    ) -> Result<(), StorageFabricError> {
+        if owner_id == [0u8; 32] {
+            return Err(StorageFabricError::InvalidMetadata(String::from(
+                "owner_id must be non-zero",
+            )));
+        }
+        self.bind_bns_checked(Some(owner_id), bns_name, digest)
+    }
+
+    fn bind_bns_checked(
+        &mut self,
+        caller_owner: Option<Hash32>,
+        bns_name: &str,
+        digest: Hash32,
+    ) -> Result<(), StorageFabricError> {
         let uri = UniversalContentUri::parse(&format!("bns://{bns_name}"))?;
         if uri.sub_path.is_some() {
             return Err(StorageFabricError::InvalidUri(String::from(
                 "BNS name binding must not include a sub-path",
             )));
+        }
+        if let Some(&existing_owner) = self.bns_owners.get(&uri.locator) {
+            if caller_owner != Some(existing_owner) {
+                return Err(StorageFabricError::UnauthorizedOwner(uri.locator));
+            }
         }
         if !self.objects.contains_key(&digest) {
             return Err(StorageFabricError::NotFound(hex::encode(digest)));
@@ -475,8 +553,42 @@ impl UnifiedStorageFabric {
         {
             return Err(StorageFabricError::FabricFull);
         }
+        if let Some(owner) = caller_owner {
+            self.bns_owners.insert(uri.locator.clone(), owner);
+        }
         self.bns_bindings.insert(uri.locator, digest);
         Ok(())
+    }
+
+    /// Deterministic Merkle commitment over all registered content records,
+    /// owner locks, and `bns://` bindings in canonical `BTreeMap` order.
+    #[must_use]
+    pub fn state_root(&self) -> Hash32 {
+        let obj_leaves: Vec<Hash32> = self
+            .objects
+            .iter()
+            .map(|(digest, rec)| {
+                let owner = self.object_owners.get(digest).copied().unwrap_or([0u8; 32]);
+                hash_domain_fields(
+                    b"BDLM_FABRIC_OBJ_LEAF_V1",
+                    &[digest, &rec.record_hash(), &owner],
+                )
+            })
+            .collect();
+        let bns_leaves: Vec<Hash32> = self
+            .bns_bindings
+            .iter()
+            .map(|(name, digest)| {
+                let owner = self.bns_owners.get(name).copied().unwrap_or([0u8; 32]);
+                hash_domain_fields(
+                    b"BDLM_FABRIC_BNS_LEAF_V1",
+                    &[name.as_bytes(), digest, &owner],
+                )
+            })
+            .collect();
+        let obj_root = unification_merkle_root(b"BDLM_FABRIC_OBJECTS_V1", &obj_leaves);
+        let bns_root = unification_merkle_root(b"BDLM_FABRIC_BNS_V1", &bns_leaves);
+        hash_domain_fields(b"BDLM_STORAGE_FABRIC_ROOT_V1", &[&obj_root, &bns_root])
     }
 
     /// Resolves any universal Web3 URI (`bns://`, `bud://`, `ipfs://`, `ar://`,

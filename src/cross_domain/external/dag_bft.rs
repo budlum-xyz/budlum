@@ -80,24 +80,28 @@ pub struct PinnedDagCommittee {
 }
 
 /// One validator signature inside an availability certificate or voter vertex.
+///
+/// WIRING: Verified by [`BullsharkDagAdapter`] and [`verify_dag_equivocation_proof`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct DagBftSig {
-    signer_pubkey: [u8; 32],
-    ed25519_sig: Vec<u8>,
+pub struct DagBftSig {
+    pub signer_pubkey: [u8; 32],
+    pub ed25519_sig: Vec<u8>,
     #[serde(default)]
-    pq_sig: Vec<u8>,
+    pub pq_sig: Vec<u8>,
 }
 
 /// Summary of a round `r - 1` causal parent referenced by the wave anchor.
+///
+/// WIRING: Causal ancestry witness in [`DagWaveCommitEvidence`] and [`DagEquivocationProof`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct DagCausalParent {
-    round: u64,
-    author: [u8; 32],
-    payload_root: Hash32,
-    digest: Hash32,
-    author_ed25519_sig: Vec<u8>,
+pub struct DagCausalParent {
+    pub round: u64,
+    pub author: [u8; 32],
+    pub payload_root: Hash32,
+    pub digest: Hash32,
+    pub author_ed25519_sig: Vec<u8>,
     #[serde(default)]
-    author_pq_sig: Vec<u8>,
+    pub author_pq_sig: Vec<u8>,
 }
 
 impl DagCausalParent {
@@ -116,18 +120,20 @@ impl DagCausalParent {
 }
 
 /// Even-round Bullshark wave anchor vertex committing state, tx, and event roots.
+///
+/// WIRING: Anchor commitment in [`DagWaveCommitEvidence`] and [`DagIndirectWaveCommitProof`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct DagAnchorVertex {
-    epoch: u64,
-    round: u64,
-    author: [u8; 32],
-    timestamp_secs: u64,
-    state_root: Hash32,
-    tx_root: Hash32,
-    event_root: Hash32,
+pub struct DagAnchorVertex {
+    pub epoch: u64,
+    pub round: u64,
+    pub author: [u8; 32],
+    pub timestamp_secs: u64,
+    pub state_root: Hash32,
+    pub tx_root: Hash32,
+    pub event_root: Hash32,
     /// Strictly ascending canonical parent digests in round `r - 1`.
-    parent_digests: Vec<Hash32>,
-    digest: Hash32,
+    pub parent_digests: Vec<Hash32>,
+    pub digest: Hash32,
 }
 
 impl DagAnchorVertex {
@@ -151,16 +157,19 @@ impl DagAnchorVertex {
 }
 
 /// Round `r + 1` voter vertex with a direct causal edge to the anchor vertex.
+///
+/// WIRING: Wave-quorum and causal-relay witness in [`BullsharkDagAdapter`],
+/// [`verify_indirect_dag_wave_commit`], and [`verify_dag_equivocation_proof`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct DagVoterVertex {
-    round: u64,
-    author: [u8; 32],
+pub struct DagVoterVertex {
+    pub round: u64,
+    pub author: [u8; 32],
     /// Strictly ascending round `r` parent digests (MUST contain `anchor.digest`).
-    parent_digests: Vec<Hash32>,
-    digest: Hash32,
-    ed25519_sig: Vec<u8>,
+    pub parent_digests: Vec<Hash32>,
+    pub digest: Hash32,
+    pub ed25519_sig: Vec<u8>,
     #[serde(default)]
-    pq_sig: Vec<u8>,
+    pub pq_sig: Vec<u8>,
 }
 
 impl DagVoterVertex {
@@ -180,12 +189,14 @@ impl DagVoterVertex {
 }
 
 /// Complete Bullshark round-DAG finality bundle committing `anchor`.
+///
+/// WIRING: Wire body verified by [`BullsharkDagAdapter`] and [`verify_indirect_dag_wave_commit`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct DagWaveCommitEvidence {
-    anchor: DagAnchorVertex,
-    causal_parents: Vec<DagCausalParent>,
-    anchor_cert_sigs: Vec<DagBftSig>,
-    voter_vertices: Vec<DagVoterVertex>,
+pub struct DagWaveCommitEvidence {
+    pub anchor: DagAnchorVertex,
+    pub causal_parents: Vec<DagCausalParent>,
+    pub anchor_cert_sigs: Vec<DagBftSig>,
+    pub voter_vertices: Vec<DagVoterVertex>,
 }
 
 fn fold_sorted_digests(digests: &[Hash32]) -> Hash32 {
@@ -256,7 +267,6 @@ fn verify_member_sig(
     }
 }
 
-#[cfg(test)]
 fn encode_dag_evidence(bundle: &DagWaveCommitEvidence) -> Result<Vec<u8>, String> {
     let body = bincode::serialize(bundle).map_err(|e| format!("DAG-BFT encode failed: {e}"))?;
     let total = PAYLOAD_MAGIC.len().saturating_add(body.len());
@@ -358,10 +368,10 @@ impl BullsharkDagAdapter {
                 found: hex::encode(evidence.adapter.as_bytes()),
             });
         }
-        if evidence.evidence_version != EVIDENCE_VERSION {
+        if evidence.evidence_version != EVIDENCE_VERSION && evidence.evidence_version != 2 {
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
-                accepted: EVIDENCE_VERSION.to_string(),
+                accepted: "1,2".into(),
             });
         }
         if evidence.network != self.network {
@@ -377,6 +387,30 @@ impl BullsharkDagAdapter {
                 rule: "no pinned DAG-BFT committee; admission is closed".into(),
             });
         };
+        if evidence.evidence_version == 2 {
+            let indirect = decode_indirect_dag_evidence(&evidence.payload)?;
+            if policy.require_declared_match {
+                if evidence.declared_height != indirect.target_anchor.round {
+                    return Err(AdapterError::DeclarationMismatch { field: "height" });
+                }
+                if !bool::from(
+                    evidence
+                        .declared_root
+                        .ct_eq(&indirect.target_anchor.state_root),
+                ) {
+                    return Err(AdapterError::DeclarationMismatch { field: "root" });
+                }
+            }
+            let att = verify_indirect_dag_wave_commit(&self.network, pinned, &indirect, policy)?;
+            let pq = matches!(
+                att.security,
+                SecurityBacking::SignatureSet {
+                    scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+                    ..
+                }
+            );
+            return Ok((att, pq));
+        }
         if pinned.members.is_empty() || pinned.members.len() > MAX_DAG_COMMITTEE {
             return Err(AdapterError::ConsensusRule {
                 rule: "pinned DAG-BFT committee size outside valid bounds".into(),
@@ -450,6 +484,18 @@ impl BullsharkDagAdapter {
         if anchor.state_root == [0u8; 32] || !member_map.contains_key(&anchor.author) {
             return Err(AdapterError::ConsensusRule {
                 rule: "DAG anchor carries zero state_root or non-committee leader author".into(),
+            });
+        }
+        // Deterministic Bullshark/Mysticeti wave-leader rule: each even round r in
+        // `(network, epoch)` maps to a single stake-weighted leader, preventing two
+        // distinct honest round-r vertices from finalizing conflicting roots.
+        let expected_leader = elect_dag_wave_leader(&self.network, pinned, anchor.round)?;
+        if !bool::from(anchor.author.ct_eq(&expected_leader)) {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "DAG anchor author is not the deterministic wave leader for round {}",
+                    anchor.round
+                ),
             });
         }
         if anchor.parent_digests.is_empty()
@@ -764,6 +810,618 @@ impl ExternalFinalityAdapter for BullsharkDagAdapter {
     }
 }
 
+type CommitteeIndex<'a> = (BTreeMap<[u8; 32], &'a DagBftValidator>, u128, Hash32);
+
+fn canonical_committee_map(
+    pinned: &PinnedDagCommittee,
+) -> Result<CommitteeIndex<'_>, AdapterError> {
+    if pinned.members.is_empty() || pinned.members.len() > MAX_DAG_COMMITTEE {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!(
+                "pinned DAG committee size {} outside 1..={MAX_DAG_COMMITTEE}",
+                pinned.members.len()
+            ),
+        });
+    }
+    let mut map = BTreeMap::new();
+    let mut total = 0u128;
+    for m in &pinned.members {
+        if m.ed25519_pubkey == [0u8; 32] || m.voting_weight == 0 {
+            return Err(AdapterError::ConsensusRule {
+                rule: "pinned DAG committee has zero pubkey or zero voting_weight".into(),
+            });
+        }
+        if map.insert(m.ed25519_pubkey, m).is_some() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "pinned DAG committee contains duplicate pubkey".into(),
+            });
+        }
+        total = total
+            .checked_add(u128::from(m.voting_weight))
+            .ok_or_else(|| AdapterError::ConsensusRule {
+                rule: "pinned DAG committee stake overflows u128".into(),
+            })?;
+    }
+    // Canonical committee digest over sorted pubkeys (order-invariant across input Vecs).
+    let mut running = crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_DAGBFT_COMMITTEE_V1",
+        &pinned.epoch.to_le_bytes(),
+        &(map.len() as u64).to_le_bytes(),
+    ]);
+    for (pk, m) in &map {
+        let w = m.voting_weight.to_le_bytes();
+        running = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_DAGBFT_MEMBER_V1",
+            &running,
+            pk,
+            &w,
+            &m.pq_pubkey,
+        ]);
+    }
+    Ok((map, total, running))
+}
+
+/// Deterministically elect the unique stake-weighted Bullshark/Mysticeti wave
+/// leader for an even wave `round` in `(network, pinned.epoch)`.
+///
+/// Order-invariant over `pinned.members` and pure-integer (no floats or RNG).
+///
+/// # Errors
+///
+/// Returns [`AdapterError::ConsensusRule`] when `network` is empty, `round` is
+/// odd or `< 2`, or `pinned` is malformed.
+///
+/// WIRING: Enforced by [`BullsharkDagAdapter`] and [`verify_indirect_dag_wave_commit`]
+/// to guarantee unique anchor finality per wave round.
+pub fn elect_dag_wave_leader(
+    network: &str,
+    pinned: &PinnedDagCommittee,
+    round: u64,
+) -> Result<[u8; 32], AdapterError> {
+    if network.trim().is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "DAG leader schedule requires non-empty network".into(),
+        });
+    }
+    if round < 2 || !round.is_multiple_of(2) {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!("DAG wave leader round {round} must be an even round >= 2"),
+        });
+    }
+    let (map, total_stake, committee_root) = canonical_committee_map(pinned)?;
+    let seed = crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_DAGBFT_LEADER_V1",
+        network.as_bytes(),
+        &pinned.epoch.to_le_bytes(),
+        &round.to_le_bytes(),
+        &committee_root,
+    ]);
+    let mut ticket_bytes = [0u8; 16];
+    if let Some(prefix) = seed.get(..16) {
+        ticket_bytes.copy_from_slice(prefix);
+    }
+    let ticket = u128::from_le_bytes(ticket_bytes) % total_stake;
+    let mut cumulative = 0u128;
+    for (pk, member) in &map {
+        cumulative = cumulative.saturating_add(u128::from(member.voting_weight));
+        if ticket < cumulative {
+            return Ok(*pk);
+        }
+    }
+    map.keys()
+        .next()
+        .copied()
+        .ok_or_else(|| AdapterError::ConsensusRule {
+            rule: "empty DAG committee during leader election".into(),
+        })
+}
+
+/// Indirect Bullshark/Mysticeti two-wave commit proof for an even round `r`.
+///
+/// Finalizes `target_anchor` whose direct round `r + 1` votes missed quorum
+/// via a certified causal path from a directly committed round `r + 2` anchor.
+///
+/// WIRING: Version-2 wire payload verified by [`BullsharkDagAdapter`] and
+/// [`verify_indirect_dag_wave_commit`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DagIndirectWaveCommitProof {
+    /// Target even-round anchor at round `r` being finalized indirectly.
+    pub target_anchor: DagAnchorVertex,
+    /// Certified round `r - 1` causal parents proving `> 2/3` causal history.
+    pub target_causal_parents: Vec<DagCausalParent>,
+    /// Availability certificate (`> 2/3` committee stake) over `target_anchor`.
+    pub target_cert_sigs: Vec<DagBftSig>,
+    /// Certified round `r + 1` relay vertex referencing `target_anchor.digest`
+    /// and matching a certified causal parent of `committing_wave.anchor` (`r + 2`).
+    pub relay_vertex: DagVoterVertex,
+    /// Payload root binding `relay_vertex.digest` into `committing_wave.causal_parents`.
+    pub committing_wave: DagWaveCommitEvidence,
+    /// Submitter address recorded on the resulting finality attestation.
+    pub submitter: crate::core::address::Address,
+}
+
+const INDIRECT_DAG_MAGIC: &[u8; 8] = b"BDLMDGI2";
+
+fn decode_indirect_dag_evidence(bytes: &[u8]) -> Result<DagIndirectWaveCommitProof, AdapterError> {
+    if bytes.is_empty() || bytes.len() > MAX_DAG_PAYLOAD_BYTES {
+        return Err(AdapterError::Malformed {
+            offset: 0,
+            reason: format!("indirect DAG-BFT payload len {} out of bounds", bytes.len()),
+        });
+    }
+    if bytes.get(..8) != Some(INDIRECT_DAG_MAGIC.as_slice()) {
+        return Err(AdapterError::Malformed {
+            offset: 0,
+            reason: "missing indirect DAG-BFT evidence magic".into(),
+        });
+    }
+    let body = bytes.get(8..).unwrap_or(&[]);
+    let proof: DagIndirectWaveCommitProof =
+        crate::network::bounded_bincode::decode_bounded_bincode(body, MAX_DAG_PAYLOAD_BYTES)
+            .map_err(|e| AdapterError::Malformed {
+                offset: 8,
+                reason: format!("indirect DAG-BFT bincode decode failed: {e}"),
+            })?;
+    if bincode::serialized_size(&proof).ok() != u64::try_from(body.len()).ok() {
+        return Err(AdapterError::Malformed {
+            offset: 8,
+            reason: "trailing bytes after indirect DAG-BFT evidence".into(),
+        });
+    }
+    Ok(proof)
+}
+
+/// Verify an indirect two-wave Bullshark/Mysticeti finality proof.
+///
+/// Confirms that `committing_wave` directly finalizes canonical leader `A_{r+2}`
+/// and carries an authenticated causal path `A_{r+2} -> relay_{r+1} -> A_r`.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] if either wave leader mismatches, any availability
+/// or causal quorum is `<= 2/3`, any signature fails, or the causal bridge
+/// between `A_{r+2}`, `relay_{r+1}`, and `A_r` is broken.
+///
+/// WIRING: Asynchronous liveness continuation for [`BullsharkDagAdapter`] domains.
+pub fn verify_indirect_dag_wave_commit(
+    network: &str,
+    pinned: &PinnedDagCommittee,
+    proof: &DagIndirectWaveCommitProof,
+    policy: &VerificationPolicy,
+) -> Result<FinalityAttestation, AdapterError> {
+    let target = &proof.target_anchor;
+    let commit_round = target
+        .round
+        .checked_add(2)
+        .ok_or_else(|| AdapterError::ConsensusRule {
+            rule: "indirect DAG anchor round overflows u64".into(),
+        })?;
+    if proof.committing_wave.anchor.round != commit_round {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!(
+                "indirect DAG committing anchor round {} must equal target round + 2 ({commit_round})",
+                proof.committing_wave.anchor.round
+            ),
+        });
+    }
+    // 1. Verify full direct wave finality of round `r + 2` committing anchor.
+    let adapter = BullsharkDagAdapter::new(network, Some(pinned.clone()));
+    let direct_raw = RawConsensusEvidence {
+        adapter: AdapterId::from_name(ADAPTER_NAME),
+        evidence_version: EVIDENCE_VERSION,
+        network: network.to_string(),
+        payload: encode_dag_evidence(&proof.committing_wave)
+            .map_err(|reason| AdapterError::Malformed { offset: 0, reason })?,
+        declared_height: proof.committing_wave.anchor.round,
+        declared_root: proof.committing_wave.anchor.state_root,
+        submitter: proof.submitter,
+    };
+    let _direct_att = adapter.verify(&direct_raw, policy)?;
+
+    // 2. Verify target round-r anchor canonical leader, digest, >2/3 parents, and >2/3 cert.
+    let (member_map, total_stake, _) = canonical_committee_map(pinned)?;
+    if target.epoch != pinned.epoch || target.state_root == [0u8; 32] {
+        return Err(AdapterError::ConsensusRule {
+            rule: "indirect target DAG anchor has wrong epoch or zero state_root".into(),
+        });
+    }
+    let expected_leader = elect_dag_wave_leader(network, pinned, target.round)?;
+    if !bool::from(target.author.ct_eq(&expected_leader)) {
+        return Err(AdapterError::ConsensusRule {
+            rule: "indirect target DAG anchor is not the canonical wave leader".into(),
+        });
+    }
+    if target.parent_digests.is_empty()
+        || target.parent_digests.len() > MAX_VERTEX_PARENTS
+        || !is_strictly_ascending(&target.parent_digests)
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "indirect target DAG anchor parent_digests invalid".into(),
+        });
+    }
+    let expected_target = target.compute_digest(network);
+    if !bool::from(target.digest.ct_eq(&expected_target)) {
+        return Err(AdapterError::ConsensusRule {
+            rule: "indirect target DAG anchor digest mismatch".into(),
+        });
+    }
+
+    let prev_round = target.round - 1;
+    let mut parent_authors = BTreeSet::new();
+    let mut parent_stake = 0u128;
+    let mut all_pq = true;
+    for p in &proof.target_causal_parents {
+        if p.round != prev_round
+            || !parent_authors.insert(p.author)
+            || target.parent_digests.binary_search(&p.digest).is_err()
+        {
+            return Err(AdapterError::ConsensusRule {
+                rule: "indirect target DAG causal parent invalid, duplicate, or unreferenced"
+                    .into(),
+            });
+        }
+        let Some(m) = member_map.get(&p.author) else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "indirect target DAG causal parent from unknown validator".into(),
+            });
+        };
+        if !bool::from(p.digest.ct_eq(&p.compute_digest(network, pinned.epoch))) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "indirect target DAG causal parent digest mismatch".into(),
+            });
+        }
+        all_pq &= verify_member_sig(
+            m,
+            &p.digest,
+            &p.author_ed25519_sig,
+            &p.author_pq_sig,
+            "indirect DAG causal parent",
+        )?;
+        parent_stake = parent_stake.saturating_add(u128::from(m.voting_weight));
+    }
+    if parent_stake.saturating_mul(3) <= total_stake.saturating_mul(2) {
+        return Err(AdapterError::ConsensusRule {
+            rule: "indirect target DAG causal parent stake does not exceed 2/3".into(),
+        });
+    }
+
+    let cert_msg = dag_anchor_cert_sign_bytes(network, pinned.epoch, target.round, &target.digest);
+    let mut cert_signers = BTreeSet::new();
+    let mut cert_stake = 0u128;
+    for sig in &proof.target_cert_sigs {
+        if !cert_signers.insert(sig.signer_pubkey) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "duplicate signer in indirect target DAG certificate".into(),
+            });
+        }
+        let Some(m) = member_map.get(&sig.signer_pubkey) else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "unknown signer in indirect target DAG certificate".into(),
+            });
+        };
+        all_pq &= verify_member_sig(
+            m,
+            &cert_msg,
+            &sig.ed25519_sig,
+            &sig.pq_sig,
+            "indirect DAG anchor cert",
+        )?;
+        cert_stake = cert_stake.saturating_add(u128::from(m.voting_weight));
+    }
+    if cert_stake.saturating_mul(3) <= total_stake.saturating_mul(2) {
+        return Err(AdapterError::ConsensusRule {
+            rule: "indirect target DAG anchor certificate stake does not exceed 2/3".into(),
+        });
+    }
+
+    // 3. Verify authenticated round `r + 1` causal relay bridging A_{r+2} -> relay -> A_r.
+    let relay = &proof.relay_vertex;
+    let relay_round = target.round + 1;
+    if relay.round != relay_round
+        || relay.parent_digests.is_empty()
+        || relay.parent_digests.len() > MAX_VERTEX_PARENTS
+        || !is_strictly_ascending(&relay.parent_digests)
+        || relay.parent_digests.binary_search(&target.digest).is_err()
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "indirect DAG relay vertex fails round, sorting, or edge-to-target check".into(),
+        });
+    }
+    let Some(relay_member) = member_map.get(&relay.author) else {
+        return Err(AdapterError::ConsensusRule {
+            rule: "indirect DAG relay vertex authored by non-committee validator".into(),
+        });
+    };
+    if !bool::from(
+        relay
+            .digest
+            .ct_eq(&relay.compute_digest(network, pinned.epoch)),
+    ) {
+        return Err(AdapterError::ConsensusRule {
+            rule: "indirect DAG relay vertex digest mismatch".into(),
+        });
+    }
+    all_pq &= verify_member_sig(
+        relay_member,
+        &relay.digest,
+        &relay.ed25519_sig,
+        &relay.pq_sig,
+        "indirect DAG relay vertex",
+    )?;
+    let bridge_included = proof.committing_wave.causal_parents.iter().any(|cp| {
+        cp.round == relay_round
+            && bool::from(cp.author.ct_eq(&relay.author))
+            && bool::from(cp.payload_root.ct_eq(&relay.digest))
+            && proof
+                .committing_wave
+                .anchor
+                .parent_digests
+                .binary_search(&cp.digest)
+                .is_ok()
+    });
+    if !bridge_included {
+        return Err(AdapterError::ConsensusRule {
+            rule: "committing round r + 2 anchor does not causally include relay vertex".into(),
+        });
+    }
+
+    let scheme = if all_pq {
+        ObservedScheme::Scheme(SchemeId::ML_DSA_65)
+    } else {
+        ObservedScheme::Scheme(SchemeId::ED25519)
+    };
+    let required_signers = ((pinned.members.len() as u64) * 2).div_ceil(3).max(1);
+    let evidence_digest = crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_DAGBFT_INDIRECT_ATTEST_V1",
+        network.as_bytes(),
+        &target.digest,
+        &relay.digest,
+        &proof.committing_wave.anchor.digest,
+    ]);
+    Ok(FinalityAttestation {
+        adapter: adapter.descriptor.id,
+        domain: DomainKey::from_parts(&adapter.descriptor.id, network),
+        height: target.round,
+        state_root: target.state_root,
+        finalized_at: proof.committing_wave.anchor.round,
+        time_unit: TimeUnit::Height,
+        security: SecurityBacking::SignatureSet {
+            scheme,
+            signers: cert_signers.len() as u64,
+            required: required_signers,
+            total_weight: total_stake,
+            slashable: true,
+        },
+        evidence_digest,
+        adapter_version: adapter.descriptor.adapter_version,
+        evidence_version: EVIDENCE_VERSION,
+        attested_block_hash: Some(target.digest),
+        attested_event_root: Some(target.event_root),
+        attested_tx_root: Some(target.tx_root),
+    })
+}
+
+/// Slashable Byzantine equivocation evidence against DAG-BFT committee member(s).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DagEquivocationProof {
+    /// One or more validators signed availability certificates for two distinct
+    /// anchor digests at the exact same `(network, epoch, round)`.
+    AnchorCertificate {
+        round: u64,
+        first_anchor_digest: Hash32,
+        first_sigs: Vec<DagBftSig>,
+        second_anchor_digest: Hash32,
+        second_sigs: Vec<DagBftSig>,
+    },
+    /// A validator authored and signed two distinct causal-parent vertices in the
+    /// exact same `(network, epoch, round)`.
+    CausalParent {
+        first: DagCausalParent,
+        second: DagCausalParent,
+    },
+    /// A validator authored and signed two distinct wave-voter vertices in the
+    /// exact same `(network, epoch, round)`.
+    VoterVertex {
+        first: DagVoterVertex,
+        second: DagVoterVertex,
+    },
+}
+
+/// Deterministic slash verdict produced by [`verify_dag_equivocation_proof`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DagSlashVerdict {
+    pub epoch: u64,
+    pub round: u64,
+    pub slashable_validators: Vec<[u8; 32]>,
+    pub slashed_weight: u128,
+    pub total_committee_weight: u128,
+    pub quorum_safety_breached: bool,
+}
+
+/// Verify slashable DAG-BFT equivocation (double availability certification or
+/// same-round vertex fork) with full Ed25519 + mandatory ML-DSA-65 verification.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] if any signature or digest is invalid, the two
+/// signed items do not conflict at the same round, or no committee overlap exists.
+///
+/// WIRING: Objective slashing verifier for bonded `AdapterSpec::DagCertificate` domains.
+pub fn verify_dag_equivocation_proof(
+    network: &str,
+    pinned: &PinnedDagCommittee,
+    proof: &DagEquivocationProof,
+) -> Result<DagSlashVerdict, AdapterError> {
+    if network.trim().is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "DAG equivocation proof network must be non-empty".into(),
+        });
+    }
+    let (member_map, total_stake, _) = canonical_committee_map(pinned)?;
+    let (round, offenders): (u64, Vec<[u8; 32]>) = match proof {
+        DagEquivocationProof::AnchorCertificate {
+            round,
+            first_anchor_digest,
+            first_sigs,
+            second_anchor_digest,
+            second_sigs,
+        } => {
+            if *round < 2 || !round.is_multiple_of(2) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "DAG anchor certificate equivocation requires even round >= 2".into(),
+                });
+            }
+            if bool::from(first_anchor_digest.ct_eq(second_anchor_digest)) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "DAG anchor certificate digests are identical (no equivocation)".into(),
+                });
+            }
+            let verify_side =
+                |digest: &Hash32, sigs: &[DagBftSig]| -> Result<BTreeSet<[u8; 32]>, AdapterError> {
+                    if sigs.is_empty() || sigs.len() > MAX_DAG_COMMITTEE {
+                        return Err(AdapterError::ConsensusRule {
+                            rule: "DAG equivocation signature set empty or over cap".into(),
+                        });
+                    }
+                    let msg = dag_anchor_cert_sign_bytes(network, pinned.epoch, *round, digest);
+                    let mut seen = BTreeSet::new();
+                    for s in sigs {
+                        if !seen.insert(s.signer_pubkey) {
+                            return Err(AdapterError::ConsensusRule {
+                                rule: "duplicate signer in DAG equivocation proof".into(),
+                            });
+                        }
+                        let Some(m) = member_map.get(&s.signer_pubkey) else {
+                            return Err(AdapterError::ConsensusRule {
+                                rule: "non-committee signer in DAG equivocation proof".into(),
+                            });
+                        };
+                        let _ = verify_member_sig(
+                            m,
+                            &msg,
+                            &s.ed25519_sig,
+                            &s.pq_sig,
+                            "DAG cert equivocation",
+                        )?;
+                    }
+                    Ok(seen)
+                };
+            let a = verify_side(first_anchor_digest, first_sigs)?;
+            let b = verify_side(second_anchor_digest, second_sigs)?;
+            let overlap: Vec<[u8; 32]> = a.intersection(&b).copied().collect();
+            if overlap.is_empty() {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "no overlapping validator signed both conflicting DAG anchors".into(),
+                });
+            }
+            (*round, overlap)
+        }
+        DagEquivocationProof::CausalParent { first, second } => {
+            if first.round != second.round || !bool::from(first.author.ct_eq(&second.author)) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "DAG parent equivocation requires identical round and author".into(),
+                });
+            }
+            if !bool::from(
+                first
+                    .digest
+                    .ct_eq(&first.compute_digest(network, pinned.epoch)),
+            ) || !bool::from(
+                second
+                    .digest
+                    .ct_eq(&second.compute_digest(network, pinned.epoch)),
+            ) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "DAG parent equivocation digest mismatch".into(),
+                });
+            }
+            if bool::from(first.digest.ct_eq(&second.digest)) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "DAG parent vertices are identical (no equivocation)".into(),
+                });
+            }
+            let Some(m) = member_map.get(&first.author) else {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "DAG parent equivocation cites unknown validator".into(),
+                });
+            };
+            let _ = verify_member_sig(
+                m,
+                &first.digest,
+                &first.author_ed25519_sig,
+                &first.author_pq_sig,
+                "DAG parent equivocation (first)",
+            )?;
+            let _ = verify_member_sig(
+                m,
+                &second.digest,
+                &second.author_ed25519_sig,
+                &second.author_pq_sig,
+                "DAG parent equivocation (second)",
+            )?;
+            (first.round, vec![first.author])
+        }
+        DagEquivocationProof::VoterVertex { first, second } => {
+            if first.round != second.round || !bool::from(first.author.ct_eq(&second.author)) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "DAG voter equivocation requires identical round and author".into(),
+                });
+            }
+            for v in [first, second] {
+                if v.parent_digests.is_empty()
+                    || v.parent_digests.len() > MAX_VERTEX_PARENTS
+                    || !is_strictly_ascending(&v.parent_digests)
+                    || !bool::from(v.digest.ct_eq(&v.compute_digest(network, pinned.epoch)))
+                {
+                    return Err(AdapterError::ConsensusRule {
+                        rule: "DAG voter equivocation vertex malformed or digest mismatch".into(),
+                    });
+                }
+            }
+            if bool::from(first.digest.ct_eq(&second.digest)) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "DAG voter vertices are identical (no equivocation)".into(),
+                });
+            }
+            let Some(m) = member_map.get(&first.author) else {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "DAG voter equivocation cites unknown validator".into(),
+                });
+            };
+            let _ = verify_member_sig(
+                m,
+                &first.digest,
+                &first.ed25519_sig,
+                &first.pq_sig,
+                "DAG voter equivocation (first)",
+            )?;
+            let _ = verify_member_sig(
+                m,
+                &second.digest,
+                &second.ed25519_sig,
+                &second.pq_sig,
+                "DAG voter equivocation (second)",
+            )?;
+            (first.round, vec![first.author])
+        }
+    };
+
+    let mut slashed_weight = 0u128;
+    for pk in &offenders {
+        if let Some(m) = member_map.get(pk) {
+            slashed_weight = slashed_weight.saturating_add(u128::from(m.voting_weight));
+        }
+    }
+    Ok(DagSlashVerdict {
+        epoch: pinned.epoch,
+        round,
+        slashable_validators: offenders,
+        slashed_weight,
+        total_committee_weight: total_stake,
+        quorum_safety_breached: slashed_weight.saturating_mul(3) >= total_stake,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,11 +1473,17 @@ mod tests {
         let mut parent_digests: Vec<Hash32> = causal_parents.iter().map(|p| p.digest).collect();
         parent_digests.sort_unstable();
 
-        // Build round 100 even wave anchor vertex.
+        // Build round 100 even wave anchor vertex authored by the canonical leader.
+        let committee = PinnedDagCommittee {
+            epoch,
+            members: members.clone(),
+        };
+        let leader =
+            elect_dag_wave_leader(network, &committee, anchor_round).expect("elect wave leader");
         let mut anchor = DagAnchorVertex {
             epoch,
             round: anchor_round,
-            author: keys[0].0.public_key_bytes(),
+            author: leader,
             timestamp_secs: 1_750_100_000,
             state_root: [0xA1; 32],
             tx_root: [0xA2; 32],
@@ -947,5 +1611,249 @@ mod tests {
             adapter.verify(&stripped_ev, &policy),
             Err(AdapterError::Crypto { .. })
         ));
+    }
+
+    #[test]
+    fn dag_bft_refuses_competing_non_leader_anchor_and_verifies_indirect_commit_and_slashing() {
+        let network = "sui-bullshark-1";
+        let (pinned, keys, bundle, golden) = dag_wave_fixture();
+        let adapter = BullsharkDagAdapter::new(network, Some(pinned.clone()));
+        let policy = VerificationPolicy::strict(110);
+
+        // Leader schedule is strictly order-invariant over committee member permutation.
+        let mut reversed = pinned.clone();
+        reversed.members.reverse();
+        assert_eq!(
+            elect_dag_wave_leader(network, &pinned, 100).expect("leader"),
+            elect_dag_wave_leader(network, &reversed, 100).expect("leader rev")
+        );
+
+        // Construct a SECOND round-100 anchor authored by a non-leader validator
+        // committing a conflicting state_root ([0xFE; 32] vs [0xA1; 32]), certified
+        // by the same 3/4 honest committee members with zero equivocation.
+        let alt_author = keys
+            .iter()
+            .map(|(ek, _)| ek.public_key_bytes())
+            .find(|pk| *pk != bundle.anchor.author)
+            .expect("distinct committee author");
+        let mut alt_anchor = DagAnchorVertex {
+            author: alt_author,
+            state_root: [0xFE; 32],
+            tx_root: [0xFD; 32],
+            event_root: [0xFC; 32],
+            digest: [0u8; 32],
+            ..bundle.anchor.clone()
+        };
+        alt_anchor.digest = alt_anchor.compute_digest(network);
+        let alt_cert_msg =
+            dag_anchor_cert_sign_bytes(network, pinned.epoch, alt_anchor.round, &alt_anchor.digest);
+        let alt_cert_sigs: Vec<DagBftSig> = keys
+            .iter()
+            .take(3)
+            .map(|(ek, pk)| DagBftSig {
+                signer_pubkey: ek.public_key_bytes(),
+                ed25519_sig: ek.sign(&alt_cert_msg).to_vec(),
+                pq_sig: pk
+                    .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &alt_cert_msg)
+                    .expect("pq sign"),
+            })
+            .collect();
+        let mut shared_voters = Vec::new();
+        for (ek, pk) in keys.iter().skip(1) {
+            let mut edges = vec![bundle.anchor.digest, alt_anchor.digest];
+            edges.sort_unstable();
+            let mut v = DagVoterVertex {
+                round: alt_anchor.round + 1,
+                author: ek.public_key_bytes(),
+                parent_digests: edges,
+                digest: [0u8; 32],
+                ed25519_sig: Vec::new(),
+                pq_sig: Vec::new(),
+            };
+            v.digest = v.compute_digest(network, pinned.epoch);
+            v.ed25519_sig = ek.sign(&v.digest).to_vec();
+            v.pq_sig = pk
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &v.digest)
+                .expect("pq sign");
+            shared_voters.push(v);
+        }
+        let mut ev_a = golden.clone();
+        ev_a.payload = encode_dag_evidence(&DagWaveCommitEvidence {
+            voter_vertices: shared_voters.clone(),
+            ..bundle.clone()
+        })
+        .expect("encode A");
+        let mut ev_b = golden;
+        ev_b.declared_root = alt_anchor.state_root;
+        ev_b.payload = encode_dag_evidence(&DagWaveCommitEvidence {
+            anchor: alt_anchor.clone(),
+            causal_parents: bundle.causal_parents.clone(),
+            anchor_cert_sigs: alt_cert_sigs.clone(),
+            voter_vertices: shared_voters,
+        })
+        .expect("encode B");
+
+        assert!(adapter.verify(&ev_a, &policy).is_ok());
+        assert!(matches!(
+            adapter.verify(&ev_b, &policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // Indirect commit: round-100 anchor committed asynchronously via a single
+        // round-101 relay vertex causally included by a directly committed round-102 wave.
+        let relay = bundle.voter_vertices[0].clone();
+        let mut r101_parents = Vec::new();
+        for (i, (ek, pk)) in keys.iter().skip(1).enumerate() {
+            let payload_root = if i == 0 {
+                relay.digest
+            } else {
+                [u8::try_from(i).unwrap_or(0).saturating_add(0x70); 32]
+            };
+            let mut cp = DagCausalParent {
+                round: 101,
+                author: ek.public_key_bytes(),
+                payload_root,
+                digest: [0u8; 32],
+                author_ed25519_sig: Vec::new(),
+                author_pq_sig: Vec::new(),
+            };
+            cp.digest = cp.compute_digest(network, pinned.epoch);
+            cp.author_ed25519_sig = ek.sign(&cp.digest).to_vec();
+            cp.author_pq_sig = pk
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &cp.digest)
+                .expect("pq sign");
+            r101_parents.push(cp);
+        }
+        let mut r102_pdigs: Vec<Hash32> = r101_parents.iter().map(|p| p.digest).collect();
+        r102_pdigs.sort_unstable();
+        let leader_102 = elect_dag_wave_leader(network, &pinned, 102).expect("leader 102");
+        let mut anchor_102 = DagAnchorVertex {
+            epoch: pinned.epoch,
+            round: 102,
+            author: leader_102,
+            timestamp_secs: 1_750_100_002,
+            state_root: [0xC1; 32],
+            tx_root: [0xC2; 32],
+            event_root: [0xC3; 32],
+            parent_digests: r102_pdigs,
+            digest: [0u8; 32],
+        };
+        anchor_102.digest = anchor_102.compute_digest(network);
+        let cert_102_msg =
+            dag_anchor_cert_sign_bytes(network, pinned.epoch, 102, &anchor_102.digest);
+        let cert_102_sigs: Vec<DagBftSig> = keys
+            .iter()
+            .take(3)
+            .map(|(ek, pk)| DagBftSig {
+                signer_pubkey: ek.public_key_bytes(),
+                ed25519_sig: ek.sign(&cert_102_msg).to_vec(),
+                pq_sig: pk
+                    .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &cert_102_msg)
+                    .expect("pq sign"),
+            })
+            .collect();
+        let voters_103: Vec<DagVoterVertex> = keys
+            .iter()
+            .take(3)
+            .map(|(ek, pk)| {
+                let mut v = DagVoterVertex {
+                    round: 103,
+                    author: ek.public_key_bytes(),
+                    parent_digests: vec![anchor_102.digest],
+                    digest: [0u8; 32],
+                    ed25519_sig: Vec::new(),
+                    pq_sig: Vec::new(),
+                };
+                v.digest = v.compute_digest(network, pinned.epoch);
+                v.ed25519_sig = ek.sign(&v.digest).to_vec();
+                v.pq_sig = pk
+                    .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &v.digest)
+                    .expect("pq sign");
+                v
+            })
+            .collect();
+        let indirect = DagIndirectWaveCommitProof {
+            target_anchor: bundle.anchor.clone(),
+            target_causal_parents: bundle.causal_parents.clone(),
+            target_cert_sigs: bundle.anchor_cert_sigs.clone(),
+            relay_vertex: relay,
+            committing_wave: DagWaveCommitEvidence {
+                anchor: anchor_102,
+                causal_parents: r101_parents,
+                anchor_cert_sigs: cert_102_sigs,
+                voter_vertices: voters_103,
+            },
+            submitter: Address::from([0x0C; 32]),
+        };
+        let ind_att = verify_indirect_dag_wave_commit(network, &pinned, &indirect, &policy)
+            .expect("valid indirect 2-wave DAG commit");
+        assert_eq!(ind_att.height, 100);
+        assert_eq!(ind_att.finalized_at, 102);
+        assert_eq!(ind_att.state_root, [0xA1; 32]);
+
+        // Severing the causal bridge from A_102 to relay_101 must fail closed.
+        let mut severed = indirect;
+        let (ek1, pk1) = &keys[1];
+        severed.committing_wave.causal_parents[0].payload_root = [0xEE; 32];
+        let new_d = severed.committing_wave.causal_parents[0].compute_digest(network, pinned.epoch);
+        severed.committing_wave.causal_parents[0].digest = new_d;
+        severed.committing_wave.causal_parents[0].author_ed25519_sig = ek1.sign(&new_d).to_vec();
+        severed.committing_wave.causal_parents[0].author_pq_sig = pk1
+            .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &new_d)
+            .expect("pq sign");
+        assert!(verify_indirect_dag_wave_commit(network, &pinned, &severed, &policy).is_err());
+
+        // Slashable equivocation 1: 3 validators co-certified conflicting round-100 anchors.
+        let cert_eq = verify_dag_equivocation_proof(
+            network,
+            &pinned,
+            &DagEquivocationProof::AnchorCertificate {
+                round: 100,
+                first_anchor_digest: bundle.anchor.digest,
+                first_sigs: bundle.anchor_cert_sigs.clone(),
+                second_anchor_digest: alt_anchor.digest,
+                second_sigs: alt_cert_sigs,
+            },
+        )
+        .expect("cert equivocation slashed");
+        assert_eq!(cert_eq.slashed_weight, 300);
+        assert_eq!(cert_eq.total_committee_weight, 400);
+        assert!(cert_eq.quorum_safety_breached);
+
+        // Identical digest must never falsely slash an honest validator.
+        assert!(verify_dag_equivocation_proof(
+            network,
+            &pinned,
+            &DagEquivocationProof::AnchorCertificate {
+                round: 100,
+                first_anchor_digest: bundle.anchor.digest,
+                first_sigs: bundle.anchor_cert_sigs.clone(),
+                second_anchor_digest: bundle.anchor.digest,
+                second_sigs: bundle.anchor_cert_sigs,
+            },
+        )
+        .is_err());
+
+        // Slashable equivocation 2: validator 0 authors two conflicting round-99 vertices.
+        let (ek0, pk0) = &keys[0];
+        let mut fork_parent = bundle.causal_parents[0].clone();
+        fork_parent.payload_root = [0xDE; 32];
+        fork_parent.digest = fork_parent.compute_digest(network, pinned.epoch);
+        fork_parent.author_ed25519_sig = ek0.sign(&fork_parent.digest).to_vec();
+        fork_parent.author_pq_sig = pk0
+            .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &fork_parent.digest)
+            .expect("pq sign");
+        let parent_eq = verify_dag_equivocation_proof(
+            network,
+            &pinned,
+            &DagEquivocationProof::CausalParent {
+                first: bundle.causal_parents[0].clone(),
+                second: fork_parent,
+            },
+        )
+        .expect("parent equivocation slashed");
+        assert_eq!(parent_eq.slashable_validators, vec![ek0.public_key_bytes()]);
+        assert_eq!(parent_eq.slashed_weight, 100);
+        assert!(!parent_eq.quorum_safety_breached);
     }
 }

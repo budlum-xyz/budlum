@@ -350,11 +350,18 @@ impl FinalityGuarantee {
                 }
             }
             AdapterSpec::DataAvailability { committee, .. } => {
-                let (min_samples, pq_all) = committee.as_ref().map_or((0, false), |c| {
-                    let pq =
-                        !c.members.is_empty() && c.members.iter().all(|m| !m.pq_pubkey.is_empty());
-                    (c.min_samples, pq)
-                });
+                let (valid, min_samples, pq_all) =
+                    committee.as_ref().map_or((false, 0, false), |c| {
+                        let (ok, pq) =
+                            validate_pinned_committee_keys(c.members.iter().map(|m| {
+                                (&m.ed25519_pubkey, m.voting_weight, m.pq_pubkey.as_slice())
+                            }));
+                        let valid = ok
+                            && c.min_samples > 0
+                            && c.min_square_size >= 2
+                            && c.min_square_size.is_power_of_two();
+                        (valid, if valid { c.min_samples } else { 0 }, valid && pq)
+                    });
                 Self {
                     reversibility: FinalityReversibility::DataAvailabilitySampled { min_samples },
                     quantum_posture: if pq_all {
@@ -363,24 +370,22 @@ impl FinalityGuarantee {
                         QuantumClass::Classical
                     },
                     attestation: CommitmentAttestation {
-                        state_root: committee.is_some(),
-                        tx_root: committee.is_some(),
+                        state_root: valid,
+                        tx_root: valid,
                         event_root: false,
                         parent: false,
                     },
-                    slashable_backing: committee.is_some(),
-                    fault_tolerance_bps: if committee.is_some() {
-                        BFT_FAULT_TOLERANCE_BPS
-                    } else {
-                        0
-                    },
+                    slashable_backing: valid,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
             AdapterSpec::HotStuffQc { committee, .. } => {
                 let (valid, pq_all) = committee.as_ref().map_or((false, false), |c| {
-                    let ok = !c.members.is_empty() && c.members.iter().all(|m| m.voting_weight > 0);
-                    let pq = ok && c.members.iter().all(|m| !m.pq_pubkey.is_empty());
-                    (ok, pq)
+                    validate_pinned_committee_keys(
+                        c.members
+                            .iter()
+                            .map(|m| (&m.ed25519_pubkey, m.voting_weight, m.pq_pubkey.as_slice())),
+                    )
                 });
                 Self {
                     reversibility: FinalityReversibility::DeterministicQuorum,
@@ -401,9 +406,11 @@ impl FinalityGuarantee {
             }
             AdapterSpec::DagCertificate { committee, .. } => {
                 let (valid, pq_all) = committee.as_ref().map_or((false, false), |c| {
-                    let ok = !c.members.is_empty() && c.members.iter().all(|m| m.voting_weight > 0);
-                    let pq = ok && c.members.iter().all(|m| !m.pq_pubkey.is_empty());
-                    (ok, pq)
+                    validate_pinned_committee_keys(
+                        c.members
+                            .iter()
+                            .map(|m| (&m.ed25519_pubkey, m.voting_weight, m.pq_pubkey.as_slice())),
+                    )
                 });
                 Self {
                     reversibility: FinalityReversibility::DeterministicQuorum,
@@ -429,7 +436,7 @@ impl FinalityGuarantee {
     /// cross-domain value transfer: authenticated events plus either slashable
     /// economic security, STARK validity, or deep cumulative PoW (`>= 6` blocks).
     #[must_use]
-    const fn admits_cross_domain_value(&self) -> bool {
+    pub const fn admits_cross_domain_value(&self) -> bool {
         if !self.attestation.event_root
             || self.fault_tolerance_bps == 0
             || self.fault_tolerance_bps > BPS_SCALE
@@ -448,6 +455,35 @@ impl FinalityGuarantee {
             | FinalityReversibility::DataAvailabilitySampled { .. } => false,
         }
     }
+}
+
+/// Validate a pinned external quorum committee: non-empty, bounded non-zero
+/// `voting_weight` without `u128` overflow, unique non-zero `Ed25519` keys, and
+/// canonical ML-DSA-65 public-key encoding before advertising `QuantumClass::Lattice`.
+fn validate_pinned_committee_keys<'a>(
+    members: impl Iterator<Item = (&'a [u8; 32], u64, &'a [u8])>,
+) -> (bool, bool) {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut total = 0u128;
+    let mut pq_all = true;
+    for (ed_pk, weight, pq_pk) in members {
+        if *ed_pk == [0u8; 32] || weight == 0 || !seen.insert(*ed_pk) {
+            return (false, false);
+        }
+        let Some(next) = total.checked_add(u128::from(weight)) else {
+            return (false, false);
+        };
+        total = next;
+        if pq_pk.is_empty()
+            || crate::crypto::primitives::PqKeyPair::validate_public_key(pq_pk).is_err()
+        {
+            pq_all = false;
+        }
+    }
+    if seen.is_empty() || total == 0 {
+        return (false, false);
+    }
+    (true, pq_all)
 }
 
 /// End-to-end guarantee of a composed cross-domain settlement route.
@@ -700,7 +736,7 @@ mod tests {
                 members: vec![crate::cross_domain::external::DagBftValidator {
                     ed25519_pubkey: [0x21; 32],
                     voting_weight: 100,
-                    pq_pubkey: vec![0x22; 32],
+                    pq_pubkey: vec![0x22; 1_952],
                 }],
             }),
         });
@@ -715,7 +751,7 @@ mod tests {
                 members: vec![crate::cross_domain::external::HotStuffValidator {
                     ed25519_pubkey: [0x31; 32],
                     voting_weight: 100,
-                    pq_pubkey: vec![0x32; 32],
+                    pq_pubkey: vec![0x32; 1_952],
                 }],
             }),
         });
@@ -837,10 +873,11 @@ mod tests {
                 members: vec![DaCommitteeMember {
                     ed25519_pubkey: [4; 32],
                     voting_weight: 100,
-                    pq_pubkey: vec![5; 32],
+                    pq_pubkey: vec![5; 1_952],
                 }],
             }),
         });
+        assert_eq!(g_da.quantum_posture, QuantumClass::Lattice);
         let da_to_zk = compose_cross_domain_route(&g_da, &hub, &g_zk);
         assert_eq!(
             da_to_zk.bottleneck_reversibility,
@@ -888,5 +925,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn external_spec_refuses_empty_duplicate_zero_sample_and_short_pq_committees() {
+        let empty_da = FinalityGuarantee::for_external_spec(&AdapterSpec::DataAvailability {
+            network: "celestia-empty".into(),
+            committee: Some(PinnedDaCommittee {
+                namespace_id: [0x10; 32],
+                min_samples: 0,
+                min_square_size: 2,
+                members: Vec::new(),
+            }),
+        });
+        assert_eq!(empty_da.fault_tolerance_bps, 0);
+        assert!(!empty_da.slashable_backing);
+        assert!(!empty_da.attestation.state_root);
+        assert!(!empty_da.attestation.tx_root);
+
+        // Short 32-byte non-ML-DSA-65 pq_pubkey must never claim QuantumClass::Lattice.
+        let short_pq_dag = FinalityGuarantee::for_external_spec(&AdapterSpec::DagCertificate {
+            network: "dag-short-pq".into(),
+            committee: Some(crate::cross_domain::external::PinnedDagCommittee {
+                epoch: 1,
+                members: vec![crate::cross_domain::external::DagBftValidator {
+                    ed25519_pubkey: [0x41; 32],
+                    voting_weight: 100,
+                    pq_pubkey: vec![0x99; 32],
+                }],
+            }),
+        });
+        assert_eq!(short_pq_dag.quantum_posture, QuantumClass::Classical);
+
+        // Duplicate validator ed25519 pubkeys invalidate pinned BFT committee guarantees.
+        let dup_member = crate::cross_domain::external::DagBftValidator {
+            ed25519_pubkey: [0x55; 32],
+            voting_weight: 100,
+            pq_pubkey: vec![0x77; 1_952],
+        };
+        let dup_dag = FinalityGuarantee::for_external_spec(&AdapterSpec::DagCertificate {
+            network: "dag-dup".into(),
+            committee: Some(crate::cross_domain::external::PinnedDagCommittee {
+                epoch: 1,
+                members: vec![dup_member.clone(), dup_member],
+            }),
+        });
+        assert_eq!(dup_dag.fault_tolerance_bps, 0);
+        assert!(!dup_dag.slashable_backing);
     }
 }
