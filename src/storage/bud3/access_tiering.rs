@@ -60,6 +60,10 @@ pub struct AccessTierTracker {
     transitions: Vec<TierTransition>,
 }
 
+const MAX_TRACKED_OBJECTS: usize = 65_536;
+const MAX_ACCESS_SAMPLES_PER_OBJECT: usize = 64;
+const MAX_TRANSITION_LOG: usize = 4_096;
+
 impl AccessTierTracker {
     /// On testnet (`45261`), `SlowY` codecs are open and archival tiering converts
     /// cold public objects.
@@ -69,15 +73,28 @@ impl AccessTierTracker {
         true
     }
 
-    /// Track a newly observed object (`is_sealed` prevents validator-side tier conversion).
+    /// Track a newly observed object (`is_sealed` prevents validator-side tier conversion
+    /// and latches monotonically so a sealed object is never downgraded to public).
     /// Convenience: exposed for upload and registration telemetry.
     pub fn track_object(&mut self, object: ObjectKey, is_sealed: bool) {
-        self.objects.entry(object).or_insert(ObjectAccessLog {
-            is_sealed,
-            current_tier: Some(AccessTier::Normal),
-            cold_since_secs: None,
-            recent_access_secs: Vec::new(),
-        });
+        if let Some(existing) = self.objects.get_mut(&object) {
+            existing.is_sealed |= is_sealed;
+            return;
+        }
+        if self.objects.len() >= MAX_TRACKED_OBJECTS {
+            if let Some(evict) = self.objects.keys().next().copied() {
+                self.objects.remove(&evict);
+            }
+        }
+        self.objects.insert(
+            object,
+            ObjectAccessLog {
+                is_sealed,
+                current_tier: Some(AccessTier::Normal),
+                cold_since_secs: None,
+                recent_access_secs: Vec::new(),
+            },
+        );
     }
 
     /// Record a paid view or gateway read at `now_secs` and evaluate tier change.
@@ -92,6 +109,10 @@ impl AccessTierTracker {
         if let Some(entry) = self.objects.get_mut(&object) {
             let cutoff = now_secs.saturating_sub(COLD_WINDOW_SECS);
             entry.recent_access_secs.retain(|&ts| ts >= cutoff);
+            if entry.recent_access_secs.len() >= MAX_ACCESS_SAMPLES_PER_OBJECT {
+                let drop_n = entry.recent_access_secs.len() + 1 - MAX_ACCESS_SAMPLES_PER_OBJECT;
+                entry.recent_access_secs.drain(..drop_n);
+            }
             entry.recent_access_secs.push(now_secs);
         }
         self.evaluate_tier(object, now_secs)
@@ -140,6 +161,10 @@ impl AccessTierTracker {
         let prev = entry.current_tier.unwrap_or(AccessTier::Normal);
         if prev != next_tier {
             entry.current_tier = Some(next_tier);
+            if self.transitions.len() >= MAX_TRANSITION_LOG {
+                let drop_n = self.transitions.len() + 1 - MAX_TRANSITION_LOG;
+                self.transitions.drain(..drop_n);
+            }
             self.transitions.push(TierTransition {
                 object,
                 from: prev,
@@ -212,6 +237,21 @@ mod tests {
         }
         assert_eq!(tracker.evaluate_tier(obj, base + 600), AccessTier::Hot);
         assert_eq!(tracker.transitions().last().unwrap().to, AccessTier::Hot);
+        // Sealed flag latches permanently even if first tracked with `is_sealed = false`.
+        let latched = [0x55u8; 32];
+        tracker.track_object(latched, false);
+        tracker.track_object(latched, true);
+        tracker.track_object(latched, false);
+        assert_eq!(
+            tracker.evaluate_tier(latched, 100 * 86_400),
+            AccessTier::Cold
+        );
+        assert!(
+            !tracker
+                .expansion_archival_candidates(135 * 86_400, true)
+                .contains(&latched),
+            "sealed-latched object must never be selected for validator SlowY conversion"
+        );
     }
 
     #[test]

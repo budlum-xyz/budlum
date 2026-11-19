@@ -156,6 +156,17 @@ impl BlockBguMeter {
     }
 }
 
+/// Computes `floor(base * factor / denom)` without intermediate `base * factor`
+/// overflow (`denom` must be non-zero).
+const fn mul_div_floor_u128(base: u128, factor: u128, denom: u128) -> u128 {
+    let q = base / denom;
+    let r = base % denom;
+    // `r < denom = 30_000_000 * 8 = 240_000_000` and `factor <= 30_000_000`, so
+    // `r * factor <= 7.2e15 << u128::MAX` and cannot overflow.
+    q.saturating_mul(factor)
+        .saturating_add((r * factor) / denom)
+}
+
 /// Computes the next block's UEL base fee in attoBUD per BGU (section 8.9 item 5).
 #[must_use]
 pub fn next_uel_base_fee_attos(current_base_fee_attos: u128, block_gas_used_bgu: u64) -> u128 {
@@ -165,17 +176,14 @@ pub fn next_uel_base_fee_attos(current_base_fee_attos: u128, block_gas_used_bgu:
     if used == target {
         return base;
     }
+    let den = target.saturating_mul(BASE_FEE_MAX_CHANGE_DENOM);
     if used > target {
         let excess = used - target;
-        let num = base.saturating_mul(excess);
-        let den = target.saturating_mul(BASE_FEE_MAX_CHANGE_DENOM);
-        let delta = (num / den).max(1);
+        let delta = mul_div_floor_u128(base, excess, den).max(1);
         base.saturating_add(delta)
     } else {
         let deficit = target - used;
-        let num = base.saturating_mul(deficit);
-        let den = target.saturating_mul(BASE_FEE_MAX_CHANGE_DENOM);
-        let delta = num / den;
+        let delta = mul_div_floor_u128(base, deficit, den);
         base.saturating_sub(delta).max(MIN_UEL_BASE_FEE_ATTOS)
     }
 }
@@ -254,42 +262,91 @@ pub fn settle_uel_fee_attos(
     let atom_q = u128::from(ATTOS_PER_ATOM);
     let whole_burn_atoms =
         u64::try_from(ten_percent / atom_q).map_err(|_| String::from("UEL burn atom overflow"))?;
+    let next_burned_total = state
+        .burned_total
+        .checked_add(whole_burn_atoms)
+        .ok_or_else(|| String::from("UEL cumulative burned_total overflow"))?;
     let burn_dust_attos = ten_percent % atom_q;
 
     let pool_addr = reward_pool_account();
-    let pool_plus_dust = if let Some(burn_reserve) = state.burn_reserve_address {
-        if burn_dust_attos > 0 {
-            state.transfer_attos_in_unit(
-                payer,
-                &burn_reserve,
-                burn_dust_attos,
-                BudEnvUnit::EvmWei,
-            )?;
-        }
-        pool_share
-    } else {
-        pool_share.saturating_add(burn_dust_attos)
-    };
+    let mut touched_addrs = vec![*payer, pool_addr, *proposer];
+    if let Some(burn_reserve) = state.burn_reserve_address {
+        touched_addrs.push(burn_reserve);
+    }
+    touched_addrs.sort();
+    touched_addrs.dedup();
+    let saved_accounts: Vec<(Address, Option<crate::core::account::Account>, bool)> = touched_addrs
+        .into_iter()
+        .map(|addr| {
+            (
+                addr,
+                state.accounts.get(&addr).cloned(),
+                state.dirty_accounts.contains(&addr),
+            )
+        })
+        .collect();
+    let saved_burned_total = state.burned_total;
 
-    if pool_plus_dust > 0 {
-        state.transfer_attos_in_unit(payer, &pool_addr, pool_plus_dust, BudEnvUnit::EvmWei)?;
-    }
-    if tip_total > 0 {
-        state.transfer_attos_in_unit(payer, proposer, tip_total, BudEnvUnit::EvmWei)?;
-    }
-    if whole_burn_atoms > 0 {
-        let exact_burn_attos = u128::from(whole_burn_atoms).saturating_mul(atom_q);
-        let acct = state
-            .accounts
-            .get_mut(payer)
-            .ok_or_else(|| String::from("payer account missing during burn"))?;
-        let current = acct.checked_total_attos()?;
-        let after = current
-            .checked_sub(exact_burn_attos)
-            .ok_or_else(|| String::from("payer attoBUD underflow during burn"))?;
-        acct.set_from_total_attos(after)?;
-        state.dirty_accounts.insert(*payer);
-        state.burned_total = state.burned_total.saturating_add(whole_burn_atoms);
+    let apply_result = (|| -> Result<(), String> {
+        let pool_plus_dust = if let Some(burn_reserve) = state.burn_reserve_address {
+            if burn_dust_attos > 0 {
+                state.transfer_attos_in_unit(
+                    payer,
+                    &burn_reserve,
+                    burn_dust_attos,
+                    BudEnvUnit::EvmWei,
+                )?;
+            }
+            pool_share
+        } else {
+            pool_share
+                .checked_add(burn_dust_attos)
+                .ok_or_else(|| String::from("UEL reward pool fee overflow"))?
+        };
+
+        if pool_plus_dust > 0 {
+            state.transfer_attos_in_unit(payer, &pool_addr, pool_plus_dust, BudEnvUnit::EvmWei)?;
+        }
+        if tip_total > 0 {
+            state.transfer_attos_in_unit(payer, proposer, tip_total, BudEnvUnit::EvmWei)?;
+        }
+        if whole_burn_atoms > 0 {
+            let exact_burn_attos = u128::from(whole_burn_atoms)
+                .checked_mul(atom_q)
+                .ok_or_else(|| String::from("UEL exact burn attos overflow"))?;
+            let acct = state
+                .accounts
+                .get_mut(payer)
+                .ok_or_else(|| String::from("payer account missing during burn"))?;
+            let current = acct.checked_total_attos()?;
+            let after = current
+                .checked_sub(exact_burn_attos)
+                .ok_or_else(|| String::from("payer attoBUD underflow during burn"))?;
+            acct.set_from_total_attos(after)?;
+            state.dirty_accounts.insert(*payer);
+            state.burned_total = next_burned_total;
+        }
+        Ok(())
+    })();
+
+    if let Err(err) = apply_result {
+        for (addr, prev_acct, was_dirty) in saved_accounts {
+            match prev_acct {
+                Some(acct) => {
+                    state.accounts.insert(addr, acct);
+                }
+                None => {
+                    state.accounts.remove(&addr);
+                }
+            }
+            if was_dirty {
+                state.dirty_accounts.insert(addr);
+            } else {
+                state.dirty_accounts.remove(&addr);
+            }
+        }
+        state.burned_total = saved_burned_total;
+        return Err(err);
     }
 
     let burned_recorded = if state.burn_reserve_address.is_some() {
@@ -303,4 +360,86 @@ pub fn settle_uel_fee_attos(
         security_pool_attos: base_total.saturating_sub(burned_recorded),
         proposer_tip_attos: tip_total,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settle_uel_fee_rolls_back_atomically_and_refuses_burned_total_overflow() {
+        let payer = Address([0x11; 32]);
+        let proposer = Address([0x22; 32]);
+        let burn_reserve = Address([0x33; 32]);
+        let pool = reward_pool_account();
+
+        let mut state = AccountState::new();
+        state.burn_reserve_address = Some(burn_reserve);
+        state.get_or_create(&payer).balance = 1_000;
+        // Saturate proposer balance so the third leg (priority-fee credit) fails
+        // after burn_reserve and reward_pool have already been credited.
+        state.get_or_create(&proposer).balance = u64::MAX;
+        state.dirty_accounts.clear();
+
+        let base_fee = u128::from(ATTOS_PER_ATOM) + 10; // yields whole burn + sub-atom dust
+        let tip = u128::from(ATTOS_PER_ATOM);
+        let err = settle_uel_fee_attos(
+            &mut state,
+            &payer,
+            &proposer,
+            10,
+            base_fee,
+            base_fee + tip,
+            tip,
+        );
+        assert!(err.is_err(), "overflowing proposer credit must fail closed");
+        assert_eq!(
+            state.spendable_attos(&payer),
+            1_000 * u128::from(ATTOS_PER_ATOM)
+        );
+        assert_eq!(state.spendable_attos(&burn_reserve), 0);
+        assert_eq!(state.spendable_attos(&pool), 0);
+        assert_eq!(state.burned_total, 0);
+        assert!(state.dirty_accounts.is_empty());
+
+        // Also refuse cumulative `burned_total` u64 overflow without touching balances.
+        state.get_or_create(&proposer).balance = 0;
+        state.burned_total = u64::MAX;
+        state.dirty_accounts.clear();
+        let burn_err = settle_uel_fee_attos(
+            &mut state,
+            &payer,
+            &proposer,
+            10,
+            u128::from(ATTOS_PER_ATOM),
+            2 * u128::from(ATTOS_PER_ATOM),
+            u128::from(ATTOS_PER_ATOM),
+        );
+        assert!(
+            burn_err.is_err(),
+            "burned_total u64 overflow must refuse rather than drop burned supply"
+        );
+        assert_eq!(
+            state.spendable_attos(&payer),
+            1_000 * u128::from(ATTOS_PER_ATOM)
+        );
+        assert_eq!(state.spendable_attos(&pool), 0);
+        assert_eq!(state.spendable_attos(&proposer), 0);
+        assert_eq!(state.burned_total, u64::MAX);
+    }
+
+    #[test]
+    fn next_uel_base_fee_preserves_exact_eighth_step_near_u128_max() {
+        // Large base fee where `base * TARGET_BLOCK_BGU` would overflow `u128`.
+        let large_base: u128 = 1u128 << 120;
+        let expected_step = large_base / BASE_FEE_MAX_CHANGE_DENOM;
+        assert_eq!(
+            next_uel_base_fee_attos(large_base, BLOCK_BGU_LIMIT),
+            large_base + expected_step
+        );
+        assert_eq!(
+            next_uel_base_fee_attos(large_base, 0),
+            large_base - expected_step
+        );
+    }
 }
