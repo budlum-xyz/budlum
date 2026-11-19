@@ -1319,7 +1319,9 @@ mod tests {
         };
         let out = guard
             .submit_contradiction(41, &fault, Address::from([0xCA; 32]), 410)
-            .expect("a verified Algorand voter equivocation freezes the domain and slashes the bond");
+            .expect(
+                "a verified Algorand voter equivocation freezes the domain and slashes the bond",
+            );
         assert_eq!(out.external_slashed_weight, culpable_weight);
         assert_eq!(out.slashed_bond_atoms, 20_000);
         assert_eq!(out.challenger_reward_atoms, 2_000);
