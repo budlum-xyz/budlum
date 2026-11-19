@@ -175,35 +175,24 @@ impl TxOverlay {
     ///
     /// Returns an error if the operation fails.
     pub fn charge_bgu(&mut self, bgu: u64) -> Result<(), budlum_uel_abi::OutOfGas> {
-        for frame in &mut self.frames {
-            if let Some(limit) = frame.frame_gas_limit_bgu {
-                let next_frame = frame
-                    .frame_gas_used_bgu
-                    .checked_add(bgu)
-                    .ok_or(budlum_uel_abi::OutOfGas)?;
-                if next_frame > limit {
-                    let avail = limit.saturating_sub(frame.frame_gas_used_bgu);
-                    frame.frame_gas_used_bgu = limit;
-                    self.gas_used_bgu = self
-                        .gas_used_bgu
-                        .saturating_add(avail)
-                        .min(self.gas_limit_bgu);
-                    return Err(budlum_uel_abi::OutOfGas);
-                }
+        let avail = self.remaining_bgu();
+        if bgu > avail {
+            for frame in &mut self.frames {
+                frame.frame_gas_used_bgu = frame.frame_gas_used_bgu.saturating_add(avail);
             }
-        }
-        let next = self
-            .gas_used_bgu
-            .checked_add(bgu)
-            .ok_or(budlum_uel_abi::OutOfGas)?;
-        if next > self.gas_limit_bgu {
-            self.gas_used_bgu = self.gas_limit_bgu;
+            self.gas_used_bgu = self
+                .gas_used_bgu
+                .saturating_add(avail)
+                .min(self.gas_limit_bgu);
             return Err(budlum_uel_abi::OutOfGas);
         }
         for frame in &mut self.frames {
             frame.frame_gas_used_bgu = frame.frame_gas_used_bgu.saturating_add(bgu);
         }
-        self.gas_used_bgu = next;
+        self.gas_used_bgu = self
+            .gas_used_bgu
+            .saturating_add(bgu)
+            .min(self.gas_limit_bgu);
         Ok(())
     }
 
@@ -516,4 +505,49 @@ fn restore_accounts(state: &mut AccountState, snap: &BTreeMap<Address, (u64, u64
         }
     }
     state.keys_dirty = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_frame_oog_debits_parent_frame_budget_and_burns_on_u64_max() {
+        let mut state = AccountState::default();
+        let mut overlay = TxOverlay::new(&state, EeId::EVM, 1_000);
+
+        // Parent frame (WASM) capped at 100 BGU spawns child (SVM) capped at 60 BGU.
+        overlay
+            .push_universal_frame_with_budget(&state, EeId::WASM, false, Some(100))
+            .unwrap();
+        overlay
+            .push_universal_frame_with_budget(&state, EeId::SVM, false, Some(60))
+            .unwrap();
+
+        // Child attempts 80 BGU (> 60): burns 60 BGU and returns OutOfGas.
+        assert!(overlay.charge_bgu(80).is_err());
+        assert_eq!(overlay.gas_used_bgu(), 60);
+        overlay.rollback_universal_frame(&mut state);
+
+        // Parent frame (budget 100) MUST have only 40 BGU remaining, not 100.
+        assert_eq!(
+            overlay.remaining_bgu(),
+            40,
+            "child OOG burn must debit every enclosing frame budget"
+        );
+
+        // A second child asking for u64::MAX must burn the remaining 40 BGU (not 0)
+        // and leave the parent frame exhausted, preserving 900 BGU in root tx.
+        overlay
+            .push_universal_frame_with_budget(&state, EeId::SVM, false, Some(60))
+            .unwrap();
+        assert!(overlay.charge_bgu(u64::MAX).is_err());
+        overlay.rollback_universal_frame(&mut state);
+        assert_eq!(overlay.gas_used_bgu(), 100);
+        assert_eq!(overlay.remaining_bgu(), 0);
+
+        // Once parent rolls back, root caller still holds its unspent 900 BGU.
+        overlay.rollback_universal_frame(&mut state);
+        assert_eq!(overlay.remaining_bgu(), 900);
+    }
 }
