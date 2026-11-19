@@ -79,6 +79,7 @@
 //! with their units attached. The judgement is the reader's, and the numbers it
 //! needs are in [`profile`].
 
+pub mod algorand_stateproof;
 pub mod arweave_spora;
 pub mod auxpow_pop;
 pub mod babylon_eots;
@@ -90,11 +91,13 @@ pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
 pub mod external_tx;
+pub mod ghostdag;
 pub mod heterogeneous_multiprover;
 pub mod hotstuff;
 pub mod intake;
 pub mod intake_quorum;
 pub mod mina_recursive;
+pub mod near_doomslug;
 pub mod nipopow;
 pub mod ouroboros_mithril;
 pub mod phase_a_dual;
@@ -116,6 +119,10 @@ pub mod ton_catchain;
 pub mod versioning;
 pub mod zkvm_proof;
 
+pub use algorand_stateproof::{
+    advance_algorand_verifier, verify_algorand_equivocation, AlgorandStateProofAdapter,
+    AlgorandStateProofMessage, PinnedAlgorandVerifier,
+};
 pub use arweave_spora::{ArweaveSpOraAdapter, ArweaveSpOraEvidence};
 pub use auxpow_pop::{
     AuxPowPopAdapter, PinnedAuxPowAnchor, PopAnchorSigner, PopEquivocationProof, U256Bytes,
@@ -151,6 +158,10 @@ pub use evm_hybrid::{
 pub use external_tx::{
     execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext, ExternalDomainTxError,
 };
+pub use ghostdag::{
+    encode_ghostdag_evidence, GhostdagEvidence, GhostdagHeader, GhostdagPowAdapter,
+    PinnedGhostdagAnchor,
+};
 pub use heterogeneous_multiprover::{
     detect_prover_disagreement, AttestedCommitteeLeg, FaultWindowLeg,
     HeterogeneousMultiProverAdapter, MultiProverCommitteeMember, MultiProverDisagreement,
@@ -172,6 +183,10 @@ pub use intake_quorum::{
     ROUND_RETENTION_BLOCKS,
 };
 pub use mina_recursive::{PinnedSuccinctGenesis, SuccinctRecursiveAdapter};
+pub use near_doomslug::{
+    advance_near_epoch, verify_near_approval_slash, NearBlockProducer, NearDoomslugAdapter,
+    PinnedNearEpoch,
+};
 pub use nipopow::{
     best_superchain_score, superblock_level, InterlinkHop, InterlinkMerkleStep, NipopowAdapter,
     NipopowEvidence, NipopowHeader, PinnedNipopowGenesis,
