@@ -11,7 +11,7 @@
 # These rows were invisible until now: the second loop of the ratchet compared
 # the missing list against this file backwards, so no gap was ever reported and
 # no line could ever be recorded (`denetim/bulgular/B-0079`). The rows are
-# recorded, not excused: `B-0142` closes them family by family, and every such
+# recorded, not excused: `B-0156` closes them family by family, and every such
 # change deletes the lines it closes.
 
 # Solana compatibility surface (42 rows)
