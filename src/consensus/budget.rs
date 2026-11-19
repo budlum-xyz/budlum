@@ -53,7 +53,7 @@ impl BlockBudget {
 
     /// Bytes charged to `section` so far.
     #[must_use]
-    pub fn used(&self, section: Section) -> usize {
+    pub const fn used(&self, section: Section) -> usize {
         match section {
             Section::Body => self.body,
             Section::Witness => self.witness,

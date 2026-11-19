@@ -39,12 +39,12 @@ pub const DEFAULT_BLOCK_LEN: u16 = 200;
 pub const MAX_K: u16 = 4096;
 /// Maximum original payload accepted by one carousel segment (not consensus).
 pub const MAX_CAROUSEL_BYTES: usize = 64 * 1024 * 1024;
-/// Largest `block_len` a carousel accepts: header plus body of one drop must
-/// fit the optical frame's drop-wire cap (`qr_frame::MAX_DROP_WIRE`, 8 KiB),
-/// so `DROP_HEADER_LEN + MAX_BLOCK_LEN` is exactly that cap. `from_payload`
-/// used to accept any non-zero `u16` here, and a drop packed above the cap
-/// was refused by every receiver as `BadDropLen`.
-pub const MAX_BLOCK_LEN: u16 = 8 * 1024 - DROP_HEADER_LEN as u16;
+/// Largest `block_len` a carousel accepts (`MAX_DROP_WIRE - DROP_HEADER_LEN`).
+///
+/// Header plus body of one drop must fit the optical frame's drop-wire cap
+/// (`qr_frame::MAX_DROP_WIRE`, 8 KiB) so `from_payload` and every receiver agree.
+pub const MAX_BLOCK_LEN: u16 = 8 * 1024 - 24;
+const _: () = assert!(8 * 1024 - (MAX_BLOCK_LEN as usize) == DROP_HEADER_LEN);
 
 /// Repair margin for a one-shot encode, in permillage of `k`.
 ///
@@ -184,7 +184,7 @@ impl CarouselParams {
         if self.total_len == 0 {
             return Err(CarouselError::Empty);
         }
-        if self.total_len > MAX_CAROUSEL_BYTES as u32 {
+        if self.total_len as usize > MAX_CAROUSEL_BYTES {
             return Err(CarouselError::TooLarge {
                 len: self.total_len as usize,
                 max: MAX_CAROUSEL_BYTES,
@@ -221,7 +221,9 @@ impl CarouselParams {
         let bl = usize::from(block_len);
         let k_usize = payload.len().div_ceil(bl);
         if k_usize == 0 || k_usize > usize::from(MAX_K) {
-            return Err(CarouselError::BadK(k_usize.min(u16::MAX as usize) as u16));
+            return Err(CarouselError::BadK(
+                u16::try_from(k_usize).unwrap_or(u16::MAX),
+            ));
         }
         let k = u16::try_from(k_usize).map_err(|_| CarouselError::BadK(MAX_K))?;
         Ok(Self {
@@ -442,8 +444,7 @@ pub fn planned_drop_count(k: u16, p_milli: u32) -> u32 {
     let num = u64::from(k) * u64::from(t_milli) * 1020;
     let n = num.div_ceil(1_000_000);
     // At least one full carousel cycle (2k) so systematic pass is covered.
-    n.max(u64::from(k).saturating_mul(2))
-        .min(u64::from(u32::MAX)) as u32
+    u32::try_from(n.max(u64::from(k).saturating_mul(2))).unwrap_or(u32::MAX)
 }
 
 /// Drop budget for a **one-shot** encode, as opposed to a carousel broadcast.
@@ -629,7 +630,7 @@ impl CarouselDecoder {
                 continue;
             }
             if let Some(known) = self.solved.get(idx).and_then(|s| s.as_ref()) {
-                xor_into(&mut rhs, known)
+                xor_into(&mut rhs, known);
             } else {
                 bitset_set(&mut mask, idx);
                 degree = degree.saturating_add(1);
@@ -759,7 +760,7 @@ impl CarouselDecoder {
                 return Ok(());
             };
             let idx = self.residuals.len();
-            let degree = bitset_popcount(&mask) as u16;
+            let degree = u16::try_from(bitset_popcount(&mask)).unwrap_or(u16::MAX);
             self.residuals.push(Residual {
                 mask: mask.clone(),
                 rhs: rhs.clone(),
@@ -791,7 +792,7 @@ impl CarouselDecoder {
                 if let (Some(dst), Some(src)) = (lo.get_mut(other), hi.first_mut()) {
                     bitset_xor(&mut dst.mask, &src.mask);
                     xor_into(&mut dst.rhs, &src.rhs);
-                    dst.degree = bitset_popcount(&dst.mask) as u16;
+                    dst.degree = u16::try_from(bitset_popcount(&dst.mask)).unwrap_or(u16::MAX);
                     let _ = cc;
                 }
             }
@@ -845,7 +846,8 @@ impl CarouselDecoder {
                     if bitset_test(&held.mask, idx) {
                         xor_into(&mut held.rhs, &body);
                         bitset_clear(&mut held.mask, idx);
-                        held.degree = bitset_popcount(&held.mask) as u16;
+                        held.degree =
+                            u16::try_from(bitset_popcount(&held.mask)).unwrap_or(u16::MAX);
                     }
                 }
                 self.rebuild_pivots(k);
@@ -860,7 +862,7 @@ impl CarouselDecoder {
         if self.pivots.len() != k {
             self.pivots = vec![None; k];
         }
-        for slot in self.pivots.iter_mut() {
+        for slot in &mut self.pivots {
             *slot = None;
         }
         for (i, r) in self.residuals.iter().enumerate() {

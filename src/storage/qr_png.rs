@@ -53,12 +53,12 @@ impl From<QrMatrixError> for QrPngError {
     }
 }
 
-/// Upper bound on the PNG side (px) the raster encoder emits and the BDLV
-/// decoder accepts. A QR matrix is at most 177×177 modules; at [`MODULE_PX`]
-/// per module plus quiet zone the side stays far under the cap, but the cap is
-/// what stops a hostile IHDR from declaring a geometry our encoder never
-/// produces (see `qr_video::decode_png_grey`, which re-uses this ceiling).
-/// The largest honest side is (177 + 8) * 4 = 740 px, so 1024 leaves headroom
+/// Upper bound on the PNG side (px) the raster encoder emits and the BDLV decoder accepts.
+///
+/// A QR matrix is at most 177×177 modules; at [`MODULE_PX`] per module plus quiet
+/// zone the largest honest side is `(177 + 8) * 4 = 740` px, and `qr_video::decode_png_grey`
+/// reuses this ceiling so a hostile IHDR cannot declare an outsized geometry.
+/// 1024 leaves headroom
 /// while bounding a hostile frame to a few MiB of raw pixels.
 pub const MAX_PNG_SIDE_PX: u32 = 1024;
 
@@ -76,11 +76,13 @@ pub fn matrix_to_png(matrix: &QrMatrix) -> Result<Vec<u8>, QrPngError> {
     let h = w;
     // RGB raw + filter byte per row
     let mut raw = Vec::with_capacity(h * (1 + w * 3));
-    for py in 0..h {
+    let w_u32 = u32::try_from(w).map_err(|_| QrPngError::Geometry)?;
+    let h_u32 = u32::try_from(h).map_err(|_| QrPngError::Geometry)?;
+    for py in 0..h_u32 {
         raw.push(0); // filter None
-        let my = (py as u32) / MODULE_PX;
-        for px in 0..w {
-            let mx = (px as u32) / MODULE_PX;
+        let my = py / MODULE_PX;
+        for px in 0..w_u32 {
+            let mx = px / MODULE_PX;
             let dark = if my >= QUIET_ZONE
                 && mx >= QUIET_ZONE
                 && my < QUIET_ZONE + matrix.width
@@ -119,19 +121,20 @@ fn write_png_rgb8(width: u32, height: u32, filtered_raw: &[u8]) -> Result<Vec<u8
     ihdr.push(0);
     ihdr.push(0);
     ihdr.push(0);
-    write_chunk(&mut out, b"IHDR", &ihdr);
+    write_chunk(&mut out, *b"IHDR", &ihdr);
     let idat = zlib_deflate(filtered_raw)?;
-    write_chunk(&mut out, b"IDAT", &idat);
-    write_chunk(&mut out, b"IEND", &[]);
+    write_chunk(&mut out, *b"IDAT", &idat);
+    write_chunk(&mut out, *b"IEND", &[]);
     Ok(out)
 }
 
-fn write_chunk(out: &mut Vec<u8>, ty: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    out.extend_from_slice(ty);
+fn write_chunk(out: &mut Vec<u8>, ty: [u8; 4], data: &[u8]) {
+    let data_len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&data_len.to_be_bytes());
+    out.extend_from_slice(&ty);
     out.extend_from_slice(data);
     let mut crc_input = Vec::with_capacity(4 + data.len());
-    crc_input.extend_from_slice(ty);
+    crc_input.extend_from_slice(&ty);
     crc_input.extend_from_slice(data);
     out.extend_from_slice(&crc32_png(&crc_input).to_be_bytes());
 }
@@ -157,8 +160,8 @@ fn zlib_deflate_via<W: std::io::Write>(data: &[u8], sink: W) -> Result<(), QrPng
 
 fn crc32_png(data: &[u8]) -> u32 {
     let mut table = [0u32; 256];
-    for (i, entry) in table.iter_mut().enumerate() {
-        let mut c = i as u32;
+    for (i, entry) in (0u32..256).zip(table.iter_mut()) {
+        let mut c = i;
         for _ in 0..8 {
             c = if c & 1 != 0 {
                 0xEDB8_8320 ^ (c >> 1)

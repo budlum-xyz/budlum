@@ -15,9 +15,10 @@
 //! A future mux adapter implements [`FrameMux`] and is refused unless
 //! [`CodecKind::is_allowed`] is true.
 
-/// Magic of the [`CodecKind::RawFrames`] carrier: frames concatenated under a
-/// count header. Named here so the durable-storage classifier reads the same
-/// constant the muxer writes - a bumped magic cannot silently un-classify a blob.
+/// Magic of the [`CodecKind::RawFrames`] carrier (frames concatenated under a count header).
+///
+/// Named here so the durable-storage classifier reads the same constant the muxer writes,
+/// preventing a bumped magic from silently un-classifying a blob.
 pub const RAW_CONCAT_MAGIC: [u8; 4] = *b"BDLR";
 
 /// Channel kinds that may carry Three optical frames.
