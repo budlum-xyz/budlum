@@ -80,6 +80,7 @@
 //! needs are in [`profile`].
 
 pub mod arweave_spora;
+pub mod auxpow_pop;
 pub mod babylon_eots;
 pub mod based_preconf;
 pub mod bitcoin_spv;
@@ -100,7 +101,9 @@ pub mod profile;
 pub mod prover;
 pub mod quorum;
 pub mod registry;
+pub mod restaking_avs;
 pub mod selftest;
+pub mod simplex_bft;
 pub mod solana_tower_bft;
 pub mod spec;
 pub mod stellar_fba;
@@ -111,6 +114,9 @@ pub mod versioning;
 pub mod zkvm_proof;
 
 pub use arweave_spora::{ArweaveSpOraAdapter, ArweaveSpOraEvidence};
+pub use auxpow_pop::{
+    AuxPowPopAdapter, PinnedAuxPowAnchor, PopAnchorSigner, PopEquivocationProof, U256Bytes,
+};
 pub use babylon_eots::{
     epoch_vote_message, BabylonEotsAdapter, BtcCheckpoint, BtcWeakSubjectivityAnchor,
     EotsEquivocationProof, EotsEvidence, EotsPublicKey, EotsVote, PostQuantumHalf,
@@ -172,9 +178,17 @@ pub use quorum::{
     LowParticipantsBehavior, QuorumOutcome, QuorumPolicy,
 };
 pub use registry::{no_backing, DomainRegistration, ExternalDomainRegistry, RegistryError};
+pub use restaking_avs::{
+    AvsQuorumMember, PinnedRestakingAvsSet, RestakedOperator, RestakingAvsAdapter,
+    RestakingSlashingProof,
+};
 pub use selftest::{
     admit, admit_observed, apply_patch, run_probe, AdmissionReport, BytePatch, ExpectedRefusal,
     FaultProbe, ProbeOutcome, RefusalKind,
+};
+pub use simplex_bft::{
+    NoEndorsementCertificate, PinnedSimplexCommittee, SimplexBftAdapter, SimplexSlashingProof,
+    SimplexValidator,
 };
 pub use solana_tower_bft::{PinnedSolEpoch, SolanaTowerBftAdapter, SolanaValidator};
 pub use spec::{

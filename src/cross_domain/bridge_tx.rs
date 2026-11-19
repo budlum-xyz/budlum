@@ -987,6 +987,154 @@ fn ensure_domain_class_intake(
     }
 }
 
+/// Configure or update the adaptive escrow ceiling and optional prover bond
+/// guarding bridge flows for `domain_id`.
+///
+/// WIRING: production bridge economic-guard configuration entry point paired
+/// with [`crate::cross_domain::bridge::BridgeState::mint`],
+/// [`crate::cross_domain::bridge::BridgeState::unlock`], and
+/// [`report_bridge_contradiction`].
+///
+/// # Errors
+///
+/// Returns an error string when `policy` violates protocol bounds.
+pub fn configure_domain_economic_guard(
+    state: &mut AccountState,
+    domain_id: DomainId,
+    policy: crate::cross_domain::economic_guard::DomainCeilingPolicy,
+    prover_bond: Option<crate::cross_domain::external::prover::ProverBond>,
+) -> Result<(), String> {
+    let prior_bond = state
+        .bridge_state
+        .economic_guard
+        .record(domain_id)
+        .and_then(|r| r.prover_bond.as_ref())
+        .map(|b| (b.prover, b.live_atoms()));
+    let new_bond_spec = match &prover_bond {
+        None => None,
+        Some(b) => {
+            let live = u64::try_from(b.live_atoms())
+                .map_err(|_| "Prover bond exceeds u64 escrow representation".to_string())?;
+            Some((b.prover, live))
+        }
+    };
+    let guard_before = state.bridge_state.economic_guard.clone();
+    state
+        .bridge_state
+        .economic_guard
+        .configure_domain(domain_id, policy, prover_bond)
+        .map_err(|e| e.to_string())?;
+
+    if let Some((old_prover, old_atoms)) = prior_bond {
+        if old_atoms > 0 {
+            let old_u64 = match u64::try_from(old_atoms) {
+                Ok(v) => v,
+                Err(_) => {
+                    state.bridge_state.economic_guard = guard_before;
+                    return Err("Existing prover bond exceeds u64 escrow representation".into());
+                }
+            };
+            if let Err(err) = state.release_external_bond(&old_prover, old_u64) {
+                state.bridge_state.economic_guard = guard_before;
+                return Err(format!("Bridge economic guard bond release: {err}"));
+            }
+        }
+    }
+    if let Some((new_prover, new_u64)) = new_bond_spec {
+        if new_u64 > 0 {
+            if let Err(err) = state.lock_external_bond(&new_prover, new_u64) {
+                if let Some((old_prover, old_atoms)) = prior_bond {
+                    if let Ok(old_u64) = u64::try_from(old_atoms) {
+                        if old_u64 > 0 {
+                            let _ = state.lock_external_bond(&old_prover, old_u64);
+                        }
+                    }
+                }
+                state.bridge_state.economic_guard = guard_before;
+                return Err(format!("Bridge economic guard bond lock: {err}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refresh a guarded external domain's verified `SecurityBacking` from a
+/// cryptographic consensus proof (`restaking-avs-v1`, `auxpow-pop-v1`, or
+/// `simplex-bft-v1`).
+///
+/// WIRING: production bridge adapter-backing refresh entry point updating the
+/// consensus-committed [`crate::cross_domain::bridge::BridgeState::economic_guard`].
+///
+/// # Errors
+///
+/// Returns an error string when the domain is unknown, frozen, or the adapter
+/// rejects `evidence` under `verification_policy`.
+pub fn refresh_domain_economic_backing(
+    state: &mut AccountState,
+    domain_id: DomainId,
+    adapter_cfg: &crate::cross_domain::economic_guard::GuardedExternalAdapter,
+    evidence: &crate::cross_domain::external::spec::RawConsensusEvidence,
+    verification_policy: &crate::cross_domain::external::spec::VerificationPolicy,
+) -> Result<crate::cross_domain::external::spec::FinalityAttestation, String> {
+    state
+        .bridge_state
+        .economic_guard
+        .refresh_backing_from_adapter(domain_id, adapter_cfg, evidence, verification_policy)
+        .map_err(|e| e.to_string())
+}
+
+/// Verify permissionless contradiction or equivocation evidence against a
+/// guarded bridge domain, freeze its bridge flows without any admin key, slash
+/// its attached prover bond, and credit the challenger's bounded reward.
+///
+/// WIRING: production bridge prover-fraud slashing entry point closing the
+/// contradiction slash loop over
+/// [`crate::cross_domain::bridge::BridgeState::economic_guard`].
+///
+/// # Errors
+///
+/// Returns an error string if verification fails, the evidence was already
+/// consumed, or crediting `challenger` would overflow `u64`.
+pub fn report_bridge_contradiction(
+    state: &mut AccountState,
+    domain_id: DomainId,
+    evidence: &crate::cross_domain::economic_guard::ContradictionEvidence,
+    challenger: Address,
+    height: u64,
+) -> Result<crate::cross_domain::economic_guard::ContradictionOutcome, String> {
+    let guard_before = state.bridge_state.economic_guard.clone();
+    let outcome = state
+        .bridge_state
+        .economic_guard
+        .submit_contradiction(domain_id, evidence, challenger, height)
+        .map_err(|e| e.to_string())?;
+    if outcome.slashed_bond_atoms > 0 {
+        let Some(prover) = outcome.slashed_prover else {
+            state.bridge_state.economic_guard = guard_before;
+            return Err("Slashed bond outcome missing prover address".into());
+        };
+        let slashed_u64 = match u64::try_from(outcome.slashed_bond_atoms) {
+            Ok(v) => v,
+            Err(_) => {
+                state.bridge_state.economic_guard = guard_before;
+                return Err("Slashed bond exceeds u64 escrow representation".into());
+            }
+        };
+        let reward_u64 = match u64::try_from(outcome.challenger_reward_atoms) {
+            Ok(v) => v,
+            Err(_) => {
+                state.bridge_state.economic_guard = guard_before;
+                return Err("Challenger reward exceeds u64 escrow representation".into());
+            }
+        };
+        if let Err(err) = state.slash_external_bond(&prover, slashed_u64, reward_u64, &challenger) {
+            state.bridge_state.economic_guard = guard_before;
+            return Err(format!("Bridge contradiction bond slash: {err}"));
+        }
+    }
+    Ok(outcome)
+}
+
 /// Apply one bridge write to `state`.
 ///
 /// # Errors

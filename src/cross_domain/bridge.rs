@@ -237,6 +237,9 @@ pub struct BridgeState {
     /// Fix O(N) sweep `DoS` by indexing by height.
     expiry_queue: BTreeMap<u64, Vec<MessageId>>,
     pub replay: ReplayNonceStore,
+    /// Adaptive escrow ceiling and permissionless contradiction slashing guard.
+    #[serde(default)]
+    pub economic_guard: super::economic_guard::BridgeEconomicGuard,
     /// Settled queue: the height a transfer reached a terminal status
     /// (`Unlocked`, or `Active` again after its lock expired) -> `[message_id]`.
     /// `sweep_expired_locks` drops those rows `SETTLED_RETENTION_BLOCKS`
@@ -410,6 +413,7 @@ impl BridgeState {
             expiry_queue: BTreeMap::new(),
             settled_queue: BTreeMap::new(),
             replay: ReplayNonceStore::new(),
+            economic_guard: super::economic_guard::BridgeEconomicGuard::new(),
         }
     }
 
@@ -620,6 +624,13 @@ impl BridgeState {
                 "Transfer is not locked on source domain".into(),
             ));
         }
+        let mint_flow_atoms = u128::from(transfer.amount.get());
+        self.economic_guard
+            .ensure_domain_not_frozen(message.target_domain)
+            .map_err(|e| BridgeError(e.to_string()))?;
+        self.economic_guard
+            .check_and_record_flow(message.source_domain, mint_flow_atoms, current_height)
+            .map_err(|e| BridgeError(e.to_string()))?;
         self.replay
             .mark_processed_at(
                 message.source_domain,
@@ -847,9 +858,21 @@ impl BridgeState {
             ));
         }
         // The asset returns to Active on the original source domain, where
-        // the lock was made.
+        // the lock was made. Enforce the adaptive economic ceiling and
+        // admin-keyless contradiction freeze before mutating any field.
         let original_source = transfer.source_domain;
         let asset_id = transfer.asset_id;
+        let unlock_flow_atoms = u128::from(transfer.amount.get());
+        self.economic_guard
+            .ensure_domain_not_frozen(original_source)
+            .map_err(|e| BridgeError(e.to_string()))?;
+        self.economic_guard
+            .check_and_record_flow(source_domain, unlock_flow_atoms, settled_height)
+            .map_err(|e| BridgeError(e.to_string()))?;
+        let transfer = self
+            .transfers
+            .get_mut(&message_id)
+            .ok_or_else(|| BridgeError("Unknown bridge transfer".into()))?;
         transfer.status = BridgeStatus::Unlocked {
             domain: original_source,
         };
@@ -940,6 +963,12 @@ impl BridgeState {
                     message_id,
                 ]));
             }
+        }
+        if !self.economic_guard.is_empty() {
+            leaves.push(hash_fields_bytes(&[
+                b"BDLM_ECON_GUARD_ROOT_V1",
+                &self.economic_guard.root(),
+            ]));
         }
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
