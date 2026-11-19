@@ -1358,16 +1358,26 @@ fn invoke_uol_precompile(
                     b"UOL offerer balance exhausted".to_vec(),
                 ));
             }
-            let mut preimage = Vec::with_capacity(96 + taker.len() + payment.len());
+            let mut preimage = Vec::with_capacity(112 + taker.len() + payment.len());
             preimage.extend_from_slice(b"BDLM_UOL_OFFER_V1");
             preimage.extend_from_slice(caller20);
             preimage.extend_from_slice(&class_id);
             preimage.extend_from_slice(&asset_id);
+            preimage.extend_from_slice(&(taker.len() as u64).to_le_bytes());
             preimage.extend_from_slice(&taker);
+            preimage.extend_from_slice(&(payment.len() as u64).to_le_bytes());
             preimage.extend_from_slice(&payment);
             preimage.extend_from_slice(&amount.to_le_bytes());
             preimage.extend_from_slice(&expiry.to_le_bytes());
             let offer_id: [u8; 32] = Keccak256::digest(&preimage).into();
+            let offer_key = uol_offer_key(&offer_id);
+            if host
+                .read(&ns, &offer_key)
+                .map_err(|e| e.to_string())?
+                .is_some()
+            {
+                return Ok((OutcomeStatus::Revert, b"UOL offer already exists".to_vec()));
+            }
             let rec = PrecompileUolOffer {
                 maker: *caller20,
                 class_id,
@@ -1378,7 +1388,7 @@ fn invoke_uol_precompile(
                 expiry,
             };
             let enc = encode_uol_offer_bytes(&rec);
-            host.write(&ns, &uol_offer_key(&offer_id), Some(&enc))
+            host.write(&ns, &offer_key, Some(&enc))
                 .map_err(|e| e.to_string())?;
             Ok((OutcomeStatus::Success, offer_id.to_vec()))
         }

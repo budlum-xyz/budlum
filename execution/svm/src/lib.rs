@@ -700,7 +700,13 @@ impl SvmWorker {
             };
             return match host.universal_call(ucall) {
                 Ok(ures) => {
-                    let _ = host.charge(ures.gas_used);
+                    if host.charge(ures.gas_used).is_err() {
+                        return EeOutcome {
+                            status: OutcomeStatus::OutOfGas,
+                            output: Vec::new(),
+                            gas_used: call.gas_limit,
+                        };
+                    }
                     EeOutcome {
                         status: if ures.success {
                             OutcomeStatus::Success
@@ -974,13 +980,39 @@ impl ExecutionEnvironment for SvmWorker {
         call: &EeCall,
         host: &mut dyn HostApi,
     ) -> Result<EeOutcome, EeFault> {
-        catch_unwind(AssertUnwindSafe(|| Self::execute_inner(ctx, call, host))).map_err(|payload| {
-            let msg = panic_payload_message(&*payload);
-            EeFault {
-                ee: EeId::SVM,
-                panic_digest: panic_digest(EeId::SVM, &msg),
+        let Ok(cp) = host.checkpoint_begin() else {
+            return Ok(EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: b"SVM checkpoint begin failed".to_vec(),
+                gas_used: 0,
+            });
+        };
+        let res = catch_unwind(AssertUnwindSafe(|| Self::execute_inner(ctx, call, host)));
+        match res {
+            Ok(outcome) => {
+                if outcome.status == OutcomeStatus::Success {
+                    if host.checkpoint_commit(cp).is_err() {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"SVM checkpoint commit failed".to_vec(),
+                            gas_used: outcome.gas_used,
+                        });
+                    }
+                } else {
+                    let _ = host.checkpoint_rollback(cp);
+                }
+                Ok(outcome)
             }
-        })
+            Err(payload) => {
+                let _ = host.checkpoint_rollback(cp);
+                let msg = panic_payload_message(&*payload);
+                Err(EeFault {
+                    ee: EeId::SVM,
+                    panic_digest: panic_digest(EeId::SVM, &msg),
+                })
+            }
+        }
     }
 
     fn query(

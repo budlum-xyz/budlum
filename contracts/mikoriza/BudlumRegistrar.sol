@@ -15,8 +15,12 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
     bytes internal constant ALLOCATION_KIND = "budlum/mikoriza/allocation/v1";
     uint8 internal constant SOURCE_EIGENLAYER = 1;
     uint256 internal constant UNIT = 1e9;
+    uint256 internal constant MAX_WAD = 1e18;
+    uint256 internal constant MAX_STRATEGIES = 64;
     uint256 private constant OPERATOR_CORR_FIELDS = 2;
     uint256 private constant ALLOCATION_PAYLOAD_FIELDS = 7;
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
 
     IAllocationManager public immutable allocationManager;
     uint32 public immutable operatorSetId;
@@ -39,6 +43,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
     mapping(bytes32 => mapping(bytes32 => bool)) internal boundKeys;
     mapping(address => bytes32) public validatorOf;
     mapping(address => uint64) public lastReportedBlock;
+    uint256 private _reentrancyLock;
 
     event Bound(address indexed operator, bytes32 indexed budlumValidator, bytes compressedKey);
     event Unbound(address indexed operator, bytes32 indexed budlumValidator);
@@ -55,6 +60,10 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
     error AlreadyReported(uint64 blockNumber);
     error OnlySlasher();
     error NoStrategies();
+    error InvalidRegistrarConfig();
+    error InvalidValidator();
+    error InvalidStakeMatrix();
+    error ReentrantCall();
 
     constructor(
         IAllocationManager allocationManager_,
@@ -64,8 +73,25 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         bytes32 g2GeneratorHash_,
         uint256 doubleVoteWad_
     ) {
-        if (strategies_.length == 0) {
+        if (strategies_.length == 0 || strategies_.length > MAX_STRATEGIES) {
             revert NoStrategies();
+        }
+        if (
+            address(allocationManager_) == address(0) || address(allocationManager_).code.length == 0
+                || budlumChainId_ == 0 || g2GeneratorHash_ == bytes32(0) || doubleVoteWad_ == 0 || doubleVoteWad_ > MAX_WAD
+        ) {
+            revert InvalidRegistrarConfig();
+        }
+        for (uint256 i = 0; i < strategies_.length; i++) {
+            address s = strategies_[i];
+            if (s == address(0)) {
+                revert InvalidRegistrarConfig();
+            }
+            for (uint256 j = i + 1; j < strategies_.length; j++) {
+                if (strategies_[j] == s) {
+                    revert InvalidRegistrarConfig();
+                }
+            }
         }
         allocationManager = allocationManager_;
         operatorSetId = operatorSetId_;
@@ -73,14 +99,20 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         budlumChainId = budlumChainId_;
         g2GeneratorHash = g2GeneratorHash_;
         doubleVoteWad = doubleVoteWad_;
+        _reentrancyLock = _NOT_ENTERED;
         slasher = new BudlumSlasher(address(this), budlumChainId_, g2GeneratorHash_);
     }
 
-    function bindingMessage(address operator, bytes32 budlumValidator)
-        public
-        view
-        returns (bytes memory)
-    {
+    modifier nonReentrant() {
+        if (_reentrancyLock == _ENTERED) {
+            revert ReentrantCall();
+        }
+        _reentrancyLock = _ENTERED;
+        _;
+        _reentrancyLock = _NOT_ENTERED;
+    }
+
+    function bindingMessage(address operator, bytes32 budlumValidator) public view returns (bytes memory) {
         return bytes.concat(
             bytes("BDLM_MIKORIZA_BIND_V1"),
             BudlumHash.le64(uint64(block.chainid)),
@@ -97,37 +129,36 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         bytes calldata uncompressedKey,
         bytes calldata negBindingSignature,
         bytes calldata g2Generator
-    ) external {
+    ) external nonReentrant {
+        if (budlumValidator == bytes32(0)) {
+            revert InvalidValidator();
+        }
         if (keccak256(g2Generator) != g2GeneratorHash) {
             revert UntrustedGenerator();
         }
         if (!BudlumBls.g2Matches(compressedKey, uncompressedKey)) {
             revert KeyMismatch();
         }
-        if (!BudlumBls.verify(
-            uncompressedKey, bindingMessage(msg.sender, budlumValidator), negBindingSignature, g2Generator
-        )) {
+        if (
+            !BudlumBls.verify(
+                uncompressedKey, bindingMessage(msg.sender, budlumValidator), negBindingSignature, g2Generator
+            )
+        ) {
             revert BindingSignatureInvalid();
         }
-        _retireMovedRow(msg.sender, budlumValidator, compressedKey);
-        bytes32 row = bindingKey(budlumValidator, msg.sender);
-        boundKeys[row][keccak256(uncompressedKey)] = true;
-        bindings[row] = Binding({
-            operator: msg.sender,
-            compressedKey: compressedKey,
-            uncompressedKey: uncompressedKey
-        });
-        validatorOf[msg.sender] = budlumValidator;
         OperatorSet memory set = OperatorSet({avs: address(this), id: operatorSetId});
         if (!allocationManager.isMemberOfOperatorSet(msg.sender, set)) {
             revert NotInOperatorSet(msg.sender);
         }
+        _retireMovedRow(msg.sender, budlumValidator, compressedKey);
+        bytes32 row = bindingKey(budlumValidator, msg.sender);
+        boundKeys[row][keccak256(uncompressedKey)] = true;
+        bindings[row] = Binding({operator: msg.sender, compressedKey: compressedKey, uncompressedKey: uncompressedKey});
+        validatorOf[msg.sender] = budlumValidator;
         emit Bound(msg.sender, budlumValidator, compressedKey);
     }
 
-    function _retireMovedRow(address operator, bytes32 budlumValidator, bytes memory compressedKey)
-        internal
-    {
+    function _retireMovedRow(address operator, bytes32 budlumValidator, bytes memory compressedKey) internal {
         bytes32 previous = validatorOf[operator];
         if (previous == bytes32(0) || previous == budlumValidator) {
             return;
@@ -142,7 +173,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         }
     }
 
-    function reportAllocation(address operator) external returns (uint64 units) {
+    function reportAllocation(address operator) external nonReentrant returns (uint64 units) {
         bytes32 validator = validatorOf[operator];
         if (validator == bytes32(0) || bindings[bindingKey(validator, operator)].operator == address(0)) {
             revert NotBound(operator);
@@ -170,9 +201,11 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         }
         address[] memory operators = new address[](1);
         operators[0] = operator;
-        uint256[][] memory stake = allocationManager.getMinimumSlashableStake(
-            set, operators, strategies, uint32(block.number)
-        );
+        uint256[][] memory stake =
+            allocationManager.getMinimumSlashableStake(set, operators, strategies, uint32(block.number));
+        if (stake.length != 1 || stake[0].length != strategies.length) {
+            revert InvalidStakeMatrix();
+        }
         uint256 total;
         for (uint256 i = 0; i < stake[0].length; i++) {
             total += stake[0][i];
@@ -206,11 +239,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         return BudlumHash.hashFields(fields);
     }
 
-    function uncompressedKeyOf(bytes32 budlumValidator, address operator)
-        external
-        view
-        returns (bytes memory)
-    {
+    function uncompressedKeyOf(bytes32 budlumValidator, address operator) external view returns (bytes memory) {
         return bindings[bindingKey(budlumValidator, operator)].uncompressedKey;
     }
 
@@ -222,11 +251,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         return boundKeys[bindingKey(budlumValidator, operator)][keccak256(uncompressedKey)];
     }
 
-    function compressedKeyOf(bytes32 budlumValidator, address operator)
-        external
-        view
-        returns (bytes memory)
-    {
+    function compressedKeyOf(bytes32 budlumValidator, address operator) external view returns (bytes memory) {
         return bindings[bindingKey(budlumValidator, operator)].compressedKey;
     }
 
@@ -234,7 +259,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         return keccak256(abi.encode(budlumValidator, operator));
     }
 
-    function slashForDoubleVote(address operator, string calldata description) external {
+    function slashForDoubleVote(address operator, string calldata description) external nonReentrant {
         if (msg.sender != address(slasher)) {
             revert OnlySlasher();
         }

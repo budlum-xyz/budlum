@@ -31,6 +31,16 @@ module budlum::budlum_verifier {
         table::contains(&c.header_at, height)
     }
 
+    #[view]
+    public fun header_at(height: u64): vector<u8> acquires Checkpoints {
+        let c = borrow_global<Checkpoints>(@budlum);
+        if (table::contains(&c.header_at, height)) {
+            *table::borrow(&c.header_at, height)
+        } else {
+            std::vector::empty()
+        }
+    }
+
     #[test_only]
     public fun conflict_code(): u64 { E_CONFLICT }
 }

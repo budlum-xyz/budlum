@@ -10,13 +10,16 @@
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::execution::coordinator::alias::MOVE_ALIAS_SCHEME_BYTE;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use k256::ecdsa::{Signature as SecpSig, VerifyingKey as SecpVerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 /// Canonical Budlum Aptos Compatibility Lane chain ID (`45261 % 256 = 205`).
 pub const BUDLUM_APTOS_CHAIN_ID: u8 = 205;
+
+/// Maximum serialized Aptos `SignedTransaction` byte length (`128 KiB`).
+pub const MAX_APTOS_TRANSACTION_BYTES: usize = 128 * 1024;
 
 /// Pinned Aptos authentication-key scheme bytes in `aptos-types` (`Scheme` enum).
 ///
@@ -156,10 +159,13 @@ pub(crate) fn write_uleb128_u32(mut val: u32, out: &mut Vec<u8>) {
 
 fn read_bcs_bytes(buf: &[u8], cur: &mut usize) -> Result<Vec<u8>, AptosEnvelopeError> {
     let len = read_uleb128_u32(buf, cur)? as usize;
+    let end = cur
+        .checked_add(len)
+        .ok_or_else(|| AptosEnvelopeError::MalformedBcs(String::from("BCS length overflow")))?;
     let slice = buf
-        .get(*cur..*cur + len)
+        .get(*cur..end)
         .ok_or_else(|| AptosEnvelopeError::MalformedBcs(String::from("truncated BCS bytes")))?;
-    *cur += len;
+    *cur = end;
     Ok(slice.to_vec())
 }
 
@@ -211,6 +217,11 @@ pub fn decode_aptos_tx(
     expected_chain_id: u8,
     now_timestamp_secs: u64,
 ) -> Result<DecodedAptosTx, AptosEnvelopeError> {
+    if bcs_bytes.len() > MAX_APTOS_TRANSACTION_BYTES {
+        return Err(AptosEnvelopeError::MalformedBcs(String::from(
+            "Aptos SignedTransaction exceeds 128 KiB limit",
+        )));
+    }
     let mut cur = 0usize;
     let sender_slice = bcs_bytes
         .get(cur..cur + 32)
@@ -296,8 +307,13 @@ pub fn decode_aptos_tx(
             })?;
             let vk = VerifyingKey::from_bytes(&pk32)
                 .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
+            if vk.is_weak() {
+                return Err(AptosEnvelopeError::InvalidSignature(String::from(
+                    "small-order Ed25519 public key refused",
+                )));
+            }
             let sig = Signature::from_bytes(&sig64);
-            vk.verify(&signing_msg, &sig)
+            vk.verify_strict(&signing_msg, &sig)
                 .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
         }
         1 => {
@@ -310,9 +326,9 @@ pub fn decode_aptos_tx(
             }
             let threshold = *pks_concat.last().unwrap_or(&0) as usize;
             let n_keys = (pks_concat.len() - 1) / 32;
-            if threshold == 0 || threshold > n_keys || threshold > 32 {
+            if n_keys == 0 || n_keys > 32 || threshold == 0 || threshold > n_keys {
                 return Err(AptosEnvelopeError::InvalidSignature(String::from(
-                    "invalid MultiEd25519 threshold",
+                    "invalid MultiEd25519 threshold or key count",
                 )));
             }
             let mut auth_h = Sha3_256::new();
@@ -328,9 +344,9 @@ pub fn decode_aptos_tx(
                 )));
             }
             let sig_count = (sigs_concat.len() - 4) / 64;
-            if sig_count < threshold {
+            if sig_count < threshold || sig_count > n_keys {
                 return Err(AptosEnvelopeError::InvalidSignature(String::from(
-                    "MultiEd25519 below threshold",
+                    "MultiEd25519 signature count out of range",
                 )));
             }
             let bitmap_slice = sigs_concat.get(sigs_concat.len() - 4..).unwrap_or(&[]);
@@ -338,6 +354,11 @@ pub fn decode_aptos_tx(
                 .try_into()
                 .map_err(|_| AptosEnvelopeError::InvalidSignature(String::from("bad bitmap")))?;
             let bitmap = u32::from_be_bytes(bitmap_arr);
+            if n_keys < 32 && (bitmap & ((1u32 << (32 - n_keys)) - 1)) != 0 {
+                return Err(AptosEnvelopeError::InvalidSignature(String::from(
+                    "MultiEd25519 bitmap carries trailing non-zero bits",
+                )));
+            }
             let mut sig_idx = 0usize;
             for bit in 0..n_keys {
                 if (bitmap & (1u32 << (31 - bit))) == 0 {
@@ -358,7 +379,12 @@ pub fn decode_aptos_tx(
                     .map_err(|_| AptosEnvelopeError::InvalidSignature(String::from("sig len")))?;
                 let vk = VerifyingKey::from_bytes(&pk32)
                     .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
-                vk.verify(&signing_msg, &Signature::from_bytes(&sig64))
+                if vk.is_weak() {
+                    return Err(AptosEnvelopeError::InvalidSignature(String::from(
+                        "small-order MultiEd25519 public key refused",
+                    )));
+                }
+                vk.verify_strict(&signing_msg, &Signature::from_bytes(&sig64))
                     .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
             }
             if sig_idx != sig_count {
