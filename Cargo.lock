@@ -2736,6 +2736,7 @@ dependencies = [
  "hash2curve",
  "primeorder",
  "sha2 0.11.1",
+ "signature",
  "wnaf",
 ]
 
