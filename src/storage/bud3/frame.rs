@@ -324,11 +324,18 @@ mod tests {
             Bud3Frame::decode_wire(&bad_res, &mut m),
             Err(FrameWireError::ReservedNonZero(1))
         );
-        let mut bad_kind = good;
+        let mut bad_kind = good.clone();
         bad_kind[4] = KIND_REPAIR;
         assert_eq!(
             Bud3Frame::decode_wire(&bad_kind, &mut m),
             Err(FrameWireError::BadKind(KIND_REPAIR))
+        );
+        let mut huge_k = good;
+        let over_k = super::super::limits::Profile::P0.k_max + 1;
+        huge_k[22..26].copy_from_slice(&over_k.to_le_bytes());
+        assert_eq!(
+            Bud3Frame::decode_wire(&huge_k, &mut m),
+            Err(FrameWireError::BadGeometry)
         );
     }
 

@@ -4,8 +4,11 @@
 //! finality snapshot through `Validator::voting_weight`; the Ethereum-side
 //! `BudlumRegistrar` and `BudlumSlasher` contracts are.
 //!
-//! Mikoriza: shared security from restaked Ethereum collateral (testnet
-//!).
+//! Shared security from restaked Ethereum collateral.
+//!
+//! The implementation is active only on devnet. Public testnet and mainnet
+//! fail closed until their activation gates and external evidence rehearsals
+//! pass.
 //!
 //! An Ethereum operator that restakes (`EigenLayer` first; Symbiotic and
 //! Babylon are later sources behind the same [`SharedSecuritySource`] trait)
@@ -61,6 +64,12 @@ pub const BLS_PUBLIC_KEY_BYTES: usize = 96;
 /// for a permissionless `reportAllocation` to be carried and anchored, and an
 /// operator that wants its restaked weight re-attests inside it.
 pub const MAX_ALLOCATION_AGE_EPOCHS: u64 = 100;
+/// Maximum `max_restaked_share_ppm` preserving strict `< 1/3` BFT safety.
+///
+/// Fixed at `333_333` ppm so restaked external collateral never reaches 1/3 of
+/// total voting weight and cannot stall or finalize Budlum without native stake.
+/// WIRING: enforced by [`SharedSecurityParams::respects_bft_safety_cap`].
+pub const MAX_SAFE_BFT_RESTAKED_SHARE_PPM: u32 = 333_333;
 /// Parts per million.
 const PPM: u128 = 1_000_000;
 
@@ -104,6 +113,14 @@ impl SharedSecurityParams {
         let cap = u128::from(bud_weight) * share / (PPM - share);
         u64::try_from(cap).unwrap_or(u64::MAX)
     }
+
+    /// Returns `true` iff `max_restaked_share_ppm <= MAX_SAFE_BFT_RESTAKED_SHARE_PPM` (`< 1/3`).
+    ///
+    /// Convenience: kept for the CLI and genesis parameter auditors.
+    #[must_use]
+    pub const fn respects_bft_safety_cap(&self) -> bool {
+        self.max_restaked_share_ppm <= MAX_SAFE_BFT_RESTAKED_SHARE_PPM
+    }
 }
 
 /// A restaking protocol Budlum reads allocations from. Budlum's side is
@@ -124,7 +141,7 @@ pub trait SharedSecuritySource {
     }
 }
 
-/// The first adapter: `EigenLayer` operator sets.
+/// First adapter: `EigenLayer` operator sets settled on Ethereum.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EigenLayerSource;
 
@@ -134,17 +151,93 @@ impl SharedSecuritySource for EigenLayerSource {
     }
 }
 
-/// The restaking protocol an allocation comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Second adapter: `Symbiotic` restaking vaults settled on Ethereum.
+///
+/// WIRING: selected by [`RestakeSource::adapter`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SymbioticSource;
+
+impl SharedSecuritySource for SymbioticSource {
+    fn source(&self) -> RestakeSource {
+        RestakeSource::Symbiotic
+    }
+}
+
+/// Third adapter: `Babylon` finality-provider BTC staking settled on Bitcoin.
+///
+/// WIRING: selected by [`RestakeSource::adapter`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BabylonSource;
+
+impl SharedSecuritySource for BabylonSource {
+    fn source(&self) -> RestakeSource {
+        RestakeSource::Babylon
+    }
+}
+
+/// Fourth adapter: `CometBFT` / IBC Interchain Security provider (`CosmosIcs`).
+///
+/// `AllocationClaim::eth_operator` holds the 20-byte `CometBFT` validator
+/// address (`SHA256(ed25519_pk)[..20]`), directly slashable via ICS-07
+/// [`execute_tendermint_misbehaviour_slash`].
+/// WIRING: selected by [`RestakeSource::adapter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CosmosIcsSource {
+    /// Registered settlement domain id of the `CometBFT` provider chain.
+    pub domain_id: u32,
+}
+
+impl SharedSecuritySource for CosmosIcsSource {
+    fn source(&self) -> RestakeSource {
+        RestakeSource::CosmosIcs {
+            domain_id: self.domain_id,
+        }
+    }
+}
+
+/// The restaking protocol an allocation comes from (append-only variant order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RestakeSource {
+    /// `EigenLayer` operator sets anchored on Ethereum.
     EigenLayer,
+    /// `Symbiotic` collateral vaults anchored on Ethereum.
+    Symbiotic,
+    /// `Babylon` BTC staking finality providers anchored on Bitcoin.
+    Babylon,
+    /// `CometBFT` / IBC Interchain Security provider bound to `domain_id`.
+    CosmosIcs {
+        /// Registered `CometBFT` provider settlement domain id.
+        domain_id: u32,
+    },
 }
 
 impl RestakeSource {
     const fn tag(self) -> u8 {
         match self {
             Self::EigenLayer => 1,
+            Self::Symbiotic => 2,
+            Self::Babylon => 3,
+            Self::CosmosIcs { .. } => 4,
         }
+    }
+
+    const fn domain_scope(self) -> u32 {
+        match self {
+            Self::CosmosIcs { domain_id } => domain_id,
+            Self::EigenLayer | Self::Symbiotic | Self::Babylon => 0,
+        }
+    }
+
+    /// Canonical collision-free string key identifying `(self, operator)` in
+    /// serialized state maps.
+    #[must_use]
+    pub fn operator_map_key(self, operator: &[u8; 20]) -> String {
+        format!(
+            "{}:{}:{}",
+            self.tag(),
+            self.domain_scope(),
+            hex::encode(operator)
+        )
     }
 
     /// The adapter of this source.
@@ -152,20 +245,24 @@ impl RestakeSource {
     pub fn adapter(self) -> Box<dyn SharedSecuritySource> {
         match self {
             Self::EigenLayer => Box::new(EigenLayerSource),
+            Self::Symbiotic => Box::new(SymbioticSource),
+            Self::Babylon => Box::new(BabylonSource),
+            Self::CosmosIcs { domain_id } => Box::new(CosmosIcsSource { domain_id }),
         }
     }
 
     /// The external chain this protocol's allocations are attested on.
     ///
-    /// An allocation is only as real as the chain that attests it, and the
-    /// source is chosen by the transaction sender. Without this binding an
-    /// `EigenLayer` claim could point at evidence anchored on any domain the
-    /// sender registered itself, which is a chain nobody else vouched for.
-    /// `EigenLayer` settles on Ethereum, so the evidence must be Ethereum's.
+    /// Prevents claiming a high-value restaking source against evidence from an
+    /// unrelated self-registered domain.
     #[must_use]
     pub const fn external_chain(self) -> crate::core::transaction::ExternalChain {
         match self {
-            Self::EigenLayer => crate::core::transaction::ExternalChain::Ethereum,
+            Self::EigenLayer | Self::Symbiotic => crate::core::transaction::ExternalChain::Ethereum,
+            Self::Babylon => crate::core::transaction::ExternalChain::Bitcoin,
+            Self::CosmosIcs { domain_id } => {
+                crate::core::transaction::ExternalChain::Custom(domain_id)
+            }
         }
     }
 }
@@ -177,6 +274,33 @@ pub enum RestakeStatus {
     Active,
     /// The operator deallocated (an observed allocation of zero units).
     Exited,
+    /// Permanently slashed and quarantined by verified consensus misbehaviour.
+    Slashed,
+}
+
+/// Immutable on-chain slashing receipt recorded when a shared-security operator
+/// is slashed via verified external consensus misbehaviour (e.g. ICS-07).
+///
+/// WIRING: written by [`execute_tendermint_misbehaviour_slash`] and stored in
+/// [`SharedSecurityRegistry::slashed_operators`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalSlashRecord {
+    /// Source protocol where the operator was bonded.
+    pub source: RestakeSource,
+    /// Slashed 20-byte operator / `CometBFT` validator address.
+    pub operator: [u8; 20],
+    /// Bound Budlum validator whose restaked backing was forfeited.
+    pub budlum_validator: Address,
+    /// Allocated restaked units forfeited to zero at slashing time.
+    pub slashed_units: u64,
+    /// Proven class of `CometBFT` ICS-07 misbehaviour.
+    pub kind: crate::cross_domain::external::tendermint::TendermintMisbehaviourKind,
+    /// Fault height on the provider chain.
+    pub infraction_height: u64,
+    /// Budlum epoch at which the slash was executed.
+    pub slashed_at_epoch: u64,
+    /// Deterministic evidence digest binding the verified misbehaviour proof.
+    pub evidence_id: [u8; 32],
 }
 
 /// What the registrar event states, carried in clear by the transaction and
@@ -222,6 +346,13 @@ pub struct SharedSecurityRegistry {
     /// the weight pass can refuse an allocation that has not been re-attested.
     #[serde(default)]
     pub attested_at: BTreeMap<Address, u64>,
+    /// Highest observed external epoch per canonical `(source, operator)` key,
+    /// preventing stale out-of-order operator events from exiting newer moves.
+    #[serde(default)]
+    pub operator_epochs: BTreeMap<String, u64>,
+    /// Permanent quarantine records for slashed `(source, operator)` keys.
+    #[serde(default)]
+    pub slashed_operators: BTreeMap<String, ExternalSlashRecord>,
 }
 
 impl SharedSecurityRegistry {
@@ -231,6 +362,8 @@ impl SharedSecurityRegistry {
             && self.validators.is_empty()
             && self.used_messages.is_empty()
             && self.attested_at.is_empty()
+            && self.operator_epochs.is_empty()
+            && self.slashed_operators.is_empty()
     }
 
     /// The registry root, folded into the settlement root once the registry
@@ -249,21 +382,67 @@ impl SharedSecurityRegistry {
             .get(validator)
             .filter(|row| row.status == RestakeStatus::Active)
     }
+
+    /// Return `true` iff `(source, operator)` has been permanently slashed.
+    #[must_use]
+    pub fn is_operator_slashed(&self, source: RestakeSource, operator: &[u8; 20]) -> bool {
+        self.slashed_operators
+            .contains_key(&source.operator_map_key(operator))
+    }
+
+    /// Highest observed epoch recorded for `(source, operator)` across all validators.
+    #[must_use]
+    fn highest_operator_epoch(&self, source: RestakeSource, operator: &[u8; 20]) -> Option<u64> {
+        let tracked = self
+            .operator_epochs
+            .get(&source.operator_map_key(operator))
+            .copied();
+        let scanned = self
+            .validators
+            .values()
+            .filter(|r| r.source == source && r.eth_operator == *operator)
+            .map(|r| r.observed_epoch)
+            .max();
+        match (tracked, scanned) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
 }
 
-/// `H("BDLM_MIKORIZA_ALLOCATION_V1", source, validator, operator, units,
-/// epoch, bls key)`: the payload the registrar emits.
+/// `H("BDLM_MIKORIZA_ALLOCATION_V1", source, [scope], validator, operator, units, epoch, bls)`:
+/// canonical allocation payload digest committed by each source registrar.
 #[must_use]
 pub fn allocation_payload_hash(source: RestakeSource, allocation: &AllocationClaim) -> [u8; 32] {
-    hash_fields_bytes(&[
-        b"BDLM_MIKORIZA_ALLOCATION_V1",
-        &[source.tag()],
-        allocation.budlum_validator.as_bytes(),
-        &allocation.eth_operator,
-        &allocation.allocated_units.to_le_bytes(),
-        &allocation.observed_epoch.to_le_bytes(),
-        &allocation.bls_public_key,
-    ])
+    let domain_tag = b"BDLM_MIKORIZA_ALLOCATION_V1";
+    let tag = [source.tag()];
+    let scope = source.domain_scope().to_le_bytes();
+    let units = allocation.allocated_units.to_le_bytes();
+    let epoch = allocation.observed_epoch.to_le_bytes();
+    if matches!(source, RestakeSource::CosmosIcs { .. }) {
+        hash_fields_bytes(&[
+            domain_tag,
+            &tag,
+            &scope,
+            allocation.budlum_validator.as_bytes(),
+            &allocation.eth_operator,
+            &units,
+            &epoch,
+            &allocation.bls_public_key,
+        ])
+    } else {
+        hash_fields_bytes(&[
+            domain_tag,
+            &tag,
+            allocation.budlum_validator.as_bytes(),
+            &allocation.eth_operator,
+            &units,
+            &epoch,
+            &allocation.bls_public_key,
+        ])
+    }
 }
 
 /// The correlation id of an operator's allocation events.
@@ -314,13 +493,17 @@ pub fn execute_shared_security_tx(
             domain_key,
             registrar,
         } => {
-            let operator = state
+            let domain = state
                 .settlement
                 .domains
                 .get(*domain_key)
-                .ok_or_else(|| refused("Mikoriza registrar names an unregistered domain"))?
-                .operator;
-            if operator != Some(ctx.sender) {
+                .ok_or_else(|| refused("Mikoriza registrar names an unregistered domain"))?;
+            if domain.status != crate::domain::types::DomainStatus::Active {
+                return Err(refused(
+                    "shared-security registrar names an inactive domain",
+                ));
+            }
+            if domain.operator != Some(ctx.sender) {
                 return Err(refused(
                     "only the domain operator may name its Mikoriza registrar",
                 ));
@@ -344,6 +527,14 @@ pub fn execute_shared_security_tx(
     }
 }
 
+fn is_cosmos_ics_eligible_domain(domain: &crate::domain::types::ConsensusDomain) -> bool {
+    match &domain.kind {
+        crate::domain::types::ConsensusKind::Bft => true,
+        crate::domain::types::ConsensusKind::Custom(label) => label == "tendermint-bft",
+        _ => false,
+    }
+}
+
 fn observe(
     state: &mut AccountState,
     domain_key: u32,
@@ -357,6 +548,21 @@ fn observe(
     if allocation.bls_public_key.len() != BLS_PUBLIC_KEY_BYTES {
         return Err(refused("Mikoriza allocation BLS key has the wrong length"));
     }
+    let domain = state
+        .settlement
+        .domains
+        .get(domain_key)
+        .ok_or_else(|| refused("shared-security observation names an unregistered domain"))?;
+    if domain.status != crate::domain::types::DomainStatus::Active {
+        return Err(refused(
+            "shared-security observation names an inactive domain",
+        ));
+    }
+    if matches!(source, RestakeSource::CosmosIcs { .. }) && !is_cosmos_ics_eligible_domain(domain) {
+        return Err(refused(
+            "CosmosIcs allocation requires an active Tendermint/BFT settlement domain",
+        ));
+    }
     let registrar = state
         .settlement
         .shared_security
@@ -367,10 +573,6 @@ fn observe(
     if evidence.chain.domain_id() != domain_key {
         return Err(refused("Mikoriza evidence comes from another domain"));
     }
-    // The source is the sender's word; the chain is the fact. A source that
-    // settles elsewhere cannot back an allocation here, or a caller could
-    // name the most valuable restaking protocol and anchor the evidence on a
-    // domain it registered itself.
     let attested_on = source.external_chain();
     if evidence.chain != attested_on {
         return Err(refused(format!(
@@ -379,9 +581,15 @@ fn observe(
             evidence.chain
         )));
     }
-    // The validator binds the same BLS key on both sides: the slasher on
-    // Ethereum verifies double votes against the key Budlum finality uses, and
-    // the key is what says which operator may speak for the validator.
+    if state
+        .settlement
+        .shared_security
+        .is_operator_slashed(source, &allocation.eth_operator)
+    {
+        return Err(refused(
+            "shared-security operator is permanently slashed for proven consensus misbehaviour",
+        ));
+    }
     if let Some(validator) = state.validators.get(&allocation.budlum_validator) {
         if !validator.bls_public_key.is_empty()
             && validator.bls_public_key != allocation.bls_public_key
@@ -406,6 +614,7 @@ fn observe(
     }
     let message_id = message.message_id;
     let attested_at = state.epoch_index;
+    let op_key = source.operator_map_key(&allocation.eth_operator);
     let registry = &mut state.settlement.shared_security;
     if registry.used_messages.contains(&message_id) {
         return Err(refused("Mikoriza allocation event has already been used"));
@@ -413,25 +622,62 @@ fn observe(
     if registry.used_messages.len() >= MAX_USED_ALLOCATION_MESSAGES {
         return Err(refused("Mikoriza replay set is full"));
     }
-    if let Some(previous) = registry.validators.get(&allocation.budlum_validator) {
-        // The newest report wins, whoever it names: a rebinding is the
-        // operator's to make and the registrar only emits one after the key
-        // signed for the new operator, so the row follows the validator's key
-        // instead of belonging to the first operator ever recorded for it.
-        if allocation.observed_epoch <= previous.observed_epoch {
+    // Enforce strict per-(source, eth_operator) epoch monotonicity across ALL
+    // validators so an unconsumed older operator event cannot silently retire a
+    // newer live allocation after the operator moved to another validator.
+    if let Some(prev_op_epoch) = registry.highest_operator_epoch(source, &allocation.eth_operator) {
+        if allocation.observed_epoch <= prev_op_epoch {
             return Err(refused(
-                "Mikoriza allocation is not newer than the recorded one",
+                "shared-security allocation epoch is not newer than the operator's recorded epoch",
             ));
         }
-    } else if registry.validators.len() >= MAX_RESTAKED_VALIDATORS {
+    }
+    let validator_exists =
+        if let Some(previous) = registry.validators.get(&allocation.budlum_validator) {
+            if previous.status == RestakeStatus::Slashed
+                && previous.source == source
+                && previous.eth_operator == allocation.eth_operator
+            {
+                return Err(refused(
+                    "shared-security validator backing is permanently slashed",
+                ));
+            }
+            if allocation.observed_epoch <= previous.observed_epoch {
+                return Err(refused(
+                    "Mikoriza allocation is not newer than the recorded one",
+                ));
+            }
+            true
+        } else {
+            false
+        };
+    let operator_has_other_active = registry.validators.values().any(|row| {
+        row.budlum_validator != allocation.budlum_validator
+            && row.source == source
+            && row.eth_operator == allocation.eth_operator
+            && row.status == RestakeStatus::Active
+    });
+    // Refuse cold zero-unit observations (where neither the target validator
+    // nor the operator holds any live row) so zero-stake events cannot squat
+    // and exhaust MAX_RESTAKED_VALIDATORS.
+    if allocation.allocated_units == 0 && !validator_exists && !operator_has_other_active {
+        return Err(refused(
+            "shared-security zero-unit allocation retires no live validator or operator binding",
+        ));
+    }
+    if !validator_exists && registry.validators.len() >= MAX_RESTAKED_VALIDATORS {
         return Err(refused("Mikoriza validator table is full"));
     }
+    if !registry.operator_epochs.contains_key(&op_key)
+        && registry.operator_epochs.len() >= MAX_USED_ALLOCATION_MESSAGES
+    {
+        return Err(refused("shared-security operator epoch table is full"));
+    }
+
     registry.used_messages.insert(message_id);
-    // The registrar keeps one `validator` slot per operator, so an operator's
-    // live allocation names one validator at a time: a newer report from that
-    // operator for another validator (even with zero allocated units on exit)
-    // means it moved and the validator it was bound to before is no longer
-    // backed. Retire the old row unconditionally.
+    registry
+        .operator_epochs
+        .insert(op_key, allocation.observed_epoch);
     for row in registry.validators.values_mut() {
         if row.budlum_validator != allocation.budlum_validator
             && row.source == source
@@ -439,6 +685,7 @@ fn observe(
             && row.status == RestakeStatus::Active
         {
             row.status = RestakeStatus::Exited;
+            row.allocated_units = 0;
         }
     }
     registry.validators.insert(
@@ -461,6 +708,140 @@ fn observe(
         .attested_at
         .insert(allocation.budlum_validator, attested_at);
     Ok(())
+}
+
+/// Verify ICS-07 `CometBFT` misbehaviour and slash culpable restaked operators.
+///
+/// Runs full IBC ICS-07 misbehaviour verification through a pinned
+/// [`crate::cross_domain::external::tendermint::TendermintLightClient`],
+/// transitions every culpable `CosmosIcs { domain_id: domain_key }` operator to
+/// [`RestakeStatus::Slashed`], zeroes its `allocated_units` and live
+/// `Validator.restaked_weight`, and writes an immutable [`ExternalSlashRecord`]
+/// permanently quarantining future re-entry.
+///
+/// # Errors
+///
+/// Returns [`SettlementTxError::Refused`] if shared security is disabled, the
+/// domain is unregistered or inactive, the ICS-07 proof fails verification, or
+/// no proven culprit holds an active `CosmosIcs` allocation on `domain_key`.
+///
+/// Convenience: kept for the CLI and IBC Interchain Security slash relayers.
+pub fn execute_tendermint_misbehaviour_slash(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    domain_key: u32,
+    trusted: &crate::cross_domain::external::tendermint::TrustedTendermintState,
+    light_params: &crate::cross_domain::external::tendermint::TendermintLightParams,
+    misbehaviour: &crate::cross_domain::external::tendermint::TendermintMisbehaviour,
+    now_secs: u64,
+) -> Result<Vec<ExternalSlashRecord>, SettlementTxError> {
+    use crate::cross_domain::external::tendermint::{
+        validator_set_hash, TendermintLightClient, TendermintLightParams,
+    };
+
+    let params = crate::core::chain_config::shared_security_for_chain_id(ctx.chain_id);
+    if !params.enabled {
+        return Err(refused(
+            "shared security is not enabled at this chain's genesis",
+        ));
+    }
+    let domain = state
+        .settlement
+        .domains
+        .get(domain_key)
+        .ok_or_else(|| refused("Tendermint slash names an unregistered domain"))?;
+    if domain.status != crate::domain::types::DomainStatus::Active
+        || !is_cosmos_ics_eligible_domain(domain)
+    {
+        return Err(refused(
+            "Tendermint slash requires an active Tendermint/BFT settlement domain",
+        ));
+    }
+    let _ = TendermintLightParams::standard_for_unbonding(light_params.unbonding_period_secs)
+        .map_err(|e| refused(format!("Tendermint unbonding period rejected: {e}")))?;
+    let anchor_root = validator_set_hash(&trusted.validators);
+    let mut client =
+        TendermintLightClient::new(trusted.clone(), anchor_root, anchor_root, *light_params)
+            .map_err(|e| refused(format!("Tendermint trusted anchor rejected: {e}")))?;
+    if client.consensus_state(trusted.height).is_none() {
+        return Err(refused(
+            "Tendermint light client missing pinned trusted height",
+        ));
+    }
+    let verified = client
+        .submit_misbehaviour(misbehaviour, now_secs)
+        .map_err(|e| refused(format!("Tendermint ICS-07 misbehaviour rejected: {e}")))?;
+
+    let source = RestakeSource::CosmosIcs {
+        domain_id: domain_key,
+    };
+    let culprit_addrs: BTreeSet<[u8; 20]> = verified.culprits.iter().map(|v| v.address).collect();
+    let infraction_height = verified.header_1_height.min(verified.header_2_height);
+    let epoch = state.epoch_index;
+
+    // Pre-check match count and capacity before mutating any state.
+    let targets: Vec<Address> = state
+        .settlement
+        .shared_security
+        .validators
+        .iter()
+        .filter(|(_, row)| {
+            row.source == source
+                && row.status == RestakeStatus::Active
+                && culprit_addrs.contains(&row.eth_operator)
+        })
+        .map(|(addr, _)| *addr)
+        .collect();
+    if targets.is_empty() {
+        return Err(refused(
+            "verified Tendermint misbehaviour matches no active unslashed shared-security operator",
+        ));
+    }
+    if state
+        .settlement
+        .shared_security
+        .slashed_operators
+        .len()
+        .saturating_add(targets.len())
+        > MAX_RESTAKED_VALIDATORS
+    {
+        return Err(refused("shared-security slash quarantine table is full"));
+    }
+
+    let mut records = Vec::with_capacity(targets.len());
+    for val_addr in targets {
+        if let Some(row) = state
+            .settlement
+            .shared_security
+            .validators
+            .get_mut(&val_addr)
+        {
+            let slashed_units = row.allocated_units;
+            let op = row.eth_operator;
+            row.allocated_units = 0;
+            row.status = RestakeStatus::Slashed;
+            let rec = ExternalSlashRecord {
+                source,
+                operator: op,
+                budlum_validator: val_addr,
+                slashed_units,
+                kind: verified.kind,
+                infraction_height,
+                slashed_at_epoch: epoch,
+                evidence_id: verified.evidence_id,
+            };
+            state
+                .settlement
+                .shared_security
+                .slashed_operators
+                .insert(source.operator_map_key(&op), rec.clone());
+            records.push(rec);
+        }
+        if let Some(val) = state.validators.get_mut(&val_addr) {
+            val.restaked_weight = 0;
+        }
+    }
+    Ok(records)
 }
 
 /// Recompute every validator's restaked weight from the live allocations
@@ -716,9 +1097,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("not enabled"), "{err}");
-        assert!(execute_shared_security_tx(
+        let testnet_err = execute_shared_security_tx(
             &mut state,
             &ctx(operator, testnet),
+            &SharedSecurityTx::SetRegistrar {
+                domain_key: DOMAIN,
+                registrar: REGISTRAR.to_vec(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            testnet_err.to_string().contains("not enabled"),
+            "{testnet_err}"
+        );
+        assert!(execute_shared_security_tx(
+            &mut state,
+            &ctx(operator, devnet()),
             &SharedSecurityTx::SetRegistrar {
                 domain_key: DOMAIN,
                 registrar: REGISTRAR.to_vec(),
@@ -1064,5 +1458,461 @@ mod tests {
             .insert(addr, state.epoch_index);
         apply_restaked_weights(&mut state, &params);
         assert!(state.validators[&addr].restaked_weight > 0);
+    }
+
+    fn anchored_for_source(
+        state: &mut AccountState,
+        domain_key: u32,
+        registrar: &[u8],
+        source: RestakeSource,
+        allocation: &AllocationClaim,
+        nonce: u64,
+    ) -> Box<RelayerExternalResult> {
+        let message = CrossDomainMessage::new_correlated(
+            CrossDomainMessageParams {
+                source_domain: domain_key,
+                target_domain: 1,
+                source_height: 10 + nonce,
+                event_index: 0,
+                nonce,
+                sender: crate::settlement::app_binding::origin_emitter(registrar),
+                recipient: allocation.budlum_validator,
+                payload_hash: allocation_payload_hash(source, allocation),
+                kind: MessageKind::Custom(ALLOCATION_KIND.to_vec()),
+                expiry_height: 0,
+            },
+            operator_correlation(&allocation.eth_operator),
+        );
+        let mut result = RelayerExternalResult {
+            chain: source.external_chain(),
+            tx_hash: format!("0x{nonce:04x}"),
+            success: true,
+            message: Some(message),
+            receipt_proof: Vec::new(),
+            external_state_root: [0u8; 32],
+        };
+        let leaf = result.result_leaf();
+        result.receipt_proof = bincode::serialize(&crate::cross_domain::event_tree::MerkleProof {
+            leaf,
+            index: 0,
+            siblings: Vec::new(),
+        })
+        .expect("proof");
+        result.external_state_root = leaf;
+        assert!(state.anchor_external_root(domain_key, leaf));
+        Box::new(result)
+    }
+
+    #[test]
+    fn strix_stale_epoch_replay_refuses_to_exit_newer_operator_rebind() {
+        let operator = Address::from([1u8; 32]);
+        let carrier = Address::from([3u8; 32]);
+        let mut state = state_with_registrar(operator);
+        let val_a = Address::from([0xA1; 32]);
+        let val_b = Address::from([0xB2; 32]);
+
+        // Operator binds to val_b at epoch 50 first.
+        let newer = claim(val_b, 50_000, 50);
+        let newer_tx = observe_tx(&mut state, &newer, 1);
+        execute_shared_security_tx(&mut state, &ctx(carrier, devnet()), &newer_tx)
+            .expect("newer epoch 50 records");
+
+        // Attacker replays an unconsumed historical event for val_a from epoch 10 (< 50):
+        // MUST fail closed and keep val_b's epoch-50 allocation Active!
+        let stale = claim(val_a, 1_000, 10);
+        let stale_tx = observe_tx(&mut state, &stale, 2);
+        let err = execute_shared_security_tx(&mut state, &ctx(carrier, devnet()), &stale_tx)
+            .expect_err("stale operator epoch replay must be refused");
+        assert!(matches!(err, SettlementTxError::Refused(_)));
+        assert_eq!(
+            state
+                .settlement
+                .shared_security
+                .active(&val_b)
+                .expect("val_b stays live")
+                .allocated_units,
+            50_000
+        );
+        assert!(!state
+            .settlement
+            .shared_security
+            .validators
+            .contains_key(&val_a));
+    }
+
+    #[test]
+    fn strix_cold_zero_unit_allocation_refuses_to_squat_registry_slot() {
+        let operator = Address::from([1u8; 32]);
+        let carrier = Address::from([3u8; 32]);
+        let mut state = state_with_registrar(operator);
+        let squat_val = Address::from([0xC3; 32]);
+        let zero = claim(squat_val, 0, 1);
+        let tx = observe_tx(&mut state, &zero, 99);
+        let err = execute_shared_security_tx(&mut state, &ctx(carrier, devnet()), &tx)
+            .expect_err("cold zero-unit allocation must not squat registry slot");
+        assert!(matches!(err, SettlementTxError::Refused(_)));
+        assert!(state.settlement.shared_security.validators.is_empty());
+    }
+
+    #[test]
+    fn multi_source_symbiotic_babylon_and_inactive_domain_guard_enforce_invariants() {
+        let eth_op = Address::from([0x21; 32]);
+        let btc_op = Address::from([0x22; 32]);
+        let carrier = Address::from([0x23; 32]);
+        let mut state = state_with_registrar(eth_op);
+
+        // Verify < 1/3 BFT restaking cap helper.
+        assert!(SharedSecurityParams {
+            enabled: true,
+            max_restaked_share_ppm: MAX_SAFE_BFT_RESTAKED_SHARE_PPM,
+            units_to_weight_ppm: 1_000_000,
+        }
+        .respects_bft_safety_cap());
+        assert!(!SharedSecurityParams {
+            enabled: true,
+            max_restaked_share_ppm: MAX_SAFE_BFT_RESTAKED_SHARE_PPM + 1,
+            units_to_weight_ppm: 1_000_000,
+        }
+        .respects_bft_safety_cap());
+
+        // Symbiotic settles on Ethereum (domain 1) with distinct payload domain tag.
+        let val_sym = Address::from([0x31; 32]);
+        let sym_claim = AllocationClaim {
+            budlum_validator: val_sym,
+            eth_operator: [0x51; 20],
+            allocated_units: 25_000,
+            observed_epoch: 7,
+            bls_public_key: vec![0xB2; BLS_PUBLIC_KEY_BYTES],
+        };
+        assert_ne!(
+            allocation_payload_hash(RestakeSource::Symbiotic, &sym_claim),
+            allocation_payload_hash(RestakeSource::EigenLayer, &sym_claim)
+        );
+        let sym_ev = anchored_for_source(
+            &mut state,
+            DOMAIN,
+            &REGISTRAR,
+            RestakeSource::Symbiotic,
+            &sym_claim,
+            10,
+        );
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: DOMAIN,
+                source: RestakeSource::Symbiotic,
+                allocation: sym_claim,
+                evidence: sym_ev,
+            },
+        )
+        .expect("Symbiotic allocation records");
+
+        // Register Bitcoin domain (id = 2) for Babylon BTC staking.
+        let btc_domain_id = crate::core::transaction::ExternalChain::Bitcoin.domain_id();
+        let mut btc_domain = crate::domain::plugin::default_domain(
+            btc_domain_id,
+            crate::domain::ConsensusKind::PoW,
+            20_002,
+            crate::domain::POW_HEADER_CHAIN_ADAPTER,
+            6,
+        );
+        btc_domain.operator = Some(btc_op);
+        state.add_balance(&btc_op, btc_domain.operator_bond.saturating_add(FEE));
+        crate::settlement::domains::register_domain(&mut state, btc_domain).expect("btc domain");
+        let btc_reg = [0xBBu8; 20];
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(btc_op, devnet()),
+            &SharedSecurityTx::SetRegistrar {
+                domain_key: btc_domain_id,
+                registrar: btc_reg.to_vec(),
+            },
+        )
+        .expect("btc registrar");
+
+        let val_bab = Address::from([0x32; 32]);
+        let bab_claim = AllocationClaim {
+            budlum_validator: val_bab,
+            eth_operator: [0x61; 20],
+            allocated_units: 40_000,
+            observed_epoch: 12,
+            bls_public_key: vec![0xB3; BLS_PUBLIC_KEY_BYTES],
+        };
+        let bab_ev = anchored_for_source(
+            &mut state,
+            btc_domain_id,
+            &btc_reg,
+            RestakeSource::Babylon,
+            &bab_claim,
+            11,
+        );
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: btc_domain_id,
+                source: RestakeSource::Babylon,
+                allocation: bab_claim,
+                evidence: bab_ev,
+            },
+        )
+        .expect("Babylon BTC allocation records");
+        assert_eq!(
+            state
+                .settlement
+                .shared_security
+                .active(&val_bab)
+                .expect("babylon active")
+                .source,
+            RestakeSource::Babylon
+        );
+
+        // Freezing a settlement domain blocks both SetRegistrar and Observe fail-closed.
+        if let Some(dom) = state.settlement.domains.get_mut(DOMAIN) {
+            dom.status = crate::domain::types::DomainStatus::Frozen;
+        }
+        assert!(matches!(
+            execute_shared_security_tx(
+                &mut state,
+                &ctx(eth_op, devnet()),
+                &SharedSecurityTx::SetRegistrar {
+                    domain_key: DOMAIN,
+                    registrar: vec![0xAA; 20],
+                },
+            ),
+            Err(SettlementTxError::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn cosmos_ics_misbehaviour_slashes_only_culprit_and_quarantines_reentry() {
+        use crate::cross_domain::external::tendermint::{
+            validator_address_of, validator_set_hash, vote_sign_bytes, TendermintCommitEvidence,
+            TendermintLightParams, TendermintMisbehaviour, TendermintMisbehaviourKind,
+            TendermintSignature, TendermintValidator, TrustedTendermintState,
+        };
+        use crate::crypto::primitives::KeyPair;
+
+        let dom_id = 777u32;
+        let dom_op = Address::from([0x41; 32]);
+        let carrier = Address::from([0x42; 32]);
+        let mut state = AccountState::new();
+        let mut domain = crate::domain::plugin::default_domain(
+            dom_id,
+            crate::domain::ConsensusKind::Custom("tendermint-bft".to_string()),
+            777_001,
+            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+            1,
+        );
+        domain.operator = Some(dom_op);
+        domain.plugin_code_hash = Some([0x77; 32]);
+        state.add_balance(&dom_op, domain.operator_bond.saturating_add(FEE));
+        crate::settlement::domains::register_domain(&mut state, domain).expect("tm domain");
+
+        let ics_reg = [0xCCu8; 20];
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(dom_op, devnet()),
+            &SharedSecurityTx::SetRegistrar {
+                domain_key: dom_id,
+                registrar: ics_reg.to_vec(),
+            },
+        )
+        .expect("ics registrar");
+
+        // 4 CometBFT provider validators (keys 0..4, 100 power each).
+        let keys: Vec<KeyPair> = (60u8..=63)
+            .map(|s| KeyPair::from_seed(&[s; 32]).expect("key"))
+            .collect();
+        let tm_vals: Vec<TendermintValidator> = keys
+            .iter()
+            .map(|k| {
+                let pk = k.public_key_bytes();
+                TendermintValidator {
+                    address: validator_address_of(&pk),
+                    public_key: pk,
+                    voting_power: 100,
+                }
+            })
+            .collect();
+
+        // Register two CosmosIcs allocations:
+        // - honest_val backed by tm_vals[0] (signs only fork A -> MUST STAY ACTIVE!)
+        // - culprit_val backed by tm_vals[1] (signs BOTH fork A and fork B -> MUST BE SLASHED!)
+        let source = RestakeSource::CosmosIcs { domain_id: dom_id };
+        let honest_val = Address::from([0x71; 32]);
+        let culprit_val = Address::from([0x72; 32]);
+        let bls_h = vec![0xD1; BLS_PUBLIC_KEY_BYTES];
+        let bls_c = vec![0xD2; BLS_PUBLIC_KEY_BYTES];
+        for (addr, bls) in [(honest_val, bls_h.clone()), (culprit_val, bls_c.clone())] {
+            let mut v = Validator::new(addr, 100_000);
+            v.active = true;
+            v.bls_public_key = bls;
+            state.validators.insert(addr, v);
+        }
+
+        let honest_claim = AllocationClaim {
+            budlum_validator: honest_val,
+            eth_operator: tm_vals[0].address,
+            allocated_units: 10_000,
+            observed_epoch: 1,
+            bls_public_key: bls_h,
+        };
+        let culprit_claim = AllocationClaim {
+            budlum_validator: culprit_val,
+            eth_operator: tm_vals[1].address,
+            allocated_units: 15_000,
+            observed_epoch: 1,
+            bls_public_key: bls_c.clone(),
+        };
+        for (idx, cl) in [(1u64, &honest_claim), (2u64, &culprit_claim)] {
+            let ev = anchored_for_source(&mut state, dom_id, &ics_reg, source, cl, idx);
+            execute_shared_security_tx(
+                &mut state,
+                &ctx(carrier, devnet()),
+                &SharedSecurityTx::Observe {
+                    domain_key: dom_id,
+                    source,
+                    allocation: cl.clone(),
+                    evidence: ev,
+                },
+            )
+            .expect("ics observe");
+        }
+        let params = crate::core::chain_config::shared_security_for_chain_id(devnet());
+        apply_restaked_weights(&mut state, &params);
+        assert!(state.validators[&honest_val].restaked_weight > 0);
+        assert!(state.validators[&culprit_val].restaked_weight > 0);
+
+        // Construct two conflicting CometBFT commits at height 900:
+        // Fork A signed by [0, 1, 2], Fork B signed by [1, 2, 3].
+        let chain_id = "provider-ics-1";
+        let set_hash = validator_set_hash(&tm_vals);
+        let mk_fork = |app_hash: [u8; 32], signers: &[usize]| -> TendermintCommitEvidence {
+            let ts = 1_790_000_600u64;
+            let parts = [app_hash[0]; 32];
+            let mut c = TendermintCommitEvidence {
+                chain_id: chain_id.to_string(),
+                height: 900,
+                round: 0,
+                block_hash: [0u8; 32],
+                parts_total: 1,
+                parts_hash: parts,
+                version_block: 11,
+                last_block_hash: [0x11; 32],
+                last_parts_total: 1,
+                last_parts_hash: [0x22; 32],
+                last_commit_hash: [0x33; 32],
+                data_hash: [0x44; 32],
+                validators_hash: set_hash,
+                next_validators_hash: set_hash,
+                consensus_hash: [0x66; 32],
+                app_hash,
+                last_results_hash: [0x88; 32],
+                evidence_hash: [0xaa; 32],
+                proposer_address: tm_vals[0].address,
+                commit_time: ts,
+                commit_time_nanos: 0,
+                validators: tm_vals.clone(),
+                signatures: Vec::new(),
+            };
+            c.block_hash = c.header_hash();
+            c.signatures = signers
+                .iter()
+                .map(|&i| {
+                    let msg =
+                        vote_sign_bytes(chain_id, 900, 0, &c.block_hash, 1, &parts, (ts as i64, 0));
+                    TendermintSignature {
+                        address: tm_vals[i].address,
+                        timestamp_seconds: ts as i64,
+                        timestamp_nanos: 0,
+                        signature: keys[i].sign(&msg).to_vec(),
+                    }
+                })
+                .collect();
+            c
+        };
+        let light_params = TendermintLightParams::standard_for_unbonding(1_814_400).unwrap();
+        let trusted = TrustedTendermintState {
+            chain_id: chain_id.to_string(),
+            height: 890,
+            time_secs: 1_790_000_000,
+            trusting_period_secs: light_params.trusting_period_secs,
+            validators: tm_vals.clone(),
+            next_validators_hash: set_hash,
+        };
+        let misbehaviour = TendermintMisbehaviour {
+            header_1: mk_fork([0xA1; 32], &[0, 1, 2]),
+            header_2: Some(mk_fork([0xB2; 32], &[1, 2, 3])),
+        };
+
+        let records = execute_tendermint_misbehaviour_slash(
+            &mut state,
+            &ctx(carrier, devnet()),
+            dom_id,
+            &trusted,
+            &light_params,
+            &misbehaviour,
+            1_790_001_000,
+        )
+        .expect("culprit slashed");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].budlum_validator, culprit_val);
+        assert_eq!(records[0].slashed_units, 15_000);
+        assert_eq!(
+            records[0].kind,
+            TendermintMisbehaviourKind::DoubleSignEquivocation
+        );
+
+        // Culprit is Slashed with zero live weight; honest validator stays 100% Active!
+        assert_eq!(state.validators[&culprit_val].restaked_weight, 0);
+        assert_eq!(
+            state.settlement.shared_security.validators[&culprit_val].status,
+            RestakeStatus::Slashed
+        );
+        assert!(state
+            .settlement
+            .shared_security
+            .active(&honest_val)
+            .is_some());
+        assert!(state.validators[&honest_val].restaked_weight > 0);
+
+        // Duplicate replay of same slash proof fails closed (already slashed).
+        assert!(matches!(
+            execute_tendermint_misbehaviour_slash(
+                &mut state,
+                &ctx(carrier, devnet()),
+                dom_id,
+                &trusted,
+                &light_params,
+                &misbehaviour,
+                1_790_001_000,
+            ),
+            Err(SettlementTxError::Refused(_))
+        ));
+
+        // Slashed operator attempting re-entry at a higher epoch is permanently refused!
+        let reentry = AllocationClaim {
+            budlum_validator: Address::from([0x79; 32]),
+            eth_operator: tm_vals[1].address,
+            allocated_units: 99_000,
+            observed_epoch: 50,
+            bls_public_key: bls_c,
+        };
+        let reentry_ev = anchored_for_source(&mut state, dom_id, &ics_reg, source, &reentry, 99);
+        assert!(matches!(
+            execute_shared_security_tx(
+                &mut state,
+                &ctx(carrier, devnet()),
+                &SharedSecurityTx::Observe {
+                    domain_key: dom_id,
+                    source,
+                    allocation: reentry,
+                    evidence: reentry_ev,
+                },
+            ),
+            Err(SettlementTxError::Refused(_))
+        ));
     }
 }

@@ -191,18 +191,21 @@ pub fn apply(
         registry,
         signer,
         tx,
-        epoch,
+        (crate::core::transaction::DEFAULT_CHAIN_ID, epoch),
         &std::collections::BTreeMap::new(),
         None,
     )
 }
 
-/// Apply one transaction signed by `signer` at `epoch`, supplying both the
-/// active consensus validator directory and, for `BindNft`, the chain-verified
-/// owner of the referenced NFT id.
+/// Apply one transaction signed by `signer` at `epoch` on `chain_id`,
+/// supplying the active consensus ML-DSA-65 validator key directory and, for
+/// `BindNft`, the chain-verified owner of the referenced NFT id.
 ///
-/// Callers without access to `AccountState::nft_registry` pass `None`, so
-/// `BindNft` fails closed instead of recording an unverified caller-chosen id.
+/// `RecordRepair` and `ReplaceObject` attestations are verified against the
+/// digest for `chain_id`: a quorum signed for one network is refused on any
+/// other network that shares the same validators and object keys. Callers
+/// without access to `AccountState::nft_registry` pass `None`, so `BindNft`
+/// fails closed instead of recording an unverified caller-chosen id.
 ///
 /// # Errors
 ///
@@ -211,7 +214,7 @@ pub(crate) fn apply_with_validators_and_nft_owner(
     registry: &mut Bud3Registry,
     signer: Address,
     tx: StorageTxV3,
-    epoch: u64,
+    (chain_id, epoch): (u64, u64),
     validator_keys: &std::collections::BTreeMap<Address, Vec<u8>>,
     verified_nft_owner: Option<Address>,
 ) -> Result<Applied, RegistryError> {
@@ -254,7 +257,7 @@ pub(crate) fn apply_with_validators_and_nft_owner(
                     },
                     Some(&signer),
                     validator_keys,
-                    epoch,
+                    (chain_id, epoch),
                 )
                 .map(|()| Applied::Repaired)
         }
@@ -311,7 +314,7 @@ pub(crate) fn apply_with_validators_and_nft_owner(
                 new_record,
                 new_shares,
                 &attestations,
-                (epoch, validator_keys),
+                (chain_id, epoch, validator_keys),
             )
             .map(Applied::Replaced),
         StorageTxV3::PayFallbackView {
@@ -403,7 +406,7 @@ mod tests {
                     nft: [7; 32],
                     object: key
                 },
-                1,
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 1),
                 &empty_keys,
                 Some([2; 32]),
             ),
@@ -450,7 +453,7 @@ mod tests {
                     nft: [8; 32],
                     object: key
                 },
-                3,
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 3),
                 &empty_keys,
                 Some([1; 32]),
             ),
@@ -688,7 +691,7 @@ mod tests {
                     nft: derived,
                     object: key,
                 },
-                1,
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 1),
                 &keys,
                 bob_owner,
             ),
@@ -705,7 +708,7 @@ mod tests {
                     nft: unminted,
                     object: key,
                 },
-                1,
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 1),
                 &keys,
                 unminted_owner,
             ),
@@ -722,7 +725,7 @@ mod tests {
                     nft: derived,
                     object: key,
                 },
-                1,
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 1),
                 &keys,
                 alice_owner,
             ),

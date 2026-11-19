@@ -104,7 +104,14 @@ fn apply(
     tx: StorageTxV3,
     epoch: u64,
 ) -> Result<Applied, RegistryError> {
-    apply_with_validators_and_nft_owner(registry, signer, tx, epoch, &validator_keys(), None)
+    apply_with_validators_and_nft_owner(
+        registry,
+        signer,
+        tx,
+        (crate::core::transaction::DEFAULT_CHAIN_ID, epoch),
+        &validator_keys(),
+        None,
+    )
 }
 
 /// Three distinct placement-group ML-DSA-65 attestations over
@@ -217,7 +224,7 @@ fn bud3_object_replacement_keeps_the_content_id_and_moves_the_references() {
                 nft: [7; 32],
                 object: old,
             },
-            0,
+            (crate::core::transaction::DEFAULT_CHAIN_ID, 0),
             &BTreeMap::new(),
             Some(addr(OWNER)),
         ),

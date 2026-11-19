@@ -886,7 +886,7 @@ mod tests {
     /// Directive IP-50 conformance gate: `uel_conformance_move_sui`.
     #[test]
     fn uel_conformance_move_sui() {
-        let mut worker = MoveSuiWorker::new();
+        let mut worker = MoveSuiWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(5_000_000);
         let Ok(caller) = EeIdentity::new(EeId::MOVE_SUI, vec![0x31; 32]) else {
             panic!("caller");
@@ -935,7 +935,7 @@ mod tests {
     #[test]
     fn uel_conformance_cairo() {
         assert_eq!(AUDITED_CAIRO_ENGINE_SPDX, "Apache-2.0");
-        let mut worker = CairoWorker::new();
+        let mut worker = CairoWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(5_000_000);
         let Ok(caller) = EeIdentity::new(EeId::CAIRO, vec![0x41; 32]) else {
             panic!("caller");
@@ -986,7 +986,7 @@ mod tests {
     /// Directive IP-53 (1/5) conformance gate: `uel_conformance_polkavm`.
     #[test]
     fn uel_conformance_polkavm() {
-        let mut worker = PolkaVmWorker::new();
+        let mut worker = PolkaVmWorker::with_activation_height(Some(0));
         let prog = PolkaVmProgram {
             constructor: vec![PolkaVmInsn::LoadImm { rd: 0, imm: 5 }],
             dispatches: vec![PolkaVmDispatch {
@@ -1032,7 +1032,7 @@ mod tests {
     #[test]
     fn uel_conformance_near() {
         assert_eq!(AUDITED_NEAR_SPDX, "MIT OR Apache-2.0");
-        let mut worker = NearWasmWorker::new();
+        let mut worker = NearWasmWorker::with_activation_height(Some(0));
         let prog = NearContractProgram {
             abi_version: String::from("near-sdk-5.0"),
             init_ops: vec![NearOp::StorageWrite {
@@ -1110,7 +1110,7 @@ mod tests {
     #[test]
     fn uel_conformance_tvm() {
         assert_eq!(AUDITED_TVM_SPDX, "MIT OR Apache-2.0");
-        let mut worker = TvmWorker::new();
+        let mut worker = TvmWorker::with_activation_height(Some(0));
         let contract = TvmContract {
             init: vec![
                 TvmInsn::PushInt(10),
@@ -1192,7 +1192,7 @@ mod tests {
     #[test]
     fn uel_conformance_utxo() {
         assert_eq!(AUDITED_UTXO_SPDX, "MIT");
-        let mut worker = UtxoScriptWorker::new();
+        let mut worker = UtxoScriptWorker::with_activation_height(Some(0));
         let preimage = b"conformance-preimage".to_vec();
         let digest: [u8; 32] = Sha256::digest(&preimage).into();
         let lock = UtxoLockScript {
@@ -1266,7 +1266,7 @@ mod tests {
     #[test]
     fn uel_conformance_plutus() {
         assert_eq!(AUDITED_PLUTUS_SPDX, "Apache-2.0");
-        let mut worker = PlutusWorker::new();
+        let mut worker = PlutusWorker::with_activation_height(Some(0));
         let prog = PlutusValidatorProgram {
             uplc_version: String::from("1.1.0"),
             initial_datum_int: 5,

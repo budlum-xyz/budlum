@@ -466,8 +466,8 @@ mod tests {
     /// The prompt does not offer to produce media.
     #[test]
     fn the_prompt_offers_no_generation_surface() {
-        if let Err(finding) = generation_phrases_are_all_refusals(AI_SYSTEM_PROMPT) {
-            panic!("{finding}");
+        if let Err(err) = generation_phrases_are_all_refusals(AI_SYSTEM_PROMPT) {
+            panic!("{err}");
         }
     }
 

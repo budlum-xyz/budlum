@@ -1,13 +1,12 @@
 //! In-process adapters for the eight T-Expansion execution environments
 //! (`MOVE_SUI = 0x05`, `CAIRO = 0x06`, `NEAR_WASM = 0x07`, `POLKAVM = 0x08`,
 //! `TVM = 0x09`, `UTXO = 0x0A`, `PLUTUS = 0x0B`, `RV32 = 0x0C`), wired
-//! directly into [`crate::execution::coordinator::ExecutionCoordinator::new`]
-//! so testnet blocks execute all thirteen environments seamlessly alongside
-//! out-of-process `budlum-ee-*` sockets.
+//! directly into [`crate::execution::coordinator::ExecutionCoordinator::new`].
+//! They remain devnet-only by default; public and unknown chain ids fail closed
+//! before host state is read or written.
 //!
 //! Convenience: exposed for UEL coordinator supervision and runtime wiring.
 
-use crate::core::chain_config::Network;
 use crate::execution::coordinator::state::{
     NS_CAIRO_STATE, NS_NEAR_STATE, NS_PLUTUS_STATE, NS_POLKAVM_STATE, NS_RV32_STATE, NS_SUI_OBJECT,
     NS_TVM_STATE, NS_UTXO_STATE,
@@ -32,19 +31,16 @@ struct ExpansionSpec {
 }
 
 fn check_network_open(ee: EeId, ctx: &BlockContext) -> Result<(), EeRefusal> {
-    if ctx.chain_id == Network::Testnet.chain_id().value()
-        || ctx.chain_id == Network::Devnet.chain_id().value()
-    {
-        Ok(())
-    } else {
-        Err(EeRefusal {
-            code: RefusalCode::Denied,
-            message: format!(
-                "expansion environment 0x{:02x} requires Testnet (45261)",
-                ee.0
-            ),
-        })
+    if budlum_uel_abi::expansion_environment_enabled_by_default(ctx.chain_id) {
+        return Ok(());
     }
+    Err(EeRefusal {
+        code: RefusalCode::Denied,
+        message: format!(
+            "expansion environment 0x{:02x} is closed on chain {}",
+            ee.0, ctx.chain_id
+        ),
+    })
 }
 
 fn ns(name: &str) -> Result<Namespace, EeRefusal> {
@@ -259,10 +255,11 @@ macro_rules! define_expansion_ee {
 
             fn query(
                 &self,
-                _ctx: &BlockContext,
+                ctx: &BlockContext,
                 q: &EeQuery,
                 host: &dyn HostRead,
             ) -> Result<Vec<u8>, EeRefusal> {
+                check_network_open(Self::SPEC.ee, ctx)?;
                 query_expansion_state($ns, q, host)
             }
         }

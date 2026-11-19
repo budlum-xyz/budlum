@@ -187,11 +187,18 @@ fn pick_initial_repairer(
     if full_candidates.is_empty() {
         return None;
     }
-    let head = object_key
-        .first()
-        .copied()
-        .map_or(0u64, u64::from)
-        .wrapping_add(segment);
+    // Every byte of the object key enters, not just the first one. Reading
+    // `object_key.first()` capped the head at 255, and adding the segment did not
+    // lift it, so on a set of more than 256 Full validators the reduction below
+    // could never reach index 256 and above: those validators never received a
+    // segment-0 repair, and the first 256 carried every task. The FNV-1a mix is
+    // deterministic and order-stable, so two nodes still agree on the assignee.
+    let mut head: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in object_key {
+        head ^= u64::from(*byte);
+        head = head.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let head = head.wrapping_add(segment.wrapping_mul(0x9e37_79b9_7f4a_7c15));
     let len = u64::try_from(full_candidates.len()).unwrap_or(1);
     let idx = usize::try_from(head % len).unwrap_or(0);
     full_candidates.get(idx).copied()
@@ -219,5 +226,32 @@ mod tests {
         let second = moved[0].2;
         assert_ne!(second, first);
         assert_eq!(sched.task(&key, 0).unwrap().handovers, 1);
+    }
+
+    #[test]
+    fn initial_repairer_distributes_across_more_than_256_validators() {
+        let candidates: Vec<Address> = (0u16..600)
+            .map(|i| {
+                let mut a = [0u8; 32];
+                a[..2].copy_from_slice(&i.to_le_bytes());
+                a
+            })
+            .collect();
+        let mut sched = RepairScheduler::new();
+        let mut picked_above_255 = false;
+        for sample in 0u16..200 {
+            let mut key = [0x01u8; 32];
+            key[1..3].copy_from_slice(&sample.to_le_bytes());
+            let chosen = sched.schedule_task(key, 0, 100, &candidates).unwrap();
+            let idx = u16::from_le_bytes([chosen[0], chosen[1]]);
+            if idx >= 256 {
+                picked_above_255 = true;
+                break;
+            }
+        }
+        assert!(
+            picked_above_255,
+            "segment-0 repair assignment must reach validators at index >= 256"
+        );
     }
 }

@@ -228,7 +228,7 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
 
     let fee = 10_000;
     let mut tx = Transaction::new_contract_call_to(sender, app.mirror_account, fee, 0, bytecode);
-    tx.chain_id = crate::core::chain_config::Network::Testnet
+    tx.chain_id = crate::core::chain_config::Network::Devnet
         .chain_id()
         .value();
     tx.hash = tx.calculate_hash();

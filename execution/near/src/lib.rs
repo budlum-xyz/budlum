@@ -3,8 +3,8 @@
 //!
 //! Runs strictly in deterministic interpreter mode (no JIT, no floating-point
 //! WASM ops) across `x86_64` and `aarch64`, persists NEAR contract modules and
-//! account key-value storage under `ee/near/state`, and opens on testnet
-//! `45261` at `PROPOSED_NEAR_ACTIVATION_HEIGHT` (`0`).
+//! account key-value storage under `ee/near/state`, and remains closed by
+//! default on public testnet `45261` until an explicit activation height.
 
 #![forbid(unsafe_code)]
 
@@ -26,7 +26,7 @@ pub const NEAR_JIT_ENABLED: bool = false;
 /// Budlum testnet chain ID (`45261`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed testnet activation height (open from block zero on `45261`, `IP-53`).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 pub const PROPOSED_NEAR_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing NEAR WASM contracts and storage registers.
@@ -413,11 +413,11 @@ impl Default for NearWasmWorker {
 }
 
 impl NearWasmWorker {
-    /// Default testnet posture: open from [`PROPOSED_NEAR_ACTIVATION_HEIGHT`] (`0`).
+    /// Default public-testnet posture: closed until an explicit activation height.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            testnet_activation_height: Some(PROPOSED_NEAR_ACTIVATION_HEIGHT),
+            testnet_activation_height: None,
         }
     }
 
@@ -432,8 +432,11 @@ impl NearWasmWorker {
     /// Returns `true` when NEAR WASM is active at `ctx`.
     #[must_use]
     pub const fn is_active(&self, ctx: &BlockContext) -> bool {
-        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+        if ctx.chain_id == budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID {
             return true;
+        }
+        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+            return false;
         }
         match self.testnet_activation_height {
             Some(h) => ctx.height >= h,
@@ -636,12 +639,23 @@ mod tests {
     }
 
     #[test]
-    fn near_wasm_is_open_on_testnet() {
+    fn near_wasm_is_closed_on_testnet() {
         const { assert!(!NEAR_JIT_ENABLED) };
-        let open = NearWasmWorker::new();
-        assert!(open.is_active(&ctx()));
-        let mut closed = NearWasmWorker::with_activation_height(None);
+        let mut closed = NearWasmWorker::new();
         assert!(!closed.is_active(&ctx()));
+        for chain_id in [45_260, 99_999] {
+            assert!(!closed.is_active(&BlockContext { chain_id, ..ctx() }));
+        }
+        assert!(closed.is_active(&BlockContext {
+            chain_id: 45_262,
+            ..ctx()
+        }));
+        let activated = NearWasmWorker::with_activation_height(Some(10));
+        assert!(!activated.is_active(&ctx()));
+        assert!(activated.is_active(&BlockContext {
+            height: 10,
+            ..ctx()
+        }));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::NEAR_WASM, b"alice.budlum".to_vec()) else {
             panic!("caller");
@@ -669,7 +683,7 @@ mod tests {
     #[test]
     fn uel_conformance_near() {
         assert_eq!(AUDITED_NEAR_SPDX, "MIT OR Apache-2.0");
-        let mut worker = NearWasmWorker::new();
+        let mut worker = NearWasmWorker::with_activation_height(Some(0));
         let prog = NearContractProgram {
             abi_version: String::from("near-sdk-5.0"),
             init_ops: vec![NearOp::StorageWrite {
@@ -886,7 +900,7 @@ mod tests {
                 },
             ],
         };
-        let mut worker = NearWasmWorker::new();
+        let mut worker = NearWasmWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(5_000_000);
         let Ok(alice) = EeIdentity::new(EeId::NEAR_WASM, b"alice.budlum".to_vec()) else {
             panic!("alice")

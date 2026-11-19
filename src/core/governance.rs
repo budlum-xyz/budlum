@@ -25,6 +25,16 @@ pub const GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS: u64 = 20;
 /// which the decision can be seen and contested.
 pub const GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS: u64 = 5;
 
+/// The longest external network name an anchor vote may install.
+///
+/// The name is a key in a consensus map, so it is bounded at proposal time.
+///
+/// WIRING: pub so a `PinExternalAnchor` proposer and this file's own proposal
+/// validation (and its tests) share one declared limit instead of each
+/// hand-copying the same magic number; the production check is the
+/// `network.len()` comparison a few lines below, in this file.
+pub const MAX_PINNED_NETWORK_BYTES: usize = 64;
+
 /// A zero activation delay is not a timelock.
 ///
 /// Enforced at compile time rather than in a test: a test asserting on
@@ -64,6 +74,7 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         | ProposalType::UnfreezeConsensusDomain { .. }
         | ProposalType::ResetConsensusDomainTip { .. }
         | ProposalType::PoaAddAdmin { .. }
+        | ProposalType::PinExternalAnchor { .. }
         | ProposalType::BnsSetPrimarySellers { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
 
         // Actions aimed at one account.
@@ -257,6 +268,33 @@ pub enum ProposalType {
     UnfreezeConsensusDomain {
         domain_id: u32,
         expected_validator_set_hash: [u8; 32],
+        justification_hash: [u8; 32],
+    },
+    /// Install or replace the trust anchor an external-domain adapter family
+    /// verifies against, for one external network.
+    ///
+    /// The adapters that check another chain's finality cannot take the
+    /// validator set, sync committee or checkpoint from the evidence: a
+    /// submitter that supplies its own anchor has signed nothing but its own
+    /// claim. The anchor is therefore consensus state - it is inside
+    /// `external_intake_root` - and a block is the only thing that may move it.
+    /// Before this variant existed, the four anchor maps had no writer outside
+    /// the crate's tests, so every anchored adapter was closed forever and
+    /// "governance pins the committee" named a vote nobody could cast.
+    ///
+    /// `expected_previous` is the digest of the anchor the vote replaces
+    /// (`None` for a slot that must be empty), the same anti-retargeting shape
+    /// as [`Self::UnfreezeConsensusDomain`]: a vote taken against one
+    /// checkpoint cannot activate onto its successor.
+    ///
+    /// `justification_hash` names the audit trail - the ceremony transcript,
+    /// the checkpoint's explorer URL, the pinned set's height - because an
+    /// anchor is the one value in this system that is trusted rather than
+    /// proved, and a trusted value needs a published reason.
+    PinExternalAnchor {
+        network: String,
+        anchor: crate::cross_domain::external::intake::PinnedExternalAnchor,
+        expected_previous: Option<[u8; 32]>,
         justification_hash: [u8; 32],
     },
     /// Bootstrap or extend a `PoA` domain's admin set.
@@ -675,6 +713,32 @@ impl GovernanceState {
                     );
                 }
             }
+            ProposalType::PinExternalAnchor {
+                network,
+                anchor,
+                justification_hash,
+                ..
+            } => {
+                // A network name is a consensus map key, so it is bounded here
+                // rather than at execution: an unbounded string in state is
+                // storage anyone can buy with a proposal fee.
+                if network.is_empty() {
+                    return Err("PinExternalAnchor network must not be empty".into());
+                }
+                if network.len() > MAX_PINNED_NETWORK_BYTES {
+                    return Err(format!(
+                        "PinExternalAnchor network is {} bytes; the limit is {MAX_PINNED_NETWORK_BYTES}",
+                        network.len()
+                    ));
+                }
+                if justification_hash == &[0u8; 32] {
+                    return Err("PinExternalAnchor justification_hash must be non-zero".into());
+                }
+                // The anchor is trusted rather than proved, which is why the
+                // justification is mandatory; a family with an all-zero anchor
+                // is the shape of a placeholder that would verify nothing.
+                anchor.validate()?;
+            }
             ProposalType::BnsSetPrimarySellers { sellers } => {
                 let mut reg = crate::bns::BnsRegistry::new();
                 reg.set_primary_sellers(sellers.iter().copied())?;
@@ -885,6 +949,17 @@ impl GovernanceState {
                     target_hash: *target_hash,
                     justification_hash: *justification_hash,
                 }),
+                ProposalType::PinExternalAnchor {
+                    network,
+                    anchor,
+                    expected_previous,
+                    justification_hash,
+                } => Some(GovernanceAction::PinExternalAnchor {
+                    network: network.clone(),
+                    anchor: anchor.clone(),
+                    expected_previous: *expected_previous,
+                    justification_hash: *justification_hash,
+                }),
                 ProposalType::BnsSetPrimarySellers { sellers } => {
                     Some(GovernanceAction::BnsSetPrimarySellers {
                         sellers: sellers.clone(),
@@ -926,6 +1001,15 @@ pub enum GovernanceAction {
     SetConstitutionParameter(ConstitutionParameter),
     VerifyHubApp {
         app_id: u64,
+    },
+    /// Install or replace an external-domain trust anchor. Applied in block
+    /// execution by `execution::executor`, which refuses the block when the
+    /// slot does not hold the anchor the vote expected.
+    PinExternalAnchor {
+        network: String,
+        anchor: crate::cross_domain::external::intake::PinnedExternalAnchor,
+        expected_previous: Option<[u8; 32]>,
+        justification_hash: [u8; 32],
     },
     UnfreezeConsensusDomain {
         domain_id: u32,
@@ -1704,5 +1788,111 @@ mod l4_tests {
             }),
             GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS
         );
+    }
+
+    /// An anchor vote changes what the chain enforces about another chain, so
+    /// it waits the policy delay, and it installs the anchor when it activates.
+    #[test]
+    fn a_passed_anchor_vote_installs_the_anchor_after_the_policy_delay() {
+        use crate::cross_domain::external::intake::PinnedExternalAnchor;
+        use crate::cross_domain::external::tendermint::PinnedTendermintAnchor;
+
+        let mut gov = GovernanceState::default();
+        let proposer = Address::from([0x01; 32]);
+        let anchor = PinnedExternalAnchor::Tendermint(PinnedTendermintAnchor {
+            chain_id: "noble-1".to_string(),
+            validator_set_hash: [0x11; 32],
+        });
+        let p_type = ProposalType::PinExternalAnchor {
+            network: "noble-mainnet".to_string(),
+            anchor: anchor.clone(),
+            expected_previous: None,
+            justification_hash: [0x42; 32],
+        };
+        assert_eq!(
+            activation_delay_epochs(&p_type),
+            GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS
+        );
+        gov.create_proposal(proposer, p_type, 0, 10)
+            .expect("proposal");
+        let proposal = gov.find_proposal_mut(0).expect("stored");
+        proposal.add_vote(proposer, 100_000, true, 0).expect("vote");
+        proposal.status = ProposalStatus::Passed;
+
+        // Nothing happens before the vote is ready.
+        assert!(gov.execute_passed_proposals(0).is_empty());
+        let actions = gov.execute_passed_proposals(u64::MAX);
+        assert_eq!(
+            actions,
+            vec![GovernanceAction::PinExternalAnchor {
+                network: "noble-mainnet".to_string(),
+                anchor,
+                expected_previous: None,
+                justification_hash: [0x42; 32],
+            }]
+        );
+    }
+
+    /// A vote that would install a placeholder is refused before it takes a
+    /// slot: an anchor nobody had to justify is an anchor nobody can check.
+    #[test]
+    fn an_anchor_vote_without_a_justification_or_a_real_anchor_is_refused() {
+        use crate::cross_domain::external::intake::PinnedExternalAnchor;
+        use crate::cross_domain::external::tendermint::PinnedTendermintAnchor;
+
+        let mut gov = GovernanceState::default();
+        let proposer = Address::from([0x01; 32]);
+        let real = PinnedExternalAnchor::Tendermint(PinnedTendermintAnchor {
+            chain_id: "noble-1".to_string(),
+            validator_set_hash: [0x11; 32],
+        });
+        let placeholder = PinnedExternalAnchor::Tendermint(PinnedTendermintAnchor {
+            chain_id: "noble-1".to_string(),
+            validator_set_hash: [0u8; 32],
+        });
+        let vote = |network: &str, anchor: PinnedExternalAnchor, justification: [u8; 32]| {
+            ProposalType::PinExternalAnchor {
+                network: network.to_string(),
+                anchor,
+                expected_previous: None,
+                justification_hash: justification,
+            }
+        };
+
+        assert!(gov
+            .create_proposal(proposer, vote("", real.clone(), [0x42; 32]), 0, 10)
+            .is_err());
+        assert!(gov
+            .create_proposal(
+                proposer,
+                vote(
+                    &"n".repeat(MAX_PINNED_NETWORK_BYTES + 1),
+                    real.clone(),
+                    [0x42; 32]
+                ),
+                0,
+                10
+            )
+            .is_err());
+        assert!(gov
+            .create_proposal(
+                proposer,
+                vote("noble-mainnet", real.clone(), [0u8; 32]),
+                0,
+                10
+            )
+            .is_err());
+        assert!(gov
+            .create_proposal(
+                proposer,
+                vote("noble-mainnet", placeholder, [0x42; 32]),
+                0,
+                10
+            )
+            .is_err());
+        assert!(gov.proposals.is_empty());
+        assert!(gov
+            .create_proposal(proposer, vote("noble-mainnet", real, [0x42; 32]), 0, 10)
+            .is_ok());
     }
 }

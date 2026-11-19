@@ -3,7 +3,7 @@
 //! sampling rule, and a fail-closed bound on the still-eager upload path (Sections 6.4 & 6.21.1).
 //! exposed for `/budlum/bud3/upload/1` stream handlers and `Bud3RpcService`.
 
-use super::bof1::{Bof1Error, Flags, Object};
+use super::bof1::{Bof1Error, Flags, Object, CODEC_RAW};
 use super::content_id::{ContentId, PublicHasher};
 use super::custody::{symbol_leaf, symbol_root};
 use super::fountain::{FountainError, SegmentEncoder, Symbol};
@@ -12,7 +12,8 @@ use super::limits::{Bud3Limits, LimitError, Profile};
 use super::pipeline::ObjectRecord;
 use super::placement::{place, segment_key, Candidate, PlacementError, PlacementRow, Share};
 use super::qr::{frame_to_png, png_to_frame, Bud3QrError};
-use super::registry::{Address, Bud3Registry, ObjectKey};
+use super::registry::{Address, Bud3Registry, ObjectKey, ShareStatus};
+use super::seal::{MIN_SEALED_BUCKET_BYTES, SEAL_AUTH_TAG_LEN, SEAL_SALT_LEN};
 use super::segment::{commit_object, Segmentation};
 use super::tx::StorageTxV3;
 use crate::core::hash::hash_fields_bytes;
@@ -125,15 +126,20 @@ impl From<Bud3QrError> for UploadError {
 
 /// Whether raw BOF-1 flag byte `raw_flags` is admitted on testnet.
 ///
-/// All defined BOF-1 flags (`SEALED` bit0, `LIVE` bit1, `HAS_BASE` bit2,
-/// `HAS_CONTEXT` bit3) are active on testnet; unknown high bits (`>= 0x10`)
-/// are refused.
+/// `SEALED` bit0 and `HAS_BASE` bit2 are admitted. `LIVE` bit1,
+/// `HAS_CONTEXT` bit3, and unknown high bits are closed at launch.
 ///
 /// # Errors
 ///
-/// [`UploadError::ClosedFeatureFlag`] when `raw_flags` carries unknown high bits.
+/// [`UploadError::ClosedFeatureFlag`] when `raw_flags` carries a closed or
+/// unknown bit.
 pub fn admit_testnet_flags(raw_flags: u8) -> Result<Flags, UploadError> {
-    Flags::from_byte(raw_flags).map_err(|_| UploadError::ClosedFeatureFlag(raw_flags))
+    let flags =
+        Flags::from_byte(raw_flags).map_err(|_| UploadError::ClosedFeatureFlag(raw_flags))?;
+    if flags.has(Flags::LIVE) || flags.has(Flags::HAS_CONTEXT) {
+        return Err(UploadError::ClosedFeatureFlag(raw_flags));
+    }
+    Ok(flags)
 }
 
 /// Deterministically choose which frame indices of a segment must undergo pixel
@@ -319,7 +325,10 @@ impl UploadSessionManager {
     ) -> Result<u64, UploadError> {
         let (account, ip_key) = client;
         self.purge_expired(now_sec);
-        let _ = admit_testnet_flags(raw_flags)?;
+        let flags = admit_testnet_flags(raw_flags)?;
+        if !pre_sealed_object && flags.has(Flags::SEALED) {
+            return Err(UploadError::Bof1(Bof1Error::ContentMismatch));
+        }
         if declared_len > MAX_UPLOAD_SESSION_BYTES {
             return Err(UploadError::Limit(LimitError::ContentTooLarge {
                 len: declared_len,
@@ -489,10 +498,15 @@ impl UploadSessionManager {
         if !session.pre_sealed_object {
             let content_id = session.hasher.clone().finish();
             if let Some(key) = registry.public_object(&content_id.digest) {
-                if let Some(existing) = registry
-                    .object(&key)
-                    .filter(|entry| entry.record.content_id == content_id)
-                {
+                if let Some(existing) = registry.object(&key).filter(|entry| {
+                    entry.record.content_id == content_id
+                        && entry.custody_confirmed
+                        && !entry.shares.is_empty()
+                        && entry
+                            .shares
+                            .iter()
+                            .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+                }) {
                     let record = existing.record.clone();
                     zeroize_and_release(&mut session.buffer);
                     return Ok(FinishedUploadSession {
@@ -512,8 +526,23 @@ impl UploadSessionManager {
 
         let (object, content_id) = if session.pre_sealed_object {
             let mut m = super::meter::Meter::for_object(session.buffer.len() as u64);
-            let parsed = Object::decode(&session.buffer, &mut m)?;
-            parsed.validate_testnet()?;
+            let parsed = Object::decode(&session.buffer, &mut m).inspect_err(|_| {
+                zeroize_and_release(&mut session.buffer);
+            })?;
+            parsed.validate_testnet().inspect_err(|_| {
+                zeroize_and_release(&mut session.buffer);
+            })?;
+            let min_sealed_len = SEAL_SALT_LEN
+                .saturating_add(usize::try_from(MIN_SEALED_BUCKET_BYTES).unwrap_or(64))
+                .saturating_add(SEAL_AUTH_TAG_LEN);
+            if !parsed.header.is_sealed()
+                || parsed.header.content_len != 0
+                || parsed.header.codec != CODEC_RAW
+                || parsed.payload.len() < min_sealed_len
+            {
+                zeroize_and_release(&mut session.buffer);
+                return Err(UploadError::Bof1(Bof1Error::ContentMismatch));
+            }
             let cid = ContentId {
                 kind: super::content_id::ContentIdKind::Sealed,
                 digest: parsed.header.content_digest,
@@ -534,7 +563,17 @@ impl UploadSessionManager {
         zeroize_and_release(&mut session.buffer);
 
         let deduplicated_existing = if content_id.kind == super::content_id::ContentIdKind::Public {
-            registry.public_object(&content_id.digest)
+            registry.public_object(&content_id.digest).filter(|key| {
+                registry.object(key).is_some_and(|entry| {
+                    entry.record.content_id == content_id
+                        && entry.custody_confirmed
+                        && !entry.shares.is_empty()
+                        && entry
+                            .shares
+                            .iter()
+                            .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+                })
+            })
         } else {
             None
         };
@@ -670,14 +709,15 @@ mod tests {
         let mut mgr = UploadSessionManager::new(Bud3Limits::default());
         let acc = [1u8; 32];
 
-        // Both LIVE (bit1) and HAS_CONTEXT (bit3) are open on testnet; unknown high
-        // bits (0x10+) remain refused.
-        assert!(mgr
-            .open_session((acc, [1; 16]), 16, Flags::LIVE, 10, false, 100)
-            .is_ok());
-        assert!(mgr
-            .open_session((acc, [2; 16]), 16, CLOSED_FLAG_BIT3, 10, false, 100)
-            .is_ok());
+        // LIVE (bit1), HAS_CONTEXT (bit3), and unknown high bits are closed on testnet.
+        assert_eq!(
+            mgr.open_session((acc, [1; 16]), 16, Flags::LIVE, 10, false, 100),
+            Err(UploadError::ClosedFeatureFlag(Flags::LIVE))
+        );
+        assert_eq!(
+            mgr.open_session((acc, [2; 16]), 16, CLOSED_FLAG_BIT3, 10, false, 100),
+            Err(UploadError::ClosedFeatureFlag(CLOSED_FLAG_BIT3))
+        );
         assert!(matches!(
             mgr.open_session((acc, [1; 16]), 16, 0x10, 10, false, 100),
             Err(UploadError::ClosedFeatureFlag(0x10))
@@ -952,5 +992,175 @@ mod tests {
         );
         mgr.purge_expired(2 * 86_400);
         assert!(mgr.daily_account_bytes.is_empty());
+    }
+
+    #[test]
+    fn pre_sealed_upload_rejects_public_or_truncated_bof1_and_accepts_real_sealed_bof1() {
+        use super::super::content_id::ContentKey;
+        use super::super::pipeline::view_sealed;
+        use super::super::seal::seal_object;
+
+        let mut mgr = UploadSessionManager::new(Bud3Limits::default());
+        let reg = Bud3Registry::default();
+        let row = PlacementRow {
+            n_full: 2,
+            s_full: 10,
+            n_mobile: 0,
+            s_mobile: 0,
+        };
+        let candidates = full_candidates(4);
+        let client = ([9; 32], [5; 16]);
+
+        // Contradictory flags (`SEALED` without `pre_sealed_object = true`) must fail closed.
+        assert!(matches!(
+            mgr.open_session(client, 32, Flags::SEALED, 20, false, 100),
+            Err(UploadError::Bof1(Bof1Error::ContentMismatch))
+        ));
+
+        // Public BOF-1 object uploaded into a `pre_sealed_object = true` session must be rejected.
+        let unsealed_bof1 = Object::raw_public(b"plaintext smuggled as sealed").encode();
+        let sid_bad = mgr
+            .open_session(
+                client,
+                unsealed_bof1.len() as u64,
+                Flags::SEALED,
+                20,
+                true,
+                101,
+            )
+            .unwrap();
+        mgr.append_chunk(sid_bad, &unsealed_bof1, 102).unwrap();
+        assert!(matches!(
+            mgr.finish_session(sid_bad, &SMALL, &row, &candidates, &reg, 103),
+            Err(UploadError::Bof1(Bof1Error::ContentMismatch))
+        ));
+
+        // Truncated sealed BOF-1 payload below minimum salt + bucket + MAC size must fail.
+        let mut short_sealed = Object::raw_public(b"x").encode();
+        short_sealed[3] |= Flags::SEALED;
+        if let Ok(mut parsed) = Object::decode(
+            &Object {
+                header: super::super::bof1::Header {
+                    flags: Flags::from_byte(Flags::SEALED).unwrap(),
+                    profile: Profile::P0.id,
+                    codec: CODEC_RAW,
+                    dictionary: 0,
+                    base: None,
+                    content_len: 0,
+                    content_digest: [0x22; 32],
+                    payload_len: 8,
+                    prev_object: None,
+                    context_manifest: None,
+                },
+                payload: vec![0xAA; 8],
+            }
+            .encode(),
+            &mut super::super::meter::Meter::for_object(1024),
+        ) {
+            parsed.payload = vec![0xAA; 8];
+            let encoded_short = parsed.encode();
+            let sid_short = mgr
+                .open_session(
+                    client,
+                    encoded_short.len() as u64,
+                    Flags::SEALED,
+                    20,
+                    true,
+                    104,
+                )
+                .unwrap();
+            mgr.append_chunk(sid_short, &encoded_short, 105).unwrap();
+            assert!(matches!(
+                mgr.finish_session(sid_short, &SMALL, &row, &candidates, &reg, 106),
+                Err(UploadError::Bof1(Bof1Error::ContentMismatch))
+            ));
+        }
+
+        // Real client-side sealed BOF-1 object succeeds and decrypts via `view_sealed`.
+        let key = ContentKey([0x44; 32]);
+        let plaintext = b"client-side sealed pre-encoded payload".to_vec();
+        let sealed = seal_object(&plaintext, &key, [0x17; SEAL_SALT_LEN]).unwrap();
+        let sealed_bytes = sealed.encode();
+        let sid_ok = mgr
+            .open_session(
+                client,
+                sealed_bytes.len() as u64,
+                Flags::SEALED,
+                20,
+                true,
+                107,
+            )
+            .unwrap();
+        for chunk in sealed_bytes.chunks(31) {
+            mgr.append_chunk(sid_ok, chunk, 108).unwrap();
+        }
+        let finished = mgr
+            .finish_session(sid_ok, &SMALL, &row, &candidates, &reg, 109)
+            .unwrap();
+        assert_eq!(
+            finished.record.content_id.kind,
+            super::super::content_id::ContentIdKind::Sealed
+        );
+        assert_eq!(finished.record.content_id.len, 0);
+        let recovered = view_sealed(
+            &finished.record,
+            &key,
+            finished.segments.into_iter().flatten(),
+        )
+        .unwrap();
+        assert_eq!(recovered, plaintext);
+    }
+
+    #[test]
+    fn public_dedup_ignores_lost_custody_entry() {
+        let content = b"lost-share object must not short-circuit";
+        let prepared = prepare_public_upload(content, &SMALL, &Bud3Limits::default(), 10).unwrap();
+        let key = prepared.record.commitment;
+        let mut reg = Bud3Registry::default();
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: [10; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 5,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: [11; 32],
+                    class: Class::Full,
+                    first_esi: 5,
+                    symbols: 5,
+                },
+            ),
+        ];
+        assert_eq!(
+            reg.register_object([1; 32], prepared.record, shares, 1, 20),
+            Ok(Registered::New(key))
+        );
+        reg.ack(&key, &[10; 32]).unwrap();
+        reg.ack(&key, &[11; 32]).unwrap();
+        assert_eq!(reg.mark_unseen(&[10; 32]), 1);
+        // Share is now marked lost (`s.lost == true`), so upload must NOT
+        // deduplicate with empty shares.
+        let mut mgr = UploadSessionManager::new(Bud3Limits::default());
+        let sid = mgr
+            .open_session(([2; 32], [3; 16]), content.len() as u64, 0, 20, false, 500)
+            .unwrap();
+        mgr.append_chunk(sid, content, 501).unwrap();
+        let row = PlacementRow {
+            n_full: 2,
+            s_full: 10,
+            n_mobile: 0,
+            s_mobile: 0,
+        };
+        let finished = mgr
+            .finish_session(sid, &SMALL, &row, &full_candidates(4), &reg, 502)
+            .unwrap();
+        assert!(finished.deduplicated_existing.is_none());
+        assert!(!finished.segments.is_empty());
     }
 }

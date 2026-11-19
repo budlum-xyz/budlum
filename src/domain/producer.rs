@@ -13,7 +13,8 @@
 
 use crate::core::address::Address;
 use crate::domain::finality_adapter::{
-    hash_finality_proof, hash_pow_header, leading_zero_bits, FinalityProof, PoWHeader,
+    decode_compact_bits, hash_finality_proof, hash_pow_header, leading_zero_bits,
+    target_leading_zero_bits, BitcoinHeader, FinalityProof, PoWHeader,
 };
 use crate::domain::types::{ConsensusDomain, DomainCommitment, Hash32, VerifiedDomainCommitment};
 use serde::{Deserialize, Serialize};
@@ -142,6 +143,130 @@ pub fn build_pow_commitment(spec: &PowChainSpec) -> Result<VerifiedDomainCommitm
         consensus_kind: spec.domain.kind.clone(),
         validator_set_hash: spec.domain.validator_set_hash,
         timestamp_ms: target.timestamp_ms,
+        sequence: spec.sequence,
+        producer: spec.producer,
+        state_updates: std::collections::BTreeMap::new(),
+    };
+    Ok(VerifiedDomainCommitment { commitment, proof })
+}
+
+/// Content fields a single Bitcoin header commits to (`merkle_root`, timestamp, version, bits).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BitcoinBlockContent {
+    pub version: i32,
+    pub merkle_root: Hash32,
+    pub timestamp: u32,
+    pub bits: u32,
+}
+
+/// Producer input for building a contiguous Bitcoin SPV commitment and header window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BitcoinSpvChainSpec {
+    pub domain: ConsensusDomain,
+    pub parent_hash: Hash32,
+    pub height: u64,
+    pub sequence: u64,
+    pub producer: Option<Address>,
+    pub blocks: Vec<BitcoinBlockContent>,
+}
+
+/// Mine a [`BitcoinHeader`] until its little-endian `SHA256d` hash meets its compact `bits` target.
+fn mine_bitcoin_header(mut header: BitcoinHeader) -> Result<(BitcoinHeader, Hash32), String> {
+    let (target, _) = decode_compact_bits(header.bits)
+        .ok_or_else(|| format!("malformed compact bits {:#010x}", header.bits))?;
+    loop {
+        let hash = header.block_hash();
+        let mut be = hash;
+        be.reverse();
+        if be.as_slice() <= target.as_slice() {
+            return Ok((header, hash));
+        }
+        header.nonce = header
+            .nonce
+            .checked_add(1)
+            .ok_or_else(|| "Bitcoin nonce space exhausted".to_string())?;
+    }
+}
+
+/// Build a `bitcoin-spv-v1` [`VerifiedDomainCommitment`] from a [`BitcoinSpvChainSpec`].
+///
+/// # Errors
+///
+/// Returns an error if the domain is not `bitcoin-spv-v1`, lacks valid `pow_parameters`,
+/// has an empty block window, has out-of-range header difficulty, or cannot mine a block.
+pub fn build_bitcoin_spv_commitment(
+    spec: &BitcoinSpvChainSpec,
+) -> Result<VerifiedDomainCommitment, String> {
+    if spec.domain.finality_adapter != crate::domain::types::BITCOIN_SPV_ADAPTER {
+        return Err(format!(
+            "domain {} uses adapter {}, expected {}",
+            spec.domain.id,
+            spec.domain.finality_adapter,
+            crate::domain::types::BITCOIN_SPV_ADAPTER
+        ));
+    }
+    let params = spec
+        .domain
+        .pow_parameters
+        .as_ref()
+        .ok_or_else(|| "the domain has no pow_parameters".to_string())?;
+    let target_block = spec
+        .blocks
+        .first()
+        .ok_or_else(|| "a Bitcoin SPV commitment needs at least its target block".to_string())?;
+    let mut headers = Vec::with_capacity(spec.blocks.len());
+    let mut target_hash = [0u8; 32];
+    let mut parent = spec.parent_hash;
+    let mut height = spec.height;
+    let mut prev_timestamp = 0u32;
+    for (index, block) in spec.blocks.iter().enumerate() {
+        let (decoded_target, _) = decode_compact_bits(block.bits)
+            .ok_or_else(|| format!("malformed compact bits {:#010x}", block.bits))?;
+        let required_leading = target_leading_zero_bits(&decoded_target);
+        if required_leading < params.min_difficulty_bits
+            || required_leading > params.max_difficulty_bits
+        {
+            return Err(format!(
+                "difficulty {} is outside the registered range {}..={}",
+                required_leading, params.min_difficulty_bits, params.max_difficulty_bits
+            ));
+        }
+        if index > 0 && block.timestamp < prev_timestamp {
+            return Err("Bitcoin header timestamps move backwards".to_string());
+        }
+        let (header, hash) = mine_bitcoin_header(BitcoinHeader {
+            version: block.version,
+            prev_hash: parent,
+            merkle_root: block.merkle_root,
+            timestamp: block.timestamp,
+            bits: block.bits,
+            nonce: 0,
+            height,
+        })?;
+        if index == 0 {
+            target_hash = hash;
+        }
+        headers.push(header);
+        parent = hash;
+        height = height
+            .checked_add(1)
+            .ok_or_else(|| "Bitcoin header height overflows".to_string())?;
+        prev_timestamp = block.timestamp;
+    }
+    let proof = FinalityProof::BitcoinSpv { headers };
+    let finality_proof_hash = hash_finality_proof(&proof).map_err(|e| e.to_string())?;
+    let commitment = DomainCommitment {
+        domain_id: spec.domain.id,
+        domain_height: spec.height,
+        domain_block_hash: target_hash,
+        parent_domain_block_hash: spec.parent_hash,
+        state_root: [0u8; 32],
+        tx_root: target_block.merkle_root,
+        event_root: [0u8; 32],
+        finality_proof_hash,
+        consensus_kind: spec.domain.kind.clone(),
+        validator_set_hash: spec.domain.validator_set_hash,
+        timestamp_ms: u128::from(target_block.timestamp) * 1000,
         sequence: spec.sequence,
         producer: spec.producer,
         state_updates: std::collections::BTreeMap::new(),
@@ -546,5 +671,52 @@ mod tests {
             matches!(status, FinalityStatus::Pending { .. }),
             "{status:?}"
         );
+    }
+
+    #[test]
+    fn a_built_bitcoin_spv_commitment_finalizes() {
+        let mut domain = crate::domain::plugin::default_domain(
+            3,
+            crate::domain::ConsensusKind::PoW,
+            0,
+            crate::domain::types::BITCOIN_SPV_ADAPTER,
+            2,
+        );
+        domain.pow_parameters = Some(crate::domain::types::PoWDomainParameters {
+            min_difficulty_bits: 1,
+            max_difficulty_bits: 16,
+            min_cumulative_work: 4,
+            max_headers: 8,
+        });
+        let spec = BitcoinSpvChainSpec {
+            domain: domain.clone(),
+            parent_hash: [0x11; 32],
+            height: 1,
+            sequence: 0,
+            producer: None,
+            blocks: vec![
+                BitcoinBlockContent {
+                    version: 1,
+                    merkle_root: [0x22; 32],
+                    timestamp: 1_700_000_000,
+                    bits: 0x207f_ffff,
+                },
+                BitcoinBlockContent {
+                    version: 1,
+                    merkle_root: [0x33; 32],
+                    timestamp: 1_700_000_600,
+                    bits: 0x207f_ffff,
+                },
+            ],
+        };
+        let built = build_bitcoin_spv_commitment(&spec).expect("bitcoin spv commitment builds");
+        assert!(matches!(
+            built.proof,
+            FinalityProof::BitcoinSpv { ref headers } if headers.len() == 2
+        ));
+        let status = crate::domain::finality_adapter::BitcoinSpvFinalityAdapter
+            .verify_finality(&domain, &built.commitment, &built.proof)
+            .expect("adapter runs");
+        assert_eq!(status, FinalityStatus::Finalized);
     }
 }

@@ -3,8 +3,9 @@ use crate::core::account::AccountState;
 use crate::core::block::Block;
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::finality_adapter::{
-    block_finality_proof_hash, empty_event_root, BftFinalityAdapter, DomainFinalityAdapter,
-    PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
+    block_finality_proof_hash, empty_event_root, BftFinalityAdapter, BitcoinSpvFinalityAdapter,
+    DagFinalityAdapter, DomainFinalityAdapter, PoAFinalityAdapter, PoSFinalityAdapter,
+    PoWHeaderChainFinalityAdapter, PohFinalityAdapter, PospaceFinalityAdapter, ZkFinalityAdapter,
 };
 use crate::domain::types::{
     ConsensusDomain, ConsensusKind, DomainCommitment, DomainId, DomainStatus, Hash32,
@@ -87,14 +88,25 @@ pub trait ConsensusDomainPlugin: Send + Sync {
 
 pub struct PoWDomainPlugin {
     consensus: Arc<dyn ConsensusEngine>,
-    finality: PoWHeaderChainFinalityAdapter,
+    finality: Box<dyn DomainFinalityAdapter>,
 }
 
 impl PoWDomainPlugin {
+    /// PoW plugin backed by the bounded Budlum header-chain light client.
     pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
         Self {
             consensus,
-            finality: PoWHeaderChainFinalityAdapter,
+            finality: Box::new(PoWHeaderChainFinalityAdapter),
+        }
+    }
+
+    /// PoW plugin backed by the Bitcoin SPV finality adapter: SHA256d headers,
+    /// compact bits, chainwork. This is the plugin a node registers for a PoW
+    /// domain whose `finality_adapter` is `bitcoin-spv-v1`.
+    pub fn new_bitcoin_spv(consensus: Arc<dyn ConsensusEngine>) -> Self {
+        Self {
+            consensus,
+            finality: Box::new(BitcoinSpvFinalityAdapter),
         }
     }
 }
@@ -109,7 +121,7 @@ impl ConsensusDomainPlugin for PoWDomainPlugin {
     }
 
     fn finality_adapter(&self) -> &dyn DomainFinalityAdapter {
-        &self.finality
+        self.finality.as_ref()
     }
 }
 
@@ -225,6 +237,159 @@ impl ConsensusDomainPlugin for ZkDomainPlugin {
     }
 }
 
+pub struct DagDomainPlugin {
+    consensus: Arc<dyn ConsensusEngine>,
+    finality: DagFinalityAdapter,
+}
+
+impl DagDomainPlugin {
+    pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
+        Self {
+            consensus,
+            finality: DagFinalityAdapter,
+        }
+    }
+}
+
+impl ConsensusDomainPlugin for DagDomainPlugin {
+    fn kind(&self) -> ConsensusKind {
+        ConsensusKind::Dag
+    }
+
+    fn consensus(&self) -> &dyn ConsensusEngine {
+        self.consensus.as_ref()
+    }
+
+    fn finality_adapter(&self) -> &dyn DomainFinalityAdapter {
+        &self.finality
+    }
+
+    fn validate_domain_block(
+        &self,
+        block: &Block,
+        ctx: DomainContext<'_>,
+    ) -> Result<(), DomainError> {
+        if block.chain_id != ctx.domain.domain_chain_id {
+            return Err(DomainError(format!(
+                "DAG block chain_id {} does not match domain chain_id {}",
+                block.chain_id, ctx.domain.domain_chain_id
+            )));
+        }
+        let calculated_tx_root = block.calculate_tx_root();
+        if block.tx_root != calculated_tx_root {
+            return Err(DomainError("DAG block tx_root mismatch".into()));
+        }
+        if block.index > 0 {
+            let parents = crate::consensus::dag::parse_parent_hashes(&block.previous_hash);
+            let max_parent = parents
+                .iter()
+                .filter_map(|p| ctx.chain.iter().find(|b| &b.hash == p))
+                .max_by_key(|b| b.timestamp);
+            self.consensus()
+                .validate_timestamp(block, max_parent)
+                .map_err(DomainError::from)?;
+            self.consensus()
+                .validate_block_size(block)
+                .map_err(DomainError::from)?;
+        }
+        self.consensus()
+            .validate_block(block, ctx.chain, ctx.state)
+            .map_err(DomainError::from)
+    }
+
+    fn extract_commitment(
+        &self,
+        block: &Block,
+        ctx: DomainContext<'_>,
+    ) -> Result<DomainCommitment, DomainError> {
+        if !ctx.domain.is_active() {
+            return Err(DomainError(format!(
+                "Domain {} is not active",
+                ctx.domain.id
+            )));
+        }
+        // `from_block` derives the parent from the block's own parent pointer;
+        // for a DAG block that is its first parent, and the remaining parents
+        // stay in the DAG's own edge set rather than in the commitment.
+        let mut commitment = DomainCommitment::from_block(
+            ctx.domain,
+            block,
+            empty_event_root(),
+            block_finality_proof_hash(block),
+            ctx.sequence,
+        )
+        .map_err(DomainError)?;
+        let parents = crate::consensus::dag::parse_parent_hashes(&block.previous_hash);
+        if let Some(first_parent) = parents.first() {
+            if let Ok(h) = crate::domain::types::normalize_hash32(
+                b"parent_domain_block_hash",
+                ctx.domain.id,
+                &ctx.domain.block_hash_scheme,
+                first_parent.as_bytes(),
+            ) {
+                commitment.parent_domain_block_hash = h;
+            }
+        }
+        Ok(commitment)
+    }
+}
+
+pub struct PohDomainPlugin {
+    consensus: Arc<dyn ConsensusEngine>,
+    finality: PohFinalityAdapter,
+}
+
+impl PohDomainPlugin {
+    pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
+        Self {
+            consensus,
+            finality: PohFinalityAdapter,
+        }
+    }
+}
+
+impl ConsensusDomainPlugin for PohDomainPlugin {
+    fn kind(&self) -> ConsensusKind {
+        ConsensusKind::Poh
+    }
+
+    fn consensus(&self) -> &dyn ConsensusEngine {
+        self.consensus.as_ref()
+    }
+
+    fn finality_adapter(&self) -> &dyn DomainFinalityAdapter {
+        &self.finality
+    }
+}
+
+pub struct PospaceDomainPlugin {
+    consensus: Arc<dyn ConsensusEngine>,
+    finality: PospaceFinalityAdapter,
+}
+
+impl PospaceDomainPlugin {
+    pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
+        Self {
+            consensus,
+            finality: PospaceFinalityAdapter,
+        }
+    }
+}
+
+impl ConsensusDomainPlugin for PospaceDomainPlugin {
+    fn kind(&self) -> ConsensusKind {
+        ConsensusKind::Pospace
+    }
+
+    fn consensus(&self) -> &dyn ConsensusEngine {
+        self.consensus.as_ref()
+    }
+
+    fn finality_adapter(&self) -> &dyn DomainFinalityAdapter {
+        &self.finality
+    }
+}
+
 pub fn default_domain(
     id: DomainId,
     kind: ConsensusKind,
@@ -246,16 +411,27 @@ pub fn default_domain(
         operator[0] = 1;
     }
 
-    // PoW domains with the bounded header-chain adapter require pow_parameters.
-    // Only emit defaults when the adapter is the recognized PoW header-chain
-    // Adapter - short names like "pow" are test-only and must not carry
-    // Pow_parameters (registry rejects "pow_parameters for incompatible adapter").
+    // PoW domains with the bounded header-chain adapters require
+    // pow_parameters. Only emit defaults when the adapter is a recognized PoW
+    // adapter - short names like "pow" are test-only and must not carry
+    // Pow_parameters (registry rejects "pow_parameters for incompatible
+    // adapter"). The Bitcoin SPV adapter needs its own defaults: its
+    // difficulty bounds count the leading zero bits of `SHA256d` under the
+    // compact target (mainnet-style windows start at 32, regtest-style at 1),
+    // and its chainwork floor is Bitcoin work, not a leading-zero proxy.
     let adapter_str: String = finality_adapter.into();
     let pow_parameters = if adapter_str == crate::domain::types::POW_HEADER_CHAIN_ADAPTER {
         Some(PoWDomainParameters {
             min_difficulty_bits: 8,
             max_difficulty_bits: 120,
             min_cumulative_work: 6 * (1u128 << 8),
+            max_headers: 4096,
+        })
+    } else if adapter_str == crate::domain::types::BITCOIN_SPV_ADAPTER {
+        Some(PoWDomainParameters {
+            min_difficulty_bits: 1,
+            max_difficulty_bits: 120,
+            min_cumulative_work: 4,
             max_headers: 4096,
         })
     } else {

@@ -1,6 +1,7 @@
 //! Sealed B.U.D. 3.0 objects: A0-before-sealing, Padme length bucketing,
-//! hidden `content_len = 0` header, and XChaCha20-Poly1305 AEAD bound to the
+//! hidden `content_len = 0` header, and `XChaCha20-Poly1305` AEAD bound to the
 //! keyed [`ContentId`].
+//!
 //! exposed for client-side sealed upload/view and SDK grant decryption.
 //!
 //! Per Section 6.21.4:
@@ -32,7 +33,7 @@ use zeroize::Zeroize;
 /// Domain tag for deriving the per-object XChaCha20-Poly1305 key.
 pub const SEAL_KEY_TAG: &[u8] = b"BDLM_BUD3_SEAL_KEY_V1";
 
-/// Domain tag for deriving the per-object 24-byte XChaCha20 nonce.
+/// Domain tag for deriving the per-object 24-byte `XChaCha20` nonce.
 pub const SEAL_NONCE_TAG: &[u8] = b"BDLM_BUD3_SEAL_NONCE_V1";
 
 /// Domain tag binding the sealed BOF-1 `content_digest` into AEAD associated data.
@@ -63,16 +64,17 @@ const OWNER_COMMIT_TAG: &[u8] = b"BDLM_BUD3_OWNER_COMMIT_V1";
 const CONSENT_PRED_TAG: &[u8] = b"BDLM_BUD3_CONSENT_PRED_V1";
 
 /// A public manifest alone cannot authorize its holder to issue owner consent.
+///
 /// The YK11 statement commits to public metadata, not to a signature or a
 /// private witness for `owner_commitment`. Keep issuance and verification
-/// closed independently of the shared VerifyInference opcode schedule.
+/// closed independently of the shared `VerifyInference` opcode schedule.
 pub const CONSENT_OWNER_AUTHORIZATION_LIVE: bool = false;
 
 /// Encryption profile for B.U.D. 3.0 sealed objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum CipherProfile {
-    /// Standard XChaCha20-Poly1305 + SHA-256 keyed ContentId.
+    /// Standard `XChaCha20-Poly1305` + SHA-256 keyed `ContentId`.
     Aead = 0,
     /// Goldilocks field-native Poseidon2 cipher + field commitment for ZK compute.
     FieldNative = 1,
@@ -118,7 +120,9 @@ pub struct SealedObjectManifest {
     pub owner_commitment: [u8; 32],
 }
 
-/// Reserved scoped consent proof format. Issuance is closed under the default
+/// Reserved scoped consent proof format.
+///
+/// Issuance is closed under the default
 /// testnet opcode gate until owner authorization and the private witness are
 /// cryptographically bound; no caller may treat manifest metadata as consent.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -139,7 +143,7 @@ pub struct ConsentProof {
     pub chain_id: u64,
     /// Epoch deadline after which consent expires.
     pub expires_at_epoch: u64,
-    /// Zero-knowledge BudZero `PredicateProof` (`YK11ObjectBinding`).
+    /// Zero-knowledge `BudZero` `PredicateProof` (`YK11ObjectBinding`).
     pub predicate_proof: PredicateProof,
 }
 
@@ -819,7 +823,7 @@ impl ConsentProof {
         })
     }
 
-    /// Verify revocation (`DeletionSet`), expiry, object bindings, and the BudZero
+    /// Verify revocation (`DeletionSet`), expiry, object bindings, and the `BudZero`
     /// zero-knowledge [`PredicateProof`].
     ///
     /// # Errors

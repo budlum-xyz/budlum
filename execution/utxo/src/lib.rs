@@ -22,7 +22,7 @@ pub const AUDITED_UTXO_SPDX: &str = "MIT";
 /// Budlum testnet chain ID (`45261`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed testnet activation height (open from block zero on `45261`, `IP-53`).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 pub const PROPOSED_UTXO_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing locked UTXO spending scripts and unspent notes.
@@ -367,11 +367,11 @@ impl Default for UtxoScriptWorker {
 }
 
 impl UtxoScriptWorker {
-    /// Open on testnet `45261` from [`PROPOSED_UTXO_ACTIVATION_HEIGHT`] (`0`).
+    /// Default public-testnet posture: closed until an explicit activation height.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            testnet_activation_height: Some(PROPOSED_UTXO_ACTIVATION_HEIGHT),
+            testnet_activation_height: None,
         }
     }
 
@@ -386,8 +386,11 @@ impl UtxoScriptWorker {
     /// Returns `true` when UTXO verification is active at `ctx`.
     #[must_use]
     pub const fn is_active(&self, ctx: &BlockContext) -> bool {
-        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+        if ctx.chain_id == budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID {
             return true;
+        }
+        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+            return false;
         }
         match self.testnet_activation_height {
             Some(h) => ctx.height >= h,
@@ -601,11 +604,19 @@ mod tests {
     }
 
     #[test]
-    fn utxo_is_open_on_testnet() {
-        let open = UtxoScriptWorker::new();
-        assert!(open.is_active(&ctx(0)));
-        let mut closed = UtxoScriptWorker::with_activation_height(None);
+    fn utxo_is_closed_on_testnet() {
+        let mut closed = UtxoScriptWorker::new();
         assert!(!closed.is_active(&ctx(0)));
+        for chain_id in [45_260, 99_999] {
+            assert!(!closed.is_active(&BlockContext { chain_id, ..ctx(0) }));
+        }
+        assert!(closed.is_active(&BlockContext {
+            chain_id: 45_262,
+            ..ctx(0)
+        }));
+        let activated = UtxoScriptWorker::with_activation_height(Some(10));
+        assert!(!activated.is_active(&ctx(9)));
+        assert!(activated.is_active(&ctx(10)));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::UTXO, vec![0x0A; 32]) else {
             panic!("caller");
@@ -633,7 +644,7 @@ mod tests {
     #[test]
     fn uel_conformance_utxo() {
         assert_eq!(AUDITED_UTXO_SPDX, "MIT");
-        let mut worker = UtxoScriptWorker::new();
+        let mut worker = UtxoScriptWorker::with_activation_height(Some(0));
         let preimage = b"budlum-htlc-secret".to_vec();
         let hash: [u8; 32] = Sha256::digest(&preimage).into();
         let lock = UtxoLockScript {
@@ -781,7 +792,7 @@ mod tests {
         let Ok(blob) = encode_utxo_script(&lock) else {
             panic!("encode");
         };
-        let mut worker = UtxoScriptWorker::new();
+        let mut worker = UtxoScriptWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::UTXO, vec![0x41; 32]) else {
             panic!("caller");

@@ -41,13 +41,16 @@ struct Cli {
     /// JSON file containing a `VerifiedDomainCommitment`.
     #[arg(
         long,
-        required_unless_present_any = ["pow_spec", "bft_spec", "poa_spec"],
-        conflicts_with_all = ["pow_spec", "bft_spec", "poa_spec"]
+        required_unless_present_any = ["pow_spec", "bitcoin_spec", "bft_spec", "poa_spec"],
+        conflicts_with_all = ["pow_spec", "bitcoin_spec", "bft_spec", "poa_spec"]
     )]
     payload: Option<PathBuf>,
     /// JSON `PowChainSpec`: mine the header chain and build the payload.
     #[arg(long)]
     pow_spec: Option<PathBuf>,
+    /// JSON `BitcoinSpvChainSpec`: mine the Bitcoin header window and build the payload.
+    #[arg(long)]
+    bitcoin_spec: Option<PathBuf>,
     /// JSON `BftJob`: sign the checkpoint with the BFT validators' keys.
     #[arg(long, requires = "quorum_keys")]
     bft_spec: Option<PathBuf>,
@@ -89,6 +92,33 @@ fn quantity(value: &Value, field: &str) -> Result<u64, String> {
     )
 }
 
+const MAX_RPC_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+async fn read_json_bounded(mut response: reqwest::Response, method: &str) -> Result<Value, String> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_RPC_RESPONSE_BYTES as u64)
+    {
+        return Err(format!(
+            "{method}: response exceeds {MAX_RPC_RESPONSE_BYTES}-byte limit"
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("{method}: failed reading response body: {e}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_RPC_RESPONSE_BYTES {
+            return Err(format!(
+                "{method}: response exceeds {MAX_RPC_RESPONSE_BYTES}-byte limit"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|e| format!("{method}: response was not JSON: {e}"))
+}
+
 async fn rpc_call(
     client: &reqwest::Client,
     url: &str,
@@ -101,15 +131,13 @@ async fn rpc_call(
         "method": method,
         "params": params,
     });
-    let answer: Value = client
+    let response = client
         .post(url)
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("{method}: request failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("{method}: response was not JSON: {e}"))?;
+        .map_err(|e| format!("{method}: request failed: {e}"))?;
+    let answer = read_json_bounded(response, method).await?;
     if let Some(error) = answer.get("error") {
         return Err(format!("{method}: {error}"));
     }
@@ -266,10 +294,28 @@ fn load_payload(cli: &Cli) -> Result<budlum_core::domain::VerifiedDomainCommitme
         .map_err(|e| format!("{} is not a PowChainSpec: {e}", path.display()))?;
         return budlum_core::domain::producer::build_pow_commitment(&spec);
     }
+    if let Some(path) = &cli.bitcoin_spec {
+        let spec: budlum_core::domain::producer::BitcoinSpvChainSpec = serde_json::from_slice(
+            &std::fs::read(path)
+                .map_err(|e| format!("cannot read Bitcoin spec {}: {e}", path.display()))?,
+        )
+        .map_err(|e| format!("{} is not a BitcoinSpvChainSpec: {e}", path.display()))?;
+        if spec
+            .blocks
+            .iter()
+            .any(|block: &budlum_core::domain::producer::BitcoinBlockContent| block.bits == 0)
+        {
+            return Err(format!(
+                "{} contains a BitcoinBlockContent with zero compact bits",
+                path.display()
+            ));
+        }
+        return budlum_core::domain::producer::build_bitcoin_spv_commitment(&spec);
+    }
     let path = cli
         .payload
         .as_ref()
-        .ok_or_else(|| "--payload or --pow-spec is required".to_string())?;
+        .ok_or_else(|| "--payload, --pow-spec, or --bitcoin-spec is required".to_string())?;
     serde_json::from_slice(
         &std::fs::read(path).map_err(|e| format!("cannot read payload {}: {e}", path.display()))?,
     )
@@ -283,9 +329,14 @@ fn load_payload(cli: &Cli) -> Result<budlum_core::domain::VerifiedDomainCommitme
 /// The install is idempotent and keeps an existing default, and doing it here
 /// rather than only in `main` covers every entry point - including a test that
 /// calls `run` directly, which is the path a `main`-only install leaves open.
-fn http_client() -> reqwest::Client {
+fn http_client() -> Result<reqwest::Client, String> {
     budlum_core::crypto::tls::install_default_provider();
-    reqwest::Client::new()
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("HTTP client: {e}"))
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
@@ -303,7 +354,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         .as_ref()
         .ok_or_else(|| "--key-file is required to submit".to_string())?;
     let key = budlum_core::wallet::open_key_file(key_file, cli.password_file.as_deref())?;
-    let client = http_client();
+    let client = http_client()?;
     let requested_chain_id = cli.signing_chain_id.ok_or_else(|| {
         "--signing-chain-id is required to submit a domain commitment".to_string()
     })?;
@@ -394,6 +445,7 @@ mod tests {
             rpc_url: "http://127.0.0.1:8545".into(),
             payload: None,
             pow_spec: None,
+            bitcoin_spec: None,
             bft_spec: None,
             poa_spec: None,
             quorum_keys: Some(path.clone()),
@@ -430,6 +482,7 @@ mod tests {
             rpc_url: url,
             payload: Some(files.payload.clone()),
             pow_spec: None,
+            bitcoin_spec: None,
             bft_spec: None,
             poa_spec: None,
             quorum_keys: None,
@@ -466,5 +519,57 @@ mod tests {
         ));
         assert!(tx.verify(), "the submitted transaction is signed");
         server.stop().unwrap();
+    }
+
+    #[test]
+    fn bitcoin_spec_builds_a_verified_commitment() {
+        use budlum_core::domain::producer::{
+            build_bitcoin_spv_commitment, BitcoinBlockContent, BitcoinSpvChainSpec,
+        };
+        use budlum_core::domain::{
+            default_domain, ConsensusKind, FinalityProof, PoWDomainParameters, BITCOIN_SPV_ADAPTER,
+        };
+
+        let mut domain = default_domain(3, ConsensusKind::PoW, 0, BITCOIN_SPV_ADAPTER, 1);
+        domain.pow_parameters = Some(PoWDomainParameters {
+            min_difficulty_bits: 1,
+            max_difficulty_bits: 16,
+            min_cumulative_work: 2,
+            max_headers: 8,
+        });
+        let spec = BitcoinSpvChainSpec {
+            domain,
+            parent_hash: [0u8; 32],
+            height: 1,
+            sequence: 0,
+            producer: None,
+            blocks: vec![BitcoinBlockContent {
+                version: 1,
+                merkle_root: [0x55; 32],
+                timestamp: 1_700_000_000,
+                bits: 0x207f_ffff,
+            }],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("btc.json");
+        std::fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
+        let cli = Cli {
+            rpc_url: "http://127.0.0.1:8545".into(),
+            payload: None,
+            pow_spec: None,
+            bitcoin_spec: Some(spec_path),
+            bft_spec: None,
+            poa_spec: None,
+            quorum_keys: None,
+            write_payload: None,
+            key_file: None,
+            password_file: None,
+            signing_chain_id: None,
+            fee: 1_000,
+        };
+        let loaded = load_payload(&cli).unwrap();
+        let direct = build_bitcoin_spv_commitment(&spec).unwrap();
+        assert_eq!(loaded.commitment, direct.commitment);
+        assert!(matches!(loaded.proof, FinalityProof::BitcoinSpv { .. }));
     }
 }

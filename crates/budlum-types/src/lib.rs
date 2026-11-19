@@ -58,8 +58,8 @@ use std::str::FromStr;
 /// closes  by making `"0"` and `"0x0"` errors and adding a `0X` prefix.
 /// That change is still correct and still needed; it now lands **here**, on
 /// `from_hex` below, rather than in `src/core/address.rs`, which is a re-export
-/// as of this commit. The behaviour was moved verbatim so that this PR decides
-/// nothing about the finding either way.
+/// as of this commit. The behaviour was moved verbatim so that address
+/// parsing remains identical.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address(pub [u8; 32]);
 

@@ -1492,7 +1492,7 @@ mod bls_integrity_tests {
         );
     }
 
-    /// The other half of the finding: the verifier refuses a signature that is
+    /// Strict verification invariant: the verifier refuses a signature that is
     /// the identity point, so an "aggregate" of zero signatures cannot be
     /// presented as a quorum.
     #[test]

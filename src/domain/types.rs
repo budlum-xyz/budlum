@@ -10,6 +10,20 @@ pub type Hash32 = [u8; 32];
 
 pub const POW_HEADER_CHAIN_ADAPTER: &str = "pow-header-chain-v1";
 
+/// Canonical name of the Bitcoin SPV finality adapter.
+///
+/// Set as the `ConsensusDomain::finality_adapter` value when registering a
+/// `PoW` domain whose headers are Bitcoin headers (80-byte serialization,
+/// double-SHA256, compact `bits` targets, Bitcoin-style chainwork). It is a
+/// separate name from `POW_HEADER_CHAIN_ADAPTER` because the two adapters
+/// hash different header preimages and accumulate work under different
+/// rules; a proof for one must never be judged by the other. Registration
+/// accepts `pow_parameters` for this adapter exactly as for
+/// `POW_HEADER_CHAIN_ADAPTER` (difficulty bounds, chainwork floor, header
+/// ceiling), and `min_confirmations` is read the same way: the window starts
+/// at the committed header and must be at least that deep.
+pub const BITCOIN_SPV_ADAPTER: &str = "bitcoin-spv-v1";
+
 /// Canonical name of the storage-attestation domain finality adapter.
 ///
 /// Set as the `ConsensusDomain::finality_adapter` value when registering a
@@ -57,6 +71,9 @@ pub enum ConsensusKind {
     /// Within Budlum's multi-consensus architecture, analogous to
     /// `StorageAttestation` for B.U.D. but for AI verification.
     AiInference,
+    Dag,
+    Poh,
+    Pospace,
 }
 
 impl ConsensusKind {
@@ -67,11 +84,6 @@ impl ConsensusKind {
             ConsensusKind::PoA => b"poa".to_vec(),
             ConsensusKind::Bft => b"bft".to_vec(),
             ConsensusKind::Zk => b"zk".to_vec(),
-            ConsensusKind::Custom(name) => {
-                let mut out = b"custom:".to_vec();
-                out.extend_from_slice(name.as_bytes());
-                out
-            }
             ConsensusKind::StorageAttestation(params) => {
                 // Tag + parameters: distinct from any `Custom(...)` string so
                 // Downstream code that already pattern-matches on `as_bytes`
@@ -81,6 +93,10 @@ impl ConsensusKind {
                 out
             }
             ConsensusKind::AiInference => b"ai_inference".to_vec(),
+            ConsensusKind::Dag => b"dag".to_vec(),
+            ConsensusKind::Poh => b"poh".to_vec(),
+            ConsensusKind::Pospace => b"pospace".to_vec(),
+            ConsensusKind::Custom(name) => format!("custom:{name}").into_bytes(),
         }
     }
 
@@ -92,6 +108,21 @@ impl ConsensusKind {
     /// Convenience: is this an AI Inference domain?
     pub fn is_ai(&self) -> bool {
         matches!(self, ConsensusKind::AiInference)
+    }
+
+    /// Convenience: is this a DAG domain?
+    pub fn is_dag(&self) -> bool {
+        matches!(self, ConsensusKind::Dag)
+    }
+
+    /// Convenience: is this a PoH domain?
+    pub fn is_poh(&self) -> bool {
+        matches!(self, ConsensusKind::Poh)
+    }
+
+    /// Convenience: is this a PoSpace domain?
+    pub fn is_pospace(&self) -> bool {
+        matches!(self, ConsensusKind::Pospace)
     }
 }
 
@@ -192,7 +223,8 @@ pub struct ConsensusDomain {
     pub tx_root_scheme: RootScheme,
     pub last_committed_height: u64,
     pub last_committed_hash: Hash32,
-    /// Required when `finality_adapter == "pow-header-chain-v1"`.
+    /// Required when `finality_adapter == "pow-header-chain-v1"` or
+    /// `finality_adapter == "bitcoin-spv-v1"`; rejected otherwise.
     /// Appended for bincode field-order stability; legacy records are migrated
     /// By the storage loader and remain bridge-gated.
     #[serde(default)]

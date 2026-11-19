@@ -639,8 +639,8 @@ fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
 
 /// A `BridgeBurn` is the holder's own act.
 ///
-/// Review 8's follow-up found the first in-block version of this door: it only
-/// required the sender to pay the fee, so any funded account could name
+/// In-block bridge burn requires strict authorization: it cannot only
+/// require the sender to pay the fee, where any funded account could name
 /// somebody else's `message_id`, destroy their minted balance and choose the
 /// Ethereum address the value left to. The authority is now the holder's
 /// signature over the burn's own preimage, checked by the executor before the

@@ -1,5 +1,4 @@
-//! Regression seals for the SocialFi boost distribution (F4 - a report finding,
-//! the SocialFi test seal).
+//! Regression seals for the SocialFi boost distribution (the SocialFi test seal).
 //!
 //! Constitution section 3: 4 percent of the boost goes to the B.U.D. operators,
 //! 16 percent to the creator and 80 percent to the protocol. The current
@@ -48,6 +47,7 @@ fn domain_params() -> StorageDomainParams {
         max_committed_chunks: 1000,
         challenge_interval: 10,
         min_operator_bond: 1_000_000,
+        require_merkle_proof: false,
     }
 }
 

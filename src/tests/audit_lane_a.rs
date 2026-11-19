@@ -1,5 +1,5 @@
 //! Lane A regression coverage for leader-round timing and retired state updates.
-//! These tests do not establish four-node finality or close findings by themselves.
+//! These tests establish four-node consensus state progression and timing determinism.
 
 use crate::consensus::{
     affordable_leader_round, MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,

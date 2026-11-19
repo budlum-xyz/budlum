@@ -1,4 +1,4 @@
-//! The chain-level seal for hard pruning (F1 - a report finding, sealed by test
+//! The chain-level seal for hard pruning (sealed by deterministic test
 //! on 2026-07-17).
 //!
 //! Constitution section 1: when an NFT is burned, the B.U.D. content bound to it
@@ -9,7 +9,7 @@
 //! deals and removes the manifest from the registry. This test locks the
 //! chain-level effect on the produce_block path.
 //! Physically deleting the chunks (the NodeCommand::StoragePrune worker) is a
-//! separate verification matter (see the STATUS_ONLINE finding R1: the sender
+//! separate verification matter (status online validation: the sender
 //! wiring is missing).
 //!
 //! NOTE (proved in CI): mempool transaction validation requires a signature, so

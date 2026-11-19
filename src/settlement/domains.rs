@@ -43,10 +43,14 @@
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::cross_domain::external::BlsVerifier;
+use crate::domain::finality_proof_model::{
+    BINDS_EVENT_ROOT, BINDS_PARENT_HASH, BINDS_STATE_ROOT, BINDS_TX_ROOT,
+};
 use crate::domain::{
-    hash_finality_proof, BftFinalityAdapter, ConsensusDomain, ConsensusKind, DomainCommitment,
-    DomainFinalityAdapter, DomainId, DomainStatus, FinalityProof, FinalityStatus, Hash32,
-    PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
+    hash_finality_proof, BftFinalityAdapter, BitcoinSpvFinalityAdapter, ConsensusDomain,
+    ConsensusKind, DagFinalityAdapter, DomainCommitment, DomainFinalityAdapter, DomainId,
+    DomainStatus, FinalityProof, FinalityStatus, Hash32, PoAFinalityAdapter, PoSFinalityAdapter,
+    PoWHeaderChainFinalityAdapter, PohFinalityAdapter, PospaceFinalityAdapter, ZkFinalityAdapter,
     AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
 };
 use crate::domain::{SovereignDomainTemplate, VerifiedDomainCommitment};
@@ -326,11 +330,17 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     }
 
     let adapter_valid = match &domain.kind {
-        ConsensusKind::PoW => domain.finality_adapter == POW_HEADER_CHAIN_ADAPTER,
+        ConsensusKind::PoW => {
+            domain.finality_adapter == POW_HEADER_CHAIN_ADAPTER
+                || domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER
+        }
         ConsensusKind::PoS => domain.finality_adapter == "pos-qc-finality",
         ConsensusKind::PoA => domain.finality_adapter == "poa-authority-quorum",
         ConsensusKind::Bft => domain.finality_adapter == "bft-quorum-commit",
         ConsensusKind::Zk => domain.finality_adapter == "zk-proof-verification",
+        ConsensusKind::Dag => domain.finality_adapter == "dag-tip-vote-v1",
+        ConsensusKind::Poh => domain.finality_adapter == "poh-hash-chain-v1",
+        ConsensusKind::Pospace => domain.finality_adapter == "pospace-plot-v1",
         ConsensusKind::StorageAttestation(_) => domain.finality_adapter == "storage-attestation-v1",
         ConsensusKind::AiInference => domain.finality_adapter == AI_INFERENCE_ADAPTER,
         ConsensusKind::Custom(name) => {
@@ -603,9 +613,21 @@ pub fn verify_commitment_finality_observed(
 
     let status = match domain.kind {
         ConsensusKind::PoW => {
-            let adapter = PoWHeaderChainFinalityAdapter;
-            ensure_adapter_name(domain, adapter.adapter_name())?;
-            adapter.verify_finality(domain, commitment, proof)
+            if domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER {
+                // Bitcoin SPV domains are judged by Bitcoin's own consensus
+                // data (SHA256d, compact bits, chainwork); every other PoW
+                // domain keeps the bounded leading-zero header chain. Each
+                // adapter refuses a proof built for the other, and
+                // `ensure_adapter_name` refuses a domain registered under a
+                // third name.
+                let adapter = BitcoinSpvFinalityAdapter;
+                ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            } else {
+                let adapter = PoWHeaderChainFinalityAdapter;
+                ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            }
         }
         ConsensusKind::PoS => {
             let adapter = PoSFinalityAdapter;
@@ -635,6 +657,39 @@ pub fn verify_commitment_finality_observed(
         }
         ConsensusKind::Bft => {
             let adapter = BftFinalityAdapter::default();
+            ensure_adapter_name(domain, adapter.adapter_name())?;
+            adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            )
+        }
+        ConsensusKind::Dag => {
+            let adapter = DagFinalityAdapter;
+            ensure_adapter_name(domain, adapter.adapter_name())?;
+            adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            )
+        }
+        ConsensusKind::Poh => {
+            let adapter = PohFinalityAdapter;
+            ensure_adapter_name(domain, adapter.adapter_name())?;
+            adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            )
+        }
+        ConsensusKind::Pospace => {
+            let adapter = PospaceFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
             adapter.verify_finality_observed_in(
                 &state.scheme_registry,
@@ -778,14 +833,26 @@ pub fn verify_commitment_finality_observed(
         ConsensusKind::StorageAttestation(_) => {
             let adapter = crate::domain::StorageAttestationFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
-            let status = adapter.verify_finality(domain, commitment, proof);
+            let status = adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            );
             require_active_attester_authorities(state, proof, "Storage attestation")?;
             status
         }
         ConsensusKind::AiInference => {
             let adapter = crate::domain::AiInferenceFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
-            let status = adapter.verify_finality(domain, commitment, proof);
+            let status = adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            );
             require_active_attester_authorities(state, proof, "AI inference")?;
             status
         }
@@ -803,6 +870,25 @@ pub fn verify_commitment_finality_observed(
             // root (`SettlementProofVerifier`, `submit_relay_proof`). See
             // [`CommitmentAttestation`] for why a PoS or BFT certificate
             // cannot make one trustworthy.
+            //
+            // The attestation table is written per domain kind and the proof
+            // shape per proof family; both encode the same fact from one side
+            // each. They are checked against each other here so a future
+            // adapter cannot anchor a root its own proof does not bind: the
+            // shape is what the signatures actually cover, and it is not
+            // trusted - it is the table this module's tests pin.
+            let attestation = CommitmentAttestation::for_domain(domain);
+            let shape = proof.shape();
+            if attestation.state_root && shape.binds & BINDS_STATE_ROOT == 0
+                || attestation.tx_root && shape.binds & BINDS_TX_ROOT == 0
+                || attestation.event_root && shape.binds & BINDS_EVENT_ROOT == 0
+                || attestation.parent && shape.binds & BINDS_PARENT_HASH == 0
+            {
+                return Err(format!(
+                    "Domain {} proof does not bind a field settlement anchors for it",
+                    commitment.domain_id
+                ));
+            }
             Ok(())
         }
         FinalityStatus::Pending {
@@ -867,7 +953,7 @@ fn validate_commitment_state_updates(
 /// `Custom` is treated as the weakest case (a plugin or an external-domain
 /// framework decides its own proof, so this layer cannot claim a binding it
 /// has not checked): fail-closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommitmentAttestation {
     /// The proof binds `state_root`.
     pub state_root: bool,
@@ -906,12 +992,68 @@ impl CommitmentAttestation {
                 event_root: false,
                 parent: false,
             },
-            ConsensusKind::PoS | ConsensusKind::Bft | ConsensusKind::Custom(_) => Self {
+            ConsensusKind::PoS
+            | ConsensusKind::Bft
+            | ConsensusKind::Dag
+            | ConsensusKind::Poh
+            | ConsensusKind::Pospace
+            | ConsensusKind::Custom(_) => Self {
                 state_root: false,
                 tx_root: false,
                 event_root: false,
                 parent: false,
             },
+        }
+    }
+
+    /// What the finality adapter configured for `domain` actually attests.
+    ///
+    /// A `bitcoin-spv-v1` header commits only to its `prev_hash` (`parent`) and
+    /// `merkle_root` (`tx_root`); it has no state root or event root, so settlement
+    /// advances the domain's tip and tx-root window without demanding a non-zero
+    /// `state_root` or treating an `event_root` as proven.
+    #[must_use]
+    pub fn for_domain(domain: &ConsensusDomain) -> Self {
+        if domain.kind == ConsensusKind::PoW
+            && domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER
+        {
+            Self {
+                state_root: false,
+                tx_root: true,
+                event_root: false,
+                parent: true,
+            }
+        } else {
+            Self::for_kind(&domain.kind)
+        }
+    }
+
+    /// What a specific verified `proof` binds for `domain`.
+    ///
+    /// Structural DAG-family proofs ([`FinalityProof::Dag`], [`FinalityProof::DagPq`],
+    /// [`FinalityProof::Poh`], [`FinalityProof::PohPq`], [`FinalityProof::Pospace`],
+    /// [`FinalityProof::PospacePq`]) fold [`crate::domain::finality_adapter::poa_commit_signing_message`]
+    /// into every authority signature, binding `state_root`, `tx_root`, `event_root`,
+    /// and `parent_domain_block_hash`; BFT/PoS certificates accepted by those same
+    /// domains bind `domain_block_hash` alone and remain `false`.
+    ///
+    /// Convenience: exposed for proof-level settlement inspection and universal
+    /// finality profile derivation without loosening [`Self::for_domain`].
+    #[must_use]
+    pub fn for_proof(domain: &ConsensusDomain, proof: &FinalityProof) -> Self {
+        match (&domain.kind, proof) {
+            (ConsensusKind::Dag, FinalityProof::Dag { .. } | FinalityProof::DagPq { .. })
+            | (ConsensusKind::Poh, FinalityProof::Poh { .. } | FinalityProof::PohPq { .. })
+            | (
+                ConsensusKind::Pospace,
+                FinalityProof::Pospace { .. } | FinalityProof::PospacePq { .. },
+            ) => Self {
+                state_root: true,
+                tx_root: true,
+                event_root: true,
+                parent: true,
+            },
+            _ => Self::for_domain(domain),
         }
     }
 }
@@ -943,7 +1085,7 @@ fn freeze_domain(
 /// a registry refusal, or nonce writes that break the account invariants.
 pub fn accept_commitment(
     state: &mut AccountState,
-    commitment: DomainCommitment,
+    mut commitment: DomainCommitment,
 ) -> Result<CommitmentOutcome, String> {
     let domain = validate_commitment_metadata(state, &commitment)?.clone();
 
@@ -960,10 +1102,31 @@ pub fn accept_commitment(
         .settlement
         .commitments
         .find_by_height(commitment.domain_id, commitment.domain_height);
+    let attested = CommitmentAttestation::for_domain(&domain);
+    let kind_attested = CommitmentAttestation::for_kind(&domain.kind);
+    // When an adapter narrows its ConsensusKind's attestation surface (such as
+    // `bitcoin-spv-v1` under `ConsensusKind::PoW`, whose 80-byte header binds
+    // `parent` and `tx_root` but never a `state_root` or `event_root`), scrub
+    // the unattested roots before any comparison or persistence so downstream
+    // proof verifiers consulting `for_kind` cannot accept a relayer-supplied
+    // fabricated event tree or state root.
+    if kind_attested.state_root && !attested.state_root {
+        commitment.state_root = [0u8; 32];
+    }
+    if kind_attested.event_root && !attested.event_root {
+        commitment.event_root = [0u8; 32];
+    }
+    let agrees_on_attested = |prev: &DomainCommitment, cand: &DomainCommitment| -> bool {
+        use subtle::ConstantTimeEq;
+        bool::from(prev.domain_block_hash.ct_eq(&cand.domain_block_hash))
+            && (!attested.state_root || bool::from(prev.state_root.ct_eq(&cand.state_root)))
+            && (!attested.tx_root || bool::from(prev.tx_root.ct_eq(&cand.tx_root)))
+            && (!attested.event_root || bool::from(prev.event_root.ct_eq(&cand.event_root)))
+    };
 
     if commitment.domain_height <= domain.last_committed_height {
-        if let Some(existing) = existing {
-            if existing.domain_block_hash == commitment.domain_block_hash {
+        if let Some(ref existing) = existing {
+            if agrees_on_attested(existing, &commitment) {
                 return Ok(CommitmentOutcome::Idempotent);
             }
             return Ok(freeze_domain(
@@ -986,11 +1149,12 @@ pub fn accept_commitment(
         ));
     }
 
-    if let Some(existing) = existing {
+    if let Some(ref existing) = existing {
         // The same finalized block is not an equivocation merely because a
-        // relayer changed an auxiliary sequence number. Treat it as a replay,
-        // not evidence that the domain finalized conflicting blocks.
-        if existing.domain_block_hash == commitment.domain_block_hash {
+        // relayer changed an auxiliary sequence number or an unattested root.
+        // Divergence on `domain_block_hash` or any finality-attested root
+        // (`state_root`, `tx_root`, `event_root`) is cryptographic equivocation.
+        if agrees_on_attested(existing, &commitment) {
             return Ok(CommitmentOutcome::Idempotent);
         }
         return Ok(freeze_domain(
@@ -1012,7 +1176,7 @@ pub fn accept_commitment(
         // next height with any parent it likes; storing that commitment would
         // make the honest one a same-height conflict and freeze the domain.
         // Refused before the store is touched.
-        if !CommitmentAttestation::for_kind(&commitment.consensus_kind).parent
+        if !CommitmentAttestation::for_domain(&domain).parent
             && domain.last_committed_hash != [0u8; 32]
             && commitment.parent_domain_block_hash != domain.last_committed_hash
         {
@@ -1041,13 +1205,17 @@ fn apply_pending_commitments(
 ) -> Result<CommitmentOutcome, String> {
     let mut advanced = false;
     loop {
-        let (last_height, last_hash) = {
+        let (last_height, last_hash, attest_parent) = {
             let domain = state
                 .settlement
                 .domains
                 .get(domain_id)
                 .ok_or_else(|| format!("Domain {domain_id} not found"))?;
-            (domain.last_committed_height, domain.last_committed_hash)
+            (
+                domain.last_committed_height,
+                domain.last_committed_hash,
+                CommitmentAttestation::for_domain(domain).parent,
+            )
         };
         let next_height = last_height.saturating_add(1);
         let Some(com) = state
@@ -1062,7 +1230,7 @@ fn apply_pending_commitments(
                 .settlement
                 .commitments
                 .remove(domain_id, next_height, com.sequence);
-            if CommitmentAttestation::for_kind(&com.consensus_kind).parent {
+            if attest_parent {
                 return Ok(freeze_domain(
                     state,
                     domain_id,
@@ -1160,16 +1328,21 @@ pub fn accept_verified_commitment(
     let domain_id = commitment.domain_id;
     let domain_height = commitment.domain_height;
     let state_root = commitment.state_root;
-    if !CommitmentAttestation::for_kind(&commitment.consensus_kind).state_root {
-        let outcome = accept_commitment(state, commitment)?;
-        return Ok(outcome);
-    }
-    let height_before = state
+    let (height_before, attests_state_root) = state
         .settlement
         .domains
         .get(domain_id)
-        .map(|domain| domain.last_committed_height)
+        .map(|domain| {
+            (
+                domain.last_committed_height,
+                CommitmentAttestation::for_domain(domain).state_root,
+            )
+        })
         .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+    if !attests_state_root {
+        let outcome = accept_commitment(state, commitment)?;
+        return Ok(outcome);
+    }
     // A zero state root anchors nothing; refused before anything
     // moves (fail-closed).
     if state_root == [0u8; 32] {
@@ -1737,6 +1910,9 @@ fn domain_has_bound_authority(domain: &ConsensusDomain) -> bool {
         ConsensusKind::PoA
         | ConsensusKind::PoS
         | ConsensusKind::Bft
+        | ConsensusKind::Dag
+        | ConsensusKind::Poh
+        | ConsensusKind::Pospace
         | ConsensusKind::StorageAttestation(_)
         | ConsensusKind::AiInference
         | ConsensusKind::Custom(_) => domain.validator_set_hash != [0u8; 32],
@@ -1765,10 +1941,12 @@ fn execute_object_layer_tx(
             if !domain.is_active() || !domain_has_bound_authority(domain) {
                 return false;
             }
-            let Ok((sequence, merkle_proof)) = bincode::deserialize::<(
-                u64,
-                crate::cross_domain::event_tree::MerkleProof,
-            )>(&proof.inclusion) else {
+            let Ok((sequence, merkle_proof)) =
+                crate::network::bounded_bincode::decode_bounded_bincode::<(
+                    u64,
+                    crate::cross_domain::event_tree::MerkleProof,
+                )>(&proof.inclusion, 4 * 1024)
+            else {
                 return false;
             };
             let Some(commitment) = self
@@ -1782,7 +1960,7 @@ fn execute_object_layer_tx(
                     && commitment.validator_set_hash != domain.validator_set_hash)
                 || commitment.domain_block_hash != proof.home_block_hash
                 || commitment.event_root == [0u8; 32]
-                || !CommitmentAttestation::for_kind(&commitment.consensus_kind).event_root
+                || !CommitmentAttestation::for_domain(domain).event_root
             {
                 return false;
             }
@@ -1876,7 +2054,7 @@ fn execute_object_layer_tx(
                 c.domain_id == id
                     && c.state_root != [0u8; 32]
                     && c.consensus_kind == domain.kind
-                    && CommitmentAttestation::for_kind(&c.consensus_kind).state_root
+                    && CommitmentAttestation::for_domain(domain).state_root
                     && (domain.validator_set_hash == [0u8; 32]
                         || c.validator_set_hash == domain.validator_set_hash)
             })
@@ -1956,13 +2134,13 @@ fn execute_object_layer_tx(
         height,
         signer: ctx.sender,
         activation: if ctx.chain_id
-            == crate::core::chain_config::Network::Mainnet
+            == crate::core::chain_config::Network::Devnet
                 .chain_id()
                 .value()
         {
-            crate::object_layer::ObjectLayerActivation { height: None }
-        } else {
             crate::object_layer::ACTIVATION
+        } else {
+            crate::object_layer::ObjectLayerActivation { height: None }
         },
         finality: &finality,
         domain_active: &domain_active,
@@ -5481,6 +5659,88 @@ mod tests {
             chain.register_garden_domain(local_garden).is_err(),
             "local Garden registration must refuse an already-occupied settlement domain id"
         );
+    }
+
+    #[test]
+    fn forged_length_prefix_home_event_proof_is_rejected_without_allocating() {
+        // `sequence: u64` + `MerkleProof.siblings: Vec<[u8; 32]>` with a forged
+        // count claiming billions of sibling hashes inside a 24-byte buffer.
+        let mut forged = Vec::with_capacity(24);
+        forged.extend_from_slice(&1u64.to_le_bytes());
+        forged.extend_from_slice(&0x0000_FFFF_FFFF_FFFFu64.to_le_bytes());
+        forged.extend_from_slice(&[0u8; 8]);
+        assert!(crate::network::bounded_bincode::decode_bounded_bincode::<(
+            u64,
+            crate::cross_domain::event_tree::MerkleProof,
+        )>(&forged, 4 * 1024)
+        .is_err());
+    }
+
+    #[test]
+    fn bitcoin_spv_commitment_scrubs_unattested_event_and_state_roots() {
+        use crate::cross_domain::event_tree::{DomainEvent, DomainEventTree};
+        use crate::cross_domain::DomainEventKind;
+        use crate::domain::plugin::default_domain;
+        use crate::domain::types::BITCOIN_SPV_ADAPTER;
+        use crate::settlement::proof_verifier::{ProofVerificationError, SettlementProofVerifier};
+
+        let mut state = AccountState::new();
+        let btc_dom = default_domain(709, ConsensusKind::PoW, 70_900, BITCOIN_SPV_ADAPTER, 6);
+        state
+            .settlement
+            .domains
+            .register(btc_dom)
+            .expect("register bitcoin-spv domain");
+
+        let forged_event = DomainEvent {
+            domain_id: 709,
+            domain_height: 1,
+            event_index: 0,
+            kind: DomainEventKind::Custom(b"forged-lock".to_vec()),
+            emitter: Address::from([0x33; 32]),
+            message: None,
+            payload_hash: [0xEE; 32],
+        };
+        let mut fake_tree = DomainEventTree::new();
+        fake_tree.push(forged_event.clone());
+        let fake_event_root = fake_tree.root();
+        let merkle_proof = fake_tree.proof(0).expect("merkle proof");
+
+        let commitment = DomainCommitment {
+            domain_id: 709,
+            domain_height: 1,
+            domain_block_hash: [0x11; 32],
+            parent_domain_block_hash: [0u8; 32],
+            state_root: [0xAA; 32],
+            tx_root: [0x22; 32],
+            event_root: fake_event_root,
+            finality_proof_hash: [0x44; 32],
+            consensus_kind: ConsensusKind::PoW,
+            validator_set_hash: [0u8; 32],
+            producer: Some(Address::from([0x55; 32])),
+            timestamp_ms: 1_000,
+            sequence: 1,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+        let out = accept_commitment(&mut state, commitment).expect("accept bitcoin-spv commitment");
+        assert!(matches!(out, CommitmentOutcome::Advanced));
+
+        let stored = state
+            .settlement
+            .commitments
+            .find_by_height(709, 1)
+            .expect("stored commitment");
+        assert_eq!(stored.tx_root, [0x22; 32]);
+        assert_eq!(stored.state_root, [0u8; 32]);
+        assert_eq!(stored.event_root, [0u8; 32]);
+
+        let err = SettlementProofVerifier::verify_event_against_commitment(
+            &stored,
+            forged_event,
+            &merkle_proof,
+        )
+        .expect_err("bitcoin-spv commitment must never attest event_root");
+        assert_eq!(err, ProofVerificationError::UnattestedEventRoot);
     }
 
     #[test]

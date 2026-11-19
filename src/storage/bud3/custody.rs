@@ -171,16 +171,54 @@ pub fn symbol_root(leaves: &[(u32, [u8; 32])]) -> [u8; 32] {
 /// Serde for a 64-byte sub-block (serde derives arrays only up to 32).
 mod sub_block_serde {
     use super::SUB_BLOCK;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(b: &[u8; SUB_BLOCK], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(b)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; SUB_BLOCK], D::Error> {
-        let v: Vec<u8> = Vec::deserialize(d)?;
-        v.try_into()
-            .map_err(|_| serde::de::Error::custom("a sub-block is 64 bytes"))
+        struct SubBlockVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SubBlockVisitor {
+            type Value = [u8; SUB_BLOCK];
+
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                write!(f, "exactly {SUB_BLOCK} bytes")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+                v.try_into()
+                    .map_err(|_| E::custom("a sub-block is 64 bytes"))
+            }
+
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                self.visit_bytes(&v)
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                if let Some(hint) = seq.size_hint() {
+                    if hint != SUB_BLOCK {
+                        return Err(serde::de::Error::custom("a sub-block is 64 bytes"));
+                    }
+                }
+                let mut out = [0u8; SUB_BLOCK];
+                for slot in &mut out {
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::custom("a sub-block is 64 bytes"))?;
+                }
+                if seq.next_element::<u8>()?.is_some() {
+                    return Err(serde::de::Error::custom("a sub-block is 64 bytes"));
+                }
+                Ok(out)
+            }
+        }
+
+        d.deserialize_bytes(SubBlockVisitor)
     }
 }
 
@@ -255,7 +293,12 @@ pub fn verify_symbol_root_path(
     path: &[PathStep],
 ) -> bool {
     let entry = leaf_hash(SYMBOLS_TAG, u64::from(esi), &sym_leaf);
-    fold(SYMBOLS_TAG, symbol_count, position, entry, path) == Some(expected_root)
+    fold(SYMBOLS_TAG, symbol_count, position, entry, path).is_some_and(|root| {
+        bool::from(subtle::ConstantTimeEq::ct_eq(
+            root.as_slice(),
+            expected_root.as_slice(),
+        ))
+    })
 }
 
 /// Why a proof failed.
@@ -310,7 +353,10 @@ impl CustodyProof {
             &self.root_path,
         )
         .ok_or(ProofError::BadPath)?;
-        if root != ctx.symbol_root {
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            root.as_slice(),
+            ctx.symbol_root.as_slice(),
+        )) {
             return Err(ProofError::BadPath);
         }
         Ok(())
@@ -582,5 +628,30 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn custody_proof_sub_block_deserializer_refuses_oversized_length_without_allocating() {
+        // Forged bincode CustodyProof: segment(8) + esi(4) + position(8) + sub_block(8)
+        // + forged byte-slice length u64::MAX (8). Must reject immediately via size check.
+        let mut forged = Vec::with_capacity(40);
+        forged.extend_from_slice(&0u64.to_le_bytes());
+        forged.extend_from_slice(&0u32.to_le_bytes());
+        forged.extend_from_slice(&0u64.to_le_bytes());
+        forged.extend_from_slice(&0u64.to_le_bytes());
+        forged.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert!(bincode::deserialize::<CustodyProof>(&forged).is_err());
+
+        // Short sub-block (63 bytes) is rejected cleanly as well.
+        let mut short = Vec::with_capacity(120);
+        short.extend_from_slice(&0u64.to_le_bytes());
+        short.extend_from_slice(&0u32.to_le_bytes());
+        short.extend_from_slice(&0u64.to_le_bytes());
+        short.extend_from_slice(&0u64.to_le_bytes());
+        short.extend_from_slice(&63u64.to_le_bytes());
+        short.extend_from_slice(&[0xAA; 63]);
+        short.extend_from_slice(&0u64.to_le_bytes());
+        short.extend_from_slice(&0u64.to_le_bytes());
+        assert!(bincode::deserialize::<CustodyProof>(&short).is_err());
     }
 }

@@ -99,17 +99,23 @@ pub fn extract_object_from_frames(
     if frames.is_empty() {
         return Err(TwoPathError::MissingSegment(0));
     }
+    const MAX_STREAM_SEGMENTS: usize = 1024;
     type GeomKey = (u32, usize, u32);
-    let mut by_segment: BTreeMap<u64, BTreeMap<GeomKey, Vec<&Bud3Frame>>> = BTreeMap::new();
+    let mut by_segment: BTreeMap<u64, BTreeMap<GeomKey, BTreeMap<u32, &Bud3Frame>>> =
+        BTreeMap::new();
     for frame in frames {
         let _ = u16::try_from(frame.data.len())
             .map_err(|_| TwoPathError::Frame(FrameWireError::BadGeometry))?;
+        if !by_segment.contains_key(&frame.segment) && by_segment.len() >= MAX_STREAM_SEGMENTS {
+            return Err(TwoPathError::Frame(FrameWireError::BadGeometry));
+        }
         by_segment
             .entry(frame.segment)
             .or_default()
             .entry((frame.segment_len, frame.data.len(), frame.source_symbols))
             .or_default()
-            .push(frame);
+            .entry(frame.esi)
+            .or_insert(frame);
     }
 
     let seg_count = u64::try_from(by_segment.len())
@@ -120,13 +126,20 @@ pub fn extract_object_from_frames(
             .remove(&expected_seg)
             .ok_or(TwoPathError::MissingSegment(expected_seg))?;
         let multi_geom = geom_map.len() > 1;
-        let mut candidates: Vec<(GeomKey, Vec<&Bud3Frame>)> = geom_map.into_iter().collect();
-        // Try the geometry with the highest frame count first so outlier rogue
-        // frames cannot preempt an honest majority stream.
+        let mut candidates: Vec<(GeomKey, BTreeMap<u32, &Bud3Frame>)> =
+            geom_map.into_iter().collect();
+        // Try the geometry with the highest unique-ESI count first so duplicate
+        // rogue-frame floods cannot preempt an honest majority stream.
         candidates.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
 
         let mut recovered: Option<Vec<u8>> = None;
         for ((seg_len, sym_len, source_symbols), group) in candidates.into_iter().take(4) {
+            if source_symbols == 0 || source_symbols > Profile::P0.k_max {
+                if multi_geom {
+                    continue;
+                }
+                return Err(TwoPathError::Frame(FrameWireError::BadGeometry));
+            }
             let sym_size_u16 = u16::try_from(sym_len)
                 .map_err(|_| TwoPathError::Frame(FrameWireError::BadGeometry))?;
             let eph = Profile {
@@ -134,7 +147,7 @@ pub fn extract_object_from_frames(
                 qr_version: 40,
                 symbol_size: sym_size_u16,
                 fps: 10,
-                k_max: source_symbols.max(1),
+                k_max: source_symbols,
             };
             // A decoder reserves both the padded segment buffer and the per-symbol
             // slot table (~24 bytes per source symbol) regardless of how tiny the
@@ -152,7 +165,7 @@ pub fn extract_object_from_frames(
                 Err(e) => return Err(TwoPathError::Fountain(e)),
             };
             let mut push_ok = true;
-            for frame in group {
+            for frame in group.into_values() {
                 if !dec.is_done() {
                     if let Err(e) = dec.push((*frame).clone().into_symbol(), meter) {
                         if multi_geom {
@@ -394,8 +407,10 @@ mod tests {
             Err(FrameWireError::BadGeometry)
         );
 
-        // Craft distinct-segment frames each advertising k = 10_000 symbols of 2048 bytes (~20 MB/decoder)
-        // with a 1 MB meter: second decoder allocation must hit the meter cap.
+        // Distinct-segment frames, each naming the largest permitted source
+        // count (`k_max` symbols of 2048 bytes, about 8 MB per decoder). Under
+        // a 1 MB meter the first decoder allocation hits the meter cap.
+        let k = Profile::P0.k_max;
         let mut bogus_frames = Vec::new();
         for seg in 0..4u64 {
             let mut f = Vec::with_capacity(26 + 2048);
@@ -403,9 +418,9 @@ mod tests {
             f.push(0);
             f.push(0);
             f.extend_from_slice(&seg.to_le_bytes());
-            f.extend_from_slice(&(10_000u32 * 2048).to_le_bytes());
+            f.extend_from_slice(&(k * 2048).to_le_bytes());
             f.extend_from_slice(&0u32.to_le_bytes());
-            f.extend_from_slice(&10_000u32.to_le_bytes());
+            f.extend_from_slice(&k.to_le_bytes());
             f.extend_from_slice(&vec![0x55u8; 2048]);
             bogus_frames.push(Bud3Frame::decode_wire(&f, &mut wire_meter).unwrap());
         }
@@ -415,6 +430,16 @@ mod tests {
             matches!(err, TwoPathError::Frame(FrameWireError::Budget(_))),
             "expected meter budget error, got {err:?}"
         );
+
+        // A frame naming more source symbols than the profile allows is
+        // refused before any decoder is sized from it.
+        let mut over = bogus_frames.swap_remove(0);
+        over.source_symbols = k + 1;
+        let mut meter = Meter::for_object(1 << 30);
+        assert!(matches!(
+            extract_object_from_frames(&[over], &mut meter),
+            Err(TwoPathError::Frame(FrameWireError::BadGeometry))
+        ));
     }
 
     #[test]
@@ -438,6 +463,30 @@ mod tests {
 
         let mut meter = Meter::for_object(4 << 20);
         let recovered = extract_object_from_frames(&mixed, &mut meter).unwrap();
+        assert_eq!(recovered.public_content().unwrap(), content);
+    }
+
+    #[test]
+    fn extract_object_from_frames_defeats_duplicate_rogue_frame_flood() {
+        use super::super::fountain::SymbolKind;
+        use super::super::frame::Bud3Frame;
+
+        let content = b"duplicate rogue frames must never outweigh honest frames".repeat(12);
+        let obj = Object::raw_public(&content);
+        let honest_frames = frames_for_object_bytes(&obj.encode(), &FAST_PROFILE, 3).unwrap();
+        let rogue = Bud3Frame {
+            kind: SymbolKind::Source,
+            segment: 0,
+            segment_len: honest_frames[0].segment_len.saturating_add(37),
+            esi: 0,
+            source_symbols: 99,
+            data: vec![0xAA; 37],
+        };
+        let mut flood = vec![rogue; 64];
+        flood.extend(honest_frames);
+
+        let mut meter = Meter::for_object(4 << 20);
+        let recovered = extract_object_from_frames(&flood, &mut meter).unwrap();
         assert_eq!(recovered.public_content().unwrap(), content);
     }
 }

@@ -22,7 +22,7 @@ use crate::execution::coordinator::state::{
     NS_PLUTUS_STATE, NS_POLKAVM_STATE, NS_RV32_STATE, NS_SUI_OBJECT, NS_SVM_ACCOUNT, NS_TVM_STATE,
     NS_UEL_ASSETS, NS_UTXO_STATE, NS_WASM_CODE, NS_WASM_CONTRACT,
 };
-use budlum_uel_abi::{EeId, HostRead, Namespace};
+use budlum_uel_abi::{pointer_target_enabled_by_default, EeId, HostRead, Namespace};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sha3::{Digest, Keccak256, Sha3_256};
@@ -375,14 +375,24 @@ pub fn register_asset_entry(
 
 /// Deploys an immutable zero-balance pointer contract for `asset_id` in `target_ee`.
 ///
+/// The network policy is checked before any read or write. Public networks admit
+/// only launch EVM/WASM pointers; expansion targets remain devnet-only.
+///
 /// # Errors
 ///
-/// Returns an error if the operation fails.
+/// Returns an error when the target is closed on `chain_id` or deployment fails.
 pub fn deploy_asset_pointer(
     state: &mut AccountState,
+    chain_id: u64,
     asset_id: &[u8; 32],
     target_ee: EeId,
 ) -> Result<Vec<u8>, String> {
+    if !pointer_target_enabled_by_default(chain_id, target_ee) {
+        return Err(format!(
+            "pointer target EE 0x{:02x} is closed on chain {chain_id}",
+            target_ee.0
+        ));
+    }
     let mut asset = read_registered_asset(state, asset_id)?
         .ok_or_else(|| String::from("asset_id not found in uel/assets"))?;
     if asset.home_ee == target_ee.0 {
@@ -535,13 +545,51 @@ mod tests {
             EeId::PLUTUS,
             EeId::RV32,
         ] {
-            let ptr = deploy_asset_pointer(&mut state, &entry.asset_id, target)
-                .expect("expansion EE deploys asset pointer");
+            let ptr = deploy_asset_pointer(
+                &mut state,
+                budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID,
+                &entry.asset_id,
+                target,
+            )
+            .expect("expansion EE deploys asset pointer");
             assert_eq!(ptr.len(), 32);
         }
         let reloaded = read_registered_asset(&state, &entry.asset_id)
             .unwrap()
             .unwrap();
         assert_eq!(reloaded.pointers.len(), 7);
+    }
+
+    #[test]
+    fn svm_and_move_pointer_deployment_is_closed_on_testnet() {
+        let mut state = AccountState::default();
+        let entry = register_asset_entry(
+            &mut state,
+            EeId::EVM,
+            &[0x11; 20],
+            AssetStandard::Fungible,
+            6,
+            "TST".into(),
+            "Test Asset".into(),
+        )
+        .expect("asset registration");
+        let before = state.calculate_state_root();
+
+        for target in [EeId::SVM, EeId::MOVE] {
+            let error = deploy_asset_pointer(
+                &mut state,
+                budlum_uel_abi::BUDLUM_TESTNET_CHAIN_ID,
+                &entry.asset_id,
+                target,
+            )
+            .expect_err("expansion pointer must remain closed");
+            assert!(error.contains("is closed on chain"));
+            assert_eq!(state.calculate_state_root(), before);
+        }
+
+        let reloaded = read_registered_asset(&state, &entry.asset_id)
+            .expect("registry read")
+            .expect("registered asset");
+        assert!(reloaded.pointers.is_empty());
     }
 }

@@ -89,8 +89,9 @@ impl MemorySymbolNetwork {
 
 /// Symbol source of a node that holds no symbols and has no symbol transport.
 ///
-/// Every read comes back empty, so a view through it fails with a
-/// missing-symbols error and never returns unverified bytes.
+/// Convenience: exposed for empty-network test callers and fixture views. Every
+/// read comes back empty, so a view through it fails with a missing-symbols
+/// error and never returns unverified bytes.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoSymbolsHeld;
 
@@ -188,21 +189,20 @@ fn verify_segment_candidate(
         enc.repair_symbols(0, initial_count.saturating_sub(k))
             .ok()?,
     );
-    if let Some(expected_root) = usize::try_from(seg)
+    let expected_root = usize::try_from(seg)
         .ok()
-        .and_then(|idx| record.symbol_roots.get(idx))
-    {
-        if *expected_root != [0u8; 32] && record.symbols_per_segment >= k {
-            let take_n = usize::try_from(record.symbols_per_segment).ok()?;
-            let leaves: Vec<(u32, [u8; 32])> = initial
-                .iter()
-                .take(take_n)
-                .map(|s| (s.esi, symbol_leaf(&s.data)))
-                .collect();
-            if symbol_root(&leaves) != *expected_root {
-                return None;
-            }
-        }
+        .and_then(|idx| record.symbol_roots.get(idx))?;
+    if *expected_root == [0u8; 32] || record.symbols_per_segment < k {
+        return None;
+    }
+    let take_n = usize::try_from(record.symbols_per_segment).ok()?;
+    let leaves: Vec<(u32, [u8; 32])> = initial
+        .iter()
+        .take(take_n)
+        .map(|s| (s.esi, symbol_leaf(&s.data)))
+        .collect();
+    if symbol_root(&leaves) != *expected_root {
+        return None;
     }
     let mut verified = Vec::new();
     let mut emitted = BTreeSet::new();
@@ -266,11 +266,35 @@ fn isolate_verified_segment_symbols(
             }
         }
     }
-    // Bounded multi-holder fallback (single shares then pairs) when > 1 holder lies.
-    let mut budget = 64usize;
+    // Bounded multi-holder fallback (leave-two-out, single shares, then pairs)
+    // capped at `budget` evaluations so CWE-400 complexity stays strictly bounded.
+    let mut budget = 128usize;
+    if m >= 3 {
+        for skip_a in 0..m {
+            for skip_b in (skip_a + 1)..m {
+                if budget == 0 {
+                    return Vec::new();
+                }
+                budget -= 1;
+                let mut subset = Vec::new();
+                for (idx, batch) in share_batches.iter().enumerate() {
+                    if idx != skip_a && idx != skip_b {
+                        subset.extend(batch.iter().cloned());
+                    }
+                }
+                if !subset.is_empty() {
+                    if let Some(verified) =
+                        verify_segment_candidate(seg, seg_len, record, &subset, share_batches)
+                    {
+                        return verified;
+                    }
+                }
+            }
+        }
+    }
     for batch in share_batches {
         if budget == 0 {
-            break;
+            return Vec::new();
         }
         budget -= 1;
         if let Some(verified) = verify_segment_candidate(seg, seg_len, record, batch, share_batches)
@@ -281,7 +305,7 @@ fn isolate_verified_segment_symbols(
     for (i, bi) in share_batches.iter().enumerate() {
         for bj in share_batches.iter().skip(i + 1) {
             if budget == 0 {
-                return all_flat;
+                return Vec::new();
             }
             budget -= 1;
             let mut pair = Vec::with_capacity(bi.len().saturating_add(bj.len()));
@@ -294,24 +318,16 @@ fn isolate_verified_segment_symbols(
             }
         }
     }
-    all_flat
+    // Never forward unverified Byzantine symbols when no subset verifies against
+    // the segment's symbol root and decoded byte length.
+    Vec::new()
 }
 
-/// Collect symbols for every segment of `object` from `network`, querying
-/// `Class::Full` shares before `Class::Mobile` shares (Section 6.5 G3) and
-/// isolating Byzantine holder replies against `record.symbol_roots`.
-///
-/// # Errors
-///
-/// [`ViewBud3Error::UnknownObject`] if `object` is not registered.
-pub fn collect_symbols_full_then_mobile<N: NetworkSymbolSource>(
-    registry: &Bud3Registry,
-    object: &ObjectKey,
+fn collect_verified_for_live_key<N: NetworkSymbolSource>(
+    resolved_key: &ObjectKey,
+    entry: &super::registry::ObjectEntry,
     network: &N,
-) -> Result<(ObjectRecord, Vec<Symbol>), ViewBud3Error> {
-    let entry = registry
-        .object(object)
-        .ok_or(ViewBud3Error::UnknownObject)?;
+) -> Result<(ObjectRecord, Vec<Symbol>, bool), ViewBud3Error> {
     let record = entry.record.clone();
     let mut shares_ordered: Vec<(u64, Share)> = entry
         .shares
@@ -331,8 +347,24 @@ pub fn collect_symbols_full_then_mobile<N: NetworkSymbolSource>(
     let expected_sym_len = usize::from(record.profile.symbol_size);
     let mut per_segment_batches: BTreeMap<u64, Vec<Vec<Symbol>>> = BTreeMap::new();
     for (seg, sh) in shares_ordered {
-        let syms =
-            network.fetch_holder_symbols(&sh.validator, object, seg, sh.first_esi, sh.symbols);
+        let mut syms = Vec::new();
+        let mut cursor = sh.first_esi;
+        let mut remaining = sh.symbols;
+        while remaining > 0 {
+            let chunk = remaining.min(super::symbol_protocol::MAX_SYMBOLS_PER_REQUEST);
+            syms.extend(network.fetch_holder_symbols(
+                &sh.validator,
+                resolved_key,
+                seg,
+                cursor,
+                chunk,
+            ));
+            remaining -= chunk;
+            let Some(next) = cursor.checked_add(chunk) else {
+                break;
+            };
+            cursor = next;
+        }
         let end_esi = sh.first_esi.saturating_add(sh.symbols);
         let mut seen_esis = BTreeSet::new();
         let clean: Vec<Symbol> = syms
@@ -348,19 +380,57 @@ pub fn collect_symbols_full_then_mobile<N: NetworkSymbolSource>(
         per_segment_batches.entry(seg).or_default().push(clean);
     }
 
+    let segmentation = Segmentation::new(record.object_len, &record.profile).ok_or(
+        ViewBud3Error::Pipeline(PipelineError::Fountain(FountainError::InvalidProfile)),
+    )?;
+    let seg_count = segmentation.count();
+    let mut verified_segments = 0u64;
     let mut collected = Vec::new();
-    if let Some(segmentation) = Segmentation::new(record.object_len, &record.profile) {
-        for (seg, batches) in per_segment_batches {
-            if let Some(seg_len) = segmentation.len(seg) {
-                collected.extend(isolate_verified_segment_symbols(
-                    seg, seg_len, &record, &batches,
-                ));
-            }
+    for seg in 0..seg_count {
+        let Some(batches) = per_segment_batches.get(&seg) else {
+            continue;
+        };
+        let Some(seg_len) = segmentation.len(seg) else {
+            continue;
+        };
+        let verified = isolate_verified_segment_symbols(seg, seg_len, &record, batches);
+        if !verified.is_empty() {
+            verified_segments = verified_segments.saturating_add(1);
+            collected.extend(verified);
         }
-    } else {
-        for (_, batches) in per_segment_batches {
-            for b in batches {
-                collected.extend(b);
+    }
+    Ok((record, collected, verified_segments == seg_count))
+}
+
+/// Collect symbols for every segment of `object` from `network`, querying
+/// `Class::Full` shares before `Class::Mobile` shares (Section 6.5 G3) and
+/// isolating Byzantine holder replies against `record.symbol_roots`.
+///
+/// When `object` is a pending `ReplaceObject` successor awaiting custody
+/// confirmation and holders do not yet serve the new shares, transparently falls
+/// back to the still-confirmed predecessor object's verified symbols.
+///
+/// # Errors
+///
+/// [`ViewBud3Error::UnknownObject`] if `object` is not registered.
+pub fn collect_symbols_full_then_mobile<N: NetworkSymbolSource>(
+    registry: &Bud3Registry,
+    object: &ObjectKey,
+    network: &N,
+) -> Result<(ObjectRecord, Vec<Symbol>), ViewBud3Error> {
+    let (resolved_key, entry) = registry
+        .resolve_live_object(object)
+        .ok_or(ViewBud3Error::UnknownObject)?;
+    let (record, collected, complete) =
+        collect_verified_for_live_key(&resolved_key, entry, network)?;
+    if !complete {
+        if let Some(fallback_key) = registry.pending_confirmed_fallback(&resolved_key) {
+            if let Some(fallback_entry) = registry.object(&fallback_key) {
+                if let Ok((fb_record, fb_collected, true)) =
+                    collect_verified_for_live_key(&fallback_key, fallback_entry, network)
+                {
+                    return Ok((fb_record, fb_collected));
+                }
             }
         }
     }
@@ -402,15 +472,18 @@ pub fn fallback_decode_public<N: NetworkSymbolSource>(
     receipt: &PaidViewReceipt,
     network: &N,
 ) -> Result<Vec<u8>, ViewBud3Error> {
-    let entry = registry
-        .object(object)
+    let (resolved_key, entry) = registry
+        .resolve_live_object(object)
         .ok_or(ViewBud3Error::UnknownObject)?;
     if entry.record.content_id.kind == ContentIdKind::Sealed {
         return Err(ViewBud3Error::SealedFallbackForbidden);
     }
-    if receipt.object != *object
+    let receipt_resolved = registry
+        .resolve_live_object(&receipt.object)
+        .map(|(k, _)| k);
+    if receipt_resolved != Some(resolved_key)
         || receipt.fee_paid_atoms < MIN_PAID_VIEW_FEE_ATOMS
-        || !registry.verify_paid_view(receipt)
+        || !registry.verify_paid_view_at(receipt, registry.observed_paid_view_epoch())
     {
         return Err(ViewBud3Error::UnpaidFallbackView);
     }
@@ -464,12 +537,19 @@ impl RevealSessionManager {
         let _ = usize::try_from(seg_count)
             .map_err(|_| ViewBud3Error::Pipeline(PipelineError::TooLarge))?;
         let mut decoders: BTreeMap<u64, SegmentDecoder> = BTreeMap::new();
-        let mut meter = Meter::new(
-            record.object_len.saturating_mul(4).saturating_add(1 << 20),
-            u64::from(record.symbols_per_segment).saturating_mul(seg_count),
-        );
+        let mut seen_esis: BTreeSet<(u64, u32)> = BTreeSet::new();
+        let step_budget = u64::from(
+            record
+                .symbols_per_segment
+                .saturating_add(super::fountain::MAX_EXTRA_SYMBOLS),
+        )
+        .saturating_mul(seg_count);
+        let byte_budget = step_budget
+            .saturating_mul(u64::from(record.profile.symbol_size))
+            .max(record.object_len.saturating_mul(4).saturating_add(1 << 20));
+        let mut meter = Meter::new(byte_budget, step_budget);
         for sym in symbols {
-            if sym.segment >= seg_count {
+            if sym.segment >= seg_count || !seen_esis.insert((sym.segment, sym.esi)) {
                 continue;
             }
             if let std::collections::btree_map::Entry::Vacant(e) = decoders.entry(sym.segment) {
@@ -816,5 +896,366 @@ mod tests {
             .public_content()
             .unwrap();
         assert_eq!(extracted, payload);
+    }
+
+    #[test]
+    fn collect_survives_two_simultaneous_byzantine_holders_and_refuses_total_poison() {
+        let mut reg = Bud3Registry::default();
+        let mut net = MemorySymbolNetwork::default();
+
+        // Incompressible 1,536-byte payload: the object the segments carry is
+        // longer than the payload (k = 13 at symbol_size 128), so a segment
+        // needs 13 distinct symbols before RaptorQ can rebuild it. Five
+        // holders of five symbols each give 25, and the three honest holders
+        // after two Byzantine ones still hold 15, which is above k. Four
+        // symbols per holder gave only 12 from three holders, below k, so no
+        // arrangement of the surviving shares could ever have recovered and
+        // the test could not have passed for the algorithm's reasons.
+        let payload: Vec<u8> = (0u64..48)
+            .flat_map(|i| crate::core::hash::hash_fields_bytes(&[b"BYZ5", &i.to_le_bytes()]))
+            .collect();
+        let up = prepare_public_upload(&payload, &SMALL, &Bud3Limits::default(), 25).unwrap();
+        let key = up.record.commitment;
+        let validators = [[40u8; 32], [41u8; 32], [42u8; 32], [43u8; 32], [44u8; 32]];
+        let shares: Vec<(u64, Share)> = validators
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                (
+                    0,
+                    Share {
+                        validator: *v,
+                        class: Class::Full,
+                        first_esi: u32::try_from(i).unwrap() * 5,
+                        symbols: 5,
+                    },
+                )
+            })
+            .collect();
+        reg.register_object([1; 32], up.record, shares, 0, 20)
+            .unwrap();
+
+        let mut bad0 = up.segments[0][0..5].to_vec();
+        bad0[0].data[5] ^= 0xAA;
+        let mut bad1 = up.segments[0][5..10].to_vec();
+        bad1[1].data[9] ^= 0x55;
+        net.store_holder_share(validators[0], key, 0, bad0);
+        net.store_holder_share(validators[1], key, 0, bad1);
+        net.store_holder_share(validators[2], key, 0, up.segments[0][10..15].to_vec());
+        net.store_holder_share(validators[3], key, 0, up.segments[0][15..20].to_vec());
+        net.store_holder_share(validators[4], key, 0, up.segments[0][20..25].to_vec());
+
+        assert_eq!(view_from_network(&reg, &key, None, &net).unwrap(), payload);
+
+        // When all shares are poisoned, collect_symbols_full_then_mobile returns zero
+        // unverified symbols rather than leaking Byzantine bytes.
+        for (i, v) in validators.iter().enumerate() {
+            let mut poisoned = up.segments[0][(i * 5)..((i + 1) * 5)].to_vec();
+            poisoned[0].data[0] ^= 0xFF;
+            net.store_holder_share(*v, key, 0, poisoned);
+        }
+        let (_, syms) = collect_symbols_full_then_mobile(&reg, &key, &net).unwrap();
+        assert!(
+            syms.is_empty(),
+            "unverified Byzantine symbols must never leak out of collect_symbols_full_then_mobile"
+        );
+        assert!(matches!(
+            view_from_network(&reg, &key, None, &net),
+            Err(ViewBud3Error::Pipeline(PipelineError::SegmentMissing(0)))
+        ));
+    }
+
+    #[test]
+    fn finalized_replacement_redirects_view_reveal_and_paid_fallback() {
+        use super::super::bof1::Object;
+        use super::super::custody::{symbol_leaf, symbol_root};
+        use super::super::pipeline::ObjectRecord;
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let payload = b"redirectable public B.U.D. 3.0 payload ".repeat(6);
+        let up_old = prepare_public_upload(&payload, &SMALL, &Bud3Limits::default(), 16).unwrap();
+        let old_key = up_old.record.commitment;
+        let raw_obj = Object::raw_public(&payload);
+        let raw_bytes = raw_obj.encode();
+        let new_commit = commit_object(&raw_bytes, &SMALL).unwrap();
+        let enc_raw = SegmentEncoder::new(0, &raw_bytes, &SMALL).unwrap();
+        let k_raw = enc_raw.k();
+        let mut syms_new = enc_raw.source_symbols();
+        syms_new.extend(enc_raw.repair_symbols(0, 16 - k_raw).unwrap());
+        let leaves_new: Vec<(u32, [u8; 32])> = syms_new
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let new_record = ObjectRecord {
+            content_id: up_old.record.content_id,
+            object_len: raw_bytes.len() as u64,
+            commitment: new_commit,
+            profile: SMALL,
+            codec: raw_obj.header.codec,
+            symbols_per_segment: 16,
+            symbol_roots: vec![symbol_root(&leaves_new)],
+        };
+
+        let validators = [[50u8; 32], [51u8; 32], [52u8; 32]];
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: validators[0],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[1],
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[2],
+                    class: Class::Full,
+                    first_esi: 12,
+                    symbols: 4,
+                },
+            ),
+        ];
+
+        let mut reg = Bud3Registry::default();
+        reg.register_object([1; 32], up_old.record, shares.clone(), 0, 40)
+            .unwrap();
+        for v in &validators {
+            reg.ack(&old_key, v).unwrap();
+        }
+        let receipt_id = [0xE4; 32];
+        reg.record_paid_view([9; 32], old_key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 1)
+            .unwrap();
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [50u8, 51, 52]
+            .into_iter()
+            .map(|v| {
+                (
+                    [v; 32],
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let attestations: Vec<_> = [50u8, 51, 52]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation([v; 32], &[v; 32], &old_key, &new_record, &shares).unwrap()
+            })
+            .collect();
+        let new_key = reg
+            .replace_object(
+                (validators[0], 10_000),
+                &old_key,
+                new_record,
+                shares,
+                &attestations,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    2,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for v in &validators {
+            reg.ack(&new_key, v).unwrap();
+        }
+        assert!(reg.object(&old_key).is_none());
+
+        let mut net = MemorySymbolNetwork::default();
+        net.store_holder_share(validators[0], new_key, 0, syms_new[0..6].to_vec());
+        net.store_holder_share(validators[1], new_key, 0, syms_new[6..12].to_vec());
+        net.store_holder_share(validators[2], new_key, 0, syms_new[12..16].to_vec());
+
+        assert_eq!(
+            view_from_network(&reg, &old_key, None, &net).unwrap(),
+            payload
+        );
+        let mut reveal = RevealSessionManager::default();
+        let sid = reveal.open_reveal(&reg, &old_key, 1, &net).unwrap();
+        reveal.close_reveal(sid).unwrap();
+        assert_eq!(
+            fallback_decode_public(
+                &reg,
+                &old_key,
+                &PaidViewReceipt {
+                    payer: [9; 32],
+                    object: old_key,
+                    receipt_id,
+                    fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS,
+                },
+                &net,
+            )
+            .unwrap(),
+            payload
+        );
+    }
+
+    #[test]
+    fn pending_replacement_falls_back_to_confirmed_old_symbols_when_new_shares_not_yet_pushed() {
+        use super::super::content_gateway::Bud3ContentGateway;
+        use super::super::content_ref::ContentRef;
+        use super::super::custody::{symbol_leaf, symbol_root};
+        use super::super::pipeline::ObjectRecord;
+        use super::super::registry::Bud3Query;
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut reg = Bud3Registry::default();
+        let mut net = MemorySymbolNetwork::default();
+        let owner = [1u8; 32];
+        let payload =
+            b"content available from confirmed old shares during pending handover".repeat(4);
+        let old_up = prepare_public_upload(&payload, &SMALL, &Bud3Limits::default(), 16).unwrap();
+        let old_key = old_up.record.commitment;
+        let validators = [[50u8; 32], [51u8; 32], [52u8; 32]];
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: validators[0],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[1],
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[2],
+                    class: Class::Full,
+                    first_esi: 12,
+                    symbols: 4,
+                },
+            ),
+        ];
+        reg.register_object(owner, old_up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        let nft = [0xF1; 32];
+        reg.bind_nft(nft, owner, Some(owner), &old_key).unwrap();
+        for v in &validators {
+            reg.ack(&old_key, v).unwrap();
+        }
+        net.store_holder_share(validators[0], old_key, 0, old_up.segments[0][0..6].to_vec());
+        net.store_holder_share(
+            validators[1],
+            old_key,
+            0,
+            old_up.segments[0][6..12].to_vec(),
+        );
+        net.store_holder_share(
+            validators[2],
+            old_key,
+            0,
+            old_up.segments[0][12..16].to_vec(),
+        );
+
+        let mut new_bytes = payload.clone();
+        new_bytes.push(0x00);
+        let new_up = prepare_public_upload(&new_bytes, &SMALL, &Bud3Limits::default(), 16).unwrap();
+        let new_leaves: Vec<(u32, [u8; 32])> = new_up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let new_record = ObjectRecord {
+            content_id: old_up.record.content_id,
+            object_len: new_up.record.object_len,
+            commitment: [0xEE; 32],
+            profile: SMALL,
+            codec: 0,
+            symbols_per_segment: new_up.record.symbols_per_segment,
+            symbol_roots: vec![symbol_root(&new_leaves)],
+        };
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [50u8, 51, 52]
+            .into_iter()
+            .map(|v| {
+                (
+                    [v; 32],
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let atts: Vec<_> = [50u8, 51, 52]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation([v; 32], &[v; 32], &old_key, &new_record, &shares).unwrap()
+            })
+            .collect();
+        let new_key = reg
+            .replace_object(
+                (validators[0], 10_000),
+                &old_key,
+                new_record,
+                shares,
+                &atts,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    2,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+
+        // Notice: `new_key` is unacked (`custody_confirmed == false`) and has ZERO
+        // symbols pushed to holders yet; NFT metadata advertises both states cleanly.
+        let nft_info = reg.query_json(&Bud3Query::Nft(nft));
+        assert_eq!(nft_info["custody_confirmed"], false);
+        assert_eq!(
+            nft_info["pending_fallback_commitment"],
+            hex::encode(old_key)
+        );
+
+        assert_eq!(
+            view_from_network(&reg, &new_key, None, &net).unwrap(),
+            payload
+        );
+        let cref = ContentRef::new(old_up.record.content_id, new_key, Some(nft)).unwrap();
+        let bundle = Bud3ContentGateway::fetch_symbol_bundle(&reg, &cref, &net).unwrap();
+        assert_eq!(
+            Bud3ContentGateway::decode_symbol_bundle(&bundle, None).unwrap(),
+            payload
+        );
+    }
+
+    #[test]
+    fn verify_segment_candidate_refuses_zero_symbol_root() {
+        let up = prepare_public_upload(
+            b"zero symbol root must never skip Merkle verification",
+            &SMALL,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
+        let mut forged = up.record;
+        forged.symbol_roots = vec![[0u8; 32]; forged.symbol_roots.len()];
+        assert!(verify_segment_candidate(
+            0,
+            forged.object_len,
+            &forged,
+            &up.segments[0],
+            std::slice::from_ref(&up.segments[0]),
+        )
+        .is_none());
     }
 }

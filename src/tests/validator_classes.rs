@@ -50,7 +50,10 @@ struct Fixture {
 }
 
 fn fixture(owner_byte: u8, chain_id: u64) -> Fixture {
-    let owner = Address::from([owner_byte; 32]);
+    fixture_for(Address::from([owner_byte; 32]), chain_id)
+}
+
+fn fixture_for(owner: Address, chain_id: u64) -> Fixture {
     let keys = ValidatorKeys::generate().unwrap();
     let bls = keys.bls_key.as_ref().unwrap();
     Fixture {
@@ -896,6 +899,322 @@ fn duty_lane_budget_is_twenty_percent() {
     assert_eq!(pool.all_pending_transactions(pool.len()).len(), 5);
 }
 
+/// Register `keypair`'s account as a validator of `class` on `state`, bonded
+/// at the devnet floor, and return its address.
+fn register_class(
+    state: &mut AccountState,
+    keypair: &KeyPair,
+    class: ValidatorClass,
+    n: u8,
+) -> Address {
+    let owner = Address::from(keypair.public_key_bytes());
+    state.add_balance(&owner, 10_000);
+    let f = fixture_for(owner, DEFAULT_CHAIN_ID);
+    let bond = if class.holds_seat() { 1_000 } else { 100 };
+    let register = tx(
+        owner,
+        bond,
+        state.get_nonce(&owner),
+        DEFAULT_CHAIN_ID,
+        ValidatorTx::Register(Box::new(registration(&f, class, n))),
+    );
+    apply(state, &register).unwrap();
+    owner
+}
+
+/// The free lane's signer set is the validators that still have a bond and
+/// may still do duty. A directory record outlives a penalty, so the record
+/// alone does not put its owner in the lane.
+#[test]
+fn duty_lane_signers_exclude_slashed_jailed_and_unbonded_validators() {
+    let full_key = KeyPair::from_seed(&[41u8; 32]).unwrap();
+    let phone_key = KeyPair::from_seed(&[42u8; 32]).unwrap();
+    let mut state = AccountState::new();
+    let full = register_class(&mut state, &full_key, ValidatorClass::Full, 41);
+    let phone = register_class(&mut state, &phone_key, ValidatorClass::Mobile, 42);
+    assert!(state.validator_directory.get(&full).is_some());
+    assert!(state.validator_directory.get(&phone).is_some());
+    assert_eq!(
+        state.duty_lane_signers(),
+        std::collections::BTreeSet::from([full, phone]),
+        "a bonded Full validator and a bonded phone both have the lane"
+    );
+
+    // Each penalty on the consensus entry takes the Full validator out, and
+    // the directory record it still has does not put it back.
+    for penalty in 0..3u8 {
+        let mut penalised = state.clone();
+        let seat = penalised.validators.get_mut(&full).unwrap();
+        match penalty {
+            0 => seat.jailed = true,
+            1 => seat.slashed = true,
+            _ => seat.active = false,
+        }
+        assert!(penalised.validator_directory.get(&full).is_some());
+        assert_eq!(
+            penalised.duty_lane_signers(),
+            std::collections::BTreeSet::from([phone])
+        );
+    }
+
+    // A seat class with no consensus entry at all has no seat to do duty from.
+    let mut seatless = state.clone();
+    seatless.validators.remove(&full);
+    assert_eq!(
+        seatless.duty_lane_signers(),
+        std::collections::BTreeSet::from([phone])
+    );
+
+    // A phone whose bond is gone keeps its record and loses the lane.
+    let mut unbonded = state.clone();
+    unbonded
+        .validator_directory
+        .finish_class_change(&phone, ValidatorClass::Mobile, 100);
+    assert_eq!(unbonded.validator_directory.get(&phone).unwrap().stake, 0);
+    assert_eq!(
+        unbonded.duty_lane_signers(),
+        std::collections::BTreeSet::from([full])
+    );
+}
+
+/// The same rule through the chain's own admission door, which installs the
+/// signer set on every submission: a bonded phone's free batch is admitted,
+/// and the batch of a phone that has no bond left is refused for its fee.
+#[test]
+fn chain_admission_door_gives_the_free_duty_lane_only_to_bonded_validators() {
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::pow::PoWEngine;
+
+    let bonded_key = KeyPair::from_seed(&[43u8; 32]).unwrap();
+    let unbonded_key = KeyPair::from_seed(&[44u8; 32]).unwrap();
+    let jailed_key = KeyPair::from_seed(&[45u8; 32]).unwrap();
+    let mut chain = Blockchain::new(
+        std::sync::Arc::new(PoWEngine::new(0)),
+        None,
+        DEFAULT_CHAIN_ID,
+        None,
+    );
+    let bonded = register_class(&mut chain.state, &bonded_key, ValidatorClass::Mobile, 43);
+    let unbonded = register_class(&mut chain.state, &unbonded_key, ValidatorClass::Mobile, 44);
+    let jailed = register_class(&mut chain.state, &jailed_key, ValidatorClass::Full, 45);
+    chain
+        .state
+        .validator_directory
+        .finish_class_change(&unbonded, ValidatorClass::Mobile, 100);
+    chain.state.validators.get_mut(&jailed).unwrap().jailed = true;
+
+    // Every transaction pays the consensus floor. The lane lifts the node's
+    // own pool floor, which here sits above it.
+    let floor = chain.state.base_fee;
+    chain.mempool.set_min_fee(floor.saturating_add(5));
+    let batch_of = |key: &KeyPair, nonce: u64| {
+        let from = Address::from(key.public_key_bytes());
+        let mut tx = Transaction::new_with_chain_id(
+            from,
+            Address::zero(),
+            0,
+            floor,
+            nonce,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::StorageV3(Box::new(StorageTxV3::CustodyAck { object: [9u8; 32] })),
+        );
+        tx.hash = tx.calculate_hash();
+        tx.sign(key);
+        tx
+    };
+
+    for (key, owner) in [(&unbonded_key, unbonded), (&jailed_key, jailed)] {
+        let batch = batch_of(key, chain.state.get_nonce(&owner));
+        let refusal = chain
+            .add_transaction(batch)
+            .expect_err("no bond behind the batch, no lane");
+        assert!(refusal.contains("FeeTooLow"), "{refusal}");
+    }
+    assert_eq!(chain.mempool.len(), 0);
+
+    let batch = batch_of(&bonded_key, chain.state.get_nonce(&bonded));
+    chain
+        .add_transaction(batch)
+        .expect("a bonded phone's duty batch is not held to the pool floor");
+    assert_eq!(chain.mempool.len(), 1);
+}
+
+/// The lane's pool ceiling is one number for every validator, so it must not
+/// belong to whoever reached it first. A validator that parks batches fills
+/// the lane, and the next validator's batch still gets in: the room comes from
+/// the signer holding the most. A signer never displaces one that holds no
+/// more than it would, and a refusal removes nothing.
+#[test]
+fn duty_lane_ceiling_is_shared_and_not_first_come() {
+    let hog = KeyPair::from_seed(&[31u8; 32]).unwrap();
+    let other = KeyPair::from_seed(&[32u8; 32]).unwrap();
+    let newcomer = KeyPair::from_seed(&[33u8; 32]).unwrap();
+    let now: u128 = 4_200_005;
+    let window_ms: u128 = 600_000;
+
+    let probes = [
+        duty_ack(&hog, 0, [1u8; 32]),
+        duty_ack(&hog, 1, [2u8; 32]),
+        duty_ack(&hog, 2, [3u8; 32]),
+        duty_ack(&hog, 3, [4u8; 32]),
+        duty_ack(&other, 0, [5u8; 32]),
+        duty_ack(&newcomer, 0, [6u8; 32]),
+    ];
+    // The batches submitted further down. A batch's size depends on its
+    // signature and its fields, so the block share is taken from all of them:
+    // none is then refused for its own size, and four of any of them fill the
+    // lane.
+    let fifth = duty_ack(&hog, 4, [7u8; 32]);
+    let other_second = duty_ack(&other, 1, [8u8; 32]);
+    let greedy = [
+        duty_ack(&other, 2, [9u8; 32]),
+        duty_ack(&hog, 2, [10u8; 32]),
+    ];
+    let largest = probes
+        .iter()
+        .chain([&fifth, &other_second])
+        .chain(greedy.iter())
+        .map(block_bytes)
+        .max()
+        .unwrap();
+    let hog_address = probes[0].from;
+    let other_address = probes[4].from;
+    let newcomer_address = probes[5].from;
+
+    // The lane holds four blocks of its share, so four batches fill it.
+    let mut pool = Mempool::new(MempoolConfig {
+        min_fee: 5,
+        duty_block_bytes: largest,
+        ..MempoolConfig::default()
+    });
+    pool.sync_duty_validators([hog_address, other_address, newcomer_address]);
+
+    // One validator, one batch per window, four windows: the lane is full of
+    // batches that all belong to it.
+    let mut at = now;
+    for batch in &probes[..4] {
+        pool.admit_at(batch.clone(), at)
+            .expect("the hog's batch fits");
+        at += window_ms;
+    }
+    assert_eq!(pool.len(), 4);
+    let late = now + window_ms * 4;
+
+    // It cannot take more than the lane: nobody else holds anything to give.
+    assert!(matches!(
+        pool.admit_at(fifth, late),
+        Err(MempoolError::DutyLaneRefused(
+            DutyRefusal::LaneBytesFull { .. }
+        ))
+    ));
+    assert_eq!(pool.len(), 4);
+
+    // Another validator's batch is admitted, and the hog gives up its last
+    // batch for it. The batches queued before that one are untouched.
+    pool.admit_at(probes[4].clone(), late)
+        .expect("a full lane still admits a signer that holds less of it");
+    assert_eq!(pool.len(), 4);
+    assert!(pool.get(&probes[4].hash).is_some());
+    assert!(pool.get(&probes[3].hash).is_none());
+    for kept in &probes[..3] {
+        assert!(pool.get(&kept.hash).is_some());
+    }
+
+    // A second batch of that validator, in the next window, takes one more.
+    pool.admit_at(other_second.clone(), late + window_ms)
+        .expect("two batches against the hog's three");
+    assert!(pool.get(&probes[2].hash).is_none());
+    assert_eq!(pool.len(), 4);
+
+    // Now both hold two. Neither can grow at the other's expense: it would
+    // hold three against the other's two, and the refusal removes nothing.
+    let before: Vec<String> = {
+        let mut hashes: Vec<String> = pool
+            .all_pending_transactions(pool.len())
+            .into_iter()
+            .map(|tx| tx.hash)
+            .collect();
+        hashes.sort();
+        hashes
+    };
+    for batch in greedy {
+        let refusal = pool.admit_at(batch, late + window_ms * 2);
+        assert!(
+            matches!(
+                refusal,
+                Err(MempoolError::DutyLaneRefused(
+                    DutyRefusal::LaneBytesFull { .. }
+                ))
+            ),
+            "{refusal:?}"
+        );
+    }
+    let after: Vec<String> = {
+        let mut hashes: Vec<String> = pool
+            .all_pending_transactions(pool.len())
+            .into_iter()
+            .map(|tx| tx.hash)
+            .collect();
+        hashes.sort();
+        hashes
+    };
+    assert_eq!(before, after, "a refused batch evicts nothing");
+
+    // A third validator has no batch in the lane yet, so it is lighter than
+    // both and is admitted. Whoever gives way loses its last batch, never its first.
+    pool.admit_at(probes[5].clone(), late + window_ms * 2)
+        .expect("a newcomer is lighter than every signer in the lane");
+    assert_eq!(pool.len(), 4);
+    assert!(pool.get(&probes[5].hash).is_some());
+    assert!(pool.get(&probes[0].hash).is_some());
+    assert!(pool.get(&probes[4].hash).is_some());
+    let hog_second = pool.get(&probes[1].hash).is_some();
+    let other_second_kept = pool.get(&other_second.hash).is_some();
+    assert!(
+        hog_second != other_second_kept,
+        "exactly one of the two heavier signers gave up its last batch"
+    );
+}
+
+/// A batch larger than the lane's share of one block can never be carried by
+/// a block, so it is refused at the door instead of holding lane bytes until
+/// it expires.
+#[test]
+fn duty_batch_larger_than_the_block_share_is_refused() {
+    let keypair = KeyPair::from_seed(&[34u8; 32]).unwrap();
+    let now: u128 = 4_200_005;
+    let batch = duty_ack(&keypair, 0, [1u8; 32]);
+    let batch_bytes = block_bytes(&batch);
+
+    let mut pool = Mempool::new(MempoolConfig {
+        min_fee: 5,
+        duty_block_bytes: batch_bytes - 1,
+        ..MempoolConfig::default()
+    });
+    pool.sync_duty_validators([batch.from]);
+    assert_eq!(
+        pool.admit_at(batch.clone(), now),
+        Err(MempoolError::DutyLaneRefused(
+            DutyRefusal::BatchExceedsBlockShare {
+                batch_bytes,
+                share: batch_bytes - 1,
+            }
+        ))
+    );
+    assert_eq!(pool.len(), 0);
+
+    // At exactly the share it is a batch a block can carry.
+    let mut exact = Mempool::new(MempoolConfig {
+        min_fee: 5,
+        duty_block_bytes: batch_bytes,
+        ..MempoolConfig::default()
+    });
+    exact.sync_duty_validators([batch.from]);
+    exact.admit_at(batch, now).expect("a batch at the share");
+    assert_eq!(exact.get_sorted_transactions(8).len(), 1);
+}
+
 #[test]
 fn resume_validator_is_suspension_only_and_activates_one_epoch_later() {
     let f = fixture(0x70, DEFAULT_CHAIN_ID);
@@ -944,5 +1263,179 @@ fn resume_validator_is_suspension_only_and_activates_one_epoch_later() {
     assert_eq!(
         validator.stake, stake_before,
         "absence and resume move no stake"
+    );
+}
+
+#[test]
+fn duty_lane_full_never_deletes_another_validators_single_live_batch() {
+    let keys: Vec<KeyPair> = (61u8..66u8)
+        .map(|seed| KeyPair::from_seed(&[seed; 32]).unwrap())
+        .collect();
+    let now: u128 = 4_200_005;
+    let live: Vec<Transaction> = keys[..4]
+        .iter()
+        .enumerate()
+        .map(|(i, k)| duty_ack(k, 0, [i as u8 + 1; 32]))
+        .collect();
+    let newcomer = duty_ack(&keys[4], 0, [99u8; 32]);
+    let batch_size = live
+        .iter()
+        .chain([&newcomer])
+        .map(block_bytes)
+        .max()
+        .unwrap();
+    assert!(
+        live.iter().map(block_bytes).sum::<usize>() + block_bytes(&newcomer) > batch_size * 4,
+        "5 single live batches must exceed the 4-block duty-lane ceiling"
+    );
+
+    // Exact capacity for 4 single-batch validators.
+    let mut pool = Mempool::new(MempoolConfig {
+        min_fee: 5,
+        duty_block_bytes: batch_size,
+        ..MempoolConfig::default()
+    });
+    pool.sync_duty_validators(live.iter().map(|t| t.from).chain([newcomer.from]));
+
+    for batch in &live {
+        pool.admit_at(batch.clone(), now)
+            .expect("single live batch fits");
+    }
+    assert_eq!(pool.len(), 4);
+
+    // A 5th validator submitting a batch into a lane where every incumbent
+    // holds only a single live batch must be refused and delete nothing.
+    let refusal = pool.admit_at(newcomer.clone(), now);
+    assert!(
+        matches!(
+            refusal,
+            Err(MempoolError::DutyLaneRefused(
+                DutyRefusal::LaneBytesFull { .. }
+            ))
+        ),
+        "expected LaneBytesFull, got {refusal:?}"
+    );
+    assert_eq!(pool.len(), 4);
+    assert!(pool.get(&newcomer.hash).is_none());
+    for batch in &live {
+        assert!(
+            pool.get(&batch.hash).is_some(),
+            "single live duty batch must never be evicted"
+        );
+    }
+}
+
+#[test]
+fn duty_lane_signers_exclude_underbonded_and_zero_stake_resumed_validators() {
+    let f = fixture(0x74, DEFAULT_CHAIN_ID);
+    let mut state = funded(&f.owner, 10_000);
+    apply(
+        &mut state,
+        &tx(
+            f.owner,
+            1_000,
+            0,
+            DEFAULT_CHAIN_ID,
+            ValidatorTx::Register(Box::new(registration(&f, ValidatorClass::Full, 0x74))),
+        ),
+    )
+    .unwrap();
+    assert!(state.duty_lane_signers().contains(&f.owner));
+
+    // Case 1: unbonding down to 1 atom (below min_stake) removes duty-lane eligibility
+    // even if `active` were still true on a stale record.
+    let mut underbonded = state.clone();
+    underbonded.validators.get_mut(&f.owner).unwrap().stake = 1;
+    underbonded.validators.get_mut(&f.owner).unwrap().active = true;
+    assert!(
+        !underbonded.duty_lane_signers().contains(&f.owner),
+        "1-atom stake below min_stake must not keep free duty lane"
+    );
+
+    // Case 2: suspend -> unstake to zero -> Resume -> advance_epoch must NOT
+    // re-activate a zero-stake validator or re-admit it to the duty lane.
+    let mut params = *state.registry.params();
+    params.liveness_max_missed_epochs = 1;
+    assert_eq!(
+        state
+            .liveness
+            .record_epoch(1, &[f.owner], |_| false, &params),
+        vec![f.owner]
+    );
+    state.validators.get_mut(&f.owner).unwrap().active = false;
+    state.validators.get_mut(&f.owner).unwrap().stake = 0;
+    state.epoch_index = 1;
+
+    apply(
+        &mut state,
+        &tx(f.owner, 0, 1, DEFAULT_CHAIN_ID, ValidatorTx::Resume),
+    )
+    .expect("resume request queues");
+    state.advance_epoch(2, DEFAULT_CHAIN_ID);
+    assert!(
+        !state.validators.get(&f.owner).unwrap().active,
+        "resuming with zero stake must not restore active=true"
+    );
+    assert!(
+        !state.duty_lane_signers().contains(&f.owner),
+        "zero-stake resumed validator must not gain free duty lane"
+    );
+}
+
+/// The testnet Full-validator floor is 1,000 BUD, while the registry's generic
+/// floor is only 1,000 atoms. Leaving the generic floor behind must not preserve
+/// consensus eligibility or the free duty lane.
+#[test]
+fn testnet_unstake_below_full_floor_deactivates_and_loses_duty_lane() {
+    use crate::core::chain_config::Network;
+
+    let f = fixture(0x75, TESTNET);
+    let full_floor = Network::Testnet.min_stake_full();
+    let mut state = funded(&f.owner, full_floor.saturating_add(10));
+    let registry_floor = state.registry.params().min_stake.max(1);
+    assert!(
+        registry_floor < full_floor,
+        "the test must exercise distinct floors"
+    );
+
+    apply(
+        &mut state,
+        &tx(
+            f.owner,
+            full_floor,
+            0,
+            TESTNET,
+            ValidatorTx::Register(Box::new(registration(&f, ValidatorClass::Full, 0x75))),
+        ),
+    )
+    .unwrap();
+    assert!(state.validators.get(&f.owner).unwrap().active);
+    assert!(state
+        .duty_lane_signers_for_chain(TESTNET)
+        .contains(&f.owner));
+
+    let unstake = Transaction::new_with_chain_id(
+        f.owner,
+        Address::zero(),
+        full_floor - registry_floor,
+        1,
+        1,
+        Vec::new(),
+        TESTNET,
+        TransactionType::Unstake,
+    );
+    Executor::apply_transaction_checked(&mut state, &unstake).unwrap();
+
+    let validator = state.validators.get(&f.owner).unwrap();
+    assert_eq!(validator.stake, registry_floor);
+    assert!(
+        !validator.active,
+        "stake below the network Full floor must deactivate the validator"
+    );
+    assert!(
+        !state
+            .duty_lane_signers_for_chain(TESTNET)
+            .contains(&f.owner),
+        "underbonded validator must not retain the free duty lane"
     );
 }
