@@ -990,11 +990,10 @@ mod tests {
         epoch_id: Hash32,
         next_epoch_id: Hash32,
         next_bp_hash: Hash32,
-        prev_hash: Hash32,
-        last_ds_final: Hash32,
-        last_final: Hash32,
+        links: [Hash32; 3],
         seed: u8,
     ) -> NearLightHeader {
+        let [prev_hash, last_ds_final, last_final] = links;
         let mut h = NearLightHeader {
             height,
             epoch_id,
@@ -1024,7 +1023,7 @@ mod tests {
         let digest = near_approval_sign_bytes(NET, epoch_id, inner, target_height);
         NearApprovalSig {
             signer_pubkey: ed.public_key_bytes(),
-            ed25519_sig: ed.sign(&digest).try_into().unwrap(),
+            ed25519_sig: ed.sign(&digest).to_vec(),
             pq_sig: pq
                 .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &digest)
                 .expect("ML-DSA-65 sign"),
@@ -1069,9 +1068,7 @@ mod tests {
             epoch_id,
             next_epoch_id,
             next_bp_hash,
-            [0x01; 32],
-            [0x01; 32],
-            [0x02; 32],
+            [[0x01; 32], [0x01; 32], [0x02; 32]],
             0x41,
         );
         let b1 = make_header(
@@ -1079,9 +1076,7 @@ mod tests {
             epoch_id,
             next_epoch_id,
             next_bp_hash,
-            b0.block_hash,
-            b0.block_hash,
-            [0x01; 32],
+            [b0.block_hash, b0.block_hash, [0x01; 32]],
             0x42,
         );
         let b2 = make_header(
@@ -1089,9 +1084,7 @@ mod tests {
             epoch_id,
             next_epoch_id,
             next_bp_hash,
-            b1.block_hash,
-            b1.block_hash,
-            b0.block_hash,
+            [b1.block_hash, b1.block_hash, b0.block_hash],
             0x43,
         );
 
