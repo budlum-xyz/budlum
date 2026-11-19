@@ -56,7 +56,7 @@ const INVENTORY: &str = "src/crypto/domain_tags.rs";
 /// that cannot look is not a clean scan.
 fn tags_under(root: &Path, exclude: Option<&str>) -> Result<BTreeSet<String>, String> {
     let mut tags = BTreeSet::new();
-    for dir in ["src", "budzero", "crates", "bud", "mobile"] {
+    for dir in ["src", "budzero", "crates", "mobile"] {
         let base = root.join(dir);
         if !base.is_dir() {
             return Err(format!(
@@ -65,6 +65,10 @@ fn tags_under(root: &Path, exclude: Option<&str>) -> Result<BTreeSet<String>, St
             ));
         }
         scan_dir(root, &base, exclude, &mut tags)?;
+    }
+    let legacy_bud = root.join("bud");
+    if legacy_bud.is_dir() {
+        scan_dir(root, &legacy_bud, exclude, &mut tags)?;
     }
     Ok(tags)
 }

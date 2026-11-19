@@ -20,7 +20,7 @@
 use crate::storage::qr_carousel::{CarouselEncoder, CarouselError, Drop};
 use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame, FrameError};
 use crate::storage::qr_payload::{payload_commitment, PayloadError};
-use crate::storage::qr_recipe::{three_recipe_digest, ThreeRecipePublic};
+use crate::storage::qr_recipe::ThreeRecipePublic;
 
 /// Errors re-emitting a stream from a recipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,12 +122,6 @@ impl RecipeEmitter {
             encoder,
             stream_commitment,
         })
-    }
-
-    /// Recipe digest (stable pin).
-    #[must_use]
-    pub fn recipe_digest(&self) -> [u8; 32] {
-        three_recipe_digest(&self.recipe)
     }
 
     /// A2 stream commitment used to bind frames.

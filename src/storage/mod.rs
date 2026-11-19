@@ -23,10 +23,8 @@ pub mod generated;
 pub mod key_package;
 pub mod lifecycle;
 pub mod living_threshold;
-pub mod lrc;
 pub mod manifest;
 pub mod mobile_self;
-pub mod msr;
 pub mod payload_crypt;
 pub mod provider;
 pub mod qr_carousel;
@@ -87,16 +85,11 @@ pub use living_threshold::{
     OperatorRates, ThresholdError, ACCESS_HALF_LIFE_EPOCHS, ACCESS_SCALE, HYSTERESIS_SIXTEENTHS,
     MAX_CPU_NANOS_PER_BYTE, MAX_OBJECT_BYTES, NANOS_PER_SECOND,
 };
-pub use lrc::{LrcError, LrcLayout, MAX_GROUP_SHARDS};
 pub use manifest::{
     manifest_id_from_parts_stored, manifest_id_from_shards, ContentCipher, ContentEncryption,
     ContentManifest, ErasureScheme, ShardKind, ShardRef, MIN_AEAD_CIPHERTEXT_BYTES,
 };
 pub use mobile_self::{MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile};
-pub use msr::{
-    lrc_repair_traffic_scaled, msr_repair_traffic_scaled, msr_speedup_over_lrc_scaled, MsrError,
-    TRAFFIC_SCALE,
-};
 pub use provider::{
     provider_challenge_id, ChallengeId, DealId, InMemoryStorageProvider, ProviderChallengeResult,
     PutReceipt, StorageProof, StorageProvider, StorageProviderError,

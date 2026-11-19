@@ -457,7 +457,8 @@ impl PermissionlessRegistry {
         }
     }
 
-    pub fn with_params(params: RegistryParams) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_params(params: RegistryParams) -> Self {
         Self {
             registrations: BTreeMap::new(),
             params,

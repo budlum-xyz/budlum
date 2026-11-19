@@ -17,8 +17,12 @@
 
 use sha3::{Digest, Sha3_256};
 
+/// Storage pact entry verified inside [`PactRegistry::verify_root`].
+///
+/// Convenience: exposed for quantum-account pact-root commitment tests and
+/// `PactRegistry` verification in `src/account_abstraction/registry.rs`.
 #[derive(Debug, Clone)]
-pub struct Pact {
+pub(crate) struct Pact {
     pub id: [u8; 32],
     pub recipe_hash: [u8; 32],
     pub seed: [u8; 32],
@@ -91,7 +95,8 @@ impl Pact {
     ///
     /// Returns an error when the payload exceeds `byte_budget` or does not hash
     /// to the committed value.
-    pub fn verify_commitment(&self, payload: &[u8]) -> Result<(), &'static str> {
+    #[cfg(test)]
+    pub(crate) fn verify_commitment(&self, payload: &[u8]) -> Result<(), &'static str> {
         self.validate()?;
         let payload_len = u64::try_from(payload.len())
             .map_err(|_| "storage pact: payload exceeds byte_budget")?;
@@ -122,7 +127,7 @@ impl Pact {
 
 #[derive(Debug, Clone)]
 pub struct PactRegistry {
-    pub pacts: Vec<Pact>,
+    pub(crate) pacts: Vec<Pact>,
     pub root: [u8; 32],
 }
 
@@ -153,7 +158,7 @@ impl PactRegistry {
     /// # Errors
     ///
     /// Returns an error when the id is already registered or the registry is full.
-    pub fn add_pact(&mut self, pact: Pact) -> Result<(), &'static str> {
+    pub(crate) fn add_pact(&mut self, pact: Pact) -> Result<(), &'static str> {
         if self.pacts.len() >= MAX_PACTS {
             return Err("storage pact: registry is full");
         }
@@ -233,7 +238,8 @@ impl PactGates {
     /// # Errors
     ///
     /// Returns an error when the pact commitment does not match its payload.
-    pub fn kq_storage_pact(pact: &Pact, payload: &[u8]) -> Result<(), &'static str> {
+    #[cfg(test)]
+    pub(crate) fn kq_storage_pact(pact: &Pact, payload: &[u8]) -> Result<(), &'static str> {
         pact.verify_commitment(payload)
     }
     /// # Errors

@@ -22,10 +22,10 @@ Mikoriza|19|65
 Mobile Self|10|69
 PUL|12|98
 Pollen|62|724
-Regeneration|27|107
+Regeneration|26|106
 Sera|0|0
-Tarif|52|1413
+Tarif|52|1408
 Universal Gateway|4|7
 Vault (SocialFi)|7|152
 budlumxyz|25|204
-three_* modules|29|194
+three_* modules|29|192
