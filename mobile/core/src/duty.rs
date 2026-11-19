@@ -2,7 +2,7 @@
 
 use crate::custody::{Audit, CustodyProofBatch};
 use crate::error::CoreError;
-use crate::handover::{fetch_from_holders, Holder, ShareSource};
+use crate::handover::{fetch_from_holders, fetch_verified_from_holders, Holder, ShareSource};
 use crate::policy::Policy;
 use crate::presence::{network_hint_ipv4, PresenceSignal, ResumeValidator, ValidatorClass};
 use crate::quota::{below_floor, QUOTA_MIN_BYTES};
@@ -94,8 +94,12 @@ impl MobileCore {
         relays: Vec<RelayOffer>,
         available_bytes: u64,
     ) -> Self {
+        let mut policy = Policy::default();
+        if let Some(cap) = class.max_custody_quota_bytes() {
+            policy.quota_bytes = policy.quota_bytes.min(cap).max(QUOTA_MIN_BYTES);
+        }
         Self {
-            policy: Policy::default(),
+            policy,
             store: ShareStore::new(),
             relays: RelayPool::new(relays),
             available_bytes,
@@ -290,6 +294,23 @@ impl MobileCore {
         fetch_from_holders(holders, source)
     }
 
+    /// Fetch a symbol verified against its committed Merkle leaf and length,
+    /// failing over across silent, corrupted, or zero-truncated holders.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError`] when the expected length is invalid, all holders are
+    /// silent, or no responding holder matches `expected_leaf` and `expected_len`.
+    pub fn fetch_verified_symbol<S: ShareSource>(
+        &self,
+        holders: &[Holder],
+        expected_leaf: &[u8; 32],
+        expected_len: usize,
+        source: &S,
+    ) -> Result<Vec<u8>, CoreError> {
+        fetch_verified_from_holders(holders, expected_leaf, expected_len, source)
+    }
+
     // Drop the largest shares first so a quota reduction is immediately
     // reflected in the store. The caller queues the corresponding duty.
     fn release_until_quota(&mut self, quota: u64) -> Vec<ShareId> {
@@ -327,7 +348,11 @@ impl MobileCore {
                 None => break,
             }
         }
-        self.policy.quota_bytes = self.store.stored_bytes().max(QUOTA_MIN_BYTES);
+        self.policy.quota_bytes = self
+            .store
+            .stored_bytes()
+            .min(self.policy.quota_bytes)
+            .max(QUOTA_MIN_BYTES);
         if released.is_empty() {
             None
         } else {

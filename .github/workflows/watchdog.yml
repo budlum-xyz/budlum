@@ -96,6 +96,7 @@ jobs:
             https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
+          rm -f /tmp/actionlint.tar.gz
           actionlint --version
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -120,6 +121,12 @@ jobs:
         run: |
           set -euo pipefail
           gates=./xtask/gates/target/release/budlum-gates
+          # The door was renamed together with the module it pins: main carries
+          # `regen-health-door` over `src/domain/regen_health.rs`, the consolidation
+          # branches carry `state-recovery-door` over `src/chain/state_recovery/`.
+          # Hard-coding either name broke the other tree's pulse, so resolve the
+          # name this checkout actually declares. `gate-references-are-real` fails
+          # the build when a literal gate name drifts out from under a workflow.
           door="$("$gates" --list | awk '/^(state-recovery-door|regen-health-door)$/ { print; exit }')"
           if [ -z "$door" ]; then
             echo "neither state-recovery-door nor regen-health-door is declared by this gate binary" >&2
@@ -171,3 +178,14 @@ jobs:
           name: watchdog-summary
           path: watchdog-summary.md
           retention-days: 30
+      - name: Enforce clean pulse verdict
+        env:
+          RUSTSEC_DRIFT_RESULT: ${{ needs.rustsec-drift.result }}
+          MAIN_HEALTH_PULSE_RESULT: ${{ needs.main-health-pulse.result }}
+        run: |
+          set -euo pipefail
+          cat watchdog-summary.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "$RUSTSEC_DRIFT_RESULT" != "success" ] || [ "$MAIN_HEALTH_PULSE_RESULT" != "success" ]; then
+            echo "::error::Watchdog pulse degraded (rustsec-drift=${RUSTSEC_DRIFT_RESULT}, main-health-pulse=${MAIN_HEALTH_PULSE_RESULT})." >&2
+            exit 1
+          fi
