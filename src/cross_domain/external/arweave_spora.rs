@@ -626,10 +626,9 @@ fn recompute_and_sign(network: &str, op: &TestOperator, ev: &mut ArweaveSpOraEvi
         ev.chunk_offset,
         ev.chunk_size,
     );
-    let idx = if ev.chunk_size > 0 {
-        ev.chunk_offset / ev.chunk_size
-    } else {
-        0
+    let idx = match ev.chunk_offset.checked_div(ev.chunk_size) {
+        Some(q) => q,
+        None => 0,
     };
     ev.weave_root = fold_weave_merkle_path(leaf, idx, &ev.merkle_proof);
     op.sign(network, ev);
