@@ -2386,6 +2386,7 @@ fn parse_placement_roots(
                 root: parse_opt_hex32(r["root"].as_str()?)?,
                 first_esi: u32::try_from(r["first_esi"].as_u64()?).ok()?,
                 count: u32::try_from(r["count"].as_u64()?).ok()?,
+                settled: false,
             })
         })
         .collect()

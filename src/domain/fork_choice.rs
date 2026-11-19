@@ -22,6 +22,7 @@ pub enum ForkChoiceReason {
     PosLatestMessageDriven,
     BftQuorumCertificate,
     PoaRoundRobinAuthority,
+    ZkVerifiedState,
     SingleCandidate,
 }
 
@@ -84,9 +85,17 @@ impl ConsensusDomainForkChoice for DomainForkChoice {
             ConsensusKind::PoS => resolve_pos(candidates)?,
             ConsensusKind::Bft => resolve_bft(candidates)?,
             ConsensusKind::PoA => resolve_poa(candidates)?,
-            _ => return Err(ForkChoiceError::UnsupportedConsensusKind),
+            ConsensusKind::Zk => resolve_zk(candidates)?,
+            ConsensusKind::StorageAttestation(_)
+            | ConsensusKind::AiInference
+            | ConsensusKind::Custom(_) => return Err(ForkChoiceError::UnsupportedConsensusKind),
         };
-        if candidates.len() == 1 && !matches!(self.kind, ConsensusKind::Bft | ConsensusKind::PoA) {
+        if candidates.len() == 1
+            && !matches!(
+                self.kind,
+                ConsensusKind::Bft | ConsensusKind::PoA | ConsensusKind::Zk
+            )
+        {
             head.reason = ForkChoiceReason::SingleCandidate;
         }
         Ok(head)
@@ -153,7 +162,34 @@ fn resolve_pow(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceE
     })
 }
 
+fn has_same_height_conflict<'a>(candidates: impl Iterator<Item = &'a ForkCandidate>) -> bool {
+    let mut seen = std::collections::BTreeMap::<u64, Hash32>::new();
+    for candidate in candidates {
+        if let Some(prev_hash) = seen.insert(candidate.height, candidate.head_hash) {
+            if prev_hash != candidate.head_hash {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn has_conflicting_finalized_checkpoints(candidates: &[ForkCandidate]) -> bool {
+    let mut seen: Option<Hash32> = None;
+    for cp in candidates.iter().filter_map(|c| c.finalized_checkpoint) {
+        match seen {
+            None => seen = Some(cp),
+            Some(prev) if prev != cp => return true,
+            Some(_) => {}
+        }
+    }
+    false
+}
+
 fn resolve_pos(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceError> {
+    if has_conflicting_finalized_checkpoints(candidates) {
+        return Err(ForkChoiceError::ConflictingFinality);
+    }
     let best = candidates
         .iter()
         .map(|c| c.vote_weight.filter(|w| *w > 0).map(|weight| (c, weight)))
@@ -185,17 +221,16 @@ fn resolve_bft(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceE
     if with_qc.is_empty() {
         return Err(ForkChoiceError::MissingQuorumCertificate);
     }
+    // Check every height in the candidate set - not only the highest - so a
+    // double-QC equivocation at height H cannot be masked by a single higher
+    // candidate at height H + 1.
+    if has_same_height_conflict(with_qc.iter().copied()) {
+        return Err(ForkChoiceError::ConflictingFinality);
+    }
     let best = with_qc
         .into_iter()
         .max_by(|a, b| a.height.cmp(&b.height).then(b.head_hash.cmp(&a.head_hash)))
         .ok_or(ForkChoiceError::NoCandidates)?;
-    let same_height_conflicts = candidates
-        .iter()
-        .filter(|c| c.qc_present && c.height == best.height && c.head_hash != best.head_hash)
-        .count();
-    if same_height_conflicts > 0 {
-        return Err(ForkChoiceError::ConflictingFinality);
-    }
     Ok(ResolvedHead {
         domain_id: best.domain_id,
         head_hash: best.head_hash,
@@ -206,24 +241,48 @@ fn resolve_bft(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceE
 }
 
 fn resolve_poa(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceError> {
-    let best = candidates
-        .iter()
-        .filter(|c| c.authority_quorum)
-        .max_by(|a, b| a.height.cmp(&b.height).then(b.head_hash.cmp(&a.head_hash)))
-        .ok_or(ForkChoiceError::MissingAuthorityQuorum)?;
-    let same_height_conflicts = candidates
-        .iter()
-        .filter(|c| c.authority_quorum && c.height == best.height && c.head_hash != best.head_hash)
-        .count();
-    if same_height_conflicts > 0 {
+    let with_quorum: Vec<&ForkCandidate> =
+        candidates.iter().filter(|c| c.authority_quorum).collect();
+    if with_quorum.is_empty() {
+        return Err(ForkChoiceError::MissingAuthorityQuorum);
+    }
+    if has_same_height_conflict(with_quorum.iter().copied()) {
         return Err(ForkChoiceError::ConflictingFinality);
     }
+    let best = with_quorum
+        .into_iter()
+        .max_by(|a, b| a.height.cmp(&b.height).then(b.head_hash.cmp(&a.head_hash)))
+        .ok_or(ForkChoiceError::NoCandidates)?;
     Ok(ResolvedHead {
         domain_id: best.domain_id,
         head_hash: best.head_hash,
         height: best.height,
         finality: DomainFinalityStatus::Finalized,
         reason: ForkChoiceReason::PoaRoundRobinAuthority,
+    })
+}
+
+fn resolve_zk(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceError> {
+    let verified: Vec<&ForkCandidate> = candidates
+        .iter()
+        .filter(|c| c.qc_present && c.finalized_checkpoint.is_some())
+        .collect();
+    if verified.is_empty() {
+        return Err(ForkChoiceError::MissingQuorumCertificate);
+    }
+    if has_same_height_conflict(verified.iter().copied()) {
+        return Err(ForkChoiceError::ConflictingFinality);
+    }
+    let best = verified
+        .into_iter()
+        .max_by(|a, b| a.height.cmp(&b.height).then(b.head_hash.cmp(&a.head_hash)))
+        .ok_or(ForkChoiceError::NoCandidates)?;
+    Ok(ResolvedHead {
+        domain_id: best.domain_id,
+        head_hash: best.head_hash,
+        height: best.height,
+        finality: DomainFinalityStatus::Finalized,
+        reason: ForkChoiceReason::ZkVerifiedState,
     })
 }
 
@@ -415,5 +474,70 @@ mod tests {
         lone_pos.vote_weight = Some(100);
         let resolved_pos = pos.fork_choice(&[lone_pos]).unwrap();
         assert_eq!(resolved_pos.reason, ForkChoiceReason::SingleCandidate);
+    }
+
+    #[test]
+    fn fork_choice_detects_sub_tip_equivocation_and_resolves_dag_poh_pospace_zk() {
+        let base = |h: u64, byte: u8| ForkCandidate {
+            domain_id: 7,
+            head_hash: [byte; 32],
+            parent_hash: [0x01; 32],
+            height: h,
+            cumulative_work: Some(u128::from(h) * 10),
+            vote_weight: Some(u128::from(h) * 100),
+            justified_checkpoint: Some([0xAA; 32]),
+            finalized_checkpoint: Some([0xBB; 32]),
+            proposer: None,
+            qc_present: true,
+            authority_quorum: true,
+        };
+
+        // Sub-tip double-QC at h=10 masked by single h=11 candidate must fail closed.
+        let bft = DomainForkChoice {
+            domain_id: 7,
+            kind: ConsensusKind::Bft,
+        };
+        assert_eq!(
+            bft.fork_choice(&[base(10, 0x11), base(10, 0x22), base(11, 0x33)]),
+            Err(ForkChoiceError::ConflictingFinality)
+        );
+
+        // Conflicting PoS finalized checkpoints must fail closed.
+        let pos = DomainForkChoice {
+            domain_id: 7,
+            kind: ConsensusKind::PoS,
+        };
+        let mut pos_b = base(11, 0x44);
+        pos_b.finalized_checkpoint = Some([0xCC; 32]);
+        assert_eq!(
+            pos.fork_choice(&[base(10, 0x11), pos_b]),
+            Err(ForkChoiceError::ConflictingFinality)
+        );
+
+        // Sub-tip double authority quorum at h=10 under PoA must also fail closed.
+        let poa = DomainForkChoice {
+            domain_id: 7,
+            kind: ConsensusKind::PoA,
+        };
+        assert_eq!(
+            poa.fork_choice(&[base(10, 0x11), base(10, 0x22), base(12, 0x55)]),
+            Err(ForkChoiceError::ConflictingFinality)
+        );
+
+        // Zk resolves cleanly and refuses same-height conflicting verified claims.
+        let zk = DomainForkChoice {
+            domain_id: 7,
+            kind: ConsensusKind::Zk,
+        };
+        let head = zk
+            .fork_choice(&[base(10, 0x11), base(12, 0x22)])
+            .expect("resolve zk");
+        assert_eq!(head.height, 12);
+        assert_eq!(head.head_hash, [0x22; 32]);
+        assert_eq!(head.reason, ForkChoiceReason::ZkVerifiedState);
+        assert_eq!(
+            zk.fork_choice(&[base(10, 0x11), base(10, 0x99), base(12, 0x22)]),
+            Err(ForkChoiceError::ConflictingFinality)
+        );
     }
 }

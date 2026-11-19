@@ -1372,18 +1372,42 @@ impl HostApi for HostBridge<'_> {
                 return Err(e);
             }
         }
+        // Record a newly derived target-EE alias only when the frame is
+        // non-static AND the child frame ultimately commits; a static call or a
+        // reverted/faulted child call must never leak new alias rows into the
+        // consensus state root.
+        let mut newly_registered_alias_key: Option<[u8; 33]> = None;
         let child_caller = if call.from.ee != call.to_ee {
             if let Some(owner) = self
                 .state
                 .execution_state
                 .resolve_alias_owner(call.from.ee, &call.from.id)
             {
-                match self
+                let alias_key = alias::alias_storage_key(&owner, call.to_ee);
+                let already_present = self
                     .state
                     .execution_state
-                    .ensure_alias_registered(&owner, call.to_ee)
-                {
-                    Ok(alias) => match EeIdentity::new(call.to_ee, alias) {
+                    .read(alias::ALIAS_NAMESPACE, &alias_key)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                let derived = if is_static || already_present {
+                    alias::derive_alias_bytes(&owner, call.to_ee)
+                } else {
+                    match self
+                        .state
+                        .execution_state
+                        .ensure_alias_registered(&owner, call.to_ee)
+                    {
+                        Ok(bytes) => {
+                            newly_registered_alias_key = Some(alias_key);
+                            Ok(bytes)
+                        }
+                        Err(err) => Err(err),
+                    }
+                };
+                match derived {
+                    Ok(alias_bytes) => match EeIdentity::new(call.to_ee, alias_bytes) {
                         Ok(mapped) => mapped,
                         Err(_) => call.from,
                     },
@@ -1394,6 +1418,11 @@ impl HostApi for HostBridge<'_> {
             }
         } else {
             call.from
+        };
+        let rollback_alias = |st: &mut AccountState, key: Option<[u8; 33]>| {
+            if let Some(k) = key {
+                let _ = st.execution_state.write(alias::ALIAS_NAMESPACE, &k, None);
+            }
         };
         let child_depth = u32::try_from(self.overlay.universal_depth()).unwrap_or(u32::MAX);
         let child_call = EeCall {
@@ -1416,12 +1445,16 @@ impl HostApi for HostBridge<'_> {
             (call.to_ee, &child_call, self.root_actor),
         ) {
             Ok(Ok(outcome)) => {
-                let extra = outcome
-                    .gas_used
-                    .saturating_sub(self.overlay.gas_used_bgu().saturating_sub(gas_before));
-                let _ = self.overlay.charge_bgu(extra);
+                let already_charged = self.overlay.gas_used_bgu().saturating_sub(gas_before);
+                let extra = outcome.gas_used.saturating_sub(already_charged);
+                let charge_ok = self.overlay.charge_bgu(extra).is_ok();
+                if !charge_ok {
+                    let rem = budget.saturating_sub(already_charged);
+                    let _ = self.overlay.charge_bgu(rem);
+                }
                 let total_child = self.overlay.gas_used_bgu().saturating_sub(gas_before);
-                if outcome.status == OutcomeStatus::Success {
+                let within_budget = outcome.gas_used <= budget && charge_ok;
+                if outcome.status == OutcomeStatus::Success && within_budget {
                     self.overlay.commit_universal_frame(self.cache);
                     Ok(UniversalResult {
                         success: true,
@@ -1430,15 +1463,22 @@ impl HostApi for HostBridge<'_> {
                     })
                 } else {
                     self.overlay.rollback_universal_frame(self.state);
+                    rollback_alias(self.state, newly_registered_alias_key);
+                    let out = if within_budget {
+                        outcome.output
+                    } else {
+                        Vec::new()
+                    };
                     Ok(UniversalResult {
                         success: false,
-                        output: outcome.output,
+                        output: out,
                         gas_used: total_child,
                     })
                 }
             }
             Ok(Err(fault)) => {
                 self.overlay.rollback_universal_frame(self.state);
+                rollback_alias(self.state, newly_registered_alias_key);
                 let _ = self.overlay.charge_bgu(budget);
                 if let Err(w_err) = self.supervisor.note_fault_and_restart(fault.ee) {
                     self.transport_failure = Some(w_err);
@@ -1452,11 +1492,13 @@ impl HostApi for HostBridge<'_> {
             }
             Err(AttemptError::Transport(w_err)) => {
                 self.overlay.rollback_universal_frame(self.state);
+                rollback_alias(self.state, newly_registered_alias_key);
                 self.transport_failure = Some(w_err);
                 Err(HostError::Denied(String::from("worker transport lost")))
             }
             Err(AttemptError::Deterministic(reason)) => {
                 self.overlay.rollback_universal_frame(self.state);
+                rollback_alias(self.state, newly_registered_alias_key);
                 Err(HostError::Denied(reason))
             }
         }

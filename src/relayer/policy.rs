@@ -98,6 +98,17 @@ pub enum RelayerActionKind {
     },
 }
 
+const fn is_bidi_or_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
 impl RelayerActionKind {
     /// Performs the requested operation.
     ///
@@ -114,9 +125,13 @@ impl RelayerActionKind {
                 if target_address.is_empty() || target_address.len() > 256 {
                     return Err("RelayerAction external target_address length invalid".into());
                 }
-                if target_address.bytes().any(|b| b.is_ascii_whitespace()) {
+                if target_address
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || is_bidi_or_invisible_format(c))
+                {
                     return Err(
-                        "RelayerAction external target_address cannot contain whitespace".into(),
+                        "RelayerAction external target_address contains disallowed characters"
+                            .into(),
                     );
                 }
                 if *payload_hash == [0u8; 32] {
@@ -127,7 +142,12 @@ impl RelayerActionKind {
                 if name.is_empty() || name.len() > 253 {
                     return Err("RelayerAction dweb name length invalid".into());
                 }
-                if name.contains("..") || name.contains('/') || name.bytes().any(|b| b == 0) {
+                if name.contains("..")
+                    || name.contains('/')
+                    || name.chars().any(|c| {
+                        c.is_control() || c.is_whitespace() || is_bidi_or_invisible_format(c)
+                    })
+                {
                     return Err("RelayerAction dweb name contains an invalid label".into());
                 }
             }
@@ -572,7 +592,7 @@ impl RelayerPolicyRegistry {
     ) -> Result<[u8; 32], String> {
         intent.validate(policy, current_block)?;
         self.prune_expired(current_block);
-        if self.intents.contains_key(&intent.intent_id) {
+        if self.intents.contains_key(&intent.intent_id) || self.is_settled(&intent.intent_id) {
             return Err("RelayerPolicyRegistry intent already exists".into());
         }
         if self.intents.len() >= MAX_RELAYER_INTENTS {
@@ -657,8 +677,13 @@ impl RelayerPolicyRegistry {
                 Some(bid.relayer) == awarded && bid.expires_at_block > intent.deadline_block
             })
             .collect();
+        // Drop `intent_id` from `intents` and omit it from `settled_intents`:
+        // `intent_id` binds `deadline_block <= current_block`, so `submit_intent`
+        // refuses any future replay by deadline, whereas inserting into
+        // `settled_intents` after removing from `intents` would leak a permanent
+        // unprunable 32-byte entry on every expired intent.
         self.intents.remove(&intent_id);
-        self.settled_intents.insert(intent_id);
+        self.settled_intents.remove(&intent_id);
         let settlement = IntentSettlement {
             intent_id,
             relayer: Address::zero(),
@@ -895,19 +920,23 @@ impl RelayerPolicyRegistry {
     pub fn root(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_RELAYER_POLICY_REGISTRY_V1");
+        hasher.update((self.intents.len() as u64).to_le_bytes());
         for (id, intent) in &self.intents {
             hasher.update(b"intent");
             hasher.update(id);
             hasher.update(intent.calculate_id());
         }
+        hasher.update((self.escrowed.len() as u64).to_le_bytes());
         for (intent_id, amount) in &self.escrowed {
             hasher.update(b"escrow");
             hasher.update(intent_id);
             hasher.update(amount.to_le_bytes());
         }
+        hasher.update((self.bids.len() as u64).to_le_bytes());
         for (intent_id, bids) in &self.bids {
             hasher.update(b"bids");
             hasher.update(intent_id);
+            hasher.update((bids.len() as u64).to_le_bytes());
             for bid in bids {
                 hasher.update(bid.intent_id);
                 hasher.update(bid.relayer.as_bytes());
@@ -917,12 +946,14 @@ impl RelayerPolicyRegistry {
                 hasher.update(bid.expires_at_block.to_le_bytes());
             }
         }
+        hasher.update((self.awards.len() as u64).to_le_bytes());
         for (id, award) in &self.awards {
             hasher.update(b"award");
             hasher.update(id);
             hasher.update(award.relayer.as_bytes());
             hasher.update(award.awarded_at_block.to_le_bytes());
         }
+        hasher.update((self.settlements.len() as u64).to_le_bytes());
         for (id, settlement) in &self.settlements {
             hasher.update(b"settlement");
             hasher.update(id);
@@ -936,6 +967,7 @@ impl RelayerPolicyRegistry {
                 IntentSettlementStatus::Slashed => 4,
             }]);
         }
+        hasher.update((self.settled_intents.len() as u64).to_le_bytes());
         for id in &self.settled_intents {
             hasher.update(b"settled");
             hasher.update(id);
@@ -1672,5 +1704,26 @@ mod tests {
         assert_eq!(bids.len(), 1);
         assert!(registry.is_settled(&intent_id));
         assert!(registry.escrowed.is_empty());
+        // Expired intents must not leak permanent unprunable entries into
+        // `settled_intents` after their settlement history row rotates out.
+        assert!(registry.settled_intents.is_empty());
+        assert_eq!(registry.prune_settlements(0), 1);
+        assert!(registry.is_empty());
+
+        // Control and bidi-override characters in action targets are refused.
+        assert!(RelayerActionKind::ExternalTransaction {
+            chain: ExternalChain::Ethereum,
+            target_address: "0x1234\u{202E}abcd".into(),
+            payload_hash: [0x11; 32],
+        }
+        .validate()
+        .is_err());
+        assert!(RelayerActionKind::ExternalTransaction {
+            chain: ExternalChain::Ethereum,
+            target_address: "0x1234\x07abcd".into(),
+            payload_hash: [0x11; 32],
+        }
+        .validate()
+        .is_err());
     }
 }

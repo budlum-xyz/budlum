@@ -105,10 +105,13 @@ impl SettlementProofVerifier {
         if event.domain_height != commitment.domain_height {
             return Err(ProofVerificationError::EventHeightMismatch);
         }
-        if event.event_index as usize != proof.index {
+        if usize::try_from(event.event_index).ok() != Some(proof.index) {
             return Err(ProofVerificationError::EventIndexMismatch);
         }
-        if event.leaf_hash() != proof.leaf {
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            event.leaf_hash().as_slice(),
+            proof.leaf.as_slice(),
+        )) {
             return Err(ProofVerificationError::EventLeafMismatch);
         }
         // A carried cross-domain message must be
@@ -155,7 +158,10 @@ impl SettlementProofVerifier {
         // The block hash check is not optional. It used to be a
         // `None`-skippable Option; every caller knew the hash, and the skip
         // path was pure bypass surface.
-        if commitment.domain_block_hash != expected_block_hash {
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            commitment.domain_block_hash.as_slice(),
+            expected_block_hash.as_slice(),
+        )) {
             return Err(ProofVerificationError::CommitmentBlockHashMismatch);
         }
 
