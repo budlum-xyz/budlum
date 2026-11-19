@@ -313,10 +313,24 @@ pub trait FamilyProfile: Sync {
         slice: &ClassSlice,
         proof: &HomeSliceProof,
     ) -> Result<(), Refusal> {
+        use bincode::Options;
+        const MAX_UOL_MERKLE_PROOF_BYTES: u64 = 64 * 1024;
+        const MAX_UOL_MERKLE_DEPTH: usize = 64;
         let [raw] = proof.contract_account_proof.as_slice() else {
             return Err(Refusal::UnprovenEvent);
         };
-        let merkle: MerkleProof = bincode::deserialize(raw).map_err(|_| Refusal::UnprovenEvent)?;
+        if raw.len() as u64 > MAX_UOL_MERKLE_PROOF_BYTES {
+            return Err(Refusal::UnprovenEvent);
+        }
+        let merkle: MerkleProof = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+            .with_limit(MAX_UOL_MERKLE_PROOF_BYTES)
+            .deserialize(raw)
+            .map_err(|_| Refusal::UnprovenEvent)?;
+        if merkle.siblings.len() > MAX_UOL_MERKLE_DEPTH {
+            return Err(Refusal::UnprovenEvent);
+        }
         let mut slice_bytes = Vec::new();
         for (key, value) in slice {
             let key_bytes = key.as_bytes();
@@ -358,11 +372,24 @@ pub trait FamilyProfile: Sync {
         state_root: Hash32,
         proof_nodes: &[Vec<u8>],
     ) -> Result<(), CharterRefusal> {
+        use bincode::Options;
+        const MAX_UOL_MERKLE_PROOF_BYTES: u64 = 64 * 1024;
+        const MAX_UOL_MERKLE_DEPTH: usize = 64;
         let [raw] = proof_nodes else {
             return Err(CharterRefusal::ProofDisagrees);
         };
-        let merkle: MerkleProof =
-            bincode::deserialize(raw).map_err(|_| CharterRefusal::ProofDisagrees)?;
+        if raw.len() as u64 > MAX_UOL_MERKLE_PROOF_BYTES {
+            return Err(CharterRefusal::ProofDisagrees);
+        }
+        let merkle: MerkleProof = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+            .with_limit(MAX_UOL_MERKLE_PROOF_BYTES)
+            .deserialize(raw)
+            .map_err(|_| CharterRefusal::ProofDisagrees)?;
+        if merkle.siblings.len() > MAX_UOL_MERKLE_DEPTH {
+            return Err(CharterRefusal::ProofDisagrees);
+        }
         let expected_leaf = hash_fields_bytes(&[
             b"BDLM_UOL_HOME_CODE_V1",
             chain_reference.as_bytes(),

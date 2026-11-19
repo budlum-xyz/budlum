@@ -3,7 +3,6 @@
 use crate::chain::blockchain::Blockchain;
 use crate::chain::finality::{FinalityCert, Precommit, Prevote};
 use crate::consensus::qc::{QcBlob, QcFaultProof};
-use crate::core::account::ConsensusAccountProof;
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
@@ -51,6 +50,13 @@ pub struct BnsAnchoredProof {
     pub state_root: String,
 }
 
+/// Committed account Merkle proof, state-root opening, and block height.
+pub type AccountProofReply = (
+    crate::core::account::ConsensusAccountProof,
+    crate::core::account::StateRootAccountsOpening,
+    u64,
+);
+
 #[derive(Debug)]
 pub enum ChainCommand {
     GetHeight(oneshot::Sender<u64>),
@@ -72,10 +78,7 @@ pub enum ChainCommand {
     ///
     /// Distinct from [`Self::GetBalance`]: that answers what the node says a
     /// balance is, this answers what the node can *prove* about it.
-    GetAccountProof(
-        Address,
-        oneshot::Sender<Option<(crate::core::account::ConsensusAccountProof, u64)>>,
-    ),
+    GetAccountProof(Address, oneshot::Sender<Option<AccountProofReply>>),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
     /// Run the aggregation side of the node with this ML-DSA-87 seed; the
     /// answer is the tick interval in milliseconds when the chain has the
@@ -710,7 +713,7 @@ impl ChainHandle {
     /// `None` means the node could not answer, which is not the same as the
     /// account being absent: absence is itself a proof and comes back as
     /// `Some` with `present: false`.
-    pub async fn get_account_proof(&self, addr: &Address) -> Option<(ConsensusAccountProof, u64)> {
+    pub async fn get_account_proof(&self, addr: &Address) -> Option<AccountProofReply> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetAccountProof(*addr, tx)).await;
         rx.await.unwrap_or(None)
@@ -2810,10 +2813,11 @@ impl ChainActor {
     /// to, so a light client can anchor the claim to a finalized block. There
     /// is no separate proof cache: the tree is maintained incrementally by
     /// the state itself, so a stale proof cannot be served.
-    fn account_proof(&mut self, addr: &Address) -> (ConsensusAccountProof, u64) {
+    fn account_proof(&mut self, addr: &Address) -> AccountProofReply {
         let proof = self.blockchain.state.get_account_proof(addr);
+        let opening = self.blockchain.state.get_state_root_accounts_opening();
         let height = self.blockchain.state.current_block_height;
-        (proof, height)
+        (proof, opening, height)
     }
 
     /// Height the AI read queries judge deadlines at. It is the height the
@@ -4409,13 +4413,16 @@ mod proof_cache_tests {
         let (mut actor, _handle) = ChainActor::new(bc);
         let who = Address([7u8; 32]);
         actor.blockchain.state.add_balance(&who, 100);
-        let (before, _) = actor.account_proof(&who);
+        let (before, before_opening, _) = actor.account_proof(&who);
         assert_eq!(before.balance, 100);
+        assert!(before.verify_against_state_root(&before_opening, &before_opening.state_root));
         // No block is added: the chain length stays the same.
         actor.blockchain.state.add_balance(&who, 50);
-        let (after, _) = actor.account_proof(&who);
+        let (after, after_opening, _) = actor.account_proof(&who);
         assert_eq!(after.balance, 150);
+        assert!(after.verify_against_state_root(&after_opening, &after_opening.state_root));
         assert_ne!(before.root, after.root);
+        assert_ne!(before_opening.state_root, after_opening.state_root);
     }
 
     #[test]
