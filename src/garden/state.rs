@@ -319,28 +319,41 @@ impl GardenState {
     /// when the block carries its return.
     pub fn electorate(&self, txs: &[SignedGardenTx]) -> Vec<GardenKey> {
         let mut set: BTreeSet<GardenKey> = self.active().into_iter().collect();
+        let mut expected_nonces: BTreeMap<GardenKey, u64> = BTreeMap::new();
         for signed in txs {
+            let sender = signed.tx.sender;
+            let expected = expected_nonces
+                .get(&sender)
+                .copied()
+                .unwrap_or_else(|| self.next_nonce(&sender));
+            if signed.tx.nonce != expected || signed.verify(self.chain_id()).is_err() {
+                continue;
+            }
             match &signed.tx.kind {
                 GardenTxKind::Suspend { target } => {
+                    if !set.contains(&sender) {
+                        continue;
+                    }
+                    expected_nonces.insert(sender, expected.saturating_add(1));
                     set.remove(target);
                 }
-                GardenTxKind::Leave
-                    if signed.tx.sender != self.host()
-                        && set.contains(&signed.tx.sender)
-                        && signed.verify(self.chain_id()).is_ok() =>
-                {
-                    set.remove(&signed.tx.sender);
-                }
-                GardenTxKind::Resume { .. } => {
-                    if signed.tx.sender == self.host() && self.status == DomainStatus::Frozen {
-                        set.insert(self.host());
-                    } else if self.is_active(&signed.tx.sender)
-                        && signed.verify(self.chain_id()).is_ok()
-                    {
-                        set.insert(signed.tx.sender);
+                GardenTxKind::Leave => {
+                    expected_nonces.insert(sender, expected.saturating_add(1));
+                    if sender != self.host() && set.contains(&sender) {
+                        set.remove(&sender);
                     }
                 }
-                _ => {}
+                GardenTxKind::Resume { .. } => {
+                    expected_nonces.insert(sender, expected.saturating_add(1));
+                    if sender == self.host() && self.status == DomainStatus::Frozen {
+                        set.insert(self.host());
+                    } else if self.is_active(&sender) {
+                        set.insert(sender);
+                    }
+                }
+                _ => {
+                    expected_nonces.insert(sender, expected.saturating_add(1));
+                }
             }
         }
         set.into_iter().collect()
@@ -955,8 +968,19 @@ impl GardenState {
         if self.leader(header.round) != Some(header.proposer) {
             return Err("block proposer is not the leader of its round".into());
         }
+        if block.txs.len() > self.genesis.limits.max_block_txs as usize {
+            return Err(format!(
+                "block has {} transactions, the limit is {}",
+                block.txs.len(),
+                self.genesis.limits.max_block_txs
+            ));
+        }
         verify_signature(&header.hash(), &block.proposer_signature, &header.proposer)
-            .map_err(|_| "block proposer signature is invalid".to_string())
+            .map_err(|_| "block proposer signature is invalid".to_string())?;
+        if tx_root(&block.txs) != header.tx_root {
+            return Err("block transactions do not match the signed header root".into());
+        }
+        Ok(())
     }
 
     /// Execute a block whose header passed [`Self::check_header`] and return
@@ -2408,6 +2432,39 @@ mod tests {
             .unwrap();
         assert_eq!(frozen.ledger.state.status, DomainStatus::Frozen);
         assert_eq!(frozen.ledger.state.vacant_seat(), None);
+    }
+
+    #[test]
+    fn electorate_ignores_stale_nonce_replayed_leave_and_forged_suspend() {
+        let mut net = founded(GardenAdmission::Direct, 4);
+        let a = net.join("a");
+        let stale_leave = net.tx(&a, GardenTxKind::Leave);
+        net.commit(vec![stale_leave.clone()]).unwrap();
+        let resume = net.tx(
+            &a,
+            GardenTxKind::Resume {
+                address: String::new(),
+            },
+        );
+        net.commit(vec![resume]).unwrap();
+        assert!(net.ledger.state.is_active(&a));
+
+        // Replaying the earlier validly signed Leave carries an old nonce and
+        // must not strip active validator `a` from the electorate.
+        let voters = net.ledger.state.electorate(&[stale_leave]);
+        assert!(
+            voters.contains(&a),
+            "replayed stale-nonce Leave must not shrink the electorate"
+        );
+
+        // An unsigned or badly signed Suspend must also be refused by electorate.
+        let mut forged_suspend = net.tx(&net.host, GardenTxKind::Suspend { target: a });
+        forged_suspend.signature[0] ^= 0xff;
+        let voters_after_bad_suspend = net.ledger.state.electorate(&[forged_suspend]);
+        assert!(
+            voters_after_bad_suspend.contains(&a),
+            "corrupted Suspend signature must not shrink the electorate"
+        );
     }
 
     /// One step of a random Garden history. The numbers pick a key among the
