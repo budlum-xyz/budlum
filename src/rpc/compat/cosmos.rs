@@ -389,6 +389,7 @@ mod tests {
             }),
         };
         let resp = gw.handle_rpc_for_peer("peer-a", &req, &state);
+        assert!(!resp.error.is_none());
         assert_eq!(
             resp.error.as_ref().map(|e| e.code),
             Some(JSONRPC_INVALID_PARAMS)
@@ -415,6 +416,7 @@ mod tests {
             }),
         };
         let resp = gw.handle_rpc_for_peer("peer-a", &req, &state);
+        assert!(!resp.error.is_none());
         assert_eq!(
             resp.error.as_ref().map(|e| e.code),
             Some(JSONRPC_INVALID_PARAMS)
@@ -436,6 +438,7 @@ mod tests {
             }),
         };
         let resp = gw.handle_rpc_for_peer("peer-a", &req, &state);
+        assert!(!resp.error.is_none());
         assert_eq!(
             resp.error.as_ref().map(|e| e.code),
             Some(JSONRPC_INVALID_PARAMS)
@@ -457,6 +460,7 @@ mod tests {
             }),
         };
         let resp = gw.handle_rpc_for_peer("peer-a", &req, &state);
+        assert!(!resp.error.is_none());
         assert_eq!(
             resp.error.as_ref().map(|e| e.code),
             Some(JSONRPC_INVALID_PARAMS)

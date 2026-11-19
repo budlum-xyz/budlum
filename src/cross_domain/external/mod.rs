@@ -80,10 +80,10 @@
 //! needs are in [`profile`].
 
 pub mod algorand_stateproof;
+pub mod aptos_jolteon_bft;
 pub mod arweave_spora;
 pub mod auxpow_pop;
 pub mod babylon_eots;
-pub mod aptos_jolteon_bft;
 pub mod based_preconf;
 pub mod bitcoin_spv;
 pub mod chain_key_ni_dkg;
@@ -121,6 +121,7 @@ pub mod ton_catchain;
 pub mod versioning;
 pub mod zkvm_proof;
 
+<<<<<<< HEAD
 pub use algorand_stateproof::{
     advance_algorand_verifier, verify_algorand_equivocation, AlgorandStateProofAdapter,
     AlgorandStateProofMessage, PinnedAlgorandVerifier,
@@ -140,7 +141,6 @@ pub use aptos_jolteon_bft::{
     verify_jolteon_equivocation, AptosJolteonAdapter, JolteonBlock, JolteonEquivocationProof,
     JolteonQuorumCert, JolteonTimeoutCert, JolteonTwoChainEvidence, JolteonValidator,
     JolteonValidatorSig, PinnedJolteonEpochState, APTOS_JOLTEON_ADAPTER_NAME,
-};
 };
 pub use based_preconf::{BasedPreconfAdapter, BasedPreconfValidator, PinnedBasedPreconfCommittee};
 pub use bitcoin_spv::{

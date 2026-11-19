@@ -34,7 +34,9 @@ pub const MNEMONIC_WORDS: usize = 24;
 pub const DEFAULT_KDF_ITERATIONS: u32 = 600_000;
 /// Maximum PBKDF2 iteration count. Strix B-0065: values above this are a
 /// DoS vector (tens of seconds per open on constrained hardware).
-/// WIRING: enforced in `KeyFile::open` and exposed for CLI wallet callers.
+///
+/// WIRING: enforced by the key-file open path in this module; the constant is
+/// part of the public wallet-policy surface for operators tuning KDF params.
 pub const MAX_KDF_ITERATIONS: u32 = 10_000_000;
 /// Expected salt length in bytes (128-bit).
 const SALT_LEN: usize = 16;
