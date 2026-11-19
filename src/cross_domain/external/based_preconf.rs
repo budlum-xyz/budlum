@@ -92,12 +92,102 @@ pub struct PinnedBasedPreconfCommittee {
     pub members: Vec<BasedPreconfValidator>,
 }
 
+impl PinnedBasedPreconfCommittee {
+    /// Canonical length-prefixed SHA3-256 commitment over all pinned epoch,
+    /// L1 settlement, FOCIL requirement, and committee parameters.
+    ///
+    /// WIRING: checked in constant time by `crate::cross_domain::economic_guard`
+    /// on both backing refreshes and contradiction submissions.
+    #[must_use]
+    pub fn canonical_pin_digest(&self) -> Hash32 {
+        let mut acc = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_BASED_PIN_V1",
+            &self.epoch.to_le_bytes(),
+            &self.l1_chain_id.to_le_bytes(),
+            &[u8::from(self.require_focil)],
+            &(self.members.len() as u64).to_le_bytes(),
+        ]);
+        for m in &self.members {
+            acc = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_BASED_PIN_V1",
+                &[1u8],
+                &acc,
+                &m.ed25519_pubkey,
+                &m.voting_weight.to_le_bytes(),
+                &m.pq_pubkey,
+            ]);
+        }
+        acc
+    }
+
+    /// Return the slashable voting weight and whether an ML-DSA-65 co-signing
+    /// key is bound for `pubkey`.
+    ///
+    /// WIRING: used by `crate::cross_domain::economic_guard` for incremental
+    /// per-offender preconfirmation slashing accounting.
+    #[must_use]
+    pub fn member_info(&self, pubkey: &[u8; 32]) -> Option<(u128, bool)> {
+        self.members
+            .iter()
+            .find(|m| bool::from(m.ed25519_pubkey.ct_eq(pubkey)))
+            .map(|m| (u128::from(m.voting_weight), !m.pq_pubkey.is_empty()))
+    }
+}
+
+/// Detached hybrid signature on a based preconfirmation statement or slashing proof.
+///
+/// WIRING: verified by [`BasedPreconfAdapter`] and [`verify_based_preconf_equivocation`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct BasedSig {
-    signer_pubkey: [u8; 32],
-    ed25519_sig: Vec<u8>,
+pub struct BasedSig {
+    /// Signer Ed25519 verifying key (32 bytes).
+    pub signer_pubkey: [u8; 32],
+    /// Detached Ed25519 signature bytes.
+    pub ed25519_sig: Vec<u8>,
+    /// Mandatory ML-DSA-65 co-signature when `pq_pubkey` is configured.
     #[serde(default)]
-    pq_sig: Vec<u8>,
+    pub pq_sig: Vec<u8>,
+}
+
+/// Permissionless double-preconfirmation slashing evidence proving one or more
+/// pinned preconfers certified two distinct batch digests at the same
+/// `(epoch, l1_slot, l2_sequence)`.
+///
+/// WIRING: verified in production by [`verify_based_preconf_equivocation`] via
+/// `crate::cross_domain::economic_guard::BridgeEconomicGuard::submit_contradiction`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BasedPreconfEquivocationProof {
+    /// Epoch of both conflicting preconfirmations.
+    pub epoch: u64,
+    /// L1 slot of both conflicting preconfirmations (`> 0`).
+    pub l1_slot: u64,
+    /// Sequencer batch index of both conflicting preconfirmations (`> 0`).
+    pub l2_sequence: u64,
+    /// First attested batch digest (non-zero).
+    pub batch_digest_a: Hash32,
+    /// Hybrid preconfirmer signatures on `batch_digest_a`.
+    pub sigs_a: Vec<BasedSig>,
+    /// Second conflicting batch digest (non-zero, `!= batch_digest_a`).
+    pub batch_digest_b: Hash32,
+    /// Hybrid preconfirmer signatures on `batch_digest_b`.
+    pub sigs_b: Vec<BasedSig>,
+}
+
+/// Verified outcome of [`verify_based_preconf_equivocation`].
+///
+/// WIRING: consumed by `crate::cross_domain::economic_guard` when freezing a
+/// faulted based-rollup domain and accounting for slashed preconfirmer weight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedBasedPreconfSlash {
+    /// Canonical order-independent digest of the proven double-preconfirmation.
+    pub evidence_digest: Hash32,
+    /// L1 slot at which the equivocation occurred.
+    pub l1_slot: u64,
+    /// L2 sequence number at which the equivocation occurred.
+    pub l2_sequence: u64,
+    /// Sorted unique Ed25519 keys of proven equivocating preconfers.
+    pub offenders: Vec<[u8; 32]>,
+    /// Aggregate slashable voting weight attributable to `offenders`.
+    pub slashed_voting_weight: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,8 +329,13 @@ fn proposal_sign_bytes(network: &str, batch_digest: &Hash32) -> Hash32 {
     ])
 }
 
+/// Compute canonical preconfirmation-certificate signing digest for
+/// `(network, epoch, l1_slot, l2_sequence, batch_digest)`.
+///
+/// WIRING: shared between [`BasedPreconfAdapter`] and
+/// [`verify_based_preconf_equivocation`].
 #[must_use]
-fn preconf_cert_sign_bytes(
+pub fn preconf_cert_sign_bytes(
     network: &str,
     epoch: u64,
     l1_slot: u64,
@@ -428,6 +523,156 @@ fn decode_based_evidence(payload: &[u8]) -> Result<BasedPreconfEvidence, Adapter
         });
     }
     Ok(decoded)
+}
+
+fn verify_based_slash_side(
+    committee: &BTreeMap<[u8; 32], &BasedPreconfValidator>,
+    sigs: &[BasedSig],
+    msg: &Hash32,
+    what: &str,
+) -> Result<BTreeSet<[u8; 32]>, AdapterError> {
+    if sigs.is_empty() || sigs.len() > committee.len() {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!("invalid {what} signer count {}", sigs.len()),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    for sig in sigs {
+        if !seen.insert(sig.signer_pubkey) {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!("duplicate signer in {what}"),
+            });
+        }
+        let Some(member) = committee.get(&sig.signer_pubkey) else {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!("unknown committee signer in {what}"),
+            });
+        };
+        let _ = verify_validator_sig(member, msg, &sig.ed25519_sig, &sig.pq_sig, what)?;
+    }
+    Ok(seen)
+}
+
+/// Verify permissionless based-preconfirmation equivocation evidence against a
+/// governance-pinned [`PinnedBasedPreconfCommittee`].
+///
+/// WIRING: invoked in production by
+/// `crate::cross_domain::economic_guard::BridgeEconomicGuard::submit_contradiction`.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] when the pinned committee is invalid, the epoch
+/// mismatches, the slot or sequence is zero, the batch digests match or are
+/// zero, any signature fails Ed25519 or mandatory ML-DSA-65 verification, or
+/// no committee member signed both conflicting preconfirmations.
+pub fn verify_based_preconf_equivocation(
+    network: &str,
+    pinned: &PinnedBasedPreconfCommittee,
+    proof: &BasedPreconfEquivocationProof,
+) -> Result<VerifiedBasedPreconfSlash, AdapterError> {
+    if network.trim().is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "based-preconf equivocation network cannot be empty".into(),
+        });
+    }
+    if pinned.l1_chain_id == 0
+        || pinned.members.is_empty()
+        || pinned.members.len() > MAX_BASED_COMMITTEE
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "invalid pinned based-preconf committee".into(),
+        });
+    }
+    let mut committee = BTreeMap::new();
+    for member in &pinned.members {
+        if member.ed25519_pubkey == [0u8; 32] || member.voting_weight == 0 {
+            return Err(AdapterError::ConsensusRule {
+                rule: "based-preconf member requires non-zero key and positive weight".into(),
+            });
+        }
+        if !member.pq_pubkey.is_empty() {
+            crate::crypto::pq::validate_public_key(SchemeId::ML_DSA_65, &member.pq_pubkey)
+                .map_err(|_| AdapterError::ConsensusRule {
+                    rule: "invalid ML-DSA-65 public key in based-preconf committee".into(),
+                })?;
+        }
+        if committee.insert(member.ed25519_pubkey, member).is_some() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "duplicate Ed25519 key in based-preconf committee".into(),
+            });
+        }
+    }
+    if proof.epoch != pinned.epoch || proof.l1_slot == 0 || proof.l2_sequence == 0 {
+        return Err(AdapterError::ConsensusRule {
+            rule: "based-preconf equivocation epoch mismatch or zero slot/sequence".into(),
+        });
+    }
+    if bool::from(proof.batch_digest_a.ct_eq(&[0u8; 32]))
+        || bool::from(proof.batch_digest_b.ct_eq(&[0u8; 32]))
+        || bool::from(proof.batch_digest_a.ct_eq(&proof.batch_digest_b))
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "based-preconf equivocation requires two distinct non-zero batch digests".into(),
+        });
+    }
+    let msg_a = preconf_cert_sign_bytes(
+        network,
+        proof.epoch,
+        proof.l1_slot,
+        proof.l2_sequence,
+        &proof.batch_digest_a,
+    );
+    let msg_b = preconf_cert_sign_bytes(
+        network,
+        proof.epoch,
+        proof.l1_slot,
+        proof.l2_sequence,
+        &proof.batch_digest_b,
+    );
+    let set_a = verify_based_slash_side(&committee, &proof.sigs_a, &msg_a, "based-slash-a")?;
+    let set_b = verify_based_slash_side(&committee, &proof.sigs_b, &msg_b, "based-slash-b")?;
+    let offenders: Vec<[u8; 32]> = set_a.intersection(&set_b).copied().collect();
+    if offenders.is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "based-preconf equivocation has no overlapping offending preconfer".into(),
+        });
+    }
+    let mut slashed = 0u128;
+    for pk in &offenders {
+        if let Some(m) = committee.get(pk) {
+            slashed = slashed.saturating_add(u128::from(m.voting_weight));
+        }
+    }
+    let (lo_digest, hi_digest) = if proof.batch_digest_a <= proof.batch_digest_b {
+        (&proof.batch_digest_a, &proof.batch_digest_b)
+    } else {
+        (&proof.batch_digest_b, &proof.batch_digest_a)
+    };
+    let epoch_le = proof.epoch.to_le_bytes();
+    let slot_le = proof.l1_slot.to_le_bytes();
+    let seq_le = proof.l2_sequence.to_le_bytes();
+    let cid_le = pinned.l1_chain_id.to_le_bytes();
+    let count_le = (offenders.len() as u64).to_le_bytes();
+    let mut fields: Vec<&[u8]> = Vec::with_capacity(offenders.len().saturating_add(9));
+    fields.push(b"BDLM_BASED_SLASH_V1");
+    fields.push(network.as_bytes());
+    fields.push(&cid_le);
+    fields.push(&epoch_le);
+    fields.push(&slot_le);
+    fields.push(&seq_le);
+    fields.push(lo_digest);
+    fields.push(hi_digest);
+    fields.push(&count_le);
+    for pk in &offenders {
+        fields.push(pk);
+    }
+    Ok(VerifiedBasedPreconfSlash {
+        evidence_digest: crate::core::hash::hash_fields_bytes(&fields),
+        l1_slot: proof.l1_slot,
+        l2_sequence: proof.l2_sequence,
+        offenders,
+        slashed_voting_weight: slashed,
+    })
 }
 
 /// External finality adapter for based rollups, shared sequencers, and

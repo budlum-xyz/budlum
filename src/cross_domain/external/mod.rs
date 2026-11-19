@@ -67,9 +67,30 @@
 //!
 //! **Limit of that claim.** The intake is in the state root and its digest
 //! is in the header when the intake holds any record (presence-tagged
-//! `external_intake_root`, commit `fb58775c`). Prover slashing still has no
-//! door: it needs a proof that an accepted attestation was false, which is
-//! not defined yet, so `bud_slashExternalProver` is closed.
+//! `external_intake_root`, commit `fb58775c`).
+//!
+//! The prover slashing door exists, but only for one shape of falsity. An
+//! accepted attestation is refuted by
+//! `ExternalDomainTx::ChallengeContradiction`: a challenger supplies a second
+//! finality proof that its own adapter verifies, for the *same* external
+//! `(height, evidence_version)`, with a distinct committed root, and the
+//! transaction withdraws the false attestation, freezes the domain, slashes
+//! the carrier's escrowed bond and pays the challenger out of the slash
+//! (`IntakeState::slash_on_contradiction` -> `slash_external_bond`, tests in
+//! `external_tx.rs` and `core::account`). The `bud_slashExternalProver` RPC
+//! stays refused on purpose: the only way to slash is a signed in-block
+//! challenge that carries the refuting proof, so no operator key can slash
+//! anyone and no slash can be manufactured without evidence.
+//!
+//! The limit that remains is *cross-slot*: refutation is defined only for the
+//! slot the challenged attestation occupies. A false attestation whose slot
+//! can no longer be re-proved - an abandoned branch left behind by a deeper
+//! chain, the Bitcoin reorg case - cannot be refuted from the record today,
+//! because `FinalityAttestation` carries no attested parent hash while
+//! `FinalityProofShape` already declares a `BINDS_PARENT_HASH` class. Closing
+//! that gap means carrying the ancestry commitment into the attestation and
+//! walking the accepted book backwards with it; until then the honest claim
+//! is "refutable at its own slot", not "refutable".
 //!
 //! # The rule underneath all six
 //!

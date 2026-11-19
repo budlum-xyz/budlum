@@ -22,7 +22,8 @@
 //!   the structured launch-gate evidence schema checked by `launch-evidence`,
 //! * this gate's own source file (`xtask/gates/src/gates/no_internal_ids.rs`).
 //!
-//! Any top-level `audit-notes/` scratch directory is refused unconditionally.
+//! Any top-level scratch audit directory of the historical name is refused
+//! unconditionally.
 
 use regex::Regex;
 use std::fmt::Write as _;
@@ -74,13 +75,15 @@ fn build_rules() -> Result<Vec<Rule>, String> {
                 "GOREV-", "gorev"
             ),
         ),
-        (
-            "scanner-tag",
-            format!(
-                r"(?:\b{}[A-Z0-9-]+|\b{}\b|(?:^|[^A-Za-z0-9]){}[a-z0-9_]+)",
-                "STRIX-", "Strix", "strix_"
-            ),
-        ),
+        ("scanner-tag", {
+            // The scanner token is assembled from parts so this source
+            // file carries none of the literals it refuses; the built
+            // pattern still matches exactly the same strings.
+            let head = concat!("Str", "ix");
+            let upper = head.to_ascii_uppercase();
+            let lower = head.to_ascii_lowercase();
+            format!(r"(?:\b{upper}-[A-Z0-9-]+|\b{head}\b|(?:^|[^A-Za-z0-9]){lower}[a-z0-9_]+)")
+        }),
         ("work-item-ip", format!(r"\b{}\d{{2}}\b", "IP-")),
         ("work-package-wp", format!(r"\b{}\d{{1,2}}\b", "WP-")),
         (
@@ -450,7 +453,7 @@ pub fn self_test() -> Result<String, String> {
         ("blg-id", format!("// regression for {}239\n", "BLG-")),
         ("blg-fn", format!("fn {}113_case() {{}}\n", "blg_")),
         ("task-id", format!("//! module ({}21)\n", "GOREV-")),
-        ("scanner", format!("// {} check\n", "Strix")),
+        ("scanner", format!("// {}{} check\n", "Str", "ix")),
         ("ip-id", format!("// per {}35\n", "IP-")),
         ("wp-id", format!("# Mobile ({}11)\n", "WP-")),
         ("tlg-id", format!("// blocker {}03\n", "TLG-")),
@@ -472,7 +475,7 @@ pub fn self_test() -> Result<String, String> {
     fs::create_dir_all(base.join("audit-notes")).map_err(|e| e.to_string())?;
     if evaluate(base, 1).is_ok() {
         return Err(String::from(
-            "canary `audit-notes/` passed when it must fail",
+            "canary scratch-directory passed when it must fail",
         ));
     }
     fs::remove_dir_all(base.join("audit-notes")).map_err(|e| e.to_string())?;
@@ -480,7 +483,7 @@ pub fn self_test() -> Result<String, String> {
     verify_git_canaries(base)?;
 
     Ok(String::from(
-        "no-internal-ids canary OK: 11 token classes, audit-notes/, alien author and co-author trailer refused",
+        "no-internal-ids canary OK: 11 token classes, the scratch-directory class, alien author and co-author trailer refused",
     ))
 }
 

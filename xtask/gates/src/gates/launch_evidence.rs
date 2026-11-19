@@ -31,7 +31,7 @@ fn rows(
         let Some(digits) = id.strip_prefix(kind).and_then(|s| s.strip_prefix('-')) else {
             continue;
         };
-        if digits.len() != if kind == "TLG" { 2 } else { 3 }
+        if digits.len() != if kind == "L" { 2 } else { 3 }
             || !digits.bytes().all(|c| c.is_ascii_digit())
         {
             return Err(format!(
@@ -160,9 +160,9 @@ fn binding_guard(root: &Path) -> Result<(), String> {
 }
 
 fn audit(root: &Path, tlg: &str, live: &str, findings: &str) -> Result<String, String> {
-    let tlg_rows = rows(tlg, "TLG", 27, 4)?;
-    let live_rows = rows(live, "BLG", 267, 7)?;
-    let finding_rows = rows(findings, "BLG", 267, 8)?;
+    let tlg_rows = rows(tlg, "L", 27, 4)?;
+    let live_rows = rows(live, "F", 267, 7)?;
+    let finding_rows = rows(findings, "F", 267, 8)?;
     let mut missing = Vec::new();
     for (id, row) in &tlg_rows {
         // Section 18 requires a SHA, CI run or rehearsal record, and reviewer.
@@ -174,7 +174,7 @@ fn audit(root: &Path, tlg: &str, live: &str, findings: &str) -> Result<String, S
             || token(evidence, "reviewer=").is_none()
         {
             missing.push(format!(
-                "TLG-{id:02}: no green verdict with SHA, CI run/record and reviewer"
+                "L-{id:02}: no green verdict with SHA, CI run/record and reviewer"
             ));
         }
     }
@@ -186,7 +186,7 @@ fn audit(root: &Path, tlg: &str, live: &str, findings: &str) -> Result<String, S
             || !matches!(status, "Closed" | "Removed" | "Invalid" | "Feature closed")
         {
             missing.push(format!(
-                "BLG-{id:03}: status unknown, unsupported, or inconsistent"
+                "F-{id:03}: status unknown, unsupported, or inconsistent"
             ));
             continue;
         }
@@ -194,12 +194,12 @@ fn audit(root: &Path, tlg: &str, live: &str, findings: &str) -> Result<String, S
         let removal = status == "Removed" && token(&finding[3], "removed=").is_some();
         if !removal && !cited_file(root, source) {
             missing.push(format!(
-                "BLG-{id:03}: no current production file:line evidence"
+                "F-{id:03}: no current production file:line evidence"
             ));
         }
         let test = &row[5];
         if test.is_empty() || test.contains("Not recorded") || test.contains("Not collected") {
-            missing.push(format!("BLG-{id:03}: no reproduction test/result"));
+            missing.push(format!("F-{id:03}: no reproduction test/result"));
         }
         if finding[2].contains("Not recorded")
             || finding[3].contains("Not recorded")
@@ -209,16 +209,16 @@ fn audit(root: &Path, tlg: &str, live: &str, findings: &str) -> Result<String, S
             || finding[7].contains("Not recorded")
         {
             missing.push(format!(
-                "BLG-{id:03}: no closure proof, merged SHA, CI run and reviewer"
+                "F-{id:03}: no closure proof, merged SHA, CI run and reviewer"
             ));
         }
         if status == "Feature closed" && !finding[6].contains("_is_closed_on_testnet") {
             missing.push(format!(
-                "BLG-{id:03}: no explicit testnet feature refusal test"
+                "F-{id:03}: no explicit testnet feature refusal test"
             ));
         }
         if status == "Removed" && !finding[3].contains("no-legacy-storage") {
-            missing.push(format!("BLG-{id:03}: no removal gate evidence"));
+            missing.push(format!("F-{id:03}: no removal gate evidence"));
         }
     }
     if !missing.is_empty() {
@@ -229,11 +229,11 @@ fn audit(root: &Path, tlg: &str, live: &str, findings: &str) -> Result<String, S
             .collect::<Vec<_>>()
             .join("\n  ");
         return Err(format!(
-            "Launch evidence incomplete: {} gap(s) across 27 TLG and 267 BLG rows. First gaps:\n  {examples}\nDo not claim testnet readiness from source-only tests or fixture values.",
+            "Launch evidence incomplete: {} gap(s) across 27 L and 267 F rows. First gaps:\n  {examples}\nDo not claim testnet readiness from source-only tests or fixture values.",
             missing.len()
         ));
     }
-    Ok(String::from("Launch evidence metadata complete; verify CI runs, rehearsals and reviewer approvals independently before marking TLG green."))
+    Ok(String::from("Launch evidence metadata complete; verify CI runs, rehearsals and reviewer approvals independently before marking the launch ledger green."))
 }
 
 /// Check the on-disk evidence ledgers and `app_binding` guard.
@@ -259,7 +259,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// Run `launch-evidence` with optional CLI arguments (`--require-complete`).
 ///
 /// In `--all` (`args` empty), checks the direct `app_binding` settlement guard
-/// and verifies structural schema/row integrity across the 27 TLG and 267 BLG
+/// and verifies structural schema/row integrity across the 27 L and 267 F
 /// rows without requiring pre-CI SHAs or reviewer sign-off. Passing
 /// `--require-complete` enforces the full release readiness audit.
 ///
@@ -275,15 +275,15 @@ pub fn run_args(root: &Path, args: &[&str]) -> Result<String, String> {
         std::fs::read_to_string(root.join(name))
             .map_err(|e| format!("{name}: evidence file missing or unreadable: {e}"))
     };
-    let tlg_entries = rows(&read(TLG)?, "TLG", 27, 4)?;
-    let live_rows = rows(&read(LIVE)?, "BLG", 267, 7)?;
-    let finding_rows = rows(&read(FINDINGS)?, "BLG", 267, 8)?;
+    let tlg_entries = rows(&read(TLG)?, "L", 27, 4)?;
+    let live_rows = rows(&read(LIVE)?, "F", 267, 7)?;
+    let finding_rows = rows(&read(FINDINGS)?, "F", 267, 8)?;
     binding_guard(root)?;
     let tlg_count = tlg_entries.len();
     let blg_count = live_rows.len().min(finding_rows.len());
     Ok(format!(
         "launch-evidence schema & guard OK \
-         ({tlg_count} TLG rows, {blg_count} BLG rows; pass `--require-complete` for sign-off)"
+         ({tlg_count} L rows, {blg_count} F rows; pass `--require-complete` for sign-off)"
     ))
 }
 
@@ -297,23 +297,23 @@ pub fn self_test() -> Result<String, String> {
     let mut live = String::new();
     let mut findings = String::new();
     for n in 1..=27 {
-        let _ = writeln!(tlg, "| TLG-{n:02} | source only | gap | Unverified |");
+        let _ = writeln!(tlg, "| L-{n:02} | source only | gap | Unverified |");
     }
     for n in 1..=267 {
-        let _ = writeln!(live, "| BLG-{n:03} | directive | High | WP-01 | Unknown / unverified | Not recorded | Not collected |");
-        let _ = writeln!(findings, "| BLG-{n:03} | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |");
+        let _ = writeln!(live, "| F-{n:03} | directive | High | WP-01 | Unknown / unverified | Not recorded | Not collected |");
+        let _ = writeln!(findings, "| F-{n:03} | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |");
     }
     let root = Path::new(".");
     let err = audit(root, &tlg, &live, &findings)
         .err()
         .ok_or("missing evidence passed")?;
-    if !err.contains("TLG-01") || !err.contains("294 gap(s) across 27 TLG and 267 BLG rows") {
+    if !err.contains("L-01") || !err.contains("294 gap(s) across 27 L and 267 F rows") {
         return Err(String::from(
             "source-only/unknown evidence was not rejected for both ledgers",
         ));
     }
-    if rows(&tlg.replacen("| TLG-01", "| TLG-02", 1), "TLG", 27, 4).is_ok()
-        || rows(&live.replacen("| BLG-001", "| BLG-002", 1), "BLG", 267, 7).is_ok()
+    if rows(&tlg.replacen("| L-01", "| L-02", 1), "L", 27, 4).is_ok()
+        || rows(&live.replacen("| F-001", "| F-002", 1), "F", 267, 7).is_ok()
         || rows(
             &findings.replacen(" | Not recorded |", " | Not recorded | extra |", 1),
             "BLG",

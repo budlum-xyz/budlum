@@ -120,6 +120,50 @@ pub struct PinnedAuxPowAnchor {
     pub pop_signers: Vec<PopAnchorSigner>,
 }
 
+impl PinnedAuxPowAnchor {
+    /// Canonical length-prefixed SHA3-256 commitment over every pinned merged-mining
+    /// and bonded `PoP` anchor parameter.
+    ///
+    /// WIRING: checked in constant time by `crate::cross_domain::economic_guard`
+    /// on both backing refreshes and contradiction submissions.
+    #[must_use]
+    pub fn canonical_pin_digest(&self) -> Hash32 {
+        let mut acc = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_AUXPOW_PIN_V1",
+            &self.aux_chain_id.to_le_bytes(),
+            &self.trusted_parent_hash,
+            &self.max_target_bits.to_le_bytes(),
+            &self.min_cumulative_work,
+            &self.min_confirmations.to_le_bytes(),
+            &(self.pop_signers.len() as u64).to_le_bytes(),
+        ]);
+        for signer in &self.pop_signers {
+            acc = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_AUXPOW_PIN_V1",
+                &[1u8],
+                &acc,
+                &signer.ed25519_pubkey,
+                &signer.bond_weight.to_le_bytes(),
+                &signer.pq_pubkey,
+            ]);
+        }
+        acc
+    }
+
+    /// Return the bonded `PoP` weight and whether an ML-DSA-65 key is attached
+    /// for `pubkey`.
+    ///
+    /// WIRING: used by `crate::cross_domain::economic_guard` for incremental
+    /// per-offender `PoP` slashing accounting.
+    #[must_use]
+    pub fn pop_member_info(&self, pubkey: &[u8; 32]) -> Option<(u128, bool)> {
+        self.pop_signers
+            .iter()
+            .find(|s| bool::from(s.ed25519_pubkey.ct_eq(pubkey)))
+            .map(|s| (u128::from(s.bond_weight), !s.pq_pubkey.is_empty()))
+    }
+}
+
 /// Self-derived auxiliary block commitment anchored via `AuxPoW`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuxBlockCommitment {
@@ -863,6 +907,25 @@ pub fn verify_pop_equivocation(
     }
     let cid_le = proof.aux_chain_id.to_le_bytes();
     let h_le = proof.aux_height.to_le_bytes();
+    // Order conflicting (parent_hash, aux_digest) tuples canonically so a
+    // swapped duplicate proof cannot produce a distinct evidence digest.
+    let ((lo_parent, lo_aux), (hi_parent, hi_aux)) = if (
+        proof.aux_digest_a.as_slice(),
+        proof.parent_hash_a.as_slice(),
+    ) <= (
+        proof.aux_digest_b.as_slice(),
+        proof.parent_hash_b.as_slice(),
+    ) {
+        (
+            (&proof.parent_hash_a, &proof.aux_digest_a),
+            (&proof.parent_hash_b, &proof.aux_digest_b),
+        )
+    } else {
+        (
+            (&proof.parent_hash_b, &proof.aux_digest_b),
+            (&proof.parent_hash_a, &proof.aux_digest_a),
+        )
+    };
     let count_le = u64::try_from(offenders.len())
         .unwrap_or(u64::MAX)
         .to_le_bytes();
@@ -871,10 +934,10 @@ pub fn verify_pop_equivocation(
     fields.push(network.as_bytes());
     fields.push(&cid_le);
     fields.push(&h_le);
-    fields.push(&proof.parent_hash_a);
-    fields.push(&proof.aux_digest_a);
-    fields.push(&proof.parent_hash_b);
-    fields.push(&proof.aux_digest_b);
+    fields.push(lo_parent);
+    fields.push(lo_aux);
+    fields.push(hi_parent);
+    fields.push(hi_aux);
     fields.push(&count_le);
     for pk in &offenders {
         fields.push(pk);

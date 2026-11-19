@@ -90,6 +90,29 @@ pub struct PinnedSuccinctGenesis {
     pub aggregator_pq_pubkey: Vec<u8>,
 }
 
+impl PinnedSuccinctGenesis {
+    /// Canonical length-prefixed SHA3-256 commitment over the pinned genesis
+    /// protocol state hash, initial staking ledger root, verified recursive
+    /// step-program hash, Samasika window density parameters, and ML-DSA-65
+    /// aggregator public key.
+    ///
+    /// WIRING: checked in constant time by `crate::cross_domain::economic_guard`
+    /// when refreshing succinct recursive backing attestations.
+    #[must_use]
+    pub fn canonical_pin_digest(&self) -> Hash32 {
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_MINA_PIN_V1",
+            &self.genesis_state_hash,
+            &self.genesis_staking_ledger_root,
+            &self.step_program_hash,
+            &self.slots_per_sub_window.to_le_bytes(),
+            &self.slots_per_epoch.to_le_bytes(),
+            &self.min_window_density_slots.to_le_bytes(),
+            &self.aggregator_pq_pubkey,
+        ])
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct EpochLedgerStep {
     epoch: u64,

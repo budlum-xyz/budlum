@@ -96,12 +96,107 @@ pub struct PinnedTonMasterchainAnchor {
     pub validators: Vec<TonValidator>,
 }
 
+impl PinnedTonMasterchainAnchor {
+    /// Canonical length-prefixed SHA3-256 commitment over the pinned key-block
+    /// sequence number, validator-cycle timestamps, and `ConfigParam 34` set.
+    ///
+    /// WIRING: checked in constant time by `crate::cross_domain::economic_guard`
+    /// on both backing refreshes and contradiction submissions.
+    #[must_use]
+    pub fn canonical_pin_digest(&self) -> Hash32 {
+        let mut acc = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_TON_PIN_V1",
+            &self.key_block_seqno.to_le_bytes(),
+            &self.utime_since.to_le_bytes(),
+            &self.utime_until.to_le_bytes(),
+            &(self.validators.len() as u64).to_le_bytes(),
+        ]);
+        for v in &self.validators {
+            acc = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_TON_PIN_V1",
+                &[1u8],
+                &acc,
+                &v.ed25519_pubkey,
+                &v.weight.to_le_bytes(),
+                &v.pq_pubkey,
+            ]);
+        }
+        acc
+    }
+
+    /// Return the consensus weight and whether an ML-DSA-65 co-signing key is
+    /// registered for `pubkey`.
+    ///
+    /// WIRING: used by `crate::cross_domain::economic_guard` for incremental
+    /// per-offender TON Catchain slashing accounting.
+    #[must_use]
+    pub fn validator_member_info(&self, pubkey: &[u8; 32]) -> Option<(u128, bool)> {
+        self.validators
+            .iter()
+            .find(|v| bool::from(v.ed25519_pubkey.ct_eq(pubkey)))
+            .map(|v| (u128::from(v.weight), !v.pq_pubkey.is_empty()))
+    }
+}
+
+/// Detached hybrid signature on a TON Catchain commit, key-block rotation, or
+/// equivocation proof.
+///
+/// WIRING: verified by [`TonCatchainAdapter`] and [`verify_ton_catchain_equivocation`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct CatchainSig {
-    signer_pubkey: [u8; 32],
-    ed25519_sig: Vec<u8>,
+pub struct CatchainSig {
+    /// Validator Ed25519 `SigPubKey` (32 bytes).
+    pub signer_pubkey: [u8; 32],
+    /// Detached Ed25519 signature bytes.
+    pub ed25519_sig: Vec<u8>,
+    /// Mandatory ML-DSA-65 co-signature when `pq_pubkey` is configured.
     #[serde(default)]
-    pq_sig: Vec<u8>,
+    pub pq_sig: Vec<u8>,
+}
+
+/// Permissionless TON Masterchain Catchain equivocation proof demonstrating
+/// that one or more pinned validators committed two distinct `(root_hash,
+/// file_hash)` pairs at the same `(key_block_seqno, catchain_seqno, mc_seqno)`.
+///
+/// WIRING: verified in production by [`verify_ton_catchain_equivocation`] via
+/// `crate::cross_domain::economic_guard::BridgeEconomicGuard::submit_contradiction`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TonCatchainEquivocationProof {
+    /// Key-block sequence number identifying the active validator cycle.
+    pub key_block_seqno: u64,
+    /// Catchain session number of both conflicting commits.
+    pub catchain_seqno: u64,
+    /// Masterchain block sequence number of both conflicting commits (`> 0`).
+    pub mc_seqno: u64,
+    /// First attested Masterchain `root_hash` (non-zero).
+    pub root_hash_a: Hash32,
+    /// First attested BOC `file_hash` (non-zero).
+    pub file_hash_a: Hash32,
+    /// Hybrid validator signatures on `(root_hash_a, file_hash_a)`.
+    pub sigs_a: Vec<CatchainSig>,
+    /// Second conflicting Masterchain `root_hash` (non-zero).
+    pub root_hash_b: Hash32,
+    /// Second conflicting BOC `file_hash` (non-zero).
+    pub file_hash_b: Hash32,
+    /// Hybrid validator signatures on `(root_hash_b, file_hash_b)`.
+    pub sigs_b: Vec<CatchainSig>,
+}
+
+/// Verified outcome of [`verify_ton_catchain_equivocation`].
+///
+/// WIRING: consumed by `crate::cross_domain::economic_guard` when freezing a
+/// faulted TON domain and accounting for slashed Catchain validator stake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedTonCatchainSlash {
+    /// Canonical order-independent digest of the proven Catchain equivocation.
+    pub evidence_digest: Hash32,
+    /// Masterchain sequence number of the equivocation.
+    pub mc_seqno: u64,
+    /// Catchain session sequence number of the equivocation.
+    pub catchain_seqno: u64,
+    /// Sorted unique Ed25519 keys of proven equivocating validators.
+    pub offenders: Vec<[u8; 32]>,
+    /// Aggregate validator weight attributable to `offenders`.
+    pub slashed_weight: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,8 +340,12 @@ fn shard_prefixes_overlap(a: u64, b: u64) -> Result<bool, AdapterError> {
     Ok((a & mask) == (b & mask))
 }
 
+/// Compute the canonical validator-list commitment for a TON key-block cycle.
+///
+/// WIRING: shared between [`TonCatchainAdapter`] and
+/// [`verify_ton_catchain_equivocation`].
 #[must_use]
-fn compute_validator_list_hash(
+pub fn compute_validator_list_hash(
     utime_since: u64,
     utime_until: u64,
     validators: &[TonValidator],
@@ -289,8 +388,12 @@ fn key_block_rotation_sign_bytes(
     ])
 }
 
+/// Compute the canonical TON Masterchain Catchain commit signing digest.
+///
+/// WIRING: shared between [`TonCatchainAdapter`] and
+/// [`verify_ton_catchain_equivocation`].
 #[must_use]
-fn catchain_commit_sign_bytes(
+pub fn catchain_commit_sign_bytes(
     network: &str,
     catchain_seqno: u64,
     validator_list_hash: &Hash32,
@@ -589,6 +692,171 @@ fn decode_ton_evidence(payload: &[u8]) -> Result<TonCatchainEvidence, AdapterErr
         });
     }
     Ok(decoded)
+}
+
+fn verify_ton_slash_side(
+    committee: &BTreeMap<[u8; 32], &TonValidator>,
+    sigs: &[CatchainSig],
+    msg: &Hash32,
+    what: &str,
+) -> Result<BTreeSet<[u8; 32]>, AdapterError> {
+    if sigs.is_empty() || sigs.len() > committee.len() {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!("invalid {what} signature count {}", sigs.len()),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    for sig in sigs {
+        if !seen.insert(sig.signer_pubkey) {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!("duplicate validator signature in {what}"),
+            });
+        }
+        let Some(val) = committee.get(&sig.signer_pubkey) else {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!("unknown validator signature in {what}"),
+            });
+        };
+        crate::crypto::primitives::verify_signature(msg, &sig.ed25519_sig, &val.ed25519_pubkey)
+            .map_err(|_| AdapterError::Crypto {
+                what: format!("invalid Ed25519 signature in {what}"),
+            })?;
+        if !val.pq_pubkey.is_empty() {
+            if sig.pq_sig.is_empty() {
+                return Err(AdapterError::Crypto {
+                    what: format!("missing mandatory ML-DSA-65 co-signature in {what}"),
+                });
+            }
+            crate::crypto::primitives::PqKeyPair::verify(
+                &val.pq_pubkey,
+                crate::crypto::ctx::CROSS_DOMAIN_V1,
+                msg,
+                &sig.pq_sig,
+            )
+            .map_err(|_| AdapterError::Crypto {
+                what: format!("invalid ML-DSA-65 co-signature in {what}"),
+            })?;
+        }
+    }
+    Ok(seen)
+}
+
+/// Verify permissionless TON Masterchain Catchain equivocation evidence against
+/// a governance-pinned [`PinnedTonMasterchainAnchor`].
+///
+/// WIRING: invoked in production by
+/// `crate::cross_domain::economic_guard::BridgeEconomicGuard::submit_contradiction`.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] when the pinned validator set is malformed, the
+/// key-block sequence mismatches or `mc_seqno <= key_block_seqno`, the committed
+/// `(root_hash, file_hash)` pairs are zero or identical, any signature fails
+/// Ed25519 or mandatory ML-DSA-65 verification, or no validator signed both sides.
+pub fn verify_ton_catchain_equivocation(
+    network: &str,
+    pinned: &PinnedTonMasterchainAnchor,
+    proof: &TonCatchainEquivocationProof,
+) -> Result<VerifiedTonCatchainSlash, AdapterError> {
+    if network.trim().is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "TON Catchain equivocation network cannot be empty".into(),
+        });
+    }
+    let (committee, _total, vhash) =
+        validate_validator_set(pinned.utime_since, pinned.utime_until, &pinned.validators)?;
+    if proof.key_block_seqno != pinned.key_block_seqno || proof.mc_seqno <= pinned.key_block_seqno {
+        return Err(AdapterError::ConsensusRule {
+            rule: "TON Catchain equivocation key_block_seqno mismatch or non-advancing mc_seqno"
+                .into(),
+        });
+    }
+    if bool::from(proof.root_hash_a.ct_eq(&[0u8; 32]))
+        || bool::from(proof.file_hash_a.ct_eq(&[0u8; 32]))
+        || bool::from(proof.root_hash_b.ct_eq(&[0u8; 32]))
+        || bool::from(proof.file_hash_b.ct_eq(&[0u8; 32]))
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "TON Catchain equivocation requires non-zero root_hash and file_hash".into(),
+        });
+    }
+    let same_root = bool::from(proof.root_hash_a.ct_eq(&proof.root_hash_b));
+    let same_file = bool::from(proof.file_hash_a.ct_eq(&proof.file_hash_b));
+    if same_root && same_file {
+        return Err(AdapterError::ConsensusRule {
+            rule: "TON Catchain equivocation submits identical Masterchain commits".into(),
+        });
+    }
+    let msg_a = catchain_commit_sign_bytes(
+        network,
+        proof.catchain_seqno,
+        &vhash,
+        proof.mc_seqno,
+        &proof.root_hash_a,
+        &proof.file_hash_a,
+    );
+    let msg_b = catchain_commit_sign_bytes(
+        network,
+        proof.catchain_seqno,
+        &vhash,
+        proof.mc_seqno,
+        &proof.root_hash_b,
+        &proof.file_hash_b,
+    );
+    let set_a = verify_ton_slash_side(&committee, &proof.sigs_a, &msg_a, "ton-slash-a")?;
+    let set_b = verify_ton_slash_side(&committee, &proof.sigs_b, &msg_b, "ton-slash-b")?;
+    let offenders: Vec<[u8; 32]> = set_a.intersection(&set_b).copied().collect();
+    if offenders.is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "TON Catchain equivocation has no overlapping offending validator".into(),
+        });
+    }
+    let mut slashed = 0u128;
+    for pk in &offenders {
+        if let Some(v) = committee.get(pk) {
+            slashed = slashed.saturating_add(u128::from(v.weight));
+        }
+    }
+    let ((lo_root, lo_file), (hi_root, hi_file)) =
+        if (proof.root_hash_a.as_slice(), proof.file_hash_a.as_slice())
+            <= (proof.root_hash_b.as_slice(), proof.file_hash_b.as_slice())
+        {
+            (
+                (&proof.root_hash_a, &proof.file_hash_a),
+                (&proof.root_hash_b, &proof.file_hash_b),
+            )
+        } else {
+            (
+                (&proof.root_hash_b, &proof.file_hash_b),
+                (&proof.root_hash_a, &proof.file_hash_a),
+            )
+        };
+    let kb_le = proof.key_block_seqno.to_le_bytes();
+    let cc_le = proof.catchain_seqno.to_le_bytes();
+    let mc_le = proof.mc_seqno.to_le_bytes();
+    let count_le = (offenders.len() as u64).to_le_bytes();
+    let mut fields: Vec<&[u8]> = Vec::with_capacity(offenders.len().saturating_add(11));
+    fields.push(b"BDLM_TON_SLASH_V1");
+    fields.push(network.as_bytes());
+    fields.push(&vhash);
+    fields.push(&kb_le);
+    fields.push(&cc_le);
+    fields.push(&mc_le);
+    fields.push(lo_root);
+    fields.push(lo_file);
+    fields.push(hi_root);
+    fields.push(hi_file);
+    fields.push(&count_le);
+    for pk in &offenders {
+        fields.push(pk);
+    }
+    Ok(VerifiedTonCatchainSlash {
+        evidence_digest: crate::core::hash::hash_fields_bytes(&fields),
+        mc_seqno: proof.mc_seqno,
+        catchain_seqno: proof.catchain_seqno,
+        offenders,
+        slashed_weight: slashed,
+    })
 }
 
 /// External finality adapter for TON Masterchain Catchain BFT and dynamically

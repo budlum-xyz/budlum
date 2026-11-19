@@ -13,51 +13,17 @@
 # no line could ever be recorded. The rows are
 # recorded, not excused: they close family by family, and every such
 # change deletes the lines it closes.
-
-# Solana compatibility surface (42 rows)
-
-accountSubscribe missing=refusal
-accountUnsubscribe missing=refusal
-accountUnsubscribe missing=success
-bud_subscribe missing=refusal
-bud_subscribe missing=success
-bud_unsubscribe missing=refusal
-bud_unsubscribe missing=success
-getAccountInfo missing=refusal
-getBlock missing=refusal
-getBlockHeight missing=refusal
-getEpochInfo missing=refusal
-getFeeForMessage missing=refusal
-getHealth missing=success
-getLatestBlockhash missing=refusal
-getMinimumBalanceForRentExemption missing=refusal
-getMultipleAccounts missing=refusal
-getProgramAccounts missing=refusal
-getRecentPrioritizationFees missing=refusal
-getSignatureStatuses missing=refusal
-getSignaturesForAddress missing=refusal
-getSlot missing=refusal
-getTokenAccountBalance missing=refusal
-getTokenAccountsByOwner missing=refusal
-getTokenSupply missing=refusal
-getTransaction missing=refusal
-getVersion missing=success
-isBlockhashValid missing=refusal
-logsSubscribe missing=refusal
-logsUnsubscribe missing=refusal
-logsUnsubscribe missing=success
-programSubscribe missing=refusal
-programUnsubscribe missing=refusal
-programUnsubscribe missing=success
-requestAirdrop missing=refusal
-signatureSubscribe missing=refusal
-signatureUnsubscribe missing=refusal
-signatureUnsubscribe missing=success
-simulateTransaction missing=refusal
-slotSubscribe missing=refusal
-slotSubscribe missing=success
-slotUnsubscribe missing=refusal
-slotUnsubscribe missing=success
+#
+# Closed families: the Solana compatibility surface (42 rows) is closed by
+# `src/tests/rpc_door_solana.rs`. Six of those rows were the generated
+# unsubscribe doors' `missing=refusal` halves, closed by a rule correction rather
+# than a test: those doors are total, because jsonrpsee answers every
+# unsubscribe call with `result: true/false` and never a JSON-RPC error, so no
+# invalid call exists at this layer to refuse. `wants_refusal` in
+# `src/rpc/method_class.rs` exempts them by name, sourced from the
+# `unsubscribe = "..."` attributes of `src/rpc/api.rs`, and
+# `rpc_door_solana::solana_unsubscribe_doors_answer_a_boolean_and_never_an_error`
+# asserts that totality on the wire.
 
 # operator administration (6 rows)
 
@@ -132,50 +98,6 @@ bud_submitQcFaultProof missing=refusal
 bud_submitSlashingReport missing=refusal
 bud_txPrecheck missing=refusal
 bud_validatorProfile missing=refusal
-
-# BNS name service (13 rows)
-
-bud_bnsPrepareRegisterSubdomain missing=refusal
-bud_bnsPrepareRegisterSubdomain missing=success
-bud_bnsPrepareRenew missing=refusal
-bud_bnsPrepareRenew missing=success
-bud_bnsPrepareSetStorage missing=success
-bud_bnsPrepareSetSubdomainContent missing=success
-bud_bnsPrepareTransfer missing=refusal
-bud_bnsPrepareTransfer missing=success
-bud_bnsResolve missing=refusal
-bud_bnsResolveFull missing=refusal
-bud_bnsResolveSubdomain missing=refusal
-bud_bnsResolveSubdomainContent missing=refusal
-bud_bnsResolveSubdomainContent missing=success
-
-# bridge door (5 rows)
-
-bud_burnBridgeTransfer missing=refusal
-bud_burnBridgeTransferWithEvent missing=refusal
-bud_mintBridgeTransfer missing=refusal
-bud_unlockBridgeTransfer missing=refusal
-bud_unlockBridgeTransferVerified missing=refusal
-
-# encoding and relayer planning (9 rows)
-
-bud_encodeCrossVmCall missing=success
-bud_encodeExternalEvidence missing=refusal
-bud_encodeExternalEvidence missing=success
-bud_planEvmVerification missing=refusal
-bud_planEvmVerification missing=success
-bud_relayerPrepareExternalTx missing=refusal
-bud_relayerPrepareExternalTx missing=success
-bud_replayExternalProbes missing=refusal
-bud_replayExternalProbes missing=success
-
-# role registry (5 rows)
-
-bud_registryActiveMembers missing=refusal
-bud_registryBeginRoleBondUnbonding missing=refusal
-bud_registryRegister missing=refusal
-bud_registryRegister missing=success
-bud_registryWithdrawRoleBond missing=refusal
 
 # social layer (8 rows)
 

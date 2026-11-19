@@ -460,6 +460,16 @@ pub fn mint_from_verified_event(
     state
         .ensure_mint_headroom(minted)
         .map_err(|e| format!("Bridge mint: {e}"))?;
+    // Any transfer claiming origin on an anchored external consensus domain
+    // must pass an explicitly configured BridgeEconomicGuard policy rather than
+    // falling through the internal-domain bypass.
+    if state.external_roots.contains_key(&message.source_domain) {
+        state
+            .bridge_state
+            .economic_guard
+            .ensure_domain_configured(message.source_domain)
+            .map_err(|e| e.to_string())?;
+    }
     ensure_relay_credits_fit(
         state,
         (transfer.recipient, final_amount.get()),
@@ -665,6 +675,13 @@ pub fn unlock_from_verified_event(
         .get_balance(&owner)
         .checked_add(returned)
         .ok_or_else(|| "Bridge unlock (owner credit) would overflow".to_string())?;
+    if state.external_roots.contains_key(&message.source_domain) {
+        state
+            .bridge_state
+            .economic_guard
+            .ensure_domain_configured(message.source_domain)
+            .map_err(|e| e.to_string())?;
+    }
 
     let bridge_before = state.bridge_state.clone();
     state
@@ -826,6 +843,13 @@ fn apply_relay_effects(
             state
                 .ensure_mint_headroom(minted)
                 .map_err(|e| format!("Bridge relay mint: {e}"))?;
+            if state.external_roots.contains_key(&message.source_domain) {
+                state
+                    .bridge_state
+                    .economic_guard
+                    .ensure_domain_configured(message.source_domain)
+                    .map_err(|e| e.to_string())?;
+            }
             ensure_relay_credits_fit(
                 state,
                 (transfer.recipient, final_amount.get()),
@@ -864,6 +888,13 @@ fn apply_relay_effects(
             }
             let returned = transfer.burned_amount;
             ensure_relay_credits_fit(state, (transfer.owner, returned), (relayer, 0))?;
+            if state.external_roots.contains_key(&message.source_domain) {
+                state
+                    .bridge_state
+                    .economic_guard
+                    .ensure_domain_configured(message.source_domain)
+                    .map_err(|e| e.to_string())?;
+            }
             let bridge_before = state.bridge_state.clone();
             state
                 .bridge_state
@@ -1133,6 +1164,23 @@ pub fn report_bridge_contradiction(
         }
     }
     Ok(outcome)
+}
+
+/// Bind `state.bridge_state.economic_guard` to `chain_id`'s fail-closed policy
+/// mode: strict mandatory domain policies on mainnet (`45260`) and public
+/// testnet (`45261`), permissive internal-domain mode on local devnets.
+///
+/// WIRING: production chain-mode configuration helper pairing
+/// [`crate::cross_domain::economic_guard::BridgeEconomicGuard::for_chain_id`]
+/// with consensus-committed bridge state.
+pub fn enable_chain_economic_guard_mode(state: &mut AccountState, chain_id: u64) -> bool {
+    let strict = crate::cross_domain::economic_guard::BridgeEconomicGuard::for_chain_id(chain_id)
+        .requires_configured_domains();
+    state
+        .bridge_state
+        .economic_guard
+        .set_require_configured_domains(strict);
+    strict
 }
 
 /// Apply one bridge write to `state`.
