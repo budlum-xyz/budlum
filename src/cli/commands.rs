@@ -1126,13 +1126,19 @@ impl NodeConfig {
         if let Some(ref name) = legacy.network {
             self.network = network_named("the legacy config file", name);
         }
-        if self.consensus.is_none() {
-            self.consensus = legacy.consensus.as_deref().and_then(|s| match s {
-                "pow" => Some(ConsensusType::PoW),
-                "pos" => Some(ConsensusType::PoS),
-                "poa" => Some(ConsensusType::PoA),
-                _ => None,
-            });
+        if let Some(raw_type) = legacy.consensus.as_deref() {
+            let parsed = match raw_type {
+                "pow" => ConsensusType::PoW,
+                "pos" => ConsensusType::PoS,
+                "poa" => ConsensusType::PoA,
+                other => {
+                    eprintln!("CRITICAL: Invalid consensus '{other}' in legacy config file");
+                    std::process::exit(1);
+                }
+            };
+            if self.consensus.is_none() {
+                self.consensus = Some(parsed);
+            }
         }
         if let Some(diff) = legacy.difficulty {
             self.difficulty = diff;
@@ -2135,5 +2141,36 @@ mod persona_config_tests {
             .expect("parse metrics config");
         cfg.apply_file_config(fc);
         assert_eq!(cfg.metrics_listener.as_deref(), Some("127.0.0.1:29093"));
+    }
+
+    #[test]
+    fn legacy_config_rejects_unknown_consensus_type() {
+        const CHILD_ENV: &str = "CLI_LEGACY_CONSENSUS_CHILD_PROBE";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let legacy: super::LegacyFileConfig =
+                toml::from_str("consensus = \"poss\"\n").expect("parse legacy config");
+            let mut cfg = NodeConfig::default();
+            cfg.apply_legacy_config(legacy);
+            return;
+        }
+        let exe = std::env::current_exe().expect("current test binary");
+        let output = std::process::Command::new(exe)
+            .arg("--exact")
+            .arg(
+                "cli::commands::persona_config_tests::legacy_config_rejects_unknown_consensus_type",
+            )
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("spawn child test");
+        assert!(
+            !output.status.success(),
+            "legacy config with invalid consensus must fail closed instead of falling back to default"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("CRITICAL: Invalid consensus"),
+            "unexpected stderr: {stderr}"
+        );
     }
 }

@@ -90,6 +90,12 @@ fn validate_non_empty(
             message: format!("{label} payload size invalid"),
         });
     }
+    if crate::execution::coordinator::assets::is_pointer_bytecode_prefixed(code) {
+        return Err(EeRefusal {
+            code: RefusalCode::InvalidCode,
+            message: String::from("system pointer bytecode prefix is reserved for uel/assets"),
+        });
+    }
     let code_hash: [u8; 32] = Sha256::digest(code).into();
     Ok(CodeInfo {
         code_hash,
@@ -121,6 +127,17 @@ fn execute_expansion_call(
                 });
             }
             let code_key = code_storage_key(spec.ee, &call.target.id);
+            if host
+                .read(&store_ns, &code_key)
+                .map_err(|e| map_host_err(&e))?
+                .is_some()
+            {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"expansion contract already deployed at target".to_vec(),
+                    gas_used: gas,
+                });
+            }
             host.write(&store_ns, &code_key, Some(&call.input))
                 .map_err(|e| map_host_err(&e))?;
             Ok(EeOutcome {

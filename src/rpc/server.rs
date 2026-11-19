@@ -1527,6 +1527,7 @@ impl RpcServer {
 
     fn account_proof_to_json(
         bundle: &crate::core::account::ConsensusAccountProof,
+        opening: &crate::core::account::StateRootAccountsOpening,
         height: u64,
     ) -> serde_json::Value {
         let leaf_to_json = |leaf: &crate::core::account::ConsensusTreeLeaf| {
@@ -1545,28 +1546,34 @@ impl RpcServer {
             })
         };
         serde_json::json!({
-        // `accountsRoot` is the consensus accounts subtree root: it is
-        // folded into the block state root body, so a light client checks
-        // it against the finalized block at `blockHeight` (via
-        // `bud_getGlobalHeaderProof`'s `stateRootBody` and
-        // `root_from_opening`) and then verifies the proof against it.
-                   "accountsRoot": Self::bytes32_to_0x(bundle.root),
-                   "blockHeight": Self::to_hex(height),
-                   "address": Self::bytes32_to_0x(bundle.address.0),
-                   "present": bundle.present,
-                   "balance": Self::to_hex(bundle.balance),
-                   "nonce": Self::to_hex(bundle.nonce),
-                   "fracAttos": Self::to_hex(bundle.frac_attos),
-                   "leafHash": Self::bytes32_to_0x(bundle.leaf_hash),
-                   "siblings": bundle
-                       .siblings
-                       .iter()
-                       .map(|s| Self::bytes32_to_0x(*s))
-                       .collect::<Vec<_>>(),
-                   "directions": bundle.directions.clone(),
-                   "predecessor": bundle.predecessor.as_ref().map(leaf_to_json),
-                   "successor": bundle.successor.as_ref().map(leaf_to_json),
-               })
+            // Light-client verification chain:
+            // 1. Verify leaf/absence proof against `accountsRoot`.
+            // 2. Compute `body = SHA256("v2" || epochIndex_le || accountsRoot || stateRootSuffix)`
+            //    and confirm `body == stateRootBody`.
+            // 3. Verify `AccountState::root_from_opening(body, globalHeaderSummary)` equals the
+            //    finalized block header's `state_root` at `blockHeight`.
+            "stateRoot": Self::bytes32_to_0x(opening.state_root),
+            "stateRootBody": Self::bytes32_to_0x(opening.state_root_body),
+            "epochIndex": Self::to_hex(opening.epoch_index),
+            "stateRootSuffix": format!("0x{}", hex::encode(&opening.suffix)),
+            "globalHeaderSummary": Self::bytes32_to_0x(opening.global_header_summary),
+            "accountsRoot": Self::bytes32_to_0x(bundle.root),
+            "blockHeight": Self::to_hex(height),
+            "address": Self::bytes32_to_0x(bundle.address.0),
+            "present": bundle.present,
+            "balance": Self::to_hex(bundle.balance),
+            "nonce": Self::to_hex(bundle.nonce),
+            "fracAttos": Self::to_hex(bundle.frac_attos),
+            "leafHash": Self::bytes32_to_0x(bundle.leaf_hash),
+            "siblings": bundle
+                .siblings
+                .iter()
+                .map(|s| Self::bytes32_to_0x(*s))
+                .collect::<Vec<_>>(),
+            "directions": bundle.directions.clone(),
+            "predecessor": bundle.predecessor.as_ref().map(leaf_to_json),
+            "successor": bundle.successor.as_ref().map(leaf_to_json),
+        })
     }
 
     fn consensus_domain_to_json(d: crate::domain::ConsensusDomain) -> serde_json::Value {
@@ -2550,20 +2557,20 @@ impl BudlumApiServer for RpcServer {
         // gone). Reported as an error rather than an empty result: a caller
         // must never be able to read "we did not answer" as "the account is
         // absent", because absence here is a positive claim carrying a proof.
-        let (bundle, height) = self.chain.get_account_proof(&addr).await.ok_or_else(|| {
-            ErrorObjectOwned::owned(-32603, "Account proof unavailable", None::<()>)
-        })?;
-        // A bundle that does not verify against its own root is a node bug,
-        // not a client error, and must never reach the wire: a caller cannot
-        // tell a malformed proof from a forged one.
-        if !bundle.verify_self_consistent() {
+        let (bundle, opening, height) =
+            self.chain.get_account_proof(&addr).await.ok_or_else(|| {
+                ErrorObjectOwned::owned(-32603, "Account proof unavailable", None::<()>)
+            })?;
+        // Verify both the accounts-subtree Merkle path and the full opening into
+        // the committed `state_root` before returning a byte to the caller.
+        if !bundle.verify_against_state_root(&opening, &opening.state_root) {
             return Err(ErrorObjectOwned::owned(
                 -32603,
-                "Account proof failed its own verification",
+                "Account proof failed state root verification",
                 None::<()>,
             ));
         }
-        Ok(Self::account_proof_to_json(&bundle, height))
+        Ok(Self::account_proof_to_json(&bundle, &opening, height))
     }
 
     async fn send_raw_transaction(&self, tx: Transaction) -> Result<String, ErrorObjectOwned> {

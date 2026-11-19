@@ -18,8 +18,8 @@
 use crate::cross_domain::evm::rlp::{self, Item};
 use crate::execution::coordinator::alias::{derive_foreign_cosmos_bech32, ALIAS_NAMESPACE};
 use crate::execution::coordinator::assets::{
-    decode_pointer_bytecode, AssetStandard, MovePointerFlavor, MovePointerOp, PointerDescriptor,
-    SplPointerOp,
+    is_pointer_bytecode_prefixed, verify_canonical_pointer_bytecode, AssetStandard,
+    MovePointerFlavor, MovePointerOp, PointerDescriptor, SplPointerOp,
 };
 use crate::execution::coordinator::foreign::ethereum::BUDLUM_EVM_CHAIN_ID;
 use crate::execution::coordinator::state::{
@@ -2697,8 +2697,19 @@ fn deploy_runtime_code(
     target20: &[u8; 20],
     runtime_code: &[u8],
 ) -> Result<(), String> {
+    if is_pointer_bytecode_prefixed(runtime_code) {
+        return Err(String::from(
+            "system pointer bytecode prefix is reserved for uel/assets",
+        ));
+    }
     if runtime_code.len() > MAX_EVM_BYTECODE_BYTES {
         return Err(String::from("runtime code exceeds 24 KiB EIP-170 limit"));
+    }
+    let existing = read_account_rec(host, target20)?;
+    if existing.code_hash.is_some() || existing.nonce > 0 {
+        return Err(String::from(
+            "target collision: EVM account already holds code or state",
+        ));
     }
     host.charge(200 * runtime_code.len() as u64)
         .map_err(|_| String::from("out of gas storing contract code"))?;
@@ -2804,22 +2815,33 @@ fn prepare_evm_target(
     if code.is_empty() {
         return Ok(PreparedTarget::Finished(OutcomeStatus::Success, Vec::new()));
     }
-    if let Some(ptr) = decode_pointer_bytecode(&code) {
-        if is_delegated {
+    match verify_canonical_pointer_bytecode(&code, EeId::EVM, code_addr) {
+        Err(reason) => {
             return Ok(PreparedTarget::Finished(
                 OutcomeStatus::Revert,
-                b"DELEGATECALL/CALLCODE to pointer token forbidden".to_vec(),
+                reason.into_bytes(),
             ));
         }
-        let home = EeId(ptr.home_ee);
-        let (st, out) = if home == EeId::WASM {
-            execute_evm_pointer_to_wasm(&ptr, caller20, input, is_static, gas_limit, host)?
-        } else if home == EeId::SVM || home == EeId::MOVE {
-            execute_evm_pointer_to_svm_or_move(&ptr, caller20, input, is_static, gas_limit, host)?
-        } else {
-            execute_evm_pointer_to_expansion(&ptr, caller20, input, is_static, gas_limit, host)?
-        };
-        return Ok(PreparedTarget::Finished(st, out));
+        Ok(Some(ptr)) => {
+            if is_delegated {
+                return Ok(PreparedTarget::Finished(
+                    OutcomeStatus::Revert,
+                    b"DELEGATECALL/CALLCODE to pointer token forbidden".to_vec(),
+                ));
+            }
+            let home = EeId(ptr.home_ee);
+            let (st, out) = if home == EeId::WASM {
+                execute_evm_pointer_to_wasm(&ptr, caller20, input, is_static, gas_limit, host)?
+            } else if home == EeId::SVM || home == EeId::MOVE {
+                execute_evm_pointer_to_svm_or_move(
+                    &ptr, caller20, input, is_static, gas_limit, host,
+                )?
+            } else {
+                execute_evm_pointer_to_expansion(&ptr, caller20, input, is_static, gas_limit, host)?
+            };
+            return Ok(PreparedTarget::Finished(st, out));
+        }
+        Ok(None) => {}
     }
     if let Some(spec) = decode_std_evm_token_code(&code) {
         let (st, out) =
@@ -2973,6 +2995,12 @@ impl ExecutionEnvironment for EvmEe {
                 message: String::from("EVM deploy code must not be empty"),
             });
         }
+        if is_pointer_bytecode_prefixed(code) {
+            return Err(EeRefusal {
+                code: RefusalCode::InvalidCode,
+                message: String::from("system pointer bytecode prefix is reserved for uel/assets"),
+            });
+        }
         if code.len() > MAX_EVM_INITCODE_BYTES {
             return Err(EeRefusal {
                 code: RefusalCode::TooLarge,
@@ -3034,6 +3062,11 @@ impl ExecutionEnvironment for EvmEe {
                         status: OutcomeStatus::OutOfGas,
                         output: Vec::new(),
                         gas_used: call.gas_limit,
+                    }),
+                    Err(msg) if msg.starts_with("target collision:") => Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: msg.into_bytes(),
+                        gas_used: 21_000,
                     }),
                     Err(msg) => Ok(EeOutcome {
                         status: OutcomeStatus::InvalidCode,

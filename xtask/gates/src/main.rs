@@ -182,6 +182,7 @@ mod gates {
     pub mod security_quality_wired;
     pub mod security_scans_can_fail;
     pub mod self_derived_ids_cover_every_field;
+    pub mod self_interrogation;
     pub mod semver;
     pub mod serialize_map_keys_are_strings;
     pub mod shard_placement;
@@ -452,6 +453,14 @@ const GATES: &[Gate] = &[
         run: gates::self_derived_ids_cover_every_field::run,
         run_args: None,
         self_test: gates::self_derived_ids_cover_every_field::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "self-interrogation-invariants",
+        replaces: None,
+        run: gates::self_interrogation::run,
+        run_args: None,
+        self_test: gates::self_interrogation::self_test,
         run_log: None,
     },
     Gate {

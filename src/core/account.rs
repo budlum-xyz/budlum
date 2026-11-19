@@ -338,6 +338,69 @@ impl ConsensusAccountProof {
             pred_ok && succ_ok && (self.predecessor.is_some() || self.successor.is_some())
         }
     }
+
+    /// Verify both the accounts-subtree Merkle proof and the canonical opening
+    /// that binds `self.root` into a finalized block header's `state_root`.
+    ///
+    /// In `state_root_body`, the accounts root occupies the fixed byte slice
+    /// `[10..42]` immediately after `"v2"` (2 bytes) and `epoch_index` (8 LE
+    /// bytes), followed by `opening.suffix`. Forging a different `accountsRoot`
+    /// for a finalized `expected_state_root` therefore requires a SHA-256
+    /// second preimage.
+    #[must_use]
+    pub fn verify_against_state_root(
+        &self,
+        opening: &StateRootAccountsOpening,
+        expected_state_root: &[u8; 32],
+    ) -> bool {
+        use sha2::{Digest, Sha256};
+
+        if !self.verify_self_consistent() {
+            return false;
+        }
+        if opening.suffix.len() > MAX_STATE_ROOT_OPENING_SUFFIX_BYTES {
+            return false;
+        }
+        let mut body_hasher = Sha256::new();
+        body_hasher.update(b"v2");
+        body_hasher.update(opening.epoch_index.to_le_bytes());
+        body_hasher.update(self.root);
+        body_hasher.update(&opening.suffix);
+        let body: [u8; 32] = body_hasher.finalize().into();
+        if body != opening.state_root_body {
+            return false;
+        }
+        let derived = AccountState::root_from_opening(&body, &opening.global_header_summary);
+        derived == opening.state_root && derived == *expected_state_root
+    }
+}
+
+/// Upper bound on `StateRootAccountsOpening::suffix` accepted by light clients.
+const MAX_STATE_ROOT_OPENING_SUFFIX_BYTES: usize = 1024 * 1024;
+
+/// Deterministic opening tying an `accountsRoot` to a block header's
+/// `state_root` without altering consensus hashing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateRootAccountsOpening {
+    pub epoch_index: u64,
+    pub suffix: Vec<u8>,
+    pub state_root_body: [u8; 32],
+    pub global_header_summary: [u8; 32],
+    pub state_root: [u8; 32],
+}
+
+enum StateRootSink<'a> {
+    Hasher(&'a mut sha2::Sha256),
+    Buf(&'a mut Vec<u8>),
+}
+
+impl StateRootSink<'_> {
+    fn update(&mut self, bytes: impl AsRef<[u8]>) {
+        match self {
+            Self::Hasher(h) => sha2::Digest::update(*h, bytes),
+            Self::Buf(buf) => buf.extend_from_slice(bytes.as_ref()),
+        }
+    }
 }
 /// Stand-in bytes hashed when a state-root input cannot be serialized.
 ///
@@ -5748,6 +5811,48 @@ impl AccountState {
             self.cached_tree.last().map_or([0u8; 32], |row| row[0])
         };
 
+        let mut final_hasher = Sha256::new();
+        final_hasher.update(b"v2");
+        final_hasher.update(self.epoch_index.to_le_bytes());
+        final_hasher.update(accounts_root_bytes);
+        self.write_state_root_suffix(&mut StateRootSink::Hasher(&mut final_hasher));
+        final_hasher.finalize().into()
+    }
+
+    /// Produce the canonical opening that connects the current consensus
+    /// `accounts_root` to [`Self::calculate_state_root`].
+    pub fn get_state_root_accounts_opening(&mut self) -> StateRootAccountsOpening {
+        use sha2::{Digest, Sha256};
+
+        self.ensure_accounts_tree();
+        let accounts_root_bytes = if self.cached_tree.is_empty() {
+            [0u8; 32]
+        } else {
+            self.cached_tree.last().map_or([0u8; 32], |row| row[0])
+        };
+        let mut suffix = Vec::with_capacity(512);
+        self.write_state_root_suffix(&mut StateRootSink::Buf(&mut suffix));
+
+        let mut final_hasher = Sha256::new();
+        final_hasher.update(b"v2");
+        final_hasher.update(self.epoch_index.to_le_bytes());
+        final_hasher.update(accounts_root_bytes);
+        final_hasher.update(&suffix);
+        let state_root_body: [u8; 32] = final_hasher.finalize().into();
+        let global_header_summary = self.global_header_summary;
+        let state_root = Self::root_from_opening(&state_root_body, &global_header_summary);
+        StateRootAccountsOpening {
+            epoch_index: self.epoch_index,
+            suffix,
+            state_root_body,
+            global_header_summary,
+            state_root,
+        }
+    }
+
+    fn write_state_root_suffix(&self, final_hasher: &mut StateRootSink<'_>) {
+        use sha2::{Digest, Sha256};
+
         // ConsensusStateV2 Root Hashing
         let mut validator_hashes = Vec::new();
         for (addr, val) in &self.validators {
@@ -5824,10 +5929,6 @@ impl AccountState {
             combined.finalize().into()
         };
 
-        let mut final_hasher = Sha256::new();
-        final_hasher.update(b"v2");
-        final_hasher.update(self.epoch_index.to_le_bytes());
-        final_hasher.update(accounts_root_bytes);
         final_hasher.update(validators_root);
         final_hasher.update(unbonding_root);
         final_hasher.update(self.base_fee.to_le_bytes());
@@ -5917,38 +6018,24 @@ impl AccountState {
             final_hasher.update(b"invalid_votes_v1");
             final_hasher.update(self.invalid_votes.root());
         }
-        // The PoA admission records were consensus gate
-        // state in neither the root nor the snapshot digest - hidden today,
-        // wide open the moment the write path connected. They fold in as soon
-        // as they hold anything (an empty registry leaves the root, and with
-        // it every pinned genesis hash, byte-exact - the convention of the
-        // identity and vault folds above), under a domain tag of their own.
         let poa_admission_root = self.poa_onboarding.root();
         if poa_admission_root != crate::registry::poa_onboarding::PoAOnboarding::new().root() {
             final_hasher.update(b"poa_admission_v1");
             final_hasher.update(poa_admission_root);
         }
-        // The compliance ledger decides whether an
-        // operator's audit export is refused; it is state like any other.
         let poa_compliance_root = self.poa_compliance.root();
         if poa_compliance_root != crate::registry::PoaComplianceRegistry::new().root() {
             final_hasher.update(b"poa_compliance_v1");
             final_hasher.update(poa_compliance_root);
         }
-        // The validator directory folds in once it holds a record, so a chain
-        // that never registered one keeps its pinned roots.
         if !self.validator_directory.is_empty() {
             final_hasher.update(b"validator_directory_v1");
             final_hasher.update(self.validator_directory.root());
         }
-        // The B.U.D. 3.0 registry folds in once it holds anything, so a chain
-        // that never stored an object keeps its pinned roots.
         if !self.bud3_registry.is_empty() {
             final_hasher.update(b"bud3_registry_v1");
             final_hasher.update(self.bud3_registry.state_root());
         }
-        // UEL execution state folds in once non-empty so pre-UEL chains keep
-        // their pinned genesis and block state roots.
         if !self.execution_state.is_empty() {
             final_hasher.update(b"uel_execution_v1");
             final_hasher.update(self.execution_state.execution_root());
@@ -5960,9 +6047,6 @@ impl AccountState {
                     .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
-        // Escrowed external bonds are consensus state -
-        // without this fold two nodes could disagree on the state root while
-        // agreeing on every balance.
         if !self.external_bond_escrow.is_empty() {
             final_hasher.update(b"external_bond_escrow_v1");
             final_hasher.update(
@@ -5970,10 +6054,6 @@ impl AccountState {
                     .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
-        // the settlement registries moved here from `Blockchain`,
-        // where no block root covered them. Gated on non-empty like
-        // its neighbours, so a chain that never registered anything keeps
-        // its pinned roots.
         if !self.settlement.is_empty() {
             final_hasher.update(b"settlement_v1");
             final_hasher.update(self.settlement.root());
@@ -5982,14 +6062,7 @@ impl AccountState {
             final_hasher.update(b"governance_v1");
             final_hasher.update(self.governance.root());
         }
-        // The global header summary is folded outside the body
-        // (`root_from_opening`); its slot keeps the zeros it always held.
         final_hasher.update([0u8; 32]);
-        // Governance-unfreeze queue: applied at block close after the commit
-        // (blockchain.rs), so at root time it can be non-empty and is
-        // consensus state. Without this binding a restored snapshot could
-        // smuggle in an arbitrary unfreeze queue (tampered domain
-        // permissioning) while presenting an honest state root.
         if !self.pending_domain_unfreezes.is_empty() {
             final_hasher.update(b"domain_unfreeze_v1");
             final_hasher.update(
@@ -6004,9 +6077,7 @@ impl AccountState {
                     .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
-        final_hasher.update(b"gov_disabled"); // governance version/enabled flags
-
-        final_hasher.finalize().into()
+        final_hasher.update(b"gov_disabled");
     }
     pub fn clear_dirty(&mut self) {
         self.dirty_accounts.clear();
@@ -6186,6 +6257,63 @@ mod tests {
         let mut forged = absent.clone();
         forged.predecessor = forged.successor.clone();
         assert!(!forged.verify_self_consistent());
+    }
+
+    #[test]
+    fn consensus_account_proof_anchors_to_block_state_root_and_rejects_forged_tree() {
+        let mut honest = proof_state();
+        honest.epoch_index = 42;
+        let finalized_root: [u8; 32] = hex::decode(honest.calculate_state_root())
+            .expect("hex state root")
+            .try_into()
+            .expect("32-byte state root");
+        let finalized_body = honest.state_root_body();
+        let opening = honest.get_state_root_accounts_opening();
+        assert_eq!(opening.state_root, finalized_root);
+        assert_eq!(opening.state_root_body, finalized_body);
+
+        // Present account and absent account both verify against `finalized_root`.
+        let alice = test_addr_from_byte(2);
+        let present = honest.get_account_proof(&alice);
+        assert!(present.verify_against_state_root(&opening, &finalized_root));
+        let missing = honest.get_account_proof(&test_addr_from_byte(99));
+        assert!(!missing.present);
+        assert!(missing.verify_against_state_root(&opening, &finalized_root));
+
+        // Checkpoint block with a non-zero global header summary also verifies.
+        honest.global_header_summary = [0x5A; 32];
+        let checkpoint_root: [u8; 32] = hex::decode(honest.calculate_state_root())
+            .expect("hex state root")
+            .try_into()
+            .expect("32-byte state root");
+        assert_ne!(checkpoint_root, finalized_root);
+        let checkpoint_opening = honest.get_state_root_accounts_opening();
+        assert!(present.verify_against_state_root(&checkpoint_opening, &checkpoint_root));
+
+        // A dishonest RPC crafts a valid alternate accounts tree inflating Alice's
+        // balance. `verify_self_consistent()` passes, yet `verify_against_state_root`
+        // rejects both the honest opening and the forged opening against `finalized_root`.
+        let mut forged_state = proof_state();
+        forged_state.epoch_index = 42;
+        forged_state.add_balance(&alice, 999_999_999);
+        let forged_proof = forged_state.get_account_proof(&alice);
+        let forged_opening = forged_state.get_state_root_accounts_opening();
+        assert!(forged_proof.verify_self_consistent());
+        assert!(!forged_proof.verify_against_state_root(&opening, &finalized_root));
+        assert!(!forged_proof.verify_against_state_root(&forged_opening, &finalized_root));
+
+        // Mutating any component of the opening is rejected.
+        let mut bad_epoch = opening.clone();
+        bad_epoch.epoch_index = 43;
+        assert!(!present.verify_against_state_root(&bad_epoch, &finalized_root));
+
+        let mut bad_suffix = opening;
+        bad_suffix.suffix.push(0);
+        assert!(!present.verify_against_state_root(&bad_suffix, &finalized_root));
+
+        let mut bad_summary = checkpoint_opening;
+        bad_summary.global_header_summary = [0x5B; 32];
+        assert!(!present.verify_against_state_root(&bad_summary, &checkpoint_root));
     }
 
     /// A storage that cannot be read must not turn into an empty state.
