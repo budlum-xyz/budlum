@@ -161,6 +161,9 @@ pub struct PaidViewRecord {
     pub amount_atoms: u64,
     /// Epoch in which the payment was recorded.
     pub paid_at_epoch: u64,
+    /// Whether this fallback-view receipt has already been redeemed.
+    #[serde(default)]
+    pub consumed: bool,
 }
 
 /// One replacement of an object: a second, better representation of the same
@@ -895,36 +898,67 @@ impl Bud3Registry {
                 object: target_object,
                 amount_atoms,
                 paid_at_epoch: epoch,
+                consumed: false,
             },
         );
         Ok(())
     }
 
-    /// Verify that `receipt` corresponds to a live on-chain [`PaidViewRecord`].
+    /// Verify that `receipt` corresponds to a live, unconsumed on-chain [`PaidViewRecord`].
     #[must_use]
     pub fn verify_paid_view(&self, receipt: &PaidViewReceipt) -> bool {
         receipt.fee_paid_atoms >= MIN_PAID_VIEW_FEE_ATOMS
             && self.paid_views.get(&receipt.receipt_id).is_some_and(|rec| {
-                self.resolve_live_object(&receipt.object)
-                    .is_some_and(|(resolved, _)| {
-                        resolved == rec.object
-                            && self.objects.contains_key(&rec.object)
-                            && !self.tombstones.contains_key(&rec.object)
-                            && rec.payer == receipt.payer
-                            && rec.amount_atoms >= receipt.fee_paid_atoms
-                            && rec.amount_atoms >= MIN_PAID_VIEW_FEE_ATOMS
-                    })
+                !rec.consumed
+                    && self
+                        .resolve_live_object(&receipt.object)
+                        .is_some_and(|(resolved, _)| {
+                            resolved == rec.object
+                                && self.objects.contains_key(&rec.object)
+                                && !self.tombstones.contains_key(&rec.object)
+                                && rec.payer == receipt.payer
+                                && rec.amount_atoms >= receipt.fee_paid_atoms
+                                && rec.amount_atoms >= MIN_PAID_VIEW_FEE_ATOMS
+                        })
             })
     }
 
-    /// Verify that `receipt` corresponds to an unexpired on-chain [`PaidViewRecord`]
-    /// at `current_epoch` (even before `expire` sweeps the epoch boundary).
+    /// Verify that `receipt` corresponds to an unexpired, unconsumed on-chain
+    /// [`PaidViewRecord`] at `current_epoch` (even before `expire` sweeps the
+    /// epoch boundary).
     #[must_use]
     pub fn verify_paid_view_at(&self, receipt: &PaidViewReceipt, current_epoch: u64) -> bool {
         self.verify_paid_view(receipt)
             && self.paid_views.get(&receipt.receipt_id).is_some_and(|rec| {
                 current_epoch <= rec.paid_at_epoch.saturating_add(PAID_VIEW_RETENTION_EPOCHS)
             })
+    }
+
+    /// Atomically verify and mark `receipt` consumed at `current_epoch`, retaining
+    /// the spent entry across snapshot round-trips until its retention window
+    /// expires so the same `receipt_id` can neither be redeemed twice nor
+    /// re-registered before expiry.
+    ///
+    /// exposed for stateful single-use paid fallback-view redemption.
+    pub fn consume_paid_view_at(&mut self, receipt: &PaidViewReceipt, current_epoch: u64) -> bool {
+        if !self.verify_paid_view_at(receipt, current_epoch) {
+            return false;
+        }
+        if let Some(rec) = self.paid_views.get_mut(&receipt.receipt_id) {
+            rec.consumed = true;
+            return true;
+        }
+        false
+    }
+
+    /// Return whether `receipt_id` has been redeemed while still retained.
+    ///
+    /// exposed for paid fallback-view ledger queries.
+    #[must_use]
+    pub fn is_paid_view_consumed(&self, receipt_id: &[u8; 32]) -> bool {
+        self.paid_views
+            .get(receipt_id)
+            .is_some_and(|rec| rec.consumed)
     }
 
     /// Return whether `receipt_id` is still retained in the on-chain paid-view table.
@@ -3308,6 +3342,7 @@ impl Bud3Registry {
                 &pv.object,
                 &pv.amount_atoms.to_le_bytes(),
                 &pv.paid_at_epoch.to_le_bytes(),
+                &[u8::from(pv.consumed)],
             ]);
         }
         acc
@@ -5898,5 +5933,63 @@ mod tests {
         );
         assert!(r.object(&new_key).is_some());
         assert_eq!(r.nft_binding(&nft), Some((new_key, buyer)));
+    }
+
+    #[test]
+    fn paid_view_consumption_is_single_use_digest_bound_and_survives_snapshot() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"single use paid view content");
+        let key = up.record.commitment;
+        let lifetime = PAID_VIEW_RETENTION_EPOCHS
+            .saturating_mul(2)
+            .saturating_add(20);
+        r.register_object(addr(1), up.record, shares, 1, lifetime)
+            .unwrap();
+
+        let receipt_id = [0xC7; 32];
+        let receipt = PaidViewReceipt {
+            payer: addr(2),
+            object: key,
+            receipt_id,
+            fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS,
+        };
+        r.record_paid_view(addr(2), key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 5)
+            .unwrap();
+        assert!(r.verify_paid_view_at(&receipt, 5));
+        assert!(!r.is_paid_view_consumed(&receipt_id));
+        let root_unconsumed = r.state_root();
+
+        // First consumption succeeds, flips the consensus state root, and blocks
+        // both repeat redemption and duplicate receipt_id re-registration.
+        assert!(r.consume_paid_view_at(&receipt, 5));
+        assert!(r.is_paid_view_consumed(&receipt_id));
+        assert!(r.has_paid_view(&receipt_id));
+        let root_consumed = r.state_root();
+        assert_ne!(
+            root_unconsumed, root_consumed,
+            "paid view consumption state must commit into the consensus state root"
+        );
+        assert!(!r.verify_paid_view(&receipt));
+        assert!(!r.verify_paid_view_at(&receipt, 5));
+        assert!(!r.consume_paid_view_at(&receipt, 5));
+        assert!(matches!(
+            r.record_paid_view(addr(2), key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 6),
+            Err(RegistryError::InvalidPaidView(_))
+        ));
+
+        // Round-trip through serde snapshot (simulating node restart) must keep
+        // the receipt marked consumed and preserve the exact state root.
+        let encoded = bincode::serialize(&r).expect("serialize Bud3Registry");
+        let mut restored: Bud3Registry =
+            bincode::deserialize(&encoded).expect("deserialize Bud3Registry");
+        assert_eq!(restored.state_root(), root_consumed);
+        assert!(restored.is_paid_view_consumed(&receipt_id));
+        assert!(!restored.verify_paid_view(&receipt));
+        assert!(!restored.consume_paid_view_at(&receipt, 6));
+
+        // Retention sweep still prunes spent records past PAID_VIEW_RETENTION_EPOCHS.
+        restored.expire(6 + PAID_VIEW_RETENTION_EPOCHS);
+        assert!(!restored.has_paid_view(&receipt_id));
+        assert!(!restored.is_paid_view_consumed(&receipt_id));
     }
 }

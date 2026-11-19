@@ -273,6 +273,8 @@ pub enum ReplaceError {
         got: usize,
         need: usize,
     },
+    /// Same placement-group validator supplied more than one attestation.
+    DuplicateAttester(Address),
     AttesterOutsidePlacementGroup(Address),
     InvalidAttestationSignature(Address),
     NoIndependentAttester,
@@ -322,28 +324,26 @@ pub fn admit_object_replacement(
         });
     }
 
-    let digest =
-        replace_attestation_digest(chain_id, &old_record.commitment, new_record, new_shares);
+    // Reject outside-group, duplicate, mismatched, under-quorum, or non-independent
+    // attestation lists before spending post-quantum ML-DSA-65 verification cycles.
     let mut distinct_attesters = BTreeSet::new();
     for att in attestations {
         if !placement_group_full.contains(&att.validator) {
             return Err(ReplaceError::AttesterOutsidePlacementGroup(att.validator));
+        }
+        if !distinct_attesters.insert(att.validator) {
+            return Err(ReplaceError::DuplicateAttester(att.validator));
         }
         if att.verified_content_id != old_record.content_id {
             return Err(ReplaceError::ContentIdMismatch {
                 proposer_slash_atoms: bad_repair_slash_amount(proposer_stake),
             });
         }
-        if att.new_commitment != new_record.commitment {
+        if att.new_commitment != new_record.commitment
+            || !validator_keys.contains_key(&att.validator)
+        {
             return Err(ReplaceError::InvalidAttestationSignature(att.validator));
         }
-        let Some(pk) = validator_keys.get(&att.validator) else {
-            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
-        };
-        if verify(SchemeId::ML_DSA_65, pk, &digest, STORAGE_V2, &att.signature).is_err() {
-            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
-        }
-        distinct_attesters.insert(att.validator);
     }
 
     if distinct_attesters.len() < MIN_REPLACE_ATTESTATIONS {
@@ -354,6 +354,17 @@ pub fn admit_object_replacement(
     }
     if !distinct_attesters.iter().any(|v| v != sender) {
         return Err(ReplaceError::NoIndependentAttester);
+    }
+
+    let digest =
+        replace_attestation_digest(chain_id, &old_record.commitment, new_record, new_shares);
+    for att in attestations {
+        let Some(pk) = validator_keys.get(&att.validator) else {
+            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
+        };
+        if verify(SchemeId::ML_DSA_65, pk, &digest, STORAGE_V2, &att.signature).is_err() {
+            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
+        }
     }
     Ok(())
 }
@@ -682,6 +693,68 @@ mod tests {
             ),
             Err(ReplaceError::InvalidAttestationSignature([1u8; 32])),
             "the same signatures must not admit a placement they never signed"
+        );
+    }
+
+    #[test]
+    fn duplicate_validator_attestations_are_rejected_and_every_share_field_is_bound() {
+        let cid = ContentId {
+            kind: ContentIdKind::Public,
+            len: 4_096,
+            digest: [0x51; 32],
+        };
+        let old_rec = sample_record([0x61; 32], cid, 0);
+        let new_rec = sample_record([0x62; 32], cid, 1);
+        let keys = key_map(&[1, 2, 3, 4]);
+        let pg: BTreeSet<Address> = [1u8, 2, 3, 4].into_iter().map(|b| [b; 32]).collect();
+        let shares = sample_shares(&[1, 2, 3]);
+
+        // Mutating class, first_esi, symbols, or segment must each fail signature check.
+        let mut class_mut = shares.clone();
+        class_mut[0].1.class = Class::Mobile;
+        let mut esi_mut = shares.clone();
+        esi_mut[0].1.first_esi += 1;
+        let mut sym_mut = shares.clone();
+        sym_mut[0].1.symbols += 1;
+        let mut seg_mut = shares.clone();
+        seg_mut[0].0 = 1;
+        let atts: Vec<_> = [1u8, 2, 3]
+            .into_iter()
+            .map(|b| {
+                sign_replace_attestation([b; 32], &[b; 32], &old_rec.commitment, &new_rec, &shares)
+                    .unwrap()
+            })
+            .collect();
+        for mutated in [class_mut, esi_mut, sym_mut, seg_mut] {
+            assert_eq!(
+                admit_object_replacement(
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    (&[9u8; 32], &[1u8; 32], 100_000),
+                    (&old_rec, &new_rec),
+                    &mutated,
+                    (&pg, &keys),
+                    &atts,
+                ),
+                Err(ReplaceError::InvalidAttestationSignature([1u8; 32])),
+            );
+        }
+
+        // Duplicate entries for the same attester must be refused fail-closed even
+        // when three distinct signers are also present, preventing PQ signature-check
+        // amplification via padded attestation vectors.
+        let mut dup = atts.clone();
+        dup.push(atts[0].clone());
+        assert_eq!(
+            admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &new_rec),
+                &shares,
+                (&pg, &keys),
+                &dup,
+            ),
+            Err(ReplaceError::DuplicateAttester([1u8; 32])),
+            "duplicate replacement attester must be rejected before repeated PQ verification"
         );
     }
 }

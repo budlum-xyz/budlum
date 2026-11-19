@@ -617,8 +617,16 @@ impl Mempool {
                 // entries; the duty lane's own ceiling and per-window limit
                 // bound what it can consume, so it takes its slot from the
                 // cheapest non-duty entry while paying entries stay fee-ordered.
+                // When every slot is held by duty batches, a signer holding
+                // strictly fewer batches reclaims one excess trailing batch from
+                // the heaviest multi-batch duty hoarder without ever evicting
+                // another validator's single live duty batch.
                 let victim = if duty.is_some() {
-                    self.evict_cheapest_non_duty(&tx)
+                    self.evict_cheapest_non_duty(&tx).or_else(|| {
+                        let (held_batches, _) = self.duty_lane_holding_of(&tx.from);
+                        let newcomer_batches = held_batches.saturating_add(1);
+                        self.evict_one_excess_duty_slot(&tx.from, newcomer_batches)
+                    })
                 } else {
                     self.evict_lowest_fee_silent(&tx)
                 };
@@ -1067,6 +1075,48 @@ impl Mempool {
                 .filter_map(|hash| self.remove_entry_silent(hash))
                 .collect(),
         )
+    }
+
+    /// Reclaim a single count slot from a signer holding strictly more duty
+    /// batches than `newcomer_batches` when the pool hits `max_size` with zero
+    /// non-duty entries available.
+    ///
+    /// Never touches any signer holding at most one batch (since
+    /// `newcomer_batches >= 1`), ranks candidates deterministically by
+    /// `(batch_count, lane_bytes)` with smallest-address tie-break, and pops the
+    /// victim's highest-nonce batch so lower-nonce batches are never stranded.
+    fn evict_one_excess_duty_slot(
+        &mut self,
+        signer: &Address,
+        newcomer_batches: usize,
+    ) -> Option<PendingTx> {
+        #[derive(Default)]
+        struct CountHolding {
+            bytes: usize,
+            batches: BTreeMap<u64, String>,
+        }
+        let mut held: BTreeMap<[u8; 32], CountHolding> = BTreeMap::new();
+        for entry in self.transactions.values() {
+            let Some(batch) = entry.duty else {
+                continue;
+            };
+            if entry.tx.from == *signer {
+                continue;
+            }
+            let holding = held.entry(entry.tx.from.0).or_default();
+            holding.bytes = holding.bytes.saturating_add(batch.block_bytes);
+            holding
+                .batches
+                .insert(entry.tx.nonce, entry.tx.hash.clone());
+        }
+        let victim_hash = held
+            .iter()
+            .rev()
+            .filter(|(_, holding)| holding.batches.len() > newcomer_batches)
+            .max_by_key(|(_, holding)| (holding.batches.len(), holding.bytes))
+            .and_then(|(_, holding)| holding.batches.last_key_value())
+            .map(|(_, hash)| hash.clone())?;
+        self.remove_entry_silent(&victim_hash)
     }
 
     /// The bytes the lane may hold in the pool.
@@ -2571,5 +2621,75 @@ mod tests {
             .expect("the duty batch takes the paying entry's slot");
         assert!(pool.transactions.contains_key(&duty.hash));
         assert!(!pool.transactions.contains_key(&paying.hash));
+    }
+
+    #[test]
+    fn duty_hoarder_at_count_ceiling_yields_excess_slot_without_evicting_single_live_batches() {
+        use crate::core::transaction::TransactionType;
+        use crate::crypto::primitives::KeyPair;
+
+        let make_duty = |kp: &KeyPair, nonce: u64, object_tag: u8| {
+            let addr = Address::from(kp.public_key_bytes());
+            let mut tx = Transaction::new(addr, Address::zero(), 0, Vec::new());
+            tx.nonce = nonce;
+            tx.fee = 0;
+            tx.tx_type = TransactionType::StorageV3(Box::new(
+                crate::storage::bud3::tx::StorageTxV3::CustodyAck {
+                    object: [object_tag; 32],
+                },
+            ));
+            tx.hash = tx.calculate_hash();
+            tx.sign(kp);
+            tx
+        };
+
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 2,
+            min_fee: 1,
+            max_per_sender: 100,
+            ..Default::default()
+        });
+        let hoarder = KeyPair::generate().unwrap();
+        let newcomer = KeyPair::generate().unwrap();
+        let third = KeyPair::generate().unwrap();
+        pool.sync_duty_validators([
+            Address::from(hoarder.public_key_bytes()),
+            Address::from(newcomer.public_key_bytes()),
+            Address::from(third.public_key_bytes()),
+        ]);
+
+        // Hoarder fills both pool count slots across two 10-minute duty windows
+        // while staying far below `duty_lane_cap` in bytes.
+        let next_window_ms: u128 = 10 * 60 * 1_000;
+        let h0 = make_duty(&hoarder, 0, 1);
+        let h1 = make_duty(&hoarder, 1, 2);
+        pool.admit_at(h0.clone(), 1).expect("hoarder first batch");
+        pool.admit_at(h1.clone(), 1 + next_window_ms)
+            .expect("hoarder second batch fills count ceiling");
+        assert_eq!(pool.transactions.len(), 2);
+
+        // Newcomer holding zero duty batches must reclaim hoarder's excess trailing
+        // batch (nonce 1) rather than being locked out with PoolFull.
+        let n0 = make_duty(&newcomer, 0, 3);
+        pool.admit_at(n0.clone(), 2 + next_window_ms)
+            .expect("multi-batch duty hoarder must yield excess count slot to newcomer");
+        assert!(pool.transactions.contains_key(&h0.hash));
+        assert!(!pool.transactions.contains_key(&h1.hash));
+        assert!(pool.transactions.contains_key(&n0.hash));
+
+        // Now each resident validator holds a single live duty batch; neither may
+        // be evicted by a third validator or by a high-fee paying transaction.
+        let t0 = make_duty(&third, 0, 4);
+        assert!(matches!(
+            pool.admit_at(t0, 3 + next_window_ms),
+            Err(MempoolError::PoolFull)
+        ));
+        let rich = create_test_tx_from_seed(9, 0, 1_000_000);
+        assert!(matches!(
+            pool.admit_at(rich, 4 + next_window_ms),
+            Err(MempoolError::PoolFull)
+        ));
+        assert!(pool.transactions.contains_key(&h0.hash));
+        assert!(pool.transactions.contains_key(&n0.hash));
     }
 }

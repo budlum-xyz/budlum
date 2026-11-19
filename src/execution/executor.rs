@@ -222,6 +222,64 @@ impl Executor {
         })
     }
 
+    /// Active bond floor for `validator` on `chain_id`, honoring both Filiz
+    /// seat registration and `ValidatorClass::Full` directory records alongside
+    /// any governance-raised registry `min_stake`.
+    fn validator_active_floor(state: &AccountState, validator: &Address, chain_id: u64) -> u64 {
+        let is_full_seat = state
+            .get_validator(validator)
+            .is_some_and(|v| v.filiz.is_some())
+            || state
+                .validator_directory
+                .get(validator)
+                .is_some_and(|record| record.class.holds_seat());
+        if is_full_seat {
+            state.full_validator_stake_floor(chain_id)
+        } else {
+            state.validator_stake_floor(chain_id)
+        }
+    }
+
+    /// Validator's own slashable bond (aggregate stake minus delegated stake).
+    fn validator_self_bond(state: &AccountState, validator: &Address) -> u64 {
+        let aggregate = state.get_validator(validator).map_or(0, |v| v.stake);
+        aggregate.saturating_sub(state.registry.delegated_stake(validator))
+    }
+
+    /// Enforce both aggregate and self-bond floors after any stake or delegation
+    /// exit on `validator`, clamping snapshotted vote weight on active proposals
+    /// and mirroring the post-exit stake into the permissionless registry.
+    fn enforce_validator_exit_floor(
+        state: &mut AccountState,
+        validator: &Address,
+        chain_id: u64,
+    ) -> u64 {
+        let floor = Self::validator_active_floor(state, validator, chain_id);
+        let self_bond = Self::validator_self_bond(state, validator);
+        if let Some(entry) = state.get_validator_mut(validator) {
+            if entry.stake == 0 || entry.stake < floor || self_bond < floor {
+                entry.active = false;
+            }
+        }
+
+        let live_eligible_stake = state
+            .get_validator(validator)
+            .filter(|v| v.is_eligible(state.epoch_index))
+            .map_or(0, |v| v.stake);
+        for proposal in &mut state.governance.proposals {
+            if proposal.status == crate::core::governance::ProposalStatus::Active {
+                let snapshot = proposal.vote_weight_of(validator);
+                proposal.reduce_vote_weight(
+                    validator,
+                    snapshot.saturating_sub(snapshot.min(live_eligible_stake)),
+                );
+            }
+        }
+
+        state.sync_validator_registration_with_floor(validator, floor);
+        floor
+    }
+
     /// Apply one transaction's state effect. Admission control is NOT here:
     /// `validate_transaction` has already run over this transaction at the
     /// ingest gate, including the `tx.nonce == account.nonce` check - the
@@ -532,8 +590,13 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
 
-                let min_stake = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
-                    .map_or(1, |network| network.min_stake());
+                let delegated_stake = state.registry.delegated_stake(&tx.from);
+                let min_stake = if delegated_stake > 0 {
+                    Self::validator_active_floor(state, &tx.from, tx.chain_id)
+                } else {
+                    crate::core::chain_config::Network::from_chain_id(tx.chain_id)
+                        .map_or(1, |network| network.min_stake())
+                };
                 let liveness_suspended = state.liveness.is_suspended(&tx.from);
                 let validator = state.get_validator_mut(&tx.from);
 
@@ -541,10 +604,13 @@ impl Executor {
                     v.stake = v.stake.checked_add(stake_amount).ok_or_else(|| {
                         BudlumError::validation("stake_overflow", "stake overflow")
                     })?;
+                    let new_self_bond = v.stake.saturating_sub(delegated_stake);
                     // `!v.jailed && !liveness_suspended` is not decoration:
                     // neither a timed jail nor a V-4 liveness suspension can
-                    // be lifted silently by a 1-unit stake top-up.
+                    // be lifted silently by a 1-unit stake top-up. Likewise,
+                    // delegated stake cannot shield a sub-floor self-bond.
                     v.active = v.stake >= min_stake
+                        && new_self_bond >= min_stake
                         && v.is_consensus_ready()
                         && !v.jailed
                         && !liveness_suspended;
@@ -592,6 +658,16 @@ impl Executor {
                         format!("Delegation exceeds spendable balance: have {spendable}, need {total_cost}"),
                     ));
                 }
+                let delegation_floor =
+                    Self::validator_active_floor(state, validator, tx.chain_id);
+                if state.get_validator(validator).is_some()
+                    && Self::validator_self_bond(state, validator) < delegation_floor
+                {
+                    return Err(BudlumError::validation(
+                        "delegation_failed",
+                        "validator self bond is below the network delegation floor",
+                    ));
+                }
                 state
                     .delegate_to_validator(&tx.from, validator, tx.amount)
                     .map_err(|error| BudlumError::validation("delegation_failed", error))?;
@@ -611,6 +687,7 @@ impl Executor {
                 state
                     .begin_delegation_unbonding(&tx.from, validator, tx.amount)
                     .map_err(|error| BudlumError::validation("delegation_unbond_failed", error))?;
+                Self::enforce_validator_exit_floor(state, validator, tx.chain_id);
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "delegation unbond fee underflow")
@@ -671,9 +748,20 @@ impl Executor {
                         "Redelegation requires a positive amount, zero recipient, and empty data",
                     ));
                 }
+                let target_floor =
+                    Self::validator_active_floor(state, to_validator, tx.chain_id);
+                if state.get_validator(to_validator).is_some()
+                    && Self::validator_self_bond(state, to_validator) < target_floor
+                {
+                    return Err(BudlumError::validation(
+                        "redelegation_failed",
+                        "target validator self bond is below the network delegation floor",
+                    ));
+                }
                 state
                     .redelegate_to_validator(&tx.from, from_validator, to_validator, tx.amount)
                     .map_err(|error| BudlumError::validation("redelegation_failed", error))?;
+                Self::enforce_validator_exit_floor(state, from_validator, tx.chain_id);
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "redelegation fee underflow")
@@ -715,8 +803,13 @@ impl Executor {
                     .validate(tx.from, tx.chain_id)
                     .map_err(|error| BudlumError::validation("invalid_consensus_keys", error))?;
 
-                let min_stake = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
-                    .map_or(1, |network| network.min_stake());
+                let delegated_stake = state.registry.delegated_stake(&tx.from);
+                let min_stake = if delegated_stake > 0 {
+                    Self::validator_active_floor(state, &tx.from, tx.chain_id)
+                } else {
+                    crate::core::chain_config::Network::from_chain_id(tx.chain_id)
+                        .map_or(1, |network| network.min_stake())
+                };
                 let liveness_suspended = state.liveness.is_suspended(&tx.from);
                 let validator = state.get_validator_mut(&tx.from).ok_or_else(|| {
                     BudlumError::validation(
@@ -734,9 +827,12 @@ impl Executor {
                 validator.bls_public_key = registration.bls_public_key.clone();
                 validator.pop_signature = registration.pop_signature.clone();
                 validator.pq_public_key = registration.pq_public_key.clone();
-                // Same jail and suspension rule as the stake paths: registering
-                // consensus keys does not lift a jail or a V-4 suspension early.
+                let self_bond = validator.stake.saturating_sub(delegated_stake);
+                // Same jail, suspension, and self-bond rule as the stake paths:
+                // registering consensus keys cannot lift a penalty or shield a
+                // sub-floor self-bond behind delegated stake.
                 validator.active = validator.stake >= min_stake
+                    && self_bond >= min_stake
                     && validator.is_consensus_ready()
                     && validator.verify_pop_is_valid(tx.chain_id)
                     && !validator.jailed
@@ -872,38 +968,15 @@ impl Executor {
                     .checked_sub(tx.amount)
                     .ok_or_else(|| BudlumError::validation("stake_underflow", "stake underflow"))?;
 
-                let is_full_seat = state
-                    .get_validator(&tx.from)
-                    .is_some_and(|validator| validator.filiz.is_some());
-                let unstake_floor = if is_full_seat {
-                    state.full_validator_stake_floor(tx.chain_id)
-                } else {
-                    state.validator_stake_floor(tx.chain_id)
-                };
                 if let Some(validator) = state.get_validator_mut(&tx.from) {
                     validator.stake = new_stake;
-                    if validator.stake == 0 || validator.stake < unstake_floor {
-                        validator.active = false;
-                    }
                 }
 
-                // Clamp snapshotted vote weight on open proposals to `min(snapshot, live_stake)`
-                // (or zero when the validator leaves the eligible set), matching delegation and
-                // redelegation exits so self-stake added after a vote and later unstaked cannot
-                // erase snapshotted weight it was never part of, while pre-vote exits trim the gap.
-                let live_eligible_stake = state
-                    .get_validator(&tx.from)
-                    .filter(|v| v.is_eligible(state.epoch_index))
-                    .map_or(0, |v| v.stake);
-                for proposal in &mut state.governance.proposals {
-                    if proposal.status == crate::core::governance::ProposalStatus::Active {
-                        let snapshot = proposal.vote_weight_of(&tx.from);
-                        proposal.reduce_vote_weight(
-                            &tx.from,
-                            snapshot.saturating_sub(snapshot.min(live_eligible_stake)),
-                        );
-                    }
-                }
+                // Enforce both aggregate and self-bond floors across Filiz and
+                // ValidatorClass::Full directory seats, clamp snapshotted vote
+                // weight on open proposals, and sync the reduced bond into the
+                // permissionless registry.
+                Self::enforce_validator_exit_floor(state, &tx.from, tx.chain_id);
 
                 // The unbonding window is a governance parameter
                 // (`RegistryParams::unbonding_epochs`, whitelisted in
@@ -921,14 +994,6 @@ impl Executor {
                         amount: tx.amount,
                         release_epoch: state.epoch_index.saturating_add(unbonding_epochs),
                     });
-
-                // Mirror the reduced stake into the permissionless registry.
-                // `Stake` calls this; `Unstake` did not, so the registry kept
-                // Showing the pre-unstake stake forever. `registry.is_active`
-                // Is what the liveness / invalid-vote slashing paths and the
-                // RPC member views consult, and `registry.root()` is hashed
-                // Into the state root, so the stale entry was consensus state.
-                state.sync_validator_registration_with_floor(&tx.from, unstake_floor);
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -6763,6 +6828,167 @@ mod tests {
             !after.active,
             "validator below governance-raised registry min_stake must be deactivated"
         );
+    }
+
+    #[test]
+    fn delegation_shield_and_exit_cannot_leave_underbonded_active_validator_on_live_networks() {
+        for network in [
+            crate::core::chain_config::Network::Testnet,
+            crate::core::chain_config::Network::Mainnet,
+        ] {
+            let chain_id = network.chain_id().value();
+            let floor = network.min_stake();
+
+            // Path A: confederate delegates `floor`, validator unstakes own self-bond
+            // down to 1 atom while aggregate stake stays above `floor`, then confederate
+            // undelegates `floor`. Neither step may leave an active consensus seat or
+            // duty-lane membership backed by sub-floor self-bond.
+            let mut state = AccountState::new();
+            let val = Address::from([0x81u8; 32]);
+            let peer = Address::from([0x82u8; 32]);
+            let confederate = Address::from([0x83u8; 32]);
+            state.add_balance(&val, 10_000);
+            state.add_balance(&confederate, floor.saturating_mul(3));
+            state.add_validator_with_floor(val, floor, floor);
+            state.add_validator_with_floor(peer, floor, floor);
+
+            let delegate = Transaction::new_with_chain_id(
+                confederate,
+                Address::zero(),
+                floor,
+                10,
+                0,
+                Vec::new(),
+                chain_id,
+                TransactionType::Delegate { validator: val },
+            );
+            Executor::apply_transaction_checked(&mut state, &delegate)
+                .expect("confederate delegation to full-floor validator succeeds");
+
+            let drain_self = Transaction::new_with_chain_id(
+                val,
+                Address::zero(),
+                floor - 1,
+                10,
+                0,
+                Vec::new(),
+                chain_id,
+                TransactionType::Unstake,
+            );
+            Executor::apply_transaction_checked(&mut state, &drain_self)
+                .expect("self-unstake executes");
+            let after_self_drain = state.get_validator(&val).expect("validator retained");
+            assert!(
+                !after_self_drain.active,
+                "validator with 1-atom self-bond below {network:?} floor must deactivate even when delegated stake shields aggregate stake"
+            );
+            assert!(
+                !state.duty_lane_signers_for_chain(chain_id).contains(&val),
+                "self-bond-drained validator must lose zero-fee duty-lane admission on {network:?}"
+            );
+
+            // A 1-atom Stake top-up must NOT reactivate the validator while its
+            // self-bond (2 atoms) remains below the live network floor even though
+            // aggregate stake (`floor + 2`) exceeds `floor`.
+            let dust_topup = Transaction::new_with_chain_id(
+                val,
+                Address::zero(),
+                1,
+                10,
+                1,
+                Vec::new(),
+                chain_id,
+                TransactionType::Stake,
+            );
+            Executor::apply_transaction_checked(&mut state, &dust_topup)
+                .expect("dust stake top-up executes");
+            assert!(
+                !state.get_validator(&val).expect("validator retained").active,
+                "1-atom stake top-up must not reactivate sub-floor self-bond behind delegation on {network:?}"
+            );
+
+            // Also verify direct Undelegate and Redelegate exits when a validator's
+            // aggregate stake drops below the network floor (e.g. after a governance
+            // floor increase or delegated exit).
+            let undelegate = Transaction::new_with_chain_id(
+                confederate,
+                Address::zero(),
+                floor,
+                10,
+                1,
+                Vec::new(),
+                chain_id,
+                TransactionType::Undelegate { validator: val },
+            );
+            Executor::apply_transaction_checked(&mut state, &undelegate)
+                .expect("confederate undelegation succeeds");
+            let after_undelegate = state.get_validator(&val).expect("validator retained");
+            assert_eq!(after_undelegate.stake, 2);
+            assert!(!after_undelegate.active);
+
+            // Path B: governance raises min_stake above `peer`'s self-bond while `peer`
+            // holds delegation; Undelegate and Redelegate dropping `peer` below the floor
+            // must immediately deactivate `peer` and zero its open governance vote weight.
+            let mut state_b = AccountState::new();
+            state_b.add_balance(&confederate, floor.saturating_mul(3));
+            state_b.add_validator_with_floor(val, floor, floor);
+            state_b.add_validator_with_floor(peer, floor.saturating_mul(2), floor);
+            let del_b = Transaction::new_with_chain_id(
+                confederate,
+                Address::zero(),
+                floor,
+                10,
+                0,
+                Vec::new(),
+                chain_id,
+                TransactionType::Delegate { validator: val },
+            );
+            Executor::apply_transaction_checked(&mut state_b, &del_b)
+                .expect("initial delegation succeeds");
+            let mut raised = *state_b.registry.params();
+            raised.min_stake = floor.saturating_add(500);
+            state_b.registry.set_params(raised);
+            let redel = Transaction::new_with_chain_id(
+                confederate,
+                Address::zero(),
+                floor,
+                10,
+                1,
+                Vec::new(),
+                chain_id,
+                TransactionType::Redelegate {
+                    from_validator: val,
+                    to_validator: peer,
+                },
+            );
+            Executor::apply_transaction_checked(&mut state_b, &redel)
+                .expect("redelegation to well-bonded peer succeeds");
+            let val_after_redel = state_b.get_validator(&val).expect("source retained");
+            assert!(
+                !val_after_redel.active,
+                "redelegation dropping source validator below floor on {network:?} must deactivate source"
+            );
+            assert!(
+                !state_b.duty_lane_signers_for_chain(chain_id).contains(&val),
+                "deactivated source validator must leave duty lane on {network:?}"
+            );
+
+            // A validator whose self-bond sits below the network floor must refuse fresh delegations.
+            let low_self_delegate = Transaction::new_with_chain_id(
+                confederate,
+                Address::zero(),
+                1_000,
+                10,
+                2,
+                Vec::new(),
+                chain_id,
+                TransactionType::Delegate { validator: val },
+            );
+            assert!(
+                Executor::apply_transaction_checked(&mut state_b, &low_self_delegate).is_err(),
+                "underbonded validator must refuse fresh delegation on {network:?}"
+            );
+        }
     }
 
     #[test]
