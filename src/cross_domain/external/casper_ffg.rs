@@ -109,7 +109,7 @@ impl PinnedFfgCommittee {
                 rule: "the pinned committee size is out of range".to_string(),
             });
         }
-        validators.sort_by(|a, b| a.pubkey.cmp(&b.pubkey));
+        validators.sort_by_key(|v| v.pubkey);
         for pair in validators.windows(2) {
             if pair[0].pubkey == pair[1].pubkey {
                 return Err(AdapterError::ConsensusRule {
