@@ -34,11 +34,21 @@ pub struct ShareRecord {
 pub const PLACED_ENTRY_BYTES: u64 = 36;
 /// Upper bound on retained placement entries per share (matches RFC 6330 ceiling + repair margin).
 pub const MAX_PLACED_ENTRIES: usize = 65_536;
+/// Upper bound on symbol payload size in bytes (matches RFC 6330 maximum symbol length).
+pub const MAX_SYMBOL_BYTES: usize = 65_536;
 
 /// Retained size in bytes of a symbol plus its placement vector.
 #[must_use]
 pub fn share_retained_bytes(symbol_len: usize, placed_len: usize) -> u64 {
-    (symbol_len as u64).saturating_add((placed_len as u64).saturating_mul(PLACED_ENTRY_BYTES))
+    let symbol_u64 = u64::try_from(symbol_len).unwrap_or(u64::MAX);
+    let placed_u64 = u64::try_from(placed_len).unwrap_or(u64::MAX);
+    symbol_u64.saturating_add(placed_u64.saturating_mul(PLACED_ENTRY_BYTES))
+}
+
+/// Saturating accumulation of per-share retained byte counts.
+#[must_use]
+fn sum_retained_bytes<I: Iterator<Item = u64>>(sizes: I) -> u64 {
+    sizes.fold(0u64, u64::saturating_add)
 }
 
 impl ShareRecord {
@@ -90,10 +100,10 @@ impl ShareStore {
         Self::default()
     }
 
-    /// Bytes currently stored.
+    /// Bytes currently stored, saturating at `u64::MAX` rather than wrapping or panicking.
     #[must_use]
     pub fn stored_bytes(&self) -> u64 {
-        self.shares.values().map(ShareRecord::size).sum()
+        sum_retained_bytes(self.shares.values().map(ShareRecord::size))
     }
 
     /// Number of shares.
@@ -120,6 +130,18 @@ impl ShareStore {
         assigned: AssignedShare,
         quota: u64,
     ) -> Result<ShareRecord, CoreError> {
+        if assigned.symbol.is_empty() {
+            return Err(CoreError::new(
+                "mobile_empty_symbol",
+                "a custody symbol must be at least one byte",
+            ));
+        }
+        if assigned.symbol.len() > MAX_SYMBOL_BYTES {
+            return Err(CoreError::new(
+                "mobile_symbol_too_large",
+                "a custody symbol exceeds the maximum symbol size bound",
+            ));
+        }
         if assigned.placed.len() > MAX_PLACED_ENTRIES {
             return Err(CoreError::new(
                 "mobile_placement_too_large",
@@ -289,5 +311,52 @@ mod tests {
         let stored = store.accept(assigned, 4_000).unwrap();
         assert_eq!(stored.size(), 1 + 100 * PLACED_ENTRY_BYTES);
         assert_eq!(store.stored_bytes(), 1 + 100 * PLACED_ENTRY_BYTES);
+    }
+
+    #[test]
+    fn mobile_stored_bytes_saturates_without_overflow() {
+        let mut store = ShareStore::new();
+        assert_eq!(
+            share_retained_bytes(usize::MAX, usize::MAX),
+            u64::MAX,
+            "share_retained_bytes must saturate at u64::MAX"
+        );
+        // Directly verify saturating summation across inputs whose exact sum overflows u64.
+        assert_eq!(
+            sum_retained_bytes([u64::MAX - 10, 25, u64::MAX].into_iter()),
+            u64::MAX
+        );
+        assert_eq!(sum_retained_bytes([120, 340, 40].into_iter()), 500);
+
+        // An empty symbol must be refused so it cannot masquerade as a 64-byte
+        // zero-padded symbol while accounting zero symbol bytes.
+        let empty = AssignedShare {
+            object: [5; 32],
+            segment: 0,
+            esi: 0,
+            position: 0,
+            placed: vec![(0, symbol_leaf(&[]))],
+            symbol: Vec::new(),
+        };
+        assert_eq!(
+            store.accept(empty, 4_096).err().map(|e| e.code),
+            Some("mobile_empty_symbol")
+        );
+
+        // A symbol above RFC 6330's 65_536-byte ceiling must be refused even
+        // when the quota itself is larger.
+        let oversized_bytes = vec![0xAB; MAX_SYMBOL_BYTES + 1];
+        let oversized = AssignedShare {
+            object: [6; 32],
+            segment: 0,
+            esi: 0,
+            position: 0,
+            placed: vec![(0, symbol_leaf(&oversized_bytes))],
+            symbol: oversized_bytes,
+        };
+        assert_eq!(
+            store.accept(oversized, u64::MAX).err().map(|e| e.code),
+            Some("mobile_symbol_too_large")
+        );
     }
 }
