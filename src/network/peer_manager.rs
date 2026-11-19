@@ -56,6 +56,10 @@ pub struct PeerScore {
     pub invalid_txs: u32,
     pub valid_contributions: u32,
     pub last_seen: Option<Instant>,
+    /// Timestamp of the latest verified protocol contribution accepted from
+    /// this peer. Unlike `last_seen`, penalty and rate-limit paths never
+    /// advance it, so non-banning faults cannot extend an idle inbound slot.
+    pub last_valid_at: Option<Instant>,
     pub rate_tokens: f64,
     pub rate_last_refill: Instant,
     /// Last refill of the vote and blob buckets. Separate from
@@ -84,6 +88,7 @@ impl Default for PeerScore {
             invalid_txs: 0,
             valid_contributions: 0,
             last_seen: None,
+            last_valid_at: None,
             rate_tokens: MAX_MSG_BURST,
             rate_last_refill: Instant::now(),
             aux_last_refill: Instant::now(),
@@ -767,9 +772,13 @@ impl PeerManager {
             return false;
         };
         score.refill_tokens();
-        let cost = (objects.max(1) as f64 / 16.0).clamp(1.0, 10.0);
-        if score.agg_frame_tokens >= cost {
-            score.agg_frame_tokens -= cost;
+        let capped_units = u32::try_from(objects.max(1)).unwrap_or(u32::MAX);
+        let cost = (f64::from(capped_units) / 16.0).max(1.0);
+        // Admit when accrued tokens cover `cost`, or allow a single large frame
+        // when the peer holds at least its fresh 10-token burst while recording
+        // the full unclamped cooldown debt (bounded to 128s at 2 tokens/s).
+        if score.agg_frame_tokens >= cost || score.agg_frame_tokens >= 10.0 {
+            score.agg_frame_tokens = (score.agg_frame_tokens - cost).max(-256.0);
             true
         } else {
             let floor = if authored_by_peer {
@@ -840,9 +849,11 @@ impl PeerManager {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
+        let now = Instant::now();
         score.valid_contributions += 1;
         score.score = (score.score + GOOD_BEHAVIOR_REWARD).min(MAX_SCORE);
-        score.last_seen = Some(Instant::now());
+        score.last_seen = Some(now);
+        score.last_valid_at = Some(now);
     }
     /// Reset consecutive unanswered-sync strikes only after the peer actually
     /// delivers valid sync data that advances or feeds our chain.
@@ -850,12 +861,14 @@ impl PeerManager {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
+        let now = Instant::now();
         score.valid_contributions += 1;
         score.unanswered_sync_strikes = 0;
         score.sync_rest_until = None;
         score.sync_rests = 0;
         score.score = (score.score + GOOD_BEHAVIOR_REWARD).min(MAX_SCORE);
-        score.last_seen = Some(Instant::now());
+        score.last_seen = Some(now);
+        score.last_valid_at = Some(now);
     }
     pub fn ban_peer(&mut self, peer_id: &PeerId) {
         if self.protected_peers.contains(peer_id) {
@@ -2397,6 +2410,34 @@ mod tests {
         assert!(pm.charge_agg_frame(&flooder, 160));
         // A second immediate large frame exceeds the refilled budget and fails.
         assert!(!pm.charge_agg_frame(&flooder, 160));
+    }
+
+    #[test]
+    fn agg_frame_budget_does_not_discount_frames_above_160_verification_units() {
+        let mut pm = PeerManager::new();
+        let flooder = test_peer_id();
+        // 640 verification units (e.g. 320 claims + 320 segment attestations)
+        // represent 40 tokens of ML-DSA-87 work at 16 units/token (20s at 2/s).
+        assert!(pm.charge_agg_frame(&flooder, 640));
+        // Simulate 6 seconds of refill (+12 tokens). With a 10-token clamp this
+        // would already admit another 160-unit frame; without clamping, 30 tokens
+        // of debt dropped to -18, so another frame must still be rejected.
+        if let Some(score) = pm.peers.get_mut(&flooder) {
+            score.aux_last_refill = Instant::now()
+                .checked_sub(Duration::from_secs(6))
+                .expect("6s back");
+        }
+        assert!(
+            !pm.charge_agg_frame(&flooder, 160),
+            "oversized frame must pay full proportional verification cooldown"
+        );
+        // After 25 seconds (+50 tokens from -30 -> capped at 20), budget recovers.
+        if let Some(score) = pm.peers.get_mut(&flooder) {
+            score.aux_last_refill = Instant::now()
+                .checked_sub(Duration::from_secs(25))
+                .expect("25s back");
+        }
+        assert!(pm.charge_agg_frame(&flooder, 160));
     }
 
     #[test]

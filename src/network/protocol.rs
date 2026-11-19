@@ -214,14 +214,20 @@ impl NetworkMessage {
         Self::try_from(proto_msg)
     }
 
-    /// Cheap pre-decode wire check: returns `true` iff `bytes` carries a
-    /// top-level `Handshake` (tag 1) or `HandshakeAck` (tag 2) payload and no
-    /// other payload field (`1..=63`). Used before `from_bytes_validated` so
-    /// unhandshaked peers cannot force full protobuf decode, canonical
-    /// re-encode, or Debug formatting of large payloads such as `AggFrame`.
+    /// Maximum wire length accepted by [`Self::wire_is_handshake`]. A genuine
+    /// handshake carries two varint versions, chain id, best height, a 64-byte
+    /// hex validator-set hash, and a short list of signature scheme names.
+    const MAX_HANDSHAKE_WIRE_BYTES: usize = 16 * 1024;
+
+    /// Cheap pre-decode wire check: returns `true` iff `bytes` fits within
+    /// `MAX_HANDSHAKE_WIRE_BYTES` and carries a single top-level `Handshake`
+    /// (tag 1) or `HandshakeAck` (tag 2) field with no other top-level fields
+    /// top-level fields (including unknown tags). Used before
+    /// `from_bytes_validated` so unhandshaked peers cannot force full protobuf
+    /// decode, canonical re-encode, or allocation of large payloads.
     #[must_use]
     pub fn wire_is_handshake(mut bytes: &[u8]) -> bool {
-        if bytes.is_empty() || bytes.len() > MAX_MESSAGE_SIZE {
+        if bytes.is_empty() || bytes.len() > Self::MAX_HANDSHAKE_WIRE_BYTES {
             return false;
         }
         let mut saw_handshake = false;
@@ -234,7 +240,7 @@ impl NetworkMessage {
                     return false;
                 }
                 saw_handshake = true;
-            } else if (1..=63).contains(&tag) {
+            } else {
                 return false;
             }
             if skip_wire_field(&mut bytes, wire_type).is_err() {
@@ -242,6 +248,31 @@ impl NetworkMessage {
             }
         }
         saw_handshake
+    }
+
+    /// Count the pre-dispatch native verification units inside a raw
+    /// `AggFrame` header: `claim_count + segment_count`. Each claim and each
+    /// segment attestation triggers signature verification on the aggregation
+    /// actor. Returns `None` when the 16-byte frame header is truncated or
+    /// violates wire bounds (`segment_count > claim_count` or exceeds
+    /// `WIRE_FRAME_LIMITS`).
+    #[must_use]
+    pub fn agg_frame_verification_units(frame: &[u8]) -> Option<usize> {
+        use crate::aggregation::chain::WIRE_FRAME_LIMITS;
+        if frame.len() < 16 {
+            return None;
+        }
+        let claims_raw = <[u8; 4]>::try_from(frame.get(..4)?).ok()?;
+        let segments_raw = <[u8; 4]>::try_from(frame.get(4..8)?).ok()?;
+        let claims = usize::try_from(u32::from_be_bytes(claims_raw)).ok()?;
+        let segments = usize::try_from(u32::from_be_bytes(segments_raw)).ok()?;
+        if claims > WIRE_FRAME_LIMITS.max_claims
+            || segments > WIRE_FRAME_LIMITS.max_claims
+            || segments > claims
+        {
+            return None;
+        }
+        Some(claims.saturating_add(segments))
     }
 
     /// Performs the requested operation.
@@ -1380,6 +1411,75 @@ mod tests {
         assert!(!NetworkMessage::wire_is_handshake(&frame));
         assert!(!NetworkMessage::wire_is_handshake(&[]));
         assert!(!NetworkMessage::wire_is_handshake(&[0xff, 0xff]));
+    }
+
+    #[test]
+    fn wire_is_handshake_rejects_unknown_high_tag_padding_and_oversized_frames() {
+        let mut smuggled = NetworkMessage::Handshake {
+            version_major: 1,
+            version_minor: 0,
+            chain_id: 45261,
+            best_height: 0,
+            validator_set_hash: String::new(),
+            supported_schemes: vec![],
+        }
+        .to_bytes();
+        // Append an unknown length-delimited field with tag 64 (> 63) carrying 20 KiB.
+        prost::encoding::encode_key(
+            64,
+            prost::encoding::WireType::LengthDelimited,
+            &mut smuggled,
+        );
+        let padding = vec![0xAB_u8; 20 * 1024];
+        prost::encoding::encode_varint(padding.len() as u64, &mut smuggled);
+        smuggled.extend_from_slice(&padding);
+        assert!(
+            !NetworkMessage::wire_is_handshake(&smuggled),
+            "unknown trailing tag must not pass pre-handshake gate"
+        );
+
+        let oversized_hs = NetworkMessage::Handshake {
+            version_major: 1,
+            version_minor: 0,
+            chain_id: 45261,
+            best_height: 0,
+            validator_set_hash: "a".repeat(20 * 1024),
+            supported_schemes: vec![],
+        }
+        .to_bytes();
+        assert!(
+            !NetworkMessage::wire_is_handshake(&oversized_hs),
+            "oversized handshake must not pass pre-handshake gate"
+        );
+    }
+
+    #[test]
+    fn agg_frame_verification_units_counts_claims_and_segments_and_rejects_malformed() {
+        assert_eq!(NetworkMessage::agg_frame_verification_units(&[]), None);
+        assert_eq!(
+            NetworkMessage::agg_frame_verification_units(&[0u8; 15]),
+            None
+        );
+
+        let mut valid = Vec::with_capacity(16);
+        valid.extend_from_slice(&120u32.to_be_bytes());
+        valid.extend_from_slice(&80u32.to_be_bytes());
+        valid.extend_from_slice(&1u32.to_be_bytes());
+        valid.extend_from_slice(&0u32.to_be_bytes());
+        assert_eq!(
+            NetworkMessage::agg_frame_verification_units(&valid),
+            Some(200)
+        );
+
+        let mut inverted = Vec::with_capacity(16);
+        inverted.extend_from_slice(&4u32.to_be_bytes());
+        inverted.extend_from_slice(&5u32.to_be_bytes());
+        inverted.extend_from_slice(&1u32.to_be_bytes());
+        inverted.extend_from_slice(&0u32.to_be_bytes());
+        assert_eq!(
+            NetworkMessage::agg_frame_verification_units(&inverted),
+            None
+        );
     }
 
     #[test]
