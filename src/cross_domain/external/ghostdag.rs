@@ -45,7 +45,7 @@
 //!    `attested_event_root = None` because UTXO blockDAG headers commit no
 //!    cross-domain event tree.
 //!
-//! WIRING: unwired - implements [`ExternalFinalityAdapter`] for
+//! WIRING: implements [`ExternalFinalityAdapter`] for
 //! [`super::ExternalDomainRegistry`], verified by
 //! [`super::selftest::admit_observed`]; `AdapterSpec` variant joins
 //! `intake.rs` in the follow-up intake merge.
