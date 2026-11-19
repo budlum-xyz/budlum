@@ -78,12 +78,14 @@
 //! with their units attached. The judgement is the reader's, and the numbers it
 //! needs are in [`profile`].
 
+pub mod babylon_eots;
 pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
 pub mod external_tx;
 pub mod intake;
 pub mod intake_quorum;
+pub mod ouroboros_mithril;
 pub mod phase_a_dual;
 pub mod profile;
 pub mod prover;
@@ -94,6 +96,12 @@ pub mod spec;
 pub mod versioning;
 pub mod zkvm_proof;
 
+pub use babylon_eots::{
+    epoch_vote_message, BabylonEotsAdapter, BtcCheckpoint, BtcWeakSubjectivityAnchor,
+    EotsEquivocationProof, EotsEvidence, EotsPublicKey, EotsVote, PostQuantumHalf,
+    DEFAULT_REQUIRED_BTC_CONFIRMATIONS, EVIDENCE_VERSION as EOTS_EVIDENCE_VERSION,
+    SCHNORR_PUBLIC_KEY_LEN, SCHNORR_SIGNATURE_LEN,
+};
 pub use domain_bridge::{
     decode_external_evidence, encode_external_evidence, ExternalDomainFinalityBridge,
     EXTERNAL_DOMAIN_FINALITY_ADAPTER,
@@ -118,6 +126,11 @@ pub use intake::{AdapterSpec, IntakeEntry, IntakeError, IntakeState, Registratio
 pub use intake_quorum::{
     QuorumRound, QuorumRounds, RoundEntry, RoundError, RoundKey, RoundProgress, RoundState,
     ROUND_RETENTION_BLOCKS,
+};
+pub use ouroboros_mithril::{
+    mithril_certificate_message, mithril_threshold, praos_vote_message, proof_of_equivocation,
+    EpochSigner, EpochStake, MithrilEvidence, MithrilSignature, OuroborosMithrilAdapter,
+    PraosEquivocationProof, PraosSlotProof, EVIDENCE_VERSION as PRAOS_EVIDENCE_VERSION,
 };
 pub use profile::{profile_of, DomainProfile, DomainRecord, DomainState, StateEvent, BOND_UNIT};
 pub use prover::{
