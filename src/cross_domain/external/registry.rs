@@ -1607,27 +1607,13 @@ mod tests {
         let root_b = [0xBB; 32];
 
         // First slash succeeds.
-        let result = registry.slash_symbiotic_equivocation(
-            &key,
-            prover,
-            100,
-            root_a,
-            root_b,
-            50,
-            challenger,
-        );
+        let result = registry
+            .slash_symbiotic_equivocation(&key, prover, 100, root_a, root_b, 50, challenger);
         assert!(result.is_ok(), "first equivocation slash must succeed");
 
         // Replay of the same equivocation is refused (already slashed).
-        let replay = registry.slash_symbiotic_equivocation(
-            &key,
-            prover,
-            100,
-            root_a,
-            root_b,
-            50,
-            challenger,
-        );
+        let replay = registry
+            .slash_symbiotic_equivocation(&key, prover, 100, root_a, root_b, 50, challenger);
         assert!(
             matches!(replay, Err(RegistryError::AlreadySlashed { .. })),
             "replayed equivocation slash must be refused: {replay:?}"

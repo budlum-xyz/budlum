@@ -393,7 +393,12 @@ mod tests {
             resp.error.as_ref().map(|e| e.code),
             Some(JSONRPC_INVALID_PARAMS)
         );
-        assert!(resp.error.as_ref().unwrap().message.contains("exceeds limit"));
+        assert!(resp
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("exceeds limit"));
     }
 
     #[test]

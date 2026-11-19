@@ -167,16 +167,13 @@ pub fn handle_starknet_rpc(
                     Value::String(s) => {
                         s == "latest" || s == "pending" || parse_felt_hex(s).is_some()
                     }
-                    Value::Object(obj) => obj.contains_key("block_number")
-                        || obj.contains_key("block_hash"),
+                    Value::Object(obj) => {
+                        obj.contains_key("block_number") || obj.contains_key("block_hash")
+                    }
                     _ => false,
                 };
                 if !valid {
-                    return StarknetRpcResponse::err(
-                        req.id,
-                        -32602,
-                        "invalid block_id",
-                    );
+                    return StarknetRpcResponse::err(req.id, -32602, "invalid block_id");
                 }
             }
             let Some(addr_str) = req.params.get(1).and_then(Value::as_str) else {
@@ -302,9 +299,7 @@ mod tests {
             },
         );
         assert!(resp.error.is_some());
-        assert!(resp
-            .error
-            .unwrap()["message"]
+        assert!(resp.error.unwrap()["message"]
             .as_str()
             .unwrap()
             .contains("block_id"));
