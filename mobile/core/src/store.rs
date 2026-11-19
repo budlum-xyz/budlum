@@ -130,6 +130,12 @@ impl ShareStore {
         assigned: AssignedShare,
         quota: u64,
     ) -> Result<ShareRecord, CoreError> {
+        if assigned.object == [0u8; 32] {
+            return Err(CoreError::new(
+                "mobile_zero_object",
+                "a custody share cannot reference the all-zero object key",
+            ));
+        }
         if assigned.symbol.is_empty() {
             return Err(CoreError::new(
                 "mobile_empty_symbol",
@@ -186,6 +192,32 @@ impl ShareStore {
                 "mobile_share_already_stored",
                 "this object's segment already has a symbol at that position or ESI",
             ));
+        }
+        // Two shares of the same (object, segment) under overlapping ESI ranges
+        // belong to the same symbol root and must agree on every placed leaf;
+        // repair placements cover strictly higher, disjoint ESI ranges.
+        if let (Some(&(new_first, _)), Some(&(new_last, _))) =
+            (assigned.placed.first(), assigned.placed.last())
+        {
+            let conflicts = self.shares.values().any(|share| {
+                if share.object != assigned.object || share.segment != assigned.segment {
+                    return false;
+                }
+                let Some(&(old_first, _)) = share.placed.first() else {
+                    return false;
+                };
+                let Some(&(old_last, _)) = share.placed.last() else {
+                    return false;
+                };
+                let overlaps = old_first <= new_last && new_first <= old_last;
+                overlaps && share.placed != assigned.placed
+            });
+            if conflicts {
+                return Err(CoreError::new(
+                    "mobile_share_placement_conflict",
+                    "conflicting placement root for overlapping ESI range in segment",
+                ));
+            }
         }
         let id = self.next_id;
         let next_id = id.checked_add(1).ok_or_else(|| {
@@ -358,5 +390,71 @@ mod tests {
             store.accept(oversized, u64::MAX).err().map(|e| e.code),
             Some("mobile_symbol_too_large")
         );
+
+        // All-zero object key must be rejected.
+        let zero_obj = AssignedShare {
+            object: [0; 32],
+            segment: 0,
+            esi: 0,
+            position: 0,
+            placed: vec![(0, symbol_leaf(b"ok"))],
+            symbol: b"ok".to_vec(),
+        };
+        assert_eq!(
+            store.accept(zero_obj, 4_096).err().map(|e| e.code),
+            Some("mobile_zero_object")
+        );
+
+        // Overlapping ESI range with mutated placement root must be rejected, while
+        // a disjoint higher-ESI repair root on the same (object, segment) is accepted.
+        let s0 = b"sym0".to_vec();
+        let s1 = b"sym1".to_vec();
+        let honest_placed = vec![(0, symbol_leaf(&s0)), (1, symbol_leaf(&s1))];
+        store
+            .accept(
+                AssignedShare {
+                    object: [9; 32],
+                    segment: 0,
+                    esi: 0,
+                    position: 0,
+                    placed: honest_placed,
+                    symbol: s0,
+                },
+                4_096,
+            )
+            .unwrap();
+        let conflicting_placed = vec![(0, [0xEE; 32]), (1, symbol_leaf(&s1))];
+        assert_eq!(
+            store
+                .accept(
+                    AssignedShare {
+                        object: [9; 32],
+                        segment: 0,
+                        esi: 1,
+                        position: 1,
+                        placed: conflicting_placed,
+                        symbol: s1,
+                    },
+                    4_096,
+                )
+                .err()
+                .map(|e| e.code),
+            Some("mobile_share_placement_conflict")
+        );
+        let rep0 = b"rep0".to_vec();
+        let rep1 = b"rep1".to_vec();
+        store
+            .accept(
+                AssignedShare {
+                    object: [9; 32],
+                    segment: 0,
+                    esi: 11,
+                    position: 1,
+                    placed: vec![(10, symbol_leaf(&rep0)), (11, symbol_leaf(&rep1))],
+                    symbol: rep1,
+                },
+                4_096,
+            )
+            .unwrap();
     }
 }

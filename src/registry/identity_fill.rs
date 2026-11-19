@@ -618,16 +618,25 @@ fn empty_receipt_error() -> FillError {
     }
 }
 
-/// Confirm that every disclosed `value_digest` in `entries` matches at least
-/// one non-empty UTF-8 substring (up to [`MAX_DISCLOSED_VALUE_BYTES`]) of
-/// `document`. Without this check a subject could sign a document containing
-/// arbitrary false claims alongside a valid opening of an unrelated field value.
+/// Confirm that every disclosed `value_digest` in `entries` matches its own
+/// distinct, non-overlapping, non-empty UTF-8 substring (up to
+/// [`MAX_DISCLOSED_VALUE_BYTES`]) of `document`.
+///
+/// Tracking exact multiplicity and non-overlapping `[start, end)` intervals
+/// prevents both fabricating unsupported claims and recycling a single rendered
+/// occurrence (or overlapping substring such as `"aa"` inside `"aaa"`) to back
+/// multiple slots claiming the same value.
 fn first_unsupported_entry_slot(document: &str, entries: &[ReceiptEntry]) -> Option<String> {
-    let mut pending: std::collections::BTreeSet<[u8; 32]> =
-        entries.iter().map(|entry| entry.value_digest).collect();
-    if pending.is_empty() {
+    let mut needed: std::collections::BTreeMap<[u8; 32], usize> = std::collections::BTreeMap::new();
+    for entry in entries {
+        let count = needed.entry(entry.value_digest).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+    if needed.is_empty() {
         return None;
     }
+    let mut last_end: std::collections::BTreeMap<[u8; 32], usize> =
+        std::collections::BTreeMap::new();
     let boundaries: Vec<usize> = document
         .char_indices()
         .map(|(idx, _)| idx)
@@ -641,16 +650,38 @@ fn first_unsupported_entry_slot(document: &str, entries: &[ReceiptEntry]) -> Opt
             }
             if let Some(slice) = document.get(start..end) {
                 let digest = value_digest_of(slice);
-                if pending.remove(&digest) && pending.is_empty() {
-                    break 'outer;
+                if let Some(rem) = needed.get_mut(&digest) {
+                    let prev_end = last_end.get(&digest).copied().unwrap_or(0);
+                    if start >= prev_end {
+                        last_end.insert(digest, end);
+                        *rem = rem.saturating_sub(1);
+                        if *rem == 0 {
+                            needed.remove(&digest);
+                            if needed.is_empty() {
+                                break 'outer;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-    entries
-        .iter()
-        .find(|entry| pending.contains(&entry.value_digest))
-        .map(|entry| entry.slot.clone())
+    let mut satisfied: std::collections::BTreeMap<[u8; 32], usize> =
+        std::collections::BTreeMap::new();
+    for entry in entries {
+        let total_for_digest = entries
+            .iter()
+            .filter(|e| e.value_digest == entry.value_digest)
+            .count();
+        let missing = needed.get(&entry.value_digest).copied().unwrap_or(0);
+        let ok_count = total_for_digest.saturating_sub(missing);
+        let seen = satisfied.entry(entry.value_digest).or_insert(0);
+        if *seen >= ok_count {
+            return Some(entry.slot.clone());
+        }
+        *seen = seen.saturating_add(1);
+    }
+    None
 }
 
 /// Re-verify a receipt the way the receiving side must: bound to this
@@ -1341,6 +1372,128 @@ mod tests {
         assert!(matches!(
             check_receipt_at(&registry, &forged, &requester, false_doc, 5),
             Err(FillError::DisclosureMismatch { ref slot }) if slot == "age"
+        ));
+    }
+
+    #[test]
+    fn duplicate_disclosed_values_require_distinct_non_overlapping_document_occurrences() {
+        use crate::registry::{
+            credential_id, field_commitment, CredentialCommitment, FieldCommitment, IdentityOp,
+            IdentityRecord, MethodKind, VerificationMethod,
+        };
+        let mut registry = IdentityRegistry::new();
+        let subject_key = crate::crypto::primitives::KeyPair::from_seed(&[61u8; 32]).unwrap();
+        let subject = Address::from(subject_key.public_key_bytes());
+        let issuer = Address([62u8; 32]);
+        let requester = Address([63u8; 32]);
+        let poa = crate::domain::ConsensusKind::PoA;
+        for (addr, mk) in [(subject, [11u8; 32]), (issuer, [12u8; 32])] {
+            registry
+                .apply(
+                    &poa,
+                    IdentityOp::Register {
+                        record: IdentityRecord::new(
+                            addr,
+                            vec![VerificationMethod::new(mk, MethodKind::MlDsa87)],
+                            vec![],
+                            0,
+                        )
+                        .unwrap(),
+                    },
+                    0,
+                )
+                .unwrap();
+        }
+        let salt1 = [0x11u8; 32];
+        let salt2 = [0x22u8; 32];
+        let credential = CredentialCommitment {
+            issuer,
+            subject,
+            schema: "kyc".to_string(),
+            fields: vec![
+                FieldCommitment {
+                    name: "adult".to_string(),
+                    commitment: field_commitment("kyc", "adult", &salt1, &value_digest_of("aa")),
+                },
+                FieldCommitment {
+                    name: "resident".to_string(),
+                    commitment: field_commitment("kyc", "resident", &salt2, &value_digest_of("aa")),
+                },
+            ],
+            issued_at: 0,
+            expires_at: Some(20),
+        };
+        let cid = credential_id(&credential);
+        registry
+            .apply(
+                &poa,
+                IdentityOp::Issue {
+                    credential: credential.clone(),
+                },
+                0,
+            )
+            .unwrap();
+        let (two_doc, mut valid_receipt) = build_presentation(
+            &registry,
+            &requester,
+            &subject,
+            "adult: {{adult}}, resident: {{resident}}",
+            &[
+                SlotDisclosure {
+                    slot: "adult".to_string(),
+                    credential_id: cid,
+                    field: "adult".to_string(),
+                    value: "aa".to_string(),
+                    salt: salt1,
+                },
+                SlotDisclosure {
+                    slot: "resident".to_string(),
+                    credential_id: cid,
+                    field: "resident".to_string(),
+                    value: "aa".to_string(),
+                    salt: salt2,
+                },
+            ],
+            5,
+        )
+        .unwrap();
+        let entries = valid_receipt.entries.clone();
+        valid_receipt.sign(&subject_key);
+        // Two genuinely disjoint occurrences of "aa" succeed cleanly.
+        check_receipt_at(&registry, &valid_receipt, &requester, &two_doc, 5).unwrap();
+
+        // Only one occurrence of "aa" (paired with a false claim on "resident") fails.
+        let single_doc = "adult: aa, resident: no";
+        let mut single_receipt = PresentationReceipt {
+            requester,
+            subject,
+            document_digest: document_digest_of(single_doc),
+            epoch: 5,
+            entries: entries.clone(),
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        single_receipt.sign(&subject_key);
+        assert!(matches!(
+            check_receipt_at(&registry, &single_receipt, &requester, single_doc, 5),
+            Err(FillError::DisclosureMismatch { ref slot }) if slot == "resident"
+        ));
+
+        // Overlapping "aa" inside "aaa" counts as only one occurrence, not two.
+        let overlap_doc = "code: aaa";
+        let mut overlap_receipt = PresentationReceipt {
+            requester,
+            subject,
+            document_digest: document_digest_of(overlap_doc),
+            epoch: 5,
+            entries,
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        overlap_receipt.sign(&subject_key);
+        assert!(matches!(
+            check_receipt_at(&registry, &overlap_receipt, &requester, overlap_doc, 5),
+            Err(FillError::DisclosureMismatch { ref slot }) if slot == "resident"
         ));
     }
 }
