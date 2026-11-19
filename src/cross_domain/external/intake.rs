@@ -382,6 +382,10 @@ pub struct IntakeState {
 /// a key: `"mainnet"` denotes an Ethereum sync committee in one map and a
 /// Bitcoin checkpoint in another, so every lookup and every vote names the
 /// family too.
+///
+/// WIRING: unwired - the intake door that dispatches a vote by family lands
+/// with the relayer slice; the enum is named here because the per-family maps
+/// in `IntakeState` are keyed by it and their shape has to be fixed first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum AnchorFamily {
     Ethereum,
@@ -652,6 +656,10 @@ impl IntakeState {
     }
 
     /// The anchor installed for `family` on `network`, if any.
+    ///
+    /// WIRING: unwired - read by the intake door that verifies an external
+    /// finality proof once the relayer slice lands; the accessor is defined
+    /// beside `pinned_anchor_digest` so both readers share one lookup.
     #[must_use]
     pub fn pinned_anchor(
         &self,

@@ -17,6 +17,9 @@
 //! perform the last three (and the first and the fourth) outside a block
 //! refuse and name these doors.
 
+#[cfg(test)]
+use crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND;
+
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
@@ -27,7 +30,6 @@ use crate::domain::storage_deal::{
     ChallengeOutcome, DealStatus, OperatorClass, RetrievalChallengeRequest, StorageEconomicsParams,
     StorageError, StorageReallocationTicket, StorageRegistry,
 };
-use crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND;
 use crate::domain::Hash32;
 use crate::storage::{
     ConfidentialBodyCommit, ContentId, ContentManifest, GrantAuthorization, GrantIssueTerms,

@@ -459,7 +459,6 @@ bud/src/bud_format_ratioconsensus.rs	const	DOMAIN
 bud/src/bud_format_ratioconsensus.rs	const	RATIO_CONS_MAGIC
 bud/src/bud_format_ratioconsensus.rs	const	RATIO_CONS_VERSION
 bud/src/bud_format_ratioconsensus.rs	fn	candidate_pool
-bud/src/bud_format_ratioconsensus.rs	fn	consensus_hash
 bud/src/bud_format_ratioconsensus.rs	fn	holds_ceiling
 bud/src/bud_format_ratioconsensus.rs	fn	weighted_score
 bud/src/bud_format_ratioconsensus.rs	struct	RatioCandidateAgent
@@ -1346,7 +1345,6 @@ src/domain/fork_choice.rs	struct	DomainForkChoice
 src/domain/fork_choice.rs	struct	ForkCandidate
 src/domain/fork_choice.rs	struct	ResolvedHead
 src/domain/fork_choice.rs	trait	ConsensusDomainForkChoice
-src/domain/plugin.rs	struct	DomainContext
 src/domain/plugin.rs	struct	ZkDomainPlugin
 src/domain/plugin_registry.rs	fn	domain_ids
 src/domain/plugin_registry.rs	struct	PluginReplacement

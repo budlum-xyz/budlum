@@ -95,7 +95,16 @@ pub struct ComplianceAuditEvent {
     pub admin: Address,
 }
 
+/// Caps on the compliance log, per domain and globally.
+///
+/// WIRING: unwired - the append path that enforces them is the compliance
+/// writer, which still takes the unbounded insert until the freeze/unfreeze
+/// admission slice lands. Both numbers are fixed here first so the writer and
+/// its snapshot size limit agree.
 pub const MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN: usize = 4_096;
+/// WIRING: unwired - the global cap is checked by the same compliance writer
+/// that will enforce the per-domain one; both are defined here first so the
+/// writer and its snapshot size limit agree.
 pub const MAX_POA_COMPLIANCE_ENTRIES_GLOBAL: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -28,6 +28,10 @@ pub const GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS: u64 = 5;
 /// The longest external network name an anchor vote may install.
 ///
 /// The name is a key in a consensus map, so it is bounded at proposal time.
+///
+/// WIRING: unwired - the anchor-vote proposal path that enforces it lands with
+/// the governance intake slice; the bound is defined here first so the vote type
+/// and its admission check cannot drift apart.
 pub const MAX_PINNED_NETWORK_BYTES: usize = 64;
 
 /// A zero activation delay is not a timelock.

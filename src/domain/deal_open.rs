@@ -69,7 +69,6 @@ pub fn open_deal_escrowed(
     domain_params: &StorageDomainParams,
     payer_reserve: u64,
 ) -> Result<u64, String> {
-    let min_operator_bond = domain_params.min_operator_bond;
     let operator = terms.operator;
     let manifest = terms.manifest;
     let shard_id = terms.shard_id;
@@ -153,7 +152,6 @@ pub fn accept_reallocation_escrowed(
     domain_params: &StorageDomainParams,
     payer_reserve: u64,
 ) -> Result<u64, String> {
-    let min_operator_bond = domain_params.min_operator_bond;
     let ticket_id = terms.ticket_id;
     let operator = terms.replacement_operator;
 
@@ -403,16 +401,6 @@ fn check_funds(
         }
     }
     Ok(Escrow { fee, bond })
-}
-
-/// The registry reads only `min_operator_bond` from the domain params when it
-/// opens a deal, so the defaults for every other field are inert here.
-fn registry_params(min_operator_bond: u64) -> StorageDomainParams {
-    StorageDomainParams {
-        min_operator_bond,
-        require_merkle_proof: false,
-        ..StorageDomainParams::default()
-    }
 }
 
 /// Move the fee and the bond out of the balances. The checks before the

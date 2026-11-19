@@ -1,5 +1,6 @@
 pub mod blockchain;
 pub mod chain_actor;
+pub mod domain_plugin_door;
 pub mod fee_market;
 pub mod finality;
 pub mod genesis;
