@@ -41,6 +41,10 @@ pub fn grant_revoke_digest(grant_tag: &[u8; 32]) -> [u8; 32] {
 }
 
 /// Seal a grant key package through the canonical B.U.D. 3.0 key-package codec.
+///
+/// # Errors
+///
+/// Returns [`GrantBud3Error::InvalidKeyPackage`] if HPKE sealing fails.
 pub fn seal_grant_key_package(
     recipient_hpke_pk: &[u8],
     grant_tag: &[u8; 32],
@@ -53,6 +57,10 @@ pub fn seal_grant_key_package(
 
 /// Open a grant key package through the canonical B.U.D. 3.0 key-package codec.
 /// Convenience: exposed for B.U.D. 3.0 client grant key-package opener.
+///
+/// # Errors
+///
+/// Returns [`GrantBud3Error::InvalidKeyPackage`] if HPKE opening fails.
 pub fn open_grant_key_package(
     recipient_kp: &crate::crypto::hpke::HpkeKeyPair,
     grant_tag: &[u8; 32],

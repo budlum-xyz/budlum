@@ -8,10 +8,9 @@
 //! the feature after launch (M7). This module delivers all three.
 //!
 //! Directive 6.16 and 1.5: a live segment is a T-Expansion feature behind an
-//! activation height. The testnet gateway activates it at height zero and a
-//! gateway with no activation height refuses every bit1 object. Both verdicts
-//! are proved by `live_stream_is_open_on_testnet`, and the refusal is checked
-//! at the object door, not in a comment.
+//! activation height. The public-testnet gateway has no launch activation and
+//! refuses every bit1 object. `live_stream_is_closed_on_testnet` proves the
+//! refusal at the object door rather than in a comment.
 //!
 //! Supplies [`LiveGateway`] and
 //! [`BroadcastDriver`], but the current content gateway and block executor do
@@ -91,7 +90,7 @@ impl LiveGateway {
         }
     }
 
-    /// The testnet gateway: bit1 objects are active from genesis (`height = 0`).
+    /// The public-testnet launch gateway: bit1 objects are closed.
     #[must_use]
     pub fn testnet() -> Self {
         Self::for_chain(Network::Testnet.chain_id(), ACTIVATION)
@@ -440,15 +439,24 @@ mod tests {
     }
 
     #[test]
-    fn live_stream_is_open_on_testnet() {
+    fn live_stream_is_closed_on_testnet() {
         let gateway = LiveGateway::testnet();
         let segments = two_segments();
-        assert_eq!(gateway.admit_object(&segments[0].object, 1), Ok(()));
+        assert_eq!(
+            gateway.admit_object(&segments[0].object, 1),
+            Err(LiveGatewayRefusal::ClosedOnTestnet {
+                chain_id: Network::Testnet.chain_id().value(),
+                height: 1,
+            })
+        );
         assert_eq!(
             gateway.admit_live_object(&segments[0].object, 1_000_000),
-            Ok(())
+            Err(LiveGatewayRefusal::ClosedOnTestnet {
+                chain_id: Network::Testnet.chain_id().value(),
+                height: 1_000_000,
+            })
         );
-        // A plain object is admitted via admit_object and refused by admit_live_object.
+        // Plain objects remain admitted; the live-only door still requires bit1.
         let mut plain = segments[0].object.clone();
         plain.header.flags = Flags::from_byte(0).unwrap();
         assert_eq!(gateway.admit_object(&plain, 1), Ok(()));
@@ -456,11 +464,18 @@ mod tests {
             gateway.admit_live_object(&plain, 1),
             Err(LiveGatewayRefusal::NotLive)
         );
-        // The stream and viewer doors succeed on active testnet.
-        let stream = LiveStream::begin(ORIGINATOR, NONCE, gateway.context(1));
-        assert!(stream.is_ok());
-        assert!(gateway.admit_viewer(&two_segments_stream(), 0, 1).is_ok());
-        // Explicit below-activation-height refusal still holds when gated.
+        assert_eq!(
+            LiveStream::begin(ORIGINATOR, NONCE, gateway.context(1)).map(|_| ()),
+            Err(LiveError::Closed)
+        );
+        assert_eq!(
+            gateway.admit_viewer(&two_segments_stream(), 0, 1),
+            Err(LiveGatewayRefusal::ClosedOnTestnet {
+                chain_id: Network::Testnet.chain_id().value(),
+                height: 1,
+            })
+        );
+        // An explicit future activation still refuses below its height.
         let gated = LiveGateway::for_chain(
             Network::Testnet.chain_id(),
             LiveActivation { height: Some(10) },
@@ -472,6 +487,7 @@ mod tests {
                 activation: 10,
             })
         );
+        assert_eq!(gated.admit_object(&segments[0].object, 10), Ok(()));
     }
 
     fn two_segments_stream() -> LiveStream {

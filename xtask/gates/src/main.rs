@@ -104,7 +104,10 @@ mod gates {
     pub mod fork_choice_gate;
     pub mod fsf_import_boundaries;
     pub mod fuzz_targets_wired;
+    pub mod garden_nat;
+    pub mod garden_scenario;
     pub mod gas_calibration;
+    pub mod gate_references_are_real;
     pub mod gates_are_wired;
     pub mod gates_do_not_panic;
     pub mod gateway_gate;
@@ -162,6 +165,7 @@ mod gates {
     pub mod proof_deps_are_exactly_pinned;
     pub mod qr_is_derivative_only;
     pub mod quantum_account;
+    pub mod readme_claims_are_wired;
     pub mod readme_definition_block_is_verbatim;
     pub mod readme_has_no_placeholders;
     pub mod readme_no_deny;
@@ -1262,6 +1266,14 @@ const GATES: &[Gate] = &[
         self_test: gates::gas_calibration::self_test,
     },
     Gate {
+        name: "gate-references-are-real",
+        replaces: None,
+        run: gates::gate_references_are_real::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::gate_references_are_real::self_test,
+    },
+    Gate {
         name: "gates-are-wired",
         replaces: Some("check-gates-are-wired.sh"),
         run: gates::gates_are_wired::run,
@@ -1644,6 +1656,14 @@ const GATES: &[Gate] = &[
         self_test: gates::readme_has_no_placeholders::self_test,
     },
     Gate {
+        name: "readme-claims-are-wired",
+        replaces: None,
+        run: gates::readme_claims_are_wired::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_claims_are_wired::self_test,
+    },
+    Gate {
         name: "ee-workers-build-with-unwind",
         replaces: None,
         run: gates::ee_workers_build_with_unwind::run,
@@ -1698,6 +1718,30 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::launch_matrix_tests_exist::self_test,
+    },
+    Gate {
+        name: "garden-scenario",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "garden-scenario reads a cargo test log; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::garden_scenario::run),
+        run_args: None,
+        self_test: gates::garden_scenario::self_test,
+    },
+    Gate {
+        name: "garden-nat",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "garden-nat reads a cargo test log; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::garden_nat::run),
+        run_args: None,
+        self_test: gates::garden_nat::self_test,
     },
 ];
 

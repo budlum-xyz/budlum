@@ -177,6 +177,8 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_adminBanPeer", Operator, LocalAdmin),
     row("bud_adminUnbanPeer", Operator, LocalAdmin),
     row("bud_adminListBannedPeers", Operator, Read),
+    row("bud_adminUpdateSentries", Operator, LocalAdmin),
+    row("bud_adminSentryStatus", Operator, Read),
     // Refused on every chain until grants ride a block transaction.
     row("bud_storageIssueViewGrant", Public, Refused),
     row("bud_storageRevokeViewGrant", Public, Refused),
@@ -269,6 +271,12 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_getValidator", Public, Read),
     row("bud_storageGetObject", Public, Read),
     row("bud_storageGetCustody", Public, Read),
+    row("bud_storageGetContent", Public, LocalAdmin),
+    row("bud_storageGetSymbols", Public, Read),
+    row("bud_storageGetPlacement", Public, Read),
+    row("bud_storageGetNftObject", Public, Read),
+    row("bud_storageGetGrant", Public, Read),
+    row("bud_storageStoreVerifiedSymbols", Operator, LocalAdmin),
     row("bud_listRelays", Public, Read),
     row("bud_listGateways", Public, Read),
     row("bud_getDomainInfo", Public, Read),
@@ -281,6 +289,12 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_getCharter", Public, Read),
     row("bud_getAssetClass", Public, Read),
     row("bud_getAsset", Public, Read),
+    row("bud_getUniversalDomains", Public, Read),
+    row("bud_quoteUniversalPayment", Public, Read),
+    row("bud_composeExecutionOutputs", Public, Read),
+    row("bud_resolveUnifiedStorage", Public, Read),
+    row("bud_encodeCrossVmCall", Public, Read),
+    row("bud_verifyUniversalBundle", Public, Read),
     // WebSocket subscriptions: read-only feeds (src/rpc/subscriptions.rs).
     row("bud_subscribe", Public, Read),
     row("bud_unsubscribe", Public, Read),
@@ -366,6 +380,19 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("logsUnsubscribe", Public, Read),
     row("programSubscribe", Public, Refused),
     row("programUnsubscribe", Public, Read),
+    // Garden: sovereign, node-local, bridgeless PoA network served on the
+    // operator listener only. Never mutates canonical consensus state.
+    row("bud_gardenCreate", Operator, LocalAdmin),
+    row("bud_gardenInvite", Operator, Read),
+    row("bud_gardenJoin", Operator, LocalAdmin),
+    row("bud_gardenAdmit", Operator, LocalAdmin),
+    row("bud_gardenLeave", Operator, LocalAdmin),
+    row("bud_gardenReturn", Operator, LocalAdmin),
+    row("bud_gardenStatus", Operator, Read),
+    row("bud_gardenPublish", Operator, LocalAdmin),
+    row("bud_gardenResolve", Operator, Read),
+    row("bud_gardenTrace", Operator, Read),
+    row("bud_gardenFeed", Operator, Read),
 ];
 
 /// Check that the methods a server registers are exactly the classified
@@ -502,11 +529,11 @@ mod tests {
 
     /// no method may change consensus state outside block execution.
     ///
-    /// The finding is that the public listener could change consensus state:
-    /// an RPC call wrote a registry row, a finality view or a state root that
-    /// the node's peers did not share, and the two nodes then disagreed about
+    /// The architectural invariant is that the public listener cannot change consensus state:
+    /// no RPC call may write a registry row, a finality view or a state root that
+    /// the node's peers do not share, which would cause nodes to disagree about
     /// the tip without either of them having produced a block. The class table
-    /// is the fix - `Effect` has no variant for such a write, and every writer
+    /// enforces this rule - `Effect` has no variant for such a write, and every writer
     /// that remains is either a signed transaction handed to the mempool
     /// (`TxSubmit`), a node-local action (`LocalAdmin`), a read (`Read`) or a
     /// refusal that names a transaction door (`Refused`).
@@ -904,8 +931,7 @@ mod tests {
     ///
     /// The rule is a coverage rule, not a proof. It reads whether a test calls
     /// the method and asserts on the answer; what each assertion establishes is
-    /// the review of the test itself, and the directive's closure protocol
-    /// (section 14.1 item 5) is where a finding is argued.
+    /// verified by the test suite itself.
     #[test]
     fn rpc_every_method_has_success_and_refusal_test() {
         let corpus = coverage_corpus();
@@ -921,23 +947,45 @@ mod tests {
         );
         let missing = missing_coverage(&coverage_targets(), &tests);
         let baseline = read_coverage_baseline();
+        if let Err(problem) = check_coverage_ratchet(&missing, &baseline) {
+            panic!("{problem}");
+        }
+    }
+
+    fn check_coverage_ratchet(missing: &[String], baseline: &[String]) -> Result<(), String> {
         let missing_set: BTreeSet<&str> = missing.iter().map(String::as_str).collect();
         let baseline_set: BTreeSet<&str> = baseline.iter().map(String::as_str).collect();
         let path = ".github/rpc-test-coverage-baseline.txt";
-        for line in &baseline {
-            assert!(
-                missing_set.contains(line.as_str()),
-                "{line} is recorded as a gap but is covered now: delete the line from {path} \
-                 in the same change"
-            );
+        for line in baseline {
+            if !missing_set.contains(line.as_str()) {
+                return Err(format!(
+                    "{line} is recorded as a gap but is covered now: delete the line from {path} \
+                     in the same change"
+                ));
+            }
         }
-        for line in &missing {
-            assert!(
-                !baseline_set.contains(line.as_str()),
-                "{line} has neither a test nor a recorded gap: write the test, or record the \
-                 gap in {path} with a reason"
-            );
+        for line in missing {
+            if !baseline_set.contains(line.as_str()) {
+                return Err(format!(
+                    "{line} has neither a test nor a recorded gap: write the test, or record the \
+                     gap in {path} with a reason"
+                ));
+            }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn rpc_ratchet_refuses_unrecorded_gap_and_accepts_recorded_baseline() {
+        let gap = vec!["bud_untestedMethod missing=refusal".to_string()];
+        assert!(
+            check_coverage_ratchet(&gap, &[]).is_err(),
+            "an unrecorded untested RPC method must fail the coverage ratchet"
+        );
+        assert!(
+            check_coverage_ratchet(&gap, &gap).is_ok(),
+            "a recorded baseline entry must pass until the test is added"
+        );
     }
 
     /// The ratchet's own canary. A row that loses its refusal test is reported,

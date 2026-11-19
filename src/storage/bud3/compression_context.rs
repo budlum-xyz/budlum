@@ -2,7 +2,7 @@
 //!
 //! `committed` retains the committed-manifest/local-cache API and fee/rotation
 //! engine. `corpus` provides the corpus frame, activation, and access-observation
-//! model, active on testnet `45261` from genesis (`ACTIVATION` height `Some(0)`).
+//! model. Both remain closed at public-testnet launch (`ACTIVATION.height == None`).
 
 pub mod committed;
 pub mod corpus;

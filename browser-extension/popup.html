@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Budlum BNS Settings</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; width: 340px; padding: 0.75rem; color: #111827; }
+    label { display: block; font-size: 0.8rem; font-weight: 600; margin-top: 0.5rem; }
+    textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.78rem; }
+    button { margin-top: 0.75rem; padding: 0.45rem 0.9rem; border: 0; border-radius: 6px; background: #111827; color: #ffffff; cursor: pointer; }
+    #saved { font-size: 0.8rem; color: #065f46; margin-left: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h3>Budlum BNS Resolver</h3>
+  <label for="rpcs">RPC endpoints (one URL per line)</label>
+  <textarea id="rpcs" rows="4"></textarea>
+  <label for="headers">Trusted headers JSON array (height, bns_root, epoch)</label>
+  <textarea id="headers" rows="6"></textarea>
+  <div>
+    <button id="save">Save settings</button>
+    <span id="saved"></span>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

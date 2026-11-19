@@ -95,6 +95,7 @@ impl SettlementProofVerifier {
         // delivered into the registry its target domain reads.
         if !crate::settlement::domains::CommitmentAttestation::for_kind(&commitment.consensus_kind)
             .event_root
+            || commitment.event_root == [0u8; 32]
         {
             return Err(ProofVerificationError::UnattestedEventRoot);
         }

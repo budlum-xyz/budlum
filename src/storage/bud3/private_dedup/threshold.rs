@@ -1,7 +1,8 @@
 //! Private cross-owner deduplication for sealed B.U.D. 3.0 objects (Section 6.20.2.6).
+//!
 //! exposed for expansion-tier sealed deduplication, threshold OPRF evaluation, and epoch-batched reference settlement.
 //!
-//! YK1 ownership predicates require the gated VerifyInference opcode; no
+//! YK1 ownership predicates require the gated `VerifyInference` opcode; no
 //! private-dedup proof is accepted by the default testnet schedule. The
 //! transcript-share helper is not a threshold OPRF. Keep the feature closed
 //! until a real OPRF and witness-bound proof are independently reviewed.
@@ -19,9 +20,10 @@ use crate::core::hash::hash_fields_bytes;
 
 use super::super::seal::padme_padded_len;
 
-/// Cross-owner private dedup stays closed on testnet. Its transcript shares
-/// are not a threshold OPRF, and YK1 cannot attest private ownership under
-/// the gated production proof schedule.
+/// Cross-owner private dedup stays closed on testnet.
+///
+/// Its transcript shares are not a threshold OPRF, and YK1 cannot attest
+/// private ownership under the gated production proof schedule.
 /// Convenience: exposed for launch configuration gates.
 pub const TESTNET_PRIVATE_DEDUP_ENABLED: bool = false;
 
@@ -52,7 +54,7 @@ pub enum PrivateDedupError {
     },
     /// Insufficient or duplicate threshold OPRF shares.
     InsufficientOprfShares { got: usize, threshold: usize },
-    /// Missing or invalid BudZero ownership proof (`Section 6.20.2.6`).
+    /// Missing or invalid `BudZero` ownership proof (`Section 6.20.2.6`).
     InvalidOwnershipProof(&'static str),
 }
 
@@ -121,7 +123,7 @@ pub fn combine_threshold_oprf_shares(
     ]))
 }
 
-/// BudZero Plonky3 STARK-backed ownership proof bundle (`Section 6.20.2.6`).
+/// `BudZero` Plonky3 STARK-backed ownership proof bundle (`Section 6.20.2.6`).
 /// Convenience: exposed for upload prover and verifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnershipProofBundle {
@@ -163,10 +165,12 @@ fn ownership_predicate_statement(
 }
 
 impl OwnershipProofBundle {
-    /// Attempt a BudZero ownership proof. Production refuses while YK1's
-    /// proof opening gate is closed; never return an invalid placeholder bundle
-    /// that a caller could mistake for a successfully produced proof.
-    /// Convenience: exposed for client-side BudZero prover integration.
+    /// Attempt a `BudZero` ownership proof.
+    ///
+    /// Production refuses while YK1's proof opening gate is closed; never return
+    /// an invalid placeholder bundle that a caller could mistake for a
+    /// successfully produced proof.
+    /// Convenience: exposed for client-side `BudZero` prover integration.
     ///
     /// # Errors
     ///
@@ -321,7 +325,7 @@ impl PrivateDedupEngine {
     /// Create a new [`PrivateDedupEngine`].
     /// Convenience: exposed for storage state initialization.
     #[must_use]
-    pub fn new(enabled: bool, sealed_pool_average_fee_atoms: u64) -> Self {
+    pub const fn new(enabled: bool, sealed_pool_average_fee_atoms: u64) -> Self {
         Self {
             enabled,
             max_queries_per_epoch: MAX_PRIVATE_DEDUP_QUERIES_PER_EPOCH,

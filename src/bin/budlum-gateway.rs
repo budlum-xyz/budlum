@@ -278,11 +278,44 @@ struct RpcProver {
 impl RpcProver {
     fn new(url: String) -> Result<Self, String> {
         let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("rpc client for {url}: {e}"))?;
         Ok(Self { url, client })
     }
+}
+
+/// Cap on BNS proof JSON responses read by `RpcProver` (2 MiB).
+const MAX_BNS_PROOF_RPC_BYTES: usize = 2 * 1024 * 1024;
+
+/// Cap on B.U.D. 3.0 RPC JSON responses read by `Bud3RpcSource` (32 MiB).
+const MAX_BUD3_RPC_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+async fn read_bounded_rpc_json(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<serde_json::Value, String> {
+    if let Some(len) = response.content_length() {
+        if len > max_bytes as u64 {
+            return Err(format!(
+                "rpc response content-length {len} exceeds {max_bytes}-byte cap"
+            ));
+        }
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("rpc body read: {e}"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!("rpc response body exceeds {max_bytes}-byte cap"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|e| format!("rpc json decode: {e}"))
 }
 
 impl NameProver for RpcProver {
@@ -297,14 +330,16 @@ impl NameProver for RpcProver {
         // driven to completion here, and `block_in_place` tells the runtime
         // this worker is busy so the other connections move to another one.
         let request = async {
-            self.client
+            let resp = self
+                .client
                 .post(&self.url)
                 .json(&body)
                 .send()
-                .await?
-                .error_for_status()?
-                .json::<serde_json::Value>()
                 .await
+                .map_err(|e| e.to_string())?
+                .error_for_status()
+                .map_err(|e| e.to_string())?;
+            read_bounded_rpc_json(resp, MAX_BNS_PROOF_RPC_BYTES).await
         };
         let json =
             tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(request))
@@ -691,7 +726,9 @@ impl Bud3RpcSource {
             ));
         }
         let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("bud3 rpc client: {e}"))?;
         let held = Self::sweep_orphan_tmp_and_measure(&cache_dir);
@@ -780,14 +817,16 @@ impl Bud3RpcSource {
             "params": params,
         });
         let request = async {
-            self.client
+            let resp = self
+                .client
                 .post(url)
                 .json(&body)
                 .send()
-                .await?
-                .error_for_status()?
-                .json::<serde_json::Value>()
                 .await
+                .map_err(|e| e.to_string())?
+                .error_for_status()
+                .map_err(|e| e.to_string())?;
+            read_bounded_rpc_json(resp, MAX_BUD3_RPC_RESPONSE_BYTES).await
         };
         let json = if let Ok(handle) = tokio::runtime::Handle::try_current() {
             tokio::task::block_in_place(|| handle.block_on(request))

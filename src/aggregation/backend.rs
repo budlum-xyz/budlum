@@ -68,6 +68,9 @@ pub enum AggError {
     /// A segment's aggregator attestation is missing, malformed, or does not
     /// bind its `tick_pi` to `segment.aggregator`.
     InvalidSegmentAttestation(usize),
+    /// A segment's aggregator is not an active, unslashed, unjailed validator
+    /// holding at least its required bond floor.
+    UnauthorizedSegmentAggregator(usize),
     /// This build has no backend that could prove or check a frame.
     Unavailable,
 }
@@ -84,6 +87,9 @@ impl std::fmt::Display for AggError {
             Self::ProofMismatch => write!(f, "the proof does not cover the claims"),
             Self::InvalidSegmentAttestation(at) => {
                 write!(f, "invalid aggregator attestation on segment {at}")
+            }
+            Self::UnauthorizedSegmentAggregator(at) => {
+                write!(f, "unbonded or unauthorized aggregator on segment {at}")
             }
             Self::Unavailable => write!(f, "this build has no aggregation backend"),
         }
@@ -127,4 +133,12 @@ pub trait AggBackend {
     ///
     /// [`AggError`] when the frame is not valid.
     fn verify(&self, frame: &ClaimFrame, domain: DomainId) -> Result<(), AggError>;
+
+    /// Whether block validation must require every `segment.aggregator` to hold
+    /// an active, unslashed, unjailed validator bond (`true` for attestation-
+    /// backed fold proofs such as `StarkBackend`, `false` for backends that
+    /// re-verify every raw leaf witness inline).
+    fn requires_bonded_aggregators(&self) -> bool {
+        false
+    }
 }

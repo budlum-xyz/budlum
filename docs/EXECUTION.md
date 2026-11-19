@@ -161,12 +161,14 @@ STARK proving on every call.
 
 ## 13. SVM and Move Stateless Pointers & `KR-UEL-REENTRANCY` (`the implementation track`)
 
-- Active from genesis on testnet `45261`: the coordinator serves SVM and Move
- pointer calls with no activation height
- (`home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint`).
+- EVM and WASM pointers are launch features. SVM, Move, and later catalog
+ pointer targets are closed on public testnet and mainnet; unknown chain ids
+ fail closed (`svm_move_pointer_policy_is_closed_on_testnet`). Devnet retains the
+ explicit conformance path.
 - Stateless pointer codecs in `execution/svm/src/pointer/` and `execution/move/src/pointer/`
- plus 4-way coordinator translation (`svm_pointer_holds_no_balance`,
- `move_pointer_holds_no_balance`, `pointer_allowance_lives_at_home`).
+ plus 4-way coordinator translation remain testable on devnet
+ (`svm_pointer_holds_no_balance`, `move_pointer_holds_no_balance`,
+ `pointer_allowance_lives_at_home`).
 - `KR-UEL-REENTRANCY` (`IP-52` item 3): cross-environment reentrancy prohibition
  (`Section 8.7.3` item 6) remains enforced (`ReentrancyForbidden`,
  `uel_reentrancy_forbidden`).
@@ -174,12 +176,13 @@ STARK proving on every call.
 ## 14. Deterministic Access-Set Parallel Block Execution (`the implementation track`)
 
 - Height-gated (`ParallelSchedulerPolicy` in `src/execution/coordinator/scheduler/`):
- active from genesis on testnet `45261` (`parallel_scheduler_is_open_on_testnet`).
- Blocks run as deterministic access-set waves (`StateKey::Account` +
- `StateKey::UelSlot`) with automatic sequential barrier fallback on conflict.
+ closed at public-testnet launch (`parallel_scheduler_is_closed_on_testnet`).
+ Explicitly activated blocks run as deterministic access-set waves
+ (`StateKey::Account` + `StateKey::UelSlot`) with automatic sequential barrier
+ fallback on conflict.
 - Intra-environment (`Block-STM`) parallelism has its own flag and requires
  passing state-root equality verification (`intra_ee_parallelism_active`). The
- testnet launch policy sets both.
+ public-testnet launch policy sets neither flag.
 - Calibration timing report (`PARALLEL_BLOCK_TIMING_JSON`) is emitted and uploaded by
  `conformance-nightly.yml` alongside `parallel_schedule_equals_sequential_root` and
  `parallel_scheduler_is_deterministic_across_arch`.
@@ -192,9 +195,10 @@ STARK proving on every call.
 - Sui object model in `ee/sui/object` (`AddressOwner`, `ObjectOwner`, `Shared`,
  `Immutable`, Lamport versioning, `BLAKE2b-256` object digests), `Foreign::Sui`
  (`ForeignScheme::SuiEd25519 = 0x05`), and Sui JSON-RPC subset (`src/rpc/compat/sui/`).
-- Active on testnet `45261` (`move_sui_is_open_on_testnet`,
- `foreign_sui_is_open_on_testnet`). A worker or policy built with
- `activation_height: None` refuses every call.
+- Closed at public-testnet launch (`move_sui_is_closed_on_testnet`,
+ `foreign_sui_is_closed_on_testnet`, `sui_rpc_is_closed_on_testnet`). Explicit
+ activation-height fixtures preserve conformance coverage without opening the
+ default worker, envelope, or RPC policy.
 
 ## 16. Cairo (Starknet) Execution Environment (`the implementation track`, `EeId::CAIRO = 0x06`)
 
@@ -204,10 +208,16 @@ STARK proving on every call.
 - Starknet Account Abstraction (`__validate__`, `__validate_declare__`, `__execute__`)
  bound to the caller's post-quantum Budlum local alias under `ee/cairo/state`, plus <!-- claim:L-WALLET-01 -->
  read-only Starknet JSON-RPC v0.7 subset (`src/rpc/compat/starknet/`).
-- Active from genesis on testnet `45261` (`PROPOSED_CAIRO_ACTIVATION_HEIGHT = 0`; explicit `activation_height: None` refusal coverage in `cairo_is_open_on_testnet`).
+- Closed at public-testnet launch (`cairo_is_closed_on_testnet`,
+ `starknet_rpc_is_closed_on_testnet`). Explicit activation-height fixtures run
+ conformance without opening the default worker or RPC policy.
 
 ## 17. Expansion Catalog Workers (`the implementation track`, `0x07`..`0x0B`)
 
-- `0x08` PolkaVM (`execution/polkavm/`, `budlum-ee-polkavm`, RV32EM interpreter with
- JIT disabled, `ee/polkavm/state`, active on testnet `45261` from genesis,
- `polkavm_is_open_on_testnet`, `uel_conformance_polkavm`).
+- `0x07` NEAR WASM, `0x08` PolkaVM, `0x09` TVM, `0x0A` UTXO Script, and
+ `0x0B` Plutus remain closed at public-testnet launch. The launch verdicts are
+ pinned by `near_wasm_is_closed_on_testnet`, `polkavm_is_closed_on_testnet`,
+ `tvm_is_closed_on_testnet`, `utxo_is_closed_on_testnet`, and
+ `plutus_is_closed_on_testnet`. The in-process coordinator adapters and their
+ query path are also devnet-only (`expansion_coordinator_is_closed_on_testnet`).
+ Conformance tests use explicit activation fixtures and do not alter worker defaults.

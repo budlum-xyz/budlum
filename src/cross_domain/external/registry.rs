@@ -1013,6 +1013,54 @@ impl ExternalDomainRegistry {
             .retain(|_, a| a.evidence_digest != evidence_digest);
         Ok((taken, reward))
     }
+
+    /// Invoked exclusively by [`crate::cross_domain::external::intake::IntakeState::slash_on_contradiction`]
+    /// after full cryptographic adapter verification of a conflicting finality proof.
+    pub(crate) fn slash_verified_contradiction(
+        &mut self,
+        domain: &DomainKey,
+        prover: Address,
+        evidence_digest: [u8; 32],
+        value_atoms: u128,
+        challenger: Address,
+    ) -> Result<(u128, u128), RegistryError> {
+        self.slash(domain, prover, evidence_digest, value_atoms, challenger)
+    }
+
+    /// Slash a Symbiotic vault operator for equivocation: two valid
+    /// attestations at the same epoch with different collateral roots.
+    /// The epoch+root pair is recorded so replayed contradictions are refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::AlreadySlashed`] if the evidence digest was
+    /// already slashed, or [`RegistryError::UnknownDomain`] /
+    /// [`RegistryError::UnknownProver`] if the domain or prover is not found.
+    ///
+    /// WIRING: called from the Symbiotic vault adapter's slashing path once the
+    /// intake dispatch table routes `symbiotic-curated-vault-v1` envelopes; the
+    /// test below exercises the door directly until that wiring lands.
+    pub fn slash_symbiotic_equivocation(
+        &mut self,
+        domain: &DomainKey,
+        prover: Address,
+        epoch: u64,
+        collateral_root_a: [u8; 32],
+        collateral_root_b: [u8; 32],
+        value_atoms: u128,
+        challenger: Address,
+    ) -> Result<(u128, u128), RegistryError> {
+        // Domain-separated evidence digest for the equivocation pair.
+        let evidence_digest = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_SYMBIOTIC_EQUIVOCATION_V1",
+            domain.as_bytes(),
+            prover.as_bytes(),
+            &epoch.to_le_bytes(),
+            &collateral_root_a,
+            &collateral_root_b,
+        ]);
+        self.slash(domain, prover, evidence_digest, value_atoms, challenger)
+    }
 }
 
 impl DomainRegistration {
@@ -1551,5 +1599,28 @@ mod tests {
             slashed_err,
             RegistryError::DuplicateAttestation { .. }
         ));
+    }
+
+    #[test]
+    fn slash_symbiotic_equivocation_refuses_replay() {
+        let (mut registry, key, _att) = registered();
+        let prover = Address::from([7u8; 32]);
+        let challenger = Address::from([8u8; 32]);
+
+        let root_a = [0xAA; 32];
+        let root_b = [0xBB; 32];
+
+        // First slash succeeds.
+        let result = registry
+            .slash_symbiotic_equivocation(&key, prover, 100, root_a, root_b, 50, challenger);
+        assert!(result.is_ok(), "first equivocation slash must succeed");
+
+        // Replay of the same equivocation is refused (already slashed).
+        let replay = registry
+            .slash_symbiotic_equivocation(&key, prover, 100, root_a, root_b, 50, challenger);
+        assert!(
+            matches!(replay, Err(RegistryError::AlreadySlashed { .. })),
+            "replayed equivocation slash must be refused: {replay:?}"
+        );
     }
 }

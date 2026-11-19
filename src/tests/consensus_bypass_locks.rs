@@ -138,8 +138,7 @@ fn a_development_chain_still_gets_funded() {
     );
 }
 
-/// The refill behaviour that made this worth gating, pinned on devnet so the
-/// finding stays legible: the faucet is not a mint loop, it is a refill.
+/// Refill invariant: the faucet is not a mint loop, it is a refill.
 #[test]
 fn the_faucet_refills_rather_than_stacking() {
     let mut bc = devnet_chain();

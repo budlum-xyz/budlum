@@ -628,6 +628,19 @@ pub trait BudlumApi {
     #[method(name = "bud_adminListBannedPeers")]
     async fn admin_list_banned_peers(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Operator-only: atomically replace a shielded validator's sentry peer
+    /// list at runtime without restarting or exporting validator keys.
+    #[method(name = "bud_adminUpdateSentries")]
+    async fn admin_update_sentries(
+        &self,
+        sentries: Vec<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Operator-only: inspect sentry-architecture role, discovery status, and
+    /// active sentry/private-validator connection counts.
+    #[method(name = "bud_adminSentryStatus")]
+    async fn admin_sentry_status(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     // === B.U.D. Storage RPC surface ============================
     // This temporary surface exposes grant and reveal operations. The legacy
     // B.U.D. 1.0 and 2.0 endpoints stay removed until their B.U.D. 3.0 doors
@@ -1419,6 +1432,63 @@ pub trait BudlumApi {
         validator: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// B.U.D. 3.0 G8 paid fallback decode of a public object (`content_hex`).
+    /// Requires a verified on-chain `PaidViewReceipt` and unconditionally refuses sealed objects.
+    #[method(name = "bud_storageGetContent")]
+    async fn storage_get_content(
+        &self,
+        payer: String,
+        object: String,
+        receipt_id: String,
+        fee_paid_atoms: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// B.U.D. 3.0 verified symbol range (`VerifiedSymbolItem` with Merkle custody proofs)
+    /// held locally for `(holder, object, segment, first_esi..+count)`.
+    #[method(name = "bud_storageGetSymbols")]
+    async fn storage_get_symbols(
+        &self,
+        holder: String,
+        object: String,
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// B.U.D. 3.0 placement shares, confirmation state, and physical-byte endowment telemetry.
+    #[method(name = "bud_storageGetPlacement")]
+    async fn storage_get_placement(
+        &self,
+        commitment: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Resolve a SocialFi u64 NFT id or 32-byte `NftId` hex to its bound B.U.D. 3.0
+    /// object metadata and symbol roots, or null when unbound.
+    #[method(name = "bud_storageGetNftObject")]
+    async fn storage_get_nft_object(
+        &self,
+        nft_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Look up an unlinkable B.U.D. 3.0 view grant (`GrantRow`) by 32-byte `grant_tag`
+    /// evaluated against live consensus epoch (`active`, `expired`, `revoked`, or null).
+    #[method(name = "bud_storageGetGrant")]
+    async fn storage_get_grant(
+        &self,
+        grant_tag: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Operator-only local admission of Merkle-verified B.U.D. 3.0 custody symbols.
+    /// Every item is verified against consensus `Bud3Registry` roots before persistence.
+    #[method(name = "bud_storageStoreVerifiedSymbols")]
+    async fn storage_store_verified_symbols(
+        &self,
+        holder: String,
+        object: String,
+        segment: u64,
+        items: Vec<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Validators that offer a relay.
     #[method(name = "bud_listRelays")]
     async fn list_relays(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
@@ -1495,6 +1565,48 @@ pub trait BudlumApi {
     /// Read a Universal Object Layer unique/record asset placement by 32-byte hex id.
     #[method(name = "bud_getAsset")]
     async fn get_asset(&self, asset_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Return the canonical universal blockchain domain catalog and its Merkle root.
+    #[method(name = "bud_getUniversalDomains")]
+    async fn get_universal_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Compute a dry-run atomic multi-token split-tender payment quote across domains.
+    #[method(name = "bud_quoteUniversalPayment")]
+    async fn quote_universal_payment(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Compose normalized multi-VM, multi-language execution outputs into one Merkle-verifiable bundle.
+    #[method(name = "bud_composeExecutionOutputs")]
+    async fn compose_execution_outputs(
+        &self,
+        plan: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Resolve a universal Web3 / decentralized storage URI (`bud://`, `ipfs://`, `ar://`, `bns://`, ...)
+    /// across multi-network replicas ordered by cryptographic verification strength.
+    #[method(name = "bud_resolveUnifiedStorage")]
+    async fn resolve_unified_storage(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Encode and cryptographically commit a canonical cross-VM, multi-language call envelope
+    /// between any two registered executable domains without mutating either chain's inner rules.
+    #[method(name = "bud_encodeCrossVmCall")]
+    async fn encode_cross_vm_call(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Independently verify a composed multi-VM `UnifiedOutputBundle`'s topological order,
+    /// binding commitments, steps Merkle root, and final bundle root.
+    #[method(name = "bud_verifyUniversalBundle")]
+    async fn verify_universal_bundle(
+        &self,
+        bundle: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// WebSocket subscriptions: `kind` is
     /// `newHeads`, `finalizedHeads` or `logs`; `logs` takes an optional
@@ -1991,4 +2103,80 @@ pub trait BudlumApi {
         program_id: String,
         config: Option<serde_json::Value>,
     ) -> jsonrpsee::core::SubscriptionResult;
+
+    /// Found a Garden on this node. The node becomes the host.
+    ///
+    /// Operator method. Returns the Garden status, the invite link and the
+    /// QR content (the same line).
+    #[method(name = "bud_gardenCreate")]
+    async fn garden_create(
+        &self,
+        title: String,
+        name: String,
+        options: Option<crate::garden::GardenOptions>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The invite link of this node's Garden. The same line is the QR content.
+    #[method(name = "bud_gardenInvite")]
+    async fn garden_invite(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Join a Garden with its invite link or QR content. No account and no
+    /// earlier setup is needed: the node makes a validator key of its own.
+    #[method(name = "bud_gardenJoin")]
+    async fn garden_join(
+        &self,
+        invite: String,
+        name: String,
+        options: Option<crate::garden::GardenOptions>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Answer a key that waits to join this node's Garden: `accept` seats
+    /// it, otherwise it is turned away. Only the host of a Garden founded
+    /// with `"admission": "host_approval"` has anybody to answer.
+    #[method(name = "bud_gardenAdmit")]
+    async fn garden_admit(
+        &self,
+        key: String,
+        accept: bool,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Leave this node's Garden and wipe its data from this node.
+    #[method(name = "bud_gardenLeave")]
+    async fn garden_leave(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Return to the Garden this node left.
+    #[method(name = "bud_gardenReturn")]
+    async fn garden_return(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The Garden as this node sees it, and its domain status on Budlum.
+    #[method(name = "bud_gardenStatus")]
+    async fn garden_status(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Publish a message, a post or an image as this node's validator.
+    /// `encoding` is `utf8` (default) or `hex`.
+    #[method(name = "bud_gardenPublish")]
+    async fn garden_publish(
+        &self,
+        kind: String,
+        payload: String,
+        encoding: Option<String>,
+        mime: Option<String>,
+        caption: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Resolve published content on this node and verify its content id.
+    #[method(name = "bud_gardenResolve")]
+    async fn garden_resolve(
+        &self,
+        content_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The path of a Garden transaction or content item through the chain:
+    /// the transaction, its block and the validators that signed it.
+    #[method(name = "bud_gardenTrace")]
+    async fn garden_trace(&self, id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The newest content of this node's Garden.
+    #[method(name = "bud_gardenFeed")]
+    async fn garden_feed(&self, limit: Option<u32>) -> Result<serde_json::Value, ErrorObjectOwned>;
 }

@@ -229,6 +229,12 @@ criteria = "safe-to-deploy"
 version = "2.1.2+zstd.1.5.7"
 notes = "vendored libzstd 1.5.7 C FFI bindings; reviewed 2.1.2+zstd.1.5.7 build.rs and generated bindings: compiles vendored C sources via cc with no network downloads or external process fetches"
 
+[[audits.p3-keccak-air]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "0.8.0"
+notes = "reviewed full 0.8.0 source (src/, 2380 lines across 10 files): Plonky3 Keccak-f[1600] AIR constraints and trace generator; MIT OR Apache-2.0, no build script, no filesystem, network, process or environment access. All 16 unsafe sites are repr(C) align_to/align_to_mut/transmute slice reinterprets over KeccakCols/KeccakBinaryCols/[[u64;5];5] guarded by prefix/suffix emptiness assertions."
+
 [[audits.pem]]
 who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-run"

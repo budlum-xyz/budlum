@@ -1185,6 +1185,16 @@ mod rpc_tests {
             .await
             .expect_err("public listener must refuse the operator-only method");
         assert_eq!(refused.code(), -32004);
+        let refused_rotate = public_server
+            .admin_update_sentries(vec![])
+            .await
+            .expect_err("public listener must refuse bud_adminUpdateSentries");
+        assert_eq!(refused_rotate.code(), -32004);
+        let refused_status = public_server
+            .admin_sentry_status()
+            .await
+            .expect_err("public listener must refuse bud_adminSentryStatus");
+        assert_eq!(refused_status.code(), -32004);
     }
 
     /// Every operator-gated mutating method answers -32004 on a public
@@ -2057,6 +2067,657 @@ mod rpc_tests {
         }
     }
 
+    #[tokio::test]
+    async fn rpc_bud3_live_symbols_content_placement_nft_and_bns_end_to_end() {
+        use crate::consensus::pow::PoWEngine;
+        use crate::socialfi::nft_folders::derive_bud3_nft_id;
+        use crate::storage::bud3::content_id::ContentKey;
+        use crate::storage::bud3::content_ref::ContentRef;
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::{prepare_public_upload, prepare_sealed_upload};
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::seal::SEAL_SALT_LEN;
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, verify_symbol_range_response, SymbolRangeRequest,
+            VerifiedSymbolItem,
+        };
+        use crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS;
+        use crate::storage::content_id::ContentId;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload =
+            b"B.U.D. 3.0 live node retrieval, NFT binding, and verifiable symbols".repeat(4);
+        let pub_up = prepare_public_upload(&payload, &profile, &Bud3Limits::default(), 8).unwrap();
+        let pub_key = pub_up.record.commitment;
+
+        let sealed_up = prepare_sealed_upload(
+            b"sealed object must reject paid fallback decode",
+            &ContentKey([0x55u8; 32]),
+            [0x66u8; SEAL_SALT_LEN],
+            &profile,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
+        let sealed_key = sealed_up.record.commitment;
+
+        let alice = Address::from([0xA1u8; 32]);
+        let payer = Address::from([0xB2u8; 32]);
+        let holder_full = [0x10u8; 32];
+        let holder_mobile = [0x11u8; 32];
+        let receipt_id = [0x77u8; 32];
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_full,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_mobile,
+                    class: Class::Mobile,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+        bc.state
+            .bud3_registry
+            .register_object(alice.0, pub_up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        bc.state
+            .bud3_registry
+            .register_object(alice.0, sealed_up.record.clone(), shares, 0, 50)
+            .unwrap();
+
+        let social_id = bc
+            .state
+            .nft_registry
+            .mint(
+                alice,
+                ContentId(pub_up.record.content_id.digest),
+                0,
+                Some("Alice".to_string()),
+            )
+            .unwrap();
+        let bud3_nft = derive_bud3_nft_id(social_id);
+        bc.state
+            .bud3_registry
+            .bind_nft(bud3_nft, alice.0, Some(alice.0), &pub_key)
+            .unwrap();
+
+        bc.state
+            .bns_registry
+            .register("livebud3.bud".to_string(), alice, 0, 50)
+            .unwrap();
+        let cref = ContentRef::new(pub_up.record.content_id, pub_key, Some(bud3_nft)).unwrap();
+        bc.state
+            .bns_registry
+            .set_content(
+                "livebud3.bud",
+                &alice,
+                &bc.state.bud3_registry,
+                Some(cref),
+                0,
+            )
+            .unwrap();
+        bc.state
+            .bud3_registry
+            .record_paid_view(payer.0, pub_key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 0)
+            .unwrap();
+
+        let (op_server, chain) = setup_with_blockchain(bc).await;
+        let pub_node = Node::new(chain.clone()).unwrap();
+        let pub_server = RpcServer::with_security_and_mode(
+            chain,
+            pub_node.get_client(),
+            RpcSecurityConfig::default(),
+            RpcMode::Public,
+        );
+
+        let full_hex = format!("0x{}", hex::encode(holder_full));
+        let mob_hex = format!("0x{}", hex::encode(holder_mobile));
+        let pub_hex = format!("0x{}", hex::encode(pub_key));
+        let sealed_hex = format!("0x{}", hex::encode(sealed_key));
+        let payer_hex = format!("0x{}", hex::encode(payer.0));
+        let receipt_hex = format!("0x{}", hex::encode(receipt_id));
+
+        let leaves: Vec<(u32, [u8; 32])> = pub_up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let full_items = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: pub_key,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves,
+            &pub_up.segments[0][0..4],
+        )
+        .unwrap()
+        .items;
+        let mob_items = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: pub_key,
+                segment: 0,
+                first_esi: 4,
+                count: 4,
+            },
+            &leaves,
+            &pub_up.segments[0][4..8],
+        )
+        .unwrap()
+        .items;
+        let full_json: Vec<_> = full_items
+            .iter()
+            .map(|item| serde_json::to_value(item).unwrap())
+            .collect();
+        let mob_json: Vec<_> = mob_items
+            .iter()
+            .map(|item| serde_json::to_value(item).unwrap())
+            .collect();
+
+        // Public listener refuses operator-only symbol admission (`require_operator` -> -32004).
+        let denied_pub = pub_server
+            .storage_store_verified_symbols(full_hex.clone(), pub_hex.clone(), 0, full_json.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(denied_pub.code(), -32004);
+
+        // Tampered symbol fails Merkle proof check on operator admission.
+        let mut tampered = full_items.clone();
+        tampered[0].symbol.data[70] ^= 0xFF;
+        let tampered_json = vec![serde_json::to_value(&tampered[0]).unwrap()];
+        assert_eq!(
+            op_server
+                .storage_store_verified_symbols(full_hex.clone(), pub_hex.clone(), 0, tampered_json)
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Before symbols are admitted, G8 paid decode fails without burning the receipt.
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex.clone(),
+                    pub_hex.clone(),
+                    receipt_hex.clone(),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32000
+        );
+
+        // Admit both verified shares via Operator listener.
+        let stored_full = op_server
+            .storage_store_verified_symbols(full_hex.clone(), pub_hex.clone(), 0, full_json)
+            .await
+            .unwrap();
+        assert_eq!(stored_full["stored"], 4);
+        assert_eq!(
+            op_server
+                .storage_store_verified_symbols(mob_hex, pub_hex.clone(), 0, mob_json)
+                .await
+                .unwrap()["stored"],
+            4
+        );
+
+        // Read verified symbols via Public RPC and authenticate Merkle paths client-side.
+        let syms_page = pub_server
+            .storage_get_symbols(full_hex.clone(), pub_hex.clone(), 0, 0, 4)
+            .await
+            .unwrap();
+        let page_items: Vec<VerifiedSymbolItem> = syms_page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                serde_json::from_value(serde_json::json!({
+                    "symbol": entry["symbol"].clone(),
+                    "proof": entry["proof"].clone(),
+                }))
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(page_items.len(), 4);
+        let root_hex = syms_page["symbol_roots"][0]["root"].as_str().unwrap();
+        let mut root_arr = [0u8; 32];
+        root_arr.copy_from_slice(&hex::decode(root_hex).unwrap());
+        verify_symbol_range_response(
+            0,
+            root_arr,
+            syms_page["symbol_roots"][0]["count"].as_u64().unwrap(),
+            profile.symbol_size,
+            &crate::storage::bud3::symbol_protocol::SymbolRangeResponse { items: page_items },
+        )
+        .unwrap();
+        assert_eq!(
+            pub_server
+                .storage_get_symbols(full_hex, pub_hex.clone(), 0, 0, 65)
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Placement telemetry reflects live Full + Mobile split.
+        let placement = pub_server
+            .storage_get_placement(pub_hex.clone())
+            .await
+            .unwrap();
+        assert_eq!(placement["status"], "live");
+        assert_eq!(placement["n_full"], 1);
+        assert_eq!(placement["n_mobile"], 1);
+        assert_eq!(
+            pub_server
+                .storage_get_placement("0x1234".to_string())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Paid fallback decodes public payload once, refuses replay, and refuses sealed objects.
+        let decoded = pub_server
+            .storage_get_content(
+                payer_hex.clone(),
+                pub_hex.clone(),
+                receipt_hex.clone(),
+                MIN_PAID_VIEW_FEE_ATOMS,
+            )
+            .await
+            .unwrap();
+        assert_eq!(decoded["content_hex"], hex::encode(&payload));
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex.clone(),
+                    pub_hex.clone(),
+                    receipt_hex.clone(),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex,
+                    sealed_hex,
+                    format!("0x{}", hex::encode([0x88u8; 32])),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Live BNS content resolves through BlockchainSymbolSource.
+        let bns_res = pub_server
+            .bns_resolve_content("livebud3.bud".to_string())
+            .await
+            .unwrap();
+        assert_eq!(bns_res["bytes"], format!("0x{}", hex::encode(&payload)));
+
+        // NFT object query accepts both SocialFi u64 id and 32-byte hex NftId, refuses malformed.
+        let by_id = pub_server
+            .storage_get_nft_object(social_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(by_id["commitment"], hex::encode(pub_key));
+        assert_eq!(by_id["socialfi_id"], social_id);
+        let by_hex = pub_server
+            .storage_get_nft_object(format!("0x{}", hex::encode(bud3_nft)))
+            .await
+            .unwrap();
+        assert_eq!(by_hex["commitment"], hex::encode(pub_key));
+        assert_eq!(
+            pub_server
+                .storage_get_nft_object("not-an-nft".to_string())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // SocialFi endpoints include canonical `bud3_nft_id` and live `bud3` object binding.
+        let post = pub_server.social_get_post(social_id).await.unwrap();
+        assert_eq!(post["bud3"]["commitment"], hex::encode(pub_key));
+        let profile_res = pub_server
+            .social_get_profile(format!("0x{}", alice.to_hex()), None, None)
+            .await
+            .unwrap();
+        assert_eq!(profile_res[0]["bud3"]["commitment"], hex::encode(pub_key));
+        let feed_res = pub_server.social_get_feed(10).await.unwrap();
+        assert_eq!(feed_res[0]["bud3"]["commitment"], hex::encode(pub_key));
+    }
+
+    #[tokio::test]
+    async fn rpc_bud3_sealed_nft_grant_unwrap_and_verifiable_decrypt_end_to_end() {
+        use crate::consensus::pow::PoWEngine;
+        use crate::crypto::hpke::HpkeKeyPair;
+        use crate::socialfi::nft_folders::derive_bud3_nft_id;
+        use crate::storage::bud3::content_id::ContentKey;
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::grants::build_grant_row;
+        use crate::storage::bud3::keys::{
+            derive_grant_one_time_keypair, open_key_package, seal_key_package,
+        };
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::{prepare_sealed_upload, view_sealed};
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::seal::SEAL_SALT_LEN;
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, verify_symbol_range_response, SymbolRangeRequest,
+            VerifiedSymbolItem,
+        };
+        use crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS;
+        use crate::storage::content_id::ContentId;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let secret_payload =
+            b"Confidential sealed NFT payload decrypted solely by HPKE X-Wing grant".repeat(4);
+        let owner_key = ContentKey([0xC7u8; 32]);
+        let sealed_up = prepare_sealed_upload(
+            &secret_payload,
+            &owner_key,
+            [0x42u8; SEAL_SALT_LEN],
+            &profile,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
+        let sealed_key = sealed_up.record.commitment;
+
+        let alice = Address::from([0xA3u8; 32]);
+        let payer = Address::from([0xB4u8; 32]);
+        let holder_a = [0x21u8; 32];
+        let holder_b = [0x22u8; 32];
+        let grant_nonce = [0x31u8; 32];
+        let bob_kp = HpkeKeyPair::from_seed(&[0x51u8; 32]).unwrap();
+        let charlie_kp = HpkeKeyPair::from_seed(&[0x52u8; 32]).unwrap();
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        bc.state.epoch_index = 10;
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_a,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_b,
+                    class: Class::Mobile,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+        bc.state
+            .bud3_registry
+            .register_object(alice.0, sealed_up.record.clone(), shares, 10, 50)
+            .unwrap();
+        let social_id = bc
+            .state
+            .nft_registry
+            .mint(
+                alice,
+                ContentId(sealed_up.record.content_id.digest),
+                10,
+                Some("AliceSealed".to_string()),
+            )
+            .unwrap();
+        let bud3_nft = derive_bud3_nft_id(social_id);
+        bc.state
+            .bud3_registry
+            .bind_nft(bud3_nft, alice.0, Some(alice.0), &sealed_key)
+            .unwrap();
+
+        let (_otk_seed, otk_pk) =
+            derive_grant_one_time_keypair(&[0x71u8; 32], &bud3_nft, &grant_nonce).unwrap();
+        let grant_tag = crate::storage::bud3::grants::compute_grant_tag(&bud3_nft, &grant_nonce);
+        let sealed_pkg =
+            seal_key_package(bob_kp.public_key(), &grant_tag, &sealed_key, &owner_key).unwrap();
+        let grant_row =
+            build_grant_row(&bud3_nft, &grant_nonce, otk_pk, sealed_pkg, 25, 10).unwrap();
+        bc.state
+            .bud3_registry
+            .issue_view_grant(&bud3_nft, &grant_nonce, &alice.0, grant_row.clone(), 10)
+            .unwrap();
+
+        let (op_server, chain) = setup_with_blockchain(bc).await;
+        let pub_node = Node::new(chain.clone()).unwrap();
+        let pub_server = RpcServer::with_security_and_mode(
+            chain,
+            pub_node.get_client(),
+            RpcSecurityConfig::default(),
+            RpcMode::Public,
+        );
+
+        let leaves: Vec<(u32, [u8; 32])> = sealed_up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: sealed_key,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves,
+            &sealed_up.segments[0][0..4],
+        )
+        .unwrap()
+        .items;
+        let items_b = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: sealed_key,
+                segment: 0,
+                first_esi: 4,
+                count: 4,
+            },
+            &leaves,
+            &sealed_up.segments[0][4..8],
+        )
+        .unwrap()
+        .items;
+        let holder_a_hex = format!("0x{}", hex::encode(holder_a));
+        let holder_b_hex = format!("0x{}", hex::encode(holder_b));
+        let obj_hex = format!("0x{}", hex::encode(sealed_key));
+        let grant_hex = format!("0x{}", hex::encode(grant_tag));
+
+        op_server
+            .storage_store_verified_symbols(
+                holder_a_hex.clone(),
+                obj_hex.clone(),
+                0,
+                items_a
+                    .iter()
+                    .map(|i| serde_json::to_value(i).unwrap())
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        op_server
+            .storage_store_verified_symbols(
+                holder_b_hex.clone(),
+                obj_hex.clone(),
+                0,
+                items_b
+                    .iter()
+                    .map(|i| serde_json::to_value(i).unwrap())
+                    .collect(),
+            )
+            .await
+            .unwrap();
+
+        // Bob resolves the NFT metadata and fetches his unlinkable HPKE grant capsule over RPC.
+        let nft_obj = pub_server
+            .storage_get_nft_object(social_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(nft_obj["sealed"], true);
+        assert_eq!(nft_obj["commitment"], hex::encode(sealed_key));
+
+        let grant_res = pub_server
+            .storage_get_grant(grant_hex.clone())
+            .await
+            .unwrap();
+        assert_eq!(grant_res["status"], "active");
+        assert_eq!(grant_res["expires_at_epoch"], 25);
+        assert_eq!(
+            pub_server
+                .storage_get_grant("0x12".to_string())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        let pkg_bytes = hex::decode(grant_res["sealed_key_package"].as_str().unwrap()).unwrap();
+        assert!(open_key_package(&charlie_kp, &grant_tag, &pkg_bytes).is_err());
+        let (opened_obj, opened_key) = open_key_package(&bob_kp, &grant_tag, &pkg_bytes).unwrap();
+        assert_eq!(opened_obj, sealed_key);
+        assert_eq!(opened_key, owner_key);
+
+        // Fetch Merkle-verified symbols from both holders, verify proofs client-side, and decrypt.
+        let mut all_syms = Vec::new();
+        for holder_hex in [holder_a_hex, holder_b_hex] {
+            let page = pub_server
+                .storage_get_symbols(holder_hex, obj_hex.clone(), 0, 0, 8)
+                .await
+                .unwrap();
+            let page_items: Vec<VerifiedSymbolItem> = page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| {
+                    serde_json::from_value(serde_json::json!({
+                        "symbol": entry["symbol"].clone(),
+                        "proof": entry["proof"].clone(),
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            let root_hex = page["symbol_roots"][0]["root"].as_str().unwrap();
+            let mut root_arr = [0u8; 32];
+            root_arr.copy_from_slice(&hex::decode(root_hex).unwrap());
+            verify_symbol_range_response(
+                0,
+                root_arr,
+                page["symbol_roots"][0]["count"].as_u64().unwrap(),
+                profile.symbol_size,
+                &crate::storage::bud3::symbol_protocol::SymbolRangeResponse {
+                    items: page_items.clone(),
+                },
+            )
+            .unwrap();
+            all_syms.extend(page_items.into_iter().map(|i| i.symbol));
+        }
+        assert_eq!(
+            view_sealed(&sealed_up.record, &opened_key, all_syms).unwrap(),
+            secret_payload
+        );
+
+        // G8 paid fallback decode must refuse sealed objects unconditionally.
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    format!("0x{}", hex::encode(payer.0)),
+                    obj_hex,
+                    format!("0x{}", hex::encode([0x99u8; 32])),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Once consensus epoch reaches expires_at_epoch, `bud_storageGetGrant` reports `expired`.
+        let mut expired_bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        expired_bc.state.epoch_index = 25;
+        expired_bc
+            .state
+            .bud3_registry
+            .register_object(
+                alice.0,
+                sealed_up.record,
+                vec![
+                    (
+                        0,
+                        Share {
+                            validator: holder_a,
+                            class: Class::Full,
+                            first_esi: 0,
+                            symbols: 4,
+                        },
+                    ),
+                    (
+                        0,
+                        Share {
+                            validator: holder_b,
+                            class: Class::Mobile,
+                            first_esi: 4,
+                            symbols: 4,
+                        },
+                    ),
+                ],
+                10,
+                50,
+            )
+            .unwrap();
+        expired_bc
+            .state
+            .bud3_registry
+            .bind_nft(bud3_nft, alice.0, Some(alice.0), &sealed_key)
+            .unwrap();
+        expired_bc
+            .state
+            .bud3_registry
+            .issue_view_grant(&bud3_nft, &grant_nonce, &alice.0, grant_row, 10)
+            .unwrap();
+        let (exp_server, _) = setup_with_blockchain(expired_bc).await;
+        let expired_grant = exp_server.storage_get_grant(grant_hex).await.unwrap();
+        assert_eq!(expired_grant["status"], "expired");
+    }
+
     /// second descent: the node reads. A fresh node has a height of
     /// zero, no peers and nothing to sync, and every one of these reads says so
     /// in its own shape rather than failing. The address reads keep their
@@ -2267,13 +2928,13 @@ mod rpc_tests {
     }
 
     /// the estimate is the fee the chain will actually enforce for
-    /// this transaction, not the base fee. The finding is that
-    /// `bud_estimateGas` quoted `base_fee` while admission charged
+    /// this transaction, not the base fee. Invariant:
+    /// `bud_estimateGas` must not quote `base_fee` alone while admission charges
     /// `required_fee`, which bills the proportional cut on a transfer
     /// (`transfer_fee_ppm` of the amount, on top of the base fee) and a
     /// multiplied base fee for a governance proposal. A wallet sized its
-    /// transaction from the quote and was then refused for the fee the RPC had
-    /// just suggested.
+    /// transaction from the quote and was previously refused for the fee the RPC had
+    /// suggested without proportional accounting.
     ///
     /// Canary: restore `Ok(Self::to_hex(base_fee))` in `estimate_gas` and this
     /// fails: the proportional cut alone is 1% of the amount.
@@ -2320,7 +2981,7 @@ mod rpc_tests {
         );
         assert_ne!(
             estimate, base_fee,
-            "quoting only the base fee is the finding"
+            "estimate must include proportional fee in addition to base fee"
         );
     }
 
@@ -3230,5 +3891,820 @@ mod rpc_tests {
             .social_get_profile(Address([0xAB; 32]).to_hex(), None, Some(0))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn garden_rpc_methods_are_operator_only_and_serve_lifecycle() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45268, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node = Node::new(chain.clone()).expect("node");
+        let garden = Arc::new(crate::garden::GardenService::new(Some(chain.clone()), None));
+        let public = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node.get_client(),
+            RpcSecurityConfig::default(),
+            RpcMode::Public,
+        )
+        .with_garden(garden.clone());
+        let operator = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node.get_client(),
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        )
+        .with_garden(garden);
+
+        // Public listener refuses every bud_garden* method.
+        assert!(public
+            .garden_create("Room".into(), "host".into(), None)
+            .await
+            .is_err());
+        assert!(public.garden_invite().await.is_err());
+        assert!(public
+            .garden_join("bad".into(), "guest".into(), None)
+            .await
+            .is_err());
+        assert!(public.garden_admit("00".repeat(32), true).await.is_err());
+        assert!(public.garden_leave().await.is_err());
+        assert!(public.garden_return().await.is_err());
+        assert!(public.garden_status().await.is_err());
+        assert!(public
+            .garden_publish("message".into(), "hi".into(), None, None, None)
+            .await
+            .is_err());
+        assert!(public.garden_resolve("00".repeat(32)).await.is_err());
+        assert!(public.garden_trace("00".repeat(32)).await.is_err());
+        assert!(public.garden_feed(Some(5)).await.is_err());
+
+        // Operator listener refuses invalid inputs and answers valid calls across
+        // every Garden method, including host_approval admission and leave/return.
+        let status_empty = operator.garden_status().await.unwrap();
+        assert!(status_empty.get("garden").is_some_and(|v| v.is_null()));
+        assert!(operator
+            .garden_create("".into(), "host".into(), None)
+            .await
+            .is_err());
+        let created = operator
+            .garden_create(
+                "Rpc Room".into(),
+                "host".into(),
+                Some(crate::garden::GardenOptions {
+                    listen: Some("/ip4/127.0.0.1/tcp/0".into()),
+                    round_ms: Some(150),
+                    admission: Some("host_approval".into()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let invite = created["invite"].as_str().expect("invite").to_string();
+        assert!(operator.garden_invite().await.is_ok());
+
+        // A second operator node joins using the invite, is admitted, and then
+        // exercises leave/return on a separate single-node Garden.
+        let joiner_node = Node::new(chain.clone()).expect("joiner node");
+        let joiner = RpcServer::with_security_and_mode(
+            chain.clone(),
+            joiner_node.get_client(),
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        )
+        .with_garden(Arc::new(crate::garden::GardenService::new(
+            Some(chain.clone()),
+            None,
+        )));
+        assert!(joiner
+            .garden_join("not-a-valid-invite".into(), "guest".into(), None)
+            .await
+            .is_err());
+        let joined = joiner
+            .garden_join(
+                invite,
+                "guest".into(),
+                Some(crate::garden::GardenOptions {
+                    listen: Some("/ip4/127.0.0.1/tcp/0".into()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let guest_key = joined["garden"]["me"]["key"]
+            .as_str()
+            .expect("guest key")
+            .to_string();
+
+        // Wait until the host sees the waiting guest, then test refusal + accept.
+        assert!(operator.garden_admit("bad-key".into(), true).await.is_err());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let status = operator.garden_status().await.unwrap();
+            let waiting = status["garden"]["validators"]
+                .as_array()
+                .is_some_and(|rows| {
+                    rows.iter()
+                        .any(|r| r["key"] == guest_key && r["status"] == "Waiting")
+                });
+            if waiting {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "guest did not appear as Waiting: {status}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(operator.garden_admit(guest_key, true).await.is_ok());
+
+        // Publish, feed, resolve, trace (plus refusal paths on each).
+        assert!(operator
+            .garden_publish("unknown".into(), "hi".into(), None, None, None)
+            .await
+            .is_err());
+        let published = operator
+            .garden_publish("message".into(), "hello".into(), None, None, None)
+            .await
+            .unwrap();
+        let content_id = published["content_id"]
+            .as_str()
+            .expect("content_id")
+            .to_string();
+        let tx_id = published["tx_id"].as_str().expect("tx_id").to_string();
+        assert!(operator.garden_resolve("not-hex".into()).await.is_err());
+        assert!(operator.garden_trace("not-hex".into()).await.is_err());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(trace) = operator.garden_trace(tx_id.clone()).await {
+                if trace["stage"] == "final" {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "published tx {tx_id} did not finalize"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(operator.garden_resolve(content_id).await.is_ok());
+        assert!(operator.garden_trace(tx_id).await.is_ok());
+        assert!(operator.garden_feed(Some(5)).await.is_ok());
+
+        // Joiner leaves and returns via RPC.
+        assert!(joiner.garden_leave().await.is_ok());
+        assert!(joiner.garden_return().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn universal_unification_rpc_methods_answer_and_refuse_malformed_inputs() {
+        use crate::unification::{
+            CanonicalValue, DomainTokenBalance, LiquidityQuote, NormalizedMachineOutput,
+            OutputBinding, OutputCompositionPlan, OutputSelector, PaymentRail, StorageNetworkKind,
+            StorageReplica, UnifiedContentRecord, UniversalPaymentIntent, VerificationStrength,
+        };
+        use std::collections::BTreeMap;
+
+        let (server, _) = setup().await;
+
+        // 1. bud_getUniversalDomains (0-arg answer)
+        let domains = server.get_universal_domains().await.unwrap();
+        assert!(domains["count"].as_u64().unwrap_or(0) >= 19);
+        assert!(domains["catalog_root"].as_str().unwrap().starts_with("0x"));
+
+        // 2. bud_quoteUniversalPayment (refusal + answer)
+        assert!(server
+            .quote_universal_payment(serde_json::json!({"bad": true}))
+            .await
+            .is_err());
+        let pay_req = serde_json::json!({
+            "intent": UniversalPaymentIntent {
+                payer_id: [0x11; 32],
+                merchant_id: [0x22; 32],
+                nonce: 1,
+                target_domain: 3,
+                target_asset_id: [0xAA; 32],
+                target_amount: 100,
+                max_slippage_bps: 100,
+                deadline_unix_secs: 2_000,
+                invoice_hash: [0x33; 32],
+                rail: PaymentRail::OnChain,
+            },
+            "balances": [DomainTokenBalance {
+                domain_id: 1,
+                asset_id: [0xBB; 32],
+                symbol: String::from("BUD"),
+                available_amount: 120,
+            }],
+            "quotes": [LiquidityQuote {
+                quote_id: [0x44; 32],
+                source_domain: 1,
+                source_asset_id: [0xBB; 32],
+                target_domain: 3,
+                target_asset_id: [0xAA; 32],
+                rate_scaled: 1_000_000_000_000_000_000,
+                max_target_liquidity: 500,
+                fee_bps: 10,
+                valid_until_unix_secs: 2_500,
+            }],
+            "now_unix_secs": 1_500,
+        });
+        let quote_res = server.quote_universal_payment(pay_req).await.unwrap();
+        assert_eq!(quote_res["target_amount_delivered"].as_u64(), Some(100));
+
+        // 3. bud_composeExecutionOutputs (refusal + answer)
+        assert!(server
+            .compose_execution_outputs(
+                serde_json::json!({"plan_id": "", "steps": [], "bindings": []})
+            )
+            .await
+            .is_err());
+        let evm = NormalizedMachineOutput::from_evm(
+            "evm_step",
+            3,
+            true,
+            50_000,
+            vec![1, 2],
+            &[],
+            [(String::from("amount"), CanonicalValue::U64(42))]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        let wasm = NormalizedMachineOutput::from_wasm(
+            "wasm_step",
+            5,
+            true,
+            25_000,
+            vec![3],
+            Vec::new(),
+            [(String::from("received"), CanonicalValue::U64(42))]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        let plan = OutputCompositionPlan {
+            plan_id: String::from("rpc-compose"),
+            steps: vec![evm, wasm],
+            bindings: vec![OutputBinding {
+                from_step: String::from("evm_step"),
+                selector: OutputSelector::TypedField {
+                    key: String::from("amount"),
+                },
+                to_step: String::from("wasm_step"),
+                target_input: String::from("received"),
+                enforce_match: true,
+            }],
+        };
+        let composed = server
+            .compose_execution_outputs(serde_json::to_value(plan).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(composed["total_gas_bgu"].as_u64(), Some(75_000));
+
+        // 4. bud_resolveUnifiedStorage (refusal + answer)
+        assert!(server
+            .resolve_unified_storage(serde_json::json!({"uri": "http://bad", "objects": []}))
+            .await
+            .is_err());
+        let mut obj = UnifiedContentRecord::from_bytes(b"hello web3", "text/plain");
+        let digest = obj.sha3_256_digest;
+        obj.replicas.push(StorageReplica {
+            network: StorageNetworkKind::Ipfs,
+            domain_id: StorageNetworkKind::Ipfs.default_domain_id(),
+            native_locator: String::from(
+                "bafybeihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+            ),
+            verification: VerificationStrength::CryptographicHash,
+            available: true,
+            latency_ms: 20,
+        });
+        let mut bns = BTreeMap::new();
+        bns.insert(String::from("site.bud"), digest);
+        let storage_res = server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(storage_res["primary"]["network"].as_str(), Some("ipfs"));
+        let asset_res = server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "asset_path": "/app/main.wasm",
+            }))
+            .await
+            .unwrap();
+        assert_eq!(asset_res["mime_type"].as_str(), Some("application/wasm"));
+        assert!(server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "asset_path": "/../secret",
+            }))
+            .await
+            .is_err());
+
+        // 5. bud_encodeCrossVmCall (refusal + answer)
+        assert!(server
+            .encode_cross_vm_call(serde_json::json!({
+                "source_domain": 3,
+                "target_domain": 99999,
+                "source_language": "solidity",
+                "target_language": "move",
+                "method": "swap",
+                "args": [],
+                "nonce": 1,
+            }))
+            .await
+            .is_err());
+        let envelope = server
+            .encode_cross_vm_call(serde_json::json!({
+                "source_domain": 3,
+                "target_domain": 7,
+                "source_language": "solidity",
+                "target_language": "move",
+                "method": "dex::settle",
+                "args": [
+                    {"name": "amount", "value": {"kind": "u128", "value": 4200}}
+                ],
+                "nonce": 11,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(envelope["target_encoding"].as_str(), Some("bcs_le"));
+        assert!(envelope["encoded_payload"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()));
+
+        // 6. bud_verifyUniversalBundle (answer + refusal on tampered root)
+        let verified = server
+            .verify_universal_bundle(composed.clone())
+            .await
+            .unwrap();
+        assert_eq!(verified["valid"].as_bool(), Some(true));
+        assert_eq!(verified["stepCount"].as_u64(), Some(2));
+        let mut tampered_bundle = composed;
+        tampered_bundle["bundle_root"][0] =
+            serde_json::json!(tampered_bundle["bundle_root"][0].as_u64().unwrap() ^ 0xFF);
+        assert!(server
+            .verify_universal_bundle(tampered_bundle)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn storage_get_content_hydrates_verified_symbols_from_remote_peer_and_survives_replacement(
+    ) {
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+        use crate::storage::bud3::bof1::Object;
+        use crate::storage::bud3::custody::{symbol_leaf, symbol_root};
+        use crate::storage::bud3::fountain::SegmentEncoder;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::{prepare_public_upload, ObjectRecord};
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::replace::sign_replace_attestation;
+        use crate::storage::bud3::segment::commit_object;
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, SymbolRangeRequest,
+        };
+        use crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS;
+        use crate::validators::{
+            LeaderCommitment, SeatFields, ValidatorClass, ValidatorRegistration,
+        };
+        use ed25519_dalek::SigningKey;
+        use std::collections::BTreeMap;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload = b"p2p hydrated paid fallback content surviving replace ".repeat(4);
+        let old_up = prepare_public_upload(&payload, &profile, &Bud3Limits::default(), 12).unwrap();
+        let old_key = old_up.record.commitment;
+
+        let holder_a = [0x41u8; 32];
+        let holder_b = [0x42u8; 32];
+        let holder_c = [0x43u8; 32];
+        let owner = [0x15u8; 32];
+        let payer = [0x16u8; 32];
+        let receipt_id = [0x77u8; 32];
+
+        let remote_seed = [0x61u8; 32];
+        let remote_peer_bytes = SigningKey::from_bytes(&remote_seed)
+            .verifying_key()
+            .to_bytes();
+        let remote_kp = libp2p::identity::Keypair::ed25519_from_bytes(remote_seed).unwrap();
+        let remote_peer_id = remote_kp.public().to_peer_id();
+
+        let register_vals = |bc: &mut Blockchain| {
+            bc.state.epoch_index = 10;
+            for (idx, v) in [holder_a, holder_b, holder_c].into_iter().enumerate() {
+                let v_addr = Address::from(v);
+                let pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &v).unwrap();
+                bc.state.add_validator(v_addr, 100_000);
+                bc.state.get_validator_mut(&v_addr).unwrap().pq_public_key = pk.clone();
+                let peer_bytes = if v == holder_a {
+                    remote_peer_bytes
+                } else {
+                    [0x70u8 + u8::try_from(idx).unwrap_or(0); 32]
+                };
+                let reg = ValidatorRegistration {
+                    owner: v_addr,
+                    class: ValidatorClass::Full,
+                    operator_key: pk.clone(),
+                    bls_key: vec![v[0]; crate::validators::BLS_KEY_LEN],
+                    bls_pop: vec![v[0]; crate::validators::BLS_POP_LEN],
+                    seat: Some(SeatFields {
+                        vrf_key: v.to_vec(),
+                        pq_vote_key: pk,
+                        leader_commitment: LeaderCommitment {
+                            commitment: v,
+                            length: 16,
+                        },
+                    }),
+                    custody_quota_bytes: 1_000_000,
+                    relay_offer: None,
+                    gateway_offer: None,
+                    peer_id: peer_bytes,
+                };
+                bc.state
+                    .validator_directory
+                    .register(&reg, 100_000, 1, 0)
+                    .unwrap();
+            }
+        };
+
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_a,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_b,
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 3,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_c,
+                    class: Class::Full,
+                    first_esi: 9,
+                    symbols: 3,
+                },
+            ),
+        ];
+
+        let raw_obj = Object::raw_public(&payload);
+        let raw_bytes = raw_obj.encode();
+        let new_commit = commit_object(&raw_bytes, &profile).unwrap();
+        let enc_raw = SegmentEncoder::new(0, &raw_bytes, &profile).unwrap();
+        let k_raw = enc_raw.k();
+        let mut syms_new = enc_raw.source_symbols();
+        syms_new.extend(enc_raw.repair_symbols(0, 12 - k_raw).unwrap());
+        let leaves_new: Vec<(u32, [u8; 32])> = syms_new
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let new_rec = ObjectRecord {
+            content_id: old_up.record.content_id,
+            object_len: u64::try_from(raw_bytes.len()).unwrap(),
+            commitment: new_commit,
+            profile,
+            codec: 0,
+            symbols_per_segment: 12,
+            symbol_roots: vec![symbol_root(&leaves_new)],
+        };
+        let vkeys: BTreeMap<[u8; 32], Vec<u8>> = [holder_a, holder_b, holder_c]
+            .into_iter()
+            .map(|v| (v, ml_dsa_public_key(SchemeId::ML_DSA_65, &v).unwrap()))
+            .collect();
+        let atts: Vec<_> = [holder_a, holder_b, holder_c]
+            .into_iter()
+            .map(|v| sign_replace_attestation(v, &v, &old_key, &new_rec, &shares).unwrap())
+            .collect();
+
+        let setup_chain = |bc: &mut Blockchain| -> [u8; 32] {
+            register_vals(bc);
+            bc.state
+                .bud3_registry
+                .register_object(owner, old_up.record.clone(), shares.clone(), 1, 50)
+                .unwrap();
+            for v in [holder_a, holder_b, holder_c] {
+                bc.state.bud3_registry.ack(&old_key, &v).unwrap();
+            }
+            bc.state
+                .bud3_registry
+                .record_paid_view(payer, old_key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 10)
+                .unwrap();
+            let new_key = bc
+                .state
+                .bud3_registry
+                .replace_object(
+                    (holder_a, 100_000),
+                    &old_key,
+                    new_rec.clone(),
+                    shares.clone(),
+                    &atts,
+                    (crate::core::transaction::DEFAULT_CHAIN_ID, 10, &vkeys),
+                )
+                .unwrap();
+            for v in [holder_a, holder_b, holder_c] {
+                bc.state.bud3_registry.ack(&new_key, &v).unwrap();
+            }
+            new_key
+        };
+
+        let mut local_bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let new_key = setup_chain(&mut local_bc);
+        let mut remote_bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        assert_eq!(setup_chain(&mut remote_bc), new_key);
+
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: new_key,
+                segment: 0,
+                first_esi: 0,
+                count: 6,
+            },
+            &leaves_new,
+            &syms_new[0..6],
+        )
+        .unwrap()
+        .items;
+        remote_bc
+            .store_verified_bud3_symbols(&holder_a, &new_key, 0, &items_a)
+            .unwrap();
+
+        let (local_actor, local_chain) = ChainActor::new(local_bc);
+        tokio::spawn(async move { local_actor.run().await });
+        let (remote_actor, remote_chain) = ChainActor::new(remote_bc);
+        tokio::spawn(async move { remote_actor.run().await });
+
+        let port = free_loopback().await.port();
+        let mut remote_node = Node::with_key(remote_chain, remote_kp, false, None, None).unwrap();
+        let remote_pm = remote_node.peer_manager.clone();
+        remote_node
+            .listen_multiaddr(&format!("/ip4/127.0.0.1/tcp/{port}"))
+            .unwrap();
+        let remote_task = tokio::spawn(async move { remote_node.run().await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let remote_addr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{remote_peer_id}");
+        let mut local_node = Node::new(local_chain.clone()).unwrap();
+        let local_peer_id = local_node.peer_id;
+        let local_pm = local_node.peer_manager.clone();
+        let local_client = local_node.get_client();
+        local_node.bootstrap_peers = vec![remote_addr.clone()];
+        let _ = local_node.dial(&remote_addr);
+        let local_task = tokio::spawn(async move { local_node.run().await });
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !(local_pm.lock().unwrap().is_handshaked(&remote_peer_id)
+            && remote_pm.lock().unwrap().is_handshaked(&local_peer_id))
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for peer handshake"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let server = RpcServer::with_security_and_mode(
+            local_chain,
+            local_client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        );
+        let res = server
+            .storage_get_content(
+                format!("0x{}", hex::encode(payer)),
+                format!("0x{}", hex::encode(old_key)),
+                format!("0x{}", hex::encode(receipt_id)),
+                MIN_PAID_VIEW_FEE_ATOMS,
+            )
+            .await
+            .expect("storage_get_content must hydrate verified symbols from remote peer");
+        assert_eq!(res["content_hex"], hex::encode(&payload));
+        assert_eq!(res["content_len"], payload.len());
+
+        local_task.abort();
+        remote_task.abort();
+    }
+
+    #[tokio::test]
+    async fn bns_resolve_content_hydrates_verified_symbols_from_remote_peer() {
+        use crate::bns::bud3::{checked_content_ref, Bud3BnsResolver};
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+        use crate::storage::bud3::content_ref::ContentRef;
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::prepare_public_upload;
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, SymbolRangeRequest,
+        };
+        use crate::validators::{
+            LeaderCommitment, SeatFields, ValidatorClass, ValidatorRegistration,
+        };
+        use ed25519_dalek::SigningKey;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload = b"bns peer hydrated public content payload";
+        let up = prepare_public_upload(payload, &profile, &Bud3Limits::default(), 8).unwrap();
+        let obj_key = up.record.commitment;
+        let owner = [0x17u8; 32];
+        let holder_a = [0x44u8; 32];
+        let holder_b = [0x45u8; 32];
+
+        let remote_seed = [0x65u8; 32];
+        let remote_peer_bytes = SigningKey::from_bytes(&remote_seed)
+            .verifying_key()
+            .to_bytes();
+        let remote_kp = libp2p::identity::Keypair::ed25519_from_bytes(remote_seed).unwrap();
+        let remote_peer_id = remote_kp.public().to_peer_id();
+
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_a,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 5,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_b,
+                    class: Class::Mobile,
+                    first_esi: 5,
+                    symbols: 3,
+                },
+            ),
+        ];
+
+        let init_bc = |bc: &mut Blockchain| {
+            bc.state.epoch_index = 10;
+            for (idx, v) in [holder_a, holder_b].into_iter().enumerate() {
+                let v_addr = Address::from(v);
+                let pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &v).unwrap();
+                bc.state.add_validator(v_addr, 100_000);
+                bc.state.get_validator_mut(&v_addr).unwrap().pq_public_key = pk.clone();
+                let peer_bytes = if v == holder_a {
+                    remote_peer_bytes
+                } else {
+                    [0x78u8 + u8::try_from(idx).unwrap_or(0); 32]
+                };
+                let reg = ValidatorRegistration {
+                    owner: v_addr,
+                    class: ValidatorClass::Full,
+                    operator_key: pk.clone(),
+                    bls_key: vec![v[0]; crate::validators::BLS_KEY_LEN],
+                    bls_pop: vec![v[0]; crate::validators::BLS_POP_LEN],
+                    seat: Some(SeatFields {
+                        vrf_key: v.to_vec(),
+                        pq_vote_key: pk,
+                        leader_commitment: LeaderCommitment {
+                            commitment: v,
+                            length: 16,
+                        },
+                    }),
+                    custody_quota_bytes: 1_000_000,
+                    relay_offer: None,
+                    gateway_offer: None,
+                    peer_id: peer_bytes,
+                };
+                bc.state
+                    .validator_directory
+                    .register(&reg, 100_000, 1, 0)
+                    .unwrap();
+            }
+            bc.state
+                .bud3_registry
+                .register_object(owner, up.record.clone(), shares.clone(), 1, 50)
+                .unwrap();
+            bc.state
+                .bns_registry
+                .register("hydra.bud".to_string(), Address(owner), 1, 100)
+                .unwrap();
+            let cref = checked_content_ref(
+                &bc.state.bud3_registry,
+                ContentRef::new(up.record.content_id, obj_key, None).unwrap(),
+            )
+            .unwrap();
+            Bud3BnsResolver::set_bud3_content(
+                &mut bc.state.bns_registry,
+                &bc.state.bud3_registry,
+                ("hydra.bud", &Address(owner)),
+                Some(cref),
+                2,
+            )
+            .unwrap();
+        };
+
+        let mut local_bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        init_bc(&mut local_bc);
+        let mut remote_bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        init_bc(&mut remote_bc);
+
+        let leaves: Vec<(u32, [u8; 32])> = up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj_key,
+                segment: 0,
+                first_esi: 0,
+                count: 5,
+            },
+            &leaves,
+            &up.segments[0][0..5],
+        )
+        .unwrap()
+        .items;
+        remote_bc
+            .store_verified_bud3_symbols(&holder_a, &obj_key, 0, &items_a)
+            .unwrap();
+
+        let (local_actor, local_chain) = ChainActor::new(local_bc);
+        tokio::spawn(async move { local_actor.run().await });
+        let (remote_actor, remote_chain) = ChainActor::new(remote_bc);
+        tokio::spawn(async move { remote_actor.run().await });
+
+        let port = free_loopback().await.port();
+        let mut remote_node = Node::with_key(remote_chain, remote_kp, false, None, None).unwrap();
+        let remote_pm = remote_node.peer_manager.clone();
+        remote_node
+            .listen_multiaddr(&format!("/ip4/127.0.0.1/tcp/{port}"))
+            .unwrap();
+        let remote_task = tokio::spawn(async move { remote_node.run().await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let remote_addr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{remote_peer_id}");
+        let mut local_node = Node::new(local_chain.clone()).unwrap();
+        let local_peer_id = local_node.peer_id;
+        let local_pm = local_node.peer_manager.clone();
+        let local_client = local_node.get_client();
+        local_node.bootstrap_peers = vec![remote_addr.clone()];
+        let _ = local_node.dial(&remote_addr);
+        let local_task = tokio::spawn(async move { local_node.run().await });
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !(local_pm.lock().unwrap().is_handshaked(&remote_peer_id)
+            && remote_pm.lock().unwrap().is_handshaked(&local_peer_id))
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for peer handshake"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let server = RpcServer::with_security_and_mode(
+            local_chain,
+            local_client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        );
+        let res = server
+            .bns_resolve_content("hydra.bud".to_string())
+            .await
+            .expect("bns_resolve_content must succeed");
+        assert_eq!(res["bytes"], format!("0x{}", hex::encode(payload)));
+        assert_eq!(res["view_error"], serde_json::Value::Null);
+
+        local_task.abort();
+        remote_task.abort();
     }
 }

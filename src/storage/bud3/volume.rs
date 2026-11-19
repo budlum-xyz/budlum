@@ -63,7 +63,7 @@ pub enum Visibility {
 impl Visibility {
     /// The tag and the owner the volume id binds.
     #[must_use]
-    fn tag(&self) -> (&'static [u8], [u8; 32]) {
+    const fn tag(&self) -> (&'static [u8], [u8; 32]) {
         match self {
             Self::Public => (b"public", [0u8; 32]),
             Self::Sealed(owner) => (b"sealed", *owner),
@@ -72,13 +72,13 @@ impl Visibility {
 
     /// Whether the volume carries sealed content.
     #[must_use]
-    pub fn is_sealed(&self) -> bool {
+    pub const fn is_sealed(&self) -> bool {
         matches!(self, Self::Sealed(_))
     }
 
     /// The owner of a sealed volume.
     #[must_use]
-    pub fn owner(&self) -> Option<Address> {
+    pub const fn owner(&self) -> Option<Address> {
         match self {
             Self::Public => None,
             Self::Sealed(owner) => Some(*owner),
@@ -260,13 +260,13 @@ impl AggregationVolume {
 
     /// The volume length in bytes.
     #[must_use]
-    pub fn len(&self) -> u64 {
+    pub const fn len(&self) -> u64 {
         self.bytes.len() as u64
     }
 
     /// Whether the volume has no member.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.members.is_empty()
     }
 

@@ -36,8 +36,9 @@ pub const REPAIR_ATTEST_DOMAIN: &[u8] = b"BDLM_BUD3_REPAIR_ATTEST_V1";
 
 /// Legacy fixed attestation count retained for wire and tooling compatibility.
 ///
-/// Consensus admission refuses attestation-only repairs until the witness
-/// carries a seat- or stake-weighted quorum certificate.
+/// Consensus admission rejects attestation-only repairs until the witness carries
+/// a seat- or stake-weighted quorum certificate. Three signatures are not a
+/// finality threshold.
 pub const MIN_REPAIR_ATTESTATIONS: usize = 3;
 
 /// Maximum inline Merkle-verified witness symbols accepted in one `RecordRepair` tx.
@@ -72,57 +73,64 @@ pub enum RepairWitness {
     /// Merkle-verified live symbols from existing `obj.roots` entries that decode
     /// the segment and deterministically reproduce `new_symbols`.
     ProvenSymbols(Vec<RepairSymbolProof>),
-    /// Independent Full-validator ML-DSA-65 attestations over `new_root` bound
-    /// to the segment's original committed root (`>= MIN_REPAIR_ATTESTATIONS`).
+    /// Legacy independent Full-validator ML-DSA-65 attestations over `new_root`.
+    /// The variant remains decodable, but consensus refuses it until it includes
+    /// a seat- or stake-weighted quorum certificate.
     ValidatorAttestations(Vec<RepairAttestation>),
 }
 
+/// The segment repair a [`RepairAttestation`] covers: the object, the segment
+/// position, the fresh ESI range and both the post-repair and the original
+/// committed segment roots.
+///
+/// Grouping these fields keeps [`repair_attestation_digest`] and
+/// [`sign_repair_attestation_with_chain_id`] from drifting apart: an attestation
+/// that names a different segment, ESI range or root is a different claim, and
+/// the digest commits to every field it carries.
+#[derive(Debug, Clone, Copy)]
+pub struct RepairClaim<'a> {
+    /// Object whose segment is repaired.
+    pub object: &'a ObjectKey,
+    /// Zero-based segment index inside `object`.
+    pub segment: u64,
+    /// First fresh ESI of the repaired symbol range.
+    pub first_esi: u32,
+    /// Number of repaired symbols in the range.
+    pub count: u32,
+    /// Merkle root of the newly repaired symbols.
+    pub new_root: &'a [u8; 32],
+    /// Segment root the object committed to before the repair.
+    pub original_segment_root: &'a [u8; 32],
+}
+
 /// Canonical domain-separated digest signed by each independent Full validator
-/// attesting a segment repair.
+/// attesting a segment repair on `chain_id`.
 #[must_use]
-pub fn repair_attestation_digest(
-    object: &ObjectKey,
-    segment: u64,
-    first_esi: u32,
-    count: u32,
-    new_root: &[u8; 32],
-    original_segment_root: &[u8; 32],
-) -> [u8; 32] {
+pub fn repair_attestation_digest(chain_id: u64, claim: &RepairClaim<'_>) -> [u8; 32] {
     hash_fields_bytes(&[
         REPAIR_ATTEST_DOMAIN,
-        object,
-        &segment.to_le_bytes(),
-        &first_esi.to_le_bytes(),
-        &count.to_le_bytes(),
-        new_root,
-        original_segment_root,
+        &chain_id.to_le_bytes(),
+        claim.object,
+        &claim.segment.to_le_bytes(),
+        &claim.first_esi.to_le_bytes(),
+        &claim.count.to_le_bytes(),
+        claim.new_root,
+        claim.original_segment_root,
     ])
 }
 
-/// Sign a [`RepairAttestation`] with `validator`'s ML-DSA-65 seed under `ctx::STORAGE_V2`.
-///
-/// Convenience: exposed for repair attester daemons and witness tests.
+/// Sign a [`RepairAttestation`] on `chain_id` with `validator`'s ML-DSA-65 seed under `ctx::STORAGE_V2`.
 ///
 /// # Errors
 ///
 /// Returns [`PqError`] if `ml_dsa_seed` fails to sign.
-pub fn sign_repair_attestation(
+pub fn sign_repair_attestation_with_chain_id(
+    chain_id: u64,
     validator: Address,
     ml_dsa_seed: &[u8; 32],
-    object: &ObjectKey,
-    segment: u64,
-    (first_esi, count): (u32, u32),
-    new_root: &[u8; 32],
-    original_segment_root: &[u8; 32],
+    claim: &RepairClaim<'_>,
 ) -> Result<RepairAttestation, PqError> {
-    let digest = repair_attestation_digest(
-        object,
-        segment,
-        first_esi,
-        count,
-        new_root,
-        original_segment_root,
-    );
+    let digest = repair_attestation_digest(chain_id, claim);
     let signature = ml_dsa_sign(
         SchemeId::ML_DSA_65,
         ml_dsa_seed,
@@ -134,6 +142,26 @@ pub fn sign_repair_attestation(
         validator,
         signature,
     })
+}
+
+/// Sign a [`RepairAttestation`] on [`crate::core::transaction::DEFAULT_CHAIN_ID`].
+///
+/// Convenience: exposed for repair attester daemons and witness tests.
+///
+/// # Errors
+///
+/// Returns [`PqError`] if `ml_dsa_seed` fails to sign.
+pub fn sign_repair_attestation(
+    validator: Address,
+    ml_dsa_seed: &[u8; 32],
+    claim: &RepairClaim<'_>,
+) -> Result<RepairAttestation, PqError> {
+    sign_repair_attestation_with_chain_id(
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        validator,
+        ml_dsa_seed,
+        claim,
+    )
 }
 
 /// Build `RepairSymbolProof` witnesses for `live_subset` against the full list of
@@ -164,12 +192,16 @@ pub fn build_repair_proven_witness(
         .iter()
         .map(|s| (s.esi, symbol_leaf(&s.data)))
         .collect();
+    let mut seen_esis = std::collections::BTreeSet::new();
     let mut proofs = Vec::with_capacity(live_subset.len());
     for sym in live_subset {
-        if sym.segment != seg || sym.esi < first_esi {
+        if sym.segment != seg || sym.esi < first_esi || !seen_esis.insert(sym.esi) {
             return None;
         }
         let pos = usize::try_from(sym.esi - first_esi).ok()?;
+        if pos >= placed_leaves.len() {
+            return None;
+        }
         let root_path = prove_symbol_root_path(&placed_leaves, pos)?;
         proofs.push(RepairSymbolProof {
             root_index,
@@ -408,7 +440,7 @@ pub fn verify_repaired_symbol(
 /// submits a fraudulent repair (`bud3_bad_repair_is_slashed`, Section 6.10.8).
 #[must_use]
 pub const fn bad_repair_slash_amount(repairer_stake: u64) -> u64 {
-    repairer_stake.saturating_mul(BAD_REPAIR_SLASH_BPS) / 10_000
+    ((repairer_stake as u128 * BAD_REPAIR_SLASH_BPS as u128) / 10_000) as u64
 }
 
 /// Blocks an assigned Full validator has to submit `RecordRepair` before
@@ -468,6 +500,59 @@ mod tests {
     };
 
     #[test]
+    fn repair_attestation_digest_commits_to_the_chain_and_every_claim_field() {
+        let object = [7u8; 32];
+        let new_root = [8u8; 32];
+        let original = [9u8; 32];
+        let claim = RepairClaim {
+            object: &object,
+            segment: 3,
+            first_esi: 40,
+            count: 5,
+            new_root: &new_root,
+            original_segment_root: &original,
+        };
+        let home = crate::core::transaction::DEFAULT_CHAIN_ID;
+        let base = repair_attestation_digest(home, &claim);
+
+        // A quorum collected on one network is a different message on another.
+        assert_ne!(base, repair_attestation_digest(home + 1, &claim));
+
+        let other_root = [0xAAu8; 32];
+        for changed in [
+            RepairClaim {
+                segment: 4,
+                ..claim
+            },
+            RepairClaim {
+                first_esi: 41,
+                ..claim
+            },
+            RepairClaim { count: 6, ..claim },
+            RepairClaim {
+                new_root: &other_root,
+                ..claim
+            },
+            RepairClaim {
+                original_segment_root: &other_root,
+                ..claim
+            },
+            RepairClaim {
+                object: &other_root,
+                ..claim
+            },
+        ] {
+            assert_ne!(base, repair_attestation_digest(home, &changed));
+        }
+
+        // The default-chain signer and the explicit one agree on the default chain.
+        let seed = [5u8; 32];
+        let a = sign_repair_attestation([5u8; 32], &seed, &claim).unwrap();
+        let b = sign_repair_attestation_with_chain_id(home, [5u8; 32], &seed, &claim).unwrap();
+        assert_eq!(a.validator, b.validator);
+    }
+
+    #[test]
     fn handover_advances_every_twenty_blocks() {
         let cands: Vec<Candidate> = (1..=4u8)
             .map(|i| Candidate {
@@ -514,5 +599,13 @@ mod tests {
         forged.data[0] ^= 0xFF;
         assert!(!verify_repaired_symbol(0, &seg_bytes, &SMALL, &forged).unwrap());
         assert_eq!(bad_repair_slash_amount(500_000), 5_000);
+        // Large validator stakes above u64::MAX / 100 still slash exact 1% without saturating.
+        let large_stake = u64::MAX / 10;
+        assert_eq!(bad_repair_slash_amount(large_stake), large_stake / 100);
+
+        // Duplicate ESIs in repair witness subset are rejected.
+        let enc = SegmentEncoder::new(0, &seg_bytes, &SMALL).unwrap();
+        let src = enc.source_symbols();
+        assert!(build_repair_proven_witness(0, &src, &[src[0].clone(), src[0].clone()]).is_none());
     }
 }

@@ -17,6 +17,10 @@
 //! its own cannot be told from a forgery, and a store of unauthenticated
 //! transactions is free to fill for anyone. Carried together, the native
 //! check of the object is also the check of the transaction.
+//!
+//! WIRING: [`AggNode::check_form_for`], [`AggNode::admit_with_auth`], and
+//! [`AggNode::attach_claim_ref`] serve Phase 4/5 program-auth and PCS companion
+//! object admission once `Blockchain` opens `agg/claim_ref` gossip.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,7 +28,7 @@ use zeroize::Zeroizing;
 
 use super::aggregator::{Aggregator, TickOutcome};
 use super::backend::{AggError, TickCtx};
-use super::chain::{account_claim, claim_domain, ChainBackend};
+use super::chain::{account_claim_for, claim_domain, ChainBackend};
 use super::envelope::Envelope;
 use super::frame::ClaimFrame;
 use super::params::{AggMode, AggParams};
@@ -106,6 +110,22 @@ impl std::fmt::Display for ObjectRefusal {
 
 impl std::error::Error for ObjectRefusal {}
 
+/// Iterates every claim digest required by `tx` (`auth_claim` followed by `claim_refs`).
+fn tx_required_claims(tx: &Transaction) -> impl Iterator<Item = Hash32> + '_ {
+    tx.auth_claim
+        .into_iter()
+        .chain(tx.claim_refs.iter().copied())
+}
+
+/// Returns `true` iff `tx.claim_refs` has no duplicates and does not repeat `auth_claim`.
+fn claim_refs_are_distinct(tx: &Transaction) -> bool {
+    let mut seen = BTreeSet::new();
+    if let Some(auth) = tx.auth_claim {
+        seen.insert(auth);
+    }
+    tx.claim_refs.iter().all(|digest| seen.insert(*digest))
+}
+
 /// The pending transactions as the object pool sees them, with the one that
 /// is being admitted.
 struct Lookup<'a> {
@@ -122,6 +142,17 @@ impl TxLookup for Lookup<'_> {
         Some(TxFacts {
             from: tx.from,
             fee: tx.fee,
+        })
+    }
+
+    fn accepts_claim(&self, tx_hash: &Hash32, claim_digest: &Hash32) -> bool {
+        if let Some((hash, tx)) = self.incoming {
+            if hash == *tx_hash {
+                return tx.auth_claim == Some(*claim_digest);
+            }
+        }
+        self.held.get(tx_hash).is_some_and(|tx| {
+            tx.auth_claim == Some(*claim_digest) || tx.claim_refs.contains(claim_digest)
         })
     }
 }
@@ -211,11 +242,30 @@ impl AggNode {
     ///
     /// [`ObjectRefusal::NotTheClaimedForm`].
     pub fn check_form(&self, envelope: &Envelope, tx: &Transaction) -> Result<(), ObjectRefusal> {
-        let digest = account_claim(tx).map(|claim| claim.digest(self.domain));
+        self.check_form_for(envelope, tx, None)
+    }
+
+    /// Form check supporting both standard V5 signature accounts (`None`) and
+    /// Phase 4 `BudZKVM` program-authorized accounts (`Some(program_hash)`),
+    /// plus duplicate-free `tx.claim_refs` validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObjectRefusal::NotTheClaimedForm`] if `envelope.tx_hash`,
+    /// canonical claimed shape, `auth_claim`, or distinct `claim_refs` fail.
+    pub fn check_form_for(
+        &self,
+        envelope: &Envelope,
+        tx: &Transaction,
+        auth_program_hash: Option<Hash32>,
+    ) -> Result<(), ObjectRefusal> {
+        let digest =
+            account_claim_for(tx, auth_program_hash).map(|claim| claim.digest(self.domain));
         if envelope.tx_hash != tx.signing_hash()
             || !tx.claimed_shape_is_canonical()
             || digest.is_none()
             || tx.auth_claim != digest
+            || !claim_refs_are_distinct(tx)
         {
             return Err(ObjectRefusal::NotTheClaimedForm);
         }
@@ -238,7 +288,25 @@ impl AggNode {
         tx: Transaction,
         registry: &SchemeStatusRegistry,
     ) -> Result<bool, ObjectRefusal> {
-        self.check_form(&envelope, &tx)?;
+        self.admit_with_auth(envelope, tx, None, registry)
+    }
+
+    /// Admits a claimed transaction and its primary authorization envelope for
+    /// either a V5 signature account (`None`) or a Phase 4 `BudZKVM` program
+    /// account (`Some(program_hash)`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObjectRefusal`] if form checks, nonce uniqueness, pending store
+    /// bounds, claim-digest binding, or pool verification fail.
+    pub fn admit_with_auth(
+        &mut self,
+        envelope: Envelope,
+        tx: Transaction,
+        auth_program_hash: Option<Hash32>,
+        registry: &SchemeStatusRegistry,
+    ) -> Result<bool, ObjectRefusal> {
+        self.check_form_for(&envelope, &tx, auth_program_hash)?;
         let tx_hash = tx.signing_hash();
         if self.transactions.contains_key(&tx_hash) {
             return Ok(false);
@@ -290,6 +358,45 @@ impl AggNode {
         }
     }
 
+    /// Admits a companion Phase 4/5 object (`StarkProof` / `PcsOpening`) whose
+    /// derived claim digest is explicitly listed in `tx.claim_refs` of an
+    /// already-admitted pending transaction. Uninvited objects are rejected and
+    /// blamed (`Rejection::NotTheSender`).
+    ///
+    /// Convenience: kept for the CLI and Phase 5 `agg/claim_ref` gossip admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObjectRefusal::NotTheClaimedForm`] if `envelope.tx_hash` is not
+    /// held or carries no `claim_refs`, or [`ObjectRefusal::Pool`] if pool
+    /// verification or claim-digest binding rejects the object.
+    pub fn attach_claim_ref(
+        &mut self,
+        envelope: Envelope,
+        registry: &SchemeStatusRegistry,
+    ) -> Result<bool, ObjectRefusal> {
+        let Some(tx) = self.transactions.get(&envelope.tx_hash) else {
+            return Err(ObjectRefusal::NotTheClaimedForm);
+        };
+        if tx.claim_refs.is_empty() {
+            return Err(ObjectRefusal::NotTheClaimedForm);
+        }
+        let lookup = Lookup {
+            held: &self.transactions,
+            incoming: None,
+        };
+        match self.aggregator.on_object(envelope, &lookup, registry) {
+            Ok(Admission::Accepted(_)) => {
+                self.prune_orphans();
+                Ok(true)
+            }
+            Ok(Admission::Waiting(_)) | Err(Rejection::Duplicate | Rejection::ClaimKnown) => {
+                Ok(false)
+            }
+            Err(rejection) => Err(ObjectRefusal::Pool(rejection)),
+        }
+    }
+
     /// A frame arrived on `agg/frame`. Drops (ignores) frames whose claims
     /// do not match transactions currently held by this node before running
     /// expensive ML-DSA-87 verification; returns whether the frame is new.
@@ -306,7 +413,7 @@ impl AggNode {
         let usable: BTreeSet<Hash32> = self
             .transactions
             .values()
-            .filter_map(|tx| tx.auth_claim)
+            .flat_map(tx_required_claims)
             .collect();
         if !frame
             .claims
@@ -334,10 +441,17 @@ impl AggNode {
     /// `None` when no frame is ready whose transactions are all here.
     #[must_use]
     pub fn block_input(&self) -> Option<(ClaimFrame, Vec<Transaction>)> {
+        // Expose a transaction's claims only once EVERY claim it requires
+        // (`auth_claim` plus all `claim_refs`) is already proven in a stored
+        // frame, preventing partial selection from violating block Rules 7/8.
         let usable: BTreeSet<Hash32> = self
             .transactions
             .values()
-            .filter_map(|tx| tx.auth_claim)
+            .filter(|tx| {
+                tx.is_claimed()
+                    && tx_required_claims(tx).all(|digest| self.aggregator.tracks_claim(&digest))
+            })
+            .flat_map(tx_required_claims)
             .collect();
         let frame = self.aggregator.block_frame(&usable)?;
         let wanted: BTreeSet<Hash32> = frame
@@ -348,15 +462,21 @@ impl AggNode {
         let mut transactions: Vec<Transaction> = self
             .transactions
             .values()
-            .filter(|tx| tx.auth_claim.is_some_and(|digest| wanted.contains(&digest)))
+            .filter(|tx| {
+                tx.is_claimed() && tx_required_claims(tx).all(|digest| wanted.contains(&digest))
+            })
             .cloned()
             .collect();
+        let covered: BTreeSet<Hash32> = transactions.iter().flat_map(tx_required_claims).collect();
+        if covered.len() != wanted.len() || !wanted.iter().all(|d| covered.contains(d)) {
+            return None;
+        }
         transactions.sort_by_key(|tx| (tx.from, tx.nonce));
         Some((frame, transactions))
     }
 
-    /// Forget a transaction that can no longer run. Its claim leaves the
-    /// object pool and any frame that carries it is dropped so stale frames
+    /// Forget a transaction that can no longer run. Its claims leave the
+    /// object pool and any frame that carries them is dropped so stale frames
     /// cannot linger or poison later merges.
     pub fn drop_transaction(&mut self, tx_hash: &Hash32) {
         if let Some(tx) = self.transactions.remove(tx_hash) {
@@ -367,23 +487,33 @@ impl AggNode {
                     self.by_sender.remove(&tx.from);
                 }
             }
-            if let Some(digest) = tx.auth_claim {
-                self.aggregator.forget_claim(&digest);
+            for digest in tx_required_claims(&tx) {
+                let still_referenced = self
+                    .transactions
+                    .values()
+                    .any(|other| tx_required_claims(other).any(|d| d == digest));
+                if !still_referenced {
+                    self.aggregator.forget_claim(&digest);
+                }
             }
         }
     }
 
-    /// Remove any held transaction whose claim is neither tracked by the
-    /// object pool (ready or proven) nor covered by any retained claim frame.
+    /// Remove any held transaction whose primary claim is neither tracked by
+    /// the object pool (ready or proven) nor covered by any retained frame.
     fn prune_orphans(&mut self) {
         let orphans: Vec<Hash32> = self
             .transactions
             .iter()
             .filter_map(|(hash, tx)| {
-                let orphaned = tx.auth_claim.is_none_or(|digest| {
-                    !self.aggregator.pool().tracks_claim(&digest)
-                        && !self.aggregator.tracks_claim(&digest)
-                });
+                let is_tracked = |digest: &Hash32| {
+                    self.aggregator.pool().tracks_claim(digest)
+                        || self.aggregator.tracks_claim(digest)
+                };
+                let orphaned = tx.auth_claim.map_or_else(
+                    || !tx.claim_refs.iter().any(is_tracked),
+                    |digest| !is_tracked(&digest),
+                );
                 orphaned.then_some(*hash)
             })
             .collect();

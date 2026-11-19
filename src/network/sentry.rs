@@ -1,962 +1,1178 @@
-//! Sentry node shield topology and swarm-boundary connection admission gate.
+//! Sentry node architecture: shields private validators behind public sentry
+//! full nodes over a private VPC/VPN link.
 //!
-//! A shielded validator places one or more public-facing sentry nodes in front
-//! of itself:
+//! Topology:
+//! ```text
+//! Public Internet <-> Sentry A <->
+//!                     Sentry B <-> Shielded Validator (private VPC/VPN)
+//!                     Sentry C <->
+//! ```
 //!
-//! - **Validator shield mode** (`role = "validator"` with `sentry_peers`):
-//!   - `SentryGateBehaviour` rejects every inbound connection whose
-//!     authenticated transport `PeerId` is not in `sentry_peers` before any
-//!     application protocol (`identify`, `ping`, `gossipsub`, `kad`, `sync`,
-//!     `bitswap`, `witness`) opens a substream.
-//!   - `SentryGateBehaviour` rejects every pending or established outbound dial
-//!     whose target `PeerId` is not in `sentry_peers` before any socket opens.
-//!   - Public discovery (`bootnodes`, `dns_seeds`, mDNS, Kademlia DHT server
-//!     mode, provider announcements, and periodic DHT walks) is disabled so
-//!     the validator speaks solely with its sentry nodes.
-//!
-//! - **Sentry shield mode** (`role = "sentry"` with `validator_peers`):
-//!   - Connects simultaneously to the public P2P mesh and to its protected
-//!     upstream validators (either dialed outbound over a private link or
-//!     accepted inbound from a zero-inbound-port validator authenticated by
-//!     `PeerId`).
-//!   - Reserves dedicated connection headroom (`RESERVED_SHIELD_SLOTS`) so
-//!     public connection floods reaching `max_peers` cannot block or evict
-//!     validator links.
-//!   - Suppresses Kademlia routing insertion (`Identify` and `RoutingUpdated`)
-//!     for every protected validator `PeerId` so public `FIND_NODE` queries
-//!     never learn a validator's IP address or listen multiaddr.
+//! Guarantees enforced by [`SentryPolicy`]:
+//! 1. **Shielded validator (`SentryRole::ShieldedValidator`)**:
+//!    - Peer discovery (Kademlia DHT bootstrap/routing, mDNS, DNS seeds, public
+//!      bootnodes) is forced off.
+//!    - Inbound and outbound connections are restricted strictly to configured
+//!      `sentry_peers` (authenticated by `PeerId`) and private VPC/VPN CIDRs
+//!      when `strict_private_network` or `allowed_private_cidrs` is set.
+//!    - Sentries are pinned as explicit gossipsub peers and unconditional peers
+//!      so a shared VPC `/24` never trips eclipse subnet limits.
+//!    - Live sentry rotation (`update_sentries`) swaps compromised or `DDoS`'d
+//!      sentries at runtime without restarting or exporting validator keys.
+//! 2. **Sentry shield node (`SentryRole::Sentry`)**:
+//!    - Participates normally in public peer discovery, sync, and gossip.
+//!    - Protects every shielded validator listed in `private_peers` as an
+//!      unconditional explicit peer (immune to `max_peers` eviction and `/24`
+//!      subnet caps during public `DDoS` floods).
+//!    - Never inserts `private_peers` into Kademlia or peer-exchange responses,
+//!      hiding the validator's `PeerId` and private IP from the public network.
 
-use libp2p::{
-    core::{transport::PortUse, Endpoint},
-    multiaddr::Protocol,
-    swarm::{
-        dummy, ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, THandler,
-        THandlerInEvent, THandlerOutEvent, ToSwarm,
-    },
-    Multiaddr, PeerId,
+pub use super::sentry_gate::{
+    peer_id_from_multiaddr, SentryGateBehaviour, SentryGateEvent, SentryShieldConfig,
+    RESERVED_SHIELD_SLOTS,
 };
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::task::{Context, Poll};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 
-/// Dedicated swarm connection slots reserved above the public `max_peers`
-/// ceiling for authenticated validator-sentry shield links.
-pub const RESERVED_SHIELD_SLOTS: usize = 16;
+use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
+use serde::{Deserialize, Serialize};
 
-/// Maximum number of configured shield peers on one node, matched to the
-/// reserved swarm headroom so every configured shield peer has a guaranteed slot.
-const MAX_CONFIGURED_SHIELD_PEERS: usize = RESERVED_SHIELD_SLOTS;
-
-/// Per-source cap on concurrent unauthenticated pending inbound handshakes
-/// while a validator runs in sentry-shielded mode.
-const MAX_SHIELD_PENDING_PER_SOURCE: usize = 4;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DialEndpoint {
-    peer_id: PeerId,
-    dial_addr: Multiaddr,
+/// Operating role of this node within the sentry-shield architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SentryRole {
+    /// Ordinary peer with standard discovery and peer admission.
+    #[default]
+    Standard,
+    /// Private validator connected exclusively to its configured sentry peers.
+    ShieldedValidator,
+    /// Public full node shielding one or more private validators behind it.
+    Sentry,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ValidatorEndpoint {
-    peer_id: PeerId,
-    dial_addr: Option<Multiaddr>,
-}
+/// Maximum number of sentry addresses accepted in config or live rotation.
+/// Bounds unconditional/explicit gossipsub peer sets against accidental bloat.
+const MAX_SENTRY_PEERS: usize = 64;
 
-/// Validated sentry-validator shield topology for a P2P node.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SentryShieldConfig {
-    sentry_endpoints: Vec<DialEndpoint>,
-    sentry_peer_ids: BTreeSet<PeerId>,
-    validator_endpoints: Vec<ValidatorEndpoint>,
-    validator_peer_ids: BTreeSet<PeerId>,
-}
-
-/// Extract the trailing `/p2p/<PeerId>` component from a multiaddr.
+/// Normalizes IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) produced by
+/// dual-stack sockets into plain IPv4 so CIDR and private-network checks
+/// enforce identical rules on IPv4 and dual-stack IPv6 listeners.
 #[must_use]
-pub fn peer_id_from_multiaddr(addr: &Multiaddr) -> Option<PeerId> {
-    match addr.iter().last()? {
-        Protocol::P2p(peer_id) => Some(peer_id),
-        _ => None,
+const fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        IpAddr::V4(v4) => IpAddr::V4(v4),
     }
 }
 
-fn validate_dialable_multiaddr(raw: &str, label: &str) -> Result<(PeerId, Multiaddr), String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(format!("{label} entry cannot be empty"));
-    }
-    let addr: Multiaddr = trimmed
-        .parse()
-        .map_err(|e| format!("invalid {label} multiaddr '{trimmed}': {e}"))?;
-
-    let mut has_host = false;
-    let mut has_port = false;
-    let components: Vec<Protocol<'_>> = addr.iter().collect();
-    let Some((Protocol::P2p(peer_id), prefix)) = components.split_last() else {
-        return Err(format!(
-            "{label} multiaddr '{trimmed}' must end with /p2p/<PeerId>"
-        ));
-    };
-    let peer_id = *peer_id;
-    if prefix.is_empty() {
-        return Err(format!(
-            "{label} multiaddr '{trimmed}' must include a transport host and port before /p2p/<PeerId>"
-        ));
-    }
-
-    for proto in prefix {
-        match proto {
-            Protocol::Ip4(ip) => {
-                if ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
-                    return Err(format!(
-                        "{label} multiaddr '{trimmed}' cannot target unspecified, broadcast, or multicast IPv4 address {ip}"
-                    ));
-                }
-                has_host = true;
-            }
-            Protocol::Ip6(ip) => {
-                if ip.is_unspecified() || ip.is_multicast() {
-                    return Err(format!(
-                        "{label} multiaddr '{trimmed}' cannot target unspecified or multicast IPv6 address {ip}"
-                    ));
-                }
-                has_host = true;
-            }
-            Protocol::Dns(host)
-            | Protocol::Dns4(host)
-            | Protocol::Dns6(host)
-            | Protocol::Dnsaddr(host) => {
-                if host.trim().is_empty() {
-                    return Err(format!(
-                        "{label} multiaddr '{trimmed}' has an empty DNS host"
-                    ));
-                }
-                has_host = true;
-            }
-            Protocol::Tcp(port) | Protocol::Udp(port) => {
-                if *port == 0 {
-                    return Err(format!(
-                        "{label} multiaddr '{trimmed}' must specify a non-zero port"
-                    ));
-                }
-                has_port = true;
-            }
-            Protocol::Memory(port) => {
-                if *port == 0 {
-                    return Err(format!(
-                        "{label} memory multiaddr '{trimmed}' must specify a non-zero port"
-                    ));
-                }
-                has_host = true;
-                has_port = true;
-            }
-            Protocol::P2p(_) => {
-                return Err(format!(
-                    "{label} multiaddr '{trimmed}' cannot embed multiple /p2p/<PeerId> segments"
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    if !has_host || !has_port {
-        return Err(format!(
-            "{label} multiaddr '{trimmed}' must include both a target host and non-zero port"
-        ));
-    }
-
-    Ok((peer_id, addr))
+/// IPv4 or IPv6 CIDR prefix (`address/prefix_len`) used to constrain private
+/// validator <-> sentry links to a VPC or VPN address range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct IpCidr {
+    network: IpAddr,
+    prefix_len: u8,
 }
 
-fn parse_validator_spec(raw: &str) -> Result<ValidatorEndpoint, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("validator_peers entry cannot be empty".into());
-    }
-    if !trimmed.contains('/') {
-        let peer_id = trimmed.parse::<PeerId>().map_err(|e| {
-            format!(
-                "invalid validator_peers entry '{trimmed}': expected <PeerId> or <Multiaddr>/p2p/<PeerId> ({e})"
-            )
-        })?;
-        return Ok(ValidatorEndpoint {
-            peer_id,
-            dial_addr: None,
-        });
-    }
-    let (peer_id, addr) = validate_dialable_multiaddr(trimmed, "validator_peers")?;
-    Ok(ValidatorEndpoint {
-        peer_id,
-        dial_addr: Some(addr),
-    })
-}
-
-impl SentryShieldConfig {
-    /// Validate role compatibility and parse `sentry_peers` / `validator_peers`.
+impl IpCidr {
+    /// Parses a CIDR string such as `"10.10.0.0/16"`, `"100.64.0.0/10"`, or
+    /// `"fd00::/8"`. Bare IPs without `/prefix` are treated as `/32` or `/128`.
     ///
     /// # Errors
     ///
-    /// Returns a descriptive configuration error when role constraints,
-    /// multiaddr syntax, `/p2p/<PeerId>` pinning, capacity bounds, or
-    /// self-identity checks fail.
-    pub fn from_role_and_peers(
-        role: &str,
-        raw_sentry_peers: &[String],
-        raw_validator_peers: &[String],
-        local_peer_id: Option<&PeerId>,
-    ) -> Result<Self, String> {
-        let sentry_non_empty: Vec<&str> = raw_sentry_peers
-            .iter()
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        let validator_non_empty: Vec<&str> = raw_validator_peers
-            .iter()
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
+    /// Returns [`SentryConfigError::InvalidCidr`] if the IP or prefix length
+    /// cannot be parsed or exceeds the address bit width.
+    fn parse(raw: &str) -> Result<Self, SentryConfigError> {
+        let trimmed = raw.trim();
+        let (ip_str, prefix_opt) = match trimmed.split_once('/') {
+            Some((ip, p)) => (ip, Some(p)),
+            None => (trimmed, None),
+        };
+        let ip = IpAddr::from_str(ip_str)
+            .map_err(|_| SentryConfigError::InvalidCidr(trimmed.to_string()))?;
+        let max_bits = match ip {
+            IpAddr::V4(_) => 32u8,
+            IpAddr::V6(_) => 128u8,
+        };
+        let prefix_len = match prefix_opt {
+            Some(p) => {
+                let parsed = p
+                    .parse::<u8>()
+                    .map_err(|_| SentryConfigError::InvalidCidr(trimmed.to_string()))?;
+                if parsed > max_bits {
+                    return Err(SentryConfigError::InvalidCidr(trimmed.to_string()));
+                }
+                parsed
+            }
+            None => max_bits,
+        };
+        let network = mask_ip(ip, prefix_len);
+        Ok(Self {
+            network,
+            prefix_len,
+        })
+    }
 
-        if !sentry_non_empty.is_empty() && role != "validator" {
-            return Err(format!(
-                "sentry_peers may only be configured when role = 'validator' (current role = '{role}')"
-            ));
+    /// Returns `true` when `ip` falls inside this CIDR prefix.
+    #[must_use]
+    fn contains(&self, ip: IpAddr) -> bool {
+        let ip = normalize_ip(ip);
+        match (self.network, ip) {
+            (IpAddr::V4(net), IpAddr::V4(cand)) => {
+                let mask = ipv4_mask(self.prefix_len);
+                (u32::from(cand) & mask) == u32::from(net)
+            }
+            (IpAddr::V6(net), IpAddr::V6(cand)) => {
+                let mask = ipv6_mask(self.prefix_len);
+                (u128::from(cand) & mask) == u128::from(net)
+            }
+            _ => false,
         }
-        if !validator_non_empty.is_empty() && role != "sentry" {
-            return Err(format!(
-                "validator_peers may only be configured when role = 'sentry' (current role = '{role}')"
-            ));
+    }
+}
+
+impl std::fmt::Display for IpCidr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.network, self.prefix_len)
+    }
+}
+
+const fn ipv4_mask(prefix_len: u8) -> u32 {
+    if prefix_len == 0 {
+        0
+    } else if prefix_len >= 32 {
+        u32::MAX
+    } else {
+        u32::MAX << (32 - prefix_len)
+    }
+}
+
+const fn ipv6_mask(prefix_len: u8) -> u128 {
+    if prefix_len == 0 {
+        0
+    } else if prefix_len >= 128 {
+        u128::MAX
+    } else {
+        u128::MAX << (128 - prefix_len)
+    }
+}
+
+fn mask_ip(ip: IpAddr, prefix_len: u8) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => IpAddr::V4(Ipv4Addr::from(u32::from(v4) & ipv4_mask(prefix_len))),
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & ipv6_mask(prefix_len))),
+    }
+}
+
+/// Returns `true` when `ip` belongs to a private VPC, VPN (CGNAT / `WireGuard` /
+/// Tailscale `100.64.0.0/10`), loopback, link-local, or IPv6 ULA (`fc00::/7`)
+/// range and is therefore non-routable on the public internet.
+#[must_use]
+const fn is_private_or_vpn_ip(ip: IpAddr) -> bool {
+    match normalize_ip(ip) {
+        IpAddr::V4(v4) => {
+            let [a, b, _, _] = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || (a == 100 && (b & 0b1100_0000) == 64) // RFC 6598 100.64.0.0/10
         }
-        if sentry_non_empty.len() > MAX_CONFIGURED_SHIELD_PEERS {
-            return Err(format!(
-                "sentry_peers lists {} endpoints, exceeding maximum {MAX_CONFIGURED_SHIELD_PEERS}",
-                sentry_non_empty.len()
-            ));
+        IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            v6.is_loopback()
+                || (seg0 & 0xfe00) == 0xfc00 // fc00::/7 ULA
+                || (seg0 & 0xffc0) == 0xfe80 // fe80::/10 link-local
         }
-        if validator_non_empty.len() > MAX_CONFIGURED_SHIELD_PEERS {
-            return Err(format!(
-                "validator_peers lists {} endpoints, exceeding maximum {MAX_CONFIGURED_SHIELD_PEERS}",
-                validator_non_empty.len()
-            ));
+    }
+}
+
+/// Extracts the `/p2p/<PeerId>` component from a multiaddr, if present.
+#[must_use]
+fn extract_peer_id(addr: &Multiaddr) -> Option<PeerId> {
+    addr.iter().find_map(|p| match p {
+        Protocol::P2p(id) => Some(id),
+        _ => None,
+    })
+}
+
+/// Extracts the first IPv4 or IPv6 component from a multiaddr, if present.
+#[must_use]
+fn extract_ip(addr: &Multiaddr) -> Option<IpAddr> {
+    addr.iter().find_map(|p| match p {
+        Protocol::Ip4(ip) => Some(IpAddr::V4(ip)),
+        Protocol::Ip6(ip) => Some(IpAddr::V6(ip)),
+        _ => None,
+    })
+}
+
+/// Raw operator configuration parsed from CLI flags and TOML `[p2p]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SentryConfig {
+    /// Configured node role string (`"validator"`, `"sentry"`, `"rpc"`, etc.).
+    pub role: String,
+    /// Multiaddrs (`/ip4/.../tcp/.../p2p/<PeerId>`) of sentries shielding this
+    /// validator. Non-empty on `role == "validator"` enables
+    /// [`SentryRole::ShieldedValidator`].
+    pub sentry_peers: Vec<String>,
+    /// `PeerId`s (or multiaddrs containing `/p2p/<PeerId>`) of private
+    /// validators shielded behind this sentry node.
+    pub private_peers: Vec<String>,
+    /// `PeerId`s exempt from `max_peers` eviction and `/24` subnet caps.
+    pub unconditional_peers: Vec<String>,
+    /// Allowed VPC/VPN CIDRs for private validator <-> sentry connections.
+    pub allowed_private_cidrs: Vec<String>,
+    /// Explicit peer-discovery disable override. Forced `true` for shielded
+    /// validators.
+    pub disable_peer_discovery: Option<bool>,
+    /// When `true` (default for shielded validators), connections on the
+    /// private link must originate from a private/VPN IP or an entry in
+    /// `allowed_private_cidrs`.
+    pub strict_private_network: Option<bool>,
+}
+
+/// Configuration or live-rotation validation errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SentryConfigError {
+    /// A `sentry_peers` multiaddr failed to parse or lacked `/p2p/<PeerId>`.
+    InvalidSentryMultiaddr(String),
+    /// A `private_peers` or `unconditional_peers` entry is not a valid `PeerId`.
+    InvalidPeerId(String),
+    /// An entry in `allowed_private_cidrs` is not a valid IPv4/IPv6 CIDR.
+    InvalidCidr(String),
+    /// A sentry peer address is not inside the allowed private network.
+    PublicSentryAddressDisallowed(String),
+    /// Conflicting role flags (for example `role = "sentry"` with `sentry_peers` set).
+    ConflictingRole(&'static str),
+    /// Shielded validator attempted to enable discovery or remove all sentries.
+    SafetyInvariantViolation(&'static str),
+}
+
+impl std::fmt::Display for SentryConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSentryMultiaddr(s) => {
+                write!(f, "invalid sentry multiaddr (must include /p2p/<ID>): {s}")
+            }
+            Self::InvalidPeerId(s) => write!(f, "invalid peer id in sentry config: {s}"),
+            Self::InvalidCidr(s) => write!(f, "invalid CIDR in allowed_private_cidrs: {s}"),
+            Self::PublicSentryAddressDisallowed(s) => write!(
+                f,
+                "sentry address is outside allowed private VPC/VPN network: {s}"
+            ),
+            Self::ConflictingRole(msg) | Self::SafetyInvariantViolation(msg) => {
+                write!(f, "sentry configuration error: {msg}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SentryConfigError {}
+
+/// Why [`SentryPolicy`] refused a connection or outbound dial attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionRefusal {
+    /// A shielded validator only communicates with its configured `sentry_peers`.
+    NotASentry,
+    /// The remote address is outside the permitted private VPC/VPN CIDRs.
+    DisallowedAddress,
+    /// Outbound dial target did not name an authorized sentry `PeerId`.
+    MissingTargetPeerId,
+}
+
+impl std::fmt::Display for ConnectionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotASentry => {
+                write!(f, "shielded validator refused non-sentry peer")
+            }
+            Self::DisallowedAddress => {
+                write!(f, "peer address is outside allowed private VPC/VPN range")
+            }
+            Self::MissingTargetPeerId => {
+                write!(f, "shielded validator dial requires /p2p/<PeerId>")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConnectionRefusal {}
+
+/// Summary of an atomic live sentry rotation (`bud_adminUpdateSentries`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentryRotationDiff {
+    /// Newly added sentry peer IDs and multiaddrs to dial immediately.
+    pub added: Vec<(PeerId, Multiaddr)>,
+    /// Removed sentry peer IDs to disconnect and drop from explicit gossip.
+    pub removed: Vec<PeerId>,
+    /// Resulting active sentry peer IDs after the atomic swap.
+    pub active_sentries: Vec<String>,
+}
+
+/// Safe diagnostic status returned by operator RPC `bud_adminSentryStatus`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentryStatus {
+    /// Active sentry-architecture role (`standard`, `shielded_validator`, `sentry`).
+    pub role: SentryRole,
+    /// Whether peer discovery (Kademlia/mDNS/DNS/bootnodes) is disabled.
+    pub discovery_disabled: bool,
+    /// Whether strict private VPC/VPN IP checks are enforced on private links.
+    pub strict_private_network: bool,
+    /// Configured sentry peer IDs (populated for `ShieldedValidator`).
+    pub configured_sentries: Vec<String>,
+    /// Currently connected sentry peer IDs.
+    pub connected_sentries: Vec<String>,
+    /// Number of hidden validator peers shielded by this sentry (IDs kept private).
+    pub private_peer_count: usize,
+    /// Number of currently connected shielded validator peers.
+    pub connected_private_peer_count: usize,
+    /// Number of unconditional peers protected from eviction and subnet caps.
+    pub unconditional_peer_count: usize,
+    /// Configured private CIDR allowlist strings.
+    pub allowed_private_cidrs: Vec<String>,
+}
+
+/// Live runtime policy enforcing the Budlum Sentry Node Architecture.
+#[derive(Debug, Clone, Default)]
+pub struct SentryPolicy {
+    role: SentryRole,
+    sentry_peers: BTreeMap<PeerId, Vec<Multiaddr>>,
+    private_peers: BTreeSet<PeerId>,
+    unconditional_peers: BTreeSet<PeerId>,
+    allowed_private_cidrs: Vec<IpCidr>,
+    disable_peer_discovery: bool,
+    strict_private_network: bool,
+}
+
+fn parse_peer_id_or_multiaddr(raw: &str) -> Result<(PeerId, Option<Multiaddr>), SentryConfigError> {
+    let trimmed = raw.trim();
+    if let Ok(id) = PeerId::from_str(trimmed) {
+        return Ok((id, None));
+    }
+    if let Ok(ma) = trimmed.parse::<Multiaddr>() {
+        if let Some(id) = extract_peer_id(&ma) {
+            return Ok((id, Some(ma)));
+        }
+    }
+    Err(SentryConfigError::InvalidPeerId(trimmed.to_string()))
+}
+
+fn parse_sentry_multiaddr(
+    raw: &str,
+    strict_private: bool,
+    cidrs: &[IpCidr],
+) -> Result<(PeerId, Multiaddr), SentryConfigError> {
+    let trimmed = raw.trim();
+    let ma = trimmed
+        .parse::<Multiaddr>()
+        .map_err(|_| SentryConfigError::InvalidSentryMultiaddr(trimmed.to_string()))?;
+    let peer_id = extract_peer_id(&ma)
+        .ok_or_else(|| SentryConfigError::InvalidSentryMultiaddr(trimmed.to_string()))?;
+    if !ip_permitted_by_private_policy(extract_ip(&ma), strict_private, cidrs) {
+        return Err(SentryConfigError::PublicSentryAddressDisallowed(
+            trimmed.to_string(),
+        ));
+    }
+    Ok((peer_id, ma))
+}
+
+fn ip_permitted_by_private_policy(
+    ip: Option<IpAddr>,
+    strict_private: bool,
+    cidrs: &[IpCidr],
+) -> bool {
+    if !cidrs.is_empty() {
+        return ip.is_some_and(|addr| cidrs.iter().any(|c| c.contains(addr)));
+    }
+    if strict_private {
+        return ip.is_some_and(is_private_or_vpn_ip);
+    }
+    true
+}
+
+impl SentryPolicy {
+    /// Builds and validates a [`SentryPolicy`] from operator configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SentryConfigError`] if any multiaddr, peer id, CIDR, or role
+    /// invariant is invalid. Fails closed on unsafe validator combinations.
+    pub fn from_config(cfg: &SentryConfig) -> Result<Self, SentryConfigError> {
+        let mut allowed_private_cidrs = Vec::with_capacity(cfg.allowed_private_cidrs.len());
+        for raw in &cfg.allowed_private_cidrs {
+            allowed_private_cidrs.push(IpCidr::parse(raw)?);
         }
 
-        let mut sentry_endpoints = Vec::new();
-        let mut sentry_peer_ids = BTreeSet::new();
-        for raw in sentry_non_empty {
-            let (peer_id, dial_addr) = validate_dialable_multiaddr(raw, "sentry_peers")?;
-            if local_peer_id == Some(&peer_id) {
-                return Err(format!(
-                    "sentry_peers cannot contain this validator's own PeerId ({peer_id})"
+        let role_norm = cfg.role.trim().to_ascii_lowercase();
+        let role = if role_norm == "sentry" {
+            if !cfg.sentry_peers.is_empty() {
+                return Err(SentryConfigError::ConflictingRole(
+                    "a sentry node must not configure sentry_peers; use private_peers for shielded validators",
                 ));
             }
-            if !sentry_peer_ids.insert(peer_id) {
-                return Err(format!("duplicate sentry PeerId {peer_id} in sentry_peers"));
+            SentryRole::Sentry
+        } else if !cfg.sentry_peers.is_empty() {
+            if role_norm != "validator" {
+                return Err(SentryConfigError::ConflictingRole(
+                    "sentry_peers is only valid when role = \"validator\"",
+                ));
             }
-            sentry_endpoints.push(DialEndpoint { peer_id, dial_addr });
+            SentryRole::ShieldedValidator
+        } else {
+            SentryRole::Standard
+        };
+
+        let strict_private_network = cfg
+            .strict_private_network
+            .unwrap_or(role == SentryRole::ShieldedValidator);
+
+        let disable_peer_discovery = match role {
+            SentryRole::ShieldedValidator => {
+                if cfg.disable_peer_discovery == Some(false) {
+                    return Err(SentryConfigError::SafetyInvariantViolation(
+                        "shielded validator cannot run with disable_peer_discovery = false",
+                    ));
+                }
+                true
+            }
+            SentryRole::Sentry | SentryRole::Standard => {
+                cfg.disable_peer_discovery.unwrap_or(false)
+            }
+        };
+
+        if cfg.sentry_peers.len() > MAX_SENTRY_PEERS {
+            return Err(SentryConfigError::SafetyInvariantViolation(
+                "sentry_peers exceeds maximum allowed count (64)",
+            ));
+        }
+        let mut sentry_peers: BTreeMap<PeerId, Vec<Multiaddr>> = BTreeMap::new();
+        for raw in &cfg.sentry_peers {
+            let (id, ma) =
+                parse_sentry_multiaddr(raw, strict_private_network, &allowed_private_cidrs)?;
+            sentry_peers.entry(id).or_default().push(ma);
         }
 
-        let mut validator_endpoints = Vec::new();
-        let mut validator_peer_ids = BTreeSet::new();
-        for raw in validator_non_empty {
-            let spec = parse_validator_spec(raw)?;
-            if local_peer_id == Some(&spec.peer_id) {
-                return Err(format!(
-                    "validator_peers cannot contain this sentry node's own PeerId ({})",
-                    spec.peer_id
-                ));
-            }
-            if !validator_peer_ids.insert(spec.peer_id) {
-                return Err(format!(
-                    "duplicate validator PeerId {} in validator_peers",
-                    spec.peer_id
-                ));
-            }
-            validator_endpoints.push(spec);
+        let mut private_peers = BTreeSet::new();
+        for raw in &cfg.private_peers {
+            let (id, _) = parse_peer_id_or_multiaddr(raw)?;
+            private_peers.insert(id);
         }
+
+        let mut unconditional_peers = BTreeSet::new();
+        for raw in &cfg.unconditional_peers {
+            let (id, _) = parse_peer_id_or_multiaddr(raw)?;
+            unconditional_peers.insert(id);
+        }
+        // Sentries on a shielded validator and private validators on a sentry
+        // are always unconditional so public churn or VPC subnet caps never
+        // sever the consensus shield.
+        unconditional_peers.extend(sentry_peers.keys().copied());
+        unconditional_peers.extend(private_peers.iter().copied());
 
         Ok(Self {
-            sentry_endpoints,
-            sentry_peer_ids,
-            validator_endpoints,
-            validator_peer_ids,
+            role,
+            sentry_peers,
+            private_peers,
+            unconditional_peers,
+            allowed_private_cidrs,
+            disable_peer_discovery,
+            strict_private_network,
         })
     }
 
-    /// True when this validator is shielded behind one or more sentry peers
-    /// and must reject all non-sentry inbound and outbound P2P communication.
+    /// Returns the active [`SentryRole`].
     #[must_use]
-    pub fn is_validator_shielded(&self) -> bool {
-        !self.sentry_peer_ids.is_empty()
+    pub const fn role(&self) -> SentryRole {
+        self.role
     }
 
-    /// True when this sentry node protects one or more upstream validators.
+    /// Returns `true` when Kademlia, mDNS, DNS seeds, and public bootnode
+    /// discovery must remain disabled.
     #[must_use]
-    pub fn is_sentry_protecting_validators(&self) -> bool {
-        !self.validator_peer_ids.is_empty()
+    pub const fn is_discovery_disabled(&self) -> bool {
+        self.disable_peer_discovery
     }
 
-    /// Whether an authenticated remote `PeerId` may establish a session with
-    /// this node.
+    /// Returns `true` when this node is allowed to advertise external/listen
+    /// addresses into public discovery. Always `false` for shielded validators.
     #[must_use]
-    pub fn allows_inbound_peer(&self, peer_id: &PeerId) -> bool {
-        if self.is_validator_shielded() {
-            return self.sentry_peer_ids.contains(peer_id);
-        }
-        true
+    pub const fn should_advertise_external(&self) -> bool {
+        !matches!(self.role, SentryRole::ShieldedValidator)
     }
 
-    /// Whether an outbound dial to `maybe_peer` / `addrs` is permitted.
+    /// Returns all private shielded validator `PeerId`s protected by this sentry.
     #[must_use]
-    pub fn allows_outbound_dial(&self, maybe_peer: Option<PeerId>, addrs: &[Multiaddr]) -> bool {
-        if !self.is_validator_shielded() {
-            return true;
-        }
-        if let Some(peer_id) = maybe_peer {
-            if !self.sentry_peer_ids.contains(&peer_id) {
-                return false;
+    pub fn private_peer_ids(&self) -> Vec<PeerId> {
+        self.private_peers.iter().copied().collect()
+    }
+
+    /// Returns `true` when `peer_id` is a private shielded validator whose
+    /// identity and addresses must never be gossiped or entered into Kademlia.
+    #[must_use]
+    pub fn is_private_peer(&self, peer_id: &PeerId) -> bool {
+        self.private_peers.contains(peer_id)
+    }
+
+    /// Returns `true` when `peer_id` is exempt from `max_peers` eviction and
+    /// `/24` per-subnet eclipse bounds.
+    #[must_use]
+    pub fn is_unconditional(&self, peer_id: &PeerId) -> bool {
+        self.unconditional_peers.contains(peer_id)
+    }
+
+    /// Returns `true` when `peer_id`'s addresses may be inserted into Kademlia
+    /// and shared via peer discovery.
+    ///
+    /// Always `false` when discovery is disabled (shielded validator) or when
+    /// `peer_id` is in `private_peers` (sentry hiding its validator).
+    #[must_use]
+    pub fn can_share_in_dht(&self, peer_id: &PeerId) -> bool {
+        !self.disable_peer_discovery && !self.private_peers.contains(peer_id)
+    }
+
+    /// Returns `true` when a private/VPC address advertised by `peer_id` may be
+    /// accepted for direct communication.
+    ///
+    /// Unconditional peers (configured sentries or private validators) always
+    /// talk over private VPC/VPN links even on mainnet, while untrusted public
+    /// peers remain governed by `global_accept_private`.
+    #[must_use]
+    pub fn accept_private_addr_from(&self, peer_id: &PeerId, global_accept_private: bool) -> bool {
+        self.is_unconditional(peer_id) || global_accept_private
+    }
+
+    /// Checks whether an established connection with `(peer_id, remote)` is
+    /// permitted under this sentry policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectionRefusal`] when a shielded validator receives a
+    /// non-sentry peer or an address outside its private VPC/VPN allowlist, or
+    /// when a private validator connects to a sentry from outside the sentry's
+    /// configured `allowed_private_cidrs`.
+    pub(crate) fn check_connection(
+        &self,
+        peer_id: &PeerId,
+        remote: &Multiaddr,
+    ) -> Result<(), ConnectionRefusal> {
+        match self.role {
+            SentryRole::ShieldedValidator => {
+                if !self.sentry_peers.contains_key(peer_id) {
+                    return Err(ConnectionRefusal::NotASentry);
+                }
+                if !ip_permitted_by_private_policy(
+                    extract_ip(remote),
+                    self.strict_private_network,
+                    &self.allowed_private_cidrs,
+                ) {
+                    return Err(ConnectionRefusal::DisallowedAddress);
+                }
+                Ok(())
             }
-            return addrs.iter().all(|addr| match peer_id_from_multiaddr(addr) {
-                Some(addr_peer) => addr_peer == peer_id,
-                None => true,
-            });
+            SentryRole::Sentry => {
+                if self.private_peers.contains(peer_id)
+                    && (self.strict_private_network || !self.allowed_private_cidrs.is_empty())
+                    && !ip_permitted_by_private_policy(
+                        extract_ip(remote),
+                        self.strict_private_network,
+                        &self.allowed_private_cidrs,
+                    )
+                {
+                    return Err(ConnectionRefusal::DisallowedAddress);
+                }
+                Ok(())
+            }
+            SentryRole::Standard => Ok(()),
         }
-        if addrs.is_empty() {
-            return false;
+    }
+
+    /// Checks whether an outbound dial to `addr` (targeting `peer_id` if known)
+    /// is permitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectionRefusal`] if a shielded validator attempts to dial
+    /// anything other than a configured sentry peer over a permitted private
+    /// address.
+    pub(crate) fn can_dial(
+        &self,
+        peer_id: Option<&PeerId>,
+        addr: &Multiaddr,
+    ) -> Result<(), ConnectionRefusal> {
+        if self.role != SentryRole::ShieldedValidator {
+            return Ok(());
         }
-        addrs.iter().all(|addr| {
-            peer_id_from_multiaddr(addr)
-                .is_some_and(|addr_peer| self.sentry_peer_ids.contains(&addr_peer))
-        })
-    }
-
-    /// True for configured sentry peers (on a validator) and configured
-    /// upstream validator peers (on a sentry).
-    #[must_use]
-    pub fn is_protected_peer(&self, peer_id: &PeerId) -> bool {
-        self.sentry_peer_ids.contains(peer_id) || self.validator_peer_ids.contains(peer_id)
-    }
-
-    /// True when `peer_id`'s addresses must never enter Kademlia or be served
-    /// in public routing responses.
-    #[must_use]
-    pub fn hides_from_public_routing(&self, peer_id: &PeerId) -> bool {
-        self.is_validator_shielded() || self.validator_peer_ids.contains(peer_id)
-    }
-
-    /// All protected `PeerId`s (`sentry_peers` union `validator_peers`).
-    #[must_use]
-    pub fn protected_peer_ids(&self) -> Vec<PeerId> {
-        self.sentry_peer_ids
-            .iter()
-            .chain(self.validator_peer_ids.iter())
+        let target = peer_id
             .copied()
+            .or_else(|| extract_peer_id(addr))
+            .ok_or(ConnectionRefusal::MissingTargetPeerId)?;
+        self.check_connection(&target, addr)
+    }
+
+    /// Returns all `(PeerId, Multiaddr)` endpoints of configured sentries.
+    #[must_use]
+    pub fn sentry_addrs(&self) -> Vec<(PeerId, Multiaddr)> {
+        self.sentry_peers
+            .iter()
+            .flat_map(|(id, addrs)| addrs.iter().cloned().map(|ma| (*id, ma)))
             .collect()
     }
 
-    /// Protected upstream validator `PeerId`s configured on a sentry node.
+    /// Returns all peers that should be pinned as gossipsub explicit peers.
     #[must_use]
-    pub fn validator_peer_ids(&self) -> Vec<PeerId> {
-        self.validator_peer_ids.iter().copied().collect()
+    pub fn explicit_gossip_peers(&self) -> Vec<PeerId> {
+        self.unconditional_peers.iter().copied().collect()
     }
 
-    /// Dialable shield endpoints `(PeerId, Multiaddr)` that the node maintains
-    /// across startup and periodic reconnect ticks.
+    /// Filters a peer list before exposing it publicly, stripping every
+    /// shielded validator in `private_peers`.
     #[must_use]
-    pub fn dial_targets(&self) -> Vec<(PeerId, Multiaddr)> {
-        let mut out: Vec<(PeerId, Multiaddr)> = self
-            .sentry_endpoints
+    pub fn scrub_public_peers(&self, peers: &[PeerId]) -> Vec<PeerId> {
+        peers
             .iter()
-            .map(|ep| (ep.peer_id, ep.dial_addr.clone()))
+            .copied()
+            .filter(|id| !self.private_peers.contains(id))
+            .collect()
+    }
+
+    /// Atomically replaces the sentry set of a [`SentryRole::ShieldedValidator`]
+    /// at runtime (live failover when a sentry is under attack).
+    ///
+    /// Fails closed if called on a non-shielded node, if `new_addrs` is empty,
+    /// or if any address is malformed or outside the allowed private CIDRs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SentryConfigError`] without mutating the active sentry set.
+    pub fn update_sentries(
+        &mut self,
+        new_addrs: &[String],
+    ) -> Result<SentryRotationDiff, SentryConfigError> {
+        if self.role != SentryRole::ShieldedValidator {
+            return Err(SentryConfigError::ConflictingRole(
+                "live sentry rotation is only available on a shielded validator",
+            ));
+        }
+        if new_addrs.is_empty() {
+            return Err(SentryConfigError::SafetyInvariantViolation(
+                "cannot replace sentry_peers with an empty list",
+            ));
+        }
+        if new_addrs.len() > MAX_SENTRY_PEERS {
+            return Err(SentryConfigError::SafetyInvariantViolation(
+                "sentry_peers exceeds maximum allowed count (64)",
+            ));
+        }
+
+        let mut next: BTreeMap<PeerId, Vec<Multiaddr>> = BTreeMap::new();
+        for raw in new_addrs {
+            let (id, ma) = parse_sentry_multiaddr(
+                raw,
+                self.strict_private_network,
+                &self.allowed_private_cidrs,
+            )?;
+            next.entry(id).or_default().push(ma);
+        }
+
+        let removed: Vec<PeerId> = self
+            .sentry_peers
+            .keys()
+            .filter(|id| !next.contains_key(id))
+            .copied()
             .collect();
-        for vp in &self.validator_endpoints {
-            if let Some(ref addr) = vp.dial_addr {
-                out.push((vp.peer_id, addr.clone()));
+        // Include both newly added PeerIds and newly rotated multiaddrs for
+        // an existing sentry PeerId (for example, same node key moved to a new
+        // VPC IP during live failover).
+        let added: Vec<(PeerId, Multiaddr)> = next
+            .iter()
+            .flat_map(|(id, addrs)| {
+                let existing = self.sentry_peers.get(id);
+                addrs
+                    .iter()
+                    .filter(move |ma| !existing.is_some_and(|prev| prev.contains(ma)))
+                    .cloned()
+                    .map(|ma| (*id, ma))
+            })
+            .collect();
+
+        for old_id in &removed {
+            if !self.private_peers.contains(old_id) {
+                self.unconditional_peers.remove(old_id);
             }
         }
-        out
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum PendingSourcePrefix {
-    V4([u8; 3]),
-    V6([u8; 8]),
-    Other,
-}
-
-fn pending_source_prefix(addr: &Multiaddr) -> Option<PendingSourcePrefix> {
-    for proto in addr.iter() {
-        match proto {
-            Protocol::Ip4(ip) => {
-                if ip.is_loopback() {
-                    return None;
-                }
-                let [a, b, c, _] = ip.octets();
-                return Some(PendingSourcePrefix::V4([a, b, c]));
-            }
-            Protocol::Ip6(ip) => {
-                if ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()) {
-                    return None;
-                }
-                if let Some(v4) = ip.to_ipv4_mapped() {
-                    let [a, b, c, _] = v4.octets();
-                    return Some(PendingSourcePrefix::V4([a, b, c]));
-                }
-                let [p0, p1, p2, p3, p4, p5, p6, p7, ..] = ip.octets();
-                return Some(PendingSourcePrefix::V6([p0, p1, p2, p3, p4, p5, p6, p7]));
-            }
-            Protocol::Memory(_) => return None,
-            _ => {}
+        for id in next.keys() {
+            self.unconditional_peers.insert(*id);
         }
+        self.sentry_peers = next;
+
+        let active_sentries = self.sentry_peers.keys().map(ToString::to_string).collect();
+
+        Ok(SentryRotationDiff {
+            added,
+            removed,
+            active_sentries,
+        })
     }
-    Some(PendingSourcePrefix::Other)
-}
 
-/// Inhabited event marker for [`SentryGateBehaviour`]. Never emitted at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SentryGateEvent;
-
-/// Swarm-level admission gate enforcing validator sentry allowlisting and
-/// reserved sentry-validator connection slots ahead of protocol behaviours.
-pub struct SentryGateBehaviour {
-    shield: SentryShieldConfig,
-    max_public_peers: usize,
-    max_public_incoming: usize,
-    established: BTreeMap<ConnectionId, (PeerId, bool)>,
-    pending_inbound: BTreeMap<ConnectionId, PendingSourcePrefix>,
-    pending_by_source: BTreeMap<PendingSourcePrefix, usize>,
-}
-
-impl SentryGateBehaviour {
-    /// Construct a gate enforcing `max_public_peers` total and
-    /// `max_public_incoming` inbound non-shield peers.
+    /// Produces a safe operator-RPC status snapshot without leaking hidden
+    /// validator `PeerId`s or private IPs.
     #[must_use]
-    pub fn new(max_public_peers: usize, max_public_incoming: usize) -> Self {
-        Self {
-            shield: SentryShieldConfig::default(),
-            max_public_peers: max_public_peers.max(1),
-            max_public_incoming: max_public_incoming.max(1),
-            established: BTreeMap::new(),
-            pending_inbound: BTreeMap::new(),
-            pending_by_source: BTreeMap::new(),
+    pub fn status(&self, connected: &BTreeSet<PeerId>) -> SentryStatus {
+        let configured_sentries = self.sentry_peers.keys().map(ToString::to_string).collect();
+        let connected_sentries = self
+            .sentry_peers
+            .keys()
+            .filter(|id| connected.contains(id))
+            .map(ToString::to_string)
+            .collect();
+        let connected_private_peer_count = self
+            .private_peers
+            .iter()
+            .filter(|id| connected.contains(id))
+            .count();
+        SentryStatus {
+            role: self.role,
+            discovery_disabled: self.disable_peer_discovery,
+            strict_private_network: self.strict_private_network,
+            configured_sentries,
+            connected_sentries,
+            private_peer_count: self.private_peers.len(),
+            connected_private_peer_count,
+            unconditional_peer_count: self.unconditional_peers.len(),
+            allowed_private_cidrs: self
+                .allowed_private_cidrs
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
         }
-    }
-
-    /// Install or update the active sentry shield configuration.
-    pub fn set_shield(&mut self, shield: SentryShieldConfig) {
-        self.shield = shield;
-    }
-
-    /// Synchronize public peer ceilings when network or mobile profiles change
-    /// `Node::max_peers`.
-    pub fn set_public_caps(&mut self, max_public_peers: usize, max_public_incoming: usize) {
-        self.max_public_peers = max_public_peers.max(1);
-        self.max_public_incoming = max_public_incoming.max(1);
-    }
-
-    fn clear_pending(&mut self, connection_id: ConnectionId) {
-        if let Some(prefix) = self.pending_inbound.remove(&connection_id) {
-            if let Some(count) = self.pending_by_source.get_mut(&prefix) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    self.pending_by_source.remove(&prefix);
-                }
-            }
-        }
-    }
-
-    fn admit_public_peer(&self, candidate: PeerId, incoming: bool) -> Result<(), ConnectionDenied> {
-        let mut distinct_public = BTreeSet::new();
-        let mut distinct_public_incoming = BTreeSet::new();
-        for &(peer_id, is_incoming) in self.established.values() {
-            if self.shield.is_protected_peer(&peer_id) {
-                continue;
-            }
-            distinct_public.insert(peer_id);
-            if is_incoming {
-                distinct_public_incoming.insert(peer_id);
-            }
-        }
-        // Additional connection streams for an already-admitted public peer are
-        // bounded by `connection_limits::with_max_established_per_peer`.
-        if distinct_public.contains(&candidate) {
-            return Ok(());
-        }
-        if distinct_public.len() >= self.max_public_peers {
-            return Err(ConnectionDenied::new(
-                "public peer limit reached; remaining swarm slots are reserved for sentry shield peers",
-            ));
-        }
-        if incoming && distinct_public_incoming.len() >= self.max_public_incoming {
-            return Err(ConnectionDenied::new(
-                "public inbound peer limit reached; remaining inbound slots are reserved for sentry shield peers",
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl NetworkBehaviour for SentryGateBehaviour {
-    type ConnectionHandler = dummy::ConnectionHandler;
-    type ToSwarm = SentryGateEvent;
-
-    fn handle_pending_inbound_connection(
-        &mut self,
-        connection_id: ConnectionId,
-        _local_addr: &Multiaddr,
-        remote_addr: &Multiaddr,
-    ) -> Result<(), ConnectionDenied> {
-        if self.shield.is_validator_shielded() {
-            if let Some(prefix) = pending_source_prefix(remote_addr) {
-                let in_flight = self.pending_by_source.get(&prefix).copied().unwrap_or(0);
-                if in_flight >= MAX_SHIELD_PENDING_PER_SOURCE {
-                    return Err(ConnectionDenied::new(
-                        "too many concurrent pending handshakes from one source against shielded validator",
-                    ));
-                }
-                self.pending_inbound.insert(connection_id, prefix);
-                *self.pending_by_source.entry(prefix).or_insert(0) += 1;
-            }
-        }
-        Ok(())
-    }
-
-    fn handle_established_inbound_connection(
-        &mut self,
-        connection_id: ConnectionId,
-        peer: PeerId,
-        _local_addr: &Multiaddr,
-        _remote_addr: &Multiaddr,
-    ) -> Result<THandler<Self>, ConnectionDenied> {
-        self.clear_pending(connection_id);
-        if !self.shield.allows_inbound_peer(&peer) {
-            return Err(ConnectionDenied::new(
-                "validator sentry shield rejected inbound connection from non-sentry peer",
-            ));
-        }
-        if !self.shield.is_protected_peer(&peer) {
-            self.admit_public_peer(peer, true)?;
-        }
-        self.established.insert(connection_id, (peer, true));
-        Ok(dummy::ConnectionHandler)
-    }
-
-    fn handle_pending_outbound_connection(
-        &mut self,
-        _connection_id: ConnectionId,
-        maybe_peer: Option<PeerId>,
-        addresses: &[Multiaddr],
-        _effective_role: Endpoint,
-    ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
-        if !self.shield.allows_outbound_dial(maybe_peer, addresses) {
-            return Err(ConnectionDenied::new(
-                "validator sentry shield blocked outbound dial to non-sentry peer",
-            ));
-        }
-        Ok(Vec::new())
-    }
-
-    fn handle_established_outbound_connection(
-        &mut self,
-        connection_id: ConnectionId,
-        peer: PeerId,
-        _addr: &Multiaddr,
-        _role_override: Endpoint,
-        _port_use: PortUse,
-    ) -> Result<THandler<Self>, ConnectionDenied> {
-        if !self.shield.allows_inbound_peer(&peer) {
-            return Err(ConnectionDenied::new(
-                "validator sentry shield rejected outbound session with non-sentry peer",
-            ));
-        }
-        if !self.shield.is_protected_peer(&peer) {
-            self.admit_public_peer(peer, false)?;
-        }
-        self.established.insert(connection_id, (peer, false));
-        Ok(dummy::ConnectionHandler)
-    }
-
-    fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
-        match event {
-            FromSwarm::ConnectionClosed(closed) => {
-                self.clear_pending(closed.connection_id);
-                self.established.remove(&closed.connection_id);
-            }
-            FromSwarm::ListenFailure(failure) => {
-                self.clear_pending(failure.connection_id);
-            }
-            _ => {}
-        }
-    }
-
-    fn on_connection_handler_event(
-        &mut self,
-        _peer_id: PeerId,
-        _connection_id: ConnectionId,
-        event: THandlerOutEvent<Self>,
-    ) {
-        match event {}
-    }
-
-    fn poll(
-        &mut self,
-        _cx: &mut Context<'_>,
-    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
-        Poll::Pending
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libp2p::{
-        core::{transport::MemoryTransport, upgrade},
-        futures::StreamExt,
-        identity, noise, ping,
-        swarm::{dial_opts::DialOpts, SwarmEvent},
-        yamux, Swarm, Transport,
-    };
-    use std::time::Duration;
 
-    #[derive(NetworkBehaviour)]
-    struct TestShieldBehaviour {
-        gate: SentryGateBehaviour,
-        ping: ping::Behaviour,
+    fn random_peer() -> PeerId {
+        PeerId::random()
     }
 
-    fn build_memory_swarm(
-        key: identity::Keypair,
-        shield: SentryShieldConfig,
-        max_public_peers: usize,
-        max_public_incoming: usize,
-        port: u64,
-    ) -> (Swarm<TestShieldBehaviour>, Multiaddr) {
-        let peer_id = key.public().to_peer_id();
-        let transport = MemoryTransport::default()
-            .upgrade(upgrade::Version::V1)
-            .authenticate(noise::Config::new(&key).expect("noise config"))
-            .multiplex(yamux::Config::default())
-            .boxed();
-        let mut gate = SentryGateBehaviour::new(max_public_peers, max_public_incoming);
-        gate.set_shield(shield);
-        let behaviour = TestShieldBehaviour {
-            gate,
-            ping: ping::Behaviour::new(
-                ping::Config::new().with_interval(Duration::from_millis(50)),
-            ),
+    fn ma(s: &str) -> Multiaddr {
+        s.parse().expect("valid multiaddr")
+    }
+
+    #[test]
+    fn shielded_validator_allows_only_configured_private_sentries() {
+        let sentry_a = random_peer();
+        let sentry_b = random_peer();
+        let attacker = random_peer();
+        let cfg = SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![
+                format!("/ip4/10.10.0.11/tcp/30333/p2p/{sentry_a}"),
+                format!("/ip4/10.10.0.12/tcp/30333/p2p/{sentry_b}"),
+            ],
+            allowed_private_cidrs: vec!["10.10.0.0/16".to_string()],
+            ..Default::default()
         };
-        let mut swarm = Swarm::new(
-            transport,
-            behaviour,
-            peer_id,
-            libp2p::swarm::Config::with_tokio_executor()
-                .with_idle_connection_timeout(Duration::from_secs(10)),
+        let policy = SentryPolicy::from_config(&cfg).expect("valid shielded validator");
+        assert_eq!(policy.role(), SentryRole::ShieldedValidator);
+        assert!(policy.is_discovery_disabled());
+        assert!(!policy.should_advertise_external());
+        assert!(policy.is_unconditional(&sentry_a));
+        assert!(policy.is_unconditional(&sentry_b));
+        assert!(!policy.is_unconditional(&attacker));
+        assert!(!policy.can_share_in_dht(&sentry_a));
+
+        // Private VPC links to Sentry A/B pass.
+        assert!(policy
+            .check_connection(&sentry_a, &ma("/ip4/10.10.0.11/tcp/30333"))
+            .is_ok());
+        assert!(policy
+            .can_dial(Some(&sentry_b), &ma("/ip4/10.10.0.12/tcp/30333"))
+            .is_ok());
+
+        // Unknown public or private peer is refused.
+        assert_eq!(
+            policy.check_connection(&attacker, &ma("/ip4/10.10.0.99/tcp/30333")),
+            Err(ConnectionRefusal::NotASentry)
         );
-        let listen_addr: Multiaddr = format!("/memory/{port}").parse().expect("memory addr");
-        swarm.listen_on(listen_addr.clone()).expect("listen_on");
-        let full_addr: Multiaddr = format!("{listen_addr}/p2p/{peer_id}")
-            .parse()
-            .expect("full addr");
-        (swarm, full_addr)
+        // Even a known sentry PeerId arriving from a public IP or outside the
+        // VPC CIDR is refused.
+        assert_eq!(
+            policy.check_connection(&sentry_a, &ma("/ip4/203.0.113.5/tcp/30333")),
+            Err(ConnectionRefusal::DisallowedAddress)
+        );
+        assert_eq!(
+            policy.check_connection(&sentry_a, &ma("/ip4/192.168.1.11/tcp/30333")),
+            Err(ConnectionRefusal::DisallowedAddress)
+        );
     }
 
     #[test]
-    fn config_rejects_wrong_roles_missing_p2p_self_loop_and_bad_hosts() {
-        let sentry_id = PeerId::random();
-        let validator_id = PeerId::random();
-        let good_sentry = format!("/ip4/203.0.113.10/tcp/26656/p2p/{sentry_id}");
+    fn sentry_shields_private_validator_from_dht_and_eviction() {
+        let validator = random_peer();
+        let public_peer = random_peer();
+        let cfg = SentryConfig {
+            role: "sentry".to_string(),
+            private_peers: vec![validator.to_string()],
+            allowed_private_cidrs: vec!["10.10.0.0/16".to_string()],
+            ..Default::default()
+        };
+        let policy = SentryPolicy::from_config(&cfg).expect("valid sentry");
+        assert_eq!(policy.role(), SentryRole::Sentry);
+        assert!(!policy.is_discovery_disabled());
+        assert!(policy.should_advertise_external());
+        assert!(policy.is_private_peer(&validator));
+        assert!(policy.is_unconditional(&validator));
+        assert!(!policy.is_unconditional(&public_peer));
 
-        // sentry_peers on non-validator role must fail closed.
-        let err = SentryShieldConfig::from_role_and_peers(
-            "rpc",
-            std::slice::from_ref(&good_sentry),
-            &[],
-            None,
-        )
-        .expect_err("rpc cannot set sentry_peers");
-        assert!(
-            err.contains("role = 'validator'"),
-            "unexpected error: {err}"
+        // Public peers enter Kademlia normally; shielded validator NEVER does.
+        assert!(policy.can_share_in_dht(&public_peer));
+        assert!(!policy.can_share_in_dht(&validator));
+
+        // Public peer list scrubbing strips the shielded validator.
+        let scrubbed = policy.scrub_public_peers(&[validator, public_peer]);
+        assert_eq!(scrubbed, vec![public_peer]);
+
+        // Public peer connects freely; private validator must use VPC CIDR.
+        assert!(policy
+            .check_connection(&public_peer, &ma("/ip4/198.51.100.7/tcp/30333"))
+            .is_ok());
+        assert!(policy
+            .check_connection(&validator, &ma("/ip4/10.10.0.5/tcp/30334"))
+            .is_ok());
+        assert_eq!(
+            policy.check_connection(&validator, &ma("/ip4/198.51.100.9/tcp/30333")),
+            Err(ConnectionRefusal::DisallowedAddress)
         );
-
-        // validator_peers on non-sentry role must fail closed.
-        let err = SentryShieldConfig::from_role_and_peers(
-            "validator",
-            &[],
-            &[validator_id.to_string()],
-            None,
-        )
-        .expect_err("validator cannot set validator_peers");
-        assert!(err.contains("role = 'sentry'"), "unexpected error: {err}");
-
-        // Unauthenticated multiaddr without /p2p/<PeerId> must fail closed.
-        let err = SentryShieldConfig::from_role_and_peers(
-            "validator",
-            &["/ip4/203.0.113.10/tcp/26656".to_string()],
-            &[],
-            None,
-        )
-        .expect_err("missing /p2p must fail");
-        assert!(err.contains("/p2p/<PeerId>"), "unexpected error: {err}");
-
-        // Unspecified host (0.0.0.0) or zero port must fail closed.
-        assert!(SentryShieldConfig::from_role_and_peers(
-            "validator",
-            &[format!("/ip4/0.0.0.0/tcp/26656/p2p/{sentry_id}")],
-            &[],
-            None,
-        )
-        .is_err());
-        assert!(SentryShieldConfig::from_role_and_peers(
-            "validator",
-            &[format!("/ip4/203.0.113.10/tcp/0/p2p/{sentry_id}")],
-            &[],
-            None,
-        )
-        .is_err());
-
-        // Self-PeerId loop must fail closed on both validator and sentry.
-        assert!(SentryShieldConfig::from_role_and_peers(
-            "validator",
-            std::slice::from_ref(&good_sentry),
-            &[],
-            Some(&sentry_id),
-        )
-        .is_err());
-        assert!(SentryShieldConfig::from_role_and_peers(
-            "sentry",
-            &[],
-            &[validator_id.to_string()],
-            Some(&validator_id),
-        )
-        .is_err());
+        // Mainnet rejects private advertisements globally, but still permits
+        // the direct private link with the authenticated validator.
+        assert!(policy.accept_private_addr_from(&validator, false));
+        assert!(!policy.accept_private_addr_from(&public_peer, false));
     }
 
     #[test]
-    fn config_supports_stealth_peer_id_and_private_wireguard_validator_specs() {
-        let v1 = PeerId::random();
-        let v2 = PeerId::random();
-        let public_peer = PeerId::random();
-        let cfg = SentryShieldConfig::from_role_and_peers(
-            "sentry",
-            &[],
-            &[v1.to_string(), format!("/ip4/10.99.0.5/tcp/26656/p2p/{v2}")],
-            None,
-        )
-        .expect("valid sentry config");
+    fn live_sentry_rotation_replaces_compromised_sentry_atomically() {
+        let sentry_a = random_peer();
+        let sentry_b = random_peer();
+        let sentry_c = random_peer();
+        let cfg = SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![
+                format!("/ip4/10.10.0.11/tcp/30333/p2p/{sentry_a}"),
+                format!("/ip4/10.10.0.12/tcp/30333/p2p/{sentry_b}"),
+            ],
+            ..Default::default()
+        };
+        let mut policy = SentryPolicy::from_config(&cfg).expect("init");
 
-        assert!(!cfg.is_validator_shielded());
-        assert!(cfg.is_sentry_protecting_validators());
-        assert!(cfg.is_protected_peer(&v1));
-        assert!(cfg.is_protected_peer(&v2));
-        assert!(!cfg.is_protected_peer(&public_peer));
+        // Fail closed on empty rotation or public IP under strict private mode.
+        assert!(policy.update_sentries(&[]).is_err());
+        assert!(policy
+            .update_sentries(&[format!("/ip4/203.0.113.10/tcp/30333/p2p/{sentry_c}")])
+            .is_err());
+        // Active set remains untouched after refused rotation.
+        assert!(policy.is_unconditional(&sentry_a));
 
-        // Protected validators must be hidden from public Kademlia routing,
-        // while ordinary public peers remain routable on a sentry node.
-        assert!(cfg.hides_from_public_routing(&v1));
-        assert!(cfg.hides_from_public_routing(&v2));
-        assert!(!cfg.hides_from_public_routing(&public_peer));
+        // Replace attacked Sentry A with fresh Sentry C over WireGuard CGNAT.
+        let diff = policy
+            .update_sentries(&[
+                format!("/ip4/10.10.0.12/tcp/30333/p2p/{sentry_b}"),
+                format!("/ip4/100.64.0.13/tcp/30333/p2p/{sentry_c}"),
+            ])
+            .expect("rotate sentry");
+        assert_eq!(diff.removed, vec![sentry_a]);
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].0, sentry_c);
+        assert!(!policy.is_unconditional(&sentry_a));
+        assert!(policy.is_unconditional(&sentry_b));
+        assert!(policy.is_unconditional(&sentry_c));
+        assert_eq!(
+            policy.check_connection(&sentry_a, &ma("/ip4/10.10.0.11/tcp/30333")),
+            Err(ConnectionRefusal::NotASentry)
+        );
+        assert!(policy
+            .check_connection(&sentry_c, &ma("/ip4/100.64.0.13/tcp/30333"))
+            .is_ok());
+    }
 
-        // Only v2 carried a dial multiaddr; v1 dials inbound from behind its firewall.
-        let targets = cfg.dial_targets();
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].0, v2);
+    #[test]
+    fn config_rejects_unsafe_combinations() {
+        let sentry_a = random_peer();
+        // Shielded validator cannot re-enable discovery.
+        let bad_disc = SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![format!("/ip4/10.10.0.11/tcp/30333/p2p/{sentry_a}")],
+            disable_peer_discovery: Some(false),
+            ..Default::default()
+        };
+        assert!(SentryPolicy::from_config(&bad_disc).is_err());
+
+        // Sentry cannot also configure sentry_peers.
+        let bad_role = SentryConfig {
+            role: "sentry".to_string(),
+            sentry_peers: vec![format!("/ip4/10.10.0.11/tcp/30333/p2p/{sentry_a}")],
+            ..Default::default()
+        };
+        assert!(SentryPolicy::from_config(&bad_role).is_err());
+
+        // Public IP sentry refused when strict_private_network defaults to true.
+        let bad_pub = SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![format!("/ip4/198.51.100.11/tcp/30333/p2p/{sentry_a}")],
+            ..Default::default()
+        };
+        assert!(SentryPolicy::from_config(&bad_pub).is_err());
+
+        // Invalid CIDR refused.
+        assert!(IpCidr::parse("10.0.0.0/33").is_err());
+        assert!(IpCidr::parse("not-an-ip/24").is_err());
     }
 
     #[tokio::test]
-    async fn shielded_validator_blocks_stranger_inbound_and_outbound_but_admits_sentry() {
-        let val_key = identity::Keypair::generate_ed25519();
-        let sentry_key = identity::Keypair::generate_ed25519();
-        let stranger_key = identity::Keypair::generate_ed25519();
+    async fn live_shielded_validator_rejects_attacker_and_rotates_sentries_without_restart() {
+        use std::net::{IpAddr, Ipv4Addr};
+        use std::sync::Arc;
+        use std::time::Duration;
 
-        let sentry_id = sentry_key.public().to_peer_id();
-        let stranger_id = stranger_key.public().to_peer_id();
+        use crate::chain::blockchain::Blockchain;
+        use crate::chain::chain_actor::ChainActor;
+        use crate::consensus::pow::PoWEngine;
+        use crate::network::node::Node;
 
-        let (mut sentry_swarm, sentry_addr) = build_memory_swarm(
-            sentry_key,
-            SentryShieldConfig::from_role_and_peers(
-                "sentry",
-                &[],
-                &[val_key.public().to_peer_id().to_string()],
-                None,
-            )
-            .expect("sentry shield"),
-            8,
-            8,
-            9101,
-        );
-        let val_shield = SentryShieldConfig::from_role_and_peers(
-            "validator",
-            &[sentry_addr.to_string()],
-            &[],
-            Some(&val_key.public().to_peer_id()),
-        )
-        .expect("validator shield");
-        let (mut val_swarm, val_addr) = build_memory_swarm(val_key, val_shield, 8, 8, 9102);
-        let (mut stranger_swarm, stranger_addr) =
-            build_memory_swarm(stranger_key, SentryShieldConfig::default(), 8, 8, 9103);
-
-        // 1. Outbound dial from shielded validator to stranger is denied before socket open.
-        let outbound_err = val_swarm
-            .dial(stranger_addr.clone())
-            .expect_err("validator must refuse dialing non-sentry peer");
-        let outbound_dbg = format!("{outbound_err:?}");
-        assert!(
-            matches!(outbound_err, libp2p::swarm::DialError::Denied { .. })
-                && outbound_dbg.contains("sentry shield"),
-            "unexpected dial error: {outbound_dbg}"
-        );
-
-        // 2. Inbound dial from stranger to shielded validator is rejected at gate admission.
-        let val_bare: Multiaddr = "/memory/9102".parse().expect("bare addr");
-        stranger_swarm
-            .dial(DialOpts::unknown_peer_id().address(val_bare).build())
-            .expect("stranger initiates transport dial");
-
-        let mut val_rejected_stranger = false;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        while tokio::time::Instant::now() < deadline && !val_rejected_stranger {
-            tokio::select! {
-                ev = val_swarm.select_next_some() => {
-                    match ev {
-                        SwarmEvent::IncomingConnectionError { error, .. } => {
-                            let err_dbg = format!("{error:?}");
-                            if matches!(error, libp2p::swarm::ListenError::Denied { .. })
-                                && err_dbg.contains("sentry shield")
-                            {
-                                val_rejected_stranger = true;
-                            }
-                        }
-                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                            panic!("shielded validator must NEVER establish connection with stranger {peer_id}");
-                        }
-                        _ => {}
-                    }
-                }
-                _ = stranger_swarm.select_next_some() => {}
-            }
+        fn pick_free_port() -> u16 {
+            let listener =
+                std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral port");
+            listener.local_addr().expect("local addr").port()
         }
-        assert!(
-            val_rejected_stranger,
-            "shielded validator must reject stranger {stranger_id} in IncomingConnectionError"
-        );
-        assert!(!val_swarm.is_connected(&stranger_id));
 
-        // 3. Configured sentry connects cleanly with the shielded validator.
-        val_swarm
-            .dial(sentry_addr)
-            .expect("validator dials configured sentry");
-        let mut val_connected_sentry = false;
-        let mut sentry_connected_val = false;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        while tokio::time::Instant::now() < deadline
-            && (!val_connected_sentry || !sentry_connected_val)
-        {
-            tokio::select! {
-                ev = val_swarm.select_next_some() => {
-                    if let SwarmEvent::ConnectionEstablished { peer_id, .. } = ev {
-                        assert_eq!(peer_id, sentry_id);
-                        val_connected_sentry = true;
-                    }
-                }
-                ev = sentry_swarm.select_next_some() => {
-                    if let SwarmEvent::ConnectionEstablished { peer_id, .. } = ev {
-                        assert_eq!(peer_id.to_string(), val_addr.iter().last().and_then(|p| match p { Protocol::P2p(id) => Some(id.to_string()), _ => None }).unwrap());
-                        sentry_connected_val = true;
-                    }
-                }
-            }
+        fn make_chain() -> crate::chain::chain_actor::ChainHandle {
+            let consensus = Arc::new(PoWEngine::new(0));
+            let blockchain = Blockchain::new(consensus, None, 45265, None);
+            let (actor, client) = ChainActor::new(blockchain);
+            tokio::spawn(async move { actor.run().await });
+            client
         }
-        assert!(val_connected_sentry && sentry_connected_val);
+
+        // Start Sentry A and Sentry B plus an unauthorized public attacker node.
+        let mut sentry_a = Node::new(make_chain()).expect("sentry A");
+        let sentry_a_id = sentry_a.peer_id;
+        let port_a = pick_free_port();
+        sentry_a
+            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_a)
+            .expect("listen sentry A");
+
+        let mut sentry_b = Node::new(make_chain()).expect("sentry B");
+        let sentry_b_id = sentry_b.peer_id;
+        let port_b = pick_free_port();
+        sentry_b
+            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_b)
+            .expect("listen sentry B");
+
+        let mut attacker = Node::new(make_chain()).expect("attacker");
+        let port_att = pick_free_port();
+        attacker
+            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_att)
+            .expect("listen attacker");
+
+        let sentry_a_addr = format!("/ip4/127.0.0.1/tcp/{port_a}/p2p/{sentry_a_id}");
+        let sentry_b_addr = format!("/ip4/127.0.0.1/tcp/{port_b}/p2p/{sentry_b_id}");
+        let attacker_addr = format!("/ip4/127.0.0.1/tcp/{port_att}/p2p/{}", attacker.peer_id);
+
+        // Configure Shielded Validator pointing ONLY to Sentry A over loopback CIDR.
+        let val_policy = SentryPolicy::from_config(&SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![sentry_a_addr.clone()],
+            allowed_private_cidrs: vec!["127.0.0.1/32".to_string()],
+            ..Default::default()
+        })
+        .expect("validator policy");
+        let mut validator = Node::new(make_chain())
+            .expect("validator")
+            .with_sentry_policy(val_policy);
+        let validator_id = validator.peer_id;
+        let port_val = pick_free_port();
+        validator
+            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_val)
+            .expect("listen validator");
+        let validator_addr = format!("/ip4/127.0.0.1/tcp/{port_val}/p2p/{validator_id}");
+
+        // Validator MUST refuse dialing the unauthorized attacker.
+        assert!(validator.dial(&attacker_addr).is_err());
+
+        // Sentry A and B register the validator as a private, unconditional peer.
+        let sentry_policy = SentryPolicy::from_config(&SentryConfig {
+            role: "sentry".to_string(),
+            private_peers: vec![validator_id.to_string()],
+            allowed_private_cidrs: vec!["127.0.0.1/32".to_string()],
+            ..Default::default()
+        })
+        .expect("sentry policy");
+        let mut sentry_a = sentry_a.with_sentry_policy(sentry_policy.clone());
+        let mut sentry_b = sentry_b.with_sentry_policy(sentry_policy);
+
+        let val_client = validator.get_client();
+        let sa_client = sentry_a.get_client();
+        let sb_client = sentry_b.get_client();
+
+        // Attacker tries to dial the shielded validator directly.
+        attacker.dial(&validator_addr).expect("attacker dials");
+
+        let h_sa = tokio::spawn(async move { sentry_a.run().await });
+        let h_sb = tokio::spawn(async move { sentry_b.run().await });
+        let h_att = tokio::spawn(async move { attacker.run().await });
+        let h_val = tokio::spawn(async move { validator.run().await });
+
+        // Wait for Validator <-> Sentry A connection to come up.
+        let mut connected_a = false;
+        for _ in 0..40 {
+            let st = val_client.admin_sentry_status().await.expect("status");
+            if st.connected_sentries == vec![sentry_a_id.to_string()] {
+                connected_a = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(connected_a, "validator should connect to Sentry A");
+        // Attacker must NOT remain connected to the shielded validator.
+        assert_eq!(
+            val_client
+                .peer_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        // Sentry A reports 1 connected private validator while keeping its ID
+        // hidden from Kademlia and public status.
+        let sa_status = sa_client
+            .admin_sentry_status()
+            .await
+            .expect("sentry A status");
+        assert_eq!(sa_status.role, SentryRole::Sentry);
+        assert_eq!(sa_status.private_peer_count, 1);
+        assert_eq!(sa_status.connected_private_peer_count, 1);
+
+        // LIVE SENTRY ROTATION: swap Sentry A -> Sentry B without restart!
+        let diff = val_client
+            .admin_update_sentries(vec![sentry_b_addr])
+            .await
+            .expect("live rotation to Sentry B");
+        assert_eq!(diff.removed, vec![sentry_a_id]);
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].0, sentry_b_id);
+
+        let mut connected_b = false;
+        for _ in 0..40 {
+            let st = val_client
+                .admin_sentry_status()
+                .await
+                .expect("status after rotate");
+            if st.connected_sentries == vec![sentry_b_id.to_string()] {
+                connected_b = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(connected_b, "validator should fail over live to Sentry B");
+        let sb_status = sb_client
+            .admin_sentry_status()
+            .await
+            .expect("sentry B status");
+        assert_eq!(sb_status.connected_private_peer_count, 1);
+
+        h_val.abort();
+        h_sa.abort();
+        h_sb.abort();
+        h_att.abort();
     }
 
-    #[tokio::test]
-    async fn sentry_reserved_slot_admits_validator_when_public_slots_are_saturated() {
-        let sentry_key = identity::Keypair::generate_ed25519();
-        let val_key = identity::Keypair::generate_ed25519();
-        let pub1_key = identity::Keypair::generate_ed25519();
-        let pub2_key = identity::Keypair::generate_ed25519();
-
-        let val_id = val_key.public().to_peer_id();
-        let pub1_id = pub1_key.public().to_peer_id();
-        let pub2_id = pub2_key.public().to_peer_id();
-
-        // Sentry allows only 1 public peer (`max_public_peers = 1`, `max_public_incoming = 1`),
-        // while protecting `val_id` in reserved shield headroom.
-        let sentry_shield = SentryShieldConfig::from_role_and_peers(
-            "sentry",
-            &[],
-            &[val_id.to_string()],
-            Some(&sentry_key.public().to_peer_id()),
-        )
-        .expect("sentry config");
-        let (mut sentry_swarm, sentry_addr) =
-            build_memory_swarm(sentry_key, sentry_shield, 1, 1, 9201);
-        let (mut pub1_swarm, _) =
-            build_memory_swarm(pub1_key, SentryShieldConfig::default(), 4, 4, 9202);
-        let (mut pub2_swarm, _) =
-            build_memory_swarm(pub2_key, SentryShieldConfig::default(), 4, 4, 9203);
-        let (mut val_swarm, _) = build_memory_swarm(
-            val_key,
-            SentryShieldConfig::from_role_and_peers(
-                "validator",
-                &[sentry_addr.to_string()],
-                &[],
-                None,
-            )
-            .expect("val config"),
-            4,
-            4,
-            9204,
+    #[test]
+    fn sentry_strict_private_network_refuses_public_ip_for_private_validator() {
+        let validator = random_peer();
+        let public_peer = random_peer();
+        let cfg = SentryConfig {
+            role: "sentry".to_string(),
+            private_peers: vec![validator.to_string()],
+            strict_private_network: Some(true),
+            ..Default::default()
+        };
+        let policy = SentryPolicy::from_config(&cfg).expect("valid strict sentry");
+        assert!(policy
+            .check_connection(&public_peer, &ma("/ip4/198.51.100.7/tcp/30333"))
+            .is_ok());
+        assert!(policy
+            .check_connection(&validator, &ma("/ip4/10.10.0.5/tcp/30333"))
+            .is_ok());
+        assert_eq!(
+            policy.check_connection(&validator, &ma("/ip4/203.0.113.9/tcp/30333")),
+            Err(ConnectionRefusal::DisallowedAddress)
         );
+    }
 
-        // First public peer fills the 1 public slot on the sentry.
-        pub1_swarm.dial(sentry_addr.clone()).expect("pub1 dial");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        while tokio::time::Instant::now() < deadline && !sentry_swarm.is_connected(&pub1_id) {
-            tokio::select! {
-                _ = sentry_swarm.select_next_some() => {}
-                _ = pub1_swarm.select_next_some() => {}
-            }
-        }
-        assert!(sentry_swarm.is_connected(&pub1_id));
-
-        // Second public peer is denied because the public cap (1) is saturated.
-        pub2_swarm.dial(sentry_addr.clone()).expect("pub2 dial");
-        let mut pub2_denied = false;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        while tokio::time::Instant::now() < deadline && !pub2_denied {
-            tokio::select! {
-                ev = sentry_swarm.select_next_some() => {
-                    if let SwarmEvent::IncomingConnectionError { error, .. } = ev {
-                        let err_dbg = format!("{error:?}");
-                        if matches!(error, libp2p::swarm::ListenError::Denied { .. })
-                            && err_dbg.contains("reserved for sentry shield")
-                        {
-                            pub2_denied = true;
-                        }
-                    }
-                }
-                _ = pub1_swarm.select_next_some() => {}
-                _ = pub2_swarm.select_next_some() => {}
-            }
-        }
-        assert!(pub2_denied && !sentry_swarm.is_connected(&pub2_id));
-
-        // Zero-inbound-port protected validator dials inbound to the saturated sentry and SUCCEEDS.
-        val_swarm.dial(sentry_addr).expect("validator dial");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        while tokio::time::Instant::now() < deadline && !sentry_swarm.is_connected(&val_id) {
-            tokio::select! {
-                _ = sentry_swarm.select_next_some() => {}
-                _ = pub1_swarm.select_next_some() => {}
-                _ = val_swarm.select_next_some() => {}
-            }
-        }
-        assert!(
-            sentry_swarm.is_connected(&val_id),
-            "protected validator must connect via reserved shield slot even when public slots are full"
+    #[test]
+    fn dual_stack_ipv4_mapped_ipv6_obeys_private_and_cidr_policy() {
+        let sentry_a = random_peer();
+        let cfg = SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![format!("/ip4/10.10.0.11/tcp/30333/p2p/{sentry_a}")],
+            allowed_private_cidrs: vec!["10.10.0.0/16".to_string()],
+            ..Default::default()
+        };
+        let policy = SentryPolicy::from_config(&cfg).expect("valid policy");
+        assert!(policy
+            .check_connection(&sentry_a, &ma("/ip6/::ffff:10.10.0.11/tcp/30333"))
+            .is_ok());
+        assert_eq!(
+            policy.check_connection(&sentry_a, &ma("/ip6/::ffff:203.0.113.11/tcp/30333")),
+            Err(ConnectionRefusal::DisallowedAddress)
         );
+        let strict = SentryPolicy::from_config(&SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![format!("/ip4/100.64.1.2/tcp/30333/p2p/{sentry_a}")],
+            ..Default::default()
+        })
+        .expect("strict policy");
+        assert!(strict
+            .check_connection(&sentry_a, &ma("/ip6/::ffff:100.64.1.2/tcp/30333"))
+            .is_ok());
+        assert_eq!(
+            strict.check_connection(&sentry_a, &ma("/ip6/::ffff:198.51.100.2/tcp/30333")),
+            Err(ConnectionRefusal::DisallowedAddress)
+        );
+    }
+
+    #[test]
+    fn live_sentry_rotation_redials_same_peer_id_on_new_ip_and_caps_count() {
+        let sentry_a = random_peer();
+        let cfg = SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![format!("/ip4/10.10.0.11/tcp/30333/p2p/{sentry_a}")],
+            ..Default::default()
+        };
+        let mut policy = SentryPolicy::from_config(&cfg).expect("init");
+
+        let new_addr = format!("/ip4/10.20.0.11/tcp/30333/p2p/{sentry_a}");
+        let diff = policy
+            .update_sentries(std::slice::from_ref(&new_addr))
+            .expect("same-peer IP rotation");
+        assert!(diff.removed.is_empty());
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].0, sentry_a);
+        assert_eq!(diff.added[0].1, ma(&new_addr));
+
+        let oversized: Vec<String> = (0..=MAX_SENTRY_PEERS)
+            .map(|i| {
+                format!(
+                    "/ip4/10.10.0.{}/tcp/30333/p2p/{}",
+                    (i % 250) + 1,
+                    random_peer()
+                )
+            })
+            .collect();
+        assert!(policy.update_sentries(&oversized).is_err());
+        assert_eq!(policy.sentry_addrs().len(), 1);
     }
 }

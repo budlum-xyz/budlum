@@ -115,3 +115,9 @@ path = "src/registry/presence.rs"
 function = "*"
 pq_companion = "ML-DSA-65 proposer block signature and validator key-set preimage binding BLS beside ML-DSA-65 (crypto/key_set_preimage.rs)"
 category = "b"
+
+[[entry]]
+path = "src/garden/net.rs"
+function = "start_with"
+pq_companion = "none: isolated bridgeless external PoA Garden domain swarm transport (bridge_enabled=false, zero settlement-chain state writes)"
+category = "d"

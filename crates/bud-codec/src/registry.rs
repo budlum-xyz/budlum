@@ -319,6 +319,20 @@ mod tests {
     }
 
     #[test]
+    fn expansion_codecs_are_closed_on_testnet() {
+        for id in [6, 7, 8, 12, 13, 23, 24, 25, 26] {
+            assert!(is_open(id), "codec {id} must remain decodable");
+            assert!(
+                !crate::is_open_on_testnet(id),
+                "expansion codec {id} must be closed at testnet launch"
+            );
+        }
+        for id in [0, 1, 2, 3, 4, 5, 10, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22] {
+            assert!(crate::is_open_on_testnet(id), "launch codec {id}");
+        }
+    }
+
+    #[test]
     fn every_open_codec_has_a_decoder() {
         for row in REGISTER.iter().filter(|row| row.state == CodecState::Open) {
             assert!(is_open(row.id), "{} is open without a decoder", row.name);
