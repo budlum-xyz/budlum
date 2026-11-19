@@ -100,6 +100,8 @@ pub enum LaneAdmissionError {
     StaleOrExpired(&'static str),
     /// A Solana envelope failed strict decoding or carried no execution budget.
     InvalidSolana(&'static str),
+    /// The envelope declared no execution budget, or a tip above its own fee cap.
+    Unfunded(&'static str),
 }
 
 impl fmt::Display for LaneAdmissionError {
@@ -110,6 +112,7 @@ impl fmt::Display for LaneAdmissionError {
             Self::ReplayRejected(why) => write!(f, "replay rejected: {why}"),
             Self::StaleOrExpired(why) => write!(f, "stale or expired envelope: {why}"),
             Self::InvalidSolana(why) => write!(f, "invalid Solana envelope: {why}"),
+            Self::Unfunded(why) => write!(f, "unfunded envelope: {why}"),
         }
     }
 }
@@ -120,7 +123,9 @@ impl std::error::Error for LaneAdmissionError {}
 struct SingleLane {
     entries: BTreeMap<[u8; 32], LaneEntry>,
     used_bytes: usize,
-    sender_nonces: BTreeSet<([u8; 32], u64)>,
+    /// `(sender, sequence, isolator)`: the isolator is the Cosmos
+    /// `account_number` and zero for every lane whose sequence is per sender.
+    sender_nonces: BTreeSet<([u8; 32], u64, u64)>,
 }
 
 /// Six-lane isolated transaction pool with priority-fee cross-lane selection.
@@ -261,12 +266,27 @@ impl MultiLaneMempool {
     ///
     /// Returns an error if the operation fails.
     pub fn admit(&mut self, entry: LaneEntry, now_unix_s: u64) -> Result<(), LaneAdmissionError> {
+        // 0. An envelope has to declare a real execution budget and a tip it can
+        // actually pay. `gas_limit_bgu == 0` passed every other check and
+        // `select_for_block` charged nothing for it, so such an entry cost the
+        // block no budget at all and could be stacked in front of entries that
+        // do pay. A tip above `max_fee_per_bgu_atto` is not a bid the sender can
+        // honour: execution would cap it at the fee, while selection priced it
+        // at the tip and ranked it above honest envelopes.
+        if entry.gas_limit_bgu == 0 {
+            return Err(LaneAdmissionError::Unfunded("zero gas_limit_bgu"));
+        }
+        if entry.max_priority_fee_per_bgu_atto > entry.max_fee_per_bgu_atto {
+            return Err(LaneAdmissionError::Unfunded(
+                "max_priority_fee_per_bgu_atto above max_fee_per_bgu_atto",
+            ));
+        }
         // 1. Validate lane <-> replay rule match and replay/freshness BEFORE mutating!
-        let nonce_pair: Option<([u8; 32], u64)> = match (&entry.lane, &entry.replay) {
+        let nonce_pair: Option<([u8; 32], u64, u64)> = match (&entry.lane, &entry.replay) {
             (
                 LaneKind::Local | LaneKind::Ethereum,
                 LaneReplayRule::AccountNonce { sender, nonce },
-            ) => Some((*sender, *nonce)),
+            ) => Some((*sender, *nonce, 0)),
             (
                 LaneKind::Solana,
                 LaneReplayRule::SolanaWindow {
@@ -297,14 +317,16 @@ impl MultiLaneMempool {
                 if *expiration_unix_s <= now_unix_s {
                     return Err(LaneAdmissionError::StaleOrExpired("Aptos tx expired"));
                 }
-                Some((*sender, *sequence))
+                Some((*sender, *sequence, 0))
             }
             (
                 LaneKind::Cosmos,
                 LaneReplayRule::CosmosSequence {
-                    sender, sequence, ..
+                    sender,
+                    account_number,
+                    sequence,
                 },
-            ) => Some((*sender, *sequence)),
+            ) => Some((*sender, *sequence, *account_number)),
             (
                 LaneKind::Duty,
                 LaneReplayRule::DutyWindow {
@@ -375,6 +397,17 @@ impl MultiLaneMempool {
     /// Convenience: called by the block proposer when assembling UEL execution batches.
     #[must_use]
     pub fn select_for_block(&self, base_fee_atto: u128, block_bgu_budget: u64) -> Vec<LaneEntry> {
+        self.select_fresh(base_fee_atto, block_bgu_budget, None)
+    }
+
+    /// Cross-lane selection with an optional block timestamp. `now_unix_s`
+    /// drops Aptos envelopes whose expiration has passed.
+    fn select_fresh(
+        &self,
+        base_fee_atto: u128,
+        block_bgu_budget: u64,
+        now_unix_s: Option<u64>,
+    ) -> Vec<LaneEntry> {
         let mut candidates: Vec<(u128, LaneEntry)> = Vec::new();
         for lane in self.lanes.values() {
             for entry in lane.entries.values() {
@@ -382,6 +415,13 @@ impl MultiLaneMempool {
                     &entry.replay,
                     LaneReplayRule::SolanaWindow { recent_blockhash, .. }
                         if !self.recent_blockhashes.contains(recent_blockhash)
+                ) {
+                    continue;
+                }
+                if matches!(
+                    (&entry.replay, now_unix_s),
+                    (LaneReplayRule::AptosSequence { expiration_unix_s, .. }, Some(now))
+                        if *expiration_unix_s <= now
                 ) {
                     continue;
                 }
@@ -404,6 +444,35 @@ impl MultiLaneMempool {
             }
         }
         picked
+    }
+
+    /// Convenience: timestamp-aware block selection filtering expired transactions.
+    ///
+    /// `select_for_block` had no clock, so an Aptos envelope was only checked
+    /// for expiry when it was admitted: one admitted a second before its
+    /// `expiration_unix_s` stayed selectable for as long as it was queued, and
+    /// the proposer put an expired transaction in a block. The proposer calls
+    /// this variant with the block timestamp.
+    #[must_use]
+    pub fn select_for_block_at(
+        &self,
+        base_fee_atto: u128,
+        block_bgu_budget: u64,
+        now_unix_s: u64,
+    ) -> Vec<LaneEntry> {
+        self.select_fresh(base_fee_atto, block_bgu_budget, Some(now_unix_s))
+    }
+
+    /// Convenience: prune duty-window replay entries older than `min_window`.
+    ///
+    /// The `(validator, window_id)` set that enforces one duty batch per window
+    /// only ever grew: every window the chain ever produced stayed in memory, so
+    /// a long-running node paid for its whole history. A window id below
+    /// `min_window` can no longer be submitted (the door refuses a stale window
+    /// before it reaches this set), so dropping it keeps the rule exact.
+    pub fn prune_duty_windows_before(&mut self, min_window: u64) {
+        self.seen_duty_windows
+            .retain(|(_, window_id)| *window_id >= min_window);
     }
 }
 
@@ -554,5 +623,114 @@ mod tests {
         assert!(pool.solana_sigs_by_blockhash.is_empty());
         assert_eq!(pool.lane_len(LaneKind::Solana), 0);
         assert!(pool.select_for_block(0, 1_000).is_empty());
+    }
+
+    #[test]
+    fn admit_refuses_zero_gas_limit_and_inverted_priority_fee() {
+        let mut pool = MultiLaneMempool::new(8, 4096);
+        let zero_gas = LaneEntry {
+            lane: LaneKind::Ethereum,
+            tx_hash: [0xA1; 32],
+            raw_bytes: vec![1, 2, 3],
+            gas_limit_bgu: 0,
+            max_fee_per_bgu_atto: u128::MAX,
+            max_priority_fee_per_bgu_atto: u128::MAX,
+            replay: LaneReplayRule::AccountNonce {
+                sender: [0x11; 32],
+                nonce: 0,
+            },
+        };
+        assert!(
+            pool.admit(zero_gas, 1_000).is_err(),
+            "zero gas_limit_bgu must be refused so free entries cannot front-run blocks"
+        );
+
+        let inverted_tip = LaneEntry {
+            lane: LaneKind::Local,
+            tx_hash: [0xA2; 32],
+            raw_bytes: vec![4, 5, 6],
+            gas_limit_bgu: 21_000,
+            max_fee_per_bgu_atto: 10,
+            max_priority_fee_per_bgu_atto: 50,
+            replay: LaneReplayRule::AccountNonce {
+                sender: [0x22; 32],
+                nonce: 0,
+            },
+        };
+        assert!(
+            pool.admit(inverted_tip, 1_000).is_err(),
+            "max_priority_fee_per_bgu_atto > max_fee_per_bgu_atto must be refused"
+        );
+    }
+
+    #[test]
+    fn select_for_block_at_skips_expired_aptos_and_cosmos_isolates_account_number() {
+        let mut pool = MultiLaneMempool::new(8, 4096);
+        let aptos_entry = LaneEntry {
+            lane: LaneKind::Aptos,
+            tx_hash: [0xB1; 32],
+            raw_bytes: vec![7; 32],
+            gas_limit_bgu: 500,
+            max_fee_per_bgu_atto: 100,
+            max_priority_fee_per_bgu_atto: 20,
+            replay: LaneReplayRule::AptosSequence {
+                sender: [0x33; 32],
+                sequence: 1,
+                expiration_unix_s: 1_000,
+            },
+        };
+        pool.admit(aptos_entry, 999).expect("live at t=999");
+        assert!(
+            pool.select_for_block_at(0, 10_000, 1_000).is_empty(),
+            "Aptos tx with expiration_unix_s <= now_unix_s must not be selected into block"
+        );
+
+        let cosmos_a = LaneEntry {
+            lane: LaneKind::Cosmos,
+            tx_hash: [0xC1; 32],
+            raw_bytes: vec![8; 16],
+            gas_limit_bgu: 500,
+            max_fee_per_bgu_atto: 100,
+            max_priority_fee_per_bgu_atto: 10,
+            replay: LaneReplayRule::CosmosSequence {
+                sender: [0x44; 32],
+                account_number: 1,
+                sequence: 0,
+            },
+        };
+        let cosmos_b = LaneEntry {
+            lane: LaneKind::Cosmos,
+            tx_hash: [0xC2; 32],
+            raw_bytes: vec![9; 16],
+            gas_limit_bgu: 500,
+            max_fee_per_bgu_atto: 100,
+            max_priority_fee_per_bgu_atto: 10,
+            replay: LaneReplayRule::CosmosSequence {
+                sender: [0x44; 32],
+                account_number: 2,
+                sequence: 0,
+            },
+        };
+        pool.admit(cosmos_a, 1_000).expect("cosmos acct 1");
+        pool.admit(cosmos_b, 1_000)
+            .expect("distinct Cosmos account_number must not collide on sequence");
+
+        for w in 1..=5u64 {
+            let duty = LaneEntry {
+                lane: LaneKind::Duty,
+                tx_hash: [w as u8; 32],
+                raw_bytes: vec![1; 8],
+                gas_limit_bgu: 100,
+                max_fee_per_bgu_atto: 10,
+                max_priority_fee_per_bgu_atto: 1,
+                replay: LaneReplayRule::DutyWindow {
+                    validator: [0x55; 32],
+                    window_id: w,
+                },
+            };
+            pool.admit(duty, 1_000).expect("duty window");
+        }
+        pool.prune_duty_windows_before(4);
+        assert_eq!(pool.seen_duty_windows.len(), 2);
     }
 }
