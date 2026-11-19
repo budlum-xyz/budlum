@@ -43,15 +43,13 @@ library BudlumBls {
 
     error PrecompileRefused(string what);
 
-    function verify(
-        bytes memory pubkeyG2,
-        bytes memory message,
-        bytes memory negSignatureG1,
-        bytes memory g2Generator
-    ) internal view returns (bool) {
+    function verify(bytes memory pubkeyG2, bytes memory message, bytes memory negSignatureG1, bytes memory g2Generator)
+        internal
+        view
+        returns (bool)
+    {
         if (
-            pubkeyG2.length != G2_UNCOMPRESSED_LEN
-                || negSignatureG1.length != G1_UNCOMPRESSED_LEN
+            pubkeyG2.length != G2_UNCOMPRESSED_LEN || negSignatureG1.length != G1_UNCOMPRESSED_LEN
                 || g2Generator.length != G2_UNCOMPRESSED_LEN
         ) {
             return false;
@@ -77,6 +75,9 @@ library BudlumBls {
             hashedG1 = sum;
         }
         bytes memory input = bytes.concat(hashedG1, pubkeyG2, negSignatureG1, g2Generator);
+        if (gasleft() < GAS_BLS_PAIRING) {
+            return false;
+        }
         (bool ok, bytes memory out) = PAIRING.staticcall{gas: GAS_BLS_PAIRING}(input);
         if (!ok || out.length != WORD_LEN) {
             return false;
@@ -88,14 +89,9 @@ library BudlumBls {
         return result == 1;
     }
 
-    function g2Matches(bytes memory compressed, bytes memory uncompressed)
-        internal
-        pure
-        returns (bool)
-    {
+    function g2Matches(bytes memory compressed, bytes memory uncompressed) internal pure returns (bool) {
         if (
-            compressed.length != G2_COMPRESSED_LEN
-                || uncompressed.length != G2_UNCOMPRESSED_LEN
+            compressed.length != G2_COMPRESSED_LEN || uncompressed.length != G2_UNCOMPRESSED_LEN
                 || _isInfinity(uncompressed)
         ) {
             return false;

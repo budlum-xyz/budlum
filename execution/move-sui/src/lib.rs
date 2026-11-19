@@ -338,6 +338,9 @@ impl ExecutionEnvironment for MoveSuiWorker {
                 ));
             };
             let pkg_id = derive_sui_object_id(&call.tx_hash, 0);
+            if matches!(read_sui_object(host, &pkg_id), Ok(Some(_))) {
+                return Ok(ee_reverted(b"package already deployed".to_vec(), gas_used));
+            }
             let contents = serde_json::to_vec(&mods).unwrap_or_default();
             let pkg_obj = SuiObject {
                 object_id: pkg_id,
@@ -356,333 +359,420 @@ impl ExecutionEnvironment for MoveSuiWorker {
         let Ok(ptb) = serde_json::from_slice::<SuiPtb>(&call.input) else {
             return Ok(ee_reverted(b"invalid SuiPtb JSON".to_vec(), gas_used));
         };
+        if ptb.commands.len() > 1_024 {
+            return Ok(ee_reverted(
+                b"PTB exceeds 1024 command cap".to_vec(),
+                gas_used,
+            ));
+        }
+        let Ok(ptb_cp) = host.checkpoint_begin() else {
+            return Ok(ee_reverted(
+                b"PTB checkpoint begin failed".to_vec(),
+                gas_used,
+            ));
+        };
         let mut created_ids: Vec<[u8; 32]> = Vec::new();
         let mut ordinal: u64 = 0;
+        const BUD_COIN_TAG: &str = "0x2::coin::Coin<0x2::bud::BUD>";
 
-        for cmd in &ptb.commands {
-            if charge_gas(&mut gas_used, call.gas_limit, SUI_CMD_STEP_BGU, host).is_err() {
-                return Ok(ee_out_of_gas(call.gas_limit));
-            }
-            match cmd {
-                SuiPtbCommand::PublishPackage {
-                    modules,
-                    initial_coin_mist,
-                } => {
-                    let bundle = match encode_sui_package_bundle(modules) {
-                        Ok(b) => b,
-                        Err(e) => return Ok(ee_reverted(e.into_bytes(), gas_used)),
-                    };
-                    let byte_cost = (bundle.len() as u64).saturating_mul(SUI_PUBLISH_PER_BYTE_BGU);
-                    if charge_gas(&mut gas_used, call.gas_limit, byte_cost, host).is_err() {
-                        return Ok(ee_out_of_gas(call.gas_limit));
+        let ptb_res: Result<(), EeOutcome> = (|| {
+            for cmd in &ptb.commands {
+                if charge_gas(&mut gas_used, call.gas_limit, SUI_CMD_STEP_BGU, host).is_err() {
+                    return Err(ee_out_of_gas(call.gas_limit));
+                }
+                match cmd {
+                    SuiPtbCommand::PublishPackage {
+                        modules,
+                        initial_coin_mist,
+                    } => {
+                        let bundle = encode_sui_package_bundle(modules)
+                            .map_err(|e| ee_reverted(e.into_bytes(), gas_used))?;
+                        let byte_cost =
+                            (bundle.len() as u64).saturating_mul(SUI_PUBLISH_PER_BYTE_BGU);
+                        if charge_gas(&mut gas_used, call.gas_limit, byte_cost, host).is_err() {
+                            return Err(ee_out_of_gas(call.gas_limit));
+                        }
+                        if decode_sui_package_bundle(&bundle).is_err() {
+                            return Err(ee_reverted(b"bad Sui modules".to_vec(), gas_used));
+                        }
+                        let pkg_id = derive_sui_object_id(&call.tx_hash, ordinal);
+                        ordinal = ordinal.saturating_add(1);
+                        if matches!(read_sui_object(host, &pkg_id), Ok(Some(_))) {
+                            return Err(ee_reverted(b"package already exists".to_vec(), gas_used));
+                        }
+                        let pkg_obj = SuiObject {
+                            object_id: pkg_id,
+                            version: 1,
+                            digest: [0u8; 32],
+                            owner: SuiOwner::Immutable,
+                            type_tag: "0x2::package::Package".to_string(),
+                            contents: serde_json::to_vec(modules).unwrap_or_default(),
+                        };
+                        if write_sui_object(host, pkg_obj).is_err() {
+                            return Err(ee_reverted(b"pkg write err".to_vec(), gas_used));
+                        }
+                        created_ids.push(pkg_id);
+                        if *initial_coin_mist > 0 {
+                            let Some(attos) =
+                                u128::from(*initial_coin_mist).checked_mul(ATTO_PER_MIST)
+                            else {
+                                return Err(ee_reverted(
+                                    b"coin amount overflow".to_vec(),
+                                    gas_used,
+                                ));
+                            };
+                            let vault = EeIdentity {
+                                ee: EeId::MOVE_SUI,
+                                id: [0x02u8; 32].to_vec(),
+                            };
+                            if host.bud_transfer(&call.caller, &vault, attos).is_err() {
+                                return Err(ee_reverted(
+                                    b"insufficient MIST balance".to_vec(),
+                                    gas_used,
+                                ));
+                            }
+                            let coin_id = derive_sui_object_id(&call.tx_hash, ordinal);
+                            ordinal = ordinal.saturating_add(1);
+                            let coin_obj = SuiObject {
+                                object_id: coin_id,
+                                version: 1,
+                                digest: [0u8; 32],
+                                owner: SuiOwner::AddressOwner(sender32),
+                                type_tag: BUD_COIN_TAG.to_string(),
+                                contents: initial_coin_mist.to_le_bytes().to_vec(),
+                            };
+                            if write_sui_object(host, coin_obj).is_err() {
+                                return Err(ee_reverted(b"coin write err".to_vec(), gas_used));
+                            }
+                            created_ids.push(coin_id);
+                        }
                     }
-                    if decode_sui_package_bundle(&bundle).is_err() {
-                        return Ok(ee_reverted(b"bad Sui modules".to_vec(), gas_used));
-                    }
-                    let pkg_id = derive_sui_object_id(&call.tx_hash, ordinal);
-                    ordinal = ordinal.saturating_add(1);
-                    let pkg_obj = SuiObject {
-                        object_id: pkg_id,
-                        version: 1,
-                        digest: [0u8; 32],
-                        owner: SuiOwner::Immutable,
-                        type_tag: "0x2::package::Package".to_string(),
-                        contents: serde_json::to_vec(modules).unwrap_or_default(),
-                    };
-                    if write_sui_object(host, pkg_obj).is_err() {
-                        return Ok(ee_reverted(b"pkg write err".to_vec(), gas_used));
-                    }
-                    created_ids.push(pkg_id);
-                    if *initial_coin_mist > 0 {
+                    SuiPtbCommand::MintGasCoin { amount_mist } => {
+                        let Some(attos) = u128::from(*amount_mist).checked_mul(ATTO_PER_MIST)
+                        else {
+                            return Err(ee_reverted(b"coin amount overflow".to_vec(), gas_used));
+                        };
+                        let vault = EeIdentity {
+                            ee: EeId::MOVE_SUI,
+                            id: [0x02u8; 32].to_vec(),
+                        };
+                        if attos > 0 && host.bud_transfer(&call.caller, &vault, attos).is_err() {
+                            return Err(ee_reverted(
+                                b"insufficient MIST balance".to_vec(),
+                                gas_used,
+                            ));
+                        }
                         let coin_id = derive_sui_object_id(&call.tx_hash, ordinal);
                         ordinal = ordinal.saturating_add(1);
-                        let coin_obj = SuiObject {
+                        let coin = SuiObject {
                             object_id: coin_id,
                             version: 1,
                             digest: [0u8; 32],
                             owner: SuiOwner::AddressOwner(sender32),
-                            type_tag: "0x2::coin::Coin<0x2::bud::BUD>".to_string(),
-                            contents: initial_coin_mist.to_le_bytes().to_vec(),
+                            type_tag: BUD_COIN_TAG.to_string(),
+                            contents: amount_mist.to_le_bytes().to_vec(),
                         };
-                        if write_sui_object(host, coin_obj).is_err() {
-                            return Ok(ee_reverted(b"coin write err".to_vec(), gas_used));
+                        if write_sui_object(host, coin).is_err() {
+                            return Err(ee_reverted(b"mint write err".to_vec(), gas_used));
                         }
                         created_ids.push(coin_id);
                     }
-                }
-                SuiPtbCommand::MintGasCoin { amount_mist } => {
-                    let attos = u128::from(*amount_mist).saturating_mul(ATTO_PER_MIST);
-                    let vault = EeIdentity {
-                        ee: EeId::MOVE_SUI,
-                        id: [0x02u8; 32].to_vec(),
-                    };
-                    if attos > 0 && host.bud_transfer(&call.caller, &vault, attos).is_err() {
-                        return Ok(ee_reverted(b"insufficient MIST balance".to_vec(), gas_used));
-                    }
-                    let coin_id = derive_sui_object_id(&call.tx_hash, ordinal);
-                    ordinal = ordinal.saturating_add(1);
-                    let coin = SuiObject {
-                        object_id: coin_id,
-                        version: 1,
-                        digest: [0u8; 32],
-                        owner: SuiOwner::AddressOwner(sender32),
-                        type_tag: "0x2::coin::Coin<0x2::bud::BUD>".to_string(),
-                        contents: amount_mist.to_le_bytes().to_vec(),
-                    };
-                    if write_sui_object(host, coin).is_err() {
-                        return Ok(ee_reverted(b"mint write err".to_vec(), gas_used));
-                    }
-                    created_ids.push(coin_id);
-                }
-                SuiPtbCommand::SplitCoins {
-                    coin_id,
-                    amounts_mist,
-                } => {
-                    let Ok(Some(mut src)) = read_sui_object(host, coin_id) else {
-                        return Ok(ee_reverted(b"coin not found".to_vec(), gas_used));
-                    };
-                    if src.owner != SuiOwner::AddressOwner(sender32) {
-                        return Ok(ee_reverted(b"not coin owner".to_vec(), gas_used));
-                    }
-                    let Ok(bal_bytes) = <[u8; 8]>::try_from(src.contents.as_slice()) else {
-                        return Ok(ee_reverted(b"corrupt coin".to_vec(), gas_used));
-                    };
-                    let mut rem = u64::from_le_bytes(bal_bytes);
-                    let mut lamport_max = src.version;
-                    for amt in amounts_mist {
-                        let Some(next_rem) = rem.checked_sub(*amt) else {
-                            return Ok(ee_reverted(b"coin split underflow".to_vec(), gas_used));
-                        };
-                        rem = next_rem;
-                        let new_id = derive_sui_object_id(&call.tx_hash, ordinal);
-                        ordinal = ordinal.saturating_add(1);
-                        let child = SuiObject {
-                            object_id: new_id,
-                            version: lamport_max.saturating_add(1),
-                            digest: [0u8; 32],
-                            owner: SuiOwner::AddressOwner(sender32),
-                            type_tag: src.type_tag.clone(),
-                            contents: amt.to_le_bytes().to_vec(),
-                        };
-                        if write_sui_object(host, child).is_err() {
-                            return Ok(ee_reverted(b"split write err".to_vec(), gas_used));
-                        }
-                        created_ids.push(new_id);
-                    }
-                    lamport_max = lamport_max.saturating_add(1);
-                    src.version = lamport_max;
-                    src.contents = rem.to_le_bytes().to_vec();
-                    if write_sui_object(host, src).is_err() {
-                        return Ok(ee_reverted(b"src write err".to_vec(), gas_used));
-                    }
-                }
-                SuiPtbCommand::MergeCoins {
-                    primary_coin,
-                    sources,
-                } => {
-                    let Ok(Some(mut prim)) = read_sui_object(host, primary_coin) else {
-                        return Ok(ee_reverted(b"primary coin missing".to_vec(), gas_used));
-                    };
-                    if prim.owner != SuiOwner::AddressOwner(sender32) {
-                        return Ok(ee_reverted(b"not primary owner".to_vec(), gas_used));
-                    }
-                    let Ok(p_arr) = <[u8; 8]>::try_from(prim.contents.as_slice()) else {
-                        return Ok(ee_reverted(b"bad primary coin".to_vec(), gas_used));
-                    };
-                    let mut total = u64::from_le_bytes(p_arr);
-                    let mut max_ver = prim.version;
-                    for sid in sources {
-                        let Ok(Some(src)) = read_sui_object(host, sid) else {
-                            return Ok(ee_reverted(b"merge src missing".to_vec(), gas_used));
+                    SuiPtbCommand::SplitCoins {
+                        coin_id,
+                        amounts_mist,
+                    } => {
+                        let Ok(Some(mut src)) = read_sui_object(host, coin_id) else {
+                            return Err(ee_reverted(b"coin not found".to_vec(), gas_used));
                         };
                         if src.owner != SuiOwner::AddressOwner(sender32) {
-                            return Ok(ee_reverted(b"not src owner".to_vec(), gas_used));
+                            return Err(ee_reverted(b"not coin owner".to_vec(), gas_used));
                         }
-                        let Ok(s_arr) = <[u8; 8]>::try_from(src.contents.as_slice()) else {
-                            return Ok(ee_reverted(b"bad src coin".to_vec(), gas_used));
+                        if src.type_tag != BUD_COIN_TAG {
+                            return Err(ee_reverted(b"not a BUD coin object".to_vec(), gas_used));
+                        }
+                        let Ok(bal_bytes) = <[u8; 8]>::try_from(src.contents.as_slice()) else {
+                            return Err(ee_reverted(b"corrupt coin".to_vec(), gas_used));
                         };
-                        let Some(sum) = total.checked_add(u64::from_le_bytes(s_arr)) else {
-                            return Ok(ee_reverted(b"merge overflow".to_vec(), gas_used));
-                        };
-                        total = sum;
-                        max_ver = max_ver.max(src.version);
-                        if delete_sui_object(host, sid).is_err() {
-                            return Ok(ee_reverted(b"merge del err".to_vec(), gas_used));
+                        let mut rem = u64::from_le_bytes(bal_bytes);
+                        let mut lamport_max = src.version;
+                        for amt in amounts_mist {
+                            let Some(next_rem) = rem.checked_sub(*amt) else {
+                                return Err(ee_reverted(
+                                    b"coin split underflow".to_vec(),
+                                    gas_used,
+                                ));
+                            };
+                            rem = next_rem;
+                            let new_id = derive_sui_object_id(&call.tx_hash, ordinal);
+                            ordinal = ordinal.saturating_add(1);
+                            let child = SuiObject {
+                                object_id: new_id,
+                                version: lamport_max.saturating_add(1),
+                                digest: [0u8; 32],
+                                owner: SuiOwner::AddressOwner(sender32),
+                                type_tag: src.type_tag.clone(),
+                                contents: amt.to_le_bytes().to_vec(),
+                            };
+                            if write_sui_object(host, child).is_err() {
+                                return Err(ee_reverted(b"split write err".to_vec(), gas_used));
+                            }
+                            created_ids.push(new_id);
+                        }
+                        lamport_max = lamport_max.saturating_add(1);
+                        src.version = lamport_max;
+                        src.contents = rem.to_le_bytes().to_vec();
+                        if write_sui_object(host, src).is_err() {
+                            return Err(ee_reverted(b"src write err".to_vec(), gas_used));
                         }
                     }
-                    prim.version = max_ver.saturating_add(1);
-                    prim.contents = total.to_le_bytes().to_vec();
-                    if write_sui_object(host, prim).is_err() {
-                        return Ok(ee_reverted(b"merge write err".to_vec(), gas_used));
+                    SuiPtbCommand::MergeCoins {
+                        primary_coin,
+                        sources,
+                    } => {
+                        let Ok(Some(mut prim)) = read_sui_object(host, primary_coin) else {
+                            return Err(ee_reverted(b"primary coin missing".to_vec(), gas_used));
+                        };
+                        if prim.owner != SuiOwner::AddressOwner(sender32) {
+                            return Err(ee_reverted(b"not primary owner".to_vec(), gas_used));
+                        }
+                        if prim.type_tag != BUD_COIN_TAG {
+                            return Err(ee_reverted(b"not a BUD coin object".to_vec(), gas_used));
+                        }
+                        let Ok(p_arr) = <[u8; 8]>::try_from(prim.contents.as_slice()) else {
+                            return Err(ee_reverted(b"bad primary coin".to_vec(), gas_used));
+                        };
+                        let mut total = u64::from_le_bytes(p_arr);
+                        let mut max_ver = prim.version;
+                        let mut seen = std::collections::BTreeSet::new();
+                        for sid in sources {
+                            if sid == primary_coin || !seen.insert(*sid) {
+                                return Err(ee_reverted(
+                                    b"cannot self-merge or duplicate coin".to_vec(),
+                                    gas_used,
+                                ));
+                            }
+                            let Ok(Some(src)) = read_sui_object(host, sid) else {
+                                return Err(ee_reverted(b"merge src missing".to_vec(), gas_used));
+                            };
+                            if src.owner != SuiOwner::AddressOwner(sender32) {
+                                return Err(ee_reverted(b"not src owner".to_vec(), gas_used));
+                            }
+                            if src.type_tag != prim.type_tag {
+                                return Err(ee_reverted(
+                                    b"coin type mismatch in merge".to_vec(),
+                                    gas_used,
+                                ));
+                            }
+                            let Ok(s_arr) = <[u8; 8]>::try_from(src.contents.as_slice()) else {
+                                return Err(ee_reverted(b"bad src coin".to_vec(), gas_used));
+                            };
+                            let Some(sum) = total.checked_add(u64::from_le_bytes(s_arr)) else {
+                                return Err(ee_reverted(b"merge overflow".to_vec(), gas_used));
+                            };
+                            total = sum;
+                            max_ver = max_ver.max(src.version);
+                            if delete_sui_object(host, sid).is_err() {
+                                return Err(ee_reverted(b"merge del err".to_vec(), gas_used));
+                            }
+                        }
+                        prim.version = max_ver.saturating_add(1);
+                        prim.contents = total.to_le_bytes().to_vec();
+                        if write_sui_object(host, prim).is_err() {
+                            return Err(ee_reverted(b"merge write err".to_vec(), gas_used));
+                        }
                     }
-                }
-                SuiPtbCommand::TransferObjects {
-                    object_ids,
-                    recipient,
-                } => {
-                    for oid in object_ids {
-                        let Ok(Some(mut obj)) = read_sui_object(host, oid) else {
-                            return Ok(ee_reverted(b"object missing".to_vec(), gas_used));
+                    SuiPtbCommand::TransferObjects {
+                        object_ids,
+                        recipient,
+                    } => {
+                        for oid in object_ids {
+                            let Ok(Some(mut obj)) = read_sui_object(host, oid) else {
+                                return Err(ee_reverted(b"object missing".to_vec(), gas_used));
+                            };
+                            if obj.owner != SuiOwner::AddressOwner(sender32) {
+                                return Err(ee_reverted(
+                                    b"cannot transfer non-owned object".to_vec(),
+                                    gas_used,
+                                ));
+                            }
+                            obj.version = obj.version.saturating_add(1);
+                            obj.owner = SuiOwner::AddressOwner(*recipient);
+                            if write_sui_object(host, obj).is_err() {
+                                return Err(ee_reverted(b"transfer err".to_vec(), gas_used));
+                            }
+                        }
+                    }
+                    SuiPtbCommand::ShareObject { object_id } => {
+                        let Ok(Some(mut obj)) = read_sui_object(host, object_id) else {
+                            return Err(ee_reverted(b"object missing".to_vec(), gas_used));
                         };
                         if obj.owner != SuiOwner::AddressOwner(sender32) {
-                            return Ok(ee_reverted(
-                                b"cannot transfer non-owned object".to_vec(),
-                                gas_used,
-                            ));
+                            return Err(ee_reverted(b"not owner".to_vec(), gas_used));
                         }
-                        obj.version = obj.version.saturating_add(1);
-                        obj.owner = SuiOwner::AddressOwner(*recipient);
+                        let next_ver = obj.version.saturating_add(1);
+                        obj.version = next_ver;
+                        obj.owner = SuiOwner::Shared {
+                            initial_shared_version: next_ver,
+                        };
                         if write_sui_object(host, obj).is_err() {
-                            return Ok(ee_reverted(b"transfer err".to_vec(), gas_used));
+                            return Err(ee_reverted(b"share err".to_vec(), gas_used));
                         }
                     }
-                }
-                SuiPtbCommand::ShareObject { object_id } => {
-                    let Ok(Some(mut obj)) = read_sui_object(host, object_id) else {
-                        return Ok(ee_reverted(b"object missing".to_vec(), gas_used));
-                    };
-                    if obj.owner != SuiOwner::AddressOwner(sender32) {
-                        return Ok(ee_reverted(b"not owner".to_vec(), gas_used));
-                    }
-                    let next_ver = obj.version.saturating_add(1);
-                    obj.version = next_ver;
-                    obj.owner = SuiOwner::Shared {
-                        initial_shared_version: next_ver,
-                    };
-                    if write_sui_object(host, obj).is_err() {
-                        return Ok(ee_reverted(b"share err".to_vec(), gas_used));
-                    }
-                }
-                SuiPtbCommand::MoveCall {
-                    package_id,
-                    module,
-                    function,
-                    shared_inputs,
-                    arg_bytes,
-                } => {
-                    let Ok(Some(pkg)) = read_sui_object(host, package_id) else {
-                        return Ok(ee_reverted(b"package not found".to_vec(), gas_used));
-                    };
-                    if pkg.owner != SuiOwner::Immutable {
-                        return Ok(ee_reverted(b"not a package".to_vec(), gas_used));
-                    }
-                    let Ok(mods) = serde_json::from_slice::<Vec<SuiCompiledModule>>(&pkg.contents)
-                    else {
-                        return Ok(ee_reverted(b"corrupt package".to_vec(), gas_used));
-                    };
-                    let found = mods.iter().any(|m| {
-                        m.name == *module && m.exported_functions.iter().any(|f| f == function)
-                    });
-                    if !found {
-                        return Ok(ee_reverted(
-                            b"Move entry function not found".to_vec(),
-                            gas_used,
-                        ));
-                    }
-                    if arg_bytes.len() > MAX_SUI_OBJECT_BYTES {
-                        return Ok(ee_reverted(
-                            b"arguments exceed the object size cap".to_vec(),
-                            gas_used,
-                        ));
-                    }
-                    // A Move module can only write the objects whose type it defines. The
-                    // worker does not run the bytecode, so it applies that rule from the type
-                    // tag: a package writes `0x<its id>::...` objects and nothing else. A
-                    // shared framework coin, or an object another package defines, is out of
-                    // reach whatever the package's functions do.
-                    let package_prefix = format!("0x{}::", hex::encode(package_id));
-                    let mut lamport_ver: u64 = 1;
-                    for sid in shared_inputs {
-                        let Ok(Some(mut sh)) = read_sui_object(host, sid) else {
-                            return Ok(ee_reverted(b"shared input missing".to_vec(), gas_used));
+                    SuiPtbCommand::MoveCall {
+                        package_id,
+                        module,
+                        function,
+                        shared_inputs,
+                        arg_bytes,
+                    } => {
+                        let Ok(Some(pkg)) = read_sui_object(host, package_id) else {
+                            return Err(ee_reverted(b"package not found".to_vec(), gas_used));
                         };
-                        let owner_may_write = match &sh.owner {
-                            SuiOwner::Shared { .. } => true,
-                            SuiOwner::AddressOwner(owner) => *owner == sender32,
-                            SuiOwner::ObjectOwner(_) | SuiOwner::Immutable => false,
+                        if pkg.owner != SuiOwner::Immutable {
+                            return Err(ee_reverted(b"not a package".to_vec(), gas_used));
+                        }
+                        let Ok(mods) =
+                            serde_json::from_slice::<Vec<SuiCompiledModule>>(&pkg.contents)
+                        else {
+                            return Err(ee_reverted(b"corrupt package".to_vec(), gas_used));
                         };
-                        if !owner_may_write || !sh.type_tag.starts_with(&package_prefix) {
-                            return Ok(ee_reverted(
-                                b"shared input unauthorized".to_vec(),
+                        let found = mods.iter().any(|m| {
+                            m.name == *module && m.exported_functions.iter().any(|f| f == function)
+                        });
+                        if !found {
+                            return Err(ee_reverted(
+                                b"Move entry function not found".to_vec(),
                                 gas_used,
                             ));
                         }
-                        let grown = sh.contents.len().saturating_add(arg_bytes.len());
-                        if grown > MAX_SUI_OBJECT_BYTES {
-                            return Ok(ee_reverted(
-                                b"object would exceed the size cap".to_vec(),
+                        if arg_bytes.len() > MAX_SUI_OBJECT_BYTES {
+                            return Err(ee_reverted(
+                                b"arguments exceed the object size cap".to_vec(),
                                 gas_used,
                             ));
                         }
-                        let write_cost = SUI_CMD_STEP_BGU.saturating_add(
-                            (grown as u64).saturating_mul(SUI_OBJECT_WRITE_PER_BYTE_BGU),
-                        );
-                        if charge_gas(&mut gas_used, call.gas_limit, write_cost, host).is_err() {
-                            return Ok(ee_out_of_gas(call.gas_limit));
+                        let package_prefix = format!("0x{}::", hex::encode(package_id));
+                        let mut lamport_ver: u64 = 1;
+                        for sid in shared_inputs {
+                            let Ok(Some(mut sh)) = read_sui_object(host, sid) else {
+                                return Err(ee_reverted(
+                                    b"shared input missing".to_vec(),
+                                    gas_used,
+                                ));
+                            };
+                            let owner_may_write = match &sh.owner {
+                                SuiOwner::Shared { .. } => true,
+                                SuiOwner::AddressOwner(owner) => *owner == sender32,
+                                SuiOwner::ObjectOwner(_) | SuiOwner::Immutable => false,
+                            };
+                            if !owner_may_write || !sh.type_tag.starts_with(&package_prefix) {
+                                return Err(ee_reverted(
+                                    b"shared input unauthorized".to_vec(),
+                                    gas_used,
+                                ));
+                            }
+                            let grown = sh.contents.len().saturating_add(arg_bytes.len());
+                            if grown > MAX_SUI_OBJECT_BYTES {
+                                return Err(ee_reverted(
+                                    b"object would exceed the size cap".to_vec(),
+                                    gas_used,
+                                ));
+                            }
+                            let write_cost = SUI_CMD_STEP_BGU.saturating_add(
+                                (grown as u64).saturating_mul(SUI_OBJECT_WRITE_PER_BYTE_BGU),
+                            );
+                            if charge_gas(&mut gas_used, call.gas_limit, write_cost, host).is_err()
+                            {
+                                return Err(ee_out_of_gas(call.gas_limit));
+                            }
+                            lamport_ver = lamport_ver.max(sh.version.saturating_add(1));
+                            sh.version = lamport_ver;
+                            sh.contents.extend_from_slice(arg_bytes);
+                            if write_sui_object(host, sh).is_err() {
+                                return Err(ee_reverted(b"shared write err".to_vec(), gas_used));
+                            }
                         }
-                        lamport_ver = lamport_ver.max(sh.version.saturating_add(1));
-                        sh.version = lamport_ver;
-                        sh.contents.extend_from_slice(arg_bytes);
-                        if write_sui_object(host, sh).is_err() {
-                            return Ok(ee_reverted(b"shared write err".to_vec(), gas_used));
+                        let out_id = derive_sui_object_id(&call.tx_hash, ordinal);
+                        ordinal = ordinal.saturating_add(1);
+                        let produced = SuiObject {
+                            object_id: out_id,
+                            version: lamport_ver,
+                            digest: [0u8; 32],
+                            owner: SuiOwner::AddressOwner(sender32),
+                            type_tag: format!("0x{}::{module}::Result", hex::encode(package_id)),
+                            contents: arg_bytes.clone(),
+                        };
+                        if write_sui_object(host, produced).is_err() {
+                            return Err(ee_reverted(b"result write err".to_vec(), gas_used));
                         }
-                    }
-                    let out_id = derive_sui_object_id(&call.tx_hash, ordinal);
-                    ordinal = ordinal.saturating_add(1);
-                    let produced = SuiObject {
-                        object_id: out_id,
-                        version: lamport_ver,
-                        digest: [0u8; 32],
-                        owner: SuiOwner::AddressOwner(sender32),
-                        type_tag: format!("0x{}::{module}::Result", hex::encode(package_id)),
-                        contents: arg_bytes.clone(),
-                    };
-                    if write_sui_object(host, produced).is_err() {
-                        return Ok(ee_reverted(b"result write err".to_vec(), gas_used));
-                    }
-                    let _ = host.emit_log(EeLog {
-                        emitter: EeIdentity {
-                            ee: EeId::MOVE_SUI,
-                            id: package_id.to_vec(),
-                        },
-                        topics: vec![format!("{module}::{function}").into_bytes()],
-                        data: arg_bytes.clone(),
-                    });
-                    created_ids.push(out_id);
-                }
-                SuiPtbCommand::UniversalBridgeCall {
-                    target_ee,
-                    target,
-                    input,
-                    value_mist,
-                    gas_limit,
-                } => {
-                    let sub_cap = (*gas_limit).min(call.gas_limit.saturating_sub(gas_used));
-                    let res = match host.universal_call(UniversalCall {
-                        from: call.caller.clone(),
-                        to_ee: EeId(*target_ee),
-                        target: EeIdentity {
-                            ee: EeId(*target_ee),
-                            id: target.clone(),
-                        },
-                        value: BudAmount(u128::from(*value_mist).saturating_mul(ATTO_PER_MIST)),
-                        input: input.clone(),
-                        gas_limit: sub_cap,
-                        is_static: false,
-                    }) {
-                        Ok(r) => r,
-                        Err(_) => {
-                            return Ok(ee_reverted(b"universal_call failed".to_vec(), gas_used));
+                        if host
+                            .emit_log(EeLog {
+                                emitter: EeIdentity {
+                                    ee: EeId::MOVE_SUI,
+                                    id: package_id.to_vec(),
+                                },
+                                topics: vec![format!("{module}::{function}").into_bytes()],
+                                data: arg_bytes.clone(),
+                            })
+                            .is_err()
+                        {
+                            return Err(ee_reverted(b"log emit err".to_vec(), gas_used));
                         }
-                    };
-                    if charge_gas(&mut gas_used, call.gas_limit, res.gas_used, host).is_err() {
-                        return Ok(ee_out_of_gas(call.gas_limit));
+                        created_ids.push(out_id);
                     }
-                    if !res.success {
-                        return Ok(ee_reverted(res.output, gas_used));
+                    SuiPtbCommand::UniversalBridgeCall {
+                        target_ee,
+                        target,
+                        input,
+                        value_mist,
+                        gas_limit,
+                    } => {
+                        let sub_cap = (*gas_limit).min(call.gas_limit.saturating_sub(gas_used));
+                        let Some(attos) = u128::from(*value_mist).checked_mul(ATTO_PER_MIST) else {
+                            return Err(ee_reverted(b"bridge value overflow".to_vec(), gas_used));
+                        };
+                        let res = match host.universal_call(UniversalCall {
+                            from: call.caller.clone(),
+                            to_ee: EeId(*target_ee),
+                            target: EeIdentity {
+                                ee: EeId(*target_ee),
+                                id: target.clone(),
+                            },
+                            value: BudAmount(attos),
+                            input: input.clone(),
+                            gas_limit: sub_cap,
+                            is_static: false,
+                        }) {
+                            Ok(r) => r,
+                            Err(_) => {
+                                return Err(ee_reverted(
+                                    b"universal_call failed".to_vec(),
+                                    gas_used,
+                                ));
+                            }
+                        };
+                        if charge_gas(&mut gas_used, call.gas_limit, res.gas_used, host).is_err() {
+                            return Err(ee_out_of_gas(call.gas_limit));
+                        }
+                        if !res.success {
+                            return Err(ee_reverted(res.output, gas_used));
+                        }
                     }
                 }
             }
+            Ok(())
+        })();
+
+        if let Err(outcome) = ptb_res {
+            let _ = host.checkpoint_rollback(ptb_cp);
+            return Ok(outcome);
+        }
+        if host.checkpoint_commit(ptb_cp).is_err() {
+            let _ = host.checkpoint_rollback(ptb_cp);
+            return Ok(ee_reverted(
+                b"PTB checkpoint commit failed".to_vec(),
+                gas_used,
+            ));
         }
 
         let out = serde_json::to_vec(&created_ids).unwrap_or_default();
@@ -1024,6 +1114,8 @@ mod tests {
         module: &str,
         tx: u8,
     ) -> ([u8; 32], [u8; 32]) {
+        let bal = host.balances.entry(who.clone()).or_insert(0);
+        *bal = bal.saturating_add(250 * ATTO_PER_MIST);
         let out = run(
             worker,
             host,
@@ -1320,5 +1412,53 @@ mod tests {
         // `x` held 10 bytes when `one` ran. It held 15 when `two` ran, and `y` held 20.
         assert_eq!(one.gas_used - none.gas_used, cost(10));
         assert_eq!(two.gas_used - none.gas_used, cost(15) + cost(20));
+    }
+
+    #[test]
+    fn publish_initial_coin_requires_backing_balance_and_self_merge_rolls_back() {
+        let mut worker = MoveSuiWorker::new();
+        let mut host = MemoryHost::new(20_000_000);
+        let who = EeIdentity {
+            ee: EeId::MOVE_SUI,
+            id: vec![0x55; 32],
+        };
+
+        // Unfunded PublishPackage with initial_coin_mist > 0 must revert and leave no package.
+        let unfunded = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![SuiPtbCommand::PublishPackage {
+                modules: vec![SuiCompiledModule {
+                    name: "vault".to_string(),
+                    exported_functions: vec!["open".to_string()],
+                    bytecode: vec![1, 2, 3, 4],
+                }],
+                initial_coin_mist: 500,
+            }],
+            0x90,
+        );
+        assert_eq!(unfunded.status, OutcomeStatus::Revert);
+        assert!(
+            read_sui_object(&host, &derive_sui_object_id(&[0x90; 32], 0))
+                .expect("read")
+                .is_none()
+        );
+
+        // Self-merge on a funded coin must revert without doubling balance.
+        let (_, coin) = publish(&mut worker, &mut host, &who, "vault", 0x91);
+        let self_merge = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![SuiPtbCommand::MergeCoins {
+                primary_coin: coin,
+                sources: vec![coin],
+            }],
+            0x92,
+        );
+        assert_eq!(self_merge.status, OutcomeStatus::Revert);
+        let after = read_sui_object(&host, &coin).expect("read").expect("coin");
+        assert_eq!(after.contents, 250u64.to_le_bytes().to_vec());
     }
 }

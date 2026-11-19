@@ -347,7 +347,10 @@ impl MoveWorker {
                         StepErr::Revert("budlum_universal::call missing gas_bgu".to_string())
                     })
                     .and_then(|b| decode_u64_le(b, "gas_bgu").map_err(StepErr::Revert))?;
-                let value_attos = u128::from(value_octas).saturating_mul(ATTO_PER_OCTA);
+                let value_attos = u128::from(value_octas)
+                    .checked_mul(ATTO_PER_OCTA)
+                    .ok_or_else(|| StepErr::Revert("value_octas overflow".to_string()))?;
+                let sub_cap = call_gas_bgu.min(cap.saturating_sub(*gas_used));
                 let resp = host
                     .universal_call(UniversalCall {
                         from: move_identity(signer),
@@ -355,14 +358,11 @@ impl MoveWorker {
                         target,
                         value: BudAmount(value_attos),
                         input,
-                        gas_limit: call_gas_bgu,
+                        gas_limit: sub_cap,
                         is_static: false,
                     })
                     .map_err(map_host_err)?;
-                *gas_used = gas_used.saturating_add(resp.gas_used);
-                if *gas_used > cap {
-                    return Err(StepErr::OutOfGas);
-                }
+                charge_bgu(host, gas_used, resp.gas_used, cap)?;
                 Ok(Some(bcs_encode_bool_and_bytes(resp.success, &resp.output)))
             }
             _ => Ok(None),
@@ -796,13 +796,39 @@ impl ExecutionEnvironment for MoveWorker {
         call: &EeCall,
         host: &mut dyn HostApi,
     ) -> Result<EeOutcome, EeFault> {
-        catch_unwind(AssertUnwindSafe(|| self.execute_inner(ctx, call, host))).map_err(|payload| {
-            let msg = panic_message(payload);
-            EeFault {
-                ee: EeId::MOVE,
-                panic_digest: panic_digest(EeId::MOVE, &msg),
+        let Ok(cp) = host.checkpoint_begin() else {
+            return Ok(EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: b"Move checkpoint begin failed".to_vec(),
+                gas_used: 0,
+            });
+        };
+        let res = catch_unwind(AssertUnwindSafe(|| self.execute_inner(ctx, call, host)));
+        match res {
+            Ok(outcome) => {
+                if outcome.status == OutcomeStatus::Success {
+                    if host.checkpoint_commit(cp).is_err() {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"Move checkpoint commit failed".to_vec(),
+                            gas_used: outcome.gas_used,
+                        });
+                    }
+                } else {
+                    let _ = host.checkpoint_rollback(cp);
+                }
+                Ok(outcome)
             }
-        })
+            Err(payload) => {
+                let _ = host.checkpoint_rollback(cp);
+                let msg = panic_message(payload);
+                Err(EeFault {
+                    ee: EeId::MOVE,
+                    panic_digest: panic_digest(EeId::MOVE, &msg),
+                })
+            }
+        }
     }
 
     fn query(

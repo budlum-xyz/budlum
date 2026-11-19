@@ -315,13 +315,29 @@ fn answer_host_request(
                     .map(|()| host_ok()),
                 Op::UniversalCall(call) => UniversalCall::try_from(call)
                     .map_err(|e| HostError::Invalid(e.to_string()))
-                    .and_then(|call| host.universal_call(call))
+                    .and_then(|call| {
+                        if call.from.ee != caller_ee {
+                            return Err(HostError::Denied(format!(
+                                "EE 0x{:02x} may not forge UniversalCall from EE 0x{:02x}",
+                                caller_ee.0, call.from.ee.0
+                            )));
+                        }
+                        host.universal_call(call)
+                    })
                     .map(|result| pb::HostResponse {
                         result: Some(pb::host_response::Result::Universal((&result).into())),
                     }),
                 Op::EmitLog(log) => EeLog::try_from(log)
                     .map_err(|e| HostError::Invalid(e.to_string()))
-                    .and_then(|log| host.emit_log(log))
+                    .and_then(|log| {
+                        if log.emitter.ee != caller_ee {
+                            return Err(HostError::Denied(format!(
+                                "EE 0x{:02x} may not emit logs as EE 0x{:02x}",
+                                caller_ee.0, log.emitter.ee.0
+                            )));
+                        }
+                        host.emit_log(log)
+                    })
                     .map(|()| host_ok()),
                 Op::Charge(charge) => host
                     .charge(charge.bgu)
@@ -333,6 +349,17 @@ fn answer_host_request(
                     let amount = transfer.attos.map(BudAmount::from);
                     match (parts, amount) {
                         (Ok((from, to)), Some(amount)) => {
+                            if from.ee != caller_ee || to.ee != caller_ee {
+                                return pb::HostResponse {
+                                    result: Some(pb::host_response::Result::Error(
+                                        (&HostError::Denied(format!(
+                                            "EE 0x{:02x} may only transfer BUD within its own EE",
+                                            caller_ee.0
+                                        )))
+                                            .into(),
+                                    )),
+                                };
+                            }
                             host.bud_transfer(&from, &to, amount.0).map(|()| host_ok())
                         }
                         (Err(e), _) => Err(e),
@@ -1085,5 +1112,110 @@ pub fn serve_connection(
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod caller_identity_tests {
+    use super::*;
+    use crate::{BudAmount, EeIdentity, EeLog, HostError, Namespace, OutOfGas};
+
+    struct DenyAllHost;
+    impl HostRead for DenyAllHost {
+        fn read(&self, _: &Namespace, _: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+            Ok(None)
+        }
+        fn bud_balance(&self, _: &EeIdentity) -> Result<BudAmount, HostError> {
+            Ok(BudAmount(0))
+        }
+    }
+    impl HostApi for DenyAllHost {
+        fn write(&mut self, _: &Namespace, _: &[u8], _: Option<&[u8]>) -> Result<(), HostError> {
+            Ok(())
+        }
+        fn universal_call(&mut self, _: UniversalCall) -> Result<UniversalResult, HostError> {
+            panic!("spoofed universal_call reached host");
+        }
+        fn emit_log(&mut self, _: EeLog) -> Result<(), HostError> {
+            panic!("spoofed emit_log reached host");
+        }
+        fn charge(&mut self, _: u64) -> Result<(), OutOfGas> {
+            Ok(())
+        }
+        fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+            Ok(0)
+        }
+        fn checkpoint_commit(&mut self, _: u64) -> Result<(), HostError> {
+            Ok(())
+        }
+        fn checkpoint_rollback(&mut self, _: u64) -> Result<(), HostError> {
+            Ok(())
+        }
+        fn bud_transfer(
+            &mut self,
+            _: &EeIdentity,
+            _: &EeIdentity,
+            _: u128,
+        ) -> Result<(), HostError> {
+            panic!("spoofed bud_transfer reached host");
+        }
+    }
+
+    #[test]
+    fn answer_host_request_refuses_cross_ee_caller_impersonation() {
+        let mut host = DenyAllHost;
+        let mut access = HostAccess::Full(&mut host);
+        let spoofed = EeIdentity {
+            ee: EeId::EVM,
+            id: vec![0xAA; 20],
+        };
+        let to = EeIdentity {
+            ee: EeId::WASM,
+            id: vec![0xBB; 32],
+        };
+        let xfer = pb::HostRequest {
+            op: Some(pb::host_request::Op::BudTransfer(pb::HostTransfer {
+                from: Some((&spoofed).into()),
+                to: Some((&to).into()),
+                attos: Some(BudAmount(1).into()),
+            })),
+        };
+        assert!(matches!(
+            answer_host_request(EeId::WASM, &mut access, xfer).result,
+            Some(pb::host_response::Result::Error(_))
+        ));
+
+        let log = EeLog {
+            emitter: spoofed.clone(),
+            topics: vec![vec![0u8; 32]],
+            data: vec![1],
+        };
+        let emit = pb::HostRequest {
+            op: Some(pb::host_request::Op::EmitLog((&log).into())),
+        };
+        assert!(matches!(
+            answer_host_request(EeId::WASM, &mut access, emit).result,
+            Some(pb::host_response::Result::Error(_))
+        ));
+
+        let ucall = UniversalCall {
+            from: spoofed,
+            to_ee: EeId::SVM,
+            target: EeIdentity {
+                ee: EeId::SVM,
+                id: vec![0xCC; 32],
+            },
+            input: vec![],
+            value: BudAmount(0),
+            gas_limit: 1000,
+            is_static: false,
+        };
+        let uc = pb::HostRequest {
+            op: Some(pb::host_request::Op::UniversalCall((&ucall).into())),
+        };
+        assert!(matches!(
+            answer_host_request(EeId::WASM, &mut access, uc).result,
+            Some(pb::host_response::Result::Error(_))
+        ));
     }
 }
