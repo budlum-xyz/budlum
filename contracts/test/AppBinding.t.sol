@@ -348,7 +348,9 @@ contract AppBindingTest is Harness {
         bytes32 appB = keccak256("app-b");
         Receiver receiver = new Receiver(finality, appA);
         PaymentProof memory proof = _proof(receiver, finality, appB);
-        assertEq(keccak256(bytes(receiver.checkPayment(proof))), keccak256("wrong app_binding"), "wrong app_binding refused");
+        assertEq(
+            keccak256(bytes(receiver.checkPayment(proof))), keccak256("wrong app_binding"), "wrong app_binding refused"
+        );
         vm.expectPartialRevert(BudlumPaymentReceiver.WrongAppBinding.selector);
         receiver.consume(proof);
     }
@@ -408,5 +410,30 @@ contract AppBindingTest is Harness {
         address predicted = factory.accountAddress(keccak256("app"), bytes32(uint256(9)));
         address deployed = factory.deploy(keccak256("app"), bytes32(uint256(9)));
         assertTrue(predicted == deployed, "CREATE2 address");
+        vm.expectPartialRevert(BudlumRemoteAccountFactory.InvalidAccountParams.selector);
+        factory.deploy(keccak256("app"), bytes32(0));
+    }
+
+    function test_receiver_and_executor_refuse_zero_version_deep_path_and_self_call() public {
+        FinalityStub finality = new FinalityStub();
+        bytes32 appId = keccak256("app");
+        Receiver receiver = new Receiver(finality, appId);
+
+        PaymentProof memory zeroVer = _proof(receiver, finality, appId);
+        zeroVer.header.version = 0;
+        assertTrue(
+            keccak256(bytes(receiver.checkPayment(zeroVer))) == keccak256("header version"),
+            "version 0 header must be refused"
+        );
+
+        PaymentProof memory deepPath = _proof(receiver, finality, appId);
+        deepPath.path = new bytes32[](65);
+        assertTrue(
+            keccak256(bytes(receiver.checkPayment(deepPath))) == keccak256("payment path"),
+            "over-deep Merkle path must be refused"
+        );
+
+        vm.expectPartialRevert(AppBindingExecutor.InvalidAuthorization.selector);
+        _authorize(keccak256("self"), address(this), SOLVER, address(executor), hex"", hex"01", 0);
     }
 }

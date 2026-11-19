@@ -20,6 +20,7 @@ contract BudlumSettlementEndpoint {
     uint256 private constant SHIFT_BYTE_1 = 8;
     uint256 private constant SHIFT_BYTE_2 = 16;
     uint256 private constant SHIFT_BYTE_3 = 24;
+    uint256 private constant MAX_SILENCE_WINDOW = 365 days;
 
     IBudlumObjectLayerFinality public immutable verifier;
     /// Seconds without a newly accepted checkpoint before the exit opens.
@@ -48,9 +49,15 @@ contract BudlumSettlementEndpoint {
     error NotNewer();
     error NotOpen(string step);
     error InvalidAssetClass();
+    error InvalidEndpointConfig();
 
     constructor(IBudlumObjectLayerFinality verifier_, uint256 silenceWindow_) {
-        require(silenceWindow_ > 0, "silence window");
+        if (
+            address(verifier_) == address(0) || address(verifier_).code.length == 0 || silenceWindow_ == 0
+                || silenceWindow_ > MAX_SILENCE_WINDOW
+        ) {
+            revert InvalidEndpointConfig();
+        }
         verifier = verifier_;
         silenceWindow = silenceWindow_;
         lastAcceptedAt = block.timestamp;
@@ -60,11 +67,7 @@ contract BudlumSettlementEndpoint {
     /// ERC-721 would take custody without any possible exit. A caller can also
     /// invoke this hook directly and forge an Arrive event without transferring
     /// a token. Refuse both cases rather than returning the ERC-721 selector.
-    function onERC721Received(address, address, uint256, bytes calldata)
-        external
-        pure
-        returns (bytes4)
-    {
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
         revert NotOpen("object-layer arrival and exit proofs");
     }
 
@@ -93,7 +96,7 @@ contract BudlumSettlementEndpoint {
     }
 
     function silent() external view returns (bool) {
-        return block.timestamp > lastAcceptedAt + silenceWindow;
+        return block.timestamp > lastAcceptedAt && block.timestamp - lastAcceptedAt > silenceWindow;
     }
 
     /// EVM class identity is the Rust `AssetClassId::derive` value, not a
@@ -119,11 +122,7 @@ contract BudlumSettlementEndpoint {
     /// The Rust `AssetId::derive` value. Fungible units have no native id;
     /// ERC-721 token ids are exactly one 32-byte big-endian ABI word. The
     /// class and token id remain stable over repeated arrivals and round trips.
-    function assetId(uint32 homeDomain, uint8 kind, address token, uint256 tokenId)
-        external
-        pure
-        returns (bytes32)
-    {
+    function assetId(uint32 homeDomain, uint8 kind, address token, uint256 tokenId) external pure returns (bytes32) {
         if (kind == FUNGIBLE && tokenId != 0) revert InvalidAssetClass();
         bytes memory nativeId = kind == FUNGIBLE ? new bytes(0) : bytes.concat(bytes32(tokenId));
         bytes[] memory fields = new bytes[](HASH_QUAD_FIELDS);

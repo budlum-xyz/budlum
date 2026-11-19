@@ -9,10 +9,7 @@ pragma solidity 0.8.26;
 ///         root. This is not an object-layer activation: settlement entry and
 ///         endpoint release/escape remain closed until their proofs are ready.
 interface IBudlumHeaderFinality {
-    function isFinalizedHeader(uint64 height, bytes32 headerHash, bytes32 stateRootBody)
-        external
-        view
-        returns (bool);
+    function isFinalizedHeader(uint64 height, bytes32 headerHash, bytes32 stateRootBody) external view returns (bool);
 }
 
 interface IBudlumObjectLayerFinality {
@@ -30,8 +27,12 @@ contract BudlumObjectLayerFinality is IBudlumObjectLayerFinality {
 
     error NotAccepted();
     error Conflict();
+    error InvalidVerifier();
 
     constructor(IBudlumHeaderFinality finality_) {
+        if (address(finality_) == address(0) || address(finality_).code.length == 0) {
+            revert InvalidVerifier();
+        }
         finality = finality_;
     }
 
@@ -39,8 +40,12 @@ contract BudlumObjectLayerFinality is IBudlumObjectLayerFinality {
     /// the other input of `AccountState::root_from_opening`; merely supplying
     /// an accepted attestation digest does not bind it to any header hash.
     function record(uint64 height, bytes32 headerHash, bytes32 stateRootBody) external {
+        if (headerHash == bytes32(0)) revert NotAccepted();
         bytes32 known = headerAt[height];
-        if (known != bytes32(0) && known != headerHash) revert Conflict();
+        if (known != bytes32(0)) {
+            if (known != headerHash) revert Conflict();
+            return;
+        }
         _requireFinalizedHeader(height, headerHash, stateRootBody);
         headerAt[height] = headerHash;
         emit CheckpointRecorded(height, headerHash);
@@ -50,10 +55,7 @@ contract BudlumObjectLayerFinality is IBudlumObjectLayerFinality {
         return headerAt[height] != bytes32(0);
     }
 
-    function _requireFinalizedHeader(uint64 height, bytes32 headerHash, bytes32 stateRootBody)
-        internal
-        view
-    {
+    function _requireFinalizedHeader(uint64 height, bytes32 headerHash, bytes32 stateRootBody) internal view {
         if (!finality.isFinalizedHeader(height, headerHash, stateRootBody)) {
             revert NotAccepted();
         }

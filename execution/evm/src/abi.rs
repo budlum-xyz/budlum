@@ -24,6 +24,19 @@ pub const PRECOMPILE_BASE_GAS: u64 = 500;
 /// Base BGU cost charged for invoking the `0x...B002` UOL precompile.
 pub const UOL_PRECOMPILE_GAS: u64 = 2_600;
 
+/// Linear BGU cost per 32-byte calldata or returndata word on UEL/UOL precompiles.
+pub const PRECOMPILE_WORD_GAS: u64 = 3;
+
+/// Hard ceiling (1 MiB) on precompile calldata and decoded dynamic byte slices.
+pub const MAX_PRECOMPILE_BYTES: usize = 1024 * 1024;
+
+/// Compute linear word gas (`3 * ceil(len / 32)`), saturating on overflow.
+#[must_use]
+pub fn precompile_word_gas(byte_len: usize) -> u64 {
+    let words = u64::try_from(byte_len.div_ceil(32)).unwrap_or(u64::MAX);
+    words.saturating_mul(PRECOMPILE_WORD_GAS)
+}
+
 /// Host namespace storing canonical UOL balances, asset holders, and offers.
 pub const NS_UEL_ASSETS: &str = "uel/assets";
 
@@ -84,6 +97,9 @@ fn read_u8_word(buf: &[u8], offset: usize) -> Option<u8> {
 fn read_dyn_bytes(args: &[u8], head_offset: usize) -> Option<Vec<u8>> {
     let rel = read_usize_word(args, head_offset)?;
     let len = read_usize_word(args, rel)?;
+    if len > MAX_PRECOMPILE_BYTES {
+        return None;
+    }
     let data_start = rel.checked_add(32)?;
     let data_end = data_start.checked_add(len)?;
     Some(args.get(data_start..data_end)?.to_vec())
@@ -92,6 +108,9 @@ fn read_dyn_bytes(args: &[u8], head_offset: usize) -> Option<Vec<u8>> {
 /// Decode Solidity calldata targeting `0x000000000000000000000000000000000000B001`.
 #[must_use]
 pub fn decode_precompile_call(calldata: &[u8]) -> Option<ParsedPrecompileCall> {
+    if calldata.len() > MAX_PRECOMPILE_BYTES {
+        return None;
+    }
     let sel = calldata.get(..4)?;
     let args = calldata.get(4..)?;
     if sel == SEL_UNIVERSAL_CALL {
@@ -241,6 +260,9 @@ pub fn uol_selector(sig: &str) -> [u8; 4] {
 
 #[must_use]
 pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
+    if calldata.len() > MAX_PRECOMPILE_BYTES {
+        return None;
+    }
     let sel = calldata.get(..4)?;
     let args = calldata.get(4..)?;
     if sel == uol_selector("balanceOf(bytes32,bytes)") {
@@ -295,20 +317,26 @@ pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
 }
 
 #[must_use]
-pub fn encode_uol_offer_bytes(offer: &UolOfferRecord) -> Vec<u8> {
-    let mut out = Vec::with_capacity(116 + offer.taker.len() + offer.payment.len());
+pub fn encode_uol_offer_bytes(offer: &UolOfferRecord) -> Option<Vec<u8>> {
+    if offer.taker.len() > MAX_PRECOMPILE_BYTES || offer.payment.len() > MAX_PRECOMPILE_BYTES {
+        return None;
+    }
+    let taker_len = u32::try_from(offer.taker.len()).ok()?;
+    let pay_len = u32::try_from(offer.payment.len()).ok()?;
+    let cap = 116usize
+        .checked_add(offer.taker.len())?
+        .checked_add(offer.payment.len())?;
+    let mut out = Vec::with_capacity(cap);
     out.extend_from_slice(&offer.maker);
     out.extend_from_slice(&offer.class_id);
     out.extend_from_slice(&offer.asset_id);
     out.extend_from_slice(&offer.amount.to_le_bytes());
     out.extend_from_slice(&offer.expiry.to_le_bytes());
-    let taker_len = u32::try_from(offer.taker.len()).unwrap_or(u32::MAX);
     out.extend_from_slice(&taker_len.to_le_bytes());
     out.extend_from_slice(&offer.taker);
-    let pay_len = u32::try_from(offer.payment.len()).unwrap_or(u32::MAX);
     out.extend_from_slice(&pay_len.to_le_bytes());
     out.extend_from_slice(&offer.payment);
-    out
+    Some(out)
 }
 
 #[must_use]

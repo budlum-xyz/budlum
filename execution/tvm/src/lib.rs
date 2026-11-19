@@ -162,6 +162,7 @@ fn c4_key(addr32: &[u8; 32], slot: &str) -> Vec<u8> {
 fn derive_tvm_addr(caller: &[u8], tx_hash: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"BDLM_TVM_ADDR_V1");
+    h.update((caller.len() as u64).to_le_bytes());
     h.update(caller);
     h.update(tx_hash);
     h.finalize().into()
@@ -410,25 +411,31 @@ impl ExecutionEnvironment for TvmWorker {
                 });
             };
             let addr = derive_tvm_addr(&call.caller.id, &call.tx_hash);
-            if host
-                .write(&ns, &code_key(&addr), Some(&call.input))
-                .is_err()
-            {
+            if matches!(host.read(&ns, &code_key(&addr)), Ok(Some(_))) {
                 return Ok(EeOutcome {
                     status: OutcomeStatus::Revert,
-                    output: b"TVM code write error".to_vec(),
+                    output: b"TVM contract already deployed".to_vec(),
                     gas_used,
                 });
             }
-            // The deployer is the owner. The init body runs as the deployer, so a
-            // `ThrowUnlessOwner` in it passes.
-            if host
-                .write(&ns, &owner_key(&addr), Some(&call.caller.id))
-                .is_err()
-            {
+            let Ok(cp) = host.checkpoint_begin() else {
                 return Ok(EeOutcome {
                     status: OutcomeStatus::Revert,
-                    output: b"TVM owner write error".to_vec(),
+                    output: b"TVM checkpoint begin error".to_vec(),
+                    gas_used,
+                });
+            };
+            if host
+                .write(&ns, &code_key(&addr), Some(&call.input))
+                .is_err()
+                || host
+                    .write(&ns, &owner_key(&addr), Some(&call.caller.id))
+                    .is_err()
+            {
+                let _ = host.checkpoint_rollback(cp);
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"TVM code write error".to_vec(),
                     gas_used,
                 });
             }
@@ -439,21 +446,37 @@ impl ExecutionEnvironment for TvmWorker {
                 gas_limit: call.gas_limit,
             };
             match run_tvm_body(&scope, &contract.init, &[], &mut gas_used, host) {
-                Ok(_) => Ok(EeOutcome {
-                    status: OutcomeStatus::Success,
-                    output: addr.to_vec(),
-                    gas_used,
-                }),
-                Err(e) if e == b"OUT_OF_GAS" => Ok(EeOutcome {
-                    status: OutcomeStatus::OutOfGas,
-                    output: Vec::new(),
-                    gas_used: call.gas_limit,
-                }),
-                Err(e) => Ok(EeOutcome {
-                    status: OutcomeStatus::Revert,
-                    output: e,
-                    gas_used,
-                }),
+                Ok(_) => {
+                    if host.checkpoint_commit(cp).is_err() {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"TVM checkpoint commit error".to_vec(),
+                            gas_used,
+                        });
+                    }
+                    Ok(EeOutcome {
+                        status: OutcomeStatus::Success,
+                        output: addr.to_vec(),
+                        gas_used,
+                    })
+                }
+                Err(e) if e == b"OUT_OF_GAS" => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(EeOutcome {
+                        status: OutcomeStatus::OutOfGas,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    })
+                }
+                Err(e) => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: e,
+                        gas_used,
+                    })
+                }
             }
         } else {
             let Ok(target32) = <[u8; 32]>::try_from(call.target.id.as_slice()) else {
@@ -491,6 +514,13 @@ impl ExecutionEnvironment for TvmWorker {
                     gas_used,
                 });
             };
+            let Ok(cp) = host.checkpoint_begin() else {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"TVM checkpoint begin error".to_vec(),
+                    gas_used,
+                });
+            };
             let scope = TvmScope {
                 ns: &ns,
                 addr32: &target32,
@@ -498,21 +528,37 @@ impl ExecutionEnvironment for TvmWorker {
                 gas_limit: call.gas_limit,
             };
             match run_tvm_body(&scope, &handler.body, &msg.args, &mut gas_used, host) {
-                Ok(out) => Ok(EeOutcome {
-                    status: OutcomeStatus::Success,
-                    output: out,
-                    gas_used,
-                }),
-                Err(e) if e == b"OUT_OF_GAS" => Ok(EeOutcome {
-                    status: OutcomeStatus::OutOfGas,
-                    output: Vec::new(),
-                    gas_used: call.gas_limit,
-                }),
-                Err(e) => Ok(EeOutcome {
-                    status: OutcomeStatus::Revert,
-                    output: e,
-                    gas_used,
-                }),
+                Ok(out) => {
+                    if host.checkpoint_commit(cp).is_err() {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"TVM checkpoint commit error".to_vec(),
+                            gas_used,
+                        });
+                    }
+                    Ok(EeOutcome {
+                        status: OutcomeStatus::Success,
+                        output: out,
+                        gas_used,
+                    })
+                }
+                Err(e) if e == b"OUT_OF_GAS" => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(EeOutcome {
+                        status: OutcomeStatus::OutOfGas,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    })
+                }
+                Err(e) => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: e,
+                        gas_used,
+                    })
+                }
             }
         }
     }

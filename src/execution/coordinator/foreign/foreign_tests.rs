@@ -1566,3 +1566,191 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
         )
         .is_err());
 }
+
+#[test]
+fn foreign_rejects_weak_ed25519_multied_overflow_and_spoofed_pq_rescue() {
+    use crate::execution::coordinator::alias::{
+        derive_foreign_cosmos_bech32, derive_move_alias, derive_wasm_alias,
+    };
+    use crate::execution::coordinator::foreign::aptos::{
+        aptos_ed25519_address, decode_aptos_tx, sign_aptos_ed25519_tx, write_uleb128_u32,
+        AptosPayloadKind, BUDLUM_APTOS_CHAIN_ID,
+    };
+    use crate::execution::coordinator::foreign::cosmos::{
+        cosmos_addr20_from_compressed_pubkey, decode_cosmos_tx, ProtoCoin, ProtoMsgSend,
+        BUDLUM_COSMOS_CHAIN_ID,
+    };
+    use crate::execution::coordinator::foreign::solana::decode_solana_tx;
+    use crate::execution::coordinator::foreign::sui::{
+        decode_and_recover_sui_tx, sui_address_from_ed25519_pubkey, SignedSuiEnvelope,
+        SuiActivationPolicy, SuiTransactionData, SUI_ED25519_FLAG,
+    };
+    use crate::execution::coordinator::state::ExecutionState;
+    use k256::ecdsa::SigningKey as K256Sk;
+    use prost::Message as _;
+    use sha3::{Digest as _, Sha3_256};
+
+    // 1. Ed25519 identity point [1, 0, ..., 0] + trivial all-zero signature is rejected
+    //    across Aptos single-signer, Aptos MultiEd25519 (33 keys), Solana, and Sui.
+    let mut weak_pk = [0u8; 32];
+    weak_pk[0] = 1;
+    let zero_sig = [0u8; 64];
+
+    let weak_aptos_sender = aptos_ed25519_address(&weak_pk);
+    let mut aptos_raw = Vec::new();
+    aptos_raw.extend_from_slice(&weak_aptos_sender);
+    aptos_raw.extend_from_slice(&0u64.to_le_bytes());
+    write_uleb128_u32(0, &mut aptos_raw);
+    write_uleb128_u32(0, &mut aptos_raw);
+    aptos_raw.extend_from_slice(&100_000u64.to_le_bytes());
+    aptos_raw.extend_from_slice(&100u64.to_le_bytes());
+    aptos_raw.extend_from_slice(&2_000_000_000u64.to_le_bytes());
+    aptos_raw.push(BUDLUM_APTOS_CHAIN_ID);
+    let mut aptos_weak = aptos_raw.clone();
+    write_uleb128_u32(0, &mut aptos_weak);
+    write_uleb128_u32(32, &mut aptos_weak);
+    aptos_weak.extend_from_slice(&weak_pk);
+    write_uleb128_u32(64, &mut aptos_weak);
+    aptos_weak.extend_from_slice(&zero_sig);
+    assert!(decode_aptos_tx(&aptos_weak, BUDLUM_APTOS_CHAIN_ID, 1_700_000_000).is_err());
+
+    // MultiEd25519 with n_keys = 33 must return a clean error rather than panicking on shift.
+    let mut pks33 = vec![0u8; 33 * 32 + 1];
+    pks33[33 * 32] = 1;
+    let mut h = Sha3_256::new();
+    h.update(&pks33);
+    h.update([0x01]);
+    let multi_sender: [u8; 32] = h.finalize().into();
+    let mut multi_tx = Vec::new();
+    multi_tx.extend_from_slice(&multi_sender);
+    multi_tx.extend_from_slice(&0u64.to_le_bytes());
+    write_uleb128_u32(0, &mut multi_tx);
+    write_uleb128_u32(0, &mut multi_tx);
+    multi_tx.extend_from_slice(&100_000u64.to_le_bytes());
+    multi_tx.extend_from_slice(&100u64.to_le_bytes());
+    multi_tx.extend_from_slice(&2_000_000_000u64.to_le_bytes());
+    multi_tx.push(BUDLUM_APTOS_CHAIN_ID);
+    write_uleb128_u32(1, &mut multi_tx);
+    write_uleb128_u32(pks33.len() as u32, &mut multi_tx);
+    multi_tx.extend_from_slice(&pks33);
+    let mut sig_bundle = vec![0u8; 68];
+    sig_bundle[64] = 0x80;
+    write_uleb128_u32(sig_bundle.len() as u32, &mut multi_tx);
+    multi_tx.extend_from_slice(&sig_bundle);
+    assert!(decode_aptos_tx(&multi_tx, BUDLUM_APTOS_CHAIN_ID, 1_700_000_000).is_err());
+
+    // Solana weak fee-payer pubkey rejected.
+    let mut sol_weak = vec![1u8];
+    sol_weak.extend_from_slice(&zero_sig);
+    sol_weak.extend_from_slice(&[1, 0, 0, 1]);
+    sol_weak.extend_from_slice(&weak_pk);
+    sol_weak.extend_from_slice(&[0xAA; 32]);
+    sol_weak.push(0);
+    assert!(decode_solana_tx(&sol_weak).is_err());
+
+    // Sui weak pubkey rejected.
+    let sui_data = SuiTransactionData {
+        sender: sui_address_from_ed25519_pubkey(&weak_pk),
+        nonce: 0,
+        ptb_json: b"{}".to_vec(),
+        gas_budget: 10_000,
+        gas_price_mist: 1,
+        chain_id: BUDLUM_EVM_CHAIN_ID,
+    };
+    let sui_data_bytes = serde_json::to_vec(&sui_data).expect("sui json");
+    let mut sui_sig = Vec::with_capacity(97);
+    sui_sig.push(SUI_ED25519_FLAG);
+    sui_sig.extend_from_slice(&zero_sig);
+    sui_sig.extend_from_slice(&weak_pk);
+    let sui_env = serde_json::to_vec(&SignedSuiEnvelope {
+        tx_data_bytes: sui_data_bytes,
+        sui_signature: sui_sig,
+    })
+    .expect("sui env");
+    assert!(decode_and_recover_sui_tx(&sui_env, SuiActivationPolicy::default()).is_err());
+
+    // 2. Cosmos spoofed MsgSend.from_address is rejected.
+    let cos_sk = [0x51u8; 32];
+    let cos_vk = K256Sk::from_bytes((&cos_sk).into()).expect("k256");
+    let cos_pk33: [u8; 33] = cos_vk
+        .verifying_key()
+        .to_sec1_point(true)
+        .as_bytes()
+        .try_into()
+        .expect("33B");
+    let real_sender =
+        derive_foreign_cosmos_bech32(&cosmos_addr20_from_compressed_pubkey(&cos_pk33));
+    let pq_dst = Address::from([0x77u8; 32]);
+    let pq_wasm = derive_wasm_alias(&pq_dst);
+    let spoofed_msg = ProtoMsgSend {
+        from_address: derive_foreign_cosmos_bech32(&[0xEE; 20]),
+        to_address: pq_wasm.clone(),
+        amount: vec![ProtoCoin {
+            denom: String::from("ubud"),
+            amount: String::from("100"),
+        }],
+    };
+    let spoofed_raw = sign_cosmos_tx_direct(
+        &cos_sk,
+        BUDLUM_COSMOS_CHAIN_ID,
+        0,
+        0,
+        150_000,
+        200,
+        vec![(
+            String::from("/cosmos.bank.v1beta1.MsgSend"),
+            spoofed_msg.encode_to_vec(),
+        )],
+    )
+    .expect("sign");
+    assert!(decode_cosmos_tx(
+        &spoofed_raw,
+        BUDLUM_COSMOS_CHAIN_ID,
+        0,
+        BUDLUM_COSMOS_CHAIN_ID
+    )
+    .is_err());
+    assert!(!real_sender.is_empty());
+
+    // 3. Level-2 Aptos rescue rejects trailing bytes after 40-byte transfer args,
+    //    and record_blockhash ignores zero and duplicate hashes.
+    let mut lane = ForeignLaneState::new();
+    lane.quantum_alert_level = QuantumAlertLevel::Level2Restricted;
+    lane.register_native_pq_account(pq_dst);
+    lane.record_blockhash([0u8; 32]);
+    assert!(lane.recent_blockhashes.is_empty());
+    lane.record_blockhash([0x44u8; 32]);
+    lane.record_blockhash([0x44u8; 32]);
+    assert_eq!(lane.recent_blockhashes.len(), 1);
+
+    let mut fw = [0u8; 32];
+    fw[31] = 1;
+    let mut bad_args = Vec::from(derive_move_alias(&pq_dst));
+    bad_args.extend_from_slice(&50u64.to_le_bytes());
+    bad_args.push(0xFF);
+    let bad_aptos = sign_aptos_ed25519_tx(
+        &[0x61; 32],
+        0,
+        &AptosPayloadKind::EntryFunction {
+            module_address: fw,
+            module_name: String::from("aptos_account"),
+            function_name: String::from("transfer"),
+            args_bcs: bad_args,
+        },
+        100_000,
+        100,
+        2_000_000_000,
+        BUDLUM_APTOS_CHAIN_ID,
+    );
+    let exec = ExecutionState::default();
+    assert!(lane
+        .validate_envelope_readonly(
+            &exec,
+            &ForeignTx::Aptos {
+                raw_bcs: bad_aptos,
+                direct_native_pq_recipient: Some(pq_dst),
+            },
+            1_700_000_000,
+        )
+        .is_err());
+}

@@ -1397,15 +1397,23 @@ fn invoke_contract_entry(
     Ok((final_data, total_fuel))
 }
 
-fn parse_ubud_coins(coins: &[CwCoin]) -> Result<u64, String> {
-    let mut total: u64 = 0;
+fn parse_ubud_coins(coins: &[CwCoin]) -> Result<u128, String> {
+    let mut total: u128 = 0;
+    let mut seen_ubud = false;
     for c in coins {
         if c.denom != "ubud" {
             return Err(format!("unsupported WASM coin denom '{}'", c.denom));
         }
+        if seen_ubud {
+            return Err(String::from("duplicate ubud coin entry"));
+        }
+        seen_ubud = true;
+        if c.amount.is_empty() || !c.amount.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("invalid ubud amount '{}'", c.amount));
+        }
         let amt = c
             .amount
-            .parse::<u64>()
+            .parse::<u128>()
             .map_err(|_| format!("invalid ubud amount '{}'", c.amount))?;
         total = total
             .checked_add(amt)
@@ -1429,7 +1437,9 @@ fn dispatch_submsg(
     match msg {
         CwCosmosMsg::Bank(CwBankMsg::Send { to_address, amount }) => {
             let ubud = parse_ubud_coins(amount).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
-            let attos = u128::from(ubud).saturating_mul(ATTOS_PER_UBUD);
+            let attos = ubud
+                .checked_mul(ATTOS_PER_UBUD)
+                .ok_or_else(|| (OutcomeStatus::Revert, String::from("attoBUD overflow"), 0))?;
             let to_id = EeIdentity {
                 ee: EeId::WASM,
                 id: to_address.as_bytes().to_vec(),
@@ -1492,16 +1502,15 @@ fn dispatch_submsg(
         }) => {
             let ubud = parse_ubud_coins(funds).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             if ubud > 0 {
+                let attos = ubud
+                    .checked_mul(ATTOS_PER_UBUD)
+                    .ok_or_else(|| (OutcomeStatus::Revert, String::from("attoBUD overflow"), 0))?;
                 let to_id = EeIdentity {
                     ee: EeId::WASM,
                     id: contract_addr.as_bytes().to_vec(),
                 };
-                host.bud_transfer(
-                    &from_id,
-                    &to_id,
-                    u128::from(ubud).saturating_mul(ATTOS_PER_UBUD),
-                )
-                .map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
+                host.bud_transfer(&from_id, &to_id, attos)
+                    .map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
             }
             let decoded_msg = b64_decode(msg).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             let info = CwMessageInfo {
@@ -1527,6 +1536,13 @@ fn dispatch_submsg(
             label,
         }) => {
             let ubud = parse_ubud_coins(funds).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
+            let ubud_u64 = u64::try_from(ubud).map_err(|_| {
+                (
+                    OutcomeStatus::Revert,
+                    String::from("ubud amount overflow"),
+                    0,
+                )
+            })?;
             let decoded_msg = b64_decode(msg).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             execute_instantiate(
                 ctx,
@@ -1536,7 +1552,7 @@ fn dispatch_submsg(
                 admin.clone(),
                 label.clone(),
                 &decoded_msg,
-                ubud,
+                ubud_u64,
                 None,
                 fuel_budget,
                 depth,
@@ -1551,6 +1567,13 @@ fn dispatch_submsg(
             salt,
         }) => {
             let ubud = parse_ubud_coins(funds).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
+            let ubud_u64 = u64::try_from(ubud).map_err(|_| {
+                (
+                    OutcomeStatus::Revert,
+                    String::from("ubud amount overflow"),
+                    0,
+                )
+            })?;
             let decoded_msg = b64_decode(msg).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             let salt_bytes = b64_decode(salt).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             execute_instantiate(
@@ -1561,7 +1584,7 @@ fn dispatch_submsg(
                 admin.clone(),
                 label.clone(),
                 &decoded_msg,
-                ubud,
+                ubud_u64,
                 Some(&salt_bytes),
                 fuel_budget,
                 depth,
@@ -2003,7 +2026,7 @@ impl WasmWorker {
                     gas_used: 0,
                 };
             };
-            let ubud_val = (call.value.0 / ATTOS_PER_UBUD) as u64;
+            let ubud_val = call.value.0 / ATTOS_PER_UBUD;
             let mut funds = Vec::new();
             if ubud_val > 0 {
                 funds.push(CwCoin {
