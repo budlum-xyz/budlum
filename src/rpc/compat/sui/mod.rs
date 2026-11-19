@@ -241,7 +241,7 @@ mod tests {
                 params: vec![],
             },
         );
-        assert!(resp.error.is_some());
+        assert!(!resp.error.is_none());
         assert!(resp.error.unwrap()["message"]
             .as_str()
             .unwrap()
@@ -266,7 +266,7 @@ mod tests {
                 params: vec![],
             },
         );
-        assert!(resp.error.is_some());
+        assert!(!resp.error.is_none());
     }
 
     #[test]

@@ -24,8 +24,9 @@
 //!    delays for curated assets; the adapter declares `FinalityKind::EconomicFinality`
 //!    and does not simulate a veto window that does not exist.
 //!
-//! WIRING: implements [`ExternalFinalityAdapter`] for
-//! [`super::ExternalDomainRegistry`] admission and slashing.
+//! WIRING: unwired - adapter is exported for [`ExternalFinalityAdapter`]
+//!   admission and slashing but the intake dispatch table does not yet route
+//!   `symbiotic-curated-vault-v1` envelopes to it. Register in `super::intake`.
 
 use crate::crypto::facts::ObservedScheme;
 use crate::domain::types::Hash32;
@@ -133,6 +134,8 @@ impl SymbioticVaultEvidence {
             fields.push(idx);
             fields.push(&sig.signature);
         }
+        }
+        let fields: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
         crate::core::hash::hash_fields_bytes(&fields)
     }
 }
@@ -254,6 +257,7 @@ fn validate_quorum_indices(
 #[derive(Debug, Clone)]
 pub struct SymbioticVaultAdapter {
     network: String,
+    golden: Option<RawConsensusEvidence>,
 }
 
 impl SymbioticVaultAdapter {
@@ -262,7 +266,15 @@ impl SymbioticVaultAdapter {
     pub fn new(network: impl Into<String>) -> Self {
         Self {
             network: network.into(),
+            golden: None,
         }
+    }
+
+    /// Attach a canonical golden evidence sample for self-test admission.
+    #[must_use]
+    pub fn with_golden(mut self, golden: RawConsensusEvidence) -> Self {
+        self.golden = Some(golden);
+        self
     }
 
     /// Free collateral after contamination check.
@@ -383,7 +395,7 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
     fn fault_probes(&self) -> Vec<FaultProbe> {
         vec![
             FaultProbe {
-                name: "corrupt-payload-opening".to_string(),
+                name: "a corrupted payload is refused".to_string(),
                 patch: BytePatch::InPayload {
                     offset: 0,
                     bytes: vec![0xFF],
@@ -391,25 +403,29 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
                 expect: ExpectedRefusal::Kind(RefusalKind::Malformed),
             },
             FaultProbe {
-                name: "wrong-evidence-version".to_string(),
+                name: "an evidence version the adapter does not read must be refused".to_string(),
                 patch: BytePatch::EvidenceVersion {
                     value: EVIDENCE_VERSION + 1,
                 },
-                expect: ExpectedRefusal::Any,
+                expect: ExpectedRefusal::Kind(RefusalKind::UnsupportedEvidenceVersion),
             },
             FaultProbe {
-                name: "wrong-network".to_string(),
+                name: "the adapter must not attest a different network".to_string(),
                 patch: BytePatch::Network {
-                    value: "symbiotic-wrongnet".to_string(),
+                    value: format!("{}-foreign", self.network),
                 },
-                expect: ExpectedRefusal::Any,
+                expect: ExpectedRefusal::Kind(RefusalKind::WrongAdapter),
             },
             FaultProbe {
-                name: "corrupt-declared-root".to_string(),
-                patch: BytePatch::DeclaredRoot { value: [0xEE; 32] },
-                expect: ExpectedRefusal::Any,
+                name: "a mismatched declared root is a declaration mismatch".to_string(),
+                patch: BytePatch::DeclaredRoot { value: [0xFE; 32] },
+                expect: ExpectedRefusal::Kind(RefusalKind::DeclarationMismatch),
             },
         ]
+    }
+
+    fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
+        self.golden.clone()
     }
 }
 
