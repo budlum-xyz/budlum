@@ -1,6 +1,6 @@
 //! Out-of-process CosmWasm Execution Environment (`EeId::WASM = 0x02`,  &).
 //!
-//! Runs `wasmi = "=2.0.1"` in pure-interpreter mode with:
+//! Runs `wasmi = "=2.0.2"` in pure-interpreter mode with:
 //! - floating-point instructions forbidden (`Config::floats(false)`);
 //! - 64 MiB linear-memory ceiling (`1024` Wasm 64-KiB pages);
 //! - `1 wasmi fuel = 1 BGU` (`Section 8.9`);
