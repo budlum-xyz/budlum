@@ -63,7 +63,6 @@ jobs:
       # Each harness runs and is timed separately. Running them all inside one
       # `cargo kani` meant the first slow one hid the results of the others; that is
       # exactly why this finding was misdiagnosed three times.
-      # sebebiydi.
       - name: Slow harnesses, each measured separately
         working-directory: kani
         run: |
