@@ -947,23 +947,45 @@ mod tests {
         );
         let missing = missing_coverage(&coverage_targets(), &tests);
         let baseline = read_coverage_baseline();
+        if let Err(problem) = check_coverage_ratchet(&missing, &baseline) {
+            panic!("{problem}");
+        }
+    }
+
+    fn check_coverage_ratchet(missing: &[String], baseline: &[String]) -> Result<(), String> {
         let missing_set: BTreeSet<&str> = missing.iter().map(String::as_str).collect();
         let baseline_set: BTreeSet<&str> = baseline.iter().map(String::as_str).collect();
         let path = ".github/rpc-test-coverage-baseline.txt";
-        for line in &baseline {
-            assert!(
-                missing_set.contains(line.as_str()),
-                "{line} is recorded as a gap but is covered now: delete the line from {path} \
-                 in the same change"
-            );
+        for line in baseline {
+            if !missing_set.contains(line.as_str()) {
+                return Err(format!(
+                    "{line} is recorded as a gap but is covered now: delete the line from {path} \
+                     in the same change"
+                ));
+            }
         }
-        for line in &missing {
-            assert!(
-                !baseline_set.contains(line.as_str()),
-                "{line} has neither a test nor a recorded gap: write the test, or record the \
-                 gap in {path} with a reason"
-            );
+        for line in missing {
+            if !baseline_set.contains(line.as_str()) {
+                return Err(format!(
+                    "{line} has neither a test nor a recorded gap: write the test, or record the \
+                     gap in {path} with a reason"
+                ));
+            }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn rpc_ratchet_refuses_unrecorded_gap_and_accepts_recorded_baseline() {
+        let gap = vec!["bud_untestedMethod missing=refusal".to_string()];
+        assert!(
+            check_coverage_ratchet(&gap, &[]).is_err(),
+            "an unrecorded untested RPC method must fail the coverage ratchet"
+        );
+        assert!(
+            check_coverage_ratchet(&gap, &gap).is_ok(),
+            "a recorded baseline entry must pass until the test is added"
+        );
     }
 
     /// The ratchet's own canary. A row that loses its refusal test is reported,
