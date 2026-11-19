@@ -2335,7 +2335,7 @@ mod tests {
         })
         .unwrap();
 
-        let all_six = vec![
+        let all_six = [
             UlpDomainSnapshot {
                 domain_id: 1,
                 external_chain_id: 1_001,

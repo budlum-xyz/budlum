@@ -718,7 +718,7 @@ fn real_mainnet_headers_prove_and_verify_plonky3_stark_prog_claim() {
         verify_bitcoin_header_chain_stark, ChainWork256, MAX_STARK_BATCH_HEADERS,
     };
 
-    assert!(MAX_STARK_BATCH_HEADERS >= 6);
+    const _: () = assert!(MAX_STARK_BATCH_HEADERS >= 6);
     let dom = 7u32;
     let adp = adapter();
     let ev = golden();
