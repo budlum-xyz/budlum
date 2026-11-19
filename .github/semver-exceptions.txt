@@ -22,7 +22,7 @@
 # line a minor addition is accepted. Approval: STATUS_ONLINE 2026-07-21.
 AccountState::distribute_block_fees | EIP-1559 fee distribution wiring (step G) - a new public method wired into block finalization | STATUS_ONLINE 2026-07-21 approval
 
-# PR12 intentional breakages (P01-P06 waves): every entry is a finding fix
+# PR12 intentional breakages: every entry is a security hardening fix
 # that changes a public API before mainnet, approved by the corresponding
 # BLG decision recorded on PR #9's decision comment (decision). The 0.x line
 # accepts these as deliberate pre-mainnet cleanup; none is accidental.

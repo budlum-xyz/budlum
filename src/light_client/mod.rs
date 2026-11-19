@@ -741,7 +741,7 @@ impl LightClient {
         Ok(())
     }
 
-    /// Checks an aggregated committee batch with `bud_proof::sigagg` (`BLG-239`) against the
+    /// Checks an aggregated committee batch with `bud_proof::sigagg` against the
     /// committee this light client trusts.
     ///
     /// A batch carries its own committee root, weights and key digests, so none of that
@@ -773,13 +773,13 @@ impl LightClient {
         )
         .map_err(|e| {
             LightClientError::VerificationFailed(format!(
-                "BLG-239 aggregated committee batch failed: {e:?}"
+                "aggregated committee batch failed: {e:?}"
             ))
         })
     }
 
     /// Verifies an aggregated committee batch against `checkpoint.block_hash`
-    /// and the trusted `committee`, ensuring `BLG-239` batch verification stays
+    /// and the trusted `committee`, ensuring aggregated committee batch verification stays
     /// wired on the production light-client path.
     ///
     /// Convenience: exposed for light-client checkpoint batch verification callers.
@@ -865,7 +865,7 @@ pub struct RemoteMerkleStep {
     pub sibling_is_right: bool,
 }
 
-/// Verified cross-domain remote state view (`RemoteStateView`, section 1.2 / IP-60).
+/// Verified cross-domain remote state view (`RemoteStateView`).
 ///
 /// Binds an external domain's finalized `remote_state_root` to a checkpointed
 /// [`crate::settlement::GlobalBlockHeader`], verifies Merkle inclusion of

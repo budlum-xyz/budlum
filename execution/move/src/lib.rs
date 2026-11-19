@@ -3,13 +3,13 @@
 //!
 //! Enforces:
 //! - Block-STM disabled (`BLOCK_STM_ENABLED = false`): strictly sequential execution
-//!   within the out-of-process worker (`IP-32` item 1).
+//!   within the out-of-process worker.
 //! - Reserved `0xBD` local-alias authentication-key scheme byte verified unused in the
 //!   pinned `aptos-core` commit (`move_alias_scheme_byte_is_unused`, Section 8.4.2 rule 2).
 //! - `0x1` staking and governance modules disabled; `0x1::randomness` bound to Budlum
-//!   `BlockContext` (`IP-32` item 3, Section 8.15).
+//!   `BlockContext`.
 //! - Native module `0x1::budlum_universal::call` bridging `octa` (`10^10` attoBUD) value
-//!   transfers and `BGU` budgets into UEL `HostApi::universal_call` (`IP-32` item 6).
+//!   transfers and `BGU` budgets into UEL `HostApi::universal_call`.
 
 #![forbid(unsafe_code)]
 
@@ -38,7 +38,7 @@ use crate::framework::{
 /// Canonical UEL namespace for Move modules and account resources (Section 8.10).
 pub const NS_MOVE_STATE: &str = "ee/move/state";
 
-/// `Block-STM` parallel scheduler flag -- permanently `false` on Budlum (`IP-32` item 1).
+/// `Block-STM` parallel scheduler flag -- permanently `false` on Budlum.
 pub const BLOCK_STM_ENABLED: bool = false;
 
 /// Conversion factor from 1 Aptos internal gas unit to BGU (`Section 8.9`).
@@ -982,7 +982,7 @@ mod tests {
         }
     }
 
-    /// Directive IP-32 gate: `move_alias_scheme_byte_is_unused` (Section 8.4.2 rule 2).
+    /// Address-scheme gate: `move_alias_scheme_byte_is_unused`.
     #[test]
     fn move_alias_scheme_byte_is_unused() {
         assert_eq!(BUDLUM_MOVE_ALIAS_SCHEME_BYTE, 0xBD);

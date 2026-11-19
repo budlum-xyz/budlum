@@ -2650,7 +2650,7 @@ mod tests {
         reg.register_attester(addr(30), 5_000, 0).unwrap();
         // Bond on bond is refused - a second
         // registration of the same role must not stack stake or reset
-        // cooldowns (F04's seam).
+        // cooldowns (bypassing cooldown accounting).
         assert!(
             reg.register_attester(addr(30), 6_000, 0).is_err(),
             "bonding an attester role twice must refuse"

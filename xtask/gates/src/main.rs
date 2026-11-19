@@ -140,6 +140,7 @@ mod gates {
     pub mod no_constant_security_verdicts;
     pub mod no_float_in_consensus_paths;
     pub mod no_idle_code;
+    pub mod no_internal_ids;
     pub mod no_legacy_storage;
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
@@ -1698,6 +1699,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::launch_matrix_tests_exist::self_test,
+    },
+    Gate {
+        name: "no-internal-ids",
+        replaces: None,
+        run: gates::no_internal_ids::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_internal_ids::self_test,
     },
 ];
 

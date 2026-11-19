@@ -1,7 +1,7 @@
 //! WIRING: unwired - `verify_deposit_observed` is reached only from the adapter fixture tests in this tree.
 //!
 //! The live relayer observation runs the adapter's `verify_observation` instead.
-//! F10.4 `EvmChainAdapter` implements `ChainAdapter` for the EVM leg. It is NOT a
+//! `EvmChainAdapter` implements `ChainAdapter` for the EVM leg. It is NOT a
 //! fully live path: the off-chain half is a stub that
 //! refuses at broadcast, so the Ethereum-to-Budlum leg has no live end-to-end
 //! route. The on-chain verification below is real and deterministic; what it
@@ -10,8 +10,8 @@
 //! Two sides:
 //!
 //! - On-chain (`verify_receipt_proof`): deterministic in Budlum consensus.
-//!   It uses F10.1 (MPT) + F10.2 (receipt/header/verify). The sync committee
-//!   (F10.3) runs only if `EvmDepositProof.sync_attestation` is populated;
+//!   It combines MPT proof verification with receipt and header validation. The sync committee
+//!   verifier runs only if `EvmDepositProof.sync_attestation` is populated;
 //!   this line said "uses" for a long time while no path called it.
 //!   Network-free - the relayer produces the proof, Budlum verifies it.
 //!
@@ -225,7 +225,7 @@ impl ChainAdapter for EvmChainAdapter {
 
     /// ON-CHAIN (Budlum consensus): verify an EVM receipt proof.
     ///
-    /// Deterministic + network-free. F10.1 (MPT) + F10.2 (receipt/header). The
+    /// Deterministic + network-free. Runs MPT inclusion plus receipt and header checks. The
     /// relayer produces the proof. The sync committee never runs on this trait
     /// path: this method only checks the Merkle proof + leaf binding, while the
     /// full package (`EvmDepositProof`) goes to `verify_deposit`.
@@ -435,7 +435,7 @@ impl ChainAdapter for EvmChainAdapter {
 }
 
 impl EvmChainAdapter {
-    /// Full on-chain EVM deposit verification (the F10.2 `verify.rs` orchestrator).
+    /// Full on-chain EVM deposit verification (the `verify.rs` orchestrator).
     ///
     /// This is the enriched form of `ChainAdapter::verify_receipt_proof`: the
     /// relayer supplies the full proof package (header chain + MPT nodes +
