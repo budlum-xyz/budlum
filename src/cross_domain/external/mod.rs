@@ -79,6 +79,7 @@
 //! with their units attached. The judgement is the reader's, and the numbers it
 //! needs are in [`profile`].
 
+pub mod based_preconf;
 pub mod bitcoin_spv;
 pub mod da_sampling;
 pub mod dag_bft;
@@ -89,6 +90,7 @@ pub mod external_tx;
 pub mod hotstuff;
 pub mod intake;
 pub mod intake_quorum;
+pub mod mina_recursive;
 pub mod phase_a_dual;
 pub mod profile;
 pub mod prover;
@@ -96,10 +98,13 @@ pub mod quorum;
 pub mod registry;
 pub mod selftest;
 pub mod spec;
+pub mod stellar_fba;
 pub mod tendermint;
+pub mod ton_catchain;
 pub mod versioning;
 pub mod zkvm_proof;
 
+pub use based_preconf::{BasedPreconfAdapter, BasedPreconfValidator, PinnedBasedPreconfCommittee};
 pub use bitcoin_spv::{
     sha256d, BitcoinHeader, BitcoinSpvAdapter, PinnedBitcoinAnchor, EVIDENCE_VERSION, HEADER_LEN,
     MAX_FUTURE_SECONDS, MAX_HEADERS, REQUIRED_DEPTH,
@@ -134,6 +139,7 @@ pub use intake_quorum::{
     QuorumRound, QuorumRounds, RoundEntry, RoundError, RoundKey, RoundProgress, RoundState,
     ROUND_RETENTION_BLOCKS,
 };
+pub use mina_recursive::{PinnedSuccinctGenesis, SuccinctRecursiveAdapter};
 pub use profile::{profile_of, DomainProfile, DomainRecord, DomainState, StateEvent, BOND_UNIT};
 pub use prover::{
     honesty_is_cheaper, required_bond_atoms, ChallengeReward, DomainEconomics, ProverBond,
@@ -153,11 +159,13 @@ pub use spec::{
     FinalityAttestation, FinalityKind, ProofSystem, RawConsensusEvidence, SecurityBacking,
     TimeUnit, TrustModel, VerificationPolicy,
 };
+pub use stellar_fba::{PinnedScpTier, ScpQuorumSet, ScpValidatorNode, StellarScpAdapter};
 pub use tendermint::{
     quorum_threshold, validator_address_of, validator_set_commitment, validator_set_hash,
     vote_sign_bytes, PinnedTendermintAnchor, TendermintCommitEvidence, TendermintFinalityAdapter,
     TendermintSignature, TendermintValidator,
 };
+pub use ton_catchain::{PinnedTonMasterchainAnchor, TonCatchainAdapter, TonValidator};
 pub use versioning::{ForkError, VersionPolicy, VersionWindow};
 pub use zkvm_proof::{
     ZkFinalityEvidence, ZkVmFinalityAdapter, EVIDENCE_VERSION as ZK_EVIDENCE_VERSION,
