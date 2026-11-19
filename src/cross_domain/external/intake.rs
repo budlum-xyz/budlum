@@ -433,6 +433,11 @@ pub struct IntakeState {
 /// a key: `"mainnet"` denotes an Ethereum sync committee in one map and a
 /// Bitcoin checkpoint in another, so every lookup and every vote names the
 /// family too.
+///
+/// WIRING: `src/execution/executor.rs` reaches this type only through
+/// `PinnedExternalAnchor::family()`'s return value (`anchor.family()`), never
+/// by naming `AnchorFamily` itself, so the call site records the door here
+/// instead of leaving the type looking unused from outside this file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum AnchorFamily {
     Ethereum,
@@ -804,6 +809,11 @@ impl IntakeState {
     }
 
     /// The anchor installed for `family` on `network`, if any.
+    ///
+    /// WIRING: the production door is `pinned_anchor_digest` in this file,
+    /// which `src/execution/executor.rs` calls; this lookup is its shared
+    /// implementation (also exercised directly by this file's tests), not a
+    /// second entry point.
     #[must_use]
     pub fn pinned_anchor(
         &self,

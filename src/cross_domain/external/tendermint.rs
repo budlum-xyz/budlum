@@ -213,7 +213,8 @@ fn merkle_root(items: &[Vec<u8>]) -> [u8; 32] {
         1 => merkle_leaf(&items[0]),
         len => {
             let split = split_point(len);
-            merkle_inner(&merkle_root(&items[..split]), &merkle_root(&items[split..]))
+            let (left, right) = items.split_at(split);
+            merkle_inner(&merkle_root(left), &merkle_root(right))
         }
     }
 }
