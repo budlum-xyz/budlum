@@ -2343,8 +2343,8 @@ mod zk_finality_real_proof {
     }
 
     // The root folds are pure and deterministic, and the
-    // empty fold is domain-separated. Pinned so the finding's "roots are pure
-    // and deterministic" claim stays true under later refactors.
+    // empty fold is domain-separated, ensuring root folding determinism
+    // stays true under all conditions.
     #[test]
     fn root_folds_are_pure_and_deterministic() {
         use crate::settlement::merkle_root;

@@ -2854,10 +2854,10 @@ fn prepare_evm_target(
         Ok(None) => {}
     }
     if let Some(spec) = decode_std_evm_token_code(&code) {
-        if is_delegated {
+        if exec_addr.is_some() {
             return Ok(PreparedTarget::Finished(
                 OutcomeStatus::Revert,
-                b"DELEGATECALL/CALLCODE to standard token forbidden".to_vec(),
+                b"DELEGATECALL/CALLCODE to standard token runtime is forbidden".to_vec(),
             ));
         }
         let (st, out) =
@@ -3693,15 +3693,10 @@ mod tests {
             PreparedTarget::Finished(OutcomeStatus::Revert, _)
         ));
 
-        // 3) DELEGATECALL / CALLCODE into a canonical pointer token contract must revert,
-        // and direct user deployment of pointer-prefixed bytecode must be refused.
-        let asset_id = [0x44u8; 32];
-        let ptr_addr_vec =
-            crate::execution::coordinator::assets::derive_pointer_address(&asset_id, EeId::EVM)
-                .unwrap();
-        let ptr_addr: [u8; 20] = ptr_addr_vec.try_into().unwrap();
+        // 3) DELEGATECALL / CALLCODE into a pointer token contract must revert.
+        let ptr_addr = [0x33u8; 20];
         let ptr_code = encode_pointer_bytecode(&PointerDescriptor {
-            asset_id,
+            asset_id: [0x44u8; 32],
             home_ee: EeId::WASM.0,
             home_ref: vec![0x55; 20],
             standard: AssetStandard::Fungible,
@@ -3710,19 +3705,59 @@ mod tests {
             name: "Test".to_string(),
         })
         .unwrap();
-        let code_hash: [u8; 32] = Keccak256::digest(&ptr_code).into();
-        let code_ns = Namespace::new(NS_EVM_CODE).unwrap();
-        host.write(&code_ns, &code_hash, Some(&ptr_code)).unwrap();
-        write_account_rec(
-            &mut host,
-            &ptr_addr,
-            &EvmAccountRecord {
-                nonce: 1,
-                code_hash: Some(hex::encode(code_hash)),
-                imported_from: None,
-            },
-        )
-        .unwrap();
+        // A pointer is installed by the asset door, which writes the code and
+        // the account metadata straight into the EVM namespaces; the raw
+        // `Deploy` path refuses the reserved prefix (see
+        // `conformance_tests::forged_or_misplaced_pointer_bytecode_is_refused`).
+        // Deploying it here would assert a door that no longer exists.
+        assert_ne!(
+            EvmEe::new()
+                .execute(
+                    &ctx,
+                    &EeCall {
+                        kind: EeCallKind::Deploy,
+                        caller: EeIdentity {
+                            ee: EeId::EVM,
+                            id: vec![0x01; 20],
+                        },
+                        target: EeIdentity {
+                            ee: EeId::EVM,
+                            id: ptr_addr.to_vec(),
+                        },
+                        value: BudAmount(0),
+                        input: ptr_code.clone(),
+                        gas_limit: 500_000,
+                        depth: 0,
+                        tx_hash: [0u8; 32],
+                    },
+                    &mut mem_host,
+                )
+                .expect("deploy is answered")
+                .status,
+            OutcomeStatus::Success,
+            "the raw EVM deploy door must refuse system pointer bytecode"
+        );
+        let ptr_code_hash: [u8; 32] = Keccak256::digest(&ptr_code).into();
+        mem_host
+            .write(
+                &Namespace::new(NS_EVM_CODE).expect("code namespace"),
+                &ptr_code_hash,
+                Some(&ptr_code),
+            )
+            .expect("write pointer code");
+        mem_host
+            .write(
+                &Namespace::new(NS_EVM_ACCOUNT).expect("account namespace"),
+                &ptr_addr,
+                Some(
+                    &serde_json::to_vec(
+                        &serde_json::json!({"nonce": 1u64, "code_hash": hex::encode(ptr_code_hash)}),
+                    )
+                    .expect("account metadata"),
+                ),
+            )
+            .expect("write pointer account");
+        let mut host = EvmStackHost::new(&mut mem_host);
 
         let prep_ptr = prepare_evm_target(
             &EvmTargetDispatch {
@@ -3743,5 +3778,80 @@ mod tests {
             prep_ptr,
             PreparedTarget::Finished(OutcomeStatus::Revert, _)
         ));
+    }
+
+    /// A standard token runtime keeps its balances under its own address. A
+    /// DELEGATECALL or CALLCODE would run it over the caller's storage, so both
+    /// are refused. An ordinary CALL still reaches the token.
+    #[test]
+    fn delegatecall_and_callcode_into_standard_token_runtime_revert_and_call_runs() {
+        use crate::execution::coordinator::assets::AssetStandard;
+        let mut mem_host = MemoryHost::new(500_000);
+        let ctx = test_ctx();
+        let attacker = [0x22u8; 20];
+        let victim = [0x11u8; 20];
+        let token = [0x66u8; 20];
+        let code = encode_std_evm_token_code(&StdEvmTokenSpec {
+            standard: AssetStandard::Fungible,
+            name: "Test".to_string(),
+            symbol: "TST".to_string(),
+            decimals: 18,
+            initial_holder: victim,
+            initial_supply_or_token_id: 1_000,
+            base_uri: String::new(),
+        })
+        .unwrap();
+        deploy(&mut mem_host, token, code);
+        let mut host = EvmStackHost::new(&mut mem_host);
+        let total_supply = solidity_selector("totalSupply()");
+
+        let delegated = prepare_evm_target(
+            &EvmTargetDispatch {
+                ctx: &ctx,
+                code_addr: &token,
+                exec_addr: Some(&attacker),
+                caller20: &victim,
+                value_wei: 0,
+                input: &total_supply,
+                is_static: false,
+                gas_limit: 500_000,
+                depth: 1,
+            },
+            &mut host,
+        )
+        .unwrap();
+        let PreparedTarget::Finished(status, out) = delegated else {
+            panic!("a standard token never runs as bytecode");
+        };
+        assert_eq!(status, OutcomeStatus::Revert);
+        assert_eq!(
+            out,
+            b"DELEGATECALL/CALLCODE to standard token runtime is forbidden".to_vec()
+        );
+
+        let called = prepare_evm_target(
+            &EvmTargetDispatch {
+                ctx: &ctx,
+                code_addr: &token,
+                exec_addr: None,
+                caller20: &victim,
+                value_wei: 0,
+                input: &total_supply,
+                is_static: true,
+                gas_limit: 500_000,
+                depth: 1,
+            },
+            &mut host,
+        )
+        .unwrap();
+        let PreparedTarget::Finished(status, out) = called else {
+            panic!("a standard token never runs as bytecode");
+        };
+        assert_ne!(
+            out,
+            b"DELEGATECALL/CALLCODE to standard token runtime is forbidden".to_vec(),
+            "an ordinary CALL is not refused by the delegated-call guard"
+        );
+        assert_eq!(status, OutcomeStatus::Success, "totalSupply answers");
     }
 }

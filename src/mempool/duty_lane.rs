@@ -91,6 +91,16 @@ pub enum DutyRefusal {
         /// The ceiling it would cross.
         cap: usize,
     },
+    /// The batch alone is larger than the lane's share of one block.
+    ///
+    /// The producer skips a batch past the share, so one this large would
+    /// never be carried: it would only hold lane bytes until it expired.
+    BatchExceedsBlockShare {
+        /// The bytes the batch costs a block.
+        batch_bytes: usize,
+        /// The lane's share of one block.
+        share: usize,
+    },
 }
 
 impl std::fmt::Display for DutyRefusal {
@@ -103,6 +113,10 @@ impl std::fmt::Display for DutyRefusal {
             DutyRefusal::LaneBytesFull { lane_bytes, cap } => write!(
                 f,
                 "the duty lane would hold {lane_bytes} bytes against its {cap} byte ceiling"
+            ),
+            DutyRefusal::BatchExceedsBlockShare { batch_bytes, share } => write!(
+                f,
+                "a duty batch of {batch_bytes} bytes exceeds the lane's {share} byte share of a block"
             ),
         }
     }

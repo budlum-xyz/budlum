@@ -72,12 +72,12 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
         return Err(ReceiptError::InvalidEnvelope);
     }
     let first = envelope[0];
-    // Legacy receipt: first byte >= 0xc0 (RLP list prefix). Typed: 0x01/0x02/0x03.
-    // The typed envelope type byte is CHECKED - any other
-    // nonzero prefix used to be accepted and its payload decoded as a receipt.
+    // Legacy receipt: first byte >= 0xc0 (RLP list prefix).
+    // EIP-2718 typed receipts: 0x01 (EIP-2930), 0x02 (EIP-1559),
+    // 0x03 (EIP-4844 Deneb blob), 0x04 (EIP-7702 Electra/Pectra SetCode).
     let (is_typed, payload) = if first >= 0xc0 {
         (false, envelope)
-    } else if (0x01..=0x03).contains(&first) {
+    } else if (0x01..=0x04).contains(&first) {
         (true, &envelope[1..])
     } else {
         return Err(ReceiptError::InvalidEnvelope);
@@ -94,6 +94,7 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
     }
 
     let status = decode_status(rlp::as_bytes(&list[0])?, is_typed)?;
+    let _cumulative_gas_used = rlp::decode_uint(&list[1])?;
     let bloom = rlp::as_bytes(&list[2])?;
     if bloom.len() != 256 {
         return Err(ReceiptError::InvalidEnvelope);
@@ -103,20 +104,16 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
     Ok(EthReceipt { status, logs })
 }
 
-/// Interprets the status field: empty means failure (post-Byzantium 0x00),
-/// [0x01] means success, and 32 bytes are a pre-Byzantium postState root
-/// (valid only on legacy receipts, never on EIP-2718 typed receipts).
+/// Interprets the status field: empty byte string (`0x80`) means failure
+/// (canonical post-Byzantium RLP integer `0`), `[0x01]` means success, and
+/// 32 bytes are a pre-Byzantium postState root (valid only on legacy receipts,
+/// never on EIP-2718 typed receipts). Single-byte `[0x00]` is non-canonical
+/// RLP for integer zero and is rejected.
 fn decode_status(b: &[u8], is_typed: bool) -> Result<bool, ReceiptError> {
     match b.len() {
-        0 => Ok(false),              // status 0 (fail)
-        32 if !is_typed => Ok(true), // pre-Byzantium postState root
-        // The status byte is EXACTLY 0 or 1. Any other
-        // nonzero value (0x02, 0xff) used to read as "success".
-        1 => match b[0] {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(ReceiptError::InvalidEnvelope),
-        },
+        0 => Ok(false),
+        32 if !is_typed => Ok(true),
+        1 if b[0] == 1 => Ok(true),
         _ => Err(ReceiptError::InvalidEnvelope),
     }
 }
@@ -402,13 +399,16 @@ mod tests {
     /// An unknown typed-envelope type byte is refused.
     #[test]
     fn neg_bad_type_byte_rejected() {
-        let mut env = build_typed_receipt(0x04, true, Vec::new());
-        // 0x04 is not a receipt type; also try 0x00 which is not either.
+        let mut env = build_typed_receipt(0x05, true, Vec::new());
+        // 0x05 is above EIP-7702 (0x04); 0x00 and 0x7f are also unassigned.
         assert_eq!(decode_receipt(&env), Err(ReceiptError::InvalidEnvelope));
         env[0] = 0x00;
         assert_eq!(decode_receipt(&env), Err(ReceiptError::InvalidEnvelope));
-        // The accepted range still works.
+        env[0] = 0x7f;
+        assert_eq!(decode_receipt(&env), Err(ReceiptError::InvalidEnvelope));
+        // Accepted EIP-2718 types 0x01..=0x04 work.
         assert!(decode_receipt(&build_typed_receipt(0x02, true, Vec::new())).is_ok());
+        assert!(decode_receipt(&build_typed_receipt(0x04, true, Vec::new())).is_ok());
     }
 
     /// Find_log_indexed binds (tx, log index) - two
@@ -473,5 +473,37 @@ mod tests {
             decode_receipt(&build_legacy_receipt(true, vec![five_topics])),
             Err(ReceiptError::InvalidLog)
         );
+    }
+
+    #[test]
+    fn receipt_accepts_eip7702_type4_and_refuses_non_canonical_zero_status_or_gas() {
+        // Electra / Pectra EIP-7702 SetCode receipt (type 0x04) must verify.
+        let log = rlp_log(&[0xbb; 20], &[[0x77; 32]], b"pectra-event");
+        let eip7702 = build_typed_receipt(0x04, true, vec![log]);
+        let decoded = decode_receipt(&eip7702).expect("EIP-7702 receipt type 0x04 must decode");
+        assert!(decoded.status);
+        assert_eq!(decoded.logs.len(), 1);
+
+        // Non-canonical single-byte status [0x00] (Yellow Paper encodes 0 as empty 0x80)
+        // must be refused.
+        let non_canonical_zero_status = Item::List(vec![
+            Item::String(vec![0x00]),
+            Item::String(vec![]),
+            Item::String(vec![0u8; 256]),
+            Item::List(vec![]),
+        ]);
+        assert_eq!(
+            decode_receipt(&encode(&non_canonical_zero_status)),
+            Err(ReceiptError::InvalidEnvelope),
+        );
+
+        // Non-canonical cumulativeGasUsed with leading zero byte must be refused.
+        let bad_gas = Item::List(vec![
+            rlp_status(true),
+            Item::String(vec![0x00, 0x52, 0x08]),
+            Item::String(vec![0u8; 256]),
+            Item::List(vec![]),
+        ]);
+        assert!(decode_receipt(&encode(&bad_gas)).is_err());
     }
 }

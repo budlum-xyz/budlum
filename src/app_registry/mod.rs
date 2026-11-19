@@ -121,9 +121,12 @@ impl AppRegistry {
         if cid.kind != ContentIdKind::Public {
             return Err(AppRegistryError::SealedBundleForbidden);
         }
-        let obj = bud3
-            .object(&obj_key)
+        let (live_key, obj) = bud3
+            .resolve_live_object(&obj_key)
             .ok_or(AppRegistryError::UnknownObject)?;
+        if live_key != obj_key {
+            return Err(AppRegistryError::UnknownObject);
+        }
         if obj.record.content_id != cid {
             return Err(AppRegistryError::ContentIdMismatch);
         }

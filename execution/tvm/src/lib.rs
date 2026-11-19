@@ -3,8 +3,8 @@
 //!
 //! Executes deterministic TON Virtual Machine cell/stack bytecode in interpreter
 //! mode across `x86_64` and `aarch64`, persists contract cells and persistent `c4`
-//! data registers under `ee/tvm/state`, and opens at block zero on testnet `45261`
-//! (`PROPOSED_TVM_ACTIVATION_HEIGHT = 0`).
+//! data registers under `ee/tvm/state`, and remains closed by default on
+//! public testnet `45261` until an explicit activation height.
 
 #![forbid(unsafe_code)]
 
@@ -22,7 +22,7 @@ pub const AUDITED_TVM_SPDX: &str = "MIT OR Apache-2.0";
 /// Budlum testnet chain ID (`45261`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed testnet activation height (open from block zero on `45261`, `IP-53`).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 pub const PROPOSED_TVM_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing TVM code cells and persistent `c4` contract data.
@@ -337,11 +337,11 @@ impl Default for TvmWorker {
 }
 
 impl TvmWorker {
-    /// Open on testnet `45261` from [`PROPOSED_TVM_ACTIVATION_HEIGHT`] (`0`).
+    /// Default public-testnet posture: closed until an explicit activation height.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            testnet_activation_height: Some(PROPOSED_TVM_ACTIVATION_HEIGHT),
+            testnet_activation_height: None,
         }
     }
 
@@ -356,8 +356,11 @@ impl TvmWorker {
     /// Returns `true` when TVM is active at `ctx`.
     #[must_use]
     pub const fn is_active(&self, ctx: &BlockContext) -> bool {
-        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+        if ctx.chain_id == budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID {
             return true;
+        }
+        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+            return false;
         }
         match self.testnet_activation_height {
             Some(h) => ctx.height >= h,
@@ -611,11 +614,22 @@ mod tests {
     }
 
     #[test]
-    fn tvm_is_open_on_testnet() {
-        let open = TvmWorker::new();
-        assert!(open.is_active(&ctx()));
-        let mut closed = TvmWorker::with_activation_height(None);
+    fn tvm_is_closed_on_testnet() {
+        let mut closed = TvmWorker::new();
         assert!(!closed.is_active(&ctx()));
+        for chain_id in [45_260, 99_999] {
+            assert!(!closed.is_active(&BlockContext { chain_id, ..ctx() }));
+        }
+        assert!(closed.is_active(&BlockContext {
+            chain_id: 45_262,
+            ..ctx()
+        }));
+        let activated = TvmWorker::with_activation_height(Some(10));
+        assert!(!activated.is_active(&ctx()));
+        assert!(activated.is_active(&BlockContext {
+            height: 10,
+            ..ctx()
+        }));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::TVM, vec![0x09; 32]) else {
             panic!("caller");
@@ -643,7 +657,7 @@ mod tests {
     #[test]
     fn uel_conformance_tvm() {
         assert_eq!(AUDITED_TVM_SPDX, "MIT OR Apache-2.0");
-        let mut worker = TvmWorker::new();
+        let mut worker = TvmWorker::with_activation_height(Some(0));
         let contract = TvmContract {
             init: vec![
                 TvmInsn::PushInt(42),
@@ -858,7 +872,7 @@ mod tests {
                 },
             ],
         };
-        let mut worker = TvmWorker::new();
+        let mut worker = TvmWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(5_000_000);
         let Ok(alice) = EeIdentity::new(EeId::TVM, vec![0x2A; 32]) else {
             panic!("alice")

@@ -379,6 +379,7 @@ dependencies = [
  "p3-fri",
  "p3-goldilocks",
  "p3-keccak",
+ "p3-keccak-air",
  "p3-matrix",
  "p3-maybe-rayon",
  "p3-merkle-tree",

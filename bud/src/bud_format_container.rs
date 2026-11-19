@@ -1,6 +1,6 @@
 //! B.U.D. 2.0 - container .bud format v2 + structural splitting
 //!
-//! Directions taken from the research findings:
+//! Directions taken from research benchmarks:
 //! 1. **Structural splitting pre-step** (S.82 container/MIME/EBML, S.174 Parquet, inspiration-2 C):
 //!    content is first divided at structural boundaries (JSON record / CSV row / log line / code AST),
 //!    each piece gets its own ContentId - a format-aware cut before CDC16K (lossless).

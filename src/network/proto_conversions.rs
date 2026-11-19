@@ -91,6 +91,16 @@ fn decode_storage_v3_tx(data: &[u8]) -> Result<crate::storage::bud3::tx::Storage
         .map_err(|e| format!("Invalid StorageTx v3 payload: {e}"))
 }
 
+/// The largest `VerifyStarkTx` payload a peer may send.
+const MAX_VERIFY_STARK_TX_BYTES: usize = 1 << 20;
+
+fn decode_verify_stark_tx(
+    data: &[u8],
+) -> Result<crate::aggregation::programs::pcs_claim::VerifyStarkTx, String> {
+    decode_bounded_bincode(data, MAX_VERIFY_STARK_TX_BYTES)
+        .map_err(|e| format!("Invalid VerifyStark payload: {e}"))
+}
+
 /// Decode a peer-supplied transaction-type payload under both a byte ceiling
 /// and an aggregate collection-count budget. `what` names the wire union arm
 /// in the refusal; fixint encoding and legacy trailing bytes stay compatible.
@@ -375,6 +385,14 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 Some(pb::proto_transaction::TypePayload::StorageV3(
                     pb::ProtoStorageV3Tx {
                         data: bincode_payload_or_log("StorageTxV3", storage_tx.as_ref()),
+                    },
+                )),
+            ),
+            TransactionType::VerifyStark(verify_tx) => (
+                pb::ProtoTransactionType::VerifyStark as i32,
+                Some(pb::proto_transaction::TypePayload::VerifyStark(
+                    pb::ProtoVerifyStarkTx {
+                        data: bincode_payload_or_log("VerifyStarkTx", verify_tx.as_ref()),
                     },
                 )),
             ),
@@ -1460,6 +1478,13 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched StorageV3 payload".into()),
                 };
                 TransactionType::StorageV3(Box::new(decode_storage_v3_tx(&payload.data)?))
+            }
+            pb::ProtoTransactionType::VerifyStark => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::VerifyStark(p)) => p,
+                    _ => return Err("Missing or mismatched VerifyStark payload".into()),
+                };
+                TransactionType::VerifyStark(Box::new(decode_verify_stark_tx(&payload.data)?))
             }
             pb::ProtoTransactionType::CrossDomainMessage => {
                 let payload = match proto.type_payload {

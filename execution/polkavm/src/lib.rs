@@ -25,7 +25,7 @@ pub const POLKAVM_JIT_ENABLED: bool = false;
 /// Budlum testnet chain ID (`Section 1.5`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed activation height on testnet `45261` (open from block zero).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 pub const PROPOSED_POLKAVM_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing PolkaVM code blobs and contract key-value storage.
@@ -338,11 +338,11 @@ impl Default for PolkaVmWorker {
 }
 
 impl PolkaVmWorker {
-    /// Open on testnet `45261` from [`PROPOSED_POLKAVM_ACTIVATION_HEIGHT`] (`0`).
+    /// Default public-testnet posture: closed until an explicit activation height.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            testnet_activation_height: Some(PROPOSED_POLKAVM_ACTIVATION_HEIGHT),
+            testnet_activation_height: None,
         }
     }
 
@@ -357,8 +357,11 @@ impl PolkaVmWorker {
     /// Returns `true` when PolkaVM is active at `ctx`.
     #[must_use]
     pub const fn is_active(&self, ctx: &BlockContext) -> bool {
-        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+        if ctx.chain_id == budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID {
             return true;
+        }
+        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+            return false;
         }
         match self.testnet_activation_height {
             Some(h) => ctx.height >= h,
@@ -574,15 +577,28 @@ mod tests {
     use budlum_uel_abi::{BudAmount, OutcomeStatus};
 
     #[test]
-    fn polkavm_is_open_on_testnet() {
+    fn polkavm_is_closed_on_testnet() {
         const { assert!(!POLKAVM_JIT_ENABLED) };
-        let open_worker = PolkaVmWorker::new();
-        assert!(open_worker.is_active(&BlockContext {
+        let mut closed_worker = PolkaVmWorker::new();
+        let launch = BlockContext {
             chain_id: BUDLUM_TESTNET_CHAIN_ID,
             height: 0,
             timestamp_ms: 1_793_923_200_000,
+        };
+        assert!(!closed_worker.is_active(&launch));
+        for chain_id in [45_260, 99_999] {
+            assert!(!closed_worker.is_active(&BlockContext { chain_id, ..launch }));
+        }
+        assert!(closed_worker.is_active(&BlockContext {
+            chain_id: 45_262,
+            ..launch
         }));
-        let mut closed_worker = PolkaVmWorker::with_activation_height(None);
+        let activated = PolkaVmWorker::with_activation_height(Some(10));
+        assert!(!activated.is_active(&launch));
+        assert!(activated.is_active(&BlockContext {
+            height: 10,
+            ..launch
+        }));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::POLKAVM, vec![0xAA; 32]) else {
             panic!("caller");
@@ -614,7 +630,7 @@ mod tests {
     /// Directive IP-53 conformance gate (1/5): `uel_conformance_polkavm`.
     #[test]
     fn uel_conformance_polkavm() {
-        let mut worker = PolkaVmWorker::new();
+        let mut worker = PolkaVmWorker::with_activation_height(Some(0));
         let slot = [0x07u8; 32];
         let prog = PolkaVmProgram {
             constructor: vec![
@@ -828,7 +844,7 @@ mod tests {
                 },
             ],
         };
-        let mut worker = PolkaVmWorker::new();
+        let mut worker = PolkaVmWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(5_000_000);
         let Ok(alice) = EeIdentity::new(EeId::POLKAVM, vec![0x11; 32]) else {
             panic!("alice")

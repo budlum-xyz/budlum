@@ -112,7 +112,12 @@ impl SettlementRegistries {
             && intake.registry.is_empty()
             && intake.quorum.policies.is_empty()
             && intake.quorum.rounds.is_empty()
-            && intake.pinned_ethereum_committees.is_empty())
+            && intake.pinned_ethereum_committees.is_empty()
+            && intake.pinned_bitcoin_anchors.is_empty()
+            && intake.pinned_tendermint_anchors.is_empty()
+            && intake.pinned_da_committees.is_empty()
+            && intake.pinned_hotstuff_committees.is_empty()
+            && intake.pinned_dag_committees.is_empty())
     }
 
     /// Advance the registries' block clocks. Called once per block, at block

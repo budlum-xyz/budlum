@@ -1,1 +1,232 @@
-# RPC method success and refusal test coverage ratchet (0 unrecorded gaps).
+# RPC method success and refusal test coverage ratchet.
+#
+# Every line below is a gap the RPC door has today: a method in
+# `src/rpc/method_class.rs` whose success answer or whose refusal is not
+# asserted by a test in the coverage corpus (`src/rpc/tests.rs` and
+# `src/tests/*.rs`). The ratchet in `rpc_every_method_has_success_and_refusal_test`
+# reads this file in both directions: a line that is no longer missing fails the
+# build until it is deleted, and a missing line that is not recorded here fails
+# the build until a test is written. The file may therefore only shrink.
+#
+# These rows were invisible until now: the second loop of the ratchet compared
+# the missing list against this file backwards, so no gap was ever reported and
+# no line could ever be recorded (`denetim/bulgular/B-0079`). The rows are
+# recorded, not excused: `B-0156` closes them family by family, and every such
+# change deletes the lines it closes.
+
+# Solana compatibility surface (42 rows)
+
+accountSubscribe missing=refusal
+accountUnsubscribe missing=refusal
+accountUnsubscribe missing=success
+bud_subscribe missing=refusal
+bud_subscribe missing=success
+bud_unsubscribe missing=refusal
+bud_unsubscribe missing=success
+getAccountInfo missing=refusal
+getBlock missing=refusal
+getBlockHeight missing=refusal
+getEpochInfo missing=refusal
+getFeeForMessage missing=refusal
+getHealth missing=success
+getLatestBlockhash missing=refusal
+getMinimumBalanceForRentExemption missing=refusal
+getMultipleAccounts missing=refusal
+getProgramAccounts missing=refusal
+getRecentPrioritizationFees missing=refusal
+getSignatureStatuses missing=refusal
+getSignaturesForAddress missing=refusal
+getSlot missing=refusal
+getTokenAccountBalance missing=refusal
+getTokenAccountsByOwner missing=refusal
+getTokenSupply missing=refusal
+getTransaction missing=refusal
+getVersion missing=success
+isBlockhashValid missing=refusal
+logsSubscribe missing=refusal
+logsUnsubscribe missing=refusal
+logsUnsubscribe missing=success
+programSubscribe missing=refusal
+programUnsubscribe missing=refusal
+programUnsubscribe missing=success
+requestAirdrop missing=refusal
+signatureSubscribe missing=refusal
+signatureUnsubscribe missing=refusal
+signatureUnsubscribe missing=success
+simulateTransaction missing=refusal
+slotSubscribe missing=refusal
+slotSubscribe missing=success
+slotUnsubscribe missing=refusal
+slotUnsubscribe missing=success
+
+# operator administration (6 rows)
+
+bud_adminBanPeer missing=success
+bud_adminListBannedPeers missing=success
+bud_adminSentryStatus missing=success
+bud_adminUnbanPeer missing=refusal
+bud_adminUnbanPeer missing=success
+bud_adminUpdateSentries missing=success
+
+# AI inference layer (34 rows)
+
+bud_aiAgentPayment missing=refusal
+bud_aiAgentPayment missing=success
+bud_aiAgentPayments missing=refusal
+bud_aiAgentPayments missing=success
+bud_aiAgentReputation missing=refusal
+bud_aiAgentReputation missing=success
+bud_aiCallbackQueue missing=refusal
+bud_aiCallbackQueue missing=success
+bud_aiCancelStatus missing=refusal
+bud_aiCancelStatus missing=success
+bud_aiDisputeSlash missing=refusal
+bud_aiDisputeSlash missing=success
+bud_aiEquivocationStatus missing=refusal
+bud_aiEquivocationStatus missing=success
+bud_aiExecutionProof missing=refusal
+bud_aiExecutionProof missing=success
+bud_aiGetModel missing=refusal
+bud_aiGetModel missing=success
+bud_aiGetOutcome missing=refusal
+bud_aiGetOutcome missing=success
+bud_aiReclaimFee missing=refusal
+bud_aiReclaimFee missing=success
+bud_aiRegisterModel missing=refusal
+bud_aiRegisterModel missing=success
+bud_aiSlashingStatus missing=refusal
+bud_aiSlashingStatus missing=success
+bud_aiSubmitRequest missing=refusal
+bud_aiSubmitRequest missing=success
+bud_aiSubmitResult missing=refusal
+bud_aiSubmitResult missing=success
+bud_aiVerifierQos missing=refusal
+bud_aiVerifierQos missing=success
+bud_aiVerifierStake missing=refusal
+bud_aiVerifierStake missing=success
+
+# record and wallet doors (59 rows)
+
+bud_appBindingPaymentProof missing=refusal
+bud_appBindingPaymentProof missing=success
+bud_atlasGetWalletContext missing=refusal
+bud_atlasGetWalletContext missing=success
+bud_gardenCreate missing=success
+bud_gatewayFetchContent missing=refusal
+bud_gatewayFetchContent missing=success
+bud_gatewayRenderContent missing=refusal
+bud_gatewayRenderContent missing=success
+bud_getAccountProof missing=success
+bud_getAppBindingApplication missing=refusal
+bud_getAppBindingApplication missing=success
+bud_getBlockByHash missing=refusal
+bud_getBlockByNumber missing=refusal
+bud_getCrossDomainMessage missing=refusal
+bud_getDomainInfo missing=refusal
+bud_getDomainInfo missing=success
+bud_getExternalDomainProfile missing=refusal
+bud_getExternalDomainProfile missing=success
+bud_getExternalDomainStatus missing=refusal
+bud_getExternalDomainStatus missing=success
+bud_getExternalQuorumRound missing=refusal
+bud_getExternalQuorumRound missing=success
+bud_getExternalQuorumRounds missing=refusal
+bud_getExternalQuorumRounds missing=success
+bud_getGlobalHeader missing=refusal
+bud_getGlobalHeaderProof missing=refusal
+bud_getGlobalHeaderProof missing=success
+bud_getRelayerIntent missing=refusal
+bud_getRelayerIntent missing=success
+bud_getSovereignTemplate missing=refusal
+bud_getSovereignTemplate missing=success
+bud_getStateSnapshot missing=refusal
+bud_getStateSnapshot missing=success
+bud_getTransactionByHash missing=refusal
+bud_getTransactionReceipt missing=refusal
+bud_getValidatorDelegations missing=refusal
+bud_hubPrepareRegister missing=refusal
+bud_hubPrepareRegister missing=success
+bud_identityCredential missing=refusal
+bud_identityVerifyPresentation missing=refusal
+bud_inspectEthereumUpdate missing=refusal
+bud_inspectEthereumUpdate missing=success
+bud_marketPrepareOffer missing=refusal
+bud_marketPrepareOffer missing=success
+bud_marketPreparePurchase missing=refusal
+bud_marketPreparePurchase missing=success
+bud_passportGetProfile missing=refusal
+bud_passportGetProfile missing=success
+bud_passportGetProofBundle missing=refusal
+bud_passportGetProofBundle missing=success
+bud_pruneStatus missing=success
+bud_requestPrune missing=success
+bud_sendTxBundle missing=refusal
+bud_sendTxBundle missing=success
+bud_submitQcFaultProof missing=refusal
+bud_submitSlashingReport missing=refusal
+bud_txPrecheck missing=refusal
+bud_validatorProfile missing=refusal
+
+# BNS name service (13 rows)
+
+bud_bnsPrepareRegisterSubdomain missing=refusal
+bud_bnsPrepareRegisterSubdomain missing=success
+bud_bnsPrepareRenew missing=refusal
+bud_bnsPrepareRenew missing=success
+bud_bnsPrepareSetStorage missing=success
+bud_bnsPrepareSetSubdomainContent missing=success
+bud_bnsPrepareTransfer missing=refusal
+bud_bnsPrepareTransfer missing=success
+bud_bnsResolve missing=refusal
+bud_bnsResolveFull missing=refusal
+bud_bnsResolveSubdomain missing=refusal
+bud_bnsResolveSubdomainContent missing=refusal
+bud_bnsResolveSubdomainContent missing=success
+
+# bridge door (5 rows)
+
+bud_burnBridgeTransfer missing=refusal
+bud_burnBridgeTransferWithEvent missing=refusal
+bud_mintBridgeTransfer missing=refusal
+bud_unlockBridgeTransfer missing=refusal
+bud_unlockBridgeTransferVerified missing=refusal
+
+# encoding and relayer planning (9 rows)
+
+bud_encodeCrossVmCall missing=success
+bud_encodeExternalEvidence missing=refusal
+bud_encodeExternalEvidence missing=success
+bud_planEvmVerification missing=refusal
+bud_planEvmVerification missing=success
+bud_relayerPrepareExternalTx missing=refusal
+bud_relayerPrepareExternalTx missing=success
+bud_replayExternalProbes missing=refusal
+bud_replayExternalProbes missing=success
+
+# role registry (5 rows)
+
+bud_registryActiveMembers missing=refusal
+bud_registryBeginRoleBondUnbonding missing=refusal
+bud_registryRegister missing=refusal
+bud_registryRegister missing=success
+bud_registryWithdrawRoleBond missing=refusal
+
+# social layer (8 rows)
+
+bud_socialGetFeed missing=refusal
+bud_socialGetPost missing=refusal
+bud_socialPrepareBoost missing=refusal
+bud_socialPrepareBoost missing=success
+bud_socialPrepareBurn missing=refusal
+bud_socialPrepareBurn missing=success
+bud_socialPreparePost missing=refusal
+bud_socialPreparePost missing=success
+
+# storage door (6 rows)
+
+bud_storageCloseReveal missing=refusal
+bud_storageCloseReveal missing=success
+bud_storageOpenReveal missing=refusal
+bud_storageOpenReveal missing=success
+bud_storageRevealFrames missing=refusal
+bud_storageRevealFrames missing=success

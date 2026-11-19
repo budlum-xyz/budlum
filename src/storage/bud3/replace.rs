@@ -82,13 +82,15 @@ pub fn replacement_placement_digest(new_shares: &[(u64, Share)]) -> [u8; 32] {
 }
 
 /// Canonical domain-separated digest signed by each placement-group Full
-/// validator over `(old_key, new_record, new_shares)`.
+/// validator over `(chain_id, old_key, new_record, new_shares)`.
 #[must_use]
 pub fn replace_attestation_digest(
+    chain_id: u64,
     old_key: &ObjectKey,
     new_record: &ObjectRecord,
     new_shares: &[(u64, Share)],
 ) -> [u8; 32] {
+    let chain_bytes = chain_id.to_le_bytes();
     let kind_byte = [match new_record.content_id.kind {
         ContentIdKind::Public => 0u8,
         ContentIdKind::Sealed => 1u8,
@@ -110,6 +112,7 @@ pub fn replace_attestation_digest(
     let placement = replacement_placement_digest(new_shares);
     hash_fields_bytes(&[
         REPLACE_ATTEST_DOMAIN,
+        &chain_bytes,
         old_key,
         &placement,
         &kind_byte,
@@ -129,21 +132,20 @@ pub fn replace_attestation_digest(
     ])
 }
 
-/// Sign a [`ReplaceAttestation`] with `validator`'s ML-DSA-65 seed under `ctx::STORAGE_V2`.
-///
-/// Convenience: exposed for validator custody daemons and replacement tests.
+/// Sign a [`ReplaceAttestation`] on `chain_id` with `validator`'s ML-DSA-65 seed under `ctx::STORAGE_V2`.
 ///
 /// # Errors
 ///
 /// Returns an error if the operation fails.
-pub fn sign_replace_attestation(
+pub fn sign_replace_attestation_with_chain_id(
+    chain_id: u64,
     validator: Address,
     ml_dsa_seed: &[u8; 32],
     old_key: &ObjectKey,
     new_record: &ObjectRecord,
     new_shares: &[(u64, Share)],
 ) -> Result<ReplaceAttestation, PqError> {
-    let digest = replace_attestation_digest(old_key, new_record, new_shares);
+    let digest = replace_attestation_digest(chain_id, old_key, new_record, new_shares);
     let signature = ml_dsa_sign(
         SchemeId::ML_DSA_65,
         ml_dsa_seed,
@@ -157,6 +159,30 @@ pub fn sign_replace_attestation(
         new_commitment: new_record.commitment,
         signature,
     })
+}
+
+/// Sign a [`ReplaceAttestation`] on [`crate::core::transaction::DEFAULT_CHAIN_ID`].
+///
+/// Convenience: exposed for validator custody daemons and replacement tests.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
+pub fn sign_replace_attestation(
+    validator: Address,
+    ml_dsa_seed: &[u8; 32],
+    old_key: &ObjectKey,
+    new_record: &ObjectRecord,
+    new_shares: &[(u64, Share)],
+) -> Result<ReplaceAttestation, PqError> {
+    sign_replace_attestation_with_chain_id(
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        validator,
+        ml_dsa_seed,
+        old_key,
+        new_record,
+        new_shares,
+    )
 }
 
 /// Verified candidate produced during stage A0 codec selection (Section 6.6.2).
@@ -247,6 +273,8 @@ pub enum ReplaceError {
         got: usize,
         need: usize,
     },
+    /// Same placement-group validator supplied more than one attestation.
+    DuplicateAttester(Address),
     AttesterOutsidePlacementGroup(Address),
     InvalidAttestationSignature(Address),
     NoIndependentAttester,
@@ -270,6 +298,7 @@ pub enum ReplaceError {
 ///
 /// Returns an error if the operation fails.
 pub fn admit_object_replacement(
+    chain_id: u64,
     (sender, old_owner, proposer_stake): (&Address, &Address, u64),
     (old_record, new_record): (&ObjectRecord, &ObjectRecord),
     new_shares: &[(u64, Share)],
@@ -295,27 +324,26 @@ pub fn admit_object_replacement(
         });
     }
 
-    let digest = replace_attestation_digest(&old_record.commitment, new_record, new_shares);
+    // Reject outside-group, duplicate, mismatched, under-quorum, or non-independent
+    // attestation lists before spending post-quantum ML-DSA-65 verification cycles.
     let mut distinct_attesters = BTreeSet::new();
     for att in attestations {
         if !placement_group_full.contains(&att.validator) {
             return Err(ReplaceError::AttesterOutsidePlacementGroup(att.validator));
+        }
+        if !distinct_attesters.insert(att.validator) {
+            return Err(ReplaceError::DuplicateAttester(att.validator));
         }
         if att.verified_content_id != old_record.content_id {
             return Err(ReplaceError::ContentIdMismatch {
                 proposer_slash_atoms: bad_repair_slash_amount(proposer_stake),
             });
         }
-        if att.new_commitment != new_record.commitment {
+        if att.new_commitment != new_record.commitment
+            || !validator_keys.contains_key(&att.validator)
+        {
             return Err(ReplaceError::InvalidAttestationSignature(att.validator));
         }
-        let Some(pk) = validator_keys.get(&att.validator) else {
-            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
-        };
-        if verify(SchemeId::ML_DSA_65, pk, &digest, STORAGE_V2, &att.signature).is_err() {
-            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
-        }
-        distinct_attesters.insert(att.validator);
     }
 
     if distinct_attesters.len() < MIN_REPLACE_ATTESTATIONS {
@@ -326,6 +354,17 @@ pub fn admit_object_replacement(
     }
     if !distinct_attesters.iter().any(|v| v != sender) {
         return Err(ReplaceError::NoIndependentAttester);
+    }
+
+    let digest =
+        replace_attestation_digest(chain_id, &old_record.commitment, new_record, new_shares);
+    for att in attestations {
+        let Some(pk) = validator_keys.get(&att.validator) else {
+            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
+        };
+        if verify(SchemeId::ML_DSA_65, pk, &digest, STORAGE_V2, &att.signature).is_err() {
+            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
+        }
     }
     Ok(())
 }
@@ -419,6 +458,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 admit_object_replacement(
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
                     (&[1u8; 32], &[1u8; 32], 50_000),
                     (&old_rec, &bad),
                     &shares,
@@ -442,6 +482,62 @@ mod tests {
             select_codec_with_fast_probe(&input, false, 3_980, &candidates);
         assert!(skipped_medium);
         assert_eq!(chosen, 1);
+    }
+
+    #[test]
+    fn replace_attestations_do_not_replay_across_chains() {
+        let cid = ContentId::public(b"canonical object bytes");
+        let old_rec = sample_record([10u8; 32], cid, 0);
+        let new_rec = sample_record([20u8; 32], cid, 1);
+        let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]].into();
+        let keys = key_map(&[1, 2, 3, 4]);
+        let shares = sample_shares(&[1, 2, 3]);
+        let home = crate::core::transaction::DEFAULT_CHAIN_ID;
+        let other = home + 1;
+
+        assert_ne!(
+            replace_attestation_digest(home, &old_rec.commitment, &new_rec, &shares),
+            replace_attestation_digest(other, &old_rec.commitment, &new_rec, &shares),
+            "the digest must commit to the chain it was signed for"
+        );
+
+        let quorum: Vec<ReplaceAttestation> = [1u8, 2, 3]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation_with_chain_id(
+                    home,
+                    [v; 32],
+                    &[v; 32],
+                    &old_rec.commitment,
+                    &new_rec,
+                    &shares,
+                )
+                .unwrap()
+            })
+            .collect();
+        admit_object_replacement(
+            home,
+            (&[9u8; 32], &[1u8; 32], 100_000),
+            (&old_rec, &new_rec),
+            &shares,
+            (&pg, &keys),
+            &quorum,
+        )
+        .expect("a quorum signed for this chain is admitted on it");
+
+        // The very same quorum, replayed on a network that shares the
+        // validators and the object key, verifies against a different digest.
+        assert_eq!(
+            admit_object_replacement(
+                other,
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &new_rec),
+                &shares,
+                (&pg, &keys),
+                &quorum,
+            ),
+            Err(ReplaceError::InvalidAttestationSignature([1u8; 32]))
+        );
     }
 
     #[test]
@@ -473,6 +569,7 @@ mod tests {
         ];
         assert!(matches!(
             admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &new_rec),
                 &shares,
@@ -494,6 +591,7 @@ mod tests {
             .unwrap(),
         );
         admit_object_replacement(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
             (&[9u8; 32], &[1u8; 32], 100_000),
             (&old_rec, &new_rec),
             &shares,
@@ -507,6 +605,7 @@ mod tests {
         forged[0].signature[0] ^= 0xFF;
         assert_eq!(
             admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &new_rec),
                 &shares,
@@ -520,6 +619,7 @@ mod tests {
         let bad_rec = sample_record([30u8; 32], bad_cid, 1);
         assert_eq!(
             admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &bad_rec),
                 &shares,
@@ -574,6 +674,7 @@ mod tests {
             })
             .collect();
         admit_object_replacement(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
             (&[9u8; 32], &[1u8; 32], 100_000),
             (&old_rec, &new_rec),
             &signed_shares,
@@ -583,6 +684,7 @@ mod tests {
         .expect("the placement the quorum signed is admitted");
         assert_eq!(
             admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &new_rec),
                 &swapped_shares,
@@ -591,6 +693,68 @@ mod tests {
             ),
             Err(ReplaceError::InvalidAttestationSignature([1u8; 32])),
             "the same signatures must not admit a placement they never signed"
+        );
+    }
+
+    #[test]
+    fn duplicate_validator_attestations_are_rejected_and_every_share_field_is_bound() {
+        let cid = ContentId {
+            kind: ContentIdKind::Public,
+            len: 4_096,
+            digest: [0x51; 32],
+        };
+        let old_rec = sample_record([0x61; 32], cid, 0);
+        let new_rec = sample_record([0x62; 32], cid, 1);
+        let keys = key_map(&[1, 2, 3, 4]);
+        let pg: BTreeSet<Address> = [1u8, 2, 3, 4].into_iter().map(|b| [b; 32]).collect();
+        let shares = sample_shares(&[1, 2, 3]);
+
+        // Mutating class, first_esi, symbols, or segment must each fail signature check.
+        let mut class_mut = shares.clone();
+        class_mut[0].1.class = Class::Mobile;
+        let mut esi_mut = shares.clone();
+        esi_mut[0].1.first_esi += 1;
+        let mut sym_mut = shares.clone();
+        sym_mut[0].1.symbols += 1;
+        let mut seg_mut = shares.clone();
+        seg_mut[0].0 = 1;
+        let atts: Vec<_> = [1u8, 2, 3]
+            .into_iter()
+            .map(|b| {
+                sign_replace_attestation([b; 32], &[b; 32], &old_rec.commitment, &new_rec, &shares)
+                    .unwrap()
+            })
+            .collect();
+        for mutated in [class_mut, esi_mut, sym_mut, seg_mut] {
+            assert_eq!(
+                admit_object_replacement(
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    (&[9u8; 32], &[1u8; 32], 100_000),
+                    (&old_rec, &new_rec),
+                    &mutated,
+                    (&pg, &keys),
+                    &atts,
+                ),
+                Err(ReplaceError::InvalidAttestationSignature([1u8; 32])),
+            );
+        }
+
+        // Duplicate entries for the same attester must be refused fail-closed even
+        // when three distinct signers are also present, preventing PQ signature-check
+        // amplification via padded attestation vectors.
+        let mut dup = atts.clone();
+        dup.push(atts[0].clone());
+        assert_eq!(
+            admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &new_rec),
+                &shares,
+                (&pg, &keys),
+                &dup,
+            ),
+            Err(ReplaceError::DuplicateAttester([1u8; 32])),
+            "duplicate replacement attester must be rejected before repeated PQ verification"
         );
     }
 }

@@ -173,7 +173,10 @@ impl ConsensusDomainRegistry {
             ));
         }
 
-        if domain.finality_adapter == crate::domain::types::POW_HEADER_CHAIN_ADAPTER {
+        let pow_family_adapter = domain.finality_adapter
+            == crate::domain::types::POW_HEADER_CHAIN_ADAPTER
+            || domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER;
+        if pow_family_adapter {
             if domain.kind != crate::domain::types::ConsensusKind::PoW {
                 return Err(format!(
                     "Domain {} uses the PoW header adapter with a non-PoW consensus kind",
@@ -214,11 +217,12 @@ impl ConsensusDomainRegistry {
             // requirement" for an adapter that finalises on a quorum.
             return Err(format!(
                 "Domain {} sets min_confirmations={} but its adapter {} never reads it; \
-                 header-chain depth only applies to {}",
+                 header-chain depth only applies to {} and {}",
                 domain.id,
                 domain.min_confirmations,
                 domain.finality_adapter,
-                crate::domain::types::POW_HEADER_CHAIN_ADAPTER
+                crate::domain::types::POW_HEADER_CHAIN_ADAPTER,
+                crate::domain::types::BITCOIN_SPV_ADAPTER
             ));
         }
 

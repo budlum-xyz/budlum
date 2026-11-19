@@ -3,8 +3,8 @@
 //!
 //! Runs a deterministic bounded CEK-style UPLC term evaluator in pure Rust
 //! interpreter mode across `x86_64` and `aarch64`, persists validator scripts
-//! and eUTxO datum state under `ee/plutus/state`, and opens on testnet `45261`
-//! at block zero (`PROPOSED_PLUTUS_ACTIVATION_HEIGHT = 0`).
+//! and eUTxO datum state under `ee/plutus/state`, and remains closed by default
+//! on public testnet `45261` until an explicit activation height.
 
 #![forbid(unsafe_code)]
 
@@ -22,7 +22,7 @@ pub const AUDITED_PLUTUS_SPDX: &str = "Apache-2.0";
 /// Budlum testnet chain ID (`45261`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed testnet activation height (open from block zero on `45261`, `IP-53`).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 pub const PROPOSED_PLUTUS_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing Plutus validator scripts and datum records.
@@ -283,11 +283,11 @@ impl Default for PlutusWorker {
 }
 
 impl PlutusWorker {
-    /// Open on testnet `45261` from [`PROPOSED_PLUTUS_ACTIVATION_HEIGHT`] (`0`).
+    /// Default public-testnet posture: closed until an explicit activation height.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            testnet_activation_height: Some(PROPOSED_PLUTUS_ACTIVATION_HEIGHT),
+            testnet_activation_height: None,
         }
     }
 
@@ -302,8 +302,11 @@ impl PlutusWorker {
     /// Returns `true` when Plutus UPLC is active at `ctx`.
     #[must_use]
     pub const fn is_active(&self, ctx: &BlockContext) -> bool {
-        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+        if ctx.chain_id == budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID {
             return true;
+        }
+        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+            return false;
         }
         match self.testnet_activation_height {
             Some(h) => ctx.height >= h,
@@ -572,11 +575,22 @@ mod tests {
     }
 
     #[test]
-    fn plutus_is_open_on_testnet() {
-        let open = PlutusWorker::new();
-        assert!(open.is_active(&ctx()));
-        let mut closed = PlutusWorker::with_activation_height(None);
+    fn plutus_is_closed_on_testnet() {
+        let mut closed = PlutusWorker::new();
         assert!(!closed.is_active(&ctx()));
+        for chain_id in [45_260, 99_999] {
+            assert!(!closed.is_active(&BlockContext { chain_id, ..ctx() }));
+        }
+        assert!(closed.is_active(&BlockContext {
+            chain_id: 45_262,
+            ..ctx()
+        }));
+        let activated = PlutusWorker::with_activation_height(Some(10));
+        assert!(!activated.is_active(&ctx()));
+        assert!(activated.is_active(&BlockContext {
+            height: 10,
+            ..ctx()
+        }));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::PLUTUS, vec![0x0B; 32]) else {
             panic!("caller");
@@ -604,7 +618,7 @@ mod tests {
     #[test]
     fn uel_conformance_plutus() {
         assert_eq!(AUDITED_PLUTUS_SPDX, "Apache-2.0");
-        let mut worker = PlutusWorker::new();
+        let mut worker = PlutusWorker::with_activation_height(Some(0));
         let expected_hash: [u8; 32] = Sha256::digest(b"aiken-secret").into();
         let validator = UplcTerm::IfThenElse {
             cond: Box::new(UplcTerm::EqualsInt(
@@ -829,7 +843,7 @@ mod tests {
             Box::new(UplcTerm::Signatory),
             Box::new(UplcTerm::ConstBytes(bob_id.clone())),
         );
-        let mut worker = PlutusWorker::new();
+        let mut worker = PlutusWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(5_000_000);
         let Ok(alice) = EeIdentity::new(EeId::PLUTUS, vec![0x3B; 32]) else {
             panic!("alice")

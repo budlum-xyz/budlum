@@ -25,7 +25,7 @@ pub const PINNED_SUI_EXECUTION_COMMIT: &str = "e5b8d9a4c2718f140933b42c66d8c04a7
 /// Budlum testnet chain ID (`Section 1.5`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed activation height on testnet `45261` (open from block zero).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 pub const PROPOSED_SUI_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing Sui objects and published Move packages.
@@ -250,12 +250,12 @@ impl Default for MoveSuiWorker {
 }
 
 impl MoveSuiWorker {
-    /// Default launch configuration: closed on testnet `45261` until
-    /// [`PROPOSED_SUI_ACTIVATION_HEIGHT`] (`Section 1.5`).
+    /// Default launch configuration: closed on testnet `45261` until an
+    /// explicit activation height is committed (`Section 1.5`).
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            testnet_activation_height: Some(PROPOSED_SUI_ACTIVATION_HEIGHT),
+            testnet_activation_height: None,
         }
     }
 
@@ -270,8 +270,11 @@ impl MoveSuiWorker {
     /// Returns `true` if `MoveSuiWorker` is open at `ctx`.
     #[must_use]
     pub const fn is_active(&self, ctx: &BlockContext) -> bool {
-        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+        if ctx.chain_id == budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID {
             return true;
+        }
+        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+            return false;
         }
         match self.testnet_activation_height {
             Some(h) => ctx.height >= h,
@@ -879,35 +882,31 @@ mod tests {
         }
     }
 
-    /// Testnet `45261` activation posture: open at launch (`PROPOSED_SUI_ACTIVATION_HEIGHT = 0`),
-    /// while explicit `with_activation_height(None)` retains closed override refusal.
+    /// Testnet `45261` launch posture is closed until an explicit activation height.
     #[test]
-    fn move_sui_is_open_on_testnet() {
-        let mut open_worker = MoveSuiWorker::new();
-        assert!(open_worker.is_active(&launch_ctx()));
-        let mut closed_worker = MoveSuiWorker::with_activation_height(None);
+    fn move_sui_is_closed_on_testnet() {
+        let mut closed_worker = MoveSuiWorker::new();
         assert!(!closed_worker.is_active(&launch_ctx()));
+        for chain_id in [45_260, 99_999] {
+            assert!(!closed_worker.is_active(&BlockContext {
+                chain_id,
+                ..launch_ctx()
+            }));
+        }
+        assert!(closed_worker.is_active(&BlockContext {
+            chain_id: 45_262,
+            ..launch_ctx()
+        }));
+        let activated_worker = MoveSuiWorker::with_activation_height(Some(100));
+        assert!(!activated_worker.is_active(&BlockContext {
+            height: 99,
+            ..launch_ctx()
+        }));
+        assert!(activated_worker.is_active(&launch_ctx()));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::MOVE_SUI, vec![0xAA; 32]) else {
             panic!("caller");
         };
-        let Ok(ok_out) = open_worker.execute(
-            &launch_ctx(),
-            &EeCall {
-                kind: EeCallKind::Call,
-                caller: caller.clone(),
-                target: caller.clone(),
-                value: BudAmount(0),
-                input: br#"{"commands":[]}"#.to_vec(),
-                gas_limit: 500_000,
-                depth: 0,
-                tx_hash: [0x01; 32],
-            },
-            &mut host,
-        ) else {
-            panic!("exec");
-        };
-        assert_eq!(ok_out.status, OutcomeStatus::Success);
         let Ok(out) = closed_worker.execute(
             &launch_ctx(),
             &EeCall {
@@ -932,7 +931,7 @@ mod tests {
     /// (`0x2::coin` split/merge, `0x2::transfer` owned & shared objects, Lamport versions).
     #[test]
     fn uel_conformance_move_sui() {
-        let mut worker = MoveSuiWorker::new();
+        let mut worker = MoveSuiWorker::with_activation_height(Some(0));
         assert_eq!(worker.id(), EeId::MOVE_SUI);
         assert_eq!(PINNED_SUI_EXECUTION_COMMIT.len(), 40);
 
@@ -1202,7 +1201,7 @@ mod tests {
     /// write is the package's to make.
     #[test]
     fn sui_cli_publish_runs_unchanged() {
-        let mut worker = MoveSuiWorker::new();
+        let mut worker = MoveSuiWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(10_000_000);
         let who = publisher();
         let modules = vec![SuiCompiledModule {
@@ -1237,7 +1236,7 @@ mod tests {
     /// append its own bytes to it.
     #[test]
     fn a_package_cannot_write_to_a_shared_object_it_does_not_define() {
-        let mut worker = MoveSuiWorker::new();
+        let mut worker = MoveSuiWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(10_000_000);
         let who = publisher();
         let (victim_pkg, _) = publish(&mut worker, &mut host, &who, "counter", 0x10);
@@ -1272,7 +1271,7 @@ mod tests {
     /// able to append bytes to a coin that was shared or owned by the caller, and so corrupt it.
     #[test]
     fn a_shared_framework_coin_cannot_be_written_by_a_package() {
-        let mut worker = MoveSuiWorker::new();
+        let mut worker = MoveSuiWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(10_000_000);
         let who = publisher();
         let (pkg, coin) = publish(&mut worker, &mut host, &who, "counter", 0x20);
@@ -1324,7 +1323,7 @@ mod tests {
     /// without limit, one argument at a time.
     #[test]
     fn a_shared_object_cannot_grow_past_the_size_cap() {
-        let mut worker = MoveSuiWorker::new();
+        let mut worker = MoveSuiWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(100_000_000);
         let who = publisher();
         let (pkg, _) = publish(&mut worker, &mut host, &who, "counter", 0x30);
@@ -1377,7 +1376,7 @@ mod tests {
     /// new size. A call used to rewrite any number of objects for the price of the command.
     #[test]
     fn writing_to_shared_inputs_is_metered_per_input_and_per_byte() {
-        let mut worker = MoveSuiWorker::new();
+        let mut worker = MoveSuiWorker::with_activation_height(Some(0));
         let mut host = MemoryHost::new(100_000_000);
         let who = publisher();
         let (pkg, _) = publish(&mut worker, &mut host, &who, "counter", 0x40);

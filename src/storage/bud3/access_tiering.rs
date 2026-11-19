@@ -184,7 +184,7 @@ impl AccessTierTracker {
     }
 
     /// Return public objects eligible for archival `SlowY` / Codec `13` conversion
-    /// when expansion-tier conversion is enabled (`Section 6.14 item 8`,  item 5`).
+    /// when expansion-tier conversion is enabled (`Section 6.14 item 8`).
     ///
     /// Active on testnet (`AccessTierTracker::testnet_converts_objects() == true`);
     /// returns an empty list when `expansion_enabled == false` and never

@@ -12,10 +12,12 @@ use serde_json::{json, Value};
 use crate::core::account::AccountState;
 use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 
-/// Proposed activation height for Cairo/Starknet on testnet `45261` (`0` = open).
+/// Explicit activation fixture height; the public-testnet default remains closed.
 ///
 /// Convenience: shared by Starknet RPC policy and activation checks.
 pub const PROPOSED_CAIRO_ACTIVATION_HEIGHT: u64 = 0;
+/// Maximum Starknet RPC request envelope size (1 MiB). Strix B-0063.
+pub const MAX_STARKNET_RPC_REQUEST_BYTES: usize = 1 << 20;
 
 /// Starknet JSON-RPC specification version supported by this gateway.
 ///
@@ -39,7 +41,7 @@ impl Default for StarknetActivationPolicy {
 }
 
 impl StarknetActivationPolicy {
-    /// Default launch posture on testnet `45261`: open from block `0`.
+    /// Default launch posture on testnet `45261`: closed until explicit activation.
     ///
     /// Convenience: default policy for Starknet RPC handlers.
     #[must_use]
@@ -47,7 +49,7 @@ impl StarknetActivationPolicy {
         Self {
             chain_id: BUDLUM_TESTNET_CHAIN_ID,
             block_height: 0,
-            activation_height: Some(PROPOSED_CAIRO_ACTIVATION_HEIGHT),
+            activation_height: None,
         }
     }
 
@@ -56,8 +58,11 @@ impl StarknetActivationPolicy {
     /// Convenience: queried before serving Starknet JSON-RPC requests.
     #[must_use]
     pub const fn is_active(&self) -> bool {
-        if self.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+        if self.chain_id == budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID {
             return true;
+        }
+        if self.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+            return false;
         }
         match self.activation_height {
             Some(h) => self.block_height >= h,
@@ -137,6 +142,17 @@ pub fn handle_starknet_rpc(
             "Cairo (Starknet) RPC is closed on testnet before activation height",
         );
     }
+    // Strix B-0063: strict JSON-RPC 2.0 version enforcement.
+    if req.jsonrpc != "2.0" {
+        return StarknetRpcResponse::err(
+            req.id,
+            -32600,
+            &format!(
+                "Starknet RPC requires jsonrpc \"2.0\", got {:?}",
+                req.jsonrpc
+            ),
+        );
+    }
     match req.method.as_str() {
         "starknet_specVersion" => StarknetRpcResponse::ok(req.id, json!(STARKNET_SPEC_VERSION)),
         "starknet_chainId" => {
@@ -145,6 +161,21 @@ pub fn handle_starknet_rpc(
         }
         "starknet_blockNumber" => StarknetRpcResponse::ok(req.id, json!(policy.block_height)),
         "starknet_getNonce" => {
+            // block_id validation (Strix B-0063): must be present and valid.
+            if let Some(block_id) = req.params.first() {
+                let valid = match block_id {
+                    Value::String(s) => {
+                        s == "latest" || s == "pending" || parse_felt_hex(s).is_some()
+                    }
+                    Value::Object(obj) => {
+                        obj.contains_key("block_number") || obj.contains_key("block_hash")
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return StarknetRpcResponse::err(req.id, -32602, "invalid block_id");
+                }
+            }
             let Some(addr_str) = req.params.get(1).and_then(Value::as_str) else {
                 return StarknetRpcResponse::err(req.id, -32602, "missing contract_address");
             };
@@ -183,15 +214,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn starknet_rpc_is_open_on_testnet_at_launch_and_respects_override() {
+    fn starknet_rpc_is_closed_on_testnet() {
         let state = AccountState::new();
+        let launch = StarknetActivationPolicy::default();
+        assert!(!launch.is_active());
+        for chain_id in [45_260, 99_999] {
+            assert!(!StarknetActivationPolicy { chain_id, ..launch }.is_active());
+        }
+        assert!(StarknetActivationPolicy {
+            chain_id: 45_262,
+            ..launch
+        }
+        .is_active());
         let closed = handle_starknet_rpc(
             &state,
-            StarknetActivationPolicy {
-                chain_id: BUDLUM_TESTNET_CHAIN_ID,
-                block_height: 0,
-                activation_height: None,
-            },
+            launch,
             StarknetRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: json!(1),
@@ -203,7 +240,11 @@ mod tests {
 
         let spec = handle_starknet_rpc(
             &state,
-            StarknetActivationPolicy::default(),
+            StarknetActivationPolicy {
+                chain_id: BUDLUM_TESTNET_CHAIN_ID,
+                block_height: 100,
+                activation_height: Some(100),
+            },
             StarknetRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: json!(2),
@@ -212,5 +253,60 @@ mod tests {
             },
         );
         assert_eq!(spec.result.unwrap().as_str(), Some("0.7.1"));
+    }
+
+    #[test]
+    fn starknet_rpc_rejects_wrong_jsonrpc_version() {
+        let state = AccountState::new();
+        let policy = StarknetActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 100,
+            activation_height: Some(100),
+        };
+        let resp = handle_starknet_rpc(
+            &state,
+            policy,
+            StarknetRpcRequest {
+                jsonrpc: "1.0".into(),
+                id: json!(1),
+                method: "starknet_specVersion".into(),
+                params: vec![],
+            },
+        );
+        assert!(!resp.error.is_none());
+        assert!(resp.error.unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains("2.0"));
+    }
+
+    #[test]
+    fn starknet_rpc_rejects_invalid_block_id() {
+        let state = AccountState::new();
+        let policy = StarknetActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 100,
+            activation_height: Some(100),
+        };
+        let resp = handle_starknet_rpc(
+            &state,
+            policy,
+            StarknetRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(1),
+                method: "starknet_getNonce".into(),
+                params: vec![json!(42), json!("0x1234")],
+            },
+        );
+        assert!(!resp.error.is_none());
+        assert!(resp.error.unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains("block_id"));
+    }
+
+    #[test]
+    fn max_starknet_rpc_request_bytes_is_bounded() {
+        assert_eq!(MAX_STARKNET_RPC_REQUEST_BYTES, 1 << 20);
     }
 }

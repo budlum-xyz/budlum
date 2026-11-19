@@ -354,6 +354,11 @@ impl Storage {
         Ok(first)
     }
 
+    /// Writes a compressed snapshot of the sled database to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if snapshot serialization or file writing fails.
     pub fn create_snapshot<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
         use std::io::Write;
 
@@ -844,6 +849,11 @@ impl Storage {
             .is_some())
     }
 
+    /// Deletes the stored block at `height` and its index entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if deleting from the database fails.
     pub fn delete_block(&self, height: u64) -> std::io::Result<()> {
         let key = format!("HEIGHT:{height}");
         if let Some(hash_val) = self.db.get(key.as_bytes())? {
@@ -1146,6 +1156,11 @@ impl Storage {
         Ok((epoch, trusted, verified))
     }
 
+    /// Persists a finalized epoch certificate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if serialization or database writes fail.
     pub fn save_finality_cert(
         &self,
         height: u64,
@@ -1389,6 +1404,11 @@ impl Storage {
         Ok(out)
     }
 
+    /// Loads the stored global block header at `height`, if present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if reading or deserializing the header fails.
     pub fn get_global_header(&self, height: u64) -> std::io::Result<Option<GlobalBlockHeader>> {
         let key = format!("GLOBAL_HEADER:{height}");
         if let Some(val) = self.db.get(key.as_bytes())? {
@@ -1646,6 +1666,11 @@ impl Storage {
             .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Persists the storage economics state snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if serialization or database writes fail.
     pub fn save_storage_economics_state(
         &self,
         snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
@@ -2238,6 +2263,126 @@ impl Storage {
             ));
         }
         Ok(bytes)
+    }
+
+    fn bud3_symbol_object_prefix(object: &[u8; 32]) -> [u8; 41] {
+        let mut prefix = [0u8; 41];
+        prefix[..9].copy_from_slice(b"BUD3_SYM:");
+        prefix[9..41].copy_from_slice(object);
+        prefix
+    }
+
+    fn bud3_symbol_key(object: &[u8; 32], holder: &[u8; 32], segment: u64, esi: u32) -> [u8; 85] {
+        let mut key = [0u8; 85];
+        key[..9].copy_from_slice(b"BUD3_SYM:");
+        key[9..41].copy_from_slice(object);
+        key[41..73].copy_from_slice(holder);
+        key[73..81].copy_from_slice(&segment.to_be_bytes());
+        key[81..85].copy_from_slice(&esi.to_be_bytes());
+        key
+    }
+
+    /// Persist B.U.D. 3.0 verified symbol items (`VerifiedSymbolItem`) atomically under
+    /// `(object, holder, segment, esi)` for node-local retrieval across restarts.
+    ///
+    /// # Errors
+    ///
+    /// Propagates serialization or `sled` batch persistence failures.
+    pub fn put_bud3_verified_symbols(
+        &self,
+        holder: &[u8; 32],
+        object: &[u8; 32],
+        segment: u64,
+        items: &[crate::storage::bud3::symbol_protocol::VerifiedSymbolItem],
+    ) -> std::io::Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut batch = sled::Batch::default();
+        for item in items {
+            let key = Self::bud3_symbol_key(object, holder, segment, item.symbol.esi);
+            let encoded = encode(item)?;
+            batch.insert(key.as_slice(), encoded);
+        }
+        self.db.apply_batch(batch)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// Load up to `count` (`<= MAX_SYMBOLS_PER_REQUEST`) stored `VerifiedSymbolItem` records
+    /// for `(holder, object, segment)` starting at `first_esi` in ascending ESI order.
+    /// Callers must re-verify proofs against live consensus `Bud3Registry` state before serving.
+    ///
+    /// # Errors
+    ///
+    /// Refuses corrupted/un-decodable entries or `sled` I/O errors.
+    pub fn get_bud3_verified_symbols(
+        &self,
+        holder: &[u8; 32],
+        object: &[u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> std::io::Result<Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>> {
+        let capped = count.min(crate::storage::bud3::symbol_protocol::MAX_SYMBOLS_PER_REQUEST);
+        if capped == 0 {
+            return Ok(Vec::new());
+        }
+        let last_inclusive = first_esi.saturating_add(capped - 1);
+        let start = Self::bud3_symbol_key(object, holder, segment, first_esi);
+        let end = Self::bud3_symbol_key(object, holder, segment, last_inclusive);
+        let mut out = Vec::new();
+        for row in self.db.range(start.as_slice()..=end.as_slice()) {
+            let (_key, val) = row?;
+            let item: crate::storage::bud3::symbol_protocol::VerifiedSymbolItem = decode(&val)?;
+            out.push(item);
+        }
+        Ok(out)
+    }
+
+    /// Delete all locally persisted B.U.D. 3.0 symbols for `object` (for example after
+    /// tombstone/expiry cleanup) and return the number of keys removed.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `sled` scan/batch removal failures.
+    pub fn delete_bud3_object_symbols(&self, object: &[u8; 32]) -> std::io::Result<usize> {
+        let prefix = Self::bud3_symbol_object_prefix(object);
+        let mut batch = sled::Batch::default();
+        let mut deleted = 0usize;
+        for row in self.db.scan_prefix(prefix) {
+            let (key, _) = row?;
+            batch.remove(key);
+            deleted = deleted.saturating_add(1);
+        }
+        if deleted > 0 {
+            self.db.apply_batch(batch)?;
+            self.db.flush()?;
+        }
+        Ok(deleted)
+    }
+
+    /// Return distinct B.U.D. 3.0 object keys with locally persisted symbols
+    /// in `sled` in `O(distinct_objects)` time via `get_gt` key skips.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `sled` I/O errors.
+    pub fn list_bud3_symbol_objects(&self) -> std::io::Result<Vec<[u8; 32]>> {
+        let mut next_start = b"BUD3_SYM:".to_vec();
+        let mut out = Vec::new();
+        while let Some((k, _)) = self.db.get_gt(&next_start)? {
+            if !k.starts_with(b"BUD3_SYM:") || k.len() < 41 {
+                break;
+            }
+            let mut obj = [0u8; 32];
+            obj.copy_from_slice(&k[9..41]);
+            out.push(obj);
+            let mut end_prefix = Self::bud3_symbol_object_prefix(&obj).to_vec();
+            end_prefix.extend_from_slice(&[0xffu8; 44]);
+            next_start = end_prefix;
+        }
+        Ok(out)
     }
 }
 
@@ -2958,6 +3103,45 @@ mod tests {
         assert!(storage2.db.get(b"BRIDGE_STATE_AT:2").unwrap().is_none());
     }
 
+    /// An account with no authorization program must survive the exact write
+    /// and read pair the durable commit uses. `bincode` is not self describing,
+    /// so a `skip_serializing_if` on `Account::auth_program_hash` wrote a
+    /// shorter row than the decoder expects and every persisted account failed
+    /// to load with `unexpected end of file`. Reverting the attribute makes this
+    /// test fail at the decode step, not at the assertion.
+    #[test]
+    fn a_program_free_account_survives_the_durable_encode_decode_pair() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let addr = Address::from_hex(&"02".repeat(32)).unwrap();
+        let account = Account::with_balance(addr, 42);
+
+        storage.save_account(&addr, &account).unwrap();
+        let loaded = storage.load_all_accounts().unwrap();
+        let stored = loaded.get(&addr).expect("account row decodes");
+        assert_eq!(stored.balance, 42);
+        assert_eq!(stored.nonce, 0);
+        assert_eq!(stored.frac_attos, 0);
+        assert_eq!(stored.auth_program_hash, None);
+    }
+
+    /// The program-authorized shape round trips through the same path, so the
+    /// fix is not a "drop the field" answer: both `Some` and `None` decode.
+    #[test]
+    fn a_program_authorized_account_survives_the_durable_encode_decode_pair() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let addr = Address::from_hex(&"03".repeat(32)).unwrap();
+        let program = [0x5Au8; 32];
+        let account = Account::with_auth_program(addr, 7, program);
+
+        storage.save_account(&addr, &account).unwrap();
+        let loaded = storage.load_all_accounts().unwrap();
+        let stored = loaded.get(&addr).expect("account row decodes");
+        assert_eq!(stored.balance, 7);
+        assert_eq!(stored.auth_program_hash, Some(program));
+    }
+
     /// A commit that carries no bridge state still leaves a snapshot at its
     /// height, so a rollback from the next height restores the live state
     /// instead of deleting it. Measured before the fix: commit H=1 with
@@ -3605,5 +3789,103 @@ mod storage_decode_locks {
 
         // And a readable version is still just read, not defaulted.
         assert!(opened >= 1, "an opened database reports its real version");
+    }
+
+    #[test]
+    fn bud3_verified_symbols_persist_across_reopen_and_delete_by_object() {
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::prepare_public_upload;
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, SymbolRangeRequest,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 path");
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let up_a = prepare_public_upload(
+            b"persisted bud3 payload a",
+            &profile,
+            &Bud3Limits::default(),
+            4,
+        )
+        .unwrap();
+        let up_b = prepare_public_upload(
+            b"persisted bud3 payload b",
+            &profile,
+            &Bud3Limits::default(),
+            4,
+        )
+        .unwrap();
+        let leaves_a: Vec<(u32, [u8; 32])> = up_a.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let leaves_b: Vec<(u32, [u8; 32])> = up_b.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let obj_a = up_a.record.commitment;
+        let obj_b = up_b.record.commitment;
+        let holder = [0x44u8; 32];
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj_a,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves_a,
+            &up_a.segments[0],
+        )
+        .unwrap()
+        .items;
+        let items_b = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj_b,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves_b,
+            &up_b.segments[0],
+        )
+        .unwrap()
+        .items;
+
+        let storage = super::Storage::new(path).expect("storage opens");
+        storage
+            .put_bud3_verified_symbols(&holder, &obj_a, 0, &items_a)
+            .unwrap();
+        storage
+            .put_bud3_verified_symbols(&holder, &obj_b, 0, &items_b)
+            .unwrap();
+        drop(storage);
+
+        let reopened = super::Storage::new(path).expect("storage reopens");
+        let got_a = reopened
+            .get_bud3_verified_symbols(&holder, &obj_a, 0, 1, 2)
+            .unwrap();
+        assert_eq!(got_a.len(), 2);
+        assert_eq!(got_a[0].symbol.esi, 1);
+        assert_eq!(got_a[1].symbol.esi, 2);
+        assert_eq!(reopened.delete_bud3_object_symbols(&obj_a).unwrap(), 4);
+        assert!(reopened
+            .get_bud3_verified_symbols(&holder, &obj_a, 0, 0, 4)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            reopened
+                .get_bud3_verified_symbols(&holder, &obj_b, 0, 0, 4)
+                .unwrap()
+                .len(),
+            4
+        );
     }
 }

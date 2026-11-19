@@ -38,6 +38,7 @@ fn domain_params() -> StorageDomainParams {
         max_committed_chunks: 1_000_000,
         challenge_interval: 10,
         min_operator_bond: 1_000_000,
+        require_merkle_proof: false,
     }
 }
 

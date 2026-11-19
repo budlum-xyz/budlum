@@ -691,6 +691,8 @@ pub struct RpcServer {
     /// are served through sessions opened by `bud_storageOpenReveal`, never
     /// as raw handle-passing.
     reveal_gateway: Arc<Mutex<crate::storage::RevealGateway>>,
+    /// Bounded node-local replay tracker for G8 `bud_storageGetContent` paid view receipts.
+    consumed_paid_views: Arc<Mutex<ConsumedPaidViews>>,
     /// Bounded, expiring, per-peer filter table of the Ethereum gateway
     /// . It is node-local bookkeeping, never consensus state.
     eth_filters: Arc<Mutex<ethereum::filters::FilterPool>>,
@@ -711,6 +713,90 @@ pub struct RpcServer {
     /// The Garden of this node. Both listeners share one service, and every
     /// `bud_garden*` method is answered on the operator listener only.
     garden: Arc<crate::garden::GardenService>,
+}
+
+const MAX_CONSUMED_PAID_VIEWS: usize = 65_536;
+const MAX_IN_FLIGHT_PAID_VIEWS: usize = 4_096;
+
+#[derive(Default)]
+struct ConsumedPaidViews {
+    seen: std::collections::BTreeSet<[u8; 32]>,
+    in_flight: std::collections::BTreeSet<[u8; 32]>,
+    order: VecDeque<[u8; 32]>,
+}
+
+impl ConsumedPaidViews {
+    fn record(&mut self, receipt_id: [u8; 32]) {
+        if !self.seen.insert(receipt_id) {
+            return;
+        }
+        self.order.push_back(receipt_id);
+        while self.order.len() > MAX_CONSUMED_PAID_VIEWS {
+            if let Some(evicted) = self.order.pop_front() {
+                self.seen.remove(&evicted);
+            }
+        }
+    }
+}
+
+/// RAII reservation preventing concurrent `bud_storageGetContent` replay of the
+/// same `receipt_id` across `.await` points. On error or task cancellation the
+/// reservation releases the in-flight slot without burning an unserved receipt.
+struct PaidViewReservation {
+    cache: Arc<Mutex<ConsumedPaidViews>>,
+    receipt_id: Option<[u8; 32]>,
+}
+
+impl PaidViewReservation {
+    fn acquire(
+        cache: &Arc<Mutex<ConsumedPaidViews>>,
+        receipt_id: [u8; 32],
+    ) -> Result<Self, ErrorObjectOwned> {
+        let mut guard = cache.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
+        })?;
+        if guard.seen.contains(&receipt_id) || guard.in_flight.contains(&receipt_id) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "paid view receipt already consumed on this node",
+                None::<()>,
+            ));
+        }
+        if guard.in_flight.len() >= MAX_IN_FLIGHT_PAID_VIEWS {
+            return Err(ErrorObjectOwned::owned(
+                -32005,
+                "too many in-flight paid view requests",
+                None::<()>,
+            ));
+        }
+        guard.in_flight.insert(receipt_id);
+        Ok(Self {
+            cache: Arc::clone(cache),
+            receipt_id: Some(receipt_id),
+        })
+    }
+
+    fn commit(mut self) -> Result<(), ErrorObjectOwned> {
+        let Some(receipt_id) = self.receipt_id.take() else {
+            return Ok(());
+        };
+        let mut guard = self.cache.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "paid view cache lock poisoned", None::<()>)
+        })?;
+        guard.in_flight.remove(&receipt_id);
+        guard.record(receipt_id);
+        Ok(())
+    }
+}
+
+impl Drop for PaidViewReservation {
+    fn drop(&mut self) {
+        if let Some(receipt_id) = self.receipt_id.take() {
+            if let Ok(mut guard) = self.cache.lock() {
+                guard.in_flight.remove(&receipt_id);
+            }
+        }
+    }
 }
 
 /// One dedicated, loopback-only Aptos HTTP listener. It reuses the RPC
@@ -916,6 +1002,7 @@ impl RpcServer {
             security: RpcSecurityConfig::default(),
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            consumed_paid_views: Arc::new(Mutex::new(ConsumedPaidViews::default())),
             eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
@@ -938,6 +1025,7 @@ impl RpcServer {
             security,
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            consumed_paid_views: Arc::new(Mutex::new(ConsumedPaidViews::default())),
             eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
@@ -961,6 +1049,7 @@ impl RpcServer {
             security,
             mode,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            consumed_paid_views: Arc::new(Mutex::new(ConsumedPaidViews::default())),
             eth_filters: Arc::new(Mutex::new(ethereum::filters::FilterPool::new())),
             metrics: None,
             tls: None,
@@ -1536,6 +1625,7 @@ impl RpcServer {
                 "balance": Self::to_hex(leaf.balance),
                 "nonce": Self::to_hex(leaf.nonce),
                 "fracAttos": Self::to_hex(leaf.frac_attos),
+                "authProgramHash": leaf.auth_program_hash.map(Self::bytes32_to_0x),
                 "leafHash": Self::bytes32_to_0x(leaf.leaf_hash),
                 "siblings": leaf
                     .siblings
@@ -1564,6 +1654,7 @@ impl RpcServer {
             "balance": Self::to_hex(bundle.balance),
             "nonce": Self::to_hex(bundle.nonce),
             "fracAttos": Self::to_hex(bundle.frac_attos),
+            "authProgramHash": bundle.auth_program_hash.map(Self::bytes32_to_0x),
             "leafHash": Self::bytes32_to_0x(bundle.leaf_hash),
             "siblings": bundle
                 .siblings
@@ -2274,6 +2365,56 @@ fn parse_hex32_field(hex_str: &str, field_name: &str) -> Result<[u8; 32], ErrorO
     Ok(arr)
 }
 
+fn parse_opt_hex32(hex_str: &str) -> Option<[u8; 32]> {
+    let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    let bytes = hex::decode(clean).ok()?;
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    Some(arr)
+}
+
+fn parse_placement_roots(
+    val: &serde_json::Value,
+) -> Vec<crate::storage::bud3::registry::SymbolRoot> {
+    let Some(items) = val["symbol_roots"].as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|r| {
+            Some(crate::storage::bud3::registry::SymbolRoot {
+                segment: r["segment"].as_u64()?,
+                root: parse_opt_hex32(r["root"].as_str()?)?,
+                first_esi: u32::try_from(r["first_esi"].as_u64()?).ok()?,
+                count: u32::try_from(r["count"].as_u64()?).ok()?,
+                settled: false,
+            })
+        })
+        .collect()
+}
+
+fn parse_placement_shares(val: &serde_json::Value) -> Vec<(u64, u8, u32, u32, [u8; 32])> {
+    let Some(items) = val["shares"].as_array() else {
+        return Vec::new();
+    };
+    let mut shares: Vec<(u64, u8, u32, u32, [u8; 32])> = items
+        .iter()
+        .filter(|s| !s["lost"].as_bool().unwrap_or(false))
+        .filter_map(|s| {
+            let segment = s["segment"].as_u64()?;
+            let rank = match s["class"].as_str()? {
+                "Full" => 0u8,
+                _ => 1u8,
+            };
+            let first_esi = u32::try_from(s["first_esi"].as_u64()?).ok()?;
+            let symbols = u32::try_from(s["symbols"].as_u64()?).ok()?;
+            let holder = parse_opt_hex32(s["validator"].as_str()?)?;
+            Some((segment, rank, first_esi, symbols, holder))
+        })
+        .collect();
+    shares.sort_unstable();
+    shares
+}
+
 /// Parses a signed grant authorisation: `{"ownerPublicKey": "0x…", "signature":
 /// "0x…"}`, the public key being the FIPS 204 ML-DSA-87 key of the account whose
 /// word the mutation is. The address the key derives to is the only identity the
@@ -2495,6 +2636,138 @@ fn view_grant_json(g: &crate::storage::ViewGrant) -> serde_json::Value {
 /// reporting to a sink only one of them has.
 fn fire_three_event(sink: &mut dyn ThreeEventHook, event: ThreeHookEvent) {
     emit_hook(sink, event);
+}
+
+impl RpcServer {
+    async fn hydrate_bud3_target_from_peers(&self, target_key: [u8; 32]) {
+        let Ok(placement) = self
+            .chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Placement(
+                target_key,
+            ))
+            .await
+        else {
+            return;
+        };
+        if placement["status"].as_str() != Some("live") {
+            return;
+        }
+        let Some(symbol_size) = placement["symbol_size"]
+            .as_u64()
+            .and_then(|v| u16::try_from(v).ok())
+        else {
+            return;
+        };
+        let all_roots = parse_placement_roots(&placement);
+        let shares = parse_placement_shares(&placement);
+        for (seg, _, first_esi, symbols, holder) in shares {
+            let Ok(Some(peer_bytes)) = self.chain.validator_peer_id(holder).await else {
+                continue;
+            };
+            let Ok(peer_id) = crate::network::bud3_protocol::ed25519_key_to_peer_id(&peer_bytes)
+            else {
+                continue;
+            };
+            if peer_id == self.node.peer_id {
+                continue;
+            }
+            let seg_roots: Vec<crate::storage::bud3::registry::SymbolRoot> = all_roots
+                .iter()
+                .filter(|r| r.segment == seg)
+                .copied()
+                .collect();
+            let mut cursor = first_esi;
+            let mut remaining = symbols;
+            while remaining > 0 {
+                let chunk =
+                    remaining.min(crate::storage::bud3::symbol_protocol::MAX_SYMBOLS_PER_REQUEST);
+                let local_complete = matches!(
+                    self.chain
+                        .bud3_get_symbols(holder, target_key, seg, cursor, chunk)
+                        .await,
+                    Ok(Ok(page)) if u32::try_from(page.items.len()).ok() == Some(chunk)
+                );
+                if !local_complete {
+                    if let Ok(items) = self
+                        .node
+                        .bud3_fetch_symbols(
+                            peer_id,
+                            crate::network::bud3_protocol::Bud3SymbolsRequest {
+                                holder,
+                                range: crate::storage::bud3::symbol_protocol::SymbolRangeRequest {
+                                    object: target_key,
+                                    segment: seg,
+                                    first_esi: cursor,
+                                    count: chunk,
+                                },
+                            },
+                            symbol_size,
+                            seg_roots.clone(),
+                        )
+                        .await
+                    {
+                        if !items.is_empty() {
+                            let _ = self
+                                .chain
+                                .bud3_store_verified_symbols(holder, target_key, seg, items)
+                                .await;
+                        }
+                    }
+                }
+                remaining -= chunk;
+                let Some(next) = cursor.checked_add(chunk) else {
+                    break;
+                };
+                cursor = next;
+            }
+        }
+    }
+
+    async fn hydrate_bud3_object_from_peers(&self, object: [u8; 32]) {
+        let mut cur = object;
+        let mut seen = std::collections::BTreeSet::from([cur]);
+        let mut live_info = serde_json::Value::Null;
+        for _ in 0..16 {
+            let Ok(info) = self
+                .chain
+                .bud3(crate::storage::bud3::registry::Bud3Query::Object(cur))
+                .await
+            else {
+                return;
+            };
+            if info["status"].as_str() == Some("replaced") {
+                let Some(next_key) = info["replaced_by"].as_str().and_then(parse_opt_hex32) else {
+                    break;
+                };
+                if !seen.insert(next_key) {
+                    break;
+                }
+                cur = next_key;
+                continue;
+            }
+            live_info = info;
+            break;
+        }
+        let mut targets = vec![cur];
+        if let Some(pending_next) = live_info["replaced_by"].as_str().and_then(parse_opt_hex32) {
+            if !targets.contains(&pending_next) {
+                targets.push(pending_next);
+            }
+        }
+        if live_info["custody_confirmed"].as_bool() == Some(false) {
+            if let Some(fb) = live_info["pending_fallback_commitment"]
+                .as_str()
+                .and_then(parse_opt_hex32)
+            {
+                if !targets.contains(&fb) {
+                    targets.push(fb);
+                }
+            }
+        }
+        for target_key in targets {
+            self.hydrate_bud3_target_from_peers(target_key).await;
+        }
+    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -2966,10 +3239,38 @@ impl BudlumApiServer for RpcServer {
                 )
             })
         };
+        let hub = crate::settlement::FinalityGuarantee::settlement_hub();
+        let finality_guarantee =
+            crate::settlement::FinalityGuarantee::for_external_spec(&entry.spec);
+        let economic_security = crate::settlement::EconomicSecurityBound::derive(
+            &finality_guarantee,
+            profile.bond_atoms,
+            profile.bond_atoms,
+        );
+        let value_outflow_open = economic_security
+            .check_value_outflow_conservation(0, 1)
+            .is_ok();
+        let composed_with_hub: crate::settlement::RouteFinalityBound =
+            crate::settlement::compose_cross_domain_route(&finality_guarantee, &hub, &hub);
+        let reversibility_kind = match composed_with_hub.bottleneck_reversibility {
+            crate::settlement::FinalityReversibility::CryptographicValidity => "validity",
+            crate::settlement::FinalityReversibility::DeterministicQuorum => "deterministic-quorum",
+            crate::settlement::FinalityReversibility::ProbabilisticWork { .. } => {
+                "probabilistic-work"
+            }
+            crate::settlement::FinalityReversibility::DataAvailabilitySampled { .. } => {
+                "da-sampled"
+            }
+        };
         Ok(serde_json::json!({
             "profile": to_val("Profile", serde_json::to_value(&profile))?,
             "intakeEntry": to_val("Intake entry", serde_json::to_value(&entry))?,
             "descriptor": to_val("Descriptor", serde_json::to_value(&descriptor))?,
+            "universalFinality": to_val("Universal finality", serde_json::to_value(finality_guarantee))?,
+            "economicSecurity": to_val("Economic security", serde_json::to_value(economic_security))?,
+            "valueOutflowOpen": value_outflow_open,
+            "settlementComposition": to_val("Settlement composition", serde_json::to_value(composed_with_hub))?,
+            "bottleneckReversibilityKind": reversibility_kind,
         }))
     }
 
@@ -4441,6 +4742,38 @@ impl BudlumApiServer for RpcServer {
         Ok(serde_json::json!({ "bannedPeers": banned }))
     }
 
+    async fn admin_update_sentries(
+        &self,
+        sentries: Vec<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminUpdateSentries")?;
+        let diff = self
+            .node
+            .admin_update_sentries(sentries)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({
+            "added": diff.added.iter().map(|(id, addr)| serde_json::json!({
+                "peerId": id.to_string(),
+                "addr": addr.to_string(),
+            })).collect::<Vec<_>>(),
+            "removed": diff.removed.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "activeSentries": diff.active_sentries,
+        }))
+    }
+
+    async fn admin_sentry_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminSentryStatus")?;
+        let status = self
+            .node
+            .admin_sentry_status()
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
+        serde_json::to_value(status).map_err(|e| {
+            ErrorObjectOwned::owned(-32000, format!("serialize status: {e}"), None::<()>)
+        })
+    }
+
     // === B.U.D. Storage RPC implementations ====================
     // This surface keeps temporary grant and reveal operations. Legacy
     // manifest, deal, challenge, and encoding RPCs are not registered.
@@ -4910,7 +5243,19 @@ impl BudlumApiServer for RpcServer {
         // The chain actor reads the record and runs it through the
         // B.U.D. 3.0 view. `bytes` is null when this node cannot rebuild the
         // object from the symbols it can reach; `view_error` says why.
-        Ok(match self.chain.bns_resolve_content(name.clone()).await {
+        let mut content_view = self.chain.bns_resolve_content(name.clone()).await;
+        if !needs_grant {
+            if let Some((ref content, Err(_))) = content_view {
+                if content.content_id.kind
+                    == crate::storage::bud3::content_id::ContentIdKind::Public
+                {
+                    self.hydrate_bud3_object_from_peers(content.object_commitment)
+                        .await;
+                    content_view = self.chain.bns_resolve_content(name.clone()).await;
+                }
+            }
+        }
+        Ok(match content_view {
             None => serde_json::Value::Null,
             Some((content, viewed)) => {
                 let (bytes, view_error) = match viewed {
@@ -5120,6 +5465,202 @@ impl BudlumApiServer for RpcServer {
         };
         serde_json::to_value(asset)
             .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn get_universal_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let catalog = crate::unification::UniversalDomainCatalog::with_canonical_ecosystems();
+        let domains = catalog.list();
+        let root = hex::encode(catalog.catalog_root());
+        Ok(serde_json::json!({
+            "count": catalog.len(),
+            "catalog_root": format!("0x{root}"),
+            "domains": domains,
+        }))
+    }
+
+    async fn quote_universal_payment(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        #[derive(serde::Deserialize)]
+        struct QuotePaymentRpcRequest {
+            intent: crate::unification::UniversalPaymentIntent,
+            balances: Vec<crate::unification::DomainTokenBalance>,
+            quotes: Vec<crate::unification::LiquidityQuote>,
+            now_unix_secs: u64,
+        }
+
+        let req: QuotePaymentRpcRequest = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid universal payment quote request: {e}"),
+                None::<()>,
+            )
+        })?;
+        let receipt = crate::unification::UniversalPaymentRouter::quote_payment(
+            &req.intent,
+            &req.balances,
+            &req.quotes,
+            req.now_unix_secs,
+        )
+        .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        serde_json::to_value(receipt)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn compose_execution_outputs(
+        &self,
+        plan: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let parsed: crate::unification::OutputCompositionPlan = serde_json::from_value(plan)
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid output composition plan: {e}"),
+                    None::<()>,
+                )
+            })?;
+        let bundle = crate::unification::OutputComposer::compose(&parsed)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        serde_json::to_value(bundle)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn resolve_unified_storage(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        #[derive(serde::Deserialize)]
+        struct ResolveStorageRpcRequest {
+            uri: String,
+            objects: Vec<crate::unification::UnifiedContentRecord>,
+            #[serde(default)]
+            bns_bindings: std::collections::BTreeMap<String, [u8; 32]>,
+            #[serde(default = "default_rpc_storage_strength")]
+            min_strength: crate::unification::VerificationStrength,
+            #[serde(default)]
+            asset_path: Option<String>,
+            #[serde(default)]
+            verify_payload_hex: Option<String>,
+        }
+        const fn default_rpc_storage_strength() -> crate::unification::VerificationStrength {
+            crate::unification::VerificationStrength::AttestedDeal
+        }
+
+        let req: ResolveStorageRpcRequest = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid unified storage resolve request: {e}"),
+                None::<()>,
+            )
+        })?;
+        // Keep one RPC call strictly bounded so a single request cannot seed
+        // thousands of transient records.
+        if req.objects.len() > 64 || req.bns_bindings.len() > 64 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request exceeds 64-entry object or BNS binding limit",
+                None::<()>,
+            ));
+        }
+        let mut fabric = crate::unification::UnifiedStorageFabric::new();
+        for obj in req.objects {
+            fabric
+                .register_object(obj)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        }
+        for (name, digest) in req.bns_bindings {
+            fabric
+                .bind_bns_name(&name, digest)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        }
+        let verify_payload = |sha3_digest: &[u8; 32]| -> Result<(), ErrorObjectOwned> {
+            if let Some(payload_hex) = req.verify_payload_hex.as_deref() {
+                let trimmed = payload_hex.strip_prefix("0x").unwrap_or(payload_hex);
+                if trimmed.len() > 131_072 {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "verify_payload_hex exceeds 64 KiB limit",
+                        None::<()>,
+                    ));
+                }
+                let payload_bytes = hex::decode(trimmed).map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("Invalid verify_payload_hex: {e}"),
+                        None::<()>,
+                    )
+                })?;
+                if !fabric.verify_resolved_bytes(sha3_digest, &payload_bytes) {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "candidate payload bytes failed SHA3-256/SHA-256 digest verification",
+                        None::<()>,
+                    ));
+                }
+            }
+            Ok(())
+        };
+        if let Some(asset_path) = req.asset_path {
+            let asset: crate::unification::Web3SiteAsset = fabric
+                .resolve_web3_asset(&req.uri, &asset_path, req.min_strength)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+            verify_payload(&asset.resolution.sha3_256_digest)?;
+            return serde_json::to_value(asset)
+                .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>));
+        }
+        let resolved = fabric
+            .resolve(&req.uri, req.min_strength)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        verify_payload(&resolved.sha3_256_digest)?;
+        serde_json::to_value(resolved)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn encode_cross_vm_call(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let req: crate::unification::CrossVmCallRequest =
+            serde_json::from_value(request).map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid cross-VM call request: {e}"),
+                    None::<()>,
+                )
+            })?;
+        let catalog = crate::unification::UniversalDomainCatalog::with_canonical_ecosystems();
+        let envelope = crate::unification::CrossVmBridge::encode_call(&catalog, &req)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        crate::unification::CrossVmBridge::verify_envelope(&envelope)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))?;
+        serde_json::to_value(envelope)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn verify_universal_bundle(
+        &self,
+        bundle: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let parsed: crate::unification::UnifiedOutputBundle = serde_json::from_value(bundle)
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid universal output bundle: {e}"),
+                    None::<()>,
+                )
+            })?;
+        crate::unification::OutputComposer::verify_bundle(&parsed)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        Ok(serde_json::json!({
+            "valid": true,
+            "planId": parsed.plan_id,
+            "stepCount": parsed.execution_order.len(),
+            "bindingCount": parsed.resolved_bindings.len(),
+            "totalGasBgu": parsed.total_gas_bgu,
+            "stepsMerkleRoot": format!("0x{}", hex::encode(parsed.steps_merkle_root)),
+            "bundleRoot": format!("0x{}", hex::encode(parsed.bundle_root)),
+        }))
     }
 
     async fn subscribe(
@@ -6340,6 +6881,12 @@ impl BudlumApiServer for RpcServer {
     async fn social_get_post(&self, id: u64) -> Result<serde_json::Value, ErrorObjectOwned> {
         if let Some(nft) = self.chain.nft_get(id).await {
             let author_bud_name = self.chain.bns_reverse_resolve(nft.owner).await;
+            let bud3_nft_id = crate::socialfi::nft_folders::derive_bud3_nft_id(nft.id);
+            let bud3 = self
+                .chain
+                .bud3(crate::storage::bud3::registry::Bud3Query::Nft(bud3_nft_id))
+                .await
+                .unwrap_or(serde_json::Value::Null);
             Ok(serde_json::json!({
                 "id": nft.id,
                 "owner": Self::to_0x_hash(nft.owner.to_hex()),
@@ -6347,6 +6894,8 @@ impl BudlumApiServer for RpcServer {
                 "minted_at": nft.minted_at_epoch,
                 "author": nft.author_name,
                 "author_bud_name": author_bud_name,
+                "bud3_nft_id": Self::bytes32_to_0x(bud3_nft_id),
+                "bud3": bud3,
             }))
         } else {
             Ok(serde_json::json!(null))
@@ -6372,15 +6921,28 @@ impl BudlumApiServer for RpcServer {
         });
         let page = page_list_response(nfts, offset, limit)?;
         let author_bud_name = self.chain.bns_reverse_resolve(addr).await;
+        let bud3_nft_ids: Vec<[u8; 32]> = page
+            .iter()
+            .map(|nft| crate::socialfi::nft_folders::derive_bud3_nft_id(nft.id))
+            .collect();
+        let bud3_bindings = self
+            .chain
+            .bud3_nfts(bud3_nft_ids.clone())
+            .await
+            .unwrap_or_else(|_| vec![serde_json::Value::Null; bud3_nft_ids.len()]);
         let list: Vec<_> = page
             .into_iter()
-            .map(|nft| {
+            .zip(bud3_nft_ids)
+            .zip(bud3_bindings)
+            .map(|((nft, bud3_nft_id), bud3)| {
                 serde_json::json!({
                     "id": nft.id,
                     "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
                     "minted_at": nft.minted_at_epoch,
                     "author": nft.author_name,
                     "author_bud_name": author_bud_name,
+                    "bud3_nft_id": Self::bytes32_to_0x(bud3_nft_id),
+                    "bud3": bud3,
                 })
             })
             .collect();
@@ -6397,9 +6959,20 @@ impl BudlumApiServer for RpcServer {
                 e.insert(handle);
             }
         }
+        let bud3_nft_ids: Vec<[u8; 32]> = nfts
+            .iter()
+            .map(|nft| crate::socialfi::nft_folders::derive_bud3_nft_id(nft.id))
+            .collect();
+        let bud3_bindings = self
+            .chain
+            .bud3_nfts(bud3_nft_ids.clone())
+            .await
+            .unwrap_or_else(|_| vec![serde_json::Value::Null; bud3_nft_ids.len()]);
         let list: Vec<_> = nfts
             .into_iter()
-            .map(|nft| {
+            .zip(bud3_nft_ids)
+            .zip(bud3_bindings)
+            .map(|((nft, bud3_nft_id), bud3)| {
                 let author_bud_name = resolved_handles.get(&nft.owner).cloned().flatten();
                 serde_json::json!({
                     "id": nft.id,
@@ -6408,6 +6981,8 @@ impl BudlumApiServer for RpcServer {
                     "minted_at": nft.minted_at_epoch,
                     "author": nft.author_name,
                     "author_bud_name": author_bud_name,
+                    "bud3_nft_id": Self::bytes32_to_0x(bud3_nft_id),
+                    "bud3": bud3,
                 })
             })
             .collect();
@@ -8477,6 +9052,331 @@ impl BudlumApiServer for RpcServer {
             .map_err(|_| bud3_actor_unavailable())
     }
 
+    async fn storage_get_content(
+        &self,
+        payer: String,
+        object: String,
+        receipt_id: String,
+        fee_paid_atoms: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let payer = parse_hex32_field(&payer, "payer")?;
+        let object = parse_hex32_field(&object, "object")?;
+        let receipt_id = parse_hex32_field(&receipt_id, "receipt_id")?;
+        if fee_paid_atoms < crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "fee_paid_atoms must be at least {}",
+                    crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS
+                ),
+                None::<()>,
+            ));
+        }
+        let reservation = PaidViewReservation::acquire(&self.consumed_paid_views, receipt_id)?;
+        let receipt = crate::storage::bud3::view::PaidViewReceipt {
+            payer,
+            object,
+            receipt_id,
+            fee_paid_atoms,
+        };
+        let mut decode_res = self
+            .chain
+            .bud3_get_content(receipt)
+            .await
+            .map_err(|_| bud3_actor_unavailable())?;
+        if matches!(
+            decode_res,
+            Err(crate::storage::bud3::view::ViewBud3Error::InsufficientNetworkSymbols(_))
+                | Err(crate::storage::bud3::view::ViewBud3Error::Pipeline(
+                    crate::storage::bud3::pipeline::PipelineError::SegmentMissing(_)
+                ))
+        ) {
+            self.hydrate_bud3_object_from_peers(object).await;
+            decode_res = self
+                .chain
+                .bud3_get_content(receipt)
+                .await
+                .map_err(|_| bud3_actor_unavailable())?;
+        }
+        let bytes = decode_res.map_err(|e| match e {
+            crate::storage::bud3::view::ViewBud3Error::SealedFallbackForbidden => {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    "G8 paid fallback decode is forbidden for sealed objects",
+                    None::<()>,
+                )
+            }
+            crate::storage::bud3::view::ViewBud3Error::UnpaidFallbackView => {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    "paid view receipt missing, expired, or insufficient",
+                    None::<()>,
+                )
+            }
+            crate::storage::bud3::view::ViewBud3Error::UnknownObject => ErrorObjectOwned::owned(
+                -32602,
+                "unknown or tombstoned B.U.D. 3.0 object",
+                None::<()>,
+            ),
+            other => ErrorObjectOwned::owned(
+                -32000,
+                format!("B.U.D. 3.0 fallback decode failed: {other:?}"),
+                None::<()>,
+            ),
+        })?;
+        reservation.commit()?;
+        Ok(serde_json::json!({
+            "object": hex::encode(object),
+            "content_hex": hex::encode(&bytes),
+            "content_len": bytes.len(),
+        }))
+    }
+
+    async fn storage_get_symbols(
+        &self,
+        holder: String,
+        object: String,
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let holder = parse_hex32_field(&holder, "holder")?;
+        let object = parse_hex32_field(&object, "object")?;
+        if count == 0 || count > crate::storage::bud3::symbol_protocol::MAX_SYMBOLS_PER_REQUEST {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "count must be within 1..={}",
+                    crate::storage::bud3::symbol_protocol::MAX_SYMBOLS_PER_REQUEST
+                ),
+                None::<()>,
+            ));
+        }
+        let mut page = self
+            .chain
+            .bud3_get_symbols(holder, object, segment, first_esi, count)
+            .await
+            .map_err(|_| bud3_actor_unavailable())?
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        if page.items.is_empty() {
+            if let Ok(Some(peer_bytes)) = self.chain.validator_peer_id(holder).await {
+                if let Ok(peer_id) =
+                    crate::network::bud3_protocol::ed25519_key_to_peer_id(&peer_bytes)
+                {
+                    if peer_id != self.node.peer_id {
+                        if let Ok(remote_items) = self
+                            .node
+                            .bud3_fetch_symbols(
+                                peer_id,
+                                crate::network::bud3_protocol::Bud3SymbolsRequest {
+                                    holder,
+                                    range:
+                                        crate::storage::bud3::symbol_protocol::SymbolRangeRequest {
+                                            object,
+                                            segment,
+                                            first_esi,
+                                            count,
+                                        },
+                                },
+                                page.symbol_size,
+                                page.roots.clone(),
+                            )
+                            .await
+                        {
+                            page.items = remote_items;
+                        }
+                    }
+                }
+            }
+        }
+        let items: Vec<serde_json::Value> = page
+            .items
+            .into_iter()
+            .map(|item| {
+                let sym_hex = hex::encode(&item.symbol.data);
+                serde_json::json!({
+                    "symbol": item.symbol,
+                    "proof": item.proof,
+                    "symbol_hex": sym_hex,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "holder": hex::encode(holder),
+            "object": hex::encode(object),
+            "segment": segment,
+            "first_esi": first_esi,
+            "count": count,
+            "symbol_size": page.symbol_size,
+            "symbol_roots": page.roots.iter().map(|r| serde_json::json!({
+                "segment": r.segment,
+                "root": hex::encode(r.root),
+                "first_esi": r.first_esi,
+                "count": r.count,
+            })).collect::<Vec<_>>(),
+            "items": items,
+        }))
+    }
+
+    async fn storage_get_placement(
+        &self,
+        commitment: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = parse_hex32_field(&commitment, "object commitment")?;
+        self.chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Placement(key))
+            .await
+            .map_err(|_| bud3_actor_unavailable())
+    }
+
+    async fn storage_get_nft_object(
+        &self,
+        nft_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if nft_id.is_empty() || nft_id != nft_id.trim() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid nft_id: empty or padded identifier",
+                None::<()>,
+            ));
+        }
+        let (bud3_nft, social_id) = if nft_id.starts_with("0x")
+            || (nft_id.len() == 64 && nft_id.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            (parse_hex32_field(&nft_id, "nft_id")?, None)
+        } else {
+            let id = nft_id.parse::<u64>().map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid nft_id (expected u64 or 32-byte hex): {e}"),
+                    None::<()>,
+                )
+            })?;
+            (
+                crate::socialfi::nft_folders::derive_bud3_nft_id(id),
+                Some(id),
+            )
+        };
+        let mut val = self
+            .chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Nft(bud3_nft))
+            .await
+            .map_err(|_| bud3_actor_unavailable())?;
+        if let Some(id) = social_id {
+            let social_nft = self.chain.nft_get(id).await;
+            if let Some(map) = val.as_object_mut() {
+                map.insert("socialfi_id".to_string(), serde_json::json!(id));
+                if let Some(nft) = social_nft {
+                    map.insert(
+                        "socialfi_nft".to_string(),
+                        serde_json::json!({
+                            "id": nft.id,
+                            "owner": Self::to_0x_hash(nft.owner.to_hex()),
+                            "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                            "minted_at": nft.minted_at_epoch,
+                            "author": nft.author_name,
+                        }),
+                    );
+                }
+            } else if let Some(nft) = social_nft {
+                val = serde_json::json!({
+                    "status": "socialfi_only",
+                    "nft_id": hex::encode(bud3_nft),
+                    "socialfi_id": id,
+                    "owner": Self::to_0x_hash(nft.owner.to_hex()),
+                    "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                    "minted_at": nft.minted_at_epoch,
+                    "author": nft.author_name,
+                });
+            }
+        }
+        Ok(val)
+    }
+
+    async fn storage_get_grant(
+        &self,
+        grant_tag: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let tag = parse_hex32_field(&grant_tag, "grant_tag")?;
+        self.chain
+            .bud3(crate::storage::bud3::registry::Bud3Query::Grant(tag))
+            .await
+            .map_err(|_| bud3_actor_unavailable())
+    }
+
+    async fn storage_store_verified_symbols(
+        &self,
+        holder: String,
+        object: String,
+        segment: u64,
+        items: Vec<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_storageStoreVerifiedSymbols")?;
+        let holder = parse_hex32_field(&holder, "holder")?;
+        let object = parse_hex32_field(&object, "object")?;
+        let max_items =
+            usize::try_from(crate::storage::bud3::symbol_protocol::MAX_SYMBOLS_PER_REQUEST)
+                .unwrap_or(64);
+        if items.is_empty() || items.len() > max_items {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("items length must be within 1..={max_items}"),
+                None::<()>,
+            ));
+        }
+        let mut decoded = Vec::with_capacity(items.len());
+        for raw in items {
+            let item: crate::storage::bud3::symbol_protocol::VerifiedSymbolItem =
+                serde_json::from_value(raw).map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("Invalid VerifiedSymbolItem JSON: {e}"),
+                        None::<()>,
+                    )
+                })?;
+            decoded.push(item);
+        }
+        let stored = self
+            .chain
+            .bud3_store_verified_symbols(holder, object, segment, decoded.clone())
+            .await
+            .map_err(|_| bud3_actor_unavailable())?
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        let mut remote_pushed: Option<usize> = None;
+        let mut remote_error: Option<String> = None;
+        if let Ok(Some(peer_bytes)) = self.chain.validator_peer_id(holder).await {
+            if let Ok(peer_id) = crate::network::bud3_protocol::ed25519_key_to_peer_id(&peer_bytes)
+            {
+                if peer_id != self.node.peer_id {
+                    match self
+                        .node
+                        .bud3_push_custody(
+                            peer_id,
+                            crate::network::bud3_protocol::Bud3CustodyRequest {
+                                holder,
+                                object,
+                                segment,
+                                items: decoded,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(count) => remote_pushed = Some(count),
+                        Err(err) => remote_error = Some(err),
+                    }
+                }
+            }
+        }
+        Ok(serde_json::json!({
+            "stored": stored,
+            "remote_pushed": remote_pushed,
+            "remote_error": remote_error,
+            "holder": hex::encode(holder),
+            "object": hex::encode(object),
+            "segment": segment,
+        }))
+    }
+
     async fn list_relays(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.chain
             .validator_directory(crate::validators::DirectoryQuery::Relays)
@@ -8517,24 +9417,46 @@ impl BudlumApiServer for RpcServer {
             .await
             .into_iter()
             .find(|domain| domain.id == domain_id);
+        let pq_enforced = self.chain.get_chain_id().await
+            == crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value();
         match domain {
-            Some(domain) => Ok(serde_json::json!({
-                "domainId": domain.id,
-                "registered": true,
-                "consensusKind": format!("{:?}", domain.kind),
-                "status": format!("{:?}", domain.status),
-                "domainChainId": Self::to_hex(domain.domain_chain_id),
-                "operator": domain.operator.map(|a| Self::to_0x_hash(a.to_hex())),
-                "operatorBond": Self::to_hex(domain.operator_bond),
-                "finalityAdapter": domain.finality_adapter,
-                "bridgeEnabled": domain.bridge_enabled,
-                "minConfirmations": Self::to_hex(domain.min_confirmations),
-                "lastCommittedHeight": Self::to_hex(domain.last_committed_height),
-                "lastCommittedHash": Self::bytes32_to_0x(domain.last_committed_hash),
-                "validatorSetHash": Self::bytes32_to_0x(domain.validator_set_hash),
-                "quantumClass": facts["quantumClass"].clone(),
-                "observedSchemes": facts["observedSchemes"].clone(),
-            })),
+            Some(domain) => {
+                let hub = crate::settlement::FinalityGuarantee::settlement_hub();
+                let guarantee =
+                    crate::settlement::FinalityGuarantee::for_domain(&domain, pq_enforced);
+                let route_bound: crate::settlement::RouteFinalityBound =
+                    crate::settlement::compose_cross_domain_route(&guarantee, &hub, &hub);
+                let economic_security = crate::settlement::EconomicSecurityBound::derive(
+                    &guarantee,
+                    u128::from(domain.operator_bond),
+                    u128::from(domain.operator_bond),
+                );
+                Ok(serde_json::json!({
+                    "domainId": domain.id,
+                    "registered": true,
+                    "consensusKind": format!("{:?}", domain.kind),
+                    "status": format!("{:?}", domain.status),
+                    "domainChainId": Self::to_hex(domain.domain_chain_id),
+                    "operator": domain.operator.map(|a| Self::to_0x_hash(a.to_hex())),
+                    "operatorBond": Self::to_hex(domain.operator_bond),
+                    "finalityAdapter": domain.finality_adapter,
+                    "bridgeEnabled": domain.bridge_enabled,
+                    "minConfirmations": Self::to_hex(domain.min_confirmations),
+                    "lastCommittedHeight": Self::to_hex(domain.last_committed_height),
+                    "lastCommittedHash": Self::bytes32_to_0x(domain.last_committed_hash),
+                    "validatorSetHash": Self::bytes32_to_0x(domain.validator_set_hash),
+                    "quantumClass": facts["quantumClass"].clone(),
+                    "observedSchemes": facts["observedSchemes"].clone(),
+                    "universalFinality": serde_json::to_value(guarantee)
+                        .unwrap_or(serde_json::Value::Null),
+                    "economicSecurity": serde_json::to_value(economic_security)
+                        .unwrap_or(serde_json::Value::Null),
+                    "settlementRouteBound": serde_json::to_value(route_bound)
+                        .unwrap_or(serde_json::Value::Null),
+                }))
+            }
             None => Ok(serde_json::json!({
                 "domainId": domain_id,
                 "registered": false,
@@ -9600,10 +10522,9 @@ mod tests {
     /// the fee a `Prepare` template is given must be one the chain
     /// will accept, not the `fee = 0` the template struct was built with.
     ///
-    /// The finding is that 14 `Prepare` handlers returned `Transaction::new(.)`
-    /// verbatim, so the wallet signed a transaction with nonce 0 and fee 0 and
-    /// the node refused it at admission for exactly the two fields the RPC had
-    /// left at their defaults. The canary is the fixture: the template starts at
+    /// All 14 `Prepare` handlers must populate transaction envelope fields,
+    /// so the wallet signs a transaction with valid nonce and fee and
+    /// the node admits it correctly. The canary is the fixture: the template starts at
     /// `fee = 500, max_fee = 500, nonce = 0` and the chain reports a required
     /// fee of 13 and a nonce of 7, so an unwired template keeps 500/0.
     ///
@@ -9628,7 +10549,7 @@ mod tests {
             }
         });
 
-        // Every template starts with the two fields the finding names unset,
+        // Every template starts with fields explicitly set,
         // plus a fee that is neither the floor nor zero: if `finish_template`
         // is not on the path, the stale 500 survives and this fails.
         let mut stale = crate::core::transaction::Transaction::new(
@@ -10291,8 +11212,7 @@ mod tests {
 /// The earlier shape compared the two buffers and, on a length mismatch,
 /// dummy-compared `b` against itself (`a_b.ct_eq(a_b)`). Those are the same
 /// pointer, so LLVM at `-C opt-level=3` can fold the whole loop away and the
-/// mismatch path becomes measurably faster than the match path; the `/t/ = 45,78`
-/// timing ratio in the finding is that gap. The rule now has a correctness
+/// mismatch path becomes measurably faster than the match path. The rule now has a correctness
 /// half and a shape half, and the shape half is what keeps the fold away.
 #[cfg(test)]
 mod api_key_comparison_tests {
@@ -10352,7 +11272,7 @@ mod api_key_comparison_tests {
 /// the client identity behind a trusted proxy is the address the
 /// proxy itself appended, and the IP quota is keyed on that identity.
 ///
-/// The finding has two halves and both were exploitable on their own:
+/// Multi-part security boundaries enforce strict bounds on each condition:
 ///
 /// * `extract_client_ip` trusted the **leftmost** `X-Forwarded-For` entry, so
 ///   a client could set the header and pick its own identity, walk straight
@@ -10397,7 +11317,7 @@ mod client_identity_tests {
             "the rightmost entry is the one the trusted proxy appended"
         );
         // The forged entry would have passed the allow-list; the real one does
-        // not, which is the point of the finding.
+        // not, ensuring fail-closed rejection.
         assert!(!is_ip_allowed(&config, &spoofed));
 
         // The quota is keyed on the real identity: one request is admitted and
@@ -10953,6 +11873,50 @@ mod view_claim_tests {
         assert!(
             limiter.per_source.lock().unwrap().is_empty(),
             "released sources must leave zero residual entries"
+        );
+    }
+}
+
+#[cfg(test)]
+mod paid_view_reservation_tests {
+    use super::{ConsumedPaidViews, PaidViewReservation};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn paid_view_reservation_blocks_concurrent_replay_and_rolls_back_on_drop() {
+        let cache = Arc::new(Mutex::new(ConsumedPaidViews::default()));
+        let receipt_id = [0x42u8; 32];
+
+        // First caller reserves the receipt before awaiting backend decode.
+        let first = PaidViewReservation::acquire(&cache, receipt_id)
+            .expect("initial reservation must succeed");
+
+        // A concurrent caller presenting the same receipt_id must be rejected
+        // before the first request completes.
+        let dup_err = PaidViewReservation::acquire(&cache, receipt_id)
+            .err()
+            .expect("concurrent duplicate receipt_id must fail closed");
+        assert!(
+            dup_err.message().contains("already consumed"),
+            "unexpected concurrent error: {}",
+            dup_err.message()
+        );
+
+        // If the first call errors or is cancelled, dropping releases in-flight
+        // without burning the unserved receipt.
+        drop(first);
+        let retry = PaidViewReservation::acquire(&cache, receipt_id)
+            .expect("cancelled/errored reservation must roll back cleanly");
+        retry.commit().expect("commit must mark receipt consumed");
+
+        // Once committed, subsequent replay is permanently refused.
+        let replay_err = PaidViewReservation::acquire(&cache, receipt_id)
+            .err()
+            .expect("committed receipt_id must be rejected on replay");
+        assert!(
+            replay_err.message().contains("already consumed"),
+            "unexpected replay error: {}",
+            replay_err.message()
         );
     }
 }

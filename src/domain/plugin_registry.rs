@@ -146,6 +146,8 @@ impl DomainPluginRegistry {
         &self.replacements
     }
 
+    /// WIRING: Consulted by `Blockchain::validate_and_extract_domain_block` for
+    /// fail-closed per-domain block validation and commitment extraction.
     #[must_use]
     pub fn get(&self, domain_id: DomainId) -> Option<&Arc<dyn ConsensusDomainPlugin>> {
         self.plugins.get(&domain_id)
@@ -156,11 +158,13 @@ impl DomainPluginRegistry {
         self.plugins.keys().copied().collect()
     }
 
+    /// Convenience: diagnostic cardinality of registered consensus plugins.
     #[must_use]
     pub fn len(&self) -> usize {
         self.plugins.len()
     }
 
+    /// Convenience: empty-registry predicate paired with [`Self::len`].
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
@@ -233,5 +237,70 @@ mod tests {
         // And after the change, the plugin read back must be the new one; keeping
         // a trail while continuing the old behaviour would make the trail lie.
         assert!(registry.get(7).is_some());
+    }
+
+    #[test]
+    fn blockchain_domain_plugin_gate_validates_pospace_block_and_fails_closed_when_missing() {
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pospace::{PoSpaceConfig, PoSpaceEngine};
+        use crate::consensus::pow::PoWEngine;
+        use crate::consensus::ConsensusEngine;
+        use crate::core::block::Block;
+        use crate::core::chain_config::Network;
+        use crate::domain::plugin::{default_domain, PospaceDomainPlugin};
+        use crate::domain::types::ConsensusKind;
+
+        let mut bc = Blockchain::new(
+            Arc::new(PoWEngine::new(1)),
+            None,
+            Network::Devnet.chain_id().value(),
+            None,
+        );
+        let domain_id = 777;
+        let dom = default_domain(
+            domain_id,
+            ConsensusKind::Pospace,
+            77_700,
+            "pospace-plot-v1",
+            1,
+        );
+        bc.state
+            .settlement
+            .domains
+            .register(dom)
+            .expect("register pospace domain");
+
+        let miner_engine = Arc::new(PoSpaceEngine::new(PoSpaceConfig::default()));
+        let leaves: Vec<[u8; 32]> = (1u8..=8).map(|b| [b; 32]).collect();
+        miner_engine
+            .register_committed_plot("miner-a", 8_000_000, leaves)
+            .expect("commit Merkle plot");
+        let mut block = Block::new(1, "0".repeat(64), Vec::new());
+        miner_engine
+            .prepare_block(&mut block, &bc.state)
+            .expect("prepare Merkle-proven PoSpace block");
+
+        // B-0046: without a registered plugin the gate MUST fail closed.
+        assert!(bc
+            .validate_and_extract_domain_block(domain_id, &block, &[], 1)
+            .is_err());
+
+        // With the matching plugin installed, valid block validates & yields canonical commitment,
+        // while a tampered Merkle witness is rejected before extraction.
+        bc.plugin_registry
+            .register(domain_id, Arc::new(PospaceDomainPlugin::new(miner_engine)))
+            .expect("register plugin");
+        let commitment = bc
+            .validate_and_extract_domain_block(domain_id, &block, &[], 1)
+            .expect("valid PoSpace domain block extracts commitment");
+        assert_eq!(commitment.domain_id, domain_id);
+        assert_eq!(commitment.domain_height, 1);
+
+        let mut tampered = block;
+        tampered.vrf_proof[90] ^= 0xff;
+        tampered.hash = tampered.calculate_hash();
+        assert!(bc
+            .validate_and_extract_domain_block(domain_id, &tampered, &[], 2)
+            .is_err());
     }
 }

@@ -54,10 +54,10 @@ pub const fn codec_is_registered(id: CodecId) -> bool {
     bud_codec::registry::is_registered(id)
 }
 
-/// Codecs open on testnet: all 26 registered non-reserved codecs (`0..=8` and `10..=26`).
+/// Whether new public-testnet objects may select this codec at launch.
 #[must_use]
 pub const fn codec_is_open_on_testnet(id: CodecId) -> bool {
-    bud_codec::is_open(id)
+    bud_codec::is_open_on_testnet(id)
 }
 
 /// The header flags.
@@ -467,17 +467,22 @@ impl Object {
         Ok(content)
     }
 
-    /// Enforce testnet admission rules on a parsed object: all registered open
-    /// codecs (`0..=8, 10..=26`), `Flags::LIVE` (with `prev_object`), and
-    /// `Flags::HAS_CONTEXT` are admitted.
+    /// Enforce public-testnet launch admission on a parsed object.
     ///
     /// # Errors
     ///
-    /// Returns [`Bof1Error`] when a live object lacks `prev_object` or the
-    /// codec is reserved/unregistered.
+    /// Returns [`Bof1Error::LiveNotOpen`] or [`Bof1Error::ContextNotOpen`]
+    /// for post-launch flags and [`Bof1Error::UnknownCodec`] for a codec that
+    /// is not admitted at launch.
     pub const fn validate_testnet(&self) -> Result<(), Bof1Error> {
-        if self.header.flags.has(Flags::LIVE) && self.header.prev_object.is_none() {
-            return Err(Bof1Error::Truncated("prev_object"));
+        if self.header.flags.has(Flags::LIVE) {
+            if self.header.prev_object.is_none() {
+                return Err(Bof1Error::Truncated("prev_object"));
+            }
+            return Err(Bof1Error::LiveNotOpen);
+        }
+        if self.header.flags.has(Flags::HAS_CONTEXT) {
+            return Err(Bof1Error::ContextNotOpen);
         }
         if !codec_is_open_on_testnet(self.header.codec) {
             return Err(Bof1Error::UnknownCodec(self.header.codec as u64));
@@ -1026,7 +1031,10 @@ mod tests {
         let decoded_ctx = Object::decode(&ctx_obj.encode(), &mut m).unwrap();
         assert_eq!(decoded_ctx, ctx_obj);
         assert!(decoded_ctx.header.flags.has(Flags::HAS_CONTEXT));
-        assert_eq!(decoded_ctx.validate_testnet(), Ok(()));
+        assert_eq!(
+            decoded_ctx.validate_testnet(),
+            Err(Bof1Error::ContextNotOpen)
+        );
 
         let mut b = good.clone();
         b[4] = 1;
@@ -1120,6 +1128,7 @@ mod tests {
         obj.header.prev_object = Some([2u8; 32]);
         let back = Object::decode(&obj.encode(), &mut meter()).unwrap();
         assert_eq!(back, obj);
+        assert_eq!(back.validate_testnet(), Err(Bof1Error::LiveNotOpen));
     }
 
     #[test]
@@ -1127,9 +1136,10 @@ mod tests {
         assert!(codec_is_open_on_testnet(CODEC_RAW));
         assert!(!codec_is_registered(9));
         assert!(!codec_is_open_on_testnet(9));
-        assert!(codec_is_open_on_testnet(8));
-        assert!(codec_is_registered(26));
-        assert!(codec_is_open_on_testnet(26));
+        for id in [6, 7, 8, 12, 13, 23, 24, 25, 26] {
+            assert!(codec_is_registered(id));
+            assert!(!codec_is_open_on_testnet(id));
+        }
         assert!(!codec_is_registered(27));
     }
 
@@ -1164,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn live_flag_admitted_on_testnet() {
+    fn live_flag_refused_on_testnet() {
         let mut obj = Object::raw_public(b"segment");
         obj.header.flags = Flags::from_byte(Flags::LIVE).unwrap();
         assert_eq!(
@@ -1172,6 +1182,6 @@ mod tests {
             Err(Bof1Error::Truncated("prev_object"))
         );
         obj.header.prev_object = Some([4u8; 32]);
-        assert_eq!(obj.validate_testnet(), Ok(()));
+        assert_eq!(obj.validate_testnet(), Err(Bof1Error::LiveNotOpen));
     }
 }

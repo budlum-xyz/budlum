@@ -47,6 +47,19 @@ pub const MAX_STORAGE_CHALLENGE_INTERVAL: u64 = 2_592_000;
 /// `deal_open::open_deal_escrowed`; that step follows this one.
 pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
 
+/// Whether the in-block deal doors demand a `VerifyMerkle` proof envelope
+/// and a `storage_root` at open/accept time.
+///
+/// The gate is the network's activation schedule, stated per domain. Every
+/// checked-in profile ships `require_merkle_proof = false` until the 64-depth
+/// Merkle verifier exists (requiring a blob the node cannot verify protects
+/// nothing), so the in-block doors state the same `false` here - the same
+/// pattern as the bond floor constant above. The flag is threaded through
+/// the doors so the day the schedule flips, this one constant moves and both
+/// doors enforce it. The registry-level gate itself is live and tested under
+/// `storage_deal::tests::deal_open_rejects_missing_merkle_proof`.
+pub const STORAGE_REQUIRE_MERKLE_PROOF: bool = false;
+
 /// Per-domain parameters for a `StorageAttestation` domain.
 ///
 /// The vision document calls these `StorageDomainParams` in We follow
@@ -71,6 +84,21 @@ pub struct StorageDomainParams {
     /// Satisfy the protocol-level `MIN_DOMAIN_OPERATOR_BOND` from
     /// `domain::registry`.
     pub min_operator_bond: u64,
+    /// Whether a deal opened under this domain must carry a `VerifyMerkle`
+    /// proof envelope and a `storage_root`.
+    ///
+    /// This is the domain's statement of the network activation schedule, not a
+    /// per-deal choice: `false` (the default, and the value every checked-in
+    /// profile implies) means the gate is closed, so a deal opens without a
+    /// proof and records that it opened without one. `true` means the envelope
+    /// is mandatory.
+    ///
+    /// The flag exists because three places used to disagree: the profiles set
+    /// `[features] verify_merkle = false`, startup printed that the requested
+    /// value was "not applied", and the deal-open path demanded the envelope
+    /// regardless. A deal path that ignores the gate is not closed.
+    #[serde(default)]
+    pub require_merkle_proof: bool,
 }
 
 impl StorageDomainParams {
@@ -122,6 +150,7 @@ impl Default for StorageDomainParams {
             max_committed_chunks: 1_000_000,
             challenge_interval: 100,
             min_operator_bond: 1_000_000,
+            require_merkle_proof: false,
         }
     }
 }
@@ -164,6 +193,7 @@ mod tests {
             max_committed_chunks: 1_000_000,
             challenge_interval: 100,
             min_operator_bond: 1_000_000,
+            require_merkle_proof: false,
         }
     }
 

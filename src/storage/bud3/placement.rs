@@ -91,7 +91,8 @@ impl PlacementRow {
     /// Total symbols of a segment.
     #[must_use]
     pub const fn total_symbols(&self) -> u64 {
-        self.n_full as u64 * self.s_full as u64 + self.n_mobile as u64 * self.s_mobile as u64
+        (self.n_full as u64 * self.s_full as u64)
+            .saturating_add(self.n_mobile as u64 * self.s_mobile as u64)
     }
 
     /// Redundancy in thousandths: `total / k`.
@@ -100,7 +101,14 @@ impl PlacementRow {
         if k == 0 {
             return 0;
         }
-        self.total_symbols() * 1000 / k as u64
+        let total = self.n_full as u128 * self.s_full as u128
+            + self.n_mobile as u128 * self.s_mobile as u128;
+        let scaled = total * 1000 / (k as u128);
+        if scaled > u64::MAX as u128 {
+            u64::MAX
+        } else {
+            scaled as u64
+        }
     }
 
     /// Symbols the Full shares hold on their own.
@@ -119,11 +127,12 @@ impl PlacementRow {
     /// The Mobile share of the symbols, in thousandths.
     #[must_use]
     pub const fn mobile_share_milli(&self) -> u64 {
-        let total = self.total_symbols();
+        let mobile = self.n_mobile as u128 * self.s_mobile as u128;
+        let total = self.n_full as u128 * self.s_full as u128 + mobile;
         if total == 0 {
             return 0;
         }
-        self.n_mobile as u64 * self.s_mobile as u64 * 1000 / total
+        (mobile * 1000 / total) as u64
     }
 }
 
@@ -672,5 +681,16 @@ mod tests {
         }
         let single = table.lookup_with_shrink(1, 0).unwrap();
         assert_eq!(single.s_full, table.k + 2);
+
+        // Extreme PlacementRow ratios never overflow u64 in milli calculations.
+        let extreme = PlacementRow {
+            n_full: u32::MAX,
+            s_full: u32::MAX,
+            n_mobile: u32::MAX,
+            s_mobile: u32::MAX,
+        };
+        assert_eq!(extreme.total_symbols(), u64::MAX);
+        assert_eq!(extreme.mobile_share_milli(), 500);
+        assert!(extreme.redundancy_milli(u32::MAX) > 0);
     }
 }

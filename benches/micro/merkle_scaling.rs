@@ -15,6 +15,7 @@ fn run_bench(account_count: usize, updates: usize, blocks: usize) {
                 balance: 1000,
                 nonce: 0,
                 frac_attos: 0,
+                auth_program_hash: None,
             },
         );
     }

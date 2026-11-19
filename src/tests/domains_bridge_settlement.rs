@@ -1,7 +1,7 @@
 //! Domains, cross-domain bridge, settlement, and testnet feature-matrix
 //! regression locks (`zk_domain_refuses_empty_halt_proof`,
-//! `bridge_e2e_lock_mint_burn_unlock`, `ethereum_sync_committee_is_open_on_testnet`,
-//! `shared_security_is_open_on_testnet`, `app_binding_is_open_on_devnet`,
+//! `bridge_e2e_lock_mint_burn_unlock`, `ethereum_sync_committee_is_closed_on_testnet`,
+//! `shared_security_is_closed_on_testnet`, `app_binding_is_open_on_devnet`,
 //! and functional regression names).
 
 use crate::chain::blockchain::Blockchain;
@@ -225,7 +225,7 @@ fn zk_domain_refuses_empty_halt_proof() {
 fn zkvm_adapter_refuses_bare_halt_program() {
     zk_domain_refuses_empty_halt_proof();
     assert!(
-        crate::core::chain_config::Network::Testnet
+        !crate::core::chain_config::Network::Testnet
             .shared_security()
             .enabled
     );
@@ -236,10 +236,11 @@ fn zkvm_adapter_refuses_bare_halt_program() {
     );
 }
 
-/// Ethereum sync-committee external domain registration is open on Testnet (`45261`)
-/// with real BLS12-381 verification and gated on Mainnet (`45260`).
+/// Ethereum sync-committee verification exists, but external-domain admission
+/// remains closed on public Testnet (`45261`) and Mainnet (`45260`) until the
+/// weak-subjectivity and production-rehearsal gates pass.
 #[test]
-fn ethereum_sync_committee_is_open_on_testnet() {
+fn ethereum_sync_committee_is_closed_on_testnet() {
     use bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
 
     let poster = addr(0x21);
@@ -308,9 +309,12 @@ fn ethereum_sync_committee_is_open_on_testnet() {
         bls: IntakeState::production_bls,
     };
     let tx = ExternalDomainTx::Register(Box::new(request));
-    execute_external_domain_tx(&mut state, &ctx, &tx)
-        .expect("EthereumSync must register cleanly on testnet 45261");
-    assert_eq!(state.settlement.external_intake.entries.len(), 1);
+    let before = state.calculate_state_root();
+    let err = execute_external_domain_tx(&mut state, &ctx, &tx)
+        .expect_err("EthereumSync must remain closed on public testnet");
+    assert_eq!(err, ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    assert_eq!(state.calculate_state_root(), before);
+    assert!(state.settlement.external_intake.entries.is_empty());
 
     let mainnet_ctx = ExternalDomainTxContext {
         sender: poster,
@@ -324,20 +328,17 @@ fn ethereum_sync_committee_is_open_on_testnet() {
 }
 
 #[test]
-fn ethereum_sync_committee_open_on_testnet_chain_id() {
-    ethereum_sync_committee_is_open_on_testnet();
-    assert!(
-        crate::core::chain_config::Network::Testnet
-            .shared_security()
-            .enabled
-    );
+fn ethereum_sync_committee_closed_on_testnet_chain_id() {
+    ethereum_sync_committee_is_closed_on_testnet();
 }
 
-/// Shared security (`shared_security`) is open on Testnet (`45261`) and gated
-/// on Mainnet (`45260`).
+/// Shared security is a post-launch feature. Public Testnet (`45261`) and
+/// Mainnet (`45260`) refuse it; Devnet (`45262`) keeps the implementation door
+/// available for integration tests.
 #[test]
-fn shared_security_is_open_on_testnet() {
-    assert!(Network::Testnet.shared_security().enabled);
+fn shared_security_is_closed_on_testnet() {
+    assert!(!Network::Testnet.shared_security().enabled);
+    assert!(Network::Devnet.shared_security().enabled);
     assert!(!Network::Mainnet.shared_security().enabled);
     let operator = addr(0x31);
     let mut state = AccountState::new();
@@ -358,7 +359,8 @@ fn shared_security_is_open_on_testnet() {
         fee: 10,
         bls: IntakeState::production_bls,
     };
-    execute_shared_security_tx(
+    let before = state.calculate_state_root();
+    let err = execute_shared_security_tx(
         &mut state,
         &testnet_ctx,
         &SharedSecurityTx::SetRegistrar {
@@ -366,7 +368,9 @@ fn shared_security_is_open_on_testnet() {
             registrar: vec![0xAB; 20],
         },
     )
-    .expect("shared_security must succeed on testnet 45261");
+    .expect_err("shared_security must remain closed on testnet");
+    assert!(err.to_string().contains("not enabled"), "{err}");
+    assert_eq!(state.calculate_state_root(), before);
 
     let mainnet_ctx = SettlementTxContext {
         sender: operator,
@@ -386,11 +390,11 @@ fn shared_security_is_open_on_testnet() {
     assert!(err.to_string().contains("not enabled"), "{err}");
 }
 
-/// Remote app binding (`app_binding`) is open on Devnet (`45262`) and gated
-/// on Mainnet (`45260`).
+/// Remote app binding (`app_binding`) is open on Devnet (`45262`) and closed
+/// on Testnet (`45261`) and Mainnet (`45260`).
 #[test]
 fn app_binding_is_open_on_devnet() {
-    assert!(Network::Testnet.app_binding_enabled());
+    assert!(!Network::Testnet.app_binding_enabled());
     assert!(Network::Devnet.app_binding_enabled());
     assert!(!Network::Mainnet.app_binding_enabled());
     let registrant = addr(0x32);
@@ -453,13 +457,17 @@ fn app_binding_is_open_on_devnet() {
         origin_app: vec![0x45; 20],
         manifest_hash: [0x56; 32],
     };
-    execute_settlement_tx(
+    let testnet_err = execute_settlement_tx(
         &mut state,
         &testnet_ctx,
         &SettlementTx::AppBinding(Box::new(testnet_tx)),
     )
-    .expect("settlement app registration must execute on testnet 45261");
-    assert_eq!(state.settlement.app_binding.apps.len(), 2);
+    .expect_err("settlement app registration must remain closed on testnet 45261");
+    assert!(
+        testnet_err.to_string().contains("not enabled"),
+        "{testnet_err}"
+    );
+    assert_eq!(state.settlement.app_binding.apps.len(), 1);
 
     let outer_err = execute_settlement_tx(
         &mut state,
