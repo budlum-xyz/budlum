@@ -2,7 +2,7 @@ use bud_proof::adapter::ProofEnvelope;
 
 // Cargo writes dependency arrays in this canonical, multiline format. Reject
 // unfamiliar formatting rather than silently missing a dependency edge.
-fn assert_postcard_has_no_heapless_dependency(lockfile: &str) {
+fn check_postcard_has_no_heapless_dependency(lockfile: &str) -> Result<(), String> {
     let mut found = false;
     for package in lockfile.split("[[package]]").skip(1) {
         let lines: Vec<_> = package.lines().map(str::trim).collect();
@@ -12,7 +12,7 @@ fn assert_postcard_has_no_heapless_dependency(lockfile: &str) {
             .and_then(|line| line.strip_prefix("name = \""))
             .and_then(|line| line.strip_suffix('"'))
         else {
-            panic!("non-canonical lockfile package name");
+            return Err("non-canonical lockfile package name".to_string());
         };
         if name != "postcard" {
             continue;
@@ -22,14 +22,13 @@ fn assert_postcard_has_no_heapless_dependency(lockfile: &str) {
             .iter()
             .position(|line| line.starts_with("dependencies"))
         else {
-            panic!("postcard dependency list is missing");
+            return Err("postcard dependency list is missing".to_string());
         };
-        assert_eq!(
-            lines[dependencies], "dependencies = [",
-            "non-canonical postcard dependency list"
-        );
+        if lines.get(dependencies).copied() != Some("dependencies = [") {
+            return Err("non-canonical postcard dependency list".to_string());
+        }
         let mut closed = false;
-        for line in &lines[dependencies + 1..] {
+        for line in lines.get(dependencies + 1..).unwrap_or(&[]) {
             if *line == "]" {
                 closed = true;
                 break;
@@ -40,19 +39,31 @@ fn assert_postcard_has_no_heapless_dependency(lockfile: &str) {
                 .strip_prefix('"')
                 .and_then(|entry| entry.strip_suffix('"'))
             else {
-                panic!("non-canonical postcard dependency entry");
+                return Err("non-canonical postcard dependency entry".to_string());
             };
             let Some(dependency) = entry.split_whitespace().next() else {
-                panic!("empty postcard dependency entry");
+                return Err("empty postcard dependency entry".to_string());
             };
-            assert_ne!(
-                dependency, "heapless",
-                "postcard must not enable the unnecessary heapless dependency"
-            );
+            if dependency == "heapless" {
+                return Err(
+                    "postcard must not enable the unnecessary heapless dependency".to_string(),
+                );
+            }
         }
-        assert!(closed, "postcard dependency list is not closed");
+        if !closed {
+            return Err("postcard dependency list is not closed".to_string());
+        }
     }
-    assert!(found, "postcard was not found in the lockfile");
+    if !found {
+        return Err("postcard was not found in the lockfile".to_string());
+    }
+    Ok(())
+}
+
+fn assert_postcard_has_no_heapless_dependency(lockfile: &str) {
+    if let Err(reason) = check_postcard_has_no_heapless_dependency(lockfile) {
+        panic!("{reason}");
+    }
 }
 
 #[test]
@@ -71,33 +82,37 @@ fn fuzz_lock_does_not_enable_postcard_heapless() {
 }
 
 #[test]
-#[should_panic(expected = "postcard must not enable the unnecessary heapless dependency")]
 fn guard_rejects_unversioned_heapless() {
-    assert_postcard_has_no_heapless_dependency(
+    let err = check_postcard_has_no_heapless_dependency(
         "[[package]]\nname = \"postcard\"\ndependencies = [\n \"heapless\",\n]\n",
-    );
+    )
+    .unwrap_err();
+    assert!(err.contains("postcard must not enable the unnecessary heapless dependency"));
 }
 
 #[test]
-#[should_panic(expected = "postcard must not enable the unnecessary heapless dependency")]
 fn guard_rejects_version_qualified_heapless() {
-    assert_postcard_has_no_heapless_dependency(
+    let err = check_postcard_has_no_heapless_dependency(
         "[[package]]\nname = \"postcard\"\ndependencies = [\n \"heapless 0.7.17\",\n]\n",
-    );
+    )
+    .unwrap_err();
+    assert!(err.contains("postcard must not enable the unnecessary heapless dependency"));
 }
 
 #[test]
-#[should_panic(expected = "non-canonical postcard dependency list")]
 fn guard_rejects_unrecognized_dependency_format() {
-    assert_postcard_has_no_heapless_dependency(
+    let err = check_postcard_has_no_heapless_dependency(
         "[[package]]\nname = \"postcard\"\ndependencies = [\"heapless\"]\n",
-    );
+    )
+    .unwrap_err();
+    assert!(err.contains("non-canonical postcard dependency list"));
 }
 
 #[test]
-#[should_panic(expected = "postcard was not found in the lockfile")]
 fn guard_rejects_a_missing_postcard_package() {
-    assert_postcard_has_no_heapless_dependency("[[package]]\nname = \"unrelated\"\n");
+    let err = check_postcard_has_no_heapless_dependency("[[package]]\nname = \"unrelated\"\n")
+        .unwrap_err();
+    assert!(err.contains("postcard was not found in the lockfile"));
 }
 
 #[test]

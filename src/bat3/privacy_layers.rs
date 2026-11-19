@@ -8,6 +8,7 @@
 use crate::core::hash::hash_fields_bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use subtle::ConstantTimeEq;
 
 /// Maximum number of disclosed fields in one `K2` envelope.
 ///
@@ -57,12 +58,73 @@ pub struct K2SelectiveEnvelope {
 pub struct K2FieldOpening {
     field_name: String,
     field_value: String,
-    field_digest: [u8; 32],
+    field_salt: [u8; 32],
+    leaf_index: u64,
+    siblings: Vec<[u8; 32]>,
+}
+
+fn k2_leaf_digest(leaf_index: u64, name: &str, value: &str, salt: &[u8; 32]) -> [u8; 32] {
+    hash_fields_bytes(&[
+        b"BDLM_BAT3_K2_ENVELOPE_V1",
+        &[0x00u8],
+        &leaf_index.to_le_bytes(),
+        name.as_bytes(),
+        value.as_bytes(),
+        salt,
+    ])
+}
+
+fn k2_branch_digest(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    hash_fields_bytes(&[b"BDLM_BAT3_K2_ENVELOPE_V1", &[0x01u8], left, right])
+}
+
+fn k2_odd_digest(only: &[u8; 32]) -> [u8; 32] {
+    hash_fields_bytes(&[b"BDLM_BAT3_K2_ENVELOPE_V1", &[0x02u8], only])
+}
+
+fn k2_root_digest(tree_root: &[u8; 32], field_count: u64) -> [u8; 32] {
+    hash_fields_bytes(&[
+        b"BDLM_BAT3_K2_ENVELOPE_V1",
+        &[0x03u8],
+        tree_root,
+        &field_count.to_le_bytes(),
+    ])
+}
+
+fn k2_merkle_root_and_proofs(leaves: &[[u8; 32]]) -> ([u8; 32], Vec<Vec<[u8; 32]>>) {
+    if leaves.is_empty() {
+        let empty = hash_fields_bytes(&[b"BDLM_BAT3_K2_ENVELOPE_V1", &[0xFFu8]]);
+        return (empty, Vec::new());
+    }
+    let mut proofs: Vec<Vec<[u8; 32]>> = vec![Vec::new(); leaves.len()];
+    let mut positions: Vec<usize> = (0..leaves.len()).collect();
+    let mut level: Vec<[u8; 32]> = leaves.to_vec();
+    while level.len() > 1 {
+        for (leaf_pos, proof) in positions.iter_mut().zip(proofs.iter_mut()) {
+            let pos = *leaf_pos;
+            let sibling_pos = pos ^ 1;
+            if let Some(sibling) = level.get(sibling_pos).copied() {
+                proof.push(sibling);
+            }
+            *leaf_pos = pos / 2;
+        }
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pair in level.chunks(2) {
+            match pair {
+                [left, right] => next.push(k2_branch_digest(left, right)),
+                [only] => next.push(k2_odd_digest(only)),
+                _ => {}
+            }
+        }
+        level = next;
+    }
+    let root = level.first().copied().unwrap_or([0u8; 32]);
+    (root, proofs)
 }
 
 impl K2SelectiveEnvelope {
-    /// Seals a set of named fields into an envelope and returns the envelope
-    /// plus the per-field openings.
+    /// Seals a set of named fields into a domain-separated Merkle envelope and
+    /// returns the envelope plus independent selective-disclosure openings.
     ///
     /// # Errors
     ///
@@ -75,25 +137,25 @@ impl K2SelectiveEnvelope {
             return Err(Bat3PrivacyError::TooManyFields);
         }
         let count = u64::try_from(fields.len()).unwrap_or(u64::MAX);
-        let mut acc: [u8; 32] = hash_fields_bytes(&[b"BDLM_BAT3_K2_ENVELOPE_V1", &[]]);
-        let mut openings = Vec::with_capacity(fields.len());
-        for (name, (value, hint)) in fields {
-            let field_digest = hash_fields_bytes(&[
-                b"BDLM_BAT3_K2_ENVELOPE_V1",
-                &acc,
-                name.as_bytes(),
-                value.as_bytes(),
-                hint,
-            ]);
-            openings.push(K2FieldOpening {
+        let mut leaves = Vec::with_capacity(fields.len());
+        for (idx, (name, (value, salt))) in fields.iter().enumerate() {
+            let leaf_index = u64::try_from(idx).unwrap_or(u64::MAX);
+            leaves.push(k2_leaf_digest(leaf_index, name, value, salt));
+        }
+        let (tree_root, proofs) = k2_merkle_root_and_proofs(&leaves);
+        let openings = fields
+            .iter()
+            .zip(proofs)
+            .enumerate()
+            .map(|(idx, ((name, (value, salt)), siblings))| K2FieldOpening {
                 field_name: name.clone(),
                 field_value: value.clone(),
-                field_digest,
-            });
-            acc = field_digest;
-        }
-        let envelope_root =
-            hash_fields_bytes(&[b"BDLM_BAT3_K2_ENVELOPE_V1", &acc, &count.to_le_bytes()]);
+                field_salt: *salt,
+                leaf_index: u64::try_from(idx).unwrap_or(u64::MAX),
+                siblings,
+            })
+            .collect();
+        let envelope_root = k2_root_digest(&tree_root, count);
         Ok((
             Self {
                 envelope_root,
@@ -117,22 +179,54 @@ impl K2SelectiveEnvelope {
 }
 
 impl K2FieldOpening {
-    /// Verifies that this opening's digest matches the envelope's folding
-    /// chain.
+    /// Verifies that this selective-disclosure opening is a genuine member of
+    /// `envelope` without requiring any sibling field's plaintext or salt.
     ///
     /// # Errors
     ///
-    /// Returns [`Bat3PrivacyError::InvalidOpening`] if the opening's digest
-    /// does not match the envelope root.
+    /// Returns [`Bat3PrivacyError::InvalidOpening`] if bounds, sibling path
+    /// shape, or the constant-time envelope root comparison fails.
     pub fn verify(&self, envelope: &K2SelectiveEnvelope) -> Result<(), Bat3PrivacyError> {
-        let recomputed = hash_fields_bytes(&[
-            b"BDLM_BAT3_K2_ENVELOPE_V1",
-            &self.field_digest,
-            self.field_name.as_bytes(),
-            self.field_value.as_bytes(),
-            &envelope.field_count.to_le_bytes(),
-        ]);
-        if recomputed != envelope.envelope_root {
+        let total = usize::try_from(envelope.field_count)
+            .map_err(|_| Bat3PrivacyError::InvalidOpening("field_count"))?;
+        if total == 0 || total > MAX_K2_FIELDS {
+            return Err(Bat3PrivacyError::InvalidOpening("field_count"));
+        }
+        let mut pos = usize::try_from(self.leaf_index)
+            .map_err(|_| Bat3PrivacyError::InvalidOpening("leaf_index"))?;
+        if pos >= total {
+            return Err(Bat3PrivacyError::InvalidOpening("leaf_index"));
+        }
+        let mut current = k2_leaf_digest(
+            self.leaf_index,
+            &self.field_name,
+            &self.field_value,
+            &self.field_salt,
+        );
+        let mut level_len = total;
+        let mut sibling_iter = self.siblings.iter();
+        while level_len > 1 {
+            let sibling_pos = pos ^ 1;
+            if sibling_pos < level_len {
+                let sibling = sibling_iter
+                    .next()
+                    .ok_or(Bat3PrivacyError::InvalidOpening("siblings"))?;
+                current = if pos & 1 == 0 {
+                    k2_branch_digest(&current, sibling)
+                } else {
+                    k2_branch_digest(sibling, &current)
+                };
+            } else {
+                current = k2_odd_digest(&current);
+            }
+            pos /= 2;
+            level_len = level_len.div_ceil(2);
+        }
+        if sibling_iter.next().is_some() {
+            return Err(Bat3PrivacyError::InvalidOpening("siblings"));
+        }
+        let recomputed = k2_root_digest(&current, envelope.field_count);
+        if !bool::from(recomputed.ct_eq(&envelope.envelope_root)) {
             return Err(Bat3PrivacyError::InvalidOpening("field_digest"));
         }
         Ok(())

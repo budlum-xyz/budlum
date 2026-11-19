@@ -635,7 +635,7 @@ mod tests {
         };
         let pinned = PinnedChainKeyRoot {
             subnet_id,
-            root_bls_pubkey: root_bls.public_key,
+            root_bls_pubkey: root_bls.public_key.clone(),
             root_pq_pubkey: root_pq.public_key_bytes().to_vec(),
             dkg_interval_length: 500,
             min_registry_version: 100,

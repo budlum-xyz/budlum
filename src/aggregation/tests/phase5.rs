@@ -855,8 +855,7 @@ fn phase5_security_hardening_rejects_deflate_malleability_mainnet_mempool_and_ov
 }
 
 #[test]
-fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked_or_conflicting_segments(
-) {
+fn blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked_or_conflicting_segments() {
     use crate::aggregation::chain::validate_params;
     use crate::aggregation::fraud::{
         is_authorized_segment_aggregator, required_challenger_bond, sign_backing_response,
@@ -1152,7 +1151,7 @@ fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked
     )
     .is_err());
 
-    // 4. Disjoint honest back-to-back single-claim ticks with equal `count`
+    // 4. disjoint honest back-to-back single-claim ticks with equal `count`
     //    are NEVER slashed, while contradictory `Claim::Prog` outputs for the
     //    exact same `(program_hash, input_hash)` slash 100% via Merkle opening.
     let eq_seed = Zeroizing::new([0x92u8; 32]);
@@ -1365,7 +1364,7 @@ fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked
 }
 
 #[test]
-fn strix_agg_02_hardens_bud_air_aux_preallocation_and_executor_verify_stark_bounds() {
+fn hardens_bud_air_aux_preallocation_and_executor_verify_stark_bounds() {
     use crate::aggregation::air_registry::{
         validate_verify_stark_envelope, AirAlgebraEvaluator, BudAirEvaluator,
     };
@@ -1456,7 +1455,7 @@ fn strix_agg_02_hardens_bud_air_aux_preallocation_and_executor_verify_stark_boun
 }
 
 #[test]
-fn gorev13_node_claim_refs_and_program_auth_reject_uninvited_and_build_atomic_block() {
+fn node_claim_refs_and_program_auth_reject_uninvited_and_build_atomic_block() {
     use crate::aggregation::air_registry::external_fib_air_id;
     use crate::aggregation::chain::claim_program_auth;
     use crate::aggregation::node::{AggNode, ObjectRefusal};
@@ -1560,7 +1559,7 @@ fn gorev13_node_claim_refs_and_program_auth_reject_uninvited_and_build_atomic_bl
 }
 
 #[test]
-fn gorev13_shadow_auditor_parity_and_10k_block_zero_silent_drop_campaign() {
+fn shadow_auditor_parity_and_10k_block_zero_silent_drop_campaign() {
     use crate::aggregation::shadow::ShadowAuditor;
 
     let registry = SchemeStatusRegistry::genesis();
@@ -1640,7 +1639,7 @@ fn gorev13_shadow_auditor_parity_and_10k_block_zero_silent_drop_campaign() {
 }
 
 #[test]
-fn gorev13_stark_tick_master_scaling_and_10k_split_stark_differential_campaign() {
+fn stark_tick_master_scaling_and_10k_split_stark_differential_campaign() {
     use std::time::Instant;
 
     use crate::aggregation::air_registry::external_fib_air_id;

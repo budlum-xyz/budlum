@@ -1876,7 +1876,7 @@ mod tests {
             Err(AdapterError::ConsensusRule { .. })
         ));
 
-        // STRIX-COC-02a forgery: stripping ML-DSA-65 co-signatures from PQ-enrolled
+        // Forgery: stripping ML-DSA-65 co-signatures from PQ-enrolled
         // DA committee members must fail closed with a crypto error.
         let mut stripped_pq = bundle.clone();
         for sig in &mut stripped_pq.signatures {
@@ -1889,7 +1889,7 @@ mod tests {
             Err(AdapterError::Crypto { .. })
         ));
 
-        // STRIX-COC-02c forgery: substituting valid dual-axis openings at prover-chosen
+        // Forgery: substituting valid dual-axis openings at prover-chosen
         // coordinates that omit a required Fiat-Shamir challenge coordinate is refused.
         let required: BTreeSet<(u16, u16)> =
             bundle.samples.iter().map(|s| (s.row, s.col)).collect();
@@ -1932,7 +1932,7 @@ mod tests {
             Err(AdapterError::ConsensusRule { .. })
         ));
 
-        // STRIX-COC-02b: trailing garbage after bounded bincode body is rejected.
+        // trailing garbage after bounded bincode body is rejected.
         let mut trailing_ev = golden;
         trailing_ev.payload.push(0x99);
         assert!(matches!(

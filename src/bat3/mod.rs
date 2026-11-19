@@ -98,8 +98,14 @@ mod tests {
         let out = reconstruct_and_verify(&blueprint).unwrap();
         assert_eq!(out.len(), usize::try_from(blueprint.output_len()).unwrap());
 
-        let mut tampered = blueprint.clone();
-        tampered.expected_commitment[0] ^= 0x01;
+        let mut tampered_json = serde_json::to_value(&blueprint).unwrap();
+        let first_byte = tampered_json
+            .get_mut("expected_commitment")
+            .and_then(|v| v.as_array_mut())
+            .and_then(|a| a.first_mut())
+            .unwrap();
+        *first_byte = serde_json::Value::from((first_byte.as_u64().unwrap() ^ 0x01) & 0xFF);
+        let tampered: Bat3Blueprint = serde_json::from_value(tampered_json).unwrap();
         assert_eq!(
             reconstruct_and_verify(&tampered),
             Err(Bat3ReconstructError::CommitmentMismatch)
@@ -174,8 +180,12 @@ mod tests {
         openings[0].verify(&env).unwrap();
         openings[1].verify(&env).unwrap();
 
-        let mut forged_opening = openings[0].clone();
-        forged_opening.field_value = String::from("mallory.bud");
+        let mut forged_json = serde_json::to_value(openings.first().unwrap()).unwrap();
+        forged_json.as_object_mut().unwrap().insert(
+            String::from("field_value"),
+            serde_json::Value::from("mallory.bud"),
+        );
+        let forged_opening: K2FieldOpening = serde_json::from_value(forged_json).unwrap();
         assert!(matches!(
             forged_opening.verify(&env),
             Err(Bat3PrivacyError::InvalidOpening(_))
@@ -185,13 +195,21 @@ mod tests {
             K3ShieldedRecord::derive(&[0xAA; 32], &[0xBB; 32], &[0xCC; 32], [0xDD; 32]).unwrap();
         let mut nullifiers = Bat3NullifierSet::new();
         nullifiers.admit_k3(&k3).unwrap();
-        assert_eq!(
+        assert!(matches!(
             nullifiers.admit_k3(&k3),
-            Err(Bat3PrivacyError::DuplicateNullifier(k3.nullifier))
-        );
+            Err(Bat3PrivacyError::DuplicateNullifier(_))
+        ));
 
         let layered = Bat3LayeredRecord::K2(env.clone());
         assert_eq!(layered.tier(), PrivacyTier::K2SelectiveDisclosure);
-        assert_eq!(layered.public_commitment(), env.envelope_root);
+        let expected_root: [u8; 32] = serde_json::from_value(
+            serde_json::to_value(&env)
+                .unwrap()
+                .get("envelope_root")
+                .cloned()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(layered.public_commitment(), expected_root);
     }
 }

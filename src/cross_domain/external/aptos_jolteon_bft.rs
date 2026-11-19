@@ -10,7 +10,7 @@
 //!    `CommitQC` over `(epoch, r_0, B_0.block_hash, B_0.state_root)` carries
 //!    strictly more than `2/3` of epoch voting power.
 //! 2. Whenever view/round progress skips timed-out rounds (`B_0.round > B_0.parent_round + 1`),
-//!    Jolteon requires an explicit [`JolteonTimeoutCertificate`] (`TC`) signed
+//!    Jolteon requires an explicit [`JolteonTimeoutCert`] (`TC`) signed
 //!    by `> 2/3` of epoch voting power for `B_0.round - 1` with
 //!    `highest_qc_round >= B_0.parent_round`, proving no conflicting 2-chain
 //!    commit could have formed in the skipped gap.

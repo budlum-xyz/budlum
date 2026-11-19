@@ -621,7 +621,7 @@ mod tests {
         assert_eq!(accounts.get_balance(&buyer), buyer_balance);
         assert_eq!(accounts.get_balance(&seller), seller_balance);
 
-        // Strix regression: expiry overflow, self-purchase wash-trade, and deactivated listing fail closed.
+        // Regression: expiry overflow, self-purchase wash-trade, and deactivated listing fail closed.
         let buyer2_seed = [0x58u8; 32];
         let buyer2_pk = ml_dsa_public_key(SchemeId::ML_DSA_87, &buyer2_seed).unwrap();
         let buyer2 =

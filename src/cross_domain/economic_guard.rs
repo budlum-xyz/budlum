@@ -246,7 +246,7 @@ pub enum ContradictionEvidence {
         /// Governance-pinned Algorand `StateProof` verifier root.
         pinned: PinnedAlgorandVerifier,
         /// Cryptographic Algorand equivocation proof.
-        proof: AlgorandEquivocationProof,
+        proof: Box<AlgorandEquivocationProof>,
     },
 }
 
@@ -1315,11 +1315,13 @@ mod tests {
         let fault = ContradictionEvidence::AlgorandFault {
             network: net.into(),
             pinned: pinned.clone(),
-            proof: proof.clone(),
+            proof: Box::new(proof.clone()),
         };
         let out = guard
             .submit_contradiction(41, &fault, Address::from([0xCA; 32]), 410)
-            .expect("a verified Algorand voter equivocation freezes the domain and slashes the bond");
+            .expect(
+                "a verified Algorand voter equivocation freezes the domain and slashes the bond",
+            );
         assert_eq!(out.external_slashed_weight, culpable_weight);
         assert_eq!(out.slashed_bond_atoms, 20_000);
         assert_eq!(out.challenger_reward_atoms, 2_000);
@@ -1346,7 +1348,7 @@ mod tests {
                 &ContradictionEvidence::AlgorandFault {
                     network: net.into(),
                     pinned,
-                    proof: forged
+                    proof: Box::new(forged)
                 },
                 Address::from([0xCA; 32]),
                 412

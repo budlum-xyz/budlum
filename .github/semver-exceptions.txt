@@ -22,7 +22,7 @@
 # line a minor addition is accepted. Approval: STATUS_ONLINE 2026-07-21.
 AccountState::distribute_block_fees | EIP-1559 fee distribution wiring (step G) - a new public method wired into block finalization | STATUS_ONLINE 2026-07-21 approval
 
-# PR12 intentional breakages (P01-P06 waves): every entry is a finding fix
+# PR12 intentional breakages: every entry is a security hardening fix
 # that changes a public API before mainnet, approved by the corresponding
 # BLG decision recorded on PR #9's decision comment (decision). The 0.x line
 # accepts these as deliberate pre-mainnet cleanup; none is accidental.
@@ -87,20 +87,20 @@ PqSignatureClass | removed: a type that classified a signature by its byte lengt
 # Universal Execution Layer coordinator and attoBUD sub-unit ledger:
 # Account gained `frac_attos: u64` (`#[serde(default)]`) so 18-decimal EVM and
 # 9-decimal SVM environments share the single BUD ledger without precision loss.
-Account | Account gained a serde-defaulted frac_attos sub-atom field for UEL attoBUD conservation | THE_BUDLUM_DIREKTIF v1.0 section 8.5 approval
+Account | Account gained a serde-defaulted frac_attos sub-atom field for UEL attoBUD conservation | Budlum core specification v1.0 section 8.5 approval
 
-# PR #126 (testnet / THE_BUDLUM_DIREKTIF v1.0) wave: pre-mainnet 0.1.0 API
+# PR #126 (testnet / Budlum core specification v1.0) wave: pre-mainnet 0.1.0 API
 # consolidation across B.U.D. 3.0 universal object storage, generic IP subnet
 # peer admission, and unified wallet/gateway surfaces. Item counts measured in
 # Semver Check job 130900956113.
-enum_missing | PR #126: superseded pre-testnet enums consolidated into B.U.D. 3.0 storage, gateway and regeneration modules (32 items) | THE_BUDLUM_DIREKTIF v1.0 approval (126)
-method_requires_different_generic_type_params | PR #126: PeerManager subnet admission methods generalized over IpAddr / Into<IpAddr> (5 items) | THE_BUDLUM_DIREKTIF v1.0 approval (126)
-module_missing | PR #126: legacy three_regime, storage::db/traits and gateway submodules replaced by B.U.D. 3.0 and wallet identity surfaces (15 items) | THE_BUDLUM_DIREKTIF v1.0 approval (126)
-trait_missing | PR #126: legacy BlockchainStorage and superseded traits retired in favour of unified storage/execution traits (3 items) | THE_BUDLUM_DIREKTIF v1.0 approval (126)
+enum_missing | PR #126: superseded pre-testnet enums consolidated into B.U.D. 3.0 storage, gateway and regeneration modules (32 items) | Budlum core specification v1.0 approval (126)
+method_requires_different_generic_type_params | PR #126: PeerManager subnet admission methods generalized over IpAddr / Into<IpAddr> (5 items) | Budlum core specification v1.0 approval (126)
+module_missing | PR #126: legacy three_regime, storage::db/traits and gateway submodules replaced by B.U.D. 3.0 and wallet identity surfaces (15 items) | Budlum core specification v1.0 approval (126)
+trait_missing | PR #126: legacy BlockchainStorage and superseded traits retired in favour of unified storage/execution traits (3 items) | Budlum core specification v1.0 approval (126)
 
-# PR #126 (testnet / THE_BUDLUM_DIREKTIF v1.0) wave, second pass: the Semver
+# PR #126 (testnet / Budlum core specification v1.0) wave, second pass: the Semver
 # Check job on `eb2cab2a` (run 43826816539, job 133162508905) reported two
 # breakages that the first-pass block above did not cover. Both are deliberate
 # pre-mainnet 0.1.0 changes made inside this PR, not accidental drift.
-enum_changed_kind | PR #126: `network::peer_manager::SubnetKey` is now a struct with a private 16-byte bucket key instead of an enum, because the enum bucketed IPv4-mapped IPv6 peers as a bare IPv6 address and left IPv6 peers unbucketed, so the eclipse bound was enforced on one family and on neither mapped form (1 item) | THE_BUDLUM_DIREKTIF v1.0 approval (126)
-inherent_associated_pub_const_missing | PR #126: `BnsRegistry::MAX_NAMES` moved from an associated constant to a stored `max_names` field seeded from `registry::params::DEFAULT_MAX_NAMES`, so the capacity is genesis-configurable instead of compiled in (2 items) | THE_BUDLUM_DIREKTIF v1.0 approval (126)
+enum_changed_kind | PR #126: `network::peer_manager::SubnetKey` is now a struct with a private 16-byte bucket key instead of an enum, because the enum bucketed IPv4-mapped IPv6 peers as a bare IPv6 address and left IPv6 peers unbucketed, so the eclipse bound was enforced on one family and on neither mapped form (1 item) | Budlum core specification v1.0 approval (126)
+inherent_associated_pub_const_missing | PR #126: `BnsRegistry::MAX_NAMES` moved from an associated constant to a stored `max_names` field seeded from `registry::params::DEFAULT_MAX_NAMES`, so the capacity is genesis-configurable instead of compiled in (2 items) | Budlum core specification v1.0 approval (126)

@@ -1953,7 +1953,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // (6b) Bind exit_code to boolean {0, 1} on the active Halt row and force
         // zero on every non-Halt row. A clean Halt (exit_code == 0) remains active
         // in the Program CTL so the ROM proves `program[pc]` is a real Halt, whereas
-        // a synthetic fault Halt (exit_code == 1) skips the ROM fetch (`BLG-191`).
+        // a synthetic fault Halt (exit_code == 1) skips the ROM fetch.
         builder
             .when(one.clone() - is_halt.clone())
             .assert_zero(cur[COL_EXIT_CODE]);

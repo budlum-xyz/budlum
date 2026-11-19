@@ -34,7 +34,7 @@ fn audit_lane_a_leader_rounds_advance_only_after_each_timeout() {
 }
 
 #[test]
-fn audit_lane_a_blg_019_retired_state_update_preserves_accounts() {
+fn audit_lane_a_retired_state_update_preserves_accounts() {
     // Exercise the executor's structured refusal on both testnet and devnet,
     // including duplicate victim entries and an attempted sender nonce write.
     for chain_id in [45261, 45262] {

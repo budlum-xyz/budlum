@@ -1,4 +1,4 @@
-//! WIRING: unwired - these AI helpers are deliberately outside the consensus path until BLG-059..062 close and VL-1 is enabled.
+//! WIRING: unwired - these AI helpers are deliberately outside the consensus path until proof-verifier prerequisites and the VL-1 gate are enabled.
 //!
 //! STARK verification and proof-production helpers (bud-proof `DefaultAdapter`).
 //!

@@ -17,7 +17,7 @@ use crate::execution::coordinator::foreign::sui::{decode_and_recover_sui_tx, Sui
 
 /// `1 MIST = 10^9 attoBUD`.
 const ATTO_PER_MIST: u128 = 1_000_000_000;
-/// Maximum Sui RPC request envelope size (1 MiB). Strix B-0063.
+/// Maximum Sui RPC request envelope size (1 MiB).
 pub const MAX_SUI_RPC_REQUEST_BYTES: usize = 1 << 20;
 
 /// Canonical Sui coin type string representing native BUD on Sui RPC.
@@ -97,7 +97,7 @@ pub fn handle_sui_rpc(
             "Move (Sui) RPC is closed on testnet before activation height",
         );
     }
-    // Strix B-0063: strict JSON-RPC 2.0 version enforcement.
+    // strict JSON-RPC 2.0 version enforcement.
     if req.jsonrpc != "2.0" {
         return SuiRpcResponse::err(
             req.id,
@@ -241,7 +241,8 @@ mod tests {
                 params: vec![],
             },
         );
-        assert!(!resp.error.is_none());
+        assert!(resp.result.is_none() && !resp.error.is_none());
+        assert!(resp.error.is_some());
         assert!(resp.error.unwrap()["message"]
             .as_str()
             .unwrap()
@@ -266,7 +267,8 @@ mod tests {
                 params: vec![],
             },
         );
-        assert!(!resp.error.is_none());
+        assert!(resp.result.is_none() && !resp.error.is_none());
+        assert!(resp.error.is_some());
     }
 
     #[test]

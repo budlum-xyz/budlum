@@ -30,11 +30,11 @@ pub trait HsmPqKey: Send + Sync {
 }
 
 pub struct Pkcs11Signer {
-    /// Read by [`Self::connection_info`] (F12): no dead-code allow here.
+    /// Read by [`Self::connection_info`]: no dead-code allow here.
     module_path: String,
-    /// Read by [`Self::connection_info`] (F12).
+    /// Read by [`Self::connection_info`].
     slot_id: u64,
-    /// Read by [`Self::connection_info`] (F12).
+    /// Read by [`Self::connection_info`].
     token_pin_env: String,
     /// Label that picks the consensus key when the slot holds more than one Ed25519 pair.
     key_label: Option<String>,
@@ -96,7 +96,7 @@ impl Pkcs11Signer {
     /// mechanisms and any vendor failure is fail-closed by
     /// [`Self::require_vendor_native_signing`].
     ///
-    /// F12: there is no software fallback left to load, so this is the same
+    /// There is no software fallback left to load, so this is the same
     /// extractable-free session as [`Self::new`]; the two names are kept
     /// because callers use both and the semantics each name promises.
     ///
@@ -112,7 +112,7 @@ impl Pkcs11Signer {
         Self::connect(module_path, slot_id, token_pin_env, key_label)
     }
 
-    /// The HSM connection identity this signer is bound to (F12). Logged at
+    /// The HSM connection identity this signer is bound to. Logged at
     /// startup so an operator can confirm which module and slot answered.
     pub fn connection_info(&self) -> String {
         format!(

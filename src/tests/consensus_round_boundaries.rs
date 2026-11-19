@@ -1,4 +1,4 @@
-//! P01 consensus-round behaviour and the P01 negative-validation batch.
+//! Consensus-round boundary behaviour and negative-validation tests.
 //!
 //! The round rule is shared by PoS and PoA: the block nonce carries the
 //! leader round, the round is capped at [`MAX_LEADER_ROUNDS`], and a round

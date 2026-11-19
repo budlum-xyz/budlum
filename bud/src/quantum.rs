@@ -1,4 +1,4 @@
-//! Kuantum direnci - NIST FIPS 204/205 FINAL (politika:
+//! Post-quantum cryptography - NIST FIPS 204/205 FINAL (policy:
 //! "the quantum layer has to be coded in its final NIST form; NOT Dilithium
 //! round-3").
 //!

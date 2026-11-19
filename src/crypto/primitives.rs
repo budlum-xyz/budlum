@@ -95,7 +95,7 @@ pub struct BlsKeypair {
     pub public_key: Vec<u8>,
 }
 
-/// F11: zero the secret scalar when the pair is dropped.
+/// Zero the secret scalar when the pair is dropped.
 impl Drop for BlsKeypair {
     fn drop(&mut self) {
         self.secret_key = Scalar::zero();
@@ -150,7 +150,7 @@ impl BlsKeypair {
     ///
     /// Returns an error if the operation fails.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        // Validate G2 encoding AND that pk matches sk. F10: the length is
+        // Validate G2 encoding AND that pk matches sk. The byte length is
         // exact - trailing garbage is not silently ignored - and the zero
         // scalar is refused (its public key is the identity point).
         if bytes.len() != 32 + 96 {
@@ -352,7 +352,7 @@ impl PqKeyPair {
             public_key: public_key.to_vec(),
             secret_key: Zeroizing::new(secret_key.to_vec()),
         };
-        // F10: the halves must pair. A probe signature under the key file
+        // The secret and public halves must pair. A probe signature under the key file
         // context must verify against the announced public key.
         const PAIRING_PROBE: &[u8] = b"BUDLUM_KEYFILE_PAIRING_PROBE_V1";
         let probe = kp
@@ -666,7 +666,7 @@ impl ValidatorKeys {
         #[cfg(not(feature = "pq-ml-dsa"))]
         let pq_key: Option<PqKeyPair> = None;
 
-        // F10: the tail after the optional PQ block is either absent or
+        // The tail after the optional PQ block is either absent or
         // exactly one BLS keypair. A 1..127-byte tail used to be dropped
         // silently, losing the BLS key; extra bytes were ignored.
         let bls_key = match bytes.len().saturating_sub(cursor) {
@@ -695,7 +695,7 @@ impl ValidatorKeys {
     ///
     /// [`CryptoError::PlaintextDiskKeysForbiddenOnMainnet`] when mainnet keys
     /// carry BLS or post-quantum secrets in the clear.
-    /// F18: the engine enforces mainnet policy through
+    /// The engine enforces mainnet policy through
     /// [`crate::crypto::mainnet_policy::check_mainnet_validator_key_policy`];
     /// this hook exists for the test suite that proves the rule.
     #[cfg(test)]
@@ -769,7 +769,7 @@ impl KeyPair {
         Ok(())
     }
     /// Test-only: production code must not read the raw ed25519 seed
-    /// (F18 keeps the surface minimal; tests use it for round-trips).
+    /// (keeps the public surface minimal; tests use it for round-trips).
     #[cfg(test)]
     pub fn private_key_bytes(&self) -> [u8; SECRET_KEY_LENGTH] {
         *self.signing_key.as_bytes()
@@ -856,7 +856,7 @@ pub struct WalletKeyPair {
 #[cfg(feature = "wallet-ml-dsa")]
 impl zeroize::ZeroizeOnDrop for WalletKeyPair {}
 
-/// F11: overwrite the wallet signing key when the pair is dropped.
+/// Overwrite the wallet signing key when the pair is dropped.
 #[cfg(feature = "wallet-ml-dsa")]
 impl Drop for WalletKeyPair {
     fn drop(&mut self) {
@@ -1100,7 +1100,7 @@ mod tests {
 
     use super::*;
 
-    // ---- (F10): key-file parsing is exact. ----
+    // ---- Key-file parsing is exact. ----
 
     #[test]
     fn bls_from_bytes_refuses_a_zero_scalar() {
@@ -1330,7 +1330,7 @@ mod tests {
     }
     #[test]
     fn test_save_and_load() {
-        // (F17): a fixed /tmp path is shared between parallel test
+        // A fixed /tmp path is shared between parallel test
         // processes; every run gets its own tempdir now.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_budlum_key");
@@ -1366,7 +1366,7 @@ fn stdout_has_64_hex_run(stdout: &[u8]) -> bool {
 /// (security audit) the public-key hex must NOT be printed to stdout by
 /// `KeyPair::generate`.
 ///
-/// (F17): the old test claimed to capture stdout but never did. The
+/// The earlier test claimed to capture stdout but never did. The
 /// check now runs `generate` inside a child process whose raw stdout is
 /// fully captured, so any printed 64-hex public key is observable. A canary
 /// test proves the detector itself works (red-green).

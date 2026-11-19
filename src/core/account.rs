@@ -913,7 +913,7 @@ pub struct AccountState {
     /// Governance-controlled consensus-domain tip rollbacks awaiting deterministic
     /// application inside `apply_block_effects` before `calculate_state_root`.
     pub pending_domain_tip_resets: Vec<PendingDomainTipReset>,
-    /// (F09): the PoA compliance ledger (screening,
+    /// The PoA compliance ledger (screening,
     /// freeze, travel-rule) in consensus state - rooted and snapshotted
     /// with everything else that decides writes.
     pub poa_compliance: crate::registry::PoaComplianceRegistry,
@@ -7863,7 +7863,7 @@ mod tests {
         );
     }
 
-    /// (F09): the PoA gate state is ROOTED - an
+    /// The PoA gate state is ROOTED - an
     /// admission write or a compliance freeze moves the state root, so a
     /// node that skipped them diverges instead of agreeing silently.
     #[test]

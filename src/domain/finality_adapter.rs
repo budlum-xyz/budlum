@@ -5845,7 +5845,7 @@ mod tests {
         );
     }
 
-    // ---- DAG / PoH / PoSpace delegation doors (BLG-268/269/270, extended) ----
+    // ---- DAG / PoH / PoSpace delegation doors ----
     //
     // The structural-quorum replacements (DAG anchors, PoH ladders, PoSpace
     // plot qualities) are pinned above. These tests pin what remains around

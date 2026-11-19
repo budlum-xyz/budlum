@@ -2165,20 +2165,29 @@ fn run_domain_register_poa(
 /// (`cross_domain::external::admit`) run locally, so an adapter author sees
 /// the report before bonding anything.
 ///
-/// One flag per adapter pin: the command's options are the function's
-/// arguments, and grouping them would make the option parsing read worse
-/// than the arity lint does.
-#[allow(clippy::too_many_arguments)]
-fn run_domain_selftest(
-    adapter: &str,
-    network: &str,
-    golden: &std::path::Path,
-    program_hash: Option<&str>,
+/// Options forwarded from `bud domain selftest` into [`run_domain_selftest`].
+struct DomainSelftestArgs<'a> {
+    adapter: &'a str,
+    network: &'a str,
+    golden: &'a std::path::Path,
+    program_hash: Option<&'a str>,
     chain_id: Option<u64>,
-    tm_chain_id: Option<&str>,
-    tm_pin_set_hash: Option<&str>,
+    tm_chain_id: Option<&'a str>,
+    tm_pin_set_hash: Option<&'a str>,
     now: u64,
-) -> Result<(), String> {
+}
+
+fn run_domain_selftest(args: DomainSelftestArgs<'_>) -> Result<(), String> {
+    let DomainSelftestArgs {
+        adapter,
+        network,
+        golden,
+        program_hash,
+        chain_id,
+        tm_chain_id,
+        tm_pin_set_hash,
+        now,
+    } = args;
     use budlum_core::cross_domain::external::{
         admit, RawConsensusEvidence, TendermintFinalityAdapter, VerificationPolicy,
         ZkVmFinalityAdapter,
@@ -4129,16 +4138,16 @@ fn main() {
                 tm_chain_id,
                 tm_pin_set_hash,
                 now,
-            } => run_domain_selftest(
+            } => run_domain_selftest(DomainSelftestArgs {
                 adapter,
                 network,
                 golden,
-                program_hash.as_deref(),
-                *chain_id,
-                tm_chain_id.as_deref(),
-                tm_pin_set_hash.as_deref(),
-                *now,
-            ),
+                program_hash: program_hash.as_deref(),
+                chain_id: *chain_id,
+                tm_chain_id: tm_chain_id.as_deref(),
+                tm_pin_set_hash: tm_pin_set_hash.as_deref(),
+                now: *now,
+            }),
         },
         Command::Dev { action } => run_dev(&cli.rpc_url, action),
         Command::AppBinding { action } => run_app_binding(&cli.rpc_url, action),
