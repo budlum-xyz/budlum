@@ -525,8 +525,8 @@ mod self_host_policy {
     #[test]
     fn self_hosting_turned_off_is_refused() {
         let mut reg = StorageRegistry::new();
-        reg.declare_self_host_policy(ContentId([1u8; 32]), policy(false, 0, false), &profile())
-            .expect("a non-critical declaration with no replicas is coherent");
+        reg.declare_self_host_policy(ContentId([1u8; 32]), policy(false, 1, false), &profile())
+            .expect("a non-self-hosted declaration with a paid replica is coherent");
 
         let err = reg
             .check_self_host_allowed(&ContentId([1u8; 32]), &ContentId([5u8; 32]))
