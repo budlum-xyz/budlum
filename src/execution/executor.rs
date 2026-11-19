@@ -4789,6 +4789,14 @@ impl Executor {
         Ok(())
     }
 
+    /// Apply `transactions` to `state` for `block_producer`.
+    ///
+    /// A rejected block leaves `state` as it was; the effects never land.
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable message describing the first refusal raised by
+    /// [`Self::apply_block_checked`].
     pub fn apply_block(
         state: &mut AccountState,
         transactions: &[Transaction],
@@ -4817,6 +4825,11 @@ impl Executor {
     /// Apply a whole block atomically. A rejected block leaves `state` exactly
     /// as it was before the call, including effects from transactions earlier
     /// in the same block.
+    /// # Errors
+    ///
+    /// Returns the first [`BudlumError`] raised by admission, execution, or a
+    /// block-level check. On error the input `state` is unchanged: all effects go to a
+    /// candidate clone that is committed only after the block validates.
     pub fn apply_block_checked(
         state: &mut AccountState,
         transactions: &[Transaction],

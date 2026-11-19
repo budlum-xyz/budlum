@@ -1271,6 +1271,11 @@ impl Bud3Registry {
     }
 
     /// Issue a view grant through the canonical issuance path.
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] from the shared validation in [`Self::validate_view_grant`]
+    /// when the NFT is unknown, the signer is not authorized, or the grant row fails its
+    /// shape and epoch checks.
     pub fn issue_grant(
         &mut self,
         nft: &NftId,
@@ -1419,6 +1424,9 @@ impl Bud3Registry {
 
     /// Admit and record a Mobile validator's declared custody quota under `limits`.
     /// Convenience: exposed for Mobile validator quota updates and RPC admission.
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::BadQuota`] when the declared custody quota violates `limits`.
     pub fn set_mobile_custody_quota(
         &mut self,
         validator: Address,
