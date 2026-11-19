@@ -250,7 +250,7 @@ impl VersionPolicy {
             .join(", ")
     }
 
-    /// Whether this policy is in a state that can serve at all: at least one
+    /// Whether this policy is in a state that can serve at all: exactly one
     /// open-ended window (no sunset), no two windows for the same version, and
     /// no window that sunsets before it starts.
     #[must_use]
@@ -259,7 +259,7 @@ impl VersionPolicy {
             return false;
         }
         let mut seen: Vec<u32> = Vec::with_capacity(self.windows.len());
-        let mut any_open = false;
+        let mut open_count: usize = 0;
         for window in &self.windows {
             if seen.contains(&window.version) {
                 return false;
@@ -271,11 +271,14 @@ impl VersionPolicy {
                 return false;
             }
             if window.sunset_height.is_none() {
-                any_open = true;
+                open_count = open_count.saturating_add(1);
+                if open_count > 1 {
+                    return false;
+                }
             }
             seen.push(window.version);
         }
-        any_open
+        open_count == 1
     }
 }
 
@@ -368,5 +371,57 @@ mod tests {
         policy.windows[0].sunset_height = Some(0);
         policy.windows[0].valid_from_height = 1;
         assert!(!policy.is_consistent());
+    }
+
+    #[test]
+    fn multiple_open_windows_and_overflowing_prover_ratios_fail_closed() {
+        use crate::cross_domain::external::prover::{
+            required_bond_atoms, ChallengeReward, ProverFee,
+        };
+
+        let mut policy = policy();
+        policy.windows.push(VersionWindow {
+            version: 2,
+            valid_from_height: 50,
+            sunset_height: None,
+        });
+        assert!(
+            !policy.is_consistent(),
+            "two concurrent non-sunset windows permit perpetual dual-format divergence"
+        );
+
+        let reward = ChallengeReward {
+            bps_of_slash: 25_000,
+            floor_atoms: 50,
+        };
+        assert_eq!(
+            reward.for_slash(0),
+            0,
+            "zero slash must never mint floor reward"
+        );
+        assert_eq!(
+            reward.for_slash(1_000),
+            1_000,
+            "bps above 10_000 caps at 100% of slash"
+        );
+        assert_eq!(
+            ChallengeReward {
+                bps_of_slash: 5_000,
+                floor_atoms: 0,
+            }
+            .for_slash(u128::MAX - 5),
+            (u128::MAX - 5) / 2
+        );
+
+        // Overflowing `ceiling * ratio_num` must saturate to `u128::MAX`, never `u128::MAX / den`.
+        assert_eq!(required_bond_atoms(u128::MAX, 2, 10), u128::MAX);
+        assert_eq!(
+            ProverFee {
+                base_atoms: 0,
+                value_bps: 5_000,
+            }
+            .for_value(1u128 << 120),
+            1u128 << 119
+        );
     }
 }
