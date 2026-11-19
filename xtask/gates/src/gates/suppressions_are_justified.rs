@@ -51,6 +51,24 @@ struct Budget {
 /// The measured inventory. Counted, not typed.
 const BUDGETS: &[Budget] = &[
     Budget {
+        file: "src/bin/bud.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "`run_domain_selftest` mirrors the CLI's own option list one-to-one; bundling them into a struct would insert a second, divergent spelling of the same flags between the parser and the self-test it drives",
+    },
+    Budget {
+        file: "src/cross_domain/evm/sync_committee.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "`rotate_period_for_fork` takes the fork name beside the SSZ branch and generalized index it must agree with; a params struct would let the fork and its gindex drift apart at the call site, which is the exact mismatch this function refuses",
+    },
+    Budget {
+        file: "src/cross_domain/external/pospace_vdf.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "test-only block miner whose nine arguments are the VDF input tuple every caller passes verbatim; a bundle type would exist solely to satisfy the arity lint",
+    },
+    Budget {
         file: "src/chain/blockchain.rs",
         lint: "clippy::expect_used",
         count: 1,

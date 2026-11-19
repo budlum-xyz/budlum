@@ -1,4 +1,4 @@
-//! Universal Light Proof (`ULP-1`) succinct multi-domain aggregation (`GOREV-21`).
+//! Universal Light Proof (`ULP-1`) succinct multi-domain aggregation.
 //!
 //! Folds `1..=MAX_ULP_DOMAINS` external finality snapshots over 128-bit `BudAir`
 //! FRI-STARKs, `StarkBackend` `MasterProof`, and split-STARK PCS verification.
