@@ -1,7 +1,6 @@
 # Legacy storage files still carrying removed-system identifiers, plus banned paths.
 # Ratchet: a file outside this list fails; a listed file that no longer offends
 # also fails until its line is removed. The list only shrinks.
-bud/
 budzero/bud-node/
 src/domain/storage_deal.rs
 src/domain/deal_open.rs
@@ -12,7 +11,6 @@ budzero/bud-node/src/lib.rs
 budzero/bud-node/src/sharding.rs
 budzero/bud-node/src/store.rs
 docs/ARCHITECTURE.md
-docs/NAMING.md
 src/chain/blockchain.rs
 src/chain/chain_actor.rs
 src/chain/snapshot.rs
@@ -33,11 +31,9 @@ src/persistence/db.rs
 src/storage/emit.rs
 src/storage/erasure.rs
 src/storage/generated.rs
-src/storage/lrc.rs
 src/storage/manifest.rs
 src/storage/mobile_self.rs
 src/storage/mod.rs
-src/storage/msr.rs
 src/storage/provider.rs
 src/storage/qr_receive.rs
 src/storage/qr_recipe.rs

@@ -187,7 +187,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | Layer | In this repo | What it is |
 | --- | --- | --- |
 | **BudZero** | [`budzero/`](budzero), [README](budzero/README.md) | ZK-native VM: deterministic ISA, gas-metered VM, compiler, and a Plonky3 STARK prover/verifier |
-| **B.U.D.** | [`bud/`](bud) · [`src/storage/`](src/storage) | Broad Universal Database: `bud/` is the 1.0/2.0/3.0 implementation (tarif / QR / receipt / settlement modules, [bud README](bud/README.md)); `src/storage/` is the settlement layer's storage engine (content addressing, deals, challenge/response proofs) |
+| **B.U.D. 3.0** | [`src/storage/bud3/`](src/storage/bud3) · [`src/storage/`](src/storage) | Broad Universal Database 3.0: self-verifying BOF-1 object store, RaptorQ fountain shards, deterministic compression, Merkle custody proofs, and access-tiered encryption |
 | **AI inference layer** | [`src/ai_inference/`](src/ai_inference) | Closed-circuit AI layer: model registry, operator compute-bond, effort tiers, Pollen-gated data access, perception declarations (V3), SocialFi output bridge. Off-chain workspace: [`crates/ai-inference/`](crates/ai-inference) |
 | **Pollen** | [`src/pollen/`](src/pollen) | Consent-gated data marketplace, grants, encryption, and the gate the AI layer must pass |
 | **BNS** | [`src/bns/`](src/bns) | `.bud` naming: registration, renewal, transfer, subdomains, content and storage records |
@@ -198,7 +198,6 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | Path | Contents |
 | --- | --- |
 | [`crates/`](crates) | Standalone workspaces: wallet-core, budlum-explorer, ai_inference, note-packing |
-| [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 implementation (its own workspace) |
 | [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, NOTICE |
 | [`config/`](config) | Devnet / testnet / mainnet profiles and genesis templates |
 | [`xtask/gates/`](xtask/gates) | CI gates, every one is self-testing (see [Engineering standards](#engineering-standards)) |

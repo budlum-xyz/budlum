@@ -113,7 +113,6 @@ const BASELINE: &[&str] = &[
     "src/storage/generated.rs",
     "src/storage/manifest.rs",
     "src/persistence/state_trie.rs",
-    "src/storage/msr.rs",
     "src/storage/provider.rs",
     "src/storage/render.rs",
     "src/tokenomics/mod.rs",
