@@ -160,6 +160,11 @@ impl L1NoteRegistry {
         commitment: NoteHash,
         owner: Address,
     ) -> Result<(), String> {
+        if !is_note_hash(&commitment) {
+            return Err(
+                "PrivacyNoteInsert: commitment is not a packed Goldilocks field element".into(),
+            );
+        }
         let owner_live = self
             .note_owners
             .values()
@@ -200,14 +205,33 @@ impl L1NoteRegistry {
                 spent_commitments.len()
             ));
         }
+        for h in spent_commitments
+            .iter()
+            .chain(nullifiers.iter())
+            .chain(output_commitments.iter())
+            .chain(nullifier_proofs.iter())
+        {
+            if !is_note_hash(h) {
+                return Err(
+                    "private transfer: a commitment, nullifier, or proof is not a packed field element"
+                        .into(),
+                );
+            }
+        }
+        let mut recorded_spent_keys = BTreeSet::new();
         for (i, (commitment, proof)) in spent_commitments
             .iter()
             .zip(nullifier_proofs.iter())
             .enumerate()
         {
-            let recorded_owner = self.note_owners.get(&hex::encode(commitment));
+            let key = hex::encode(commitment);
+            let recorded_owner = self.note_owners.get(&key);
             let owns_note = match recorded_owner {
-                Some(owner) => owner == spender,
+                Some(owner) if owner == spender => {
+                    recorded_spent_keys.insert(key);
+                    true
+                }
+                Some(_) => false,
                 None => *commitment == Self::derive_commitment(spender, proof),
             };
             if !owns_note {
@@ -215,6 +239,19 @@ impl L1NoteRegistry {
                     "spend ownership invalid for input {i}: spender does not own note"
                 ));
             }
+        }
+        let owner_live = self
+            .note_owners
+            .values()
+            .filter(|recorded| **recorded == *spender)
+            .count();
+        let projected_owner_live = owner_live
+            .saturating_sub(recorded_spent_keys.len())
+            .saturating_add(output_commitments.len());
+        if projected_owner_live > MAX_LIVE_COMMITMENTS_PER_OWNER {
+            return Err(format!(
+                "owner live commitment limit exceeded ({projected_owner_live}/{MAX_LIVE_COMMITMENTS_PER_OWNER})"
+            ));
         }
         self.apply_transfer_with_proofs(
             spent_commitments,
@@ -889,5 +926,60 @@ mod h3_tests {
             .unwrap_err();
         assert!(err.contains("nullifier"), "unexpected error: {err}");
         assert!(r.contains_commitment(&c2));
+    }
+
+    #[test]
+    fn owner_insert_refuses_unpacked_commitment_without_mutation() {
+        let mut r = L1NoteRegistry::new();
+        let owner = Address::from([0x33u8; 32]);
+        let mut unpacked = budlum_note_packing::hash_from_field(77);
+        unpacked[31] = 0x01;
+
+        let err = r
+            .insert_note_for_owner(unpacked, owner)
+            .expect_err("unpacked note hash must be rejected for owner insertion");
+        assert!(err.contains("packed Goldilocks"), "unexpected error: {err}");
+        assert_eq!(r.live_count(), 0);
+        assert!(r.note_owners.is_empty());
+    }
+
+    #[test]
+    fn spending_unrecorded_note_cannot_exceed_per_owner_live_limit() {
+        let mut r = L1NoteRegistry::new();
+        let owner = Address::from([0x44u8; 32]);
+        for i in 0..MAX_LIVE_COMMITMENTS_PER_OWNER {
+            let note = budlum_note_packing::hash_from_field((i as u64) + 1);
+            r.insert_note_for_owner(note, owner)
+                .expect("fill owner quota up to exact ceiling");
+        }
+
+        // Insert one legacy unrecorded note derivable by `owner`.
+        let legacy_proof = budlum_note_packing::hash_from_field(0x5500_0001);
+        let legacy_note = L1NoteRegistry::derive_commitment(&owner, &legacy_proof);
+        let legacy_nf = L1NoteRegistry::derive_nullifier(&legacy_note, &legacy_proof);
+        let new_out = budlum_note_packing::hash_from_field(0x5500_0002);
+        r.insert_note(legacy_note)
+            .expect("insert unrecorded legacy commitment");
+
+        // Spending `legacy_note` removes 0 recorded notes for `owner` while
+        // adding 1 new recorded output, which would push `owner` to limit + 1.
+        let err = r
+            .apply_transfer_for_owner(
+                &owner,
+                &[legacy_note],
+                &[legacy_nf],
+                &[new_out],
+                &[legacy_proof],
+            )
+            .expect_err("owner quota overflow via unrecorded spend must be refused");
+        assert!(
+            err.contains("owner live commitment limit exceeded"),
+            "unexpected error: {err}"
+        );
+        assert!(r.contains_commitment(&legacy_note));
+        assert!(!r.is_nullifier_spent(&legacy_nf));
+        assert!(!r.contains_commitment(&new_out));
+        let owner_count = r.note_owners.values().filter(|o| **o == owner).count();
+        assert_eq!(owner_count, MAX_LIVE_COMMITMENTS_PER_OWNER);
     }
 }

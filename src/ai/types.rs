@@ -571,6 +571,7 @@ impl AiInferenceResult {
         hasher.update(self.request_id.0);
         hasher.update(self.verifier.as_bytes());
         hasher.update(self.output_commitment);
+        hasher.update((self.output_ref.len() as u64).to_le_bytes());
         hasher.update(self.output_ref.as_slice());
         hasher.update(self.result_nonce.to_le_bytes());
         hasher.update(self.submitted_at_block.to_le_bytes());
@@ -818,8 +819,11 @@ impl AiExecutionProof {
             }
             None => hasher.update([0u8]),
         }
-        // Note: proof_bytes is NOT hashed (too large, and the
-        // Program_hash + commitments already uniquely identify the proof).
+        // Bind the exact proof envelope digest and byte length so two nodes holding
+        // divergent proof_bytes for the same header never share a state root.
+        hasher.update((self.proof_bytes.len() as u64).to_le_bytes());
+        let proof_digest: [u8; 32] = Sha256::digest(&self.proof_bytes).into();
+        hasher.update(proof_digest);
         hasher.finalize().into()
     }
 }

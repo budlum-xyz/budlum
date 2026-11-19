@@ -19,10 +19,10 @@ Kiragi|6|16
 Liquid storage|0|0
 Living Threshold|6|16
 Mikoriza|19|65
-Mobile Self|13|123
+Mobile Self|10|69
 PUL|12|98
-Pollen|62|725
-Regeneration|27|108
+Pollen|62|724
+Regeneration|27|107
 Sera|0|0
 Tarif|52|1413
 Universal Gateway|4|7

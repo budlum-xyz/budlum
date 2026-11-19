@@ -296,8 +296,17 @@ fn ai_mlp_guest_program_hash_stable() {
 fn l1_note_registry_root_changes() {
     let mut r = L1NoteRegistry::new();
     let a = r.state_root();
-    r.insert_note_for_owner([1u8; 32], crate::core::address::Address::zero())
-        .unwrap();
+    assert!(
+        r.insert_note_for_owner([1u8; 32], crate::core::address::Address::zero())
+            .is_err(),
+        "unpacked non-canonical bytes must be refused"
+    );
+    assert_eq!(a, r.state_root());
+    r.insert_note_for_owner(
+        budlum_note_packing::hash_from_field(1),
+        crate::core::address::Address::zero(),
+    )
+    .unwrap();
     assert_ne!(a, r.state_root());
 }
 

@@ -3,8 +3,8 @@
 //! Pollen governs *permission*: a `DataAsset` is registered, an `AccessGrant`
 //! is issued against a payment, and `validate_ai_read_ref` refuses an AI
 //! request whose grant is missing, expired, exhausted or held by someone
-//! else. B.U.D. governs *bytes*: a `ContentManifest` names shards, operators
-//! hold them, and a reader assembles `k` of them into the object.
+//! else. B.U.D. 3.0 governs *bytes*: an object commitment names segments, operators
+//! hold them, and a reader assembles the object from verified symbols.
 //!
 //! Those two were complete on their own and had no connection, which is the
 //! hole this module closes. Measured: nothing in `src/storage/` mentions
@@ -144,7 +144,7 @@ impl std::error::Error for ContentGateError {}
 
 /// Which stored objects are sold through Pollen.
 ///
-/// Deliberately a plain map rather than a field on `ContentManifest`. A
+/// Deliberately a plain map rather than a field on the storage object header. A
 /// manifest is content-addressed: its id is the hash of its own contents, so
 /// two uploaders sharding the same bytes get one id. Whether those bytes are
 /// *for sale* is not a property of the bytes, it is a property of an

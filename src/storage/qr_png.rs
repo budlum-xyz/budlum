@@ -14,7 +14,7 @@
 //! # What the determinism claim covers
 //!
 //! The PNG bytes go into the BDLV blob that `QrVideo::blob_commitment` and
-//! `VideoRecipe::video_commitment` hash, so they are committed bytes. Deflate
+//! the video recipe commitment hash, so they are committed bytes. Deflate
 //! output is fixed for one compressor implementation at one level: the
 //! `flate2` crate with its `rust_backend` (`miniz_oxide`), at the versions
 //! `Cargo.lock` pins. It is not promised across compressor versions; a

@@ -57,7 +57,7 @@
 //! shards of the same object, which is checkable from state.
 //!
 //! WIRING: wired - two production entry points, both from the storage
-//! maintenance sweep. `StorageRegistry::annotate_expected_holders` runs once
+//! maintenance sweep. `annotate_expected_holders` runs once
 //! per epoch and annotates each pending repair ticket with the holder
 //! placement would choose; the annotation goes through `assign_object`, one
 //! call per object, so several tickets for one object cannot all be advised
@@ -84,7 +84,7 @@
 //!
 //! `displaced_shards` remains uncalled and that is honest. Turning a
 //! departure into a repair needs the placement recorded when the object was
-//! written, and `ContentManifest` carries no holder list. Comparing against
+//! written, and an object manifest carries no holder list. Comparing against
 //! a placement nobody stored would compare the current answer with itself.
 
 use crate::core::address::Address;

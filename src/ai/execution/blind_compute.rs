@@ -91,6 +91,9 @@ pub fn verify_compute_without_seeing(
     }
     let program_and_pi = program_and_pi
         .ok_or("ComputeWithoutSeeing requires a full STARK program and public inputs")?;
+    if bundle.result.request_id != bundle.request.request_id || !bundle.request.verify_id() {
+        return Err("ComputeWithoutSeeing request/result id binding mismatch".into());
+    }
     if bundle.request.input_commitment
         != crate::ai::types::canonical_input_commitment(bundle.request.input_ref.as_slice())
         || bundle.result.output_commitment
