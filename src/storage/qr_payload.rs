@@ -253,7 +253,7 @@ pub fn unpack_payload(packed: &[u8]) -> Result<(PayloadKind, Vec<u8>), PayloadEr
     }
 
     let raw = if flags & FLAG_ZLIB != 0 {
-        inflate_zlib(body).map_err(|_| PayloadError::Inflate)?
+        inflate_zlib(body, orig_len).map_err(|()| PayloadError::Inflate)?
     } else {
         body.to_vec()
     };
@@ -285,19 +285,24 @@ fn try_zlib9(data: &[u8]) -> Option<Vec<u8>> {
     enc.finish().ok()
 }
 
-fn inflate_zlib(data: &[u8]) -> Result<Vec<u8>, ()> {
+fn inflate_zlib(data: &[u8], expected_len: usize) -> Result<Vec<u8>, ()> {
     let mut decoder = ZlibDecoder::new(data);
     let mut out = Vec::new();
-    // Cap the expansion before reading. A hostile body may declare a small
-    // `orig_len` in the header yet carry a zlib stream that inflates far past
-    // [`MAX_PAYLOAD_CONTENT`]; without the cap, `read_to_end` allocates the
-    // whole bomb before the length check below can refuse it.
+    // Cap expansion to `expected_len + 1` (never full MAX_PAYLOAD_CONTENT) so a
+    // compressed stream claiming 1 byte cannot force a 64 MiB allocation before
+    // failing the length check, and require every input byte to belong to the
+    // zlib stream (no trailing garbage past ADLER32).
+    let limit = expected_len.min(MAX_PAYLOAD_CONTENT);
+    let read_cap = (limit as u64).saturating_add(1);
     decoder
         .by_ref()
-        .take(MAX_PAYLOAD_CONTENT as u64 + 1)
+        .take(read_cap)
         .read_to_end(&mut out)
         .map_err(|_| ())?;
-    if out.len() > MAX_PAYLOAD_CONTENT {
+    if out.len() > limit {
+        return Err(());
+    }
+    if decoder.total_in() != data.len() as u64 {
         return Err(());
     }
     Ok(out)
@@ -559,6 +564,18 @@ mod tests {
         assert_eq!(
             unpack_payload(&packed).unwrap_err(),
             PayloadError::BadKind(0xff)
+        );
+    }
+
+    #[test]
+    fn zlib_trailing_bytes_smuggled_past_adler32_are_refused() {
+        let body = b"compressible-payload-bytes-".repeat(32);
+        let mut packed = pack_payload(PayloadKind::ContentBytes, &body).unwrap();
+        assert!(packed_is_zlib(&packed));
+        packed.extend_from_slice(b"SMUGGLED_TRAILING_GARBAGE");
+        assert!(
+            unpack_payload(&packed).is_err(),
+            "trailing bytes after zlib stream must be refused as non-canonical"
         );
     }
 }

@@ -91,7 +91,8 @@ impl std::error::Error for FrameError {}
 
 /// Lab hard cap on nested drop wire size: the drop header plus the largest
 /// body `from_payload` admits, so the two ends agree by construction.
-pub const MAX_DROP_WIRE: u16 = DROP_HEADER_LEN as u16 + MAX_BLOCK_LEN;
+pub const MAX_DROP_WIRE: u16 = 8 * 1024;
+const _: () = assert!(MAX_DROP_WIRE as usize == DROP_HEADER_LEN + MAX_BLOCK_LEN as usize);
 
 /// Pack a carousel drop into a Three optical frame.
 ///
