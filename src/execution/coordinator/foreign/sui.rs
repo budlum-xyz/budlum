@@ -342,6 +342,11 @@ impl std::error::Error for SuiEnvelopeError {}
 /// # Errors
 ///
 /// Returns an error if the operation fails.
+/// Maximum raw JSON envelope byte length for `Foreign::Sui` (`256 KiB`).
+pub const MAX_SUI_ENVELOPE_BYTES: usize = 256 * 1024;
+/// Maximum inner serialized `SuiTransactionData` byte length (`128 KiB`).
+pub const MAX_SUI_TX_DATA_BYTES: usize = 128 * 1024;
+
 pub fn decode_and_recover_sui_tx(
     raw_envelope: &[u8],
     policy: SuiActivationPolicy,
@@ -352,8 +357,18 @@ pub fn decode_and_recover_sui_tx(
             activation: policy.activation_height,
         });
     }
+    if raw_envelope.len() > MAX_SUI_ENVELOPE_BYTES {
+        return Err(SuiEnvelopeError::MalformedEnvelope(String::from(
+            "Sui envelope exceeds 256 KiB limit",
+        )));
+    }
     let env: SignedSuiEnvelope = serde_json::from_slice(raw_envelope)
         .map_err(|e| SuiEnvelopeError::MalformedEnvelope(e.to_string()))?;
+    if env.tx_data_bytes.len() > MAX_SUI_TX_DATA_BYTES {
+        return Err(SuiEnvelopeError::MalformedEnvelope(String::from(
+            "Sui tx_data_bytes exceeds 128 KiB limit",
+        )));
+    }
     let sig_len = env.sui_signature.len();
     if sig_len != 97 {
         return Err(SuiEnvelopeError::InvalidSignatureLength(sig_len));
@@ -376,6 +391,9 @@ pub fn decode_and_recover_sui_tx(
         .map_err(|_| SuiEnvelopeError::InvalidPublicKey)?;
 
     let vk = VerifyingKey::from_bytes(&pk_arr).map_err(|_| SuiEnvelopeError::InvalidPublicKey)?;
+    if vk.is_weak() {
+        return Err(SuiEnvelopeError::InvalidPublicKey);
+    }
     let sig = Signature::from_bytes(&sig_arr);
     let signing_digest = sui_transaction_signing_digest(&env.tx_data_bytes);
     vk.verify_strict(&signing_digest, &sig)

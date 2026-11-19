@@ -14,6 +14,7 @@ library BudlumHash {
     uint256 private constant MERKLE_PROMOTE_FIELDS = 2;
     uint256 private constant MERKLE_NODE_FIELDS = 3;
     uint256 private constant SENTINEL_FIELDS = 1;
+    uint256 internal constant MAX_MERKLE_DEPTH = 64;
 
     /// 8-byte little-endian encoding of `value`.
     function le64(uint64 value) internal pure returns (bytes memory out) {
@@ -50,6 +51,9 @@ library BudlumHash {
         pure
         returns (bool ok, bytes32 root)
     {
+        if (siblings.length > MAX_MERKLE_DEPTH) {
+            return (false, bytes32(0));
+        }
         bytes32 cur = leaf;
         uint256 idx = index;
         bytes[] memory sentinelFields = new bytes[](SENTINEL_FIELDS);

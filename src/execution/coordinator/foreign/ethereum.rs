@@ -329,11 +329,19 @@ fn recover_from_sig_parts(
         .map_err(|e| EthereumEnvelopeError::InvalidSignature(e.to_string()))
 }
 
+/// Maximum raw Ethereum RLP transaction byte length (`256 KiB`, geth/EIP-2718 ceiling).
+pub const MAX_ETHEREUM_TRANSACTION_BYTES: usize = 256 * 1024;
+
 /// Decodes a raw Ethereum signed transaction and recovers its sender on `expected_chain_id`.
 pub fn decode_ethereum_tx(
     raw: &[u8],
     expected_chain_id: u64,
 ) -> Result<DecodedEthereumTx, EthereumEnvelopeError> {
+    if raw.len() > MAX_ETHEREUM_TRANSACTION_BYTES {
+        return Err(EthereumEnvelopeError::MalformedRlp(String::from(
+            "Ethereum raw transaction exceeds 256 KiB limit",
+        )));
+    }
     let Some(&first) = raw.first() else {
         return Err(EthereumEnvelopeError::Empty);
     };

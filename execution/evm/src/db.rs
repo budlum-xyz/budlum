@@ -295,6 +295,7 @@ pub fn commit_evm_state(
     host: &mut dyn HostApi,
     state: &EvmState,
     logs: &[Log],
+    host_settled_debits: &BTreeMap<Address, U256>,
 ) -> Result<(), HostError> {
     let ns_acc = Namespace::new(NS_EVM_ACCOUNT).map_err(|e| HostError::Invalid(e.to_string()))?;
     let ns_code = Namespace::new(NS_EVM_CODE).map_err(|e| HostError::Invalid(e.to_string()))?;
@@ -312,7 +313,11 @@ pub fn commit_evm_state(
     let mut credits: Vec<(Address, u128)> = Vec::new();
 
     for (&addr, acc) in &ordered {
-        let orig_bal = u256_to_u128_clamped(acc.original_info().balance)?;
+        let settled = host_settled_debits
+            .get(&addr)
+            .copied()
+            .unwrap_or(U256::ZERO);
+        let orig_bal = u256_to_u128_clamped(acc.original_info().balance.saturating_sub(settled))?;
         let curr_bal = u256_to_u128_clamped(acc.info.balance)?;
         if curr_bal < orig_bal {
             debits.push((addr, orig_bal - curr_bal));
@@ -381,6 +386,17 @@ pub fn commit_evm_state(
         if credits[c_idx].1 == 0 {
             c_idx += 1;
         }
+    }
+    // Any unpaired positive credit indicates an unbacked balance inflation and fails closed.
+    if credits
+        .get(c_idx..)
+        .unwrap_or(&[])
+        .iter()
+        .any(|&(_, rem_c)| rem_c > 0)
+    {
+        return Err(HostError::Invalid(
+            "unbacked EVM balance credit refused at commit".into(),
+        ));
     }
     // Any remaining debit (e.g. SELFDESTRUCT burn) moves to 0x0000...0000.
     for &(from_addr, rem_d) in debits.get(d_idx..).unwrap_or(&[]) {

@@ -267,7 +267,9 @@ fn bump_account_nonce(
     if cur != expected_nonce {
         return Err(b"STARKNET_INVALID_TRANSACTION_NONCE");
     }
-    let next = cur.saturating_add(1);
+    let Some(next) = cur.checked_add(1) else {
+        return Err(b"STARKNET_NONCE_OVERFLOW");
+    };
     let Ok(ns) = cairo_ns() else {
         return Err(b"cairo ns err");
     };
@@ -392,7 +394,9 @@ fn run_entrypoint(
                     .get(24..32)
                     .and_then(|s| s.try_into().ok())
                     .unwrap_or([0; 8]);
-                let sum = u64::from_be_bytes(lo8).saturating_add(*delta);
+                let Some(sum) = u64::from_be_bytes(lo8).checked_add(*delta) else {
+                    return Err(b"CAIRO_U64_OVERFLOW");
+                };
                 if let Some(tail) = felt.get_mut(24..32) {
                     tail.copy_from_slice(&sum.to_be_bytes());
                 }
@@ -509,6 +513,9 @@ impl ExecutionEnvironment for CairoWorker {
                 ));
             };
             let ch = cls.class_hash();
+            if matches!(host.read(&ns, &class_key(&ch)), Ok(Some(_))) {
+                return Ok(ee_reverted(b"CLASS_ALREADY_DECLARED".to_vec(), gas_used));
+            }
             let encoded = serde_json::to_vec(&cls).unwrap_or_default();
             if host.write(&ns, &class_key(&ch), Some(&encoded)).is_err() {
                 return Ok(ee_reverted(b"declare write failed".to_vec(), gas_used));
@@ -520,46 +527,54 @@ impl ExecutionEnvironment for CairoWorker {
             return Ok(ee_reverted(b"invalid CairoAction JSON".to_vec(), gas_used));
         };
 
-        match action {
+        let Ok(action_cp) = host.checkpoint_begin() else {
+            return Ok(ee_reverted(
+                b"cairo checkpoint begin failed".to_vec(),
+                gas_used,
+            ));
+        };
+        let outcome = match action {
             CairoAction::Declare {
                 class_bundle,
                 nonce,
             } => {
                 if let Err(reason) = bump_account_nonce(host, &caller_felt, nonce) {
-                    return Ok(ee_reverted(reason.to_vec(), gas_used));
+                    ee_reverted(reason.to_vec(), gas_used)
+                } else if let Ok(cls) = decode_sierra_class(&class_bundle) {
+                    let ch = cls.class_hash();
+                    if matches!(host.read(&ns, &class_key(&ch)), Ok(Some(_))) {
+                        ee_reverted(b"CLASS_ALREADY_DECLARED".to_vec(), gas_used)
+                    } else {
+                        let encoded = serde_json::to_vec(&cls).unwrap_or_default();
+                        if host.write(&ns, &class_key(&ch), Some(&encoded)).is_err() {
+                            ee_reverted(b"class write err".to_vec(), gas_used)
+                        } else {
+                            ee_success(ch.to_vec(), gas_used)
+                        }
+                    }
+                } else {
+                    ee_reverted(b"invalid Sierra class bundle".to_vec(), gas_used)
                 }
-                let Ok(cls) = decode_sierra_class(&class_bundle) else {
-                    return Ok(ee_reverted(
-                        b"invalid Sierra class bundle".to_vec(),
-                        gas_used,
-                    ));
-                };
-                let ch = cls.class_hash();
-                let encoded = serde_json::to_vec(&cls).unwrap_or_default();
-                if host.write(&ns, &class_key(&ch), Some(&encoded)).is_err() {
-                    return Ok(ee_reverted(b"class write err".to_vec(), gas_used));
-                }
-                Ok(ee_success(ch.to_vec(), gas_used))
             }
             CairoAction::DeployContract {
                 class_hash,
                 salt,
                 constructor_calldata,
                 nonce,
-            } => {
+            } => 'deploy: {
                 if let Err(reason) = bump_account_nonce(host, &caller_felt, nonce) {
-                    return Ok(ee_reverted(reason.to_vec(), gas_used));
+                    break 'deploy ee_reverted(reason.to_vec(), gas_used);
                 }
                 let Ok(Some(_)) = host.read(&ns, &class_key(&class_hash)) else {
-                    return Ok(ee_reverted(b"CLASS_NOT_DECLARED".to_vec(), gas_used));
+                    break 'deploy ee_reverted(b"CLASS_NOT_DECLARED".to_vec(), gas_used);
                 };
                 let addr = derive_starknet_contract_address(&caller_felt, &salt, &class_hash);
                 match host.read(&ns, &inst_key(&addr)) {
                     Ok(Some(_)) => {
-                        return Ok(ee_reverted(b"CONTRACT_ALREADY_DEPLOYED".to_vec(), gas_used));
+                        break 'deploy ee_reverted(b"CONTRACT_ALREADY_DEPLOYED".to_vec(), gas_used);
                     }
                     Ok(None) => {}
-                    Err(_) => return Ok(ee_reverted(b"deploy read err".to_vec(), gas_used)),
+                    Err(_) => break 'deploy ee_reverted(b"deploy read err".to_vec(), gas_used),
                 }
                 if host
                     .write(&ns, &inst_key(&addr), Some(&class_hash))
@@ -568,7 +583,7 @@ impl ExecutionEnvironment for CairoWorker {
                         .write(&ns, &owner_key(&addr), Some(&caller_felt))
                         .is_err()
                 {
-                    return Ok(ee_reverted(b"deploy write err".to_vec(), gas_used));
+                    break 'deploy ee_reverted(b"deploy write err".to_vec(), gas_used);
                 }
                 match run_entrypoint(
                     &addr,
@@ -578,35 +593,29 @@ impl ExecutionEnvironment for CairoWorker {
                     call.gas_limit,
                     host,
                 ) {
-                    Ok(_) => Ok(ee_success(addr.to_vec(), gas_used)),
-                    Err(b"OUT_OF_GAS") => Ok(ee_out_of_gas(call.gas_limit)),
-                    Err(reason) => Ok(ee_reverted(reason.to_vec(), gas_used)),
+                    Ok(_) => ee_success(addr.to_vec(), gas_used),
+                    Err(b"OUT_OF_GAS") => ee_out_of_gas(call.gas_limit),
+                    Err(reason) => ee_reverted(reason.to_vec(), gas_used),
                 }
             }
-            CairoAction::InvokeAccount { calls, nonce } => {
-                // This compact Cairo model has no contract-side caller or
-                // signature syscall. Until it does, bind each deployed
-                // instance to its recorded deployer and reject all other
-                // callers before consuming nonce or running caller-supplied
-                // entrypoint calldata.
+            CairoAction::InvokeAccount { calls, nonce } => 'invoke: {
                 for c in &calls {
                     match host.read(&ns, &owner_key(&c.contract_address)) {
                         Ok(Some(owner)) if owner.as_slice() == caller_felt.as_slice() => {}
                         Ok(Some(_)) => {
-                            return Ok(ee_reverted(
+                            break 'invoke ee_reverted(
                                 b"CALLER_NOT_CONTRACT_OWNER".to_vec(),
                                 gas_used,
-                            ));
+                            );
                         }
                         Ok(None) => {
-                            return Ok(ee_reverted(b"CONTRACT_NOT_FOUND".to_vec(), gas_used));
+                            break 'invoke ee_reverted(b"CONTRACT_NOT_FOUND".to_vec(), gas_used);
                         }
-                        Err(_) => return Ok(ee_reverted(b"owner read err".to_vec(), gas_used)),
+                        Err(_) => break 'invoke ee_reverted(b"owner read err".to_vec(), gas_used),
                     }
                 }
-                // `__validate__`: bound directly to caller's post-quantum Budlum alias + nonce.
                 if let Err(reason) = bump_account_nonce(host, &caller_felt, nonce) {
-                    return Ok(ee_reverted(reason.to_vec(), gas_used));
+                    break 'invoke ee_reverted(reason.to_vec(), gas_used);
                 }
                 let mut all_ret: Vec<[u8; 32]> = Vec::new();
                 for c in &calls {
@@ -619,14 +628,26 @@ impl ExecutionEnvironment for CairoWorker {
                         host,
                     ) {
                         Ok(ret) => all_ret.extend(ret),
-                        Err(b"OUT_OF_GAS") => return Ok(ee_out_of_gas(call.gas_limit)),
-                        Err(reason) => return Ok(ee_reverted(reason.to_vec(), gas_used)),
+                        Err(b"OUT_OF_GAS") => break 'invoke ee_out_of_gas(call.gas_limit),
+                        Err(reason) => break 'invoke ee_reverted(reason.to_vec(), gas_used),
                     }
                 }
                 let out = serde_json::to_vec(&all_ret).unwrap_or_default();
-                Ok(ee_success(out, gas_used))
+                ee_success(out, gas_used)
             }
+        };
+        if outcome.status == OutcomeStatus::Success {
+            if host.checkpoint_commit(action_cp).is_err() {
+                let _ = host.checkpoint_rollback(action_cp);
+                return Ok(ee_reverted(
+                    b"cairo checkpoint commit failed".to_vec(),
+                    gas_used,
+                ));
+            }
+        } else {
+            let _ = host.checkpoint_rollback(action_cp);
         }
+        Ok(outcome)
     }
 
     fn query(
