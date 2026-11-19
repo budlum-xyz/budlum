@@ -255,8 +255,13 @@ fn run_rv32em(
                 }
             }
             PolkaVmInsn::SealInputU32 { rd, word_index } => {
-                let off = (word_index as usize).saturating_mul(4);
-                let Some(slice) = args_tail.get(off..off + 4) else {
+                let Some(off) = (word_index as usize).checked_mul(4) else {
+                    return Err(b"SEAL_INPUT_OOB");
+                };
+                let Some(end) = off.checked_add(4) else {
+                    return Err(b"SEAL_INPUT_OOB");
+                };
+                let Some(slice) = args_tail.get(off..end) else {
                     return Err(b"SEAL_INPUT_OOB");
                 };
                 let Ok(arr) = <[u8; 4]>::try_from(slice) else {
@@ -401,16 +406,22 @@ impl ExecutionEnvironment for PolkaVmWorker {
                 return Ok(ee_reverted(b"bad PolkaVM blob".to_vec(), gas_used));
             };
             let addr = derive_contract_addr(&caller32, &call.tx_hash);
+            if matches!(host.read(&ns, &code_key(&addr)), Ok(Some(_))) {
+                return Ok(ee_reverted(
+                    b"PolkaVM contract already deployed".to_vec(),
+                    gas_used,
+                ));
+            }
+            let Ok(cp) = host.checkpoint_begin() else {
+                return Ok(ee_reverted(b"checkpoint begin err".to_vec(), gas_used));
+            };
             if host
                 .write(&ns, &code_key(&addr), Some(&call.input))
                 .is_err()
+                || host.write(&ns, &owner_key(&addr), Some(&caller32)).is_err()
             {
+                let _ = host.checkpoint_rollback(cp);
                 return Ok(ee_reverted(b"code write err".to_vec(), gas_used));
-            }
-            // The deployer is the owner. The constructor runs as the deployer, so a
-            // `RequireOwner` in it passes.
-            if host.write(&ns, &owner_key(&addr), Some(&caller32)).is_err() {
-                return Ok(ee_reverted(b"owner write err".to_vec(), gas_used));
             }
             let scope = PvmScope {
                 ns: &ns,
@@ -419,9 +430,21 @@ impl ExecutionEnvironment for PolkaVmWorker {
                 gas_limit: call.gas_limit,
             };
             match run_rv32em(&scope, &prog.constructor, &[], &mut gas_used, host) {
-                Ok(_) => Ok(ee_success(addr.to_vec(), gas_used)),
-                Err(b"OUT_OF_GAS") => Ok(ee_out_of_gas(call.gas_limit)),
-                Err(r) => Ok(ee_reverted(r.to_vec(), gas_used)),
+                Ok(_) => {
+                    if host.checkpoint_commit(cp).is_err() {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(ee_reverted(b"checkpoint commit err".to_vec(), gas_used));
+                    }
+                    Ok(ee_success(addr.to_vec(), gas_used))
+                }
+                Err(b"OUT_OF_GAS") => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(ee_out_of_gas(call.gas_limit))
+                }
+                Err(r) => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(ee_reverted(r.to_vec(), gas_used))
+                }
             }
         } else {
             let Ok(target32) = <[u8; 32]>::try_from(call.target.id.as_slice()) else {
@@ -442,6 +465,9 @@ impl ExecutionEnvironment for PolkaVmWorker {
             let Some(disp) = prog.dispatches.iter().find(|d| d.selector == sel_slice) else {
                 return Ok(ee_reverted(b"unknown ink! selector".to_vec(), gas_used));
             };
+            let Ok(cp) = host.checkpoint_begin() else {
+                return Ok(ee_reverted(b"checkpoint begin err".to_vec(), gas_used));
+            };
             let scope = PvmScope {
                 ns: &ns,
                 contract: &target32,
@@ -449,9 +475,21 @@ impl ExecutionEnvironment for PolkaVmWorker {
                 gas_limit: call.gas_limit,
             };
             match run_rv32em(&scope, &disp.insns, args_tail, &mut gas_used, host) {
-                Ok(out) => Ok(ee_success(out, gas_used)),
-                Err(b"OUT_OF_GAS") => Ok(ee_out_of_gas(call.gas_limit)),
-                Err(r) => Ok(ee_reverted(r.to_vec(), gas_used)),
+                Ok(out) => {
+                    if host.checkpoint_commit(cp).is_err() {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(ee_reverted(b"checkpoint commit err".to_vec(), gas_used));
+                    }
+                    Ok(ee_success(out, gas_used))
+                }
+                Err(b"OUT_OF_GAS") => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(ee_out_of_gas(call.gas_limit))
+                }
+                Err(r) => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(ee_reverted(r.to_vec(), gas_used))
+                }
             }
         }
     }

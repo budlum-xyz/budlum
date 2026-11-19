@@ -121,11 +121,17 @@ fn slot_key(contract: &[u8], slot: u64) -> Vec<u8> {
 }
 
 fn set_caller_256(vm: &mut Vm, caller_id: &[u8]) {
-    let mut buf = [0u8; 32];
-    let n = caller_id.len().min(32);
-    if let (Some(dst), Some(src)) = (buf.get_mut(..n), caller_id.get(..n)) {
-        dst.copy_from_slice(src);
-    }
+    let buf: [u8; 32] = if let Ok(exact) = caller_id.try_into() {
+        exact
+    } else {
+        let mut h = Sha256::new();
+        let tag = b"bud-ee-budzero-caller-v1";
+        h.update((tag.len() as u64).to_le_bytes());
+        h.update(tag);
+        h.update((caller_id.len() as u64).to_le_bytes());
+        h.update(caller_id);
+        h.finalize().into()
+    };
     vm.context.set_sender_bytes(&buf);
 }
 
@@ -201,6 +207,20 @@ impl ExecutionEnvironment for BudZeroWorker {
                         gas_used: call.gas_limit,
                     });
                 }
+                if matches!(host.read(&prog_ns, &call.target.id), Ok(Some(_))) {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"program already deployed".to_vec(),
+                        gas_used: 0,
+                    });
+                }
+                let Ok(cp) = host.checkpoint_begin() else {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    });
+                };
                 if host
                     .write(&prog_ns, &call.target.id, Some(&call.input))
                     .is_err()
@@ -211,7 +231,9 @@ impl ExecutionEnvironment for BudZeroWorker {
                             Some(&call.caller.id),
                         )
                         .is_err()
+                    || host.checkpoint_commit(cp).is_err()
                 {
+                    let _ = host.checkpoint_rollback(cp);
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: Vec::new(),
@@ -276,6 +298,14 @@ impl ExecutionEnvironment for BudZeroWorker {
                     vm.storage.insert(slot, val);
                 }
 
+                let Ok(call_cp) = host.checkpoint_begin() else {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    });
+                };
+
                 let mut ucall_gas = 0u64;
                 if program_has_universal_syscall(&program) {
                     let is_owner_or_self = call.caller.id == call.target.id
@@ -284,6 +314,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                             Ok(Some(ref owner)) if owner.as_slice() == call.caller.id.as_slice()
                         );
                     if !is_owner_or_self {
+                        let _ = host.checkpoint_rollback(call_cp);
                         return Ok(EeOutcome {
                             status: OutcomeStatus::Revert,
                             output: b"unauthorized budzero universal syscall".to_vec(),
@@ -319,6 +350,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                             vm.storage.insert(0x4006, u64::from(ures.success));
                         }
                         Err(HostError::OutOfGas) => {
+                            let _ = host.checkpoint_rollback(call_cp);
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::OutOfGas,
                                 output: Vec::new(),
@@ -326,6 +358,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                             });
                         }
                         Err(_) => {
+                            let _ = host.checkpoint_rollback(call_cp);
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::Revert,
                                 output: Vec::new(),
@@ -338,6 +371,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                 let receipt = vm.run_receipt(&program);
                 let total_gas = receipt.gas_used.saturating_add(ucall_gas);
                 if host.charge(total_gas).is_err() {
+                    let _ = host.checkpoint_rollback(call_cp);
                     return Ok(EeOutcome {
                         status: OutcomeStatus::OutOfGas,
                         output: Vec::new(),
@@ -345,15 +379,19 @@ impl ExecutionEnvironment for BudZeroWorker {
                     });
                 }
                 if !receipt.success {
+                    let _ = host.checkpoint_rollback(call_cp);
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: Vec::new(),
                         gas_used: total_gas,
                     });
                 }
-                for (slot, val) in &vm.state_writes {
-                    let key = slot_key(&call.target.id, *slot);
+                let ordered_writes: std::collections::BTreeMap<u64, u64> =
+                    vm.state_writes.iter().copied().collect();
+                for (slot, val) in ordered_writes {
+                    let key = slot_key(&call.target.id, slot);
                     if let Err(err) = host.write(&store_ns, &key, Some(&val.to_le_bytes())) {
+                        let _ = host.checkpoint_rollback(call_cp);
                         let status = if matches!(err, HostError::OutOfGas) {
                             OutcomeStatus::OutOfGas
                         } else {
@@ -367,10 +405,30 @@ impl ExecutionEnvironment for BudZeroWorker {
                     }
                 }
                 for ev in &receipt.events {
-                    let _ = host.emit_log(EeLog {
+                    if let Err(err) = host.emit_log(EeLog {
                         emitter: call.target.clone(),
                         topics: Vec::new(),
                         data: ev.to_le_bytes().to_vec(),
+                    }) {
+                        let _ = host.checkpoint_rollback(call_cp);
+                        let status = if matches!(err, HostError::OutOfGas) {
+                            OutcomeStatus::OutOfGas
+                        } else {
+                            OutcomeStatus::Revert
+                        };
+                        return Ok(EeOutcome {
+                            status,
+                            output: Vec::new(),
+                            gas_used: call.gas_limit,
+                        });
+                    }
+                }
+                if host.checkpoint_commit(call_cp).is_err() {
+                    let _ = host.checkpoint_rollback(call_cp);
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
                     });
                 }
                 let mut out = Vec::with_capacity(receipt.events.len() * 8);
@@ -743,5 +801,49 @@ mod tests {
         fx.deploy(counter_loop(1_000));
         assert_eq!(fx.call(1_000_000).status, OutcomeStatus::Success);
         assert!(fx.query().is_ok());
+    }
+
+    #[test]
+    fn short_caller_ids_with_trailing_zeros_remain_distinct_and_redeploy_refuses() {
+        let mut vm_a = Vm::new(256);
+        let mut vm_b = Vm::new(256);
+        set_caller_256(&mut vm_a, &[0x42]);
+        set_caller_256(&mut vm_b, &[0x42, 0x00]);
+        assert_ne!(
+            vm_a.context.sender, vm_b.context.sender,
+            "distinct variable-length caller ids must not collide under zero-padding"
+        );
+        let exact = [0x5Au8; 32];
+        let mut vm_c = Vm::new(256);
+        set_caller_256(&mut vm_c, &exact);
+        assert_eq!(vm_c.context.sender, u64::from_le_bytes([0x5Au8; 8]));
+
+        let mut fx = Fixture::new();
+        let code = counter_loop(4);
+        fx.deploy(code.clone());
+        let second = BudZeroWorker
+            .execute(
+                &BlockContext {
+                    chain_id: 1,
+                    height: 2,
+                    timestamp_ms: 0,
+                },
+                &EeCall {
+                    kind: EeCallKind::Deploy,
+                    caller: EeIdentity {
+                        ee: EeId::BUDZERO,
+                        id: vec![9; 32],
+                    },
+                    target: fx.target.clone(),
+                    value: BudAmount(0),
+                    input: code,
+                    gas_limit: 100_000,
+                    depth: 0,
+                    tx_hash: [0xAB; 32],
+                },
+                &mut fx.host,
+            )
+            .expect("no fault");
+        assert_eq!(second.status, OutcomeStatus::Revert);
     }
 }

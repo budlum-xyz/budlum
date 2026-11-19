@@ -38,19 +38,39 @@ pub struct ProtoCoin {
     pub amount: String,
 }
 
-/// Cosmos `cosmos.bank.v1beta1.MsgSend` (recipient fields only).
+/// Maximum serialized `cosmos.tx.v1beta1.TxRaw` byte length (`256 KiB`).
+pub const MAX_COSMOS_TX_BYTES: usize = 256 * 1024;
+
+/// Maximum messages carried in one Cosmos `TxBody` (`64`).
+pub const MAX_COSMOS_MESSAGES: usize = 64;
+
+/// Cosmos `cosmos.bank.v1beta1.MsgSend`.
 #[derive(Clone, PartialEq, Message)]
 pub struct ProtoMsgSend {
     #[prost(string, tag = "1")]
     pub from_address: String,
     #[prost(string, tag = "2")]
     pub to_address: String,
+    #[prost(message, repeated, tag = "3")]
+    pub amount: Vec<ProtoCoin>,
+}
+
+/// Decodes `(from_address, to_address, amount)` of a canonical `cosmos.bank.v1beta1.MsgSend`,
+/// rejecting trailing/unknown protobuf fields (such as multi-send overrides).
+#[must_use]
+pub fn decode_msg_send_endpoints(payload: &[u8]) -> Option<(String, String, Vec<ProtoCoin>)> {
+    let msg = ProtoMsgSend::decode(payload).ok()?;
+    if msg.encode_to_vec() != payload {
+        return None;
+    }
+    Some((msg.from_address, msg.to_address, msg.amount))
 }
 
 /// Decodes the `to_address` of a `cosmos.bank.v1beta1.MsgSend` payload.
+#[cfg(test)]
 #[must_use]
 pub fn decode_msg_send_recipient(payload: &[u8]) -> Option<String> {
-    ProtoMsgSend::decode(payload).ok().map(|msg| msg.to_address)
+    decode_msg_send_endpoints(payload).map(|(_, to, _)| to)
 }
 
 /// Cosmos `cosmos.tx.v1beta1.TxBody`.
@@ -331,6 +351,11 @@ pub fn decode_cosmos_tx(
             got: chain_id.to_string(),
         });
     }
+    if tx_raw_bytes.len() > MAX_COSMOS_TX_BYTES {
+        return Err(CosmosEnvelopeError::MalformedProto(String::from(
+            "Cosmos TxRaw exceeds 256 KiB limit",
+        )));
+    }
     let tx_hash: [u8; 32] = Sha256::digest(tx_raw_bytes).into();
     let tx_raw = ProtoTxRaw::decode(tx_raw_bytes)
         .map_err(|e| CosmosEnvelopeError::MalformedProto(e.to_string()))?;
@@ -343,6 +368,11 @@ pub fn decode_cosmos_tx(
         .map_err(|e| CosmosEnvelopeError::MalformedProto(e.to_string()))?;
     if body.messages.is_empty() {
         return Err(CosmosEnvelopeError::EmptyMessages);
+    }
+    if body.messages.len() > MAX_COSMOS_MESSAGES {
+        return Err(CosmosEnvelopeError::MalformedProto(String::from(
+            "Cosmos TxBody exceeds 64 message cap",
+        )));
     }
     let mut message_types = Vec::with_capacity(body.messages.len());
     let mut message_payloads = Vec::with_capacity(body.messages.len());
@@ -425,6 +455,7 @@ pub fn decode_cosmos_tx(
         .as_ref()
         .ok_or_else(|| CosmosEnvelopeError::InvalidFee(String::from("missing Fee")))?;
     let mut fee_ubud = 0u128;
+    let mut seen_ubud = false;
     for coin in &fee.amount {
         if coin.denom != "ubud" {
             return Err(CosmosEnvelopeError::InvalidFee(format!(
@@ -432,15 +463,59 @@ pub fn decode_cosmos_tx(
                 coin.denom
             )));
         }
+        if seen_ubud {
+            return Err(CosmosEnvelopeError::InvalidFee(String::from(
+                "duplicate ubud fee coin entry",
+            )));
+        }
+        seen_ubud = true;
+        if coin.amount.is_empty() || !coin.amount.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(CosmosEnvelopeError::InvalidFee(String::from(
+                "bad fee amount",
+            )));
+        }
         let parsed: u128 = coin
             .amount
             .parse()
             .map_err(|_| CosmosEnvelopeError::InvalidFee(String::from("bad fee amount")))?;
-        fee_ubud = fee_ubud.saturating_add(parsed);
+        fee_ubud = fee_ubud
+            .checked_add(parsed)
+            .ok_or_else(|| CosmosEnvelopeError::InvalidFee(String::from("fee amount overflow")))?;
     }
 
     let sender_addr20 = cosmos_addr20_from_compressed_pubkey(&pk33);
     let sender_bech32 = derive_foreign_cosmos_bech32(&sender_addr20);
+
+    for (ty, payload) in message_types.iter().zip(message_payloads.iter()) {
+        if ty == "/cosmos.bank.v1beta1.MsgSend" {
+            if let Ok(msg) = ProtoMsgSend::decode(payload.as_slice()) {
+                if !msg.from_address.is_empty() && msg.from_address != sender_bech32 {
+                    return Err(CosmosEnvelopeError::MalformedProto(String::from(
+                        "MsgSend from_address does not match authenticated signer",
+                    )));
+                }
+                let mut seen_send_ubud = false;
+                for c in &msg.amount {
+                    if c.denom != "ubud" {
+                        return Err(CosmosEnvelopeError::InvalidFee(format!(
+                            "unsupported MsgSend denom `{}`",
+                            c.denom
+                        )));
+                    }
+                    if seen_send_ubud
+                        || c.amount.is_empty()
+                        || !c.amount.bytes().all(|b| b.is_ascii_digit())
+                        || c.amount.parse::<u128>().is_err()
+                    {
+                        return Err(CosmosEnvelopeError::InvalidFee(String::from(
+                            "invalid MsgSend ubud coin entry",
+                        )));
+                    }
+                    seen_send_ubud = true;
+                }
+            }
+        }
+    }
 
     Ok(DecodedCosmosTx {
         tx_hash,

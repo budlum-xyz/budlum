@@ -311,6 +311,11 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
     for (sig64, pubkey32) in signatures.iter().zip(account_keys.iter()) {
         let vk = VerifyingKey::from_bytes(pubkey32)
             .map_err(|e| SolanaEnvelopeError::InvalidSignature(e.to_string()))?;
+        if vk.is_weak() {
+            return Err(SolanaEnvelopeError::InvalidSignature(String::from(
+                "small-order Ed25519 public key refused",
+            )));
+        }
         let sig = Signature::from_bytes(sig64);
         vk.verify_strict(message_bytes, &sig)
             .map_err(|e| SolanaEnvelopeError::InvalidSignature(e.to_string()))?;

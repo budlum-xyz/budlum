@@ -33,8 +33,9 @@ use revm::primitives::{Address, Bytes, TxKind, U256};
 use revm::{InspectEvm, Inspector, MainBuilder};
 use sha2::{Digest, Sha256};
 
+use crate::abi::{UNIVERSAL_CALL_PRECOMPILE, UOL_PRECOMPILE};
 use crate::db::{commit_evm_state, HostDb, ReadOnlyHostDb};
-use crate::precompile_universal::handle_universal_precompile_call;
+use crate::precompile_universal::{handle_universal_precompile_call, PrecompileValueDebit};
 
 /// Default Budlum EVM chain ID (`EIP-155`).
 pub const BUDLUM_EVM_CHAIN_ID: u64 = 45_261;
@@ -51,6 +52,52 @@ pub struct BudlumEvmInspector {
     pub alias_collision_refused: bool,
     call_checkpoints: Vec<Option<u64>>,
     create_checkpoints: Vec<Option<u64>>,
+    frame_value_debits: Vec<Vec<PrecompileValueDebit>>,
+}
+
+impl BudlumEvmInspector {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            alias_collision_refused: false,
+            call_checkpoints: Vec::new(),
+            create_checkpoints: Vec::new(),
+            frame_value_debits: vec![Vec::new()],
+        }
+    }
+
+    fn committed_debits(&self) -> std::collections::BTreeMap<Address, U256> {
+        let mut out = std::collections::BTreeMap::new();
+        for frame in &self.frame_value_debits {
+            for d in frame {
+                let entry = out.entry(d.caller).or_insert(U256::ZERO);
+                *entry = entry.saturating_add(d.amount);
+            }
+        }
+        out
+    }
+
+    fn merge_or_revert_debits(&mut self, context: &mut EvmHostCtx<'_>, ok: bool) {
+        let Some(debits) = self.frame_value_debits.pop() else {
+            return;
+        };
+        if debits.is_empty() {
+            return;
+        }
+        if ok {
+            if let Some(parent) = self.frame_value_debits.last_mut() {
+                parent.extend(debits);
+            }
+        } else {
+            // Host checkpoint_rollback undoes the cross-VM host transfer; restore the
+            // direct caller balance deduction on the reverting sub-frame.
+            for d in debits.into_iter().rev() {
+                if let Some(acc) = context.journaled_state.evm_state_mut().get_mut(&d.caller) {
+                    acc.info.balance = acc.info.balance.saturating_add(d.amount);
+                }
+            }
+        }
+    }
 }
 
 type EvmHostCtx<'a> = Context<BlockEnv, TxEnv, CfgEnv, HostDb<'a>, Journal<HostDb<'a>>, ()>;
@@ -76,19 +123,24 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
         if collided {
             self.alias_collision_refused = true;
             self.create_checkpoints.push(None);
+            self.frame_value_debits.push(Vec::new());
             let gas = Gas::new_spent_with_reservoir(inputs.gas_limit(), inputs.reservoir());
             return Some(CreateOutcome::new(
                 InterpreterResult::new(InstructionResult::CreateCollision, Bytes::new(), gas),
                 None,
             ));
         }
-        let cp = context
-            .journaled_state
-            .db_mut()
-            .host
-            .checkpoint_begin()
-            .ok();
-        self.create_checkpoints.push(cp);
+        let Ok(cp) = context.journaled_state.db_mut().host.checkpoint_begin() else {
+            self.create_checkpoints.push(None);
+            self.frame_value_debits.push(Vec::new());
+            let gas = Gas::new_spent_with_reservoir(inputs.gas_limit(), inputs.reservoir());
+            return Some(CreateOutcome::new(
+                InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
+                None,
+            ));
+        };
+        self.create_checkpoints.push(Some(cp));
+        self.frame_value_debits.push(Vec::new());
         None
     }
 
@@ -98,8 +150,9 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
         _inputs: &CreateInputs,
         outcome: &mut CreateOutcome,
     ) {
+        let ok = outcome.result.result.is_ok();
         if let Some(Some(cp_id)) = self.create_checkpoints.pop() {
-            if outcome.result.result.is_ok() {
+            if ok {
                 let _ = context
                     .journaled_state
                     .db_mut()
@@ -113,6 +166,7 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
                     .checkpoint_rollback(cp_id);
             }
         }
+        self.merge_or_revert_debits(context, ok);
     }
 
     fn call(
@@ -120,21 +174,33 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
         context: &mut EvmHostCtx<'a>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
-        if let Some(outcome) = handle_universal_precompile_call(context, inputs) {
+        let mut debit = None;
+        if let Some(outcome) = handle_universal_precompile_call(context, inputs, &mut debit) {
+            if let Some(d) = debit {
+                if let Some(parent) = self.frame_value_debits.last_mut() {
+                    parent.push(d);
+                }
+            }
             self.call_checkpoints.push(None);
+            self.frame_value_debits.push(Vec::new());
             return Some(outcome);
         }
         let cp = if inputs.is_static {
             None
         } else {
-            context
-                .journaled_state
-                .db_mut()
-                .host
-                .checkpoint_begin()
-                .ok()
+            let Ok(id) = context.journaled_state.db_mut().host.checkpoint_begin() else {
+                self.call_checkpoints.push(None);
+                self.frame_value_debits.push(Vec::new());
+                let gas = Gas::new_spent_with_reservoir(inputs.gas_limit, inputs.reservoir);
+                return Some(CallOutcome::new(
+                    InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
+                    inputs.return_memory_offset.clone(),
+                ));
+            };
+            Some(id)
         };
         self.call_checkpoints.push(cp);
+        self.frame_value_debits.push(Vec::new());
         None
     }
 
@@ -144,8 +210,9 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
         _inputs: &CallInputs,
         outcome: &mut CallOutcome,
     ) {
+        let ok = outcome.result.result.is_ok();
         if let Some(Some(cp_id)) = self.call_checkpoints.pop() {
-            if outcome.result.result.is_ok() {
+            if ok {
                 let _ = context
                     .journaled_state
                     .db_mut()
@@ -159,10 +226,11 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
                     .checkpoint_rollback(cp_id);
             }
         }
+        self.merge_or_revert_debits(context, ok);
     }
 }
 
-/// Stateless read-only inspector blocking `0x...B001` non-static calls and `CREATE` collisions.
+/// Stateless read-only inspector blocking `0x...B001`/`0x...B002` host side effects and `CREATE`.
 #[derive(Debug, Default)]
 struct QueryInspector;
 
@@ -172,6 +240,36 @@ impl<'a>
         EthInterpreter,
     > for QueryInspector
 {
+    fn call(
+        &mut self,
+        _context: &mut Context<
+            BlockEnv,
+            TxEnv,
+            CfgEnv,
+            ReadOnlyHostDb<'a>,
+            Journal<ReadOnlyHostDb<'a>>,
+            (),
+        >,
+        inputs: &mut CallInputs,
+    ) -> Option<CallOutcome> {
+        if inputs.bytecode_address == UNIVERSAL_CALL_PRECOMPILE
+            || inputs.target_address == UNIVERSAL_CALL_PRECOMPILE
+            || inputs.bytecode_address == UOL_PRECOMPILE
+            || inputs.target_address == UOL_PRECOMPILE
+        {
+            let gas = Gas::new_spent_with_reservoir(inputs.gas_limit, inputs.reservoir);
+            return Some(CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::CallNotAllowedInsideStatic,
+                    Bytes::new(),
+                    gas,
+                ),
+                inputs.return_memory_offset.clone(),
+            ));
+        }
+        None
+    }
+
     fn create(
         &mut self,
         _context: &mut Context<
@@ -316,21 +414,28 @@ impl EvmWorker {
             ..TxEnv::default()
         };
 
-        let top_cp = host.checkpoint_begin().ok();
+        let Ok(top_cp) = host.checkpoint_begin() else {
+            let _ = host.charge(call.gas_limit);
+            return EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: Vec::new(),
+                gas_used: call.gas_limit,
+            };
+        };
         let child_gas_charged = Rc::new(Cell::new(0u64));
-        let exec_out = {
+        let (exec_out, settled_debits) = {
             let host_db = HostDb::with_child_gas_tracker(host, chain_id, child_gas_charged.clone());
             let evm_ctx = Context::<BlockEnv, _, _, _, _, _>::new(host_db, SpecId::OSAKA)
                 .with_cfg(cfg)
                 .with_block(block_env);
-            let mut evm = evm_ctx.build_mainnet_with_inspector(BudlumEvmInspector::default());
-            evm.inspect_tx(tx_env)
+            let mut evm = evm_ctx.build_mainnet_with_inspector(BudlumEvmInspector::new());
+            let out = evm.inspect_tx(tx_env);
+            let debits = evm.inspector.committed_debits();
+            (out, debits)
         };
 
         let Ok(result_and_state) = exec_out else {
-            if let Some(cp) = top_cp {
-                let _ = host.checkpoint_rollback(cp);
-            }
+            let _ = host.checkpoint_rollback(top_cp);
             let _ = host.charge(call.gas_limit);
             return EeOutcome {
                 status: OutcomeStatus::Revert,
@@ -351,9 +456,7 @@ impl EvmWorker {
             .charge(gas_used.saturating_sub(child_gas_charged.get()))
             .is_err()
         {
-            if let Some(cp) = top_cp {
-                let _ = host.checkpoint_rollback(cp);
-            }
+            let _ = host.checkpoint_rollback(top_cp);
             return EeOutcome {
                 status: OutcomeStatus::OutOfGas,
                 output: Vec::new(),
@@ -363,18 +466,22 @@ impl EvmWorker {
 
         match result_and_state.result {
             ExecutionResult::Success { logs, output, .. } => {
-                if commit_evm_state(host, &result_and_state.state, &logs).is_err() {
-                    if let Some(cp) = top_cp {
-                        let _ = host.checkpoint_rollback(cp);
-                    }
+                if commit_evm_state(host, &result_and_state.state, &logs, &settled_debits).is_err()
+                {
+                    let _ = host.checkpoint_rollback(top_cp);
                     return EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: Vec::new(),
                         gas_used,
                     };
                 }
-                if let Some(cp) = top_cp {
-                    let _ = host.checkpoint_commit(cp);
+                if host.checkpoint_commit(top_cp).is_err() {
+                    let _ = host.checkpoint_rollback(top_cp);
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: Vec::new(),
+                        gas_used,
+                    };
                 }
                 let out_bytes = match (call.kind, output.address()) {
                     (EeCallKind::Deploy, Some(created)) => created.as_slice().to_vec(),
@@ -387,9 +494,7 @@ impl EvmWorker {
                 }
             }
             ExecutionResult::Revert { output, .. } => {
-                if let Some(cp) = top_cp {
-                    let _ = host.checkpoint_rollback(cp);
-                }
+                let _ = host.checkpoint_rollback(top_cp);
                 EeOutcome {
                     status: OutcomeStatus::Revert,
                     output: output.to_vec(),
@@ -397,9 +502,7 @@ impl EvmWorker {
                 }
             }
             ExecutionResult::Halt { reason, .. } => {
-                if let Some(cp) = top_cp {
-                    let _ = host.checkpoint_rollback(cp);
-                }
+                let _ = host.checkpoint_rollback(top_cp);
                 EeOutcome {
                     status: map_halt_to_status(&reason),
                     output: Vec::new(),

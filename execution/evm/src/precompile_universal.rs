@@ -12,14 +12,23 @@ use revm::context_interface::JournalTr;
 use revm::interpreter::{
     CallInputs, CallOutcome, CallScheme, Gas, InstructionResult, InterpreterResult,
 };
-use revm::primitives::{keccak256, Bytes, Log, LogData, B256};
+use revm::primitives::{keccak256, Address, Bytes, Log, LogData, B256, U256};
 
 use crate::abi::{
     decode_precompile_call, decode_uol_call, decode_uol_offer_bytes, encode_precompile_return,
-    encode_uol_offer_bytes, uol_selector, DecodedUolCall, UolOfferRecord, NS_UEL_ASSETS,
-    PRECOMPILE_BASE_GAS, UNIVERSAL_CALL_PRECOMPILE, UOL_PRECOMPILE, UOL_PRECOMPILE_GAS,
+    encode_uol_offer_bytes, precompile_word_gas, uol_selector, DecodedUolCall, UolOfferRecord,
+    MAX_PRECOMPILE_BYTES, NS_UEL_ASSETS, PRECOMPILE_BASE_GAS, UNIVERSAL_CALL_PRECOMPILE,
+    UOL_PRECOMPILE, UOL_PRECOMPILE_GAS,
 };
 use crate::db::{evm_identity, HostDb};
+
+/// Frame-scoped record of a `0x...B001` caller debit synced into Revm state.
+/// Restored if an enclosing EVM call frame later reverts.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PrecompileValueDebit {
+    pub caller: Address,
+    pub amount: U256,
+}
 
 /// `keccak256("UniversalCallExecuted(uint8,bytes,bool)")`.
 pub const UNIVERSAL_CALL_EXECUTED_TOPIC0: [u8; 32] = [
@@ -151,18 +160,25 @@ fn handle_uol_precompile_call(
     }
     let calldata: Vec<u8> = inputs.input.as_bytes(context).to_vec();
     let mem_offset = inputs.return_memory_offset.clone();
-    if inputs.gas_limit < UOL_PRECOMPILE_GAS {
+    let entry_gas = UOL_PRECOMPILE_GAS.saturating_add(precompile_word_gas(calldata.len()));
+    if inputs.gas_limit < entry_gas {
         return Some(CallOutcome::new(
             InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
             mem_offset,
         ));
     }
     let mut gas = Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
-    if !gas.record_regular_cost(UOL_PRECOMPILE_GAS) {
+    if !gas.record_regular_cost(entry_gas) {
         return Some(CallOutcome::new(
             InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
             mem_offset,
         ));
+    }
+    if calldata.len() > MAX_PRECOMPILE_BYTES {
+        return uol_revert(b"UOL calldata exceeds maximum size", gas, mem_offset);
+    }
+    if !inputs.call_value().is_zero() {
+        return uol_revert(b"UOL precompile rejects native msg.value", gas, mem_offset);
     }
     let Some(decoded) = decode_uol_call(&calldata) else {
         return uol_revert(b"invalid UOL precompile calldata", gas, mem_offset);
@@ -200,6 +216,12 @@ fn handle_uol_precompile_call(
                 .flatten()
                 .unwrap_or_default();
             let mut out = vec![0u8; 64 + holder.len().div_ceil(32) * 32];
+            if !gas.record_regular_cost(precompile_word_gas(out.len())) {
+                return Some(CallOutcome::new(
+                    InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
+                    mem_offset,
+                ));
+            }
             if let Some(s) = out.get_mut(31) {
                 *s = 32;
             }
@@ -340,17 +362,23 @@ fn handle_uol_precompile_call(
             {
                 return uol_revert(b"UOL offerer balance exhausted", gas, mem_offset);
             }
-            let mut preimage = Vec::with_capacity(96 + taker.len() + payment.len());
+            let mut preimage = Vec::with_capacity(112 + taker.len() + payment.len());
             preimage.extend_from_slice(b"BDLM_UOL_OFFER_V1");
             preimage.extend_from_slice(&caller20);
             preimage.extend_from_slice(&class_id);
             preimage.extend_from_slice(&asset_id);
+            preimage.extend_from_slice(&(taker.len() as u64).to_le_bytes());
             preimage.extend_from_slice(&taker);
+            preimage.extend_from_slice(&(payment.len() as u64).to_le_bytes());
             preimage.extend_from_slice(&payment);
             preimage.extend_from_slice(&amount.to_le_bytes());
             preimage.extend_from_slice(&expiry.to_le_bytes());
             let offer_id: [u8; 32] = keccak256(&preimage).into();
-            let enc = encode_uol_offer_bytes(&UolOfferRecord {
+            let offer_key = uol_offer_key(&offer_id);
+            if matches!(host.read(&ns, &offer_key), Ok(Some(_))) {
+                return uol_revert(b"UOL offer already exists", gas, mem_offset);
+            }
+            let Some(enc) = encode_uol_offer_bytes(&UolOfferRecord {
                 maker: caller20,
                 class_id,
                 asset_id,
@@ -358,11 +386,10 @@ fn handle_uol_precompile_call(
                 payment,
                 amount,
                 expiry,
-            });
-            if host
-                .write(&ns, &uol_offer_key(&offer_id), Some(&enc))
-                .is_err()
-            {
+            }) else {
+                return uol_revert(b"UOL offer payload too large", gas, mem_offset);
+            };
+            if host.write(&ns, &offer_key, Some(&enc)).is_err() {
                 return uol_revert(b"UOL offer write failed", gas, mem_offset);
             }
             Some(CallOutcome::new(
@@ -379,13 +406,15 @@ fn handle_uol_precompile_call(
                 return uol_revert(b"UOL accept inside static call", gas, mem_offset);
             }
             let ok = uol_offer_key(&offer_id);
-            let caller_id = evm_identity(inputs.caller);
-            let host = &mut *context.journaled_state.db_mut().host;
-            let Ok(Some(raw)) = host.read(&ns, &ok) else {
-                return uol_revert(b"UOL unknown offerId", gas, mem_offset);
-            };
-            let Some(offer) = decode_uol_offer_bytes(&raw) else {
-                return uol_revert(b"corrupt UOL offer record", gas, mem_offset);
+            let offer = {
+                let host = &*context.journaled_state.db().host;
+                let Ok(Some(raw)) = host.read(&ns, &ok) else {
+                    return uol_revert(b"UOL unknown offerId", gas, mem_offset);
+                };
+                let Some(offer) = decode_uol_offer_bytes(&raw) else {
+                    return uol_revert(b"corrupt UOL offer record", gas, mem_offset);
+                };
+                offer
             };
             if offer.expiry > 0 && block_height > offer.expiry {
                 return uol_revert(b"UOL offer expired", gas, mem_offset);
@@ -393,110 +422,159 @@ fn handle_uol_precompile_call(
             if !offer.taker.is_empty() && offer.taker.as_slice() != caller20 {
                 return uol_revert(b"UOL unauthorized taker", gas, mem_offset);
             }
-            let Ok(cp) = host.checkpoint_begin() else {
+            let native_pay_attos =
+                if let Ok(pay_arr) = <[u8; 16]>::try_from(offer.payment.as_slice()) {
+                    Some(u128::from_le_bytes(pay_arr))
+                } else {
+                    None
+                };
+            let native_pay_checkpoint = if let Some(pay_attos) = native_pay_attos {
+                if pay_attos > 0 {
+                    let maker_addr = Address::from(offer.maker);
+                    if context.journaled_state.load_account(inputs.caller).is_err()
+                        || context.journaled_state.load_account(maker_addr).is_err()
+                    {
+                        return uol_revert(b"UOL payment account load failed", gas, mem_offset);
+                    }
+                    let jcp = context.journaled_state.checkpoint();
+                    match context.journaled_state.transfer(
+                        inputs.caller,
+                        maker_addr,
+                        U256::from(pay_attos),
+                    ) {
+                        Ok(None) => Some(jcp),
+                        Ok(Some(_)) | Err(_) => {
+                            context.journaled_state.checkpoint_revert(jcp);
+                            return uol_revert(b"UOL native payment failed", gas, mem_offset);
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let rollback_all = |context: &mut EvmHostCtx<'_>, cp: Option<u64>| {
+                if let Some(id) = cp {
+                    let _ = context
+                        .journaled_state
+                        .db_mut()
+                        .host
+                        .checkpoint_rollback(id);
+                }
+                if let Some(jcp) = native_pay_checkpoint {
+                    context.journaled_state.checkpoint_revert(jcp);
+                }
+            };
+            let Ok(cp) = context.journaled_state.db_mut().host.checkpoint_begin() else {
+                rollback_all(context, None);
                 return uol_revert(b"UOL checkpoint begin failed", gas, mem_offset);
             };
-            if let Ok(pay_arr) = <[u8; 16]>::try_from(offer.payment.as_slice()) {
-                let pay_attos = u128::from_le_bytes(pay_arr);
-                if pay_attos > 0 {
-                    let maker_id = EeIdentity {
-                        ee: EeId::EVM,
-                        id: offer.maker.to_vec(),
-                    };
-                    if host.bud_transfer(&caller_id, &maker_id, pay_attos).is_err() {
-                        let _ = host.checkpoint_rollback(cp);
-                        return uol_revert(b"UOL native payment failed", gas, mem_offset);
-                    }
-                }
-            } else if offer.payment.len() == 48 {
-                let Some(class_slice) = offer.payment.get(..32) else {
-                    let _ = host.checkpoint_rollback(cp);
+            if native_pay_attos.is_none() && offer.payment.len() == 48 {
+                let (Some(class_slice), Some(amt_slice)) =
+                    (offer.payment.get(..32), offer.payment.get(32..48))
+                else {
+                    rollback_all(context, Some(cp));
                     return uol_revert(b"unsupported UOL offer payment encoding", gas, mem_offset);
                 };
-                let Some(amt_slice) = offer.payment.get(32..48) else {
-                    let _ = host.checkpoint_rollback(cp);
-                    return uol_revert(b"unsupported UOL offer payment encoding", gas, mem_offset);
-                };
-                let Ok(pay_class) = <[u8; 32]>::try_from(class_slice) else {
-                    let _ = host.checkpoint_rollback(cp);
-                    return uol_revert(b"unsupported UOL offer payment encoding", gas, mem_offset);
-                };
-                let Ok(pay_arr) = <[u8; 16]>::try_from(amt_slice) else {
-                    let _ = host.checkpoint_rollback(cp);
+                let (Ok(pay_class), Ok(pay_arr)) = (
+                    <[u8; 32]>::try_from(class_slice),
+                    <[u8; 16]>::try_from(amt_slice),
+                ) else {
+                    rollback_all(context, Some(cp));
                     return uol_revert(b"unsupported UOL offer payment encoding", gas, mem_offset);
                 };
                 let pay_amt = u128::from_le_bytes(pay_arr);
                 if pay_amt > 0 {
+                    let host = &mut *context.journaled_state.db_mut().host;
                     let payer_bal = uol_read_balance(host, &ns, &pay_class, &caller20).unwrap_or(0);
                     let Some(rem_pay) = payer_bal.checked_sub(pay_amt) else {
-                        let _ = host.checkpoint_rollback(cp);
+                        rollback_all(context, Some(cp));
                         return uol_revert(b"UOL taker payment balance exhausted", gas, mem_offset);
                     };
                     if uol_write_balance(host, &ns, &pay_class, &caller20, rem_pay).is_err() {
-                        let _ = host.checkpoint_rollback(cp);
+                        rollback_all(context, Some(cp));
                         return uol_revert(b"UOL payment write failed", gas, mem_offset);
                     }
                     let maker_pay =
                         uol_read_balance(host, &ns, &pay_class, &offer.maker).unwrap_or(0);
                     let Some(next_maker_pay) = maker_pay.checked_add(pay_amt) else {
-                        let _ = host.checkpoint_rollback(cp);
+                        rollback_all(context, Some(cp));
                         return uol_revert(b"UOL payment overflow", gas, mem_offset);
                     };
                     if uol_write_balance(host, &ns, &pay_class, &offer.maker, next_maker_pay)
                         .is_err()
                     {
-                        let _ = host.checkpoint_rollback(cp);
+                        rollback_all(context, Some(cp));
                         return uol_revert(b"UOL payment write failed", gas, mem_offset);
                     }
                 }
-            } else if !offer.payment.is_empty() {
-                let _ = host.checkpoint_rollback(cp);
+            } else if native_pay_attos.is_none() && !offer.payment.is_empty() {
+                rollback_all(context, Some(cp));
                 return uol_revert(b"unsupported UOL offer payment encoding", gas, mem_offset);
             }
             if offer.asset_id != [0u8; 32] {
                 let hk = uol_holder_key(&offer.asset_id);
+                let host = &mut *context.journaled_state.db_mut().host;
                 let Some(cur_holder) = host.read(&ns, &hk).ok().flatten() else {
-                    let _ = host.checkpoint_rollback(cp);
+                    rollback_all(context, Some(cp));
                     return uol_revert(b"UOL offer asset missing", gas, mem_offset);
                 };
                 if cur_holder.as_slice() != offer.maker {
-                    let _ = host.checkpoint_rollback(cp);
+                    rollback_all(context, Some(cp));
                     return uol_revert(b"UOL maker no longer holds offered asset", gas, mem_offset);
                 }
                 if host.write(&ns, &hk, Some(&caller20)).is_err() {
-                    let _ = host.checkpoint_rollback(cp);
+                    rollback_all(context, Some(cp));
                     return uol_revert(b"UOL holder write failed", gas, mem_offset);
                 }
             }
             if offer.amount > 0 {
+                let host = &mut *context.journaled_state.db_mut().host;
                 let maker_bal =
                     uol_read_balance(host, &ns, &offer.class_id, &offer.maker).unwrap_or(0);
                 let Some(rem) = maker_bal.checked_sub(offer.amount) else {
-                    let _ = host.checkpoint_rollback(cp);
+                    rollback_all(context, Some(cp));
                     return uol_revert(b"UOL maker balance exhausted", gas, mem_offset);
                 };
                 if uol_write_balance(host, &ns, &offer.class_id, &offer.maker, rem).is_err() {
-                    let _ = host.checkpoint_rollback(cp);
+                    rollback_all(context, Some(cp));
                     return uol_revert(b"UOL maker write failed", gas, mem_offset);
                 }
                 let taker_bal =
                     uol_read_balance(host, &ns, &offer.class_id, &caller20).unwrap_or(0);
                 let Some(next_taker) = taker_bal.checked_add(offer.amount) else {
-                    let _ = host.checkpoint_rollback(cp);
+                    rollback_all(context, Some(cp));
                     return uol_revert(b"UOL balance overflow", gas, mem_offset);
                 };
                 if uol_write_balance(host, &ns, &offer.class_id, &caller20, next_taker).is_err() {
-                    let _ = host.checkpoint_rollback(cp);
+                    rollback_all(context, Some(cp));
                     return uol_revert(b"UOL taker write failed", gas, mem_offset);
                 }
             }
-            if host.write(&ns, &ok, None).is_err() {
-                let _ = host.checkpoint_rollback(cp);
+            if context
+                .journaled_state
+                .db_mut()
+                .host
+                .write(&ns, &ok, None)
+                .is_err()
+            {
+                rollback_all(context, Some(cp));
                 return uol_revert(b"UOL offer delete failed", gas, mem_offset);
             }
-            if host.checkpoint_commit(cp).is_err() {
-                let _ = host.checkpoint_rollback(cp);
+            if context
+                .journaled_state
+                .db_mut()
+                .host
+                .checkpoint_commit(cp)
+                .is_err()
+            {
+                rollback_all(context, Some(cp));
                 return uol_revert(b"UOL checkpoint commit failed", gas, mem_offset);
+            }
+            if let Some(jcp) = native_pay_checkpoint {
+                let _ = jcp;
+                context.journaled_state.checkpoint_commit();
             }
             let mut topic = [0u8; 32];
             if let Some(dst) = topic.get_mut(..4) {
@@ -528,6 +606,7 @@ fn handle_uol_precompile_call(
 pub(crate) fn handle_universal_precompile_call(
     context: &mut EvmHostCtx<'_>,
     inputs: &mut CallInputs,
+    recorded_debit: &mut Option<PrecompileValueDebit>,
 ) -> Option<CallOutcome> {
     if let Some(uol) = handle_uol_precompile_call(context, inputs) {
         return Some(uol);
@@ -555,25 +634,37 @@ pub(crate) fn handle_universal_precompile_call(
 
     let calldata: Vec<u8> = inputs.input.as_bytes(context).to_vec();
     let mem_offset = inputs.return_memory_offset.clone();
+    let entry_gas = PRECOMPILE_BASE_GAS.saturating_add(precompile_word_gas(calldata.len()));
 
-    if inputs.gas_limit < PRECOMPILE_BASE_GAS {
+    if inputs.gas_limit < entry_gas {
         return Some(CallOutcome::new(
             InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
+            mem_offset,
+        ));
+    }
+    if !inputs.call_value().is_zero() {
+        let mut gas = Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
+        let _ = gas.record_regular_cost(entry_gas);
+        return Some(CallOutcome::new(
+            InterpreterResult::new(
+                InstructionResult::Revert,
+                Bytes::from_static(b"universal precompile rejects native msg.value"),
+                gas,
+            ),
             mem_offset,
         ));
     }
 
     let Some(parsed) = decode_precompile_call(&calldata) else {
         let mut gas = Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
-        let _ = gas.record_regular_cost(PRECOMPILE_BASE_GAS);
+        let _ = gas.record_regular_cost(entry_gas);
         return Some(CallOutcome::new(
             InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
             mem_offset,
         ));
     };
 
-    let is_static = inputs.is_static || parsed.is_static_selector;
-    if is_static && (!parsed.is_static_selector && parsed.value_attos > 0) {
+    if inputs.is_static && !parsed.is_static_selector {
         return Some(CallOutcome::new(
             InterpreterResult::new(
                 InstructionResult::CallNotAllowedInsideStatic,
@@ -583,8 +674,35 @@ pub(crate) fn handle_universal_precompile_call(
             mem_offset,
         ));
     }
+    let is_static = inputs.is_static || parsed.is_static_selector;
+    let value_u256 = U256::from(parsed.value_attos);
+    if !value_u256.is_zero() {
+        if context.journaled_state.load_account(inputs.caller).is_err() {
+            let mut gas =
+                Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
+            let _ = gas.record_regular_cost(entry_gas);
+            return Some(CallOutcome::new(
+                InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
+                mem_offset,
+            ));
+        }
+        let has_funds = context
+            .journaled_state
+            .evm_state()
+            .get(&inputs.caller)
+            .is_some_and(|acc| acc.info.balance >= value_u256);
+        if !has_funds {
+            let mut gas =
+                Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
+            let _ = gas.record_regular_cost(entry_gas);
+            return Some(CallOutcome::new(
+                InterpreterResult::new(InstructionResult::OutOfFunds, Bytes::new(), gas),
+                mem_offset,
+            ));
+        }
+    }
 
-    let remaining_for_callee = inputs.gas_limit.saturating_sub(PRECOMPILE_BASE_GAS);
+    let remaining_for_callee = inputs.gas_limit.saturating_sub(entry_gas);
     let forwarded_gas = parsed.gas_bgu.min(remaining_for_callee);
     let target_copy = parsed.target.clone();
     let ucall = UniversalCall {
@@ -600,10 +718,48 @@ pub(crate) fn handle_universal_precompile_call(
         is_static,
     };
 
+    let host_cp = if !is_static {
+        let Ok(cp) = context.journaled_state.db_mut().host.checkpoint_begin() else {
+            let mut gas =
+                Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
+            let _ = gas.record_regular_cost(entry_gas);
+            return Some(CallOutcome::new(
+                InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
+                mem_offset,
+            ));
+        };
+        Some(cp)
+    } else {
+        None
+    };
+
     match context.journaled_state.db_mut().universal_call(ucall) {
         Ok(ures) => {
-            let total_cost = PRECOMPILE_BASE_GAS.saturating_add(ures.gas_used);
+            if ures.output.len() > MAX_PRECOMPILE_BYTES {
+                if let Some(cp) = host_cp {
+                    let _ = context
+                        .journaled_state
+                        .db_mut()
+                        .host
+                        .checkpoint_rollback(cp);
+                }
+                return Some(CallOutcome::new(
+                    InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
+                    mem_offset,
+                ));
+            }
+            let encoded = encode_precompile_return(ures.success, &ures.output);
+            let total_cost = entry_gas
+                .saturating_add(ures.gas_used)
+                .saturating_add(precompile_word_gas(encoded.len()));
             if total_cost > inputs.gas_limit {
+                if let Some(cp) = host_cp {
+                    let _ = context
+                        .journaled_state
+                        .db_mut()
+                        .host
+                        .checkpoint_rollback(cp);
+                }
                 return Some(CallOutcome::new(
                     InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
                     mem_offset,
@@ -612,10 +768,77 @@ pub(crate) fn handle_universal_precompile_call(
             let mut gas =
                 Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
             if !gas.record_regular_cost(total_cost) {
+                if let Some(cp) = host_cp {
+                    let _ = context
+                        .journaled_state
+                        .db_mut()
+                        .host
+                        .checkpoint_rollback(cp);
+                }
                 return Some(CallOutcome::new(
                     InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
                     mem_offset,
                 ));
+            }
+            if let Some(cp) = host_cp {
+                if ures.success {
+                    if context
+                        .journaled_state
+                        .db_mut()
+                        .host
+                        .checkpoint_commit(cp)
+                        .is_err()
+                    {
+                        let _ = context
+                            .journaled_state
+                            .db_mut()
+                            .host
+                            .checkpoint_rollback(cp);
+                        return Some(CallOutcome::new(
+                            InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
+                            mem_offset,
+                        ));
+                    }
+                    if !value_u256.is_zero() {
+                        if !context
+                            .journaled_state
+                            .balance_incr(inputs.caller, U256::ZERO)
+                            .is_ok()
+                        {
+                            let _ = context
+                                .journaled_state
+                                .db_mut()
+                                .host
+                                .checkpoint_rollback(cp);
+                            return Some(CallOutcome::new(
+                                InterpreterResult::new(
+                                    InstructionResult::Revert,
+                                    Bytes::new(),
+                                    gas,
+                                ),
+                                mem_offset,
+                            ));
+                        }
+                        if let Some(acc) = context
+                            .journaled_state
+                            .evm_state_mut()
+                            .get_mut(&inputs.caller)
+                        {
+                            acc.info.balance = acc.info.balance.saturating_sub(value_u256);
+                            acc.mark_touch();
+                            *recorded_debit = Some(PrecompileValueDebit {
+                                caller: inputs.caller,
+                                amount: value_u256,
+                            });
+                        }
+                    }
+                } else {
+                    let _ = context
+                        .journaled_state
+                        .db_mut()
+                        .host
+                        .checkpoint_rollback(cp);
+                }
             }
             if !is_static {
                 let ev_data = encode_universal_call_executed_data(
@@ -631,16 +854,22 @@ pub(crate) fn handle_universal_precompile_call(
                     ),
                 });
             }
-            let encoded = encode_precompile_return(ures.success, &ures.output);
             Some(CallOutcome::new(
                 InterpreterResult::new(InstructionResult::Return, Bytes::from(encoded), gas),
                 mem_offset,
             ))
         }
         Err(_) => {
+            if let Some(cp) = host_cp {
+                let _ = context
+                    .journaled_state
+                    .db_mut()
+                    .host
+                    .checkpoint_rollback(cp);
+            }
             let mut gas =
                 Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
-            let _ = gas.record_regular_cost(PRECOMPILE_BASE_GAS);
+            let _ = gas.record_regular_cost(entry_gas);
             Some(CallOutcome::new(
                 InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
                 mem_offset,
@@ -660,5 +889,28 @@ mod tests {
         assert!(precompile_scheme_allowed(CallScheme::StaticCall));
         assert!(!precompile_scheme_allowed(CallScheme::DelegateCall));
         assert!(!precompile_scheme_allowed(CallScheme::CallCode));
+    }
+
+    #[test]
+    fn precompile_abi_enforces_megabyte_ceiling_and_word_gas() {
+        use crate::abi::{
+            decode_precompile_call, decode_uol_call, encode_uol_offer_bytes, precompile_word_gas,
+            UolOfferRecord, MAX_PRECOMPILE_BYTES, PRECOMPILE_WORD_GAS,
+        };
+        assert_eq!(precompile_word_gas(0), 0);
+        assert_eq!(precompile_word_gas(1), PRECOMPILE_WORD_GAS);
+        assert_eq!(precompile_word_gas(33), 2 * PRECOMPILE_WORD_GAS);
+        assert!(decode_precompile_call(&vec![0u8; MAX_PRECOMPILE_BYTES + 1]).is_none());
+        assert!(decode_uol_call(&vec![0u8; MAX_PRECOMPILE_BYTES + 1]).is_none());
+        let huge = UolOfferRecord {
+            maker: [1; 20],
+            class_id: [2; 32],
+            asset_id: [3; 32],
+            taker: vec![0u8; MAX_PRECOMPILE_BYTES + 1],
+            payment: Vec::new(),
+            amount: 1,
+            expiry: 10,
+        };
+        assert!(encode_uol_offer_bytes(&huge).is_none());
     }
 }

@@ -27,7 +27,14 @@ fn run_unix() -> ExitCode {
         None => EeId::EVM.0,
     };
 
-    let _ = std::fs::remove_file(&socket_path);
+    if let Ok(meta) = std::fs::symlink_metadata(&socket_path) {
+        use std::os::unix::fs::FileTypeExt as _;
+        if !meta.file_type().is_socket() {
+            eprintln!("refusing to overwrite non-socket path `{socket_path}`");
+            return ExitCode::from(1);
+        }
+        let _ = std::fs::remove_file(&socket_path);
+    }
     let listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
         Err(err) => {
@@ -35,6 +42,15 @@ fn run_unix() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(err) =
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        {
+            eprintln!("failed to restrict UEL worker socket `{socket_path}` permissions: {err}");
+            return ExitCode::from(1);
+        }
+    }
 
     let mut env = MockEe::new(EeId(ee_byte));
     for incoming in listener.incoming() {

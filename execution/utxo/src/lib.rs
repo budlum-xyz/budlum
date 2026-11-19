@@ -137,9 +137,17 @@ fn spent_key(utxo_id: &[u8; 32]) -> Vec<u8> {
     k
 }
 
+/// Maximum UTXO evaluation stack depth (matches Bitcoin consensus `MAX_STACK_SIZE`).
+const MAX_UTXO_STACK_ITEMS: usize = 1_000;
+/// Maximum UTXO stack element byte length (matches Bitcoin `MAX_SCRIPT_ELEMENT_SIZE`).
+const MAX_UTXO_ELEMENT_BYTES: usize = 520;
+/// Maximum pubkeys in `OP_CHECKMULTISIG` (matches Bitcoin standard 20-key ceiling).
+const MAX_MULTISIG_PUBKEYS: usize = 20;
+
 fn derive_utxo_id(caller: &[u8], tx_hash: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"BDLM_UTXO_OUTPOINT_V1");
+    h.update((caller.len() as u64).to_le_bytes());
     h.update(caller);
     h.update(tx_hash);
     h.finalize().into()
@@ -206,9 +214,22 @@ fn eval_script(
         }
         *gas_used = next;
         match op {
-            ScriptOp::PushBytes(b) => stack.push(b.clone()),
-            ScriptOp::PushNum(n) => stack.push(n.to_le_bytes().to_vec()),
+            ScriptOp::PushBytes(b) => {
+                if b.len() > MAX_UTXO_ELEMENT_BYTES || stack.len() >= MAX_UTXO_STACK_ITEMS {
+                    return Err(b"UTXO stack bound exceeded".to_vec());
+                }
+                stack.push(b.clone());
+            }
+            ScriptOp::PushNum(n) => {
+                if stack.len() >= MAX_UTXO_STACK_ITEMS {
+                    return Err(b"UTXO stack bound exceeded".to_vec());
+                }
+                stack.push(n.to_le_bytes().to_vec());
+            }
             ScriptOp::OpDup => {
+                if stack.len() >= MAX_UTXO_STACK_ITEMS {
+                    return Err(b"UTXO stack bound exceeded".to_vec());
+                }
                 let Some(top) = stack.last().cloned() else {
                     return Err(b"OP_DUP underflow".to_vec());
                 };
@@ -272,8 +293,16 @@ fn eval_script(
                 stack.push(req.to_le_bytes().to_vec());
             }
             ScriptOp::OpCheckMultiSigHash { threshold, pubkeys } => {
-                if *threshold == 0 || *threshold > pubkeys.len() {
+                if *threshold == 0
+                    || *threshold > pubkeys.len()
+                    || pubkeys.len() > MAX_MULTISIG_PUBKEYS
+                {
                     return Err(b"invalid multisig threshold".to_vec());
+                }
+                let unique: std::collections::BTreeSet<&[u8]> =
+                    pubkeys.iter().map(Vec::as_slice).collect();
+                if unique.len() != pubkeys.len() {
+                    return Err(b"duplicate multisig pubkey".to_vec());
                 }
                 let mut verified = 0usize;
                 let mut next_pubkey = 0usize;
@@ -415,6 +444,13 @@ impl ExecutionEnvironment for UtxoScriptWorker {
                 });
             };
             let utxo_id = derive_utxo_id(&call.caller.id, &call.tx_hash);
+            if matches!(host.read(&ns, &utxo_key(&utxo_id)), Ok(Some(_))) {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"UTXO already exists".to_vec(),
+                    gas_used,
+                });
+            }
             if host
                 .write(&ns, &utxo_key(&utxo_id), Some(&call.input))
                 .is_err()
