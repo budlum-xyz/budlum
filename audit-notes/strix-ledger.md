@@ -226,3 +226,38 @@ giden kurulumuyu soruyor
 - **Durum:** test, işareti artık gerçek kurulum kapısıyla yerleştiriyor
   (`NS_EVM_CODE`/`NS_EVM_ACCOUNT`) ve ham `Deploy` kapısının reddettiğini
   ayrıca kilitliyor. `execution::coordinator::evm_ee` 8/0.
+
+## B-0012 (genişletme) · Beşinci yetim adaptör: `pospace_vdf`
+
+- **Yer:** `src/cross_domain/external/pospace_vdf.rs` (1319 satır),
+  `mod.rs:95,145-148`.
+- **Ne:** Uç `d8d3f01` PoSpace + VDF adaptörünü ekledi ("GOREV-13,
+  GOREV-21"). `PoSpaceVdfAdapter` `mod.rs` içinden `pub use` ediliyor ama
+  `mod.rs` dışında **tek bir referansı yok**; `AdapterSpec`'e variant yok,
+  pin haritası yok, `core/transaction.rs` / `settlement/universal_finality.rs`
+  eşlemesi yok. Önceki dört yetimle aynı örüntü.
+- **Not:** Bu, `07-konsens-us-tarihi.md`'deki "eksik üç şey"den birinin
+  **kodunun yazıldığı** ancak **giriş kapısının bağlanmadığı** anlamına
+  gelir. Adaptör kütüphane olarak doğru olabilir; ağın kayıt kapısından
+  geçemez.
+- **Durum:** açık. Öneri: `AdapterSpec`'e en sona bir variant (tag 7) ve
+  `pinned_pospace_anchors` + giriş kapısı. Bu dördü + bu biri için tek bir
+  serbest değişken (campaign) olarak yapılması iyi olur.
+
+## B-0017 · Uç `d8d3f01` clippy kapısını yeniden kırmızı yapmış
+
+- **Yer:** dört dosya, dört lint.
+- **Ne:** `d8d3f01` (~5300 satır yeni kod: PoSpace+VDF adaptörü, ULP-1,
+  ışık istemcisi) clippy kapısını yeniden kırmızı yapmış:
+  1. `src/cross_domain/external/pospace_vdf.rs:1002` — `mine_valid_block`
+     9 argüman (`too_many_arguments`).
+  2. `src/settlement/shared_security.rs:1540` — `.get(&val_a).is_none()`
+     (`unnecessary_get_then_check`).
+  3. `src/tests/bitcoin_spv.rs:721` — `assert!(MAX_STARK_BATCH_HEADERS >= 6)`
+     (`assertions_on_constants`).
+  4. `src/light_client/mod.rs:2338` — `vec![...]` tek öğeli dizi
+     (`useless_vec`).
+- **Neden önemli:** Kapı her seferinde yeniden kırmızı oluyor; bu, kapıın
+  ucu gerçekten koruyamadığının kanıtı.
+- **Durum:** dördü de düzeltildi. `cargo clippy --no-default-features
+  --features "pq-ml-dsa wallet-ml-dsa" --all-targets -- -D warnings` temiz.

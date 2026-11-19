@@ -1533,12 +1533,11 @@ mod tests {
                 .allocated_units,
             50_000
         );
-        assert!(state
+        assert!(!state
             .settlement
             .shared_security
             .validators
-            .get(&val_a)
-            .is_none());
+            .contains_key(&val_a));
     }
 
     #[test]

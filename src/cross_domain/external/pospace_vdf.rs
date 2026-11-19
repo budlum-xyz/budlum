@@ -999,6 +999,11 @@ mod tests {
     use crate::cross_domain::external::selftest::{admit, admit_observed};
     use crate::crypto::primitives::PqKeyPair;
 
+    // Nine arguments are one mined block: the chain, the parent it extends,
+    // the slot it sits in, the plot it was drawn from and the difficulty it
+    // was drawn against. Every caller passes the same nine, so a bundle
+    // would be a type that exists only to satisfy the arity lint.
+    #[allow(clippy::too_many_arguments)]
     fn mine_valid_block(
         network: &str,
         parent_infusion: &Hash32,
