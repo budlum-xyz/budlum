@@ -259,7 +259,7 @@ fn phase4_hidden_multisig_authorizes_tx_through_master_proof_without_leaking_pol
         .expect("heterogeneous MasterProof verifies");
 
     // Bond both segment aggregators above the Devnet validator floor before
-    // consensus block validation (`STRIX-AGG-01`).
+    // consensus block validation.
     let agg_floor = state.validator_stake_floor(CHAIN_ID);
     for seg in &master.segments {
         state.add_validator_with_floor(seg.aggregator, agg_floor, agg_floor);
@@ -399,7 +399,7 @@ fn phase4_domain_transition_finalizes_through_master_proof() {
     assert!(frame.proof.len() <= params.max_proof_bytes);
 
     // Finalize through ClaimedDomainFinalityAdapter: unbonded state must fail,
-    // bonded validator state must pass (`STRIX-AGG-01`).
+    // bonded validator state must pass.
     let mut adapter = ClaimedDomainFinalityAdapter::new(DOMAIN);
     adapter.register_domain_program(ext_domain.id, compiled.program_hash);
     assert!(adapter

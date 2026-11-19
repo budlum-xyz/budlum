@@ -36,6 +36,9 @@
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
+use crate::cross_domain::external::algorand_stateproof::{
+    verify_algorand_equivocation, AlgorandEquivocationProof, PinnedAlgorandVerifier,
+};
 use crate::cross_domain::external::auxpow_pop::{
     verify_pop_equivocation, AuxPowPopAdapter, PinnedAuxPowAnchor, PopEquivocationProof,
 };
@@ -235,6 +238,15 @@ pub enum ContradictionEvidence {
         pinned: PinnedSimplexCommittee,
         /// Cryptographic Simplex safety-violation proof.
         proof: SimplexSlashingProof,
+    },
+    /// Verified Algorand `StateProof` voter double-signature equivocation.
+    AlgorandFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned Algorand `StateProof` verifier root.
+        pinned: PinnedAlgorandVerifier,
+        /// Cryptographic Algorand equivocation proof.
+        proof: AlgorandEquivocationProof,
     },
 }
 
@@ -884,6 +896,30 @@ impl BridgeEconomicGuard {
                     res.slashed_stake_weight,
                 )
             }
+            ContradictionEvidence::AlgorandFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let slashed_weight = verify_algorand_equivocation(network, pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                // Domain-separated from the other evidence classes, and bound to
+                // *both* conflicting messages: a digest over one message alone
+                // would let a second equivocation by the same voter over a
+                // different pair replay against the same consumed slot.
+                let digest_a = proof.message_a.digest();
+                let digest_b = proof.message_b.digest();
+                (
+                    hash_fields_bytes(&[
+                        b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                        &[4u8],
+                        &domain_id.to_le_bytes(),
+                        &digest_a,
+                        &digest_b,
+                    ]),
+                    slashed_weight,
+                )
+            }
         };
 
         if self.consumed_evidence.contains(&evidence_digest) {
@@ -1259,6 +1295,64 @@ mod tests {
                 evidence_digest: out.evidence_digest,
             }
         );
+    }
+
+    #[test]
+    fn algorand_stateproof_fault_dispatch_slashes_bond_and_refuses_replay_or_forgery() {
+        let net = "algorand-guard-net";
+        let (pinned, proof, culpable_weight) =
+            crate::cross_domain::external::algorand_stateproof::equivocation_support::conflicting_voter_fixture(net);
+
+        let mut guard = BridgeEconomicGuard::new();
+        guard
+            .configure_domain(
+                41,
+                DomainCeilingPolicy::default(),
+                Some(make_bond(Address::from([0x92; 32]), 20_000)),
+            )
+            .unwrap();
+
+        let fault = ContradictionEvidence::AlgorandFault {
+            network: net.into(),
+            pinned: pinned.clone(),
+            proof: proof.clone(),
+        };
+        let out = guard
+            .submit_contradiction(41, &fault, Address::from([0xCA; 32]), 410)
+            .expect("a verified Algorand voter equivocation freezes the domain and slashes the bond");
+        assert_eq!(out.external_slashed_weight, culpable_weight);
+        assert_eq!(out.slashed_bond_atoms, 20_000);
+        assert_eq!(out.challenger_reward_atoms, 2_000);
+        assert_eq!(
+            guard.record(41).unwrap().status,
+            DomainGuardStatus::FrozenByContradiction {
+                frozen_at_height: 410,
+                evidence_digest: out.evidence_digest,
+            }
+        );
+
+        // The same proof submitted twice is a replay, not a second slashing.
+        assert!(matches!(
+            guard.submit_contradiction(41, &fault, Address::from([0xCA; 32]), 411),
+            Err(EconomicGuardError::DuplicateEvidence(_))
+        ));
+
+        // A forged second signature never reaches the ledger.
+        let mut forged = proof.clone();
+        forged.sig_b = vec![0u8; forged.sig_b.len()];
+        assert!(matches!(
+            guard.submit_contradiction(
+                41,
+                &ContradictionEvidence::AlgorandFault {
+                    network: net.into(),
+                    pinned,
+                    proof: forged
+                },
+                Address::from([0xCA; 32]),
+                412
+            ),
+            Err(EconomicGuardError::InvalidEvidence(_))
+        ));
     }
 
     #[test]

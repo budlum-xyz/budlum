@@ -1483,3 +1483,90 @@ mod tests {
         ));
     }
 }
+
+/// Cross-module test support: one minimal, valid Algorand voter equivocation.
+///
+/// WIRING: consumed by the `crate::cross_domain::economic_guard` test suite,
+/// which submits this proof through the production slashing dispatch so the
+/// equivocation verifier is proven reachable from a production entry point.
+#[cfg(test)]
+pub(crate) mod equivocation_support {
+    use super::*;
+    use crate::crypto::primitives::PqKeyPair;
+
+    /// Four voters holding disjoint stake intervals covering `[0, 1000)`; voter
+    /// zero signs two conflicting `StateProof` messages inside one interval.
+    ///
+    /// Returns the pinned verifier root, the equivocation proof, and the voter
+    /// stake weight the proof proves culpable (`upper_weight - lower_weight`).
+    pub(crate) fn conflicting_voter_fixture(
+        network: &str,
+    ) -> (PinnedAlgorandVerifier, AlgorandEquivocationProof, u128) {
+        let intervals = [(0u128, 300u128), (300, 600), (600, 850), (850, 1_000)];
+        let keys: Vec<PqKeyPair> = (0..4).map(|_| PqKeyPair::generate()).collect();
+        let voters: Vec<AlgorandVoterLeaf> = intervals
+            .iter()
+            .enumerate()
+            .map(|(i, &(lo, hi))| AlgorandVoterLeaf {
+                position: i as u32,
+                lower_weight: lo,
+                upper_weight: hi,
+                key_first_round: 10_000,
+                key_last_round: 10_255,
+                pubkey_commitment: algorand_pubkey_commitment(keys[i].public_key_bytes()),
+            })
+            .collect();
+        let (voters_commitment, first_path) = build_voters_commitment(&voters, Some(0));
+        let genesis_hash = [0xA1; 32];
+        let pinned = PinnedAlgorandVerifier {
+            genesis_hash,
+            interval_index: 40,
+            first_round: 10_000,
+            last_round: 10_255,
+            voters_commitment,
+            voter_count: 4,
+            total_weight: 1_000,
+            threshold_bps: 7_000,
+        };
+        let message_a = AlgorandStateProofMessage {
+            genesis_hash,
+            interval_index: 40,
+            first_attested_round: 10_100,
+            last_attested_round: 10_102,
+            block_headers_commitment: [0x11; 32],
+            next_voters_commitment: [0x22; 32],
+            next_voter_count: 1,
+            next_total_weight: 2_000,
+        };
+        let mut message_b = message_a.clone();
+        message_b.block_headers_commitment = [0xFE; 32];
+        let reveal_a = AlgorandVoterReveal {
+            position: voters[0].position,
+            lower_weight: voters[0].lower_weight,
+            upper_weight: voters[0].upper_weight,
+            key_first_round: voters[0].key_first_round,
+            key_last_round: voters[0].key_last_round,
+            mldsa65_pubkey: keys[0].public_key_bytes().to_vec(),
+            mldsa65_sig: keys[0]
+                .sign(
+                    crate::crypto::ctx::CROSS_DOMAIN_V1,
+                    &stateproof_sign_digest(network, &message_a),
+                )
+                .expect("ML-DSA-65 sign"),
+            merkle_path: first_path,
+        };
+        let sig_b = keys[0]
+            .sign(
+                crate::crypto::ctx::CROSS_DOMAIN_V1,
+                &stateproof_sign_digest(network, &message_b),
+            )
+            .expect("ML-DSA-65 sign");
+        let proof = AlgorandEquivocationProof {
+            message_a,
+            reveal_a,
+            message_b,
+            sig_b,
+        };
+        (pinned, proof, intervals[0].1 - intervals[0].0)
+    }
+}

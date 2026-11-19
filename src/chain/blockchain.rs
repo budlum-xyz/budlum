@@ -1569,7 +1569,7 @@ impl Blockchain {
     }
 
     /// Fail-closed domain block validation and commitment extraction through
-    /// [`DomainPluginRegistry`] (`B-0046`): resolves the registered consensus
+    /// [`DomainPluginRegistry`]: resolves the registered consensus
     /// plugin for `domain_id`, checks its consensus kind and finality adapter
     /// binding against the active domain record, runs the engine's structural
     /// `validate_domain_block`, and derives the canonical [`DomainCommitment`].
@@ -9049,7 +9049,7 @@ impl Blockchain {
                 self.state.epoch_index.saturating_add(1)
             ));
         }
-        // BLG-0083 (P04-F01): authenticate BEFORE attributing. A garbage
+        // Authenticate BEFORE attributing. A garbage
         // vote naming a victim must not count against the victim: only a
         // vote whose `auth_sig` proves control of the registered key may
         // later earn an invalid-vote tick (self-incrimination). Unverified
@@ -9191,7 +9191,7 @@ impl Blockchain {
                 self.state.epoch_index.saturating_add(1)
             ));
         }
-        // BLG-0083 (P04-F01): authenticate BEFORE attributing (see
+        // Authenticate BEFORE attributing (see
         // `handle_prevote`).
         if let Some(v) = self.state.validators.get(&vote.voter_id) {
             if !v.bls_public_key.is_empty()

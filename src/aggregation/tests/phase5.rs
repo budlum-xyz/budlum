@@ -873,7 +873,7 @@ fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked
     let air_registry = AirRegistry::with_builtins();
 
     // 1. Mainnet (45260) and public Testnet (45261) reject AggMode::On in both
-    //    startup validation and consensus block checks (`STRIX-AGG-01`).
+    //    startup validation and consensus block checks.
     let mainnet_id = Network::Mainnet.chain_id().value();
     let testnet_id = Network::Testnet.chain_id().value();
     let devnet_id = Network::Devnet.chain_id().value();
@@ -1012,7 +1012,7 @@ fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked
         },
     )
     .is_err());
-    // B-0143 regression: a griefing challenger CANNOT frame an honest aggregator
+    // Regression: a griefing challenger CANNOT frame an honest aggregator
     // by passing `&[]` with a stranger's signature or reusing the honest signature.
     let attacker_seed = Zeroizing::new([0xA8u8; 32]);
     let forged_empty_sig =
@@ -1047,7 +1047,7 @@ fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked
     .is_err());
 
     // 3. Byzantine bonded aggregator signs an invalid backing response for a
-    //    forged `Claim::Sig` AND holds queued unbonding stake (B-0144): 100% of
+    //    forged `Claim::Sig` AND holds queued unbonding stake: 100% of
     //    both active stake and queued unbonding is swept, validator is jailed,
     //    and `total_bud_committed + burned_total` is conserved to the exact atom.
     state
@@ -1126,7 +1126,7 @@ fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked
     );
     assert!(
         state.unbonding_queue.is_empty(),
-        "B-0144: queued unbonding atoms must be confiscated on segment fraud slash"
+        "queued unbonding atoms must be confiscated on segment fraud slash"
     );
     assert!(state.get_validator(&ctx.aggregator).unwrap().jailed);
     let accounting_after = state
@@ -1134,7 +1134,7 @@ fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked
         .saturating_add(u128::from(state.burned_total));
     assert_eq!(
         accounting_after, accounting_before,
-        "B-0144: total_bud_committed + burned_total must stay bit-for-bit invariant"
+        "total_bud_committed + burned_total must stay bit-for-bit invariant"
     );
     assert!(!is_authorized_segment_aggregator(
         &state,
@@ -1152,7 +1152,7 @@ fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked
     )
     .is_err());
 
-    // 4. B-0142: disjoint honest back-to-back single-claim ticks with equal `count`
+    // 4. Disjoint honest back-to-back single-claim ticks with equal `count`
     //    are NEVER slashed, while contradictory `Claim::Prog` outputs for the
     //    exact same `(program_hash, input_hash)` slash 100% via Merkle opening.
     let eq_seed = Zeroizing::new([0x92u8; 32]);
@@ -1189,7 +1189,7 @@ fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked
             watcher,
         )
         .is_err(),
-        "B-0142: honest disjoint ticks with identical count must NEVER be slashed"
+        "honest disjoint ticks with identical count must NEVER be slashed"
     );
 
     let contra_a = Claim::Prog {
@@ -1250,7 +1250,7 @@ fn strix_agg_01_blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked
         &eq_ctx.aggregator
     ));
 
-    // 5. B-0143 bonded `SegmentChallengeBook`: honest defense burns/rewards
+    // 5. Bonded `SegmentChallengeBook`: honest defense burns/rewards
     //    frivolous challenger bond; silent timeout slashes Byzantine aggregator.
     let def_seed = Zeroizing::new([0x93u8; 32]);
     let def_ctx = TickCtx::from_seed(domain, def_seed.clone()).expect("def ctx");
@@ -1503,7 +1503,7 @@ fn gorev13_node_claim_refs_and_program_auth_reject_uninvited_and_build_atomic_bl
     assert_eq!(
         node.attach_claim_ref(uninvited_env, &registry),
         Err(ObjectRefusal::Pool(Rejection::NotTheSender)),
-        "B-0148: uninvited companion PcsOpening must be rejected before entering pool"
+        "uninvited companion PcsOpening must be rejected before entering pool"
     );
 
     // Before `pcs_env` arrives, ticking proves only `auth_claim`; `block_input` MUST
@@ -1511,7 +1511,7 @@ fn gorev13_node_claim_refs_and_program_auth_reject_uninvited_and_build_atomic_bl
     let _ = node.on_tick(&registry);
     assert!(
         node.block_input().is_none(),
-        "B-0148: partial transaction missing proven claim_refs must not enter block_input"
+        "partial transaction missing proven claim_refs must not enter block_input"
     );
 
     // Attach the authorized companion `PcsOpening`, tick, and build a valid block!
@@ -1556,7 +1556,7 @@ fn gorev13_node_claim_refs_and_program_auth_reject_uninvited_and_build_atomic_bl
         claim_program_auth(&raw_prog_tx, compiled.program_hash, &stark_obj).expect("claim prog");
     assert!(node
         .admit_with_auth(prog_env, prog_tx, Some(compiled.program_hash), &registry)
-        .expect("B-0148: program-authorized account admits cleanly via admit_with_auth"));
+        .expect("program-authorized account admits cleanly via admit_with_auth"));
 }
 
 #[test]
@@ -1597,7 +1597,7 @@ fn gorev13_shadow_auditor_parity_and_10k_block_zero_silent_drop_campaign() {
         }
     }
 
-    // Spoofed `from` address (Alice's key & sig, foreign `from`): both reject consistently (B-0149).
+    // Spoofed `from` address (Alice's key & sig, foreign `from`): both reject consistently.
     let mut spoofed_from = valid_tx.clone();
     spoofed_from.from = Address::from([0xEE; 32]);
 
@@ -1612,7 +1612,7 @@ fn gorev13_shadow_auditor_parity_and_10k_block_zero_silent_drop_campaign() {
         auditor
             .audit_block(&probe_block)
             .expect("audit probe block"),
-        "B-0149: native verification and aggregation claim parity must agree on every case"
+        "native verification and aggregation claim parity must agree on every case"
     );
     assert_eq!(auditor.report().txs_checked, 4);
     assert_eq!(auditor.report().matches, 4);
