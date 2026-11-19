@@ -352,8 +352,6 @@ bud/src/bud_format_multifile.rs	const	MULTI_VERSION
 bud/src/bud_format_multifile.rs	fn	add_delta
 bud/src/bud_format_multifile.rs	fn	apply_delta
 bud/src/bud_format_multifile.rs	struct	MultifileChunk
-bud/src/bud_format_nvc.rs	const	K1
-bud/src/bud_format_nvc.rs	const	K2
 bud/src/bud_format_nvc.rs	const	NVC_MAGIC
 bud/src/bud_format_nvc.rs	const	SIGMOID_LUT_SIZE
 bud/src/bud_format_nvc.rs	fn	dense_int
