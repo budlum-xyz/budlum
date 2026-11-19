@@ -219,7 +219,7 @@ fn pad_to_32(len: usize) -> usize {
     if rem == 0 {
         len
     } else {
-        len + (32 - rem)
+        len.saturating_add(32 - rem)
     }
 }
 
@@ -238,12 +238,15 @@ fn write_dyn_bytes(bytes: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(bytes);
     let pad = pad_to_32(bytes.len()).saturating_sub(bytes.len());
     if pad > 0 {
-        out.resize(out.len() + pad, 0);
+        out.resize(out.len().saturating_add(pad), 0);
     }
 }
 
 fn read_word(buf: &[u8], offset: usize) -> Result<&[u8], String> {
-    buf.get(offset..offset + 32)
+    let end = offset
+        .checked_add(32)
+        .ok_or_else(|| String::from("ABI calldata word offset overflow"))?;
+    buf.get(offset..end)
         .ok_or_else(|| String::from("ABI calldata truncated reading 32-byte word"))
 }
 
@@ -373,6 +376,11 @@ pub fn decode_precompile_calldata(calldata: &[u8]) -> Result<DecodedPrecompileCa
         let ee_u8 = u8::try_from(ee_u64).map_err(|_| String::from("target_ee exceeds uint8"))?;
         let target = read_dyn_bytes(args, 32)?;
         let input = read_dyn_bytes(args, 64)?;
+        if has_reserved_static_prefix(&input) {
+            return Err(String::from(
+                "staticCall input cannot carry reserved static-call envelope prefix",
+            ));
+        }
         let gas_bgu = read_u64_word(args, 96)?;
         Ok(DecodedPrecompileCall {
             target_ee: EeId(ee_u8),
@@ -405,9 +413,13 @@ pub fn encode_precompile_return(ok: bool, ret: &[u8]) -> Vec<u8> {
 ///
 /// Returns an error if the operation fails.
 pub fn decode_precompile_return(raw: &[u8]) -> Result<(bool, Vec<u8>), String> {
-    let ok_u64 = read_u64_word(raw, 0)?;
+    let ok = match read_u64_word(raw, 0)? {
+        0 => false,
+        1 => true,
+        _ => return Err(String::from("ABI boolean return word must be 0 or 1")),
+    };
     let ret = read_dyn_bytes(raw, 32)?;
-    Ok((ok_u64 != 0, ret))
+    Ok((ok, ret))
 }
 
 /// Builds the canonical `UniversalCallExecuted(uint8 ee, bytes target, bool ok)` EVM log
@@ -452,4 +464,51 @@ pub enum BudlumQuery {
         input_hex: String,
         gas_limit_bgu: u64,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abi_decoders_reject_max_dynamic_offset_without_overflow_panic() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&evm_universal_call_selector());
+        write_u64_word(u64::from(EeId::WASM.0), &mut raw);
+        write_u64_word(u64::MAX - 10, &mut raw);
+        write_u64_word(160, &mut raw);
+        write_u128_word(0, &mut raw);
+        write_u64_word(10_000, &mut raw);
+        assert!(decode_precompile_calldata(&raw).is_err());
+
+        let mut uol_raw = Vec::new();
+        uol_raw.extend_from_slice(&uol_selector("balanceOf(bytes32,bytes)"));
+        uol_raw.extend_from_slice(&[0x11; 32]);
+        write_u64_word(u64::MAX - 5, &mut uol_raw);
+        assert!(decode_uol_precompile_calldata(&uol_raw).is_err());
+    }
+
+    #[test]
+    fn static_call_rejects_reserved_prefix_and_return_requires_canonical_bool() {
+        let smuggled = wrap_static_universal_input(b"inner-payload");
+        let calldata = encode_precompile_static_call(EeId::WASM, b"contract", &smuggled, 50_000);
+        assert!(
+            decode_precompile_calldata(&calldata).is_err(),
+            "staticCall must reject caller-supplied reserved static envelope prefix"
+        );
+
+        let mut bad_bool = Vec::new();
+        write_u64_word(2, &mut bad_bool);
+        write_u64_word(64, &mut bad_bool);
+        write_dyn_bytes(b"ok", &mut bad_bool);
+        assert!(
+            decode_precompile_return(&bad_bool).is_err(),
+            "non-canonical ABI boolean 2 must be refused"
+        );
+        let ok_ret = encode_precompile_return(true, b"ok");
+        assert_eq!(
+            decode_precompile_return(&ok_ret).unwrap(),
+            (true, b"ok".to_vec())
+        );
+    }
 }

@@ -88,7 +88,7 @@ pub struct ExternalDomainTxContext {
 /// Why an external-domain transaction was refused. A refused transaction
 /// changes nothing; a submission the registry refused but recorded is not an
 /// error (see [`execute_external_domain_tx`]).
-/// exposed for execute_external_domain_tx: the executor's ExternalDomain arm reports it by its message, not by name.
+/// exposed for `execute_external_domain_tx`: reported via `Display` in executor.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExternalDomainTxError {
     #[error("external domains are not enabled on mainnet")]
@@ -174,6 +174,7 @@ pub fn execute_external_domain_tx(
         }
         ExternalDomainTx::SetQuorumPolicy { domain, policy } => {
             require_registrant(state, ctx, domain)?;
+            require_domain_mutable(state, domain)?;
             state
                 .settlement
                 .external_intake
@@ -227,6 +228,28 @@ fn require_registrant(
     Ok(())
 }
 
+fn require_domain_mutable(
+    state: &AccountState,
+    domain: &DomainKey,
+) -> Result<(), ExternalDomainTxError> {
+    use crate::cross_domain::external::profile::DomainState;
+    let reg = state
+        .settlement
+        .external_intake
+        .registry
+        .domain(domain)
+        .ok_or(ExternalDomainTxError::UnknownDomain)?;
+    if matches!(
+        reg.record.state,
+        DomainState::QuantumIsolated | DomainState::Retired
+    ) {
+        return Err(ExternalDomainTxError::Intake(
+            "domain is quantum-isolated or retired and cannot mutate rules or readmit".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn register(
     state: &mut AccountState,
     ctx: &ExternalDomainTxContext,
@@ -237,21 +260,34 @@ fn register(
     }
     let bond = fundable_bond(state, ctx, request.bond_atoms)?;
     let bls = bls_for(&request.spec, ctx);
+    let observer_adapter = request
+        .spec
+        .build(bls_for(&request.spec, ctx), Some(request.golden.clone()));
+    let (_, observed_crypto) =
+        crate::cross_domain::external::admit_observed(observer_adapter.as_ref(), &request.policy);
     // The bond is locked first, from a balance already checked to hold it
     // and the fee, and handed back if the intake refuses: a registration
     // never stands without the bond behind it.
     state
         .lock_external_bond(&ctx.sender, bond)
         .map_err(ExternalDomainTxError::Intake)?;
-    if let Err(e) = state
+    let key = match state
         .settlement
         .external_intake
         .register_domain(request.clone(), bls)
     {
-        state
-            .release_external_bond(&ctx.sender, bond)
-            .map_err(ExternalDomainTxError::Intake)?;
-        return Err(e.into());
+        Ok(k) => k,
+        Err(e) => {
+            state
+                .release_external_bond(&ctx.sender, bond)
+                .map_err(ExternalDomainTxError::Intake)?;
+            return Err(e.into());
+        }
+    };
+    if !observed_crypto.is_empty() {
+        if let Some(reg) = state.settlement.external_intake.registry.domain_mut(&key) {
+            reg.record.crypto_facts.merge(&observed_crypto);
+        }
     }
     Ok(())
 }
@@ -310,6 +346,11 @@ fn readmit(
     domain: &DomainKey,
     reason: &str,
 ) -> Result<(), ExternalDomainTxError> {
+    if reason.trim().is_empty() {
+        return Err(ExternalDomainTxError::Intake(
+            "readmission reason cannot be empty or whitespace".into(),
+        ));
+    }
     if reason.len() > MAX_READMIT_REASON_BYTES {
         return Err(ExternalDomainTxError::ReasonTooLong {
             len: reason.len(),
@@ -317,6 +358,25 @@ fn readmit(
         });
     }
     require_registrant(state, ctx, domain)?;
+    require_domain_mutable(state, domain)?;
+    {
+        let reg = state
+            .settlement
+            .external_intake
+            .registry
+            .domain(domain)
+            .ok_or(ExternalDomainTxError::UnknownDomain)?;
+        let required = reg.economics.required_bond_atoms();
+        let live_total = reg
+            .provers
+            .values()
+            .fold(0u128, |acc, bond| acc.saturating_add(bond.live_atoms()));
+        if live_total < required {
+            return Err(ExternalDomainTxError::Intake(format!(
+                "cannot readmit with live prover collateral {live_total} below required floor {required}"
+            )));
+        }
+    }
     let intake = &mut state.settlement.external_intake;
     let Some(entry) = intake.entries.get(domain) else {
         return Err(ExternalDomainTxError::UnknownDomain);
@@ -327,11 +387,17 @@ fn readmit(
     let adapter = entry
         .spec
         .build(bls_for(&entry.spec, ctx), Some(entry.golden.clone()));
-    let admission = crate::cross_domain::external::admit(adapter.as_ref(), &entry.policy);
+    let (admission, observed_crypto) =
+        crate::cross_domain::external::admit_observed(adapter.as_ref(), &entry.policy);
     intake
         .registry
         .readmit(domain, &admission, reason)
         .map_err(|e| ExternalDomainTxError::Intake(e.to_string()))?;
+    if !observed_crypto.is_empty() {
+        if let Some(reg) = intake.registry.domain_mut(domain) {
+            reg.record.crypto_facts.merge(&observed_crypto);
+        }
+    }
     if let Some(entry) = intake.entries.get_mut(domain) {
         entry.admission = admission;
     }
@@ -345,6 +411,7 @@ fn schedule_fork(
     fork_height: u64,
     grace_heights: u64,
 ) -> Result<(), ExternalDomainTxError> {
+    require_domain_mutable(state, domain)?;
     let intake = &mut state.settlement.external_intake;
     let Some(reg) = intake.registry.domain(domain) else {
         return Err(ExternalDomainTxError::UnknownDomain);
@@ -786,5 +853,102 @@ mod tests {
         let err = execute_external_domain_tx(&mut state, &ctx(poster), &tx).unwrap_err();
         assert!(matches!(err, ExternalDomainTxError::Fork(_)), "{err}");
         assert_eq!(state.settlement.root(), before);
+    }
+
+    #[test]
+    fn register_seeds_crqc_isolation_and_readmit_blocks_isolated_or_underbonded() {
+        let (mut state, key, poster) = registered();
+        let challenger = addr(42);
+
+        // Freshly registered classical EthereumSync domain is already visible to
+        // CRQC isolation before any attestation lands, and Readmit cannot undo it.
+        let mut crqc_state = state.clone();
+        assert_eq!(
+            crqc_state
+                .settlement
+                .external_intake
+                .registry
+                .isolate_classical_domains(),
+            1
+        );
+        assert!(execute_external_domain_tx(
+            &mut crqc_state,
+            &ctx(poster),
+            &ExternalDomainTx::Readmit {
+                domain: key,
+                reason: "attempting to bypass CRQC quarantine".into(),
+            },
+        )
+        .is_err());
+        assert!(execute_external_domain_tx(
+            &mut crqc_state,
+            &ctx(poster),
+            &ExternalDomainTx::SetQuorumPolicy {
+                domain: key,
+                policy: QuorumPolicy::strict(2, 3),
+            },
+        )
+        .is_err());
+
+        // After slashing drains live collateral below the required floor, neither
+        // blank reasons nor unreplenished collateral may readmit.
+        let ev_a = evidence(poster, 210, [0xA1; 32]);
+        let ev_digest = ev_a.digest();
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(ev_a)),
+        )
+        .unwrap();
+        state
+            .settlement
+            .external_intake
+            .registry
+            .mark_faulted(&key, "contradicted height 210")
+            .unwrap();
+        state
+            .settlement
+            .external_intake
+            .registry
+            .slash(&key, poster, ev_digest, 1_000, challenger)
+            .unwrap();
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::Readmit {
+                domain: key,
+                reason: "   ".into(),
+            },
+        )
+        .is_err());
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::Readmit {
+                domain: key,
+                reason: "operator audited after slash".into(),
+            },
+        )
+        .is_err());
+
+        // Replenishing bond above required floor restores honest readmission.
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::BondProver {
+                domain: key,
+                bond_atoms: 1_000,
+            },
+        )
+        .unwrap();
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::Readmit {
+                domain: key,
+                reason: "bond replenished and adapter verified".into(),
+            },
+        )
+        .unwrap();
     }
 }

@@ -130,8 +130,8 @@ pub use quorum::{
 };
 pub use registry::{no_backing, DomainRegistration, ExternalDomainRegistry, RegistryError};
 pub use selftest::{
-    admit, apply_patch, run_probe, AdmissionReport, BytePatch, ExpectedRefusal, FaultProbe,
-    ProbeOutcome, RefusalKind,
+    admit, admit_observed, apply_patch, run_probe, AdmissionReport, BytePatch, ExpectedRefusal,
+    FaultProbe, ProbeOutcome, RefusalKind,
 };
 pub use spec::{
     AdapterDescriptor, AdapterError, AdapterId, DomainKey, ExternalFinalityAdapter,
