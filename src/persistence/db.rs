@@ -3102,7 +3102,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_202_restore_rejects_duplicate_keys_and_missing_schema() {
+    fn restore_rejects_duplicate_keys_and_missing_schema() {
         let root = tempdir().unwrap();
         let write_backup = |name: &str, entries: Vec<(Vec<u8>, Vec<u8>)>| {
             let payload = encode(&entries).unwrap();
@@ -3141,7 +3141,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_202_backup_decoder_is_bounded_and_rejects_trailing_bytes() {
+    fn backup_decoder_is_bounded_and_rejects_trailing_bytes() {
         let mut excessive_allocation = 1u32.to_le_bytes().to_vec();
         excessive_allocation.extend_from_slice(&[0; 32]);
         excessive_allocation.extend_from_slice(&u64::MAX.to_le_bytes());

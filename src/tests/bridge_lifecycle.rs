@@ -170,7 +170,7 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
 
 /// A full lock/mint/burn/unlock cycle conserves the
 /// total supply. Burn is the debit half of mint: without it, each cycle
-/// mints one transfer amount out of thin air (the F01 inflation bug).
+/// mints one transfer amount out of thin air (preventing unbacked mint inflation).
 #[test]
 fn bridge_lock_mint_burn_unlock_conserves_supply() {
     let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);

@@ -1765,7 +1765,7 @@ src/tokenomics/reward_pool.rs	fn	total_epoch_payout
 # wiring, and they come out when the settlement layer starts calling them.
 
 #
-# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
+# 2026-08-31 (operator-approved hybrid schedule; remaining entries tracked
 # DENETIM-PLANI-3.0.md): the ai-serve economics modules (fee_scenario,
 # cost_forecast, validator_cost, staging, metric) are the published fee
 # schedule and cost model as code, the single source every doc number
@@ -1774,7 +1774,7 @@ src/tokenomics/reward_pool.rs	fn	total_epoch_payout
 # come out when the settlement layer starts calling them.
 
 #
-# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
+# 2026-08-31 (operator-approved hybrid schedule; remaining entries tracked
 # DENETIM-PLANI-3.0.md): the ai-serve economics modules (fee_scenario,
 # cost_forecast, validator_cost, staging, metric, residency) are the
 # published fee schedule and cost model as code, the single source every

@@ -53,7 +53,7 @@ fn test_bns_renewal() {
     assert_eq!(reg.resolve("test.bud", 250), Some(alice));
     assert_eq!(reg.resolve("test.bud", 350), None);
 
-    // F14 + B8: inside GRACE_PERIOD (epoch 400 <= 300 + 3000), resolution fails closed
+    // Inside GRACE_PERIOD (epoch 400 <= 300 + 3000), resolution fails closed
     // and third parties (`bob`) are refused on both `renew` and `register`, while the
     // owner (`alice`) may rescue the name (`new_expires_at = max(300, 400) + 100 = 500`).
     assert!(matches!(

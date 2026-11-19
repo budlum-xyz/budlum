@@ -8465,7 +8465,7 @@ impl Blockchain {
                 self.state.epoch_index.saturating_add(1)
             ));
         }
-        // BLG-0083 (P04-F01): authenticate BEFORE attributing. A garbage
+        // Authenticate BEFORE attributing. A garbage
         // vote naming a victim must not count against the victim: only a
         // vote whose `auth_sig` proves control of the registered key may
         // later earn an invalid-vote tick (self-incrimination). Unverified
@@ -8607,7 +8607,7 @@ impl Blockchain {
                 self.state.epoch_index.saturating_add(1)
             ));
         }
-        // BLG-0083 (P04-F01): authenticate BEFORE attributing (see
+        // Authenticate BEFORE attributing (see
         // `handle_prevote`).
         if let Some(v) = self.state.validators.get(&vote.voter_id) {
             if !v.bls_public_key.is_empty()
@@ -12480,7 +12480,7 @@ mod tests {
     }
 
     /// A vote naming an epoch far ahead of the chain
-    /// must not count and must not move the tracker - the F06 seam, pinned
+    /// must not count and must not move the tracker - the boundary pinned
     /// at the door that refuses it.
     #[test]
     fn a_vote_from_a_far_future_epoch_must_not_move_the_tracker() {

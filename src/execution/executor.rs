@@ -5049,7 +5049,7 @@ impl Executor {
                     ));
                 }
                 crate::core::governance::GovernanceAction::SetEncryptionPolicy(policy) => {
-                    // P12-4: DAO parameter-only update. This cannot grant decrypt
+                    // DAO parameter-only update. This cannot grant decrypt
                     // Authority or bypass user-owned AccessGrant checks.
                     state
                         .marketplace
@@ -5057,7 +5057,7 @@ impl Executor {
                         .map_err(|e| BudlumError::validation("pollen_encryption_policy", e))?;
                 }
                 crate::core::governance::GovernanceAction::SetConstitutionParameter(parameter) => {
-                    // P12-10: Constitution Engine updates are bounded. Hard
+                    // Constitution Engine updates are bounded. Hard
                     // Guardrails (AI default-deny, no governance read override,
                     // Permissionless core, PoA isolation) fail closed in
                     // ConstitutionRegistry::set_parameter.
@@ -6161,7 +6161,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_113_block_nonce_failures_are_atomic() {
+    fn block_nonce_failures_are_atomic() {
         use crate::core::transaction::DEFAULT_CHAIN_ID;
 
         let sender = Address::from([0x31; 32]);
@@ -6208,7 +6208,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_113_direct_execution_rejects_exhausted_nonce_before_mutation() {
+    fn direct_execution_rejects_exhausted_nonce_before_mutation() {
         use crate::core::transaction::DEFAULT_CHAIN_ID;
 
         let sender = Address::from([0x35; 32]);

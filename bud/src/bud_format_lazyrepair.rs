@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn karar_deterministik() {
+    fn decision_is_deterministic() {
         assert_eq!(
             repair_digest(1, 2, 3, true, 0.5),
             repair_digest(1, 2, 3, true, 0.5)

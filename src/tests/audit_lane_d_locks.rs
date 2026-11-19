@@ -28,7 +28,7 @@ mod tests {
     /// called `data` deeper in the tree still works; unanchored patterns were
     /// the original bug.
     #[test]
-    fn blg_005_the_secrets_and_data_directories_never_reach_git() {
+    fn the_secrets_and_data_directories_never_reach_git() {
         let ignore = include_str!("../../.gitignore");
         for entry in ["/secrets/", "/data/"] {
             assert!(
@@ -47,7 +47,7 @@ mod tests {
     /// `/proc/<pid>/cmdline`. The unit takes the key from a root-owned
     /// environment file and names the variable instead.
     #[test]
-    fn blg_011_the_validator_unit_dumps_no_core_and_reads_the_key_by_name() {
+    fn the_validator_unit_dumps_no_core_and_reads_the_key_by_name() {
         let unit = include_str!("../../ops/budlum-core.service");
         assert!(
             unit.lines().any(|line| line.trim() == "LimitCORE=0"),
@@ -69,7 +69,7 @@ mod tests {
     /// the machines where someone had remembered to install it. It is closed by
     /// removal: the same checks are `xtask` gates, which CI runs for everyone.
     #[test]
-    fn blg_013_no_script_directory_is_the_documented_workflow() {
+    fn no_script_directory_is_the_documented_workflow() {
         let scripts = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts");
         assert!(
             !std::path::Path::new(scripts).exists(),
@@ -92,7 +92,7 @@ mod tests {
     /// status has to fail the drill. The shape under lock is the propagation:
     /// the child is spawned, then `map_err(...)?`, then the status check.
     #[test]
-    fn blg_014_a_failed_integrity_check_fails_the_drill() {
+    fn a_failed_integrity_check_fails_the_drill() {
         let drill = include_str!("../../xtask/tools/src/backup_drill.rs");
         let start = drill.find("\"--check-db\"").unwrap_or_else(|| {
             panic!("the --check-db invocation is gone from xtask/tools/src/backup_drill.rs")
@@ -121,7 +121,7 @@ mod tests {
     /// make. Both halves are locked, because they fail independently: a README
     /// can keep the warning banner and quietly grow an "audited" claim later.
     #[test]
-    fn blg_092_the_readme_states_no_mainnet_and_no_audit() {
+    fn the_readme_states_no_mainnet_and_no_audit() {
         let readme = include_str!("../../README.md");
         assert!(
             readme.contains("Budlum has not launched a mainnet and has not been audited."),
@@ -145,7 +145,7 @@ mod tests {
     /// the same input must differ, which is only true while the domain
     /// separation tags stay distinct.
     #[test]
-    fn blg_150_prevote_precommit_and_block_signatures_are_not_interchangeable() {
+    fn prevote_precommit_and_block_signatures_are_not_interchangeable() {
         use crate::crypto::primitives::KeyPair;
         use crate::crypto::signer::{ConsensusSigner, KeyPairSigner};
 
@@ -183,7 +183,7 @@ mod tests {
     /// that is applied but not registered sits outside the collision list the
     /// registry exists to check. Both halves are locked here.
     #[test]
-    fn blg_150_the_vote_domain_tags_are_registered_and_distinct() {
+    fn the_vote_domain_tags_are_registered_and_distinct() {
         let tags = include_str!("../crypto/domain_tags.rs");
         for tag in ["BDLM_PREVOTE_ED25519_V1", "BDLM_PRECOMMIT_ED25519_V1"] {
             assert!(

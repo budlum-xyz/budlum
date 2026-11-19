@@ -1,5 +1,5 @@
 //! WIRING: unwired - verify_execution_block_finality is reached in this tree only through the adapter modules that declare themselves unwired; the relayer path wires it.
-//! F10.3 Ethereum `PoS` sync committee light client, Altair-and-later finality.
+//! Ethereum `PoS` sync committee light client, Altair-and-later finality.
 //!
 //! **BLS variant.** This module follows the Altair *structure* - 512 keys,
 //! sync periods, two-thirds threshold, fork-domain signing root - with
@@ -846,7 +846,7 @@ mod tests {
 
     /// Known answer: a genuine aggregate of exactly the threshold count
     /// verifies. This is the case both earlier versions of the function
-    /// got wrong, and it is the case that makes F10.3 a control at all.
+    /// got wrong, and it is the case that makes sync-committee verification a real control.
     #[test]
     fn a_genuine_aggregate_at_the_threshold_verifies() {
         let msg = b"altair-signing-root";
