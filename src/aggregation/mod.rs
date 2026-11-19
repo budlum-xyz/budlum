@@ -44,6 +44,7 @@ pub mod programs;
 pub mod schemes;
 pub mod shadow;
 pub mod stark;
+pub mod universal_light_proof;
 
 #[cfg(test)]
 mod tests;

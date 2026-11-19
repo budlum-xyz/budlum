@@ -170,7 +170,7 @@ impl ProofTaskKind {
     /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         match self {
-            ProofTaskKind::DomainCommitment {
+            Self::DomainCommitment {
                 domain_id,
                 domain_height,
                 ..
@@ -182,7 +182,7 @@ impl ProofTaskKind {
                     return Err("ProofTaskKind domain_height cannot be zero".into());
                 }
             }
-            ProofTaskKind::ZkProof {
+            Self::ZkProof {
                 circuit_id,
                 public_inputs_hash,
             } => {
@@ -193,7 +193,7 @@ impl ProofTaskKind {
                     return Err("ProofTaskKind public_inputs_hash cannot be zero".into());
                 }
             }
-            ProofTaskKind::SyncCommitteeSig { domain_id, epoch } => {
+            Self::SyncCommitteeSig { domain_id, epoch } => {
                 if *domain_id == 0 {
                     return Err("ProofTaskKind sync domain_id cannot be zero".into());
                 }
@@ -201,7 +201,7 @@ impl ProofTaskKind {
                     return Err("ProofTaskKind sync epoch cannot be zero".into());
                 }
             }
-            ProofTaskKind::StorageAttestation {
+            Self::StorageAttestation {
                 deal_id,
                 challenge_epoch,
             } => {
@@ -212,7 +212,7 @@ impl ProofTaskKind {
                     return Err("ProofTaskKind storage challenge_epoch cannot be zero".into());
                 }
             }
-            ProofTaskKind::PulAggregate {
+            Self::PulAggregate {
                 window_start,
                 window_end,
                 archive_witness_bytes,
@@ -237,13 +237,13 @@ impl ProofTaskKind {
         Ok(())
     }
 
-    fn tag(&self) -> u8 {
+    const fn tag(&self) -> u8 {
         match self {
-            ProofTaskKind::DomainCommitment { .. } => 1,
-            ProofTaskKind::ZkProof { .. } => 2,
-            ProofTaskKind::SyncCommitteeSig { .. } => 3,
-            ProofTaskKind::StorageAttestation { .. } => 4,
-            ProofTaskKind::PulAggregate { .. } => 5,
+            Self::DomainCommitment { .. } => 1,
+            Self::ZkProof { .. } => 2,
+            Self::SyncCommitteeSig { .. } => 3,
+            Self::StorageAttestation { .. } => 4,
+            Self::PulAggregate { .. } => 5,
         }
     }
 
@@ -251,7 +251,7 @@ impl ProofTaskKind {
         let mut out = Vec::new();
         out.push(self.tag());
         match self {
-            ProofTaskKind::DomainCommitment {
+            Self::DomainCommitment {
                 domain_id,
                 domain_height,
                 sequence,
@@ -260,25 +260,25 @@ impl ProofTaskKind {
                 out.extend_from_slice(&domain_height.to_le_bytes());
                 out.extend_from_slice(&sequence.to_le_bytes());
             }
-            ProofTaskKind::ZkProof {
+            Self::ZkProof {
                 circuit_id,
                 public_inputs_hash,
             } => {
                 out.extend_from_slice(circuit_id);
                 out.extend_from_slice(public_inputs_hash);
             }
-            ProofTaskKind::SyncCommitteeSig { domain_id, epoch } => {
+            Self::SyncCommitteeSig { domain_id, epoch } => {
                 out.extend_from_slice(&domain_id.to_le_bytes());
                 out.extend_from_slice(&epoch.to_le_bytes());
             }
-            ProofTaskKind::StorageAttestation {
+            Self::StorageAttestation {
                 deal_id,
                 challenge_epoch,
             } => {
                 out.extend_from_slice(deal_id);
                 out.extend_from_slice(&challenge_epoch.to_le_bytes());
             }
-            ProofTaskKind::PulAggregate {
+            Self::PulAggregate {
                 window_start,
                 window_end,
                 archive_witness_bytes,
@@ -1198,14 +1198,35 @@ impl ProofMarketState {
             .total_tasks_completed
             .checked_add(1)
             .ok_or_else(|| "ProofMarketState total_tasks_completed overflow".to_string())?;
-        // `complete` is the last thing that can refuse, and it needs the task
-        // by value. Take a copy, ask it, and only commit the removal once it
-        // has agreed.
-        let mut task = self.active_tasks[idx].clone();
+        // Preserve exact locked-supply conservation when a receipt claims less
+        // than the full reserved `task.reward`: check the creator's unassigned
+        // escrow refund BEFORE mutating `active_tasks`.
+        let mut task = self
+            .active_tasks
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| "ProofMarketState task not found".to_string())?;
+        let unspent_reward = task
+            .reward
+            .checked_sub(receipt.reward_claimed)
+            .ok_or_else(|| "ProofReceipt reward_claimed exceeds task reward".to_string())?;
+        let updated_creator_escrow = if unspent_reward > 0 {
+            let current = self.escrowed.get(&task.creator).copied().unwrap_or(0);
+            Some(
+                current
+                    .checked_add(unspent_reward)
+                    .ok_or_else(|| "ProofMarketState creator escrow refund overflow".to_string())?,
+            )
+        } else {
+            None
+        };
         task.complete()?;
 
         // Past every refusal: nothing below this line can fail.
         self.active_tasks.remove(idx);
+        if let Some(new_balance) = updated_creator_escrow {
+            self.escrowed.insert(task.creator, new_balance);
+        }
         self.record_retired_task(task.creator, task_id, task.deadline_epoch);
         self.pending_receipts.push(receipt);
         self.total_tasks_completed = total_tasks_completed;
@@ -1252,6 +1273,51 @@ impl ProofMarketState {
         let prover = self.pending_receipts[index].prover;
         let reward = self.pay_receipt(index)?;
         Ok((prover, reward))
+    }
+
+    /// Revokes an unpaid pending receipt after fraud/dispute invalidation and
+    /// atomically returns `receipt.reward_claimed` into `creator`'s unassigned
+    /// market escrow so `total_locked_supply` is conserved to the exact atom.
+    ///
+    /// WIRING: settlement dispute handler invokes this after receipt invalidation.
+    /// Convenience: kept for the CLI and settlement dispute handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `creator` is zero, `reason` is invalid, the receipt
+    /// is missing/settled, or crediting `creator` escrow overflows `u64::MAX`.
+    pub fn revoke_receipt_for_task(
+        &mut self,
+        task_id: [u8; 32],
+        creator: Address,
+        reason: &str,
+    ) -> Result<u64, String> {
+        if creator == Address::zero() {
+            return Err("ProofMarketState creator cannot be zero".into());
+        }
+        if reason.is_empty() || reason.len() > 256 {
+            return Err("ProofMarketState revoke reason invalid".into());
+        }
+        let receipt = self
+            .pending_receipts
+            .iter_mut()
+            .find(|receipt| receipt.task_id == task_id)
+            .ok_or("ProofMarketState receipt not found")?;
+        if !receipt.is_payable() {
+            return Err("ProofMarketState receipt is already settled".into());
+        }
+        let refund = receipt.reward_claimed;
+        let current = self.escrowed.get(&creator).copied().unwrap_or(0);
+        let updated = current
+            .checked_add(refund)
+            .ok_or_else(|| "ProofMarketState creator escrow refund overflow".to_string())?;
+        receipt.status = ReceiptStatus::Revoked {
+            reason: reason.to_string(),
+        };
+        if refund > 0 {
+            self.escrowed.insert(creator, updated);
+        }
+        Ok(refund)
     }
 
     /// Refunds a task whose deadline has passed. The reward was reserved when
@@ -1386,17 +1452,13 @@ impl ProofMarketState {
     /// the two pruning paths disagreed about what expired meant.
     pub fn enforce_max_sizes(&mut self, current_epoch: u64) {
         if self.active_tasks.len() > MAX_PROOF_MARKET_ACTIVE_TASKS {
-            // Expiry is measured against the chain, never against a value a
-            // submitter chose.
-            let before = self.active_tasks.len();
-            self.active_tasks
-                .retain(|t| t.deadline_epoch >= current_epoch);
-            let pruned_expired = before - self.active_tasks.len();
+            // Route expiry through `prune_expired` so every expired task's
+            // reserved reward is refunded into `escrowed` and its `task_id` is
+            // retired instead of leaking locked supply on direct dropping.
+            let pruned_expired = self.prune_expired(current_epoch);
             if pruned_expired > 0 {
                 tracing::info!("Pruned {pruned_expired} expired tasks by deadline");
             }
-            // If still over cap after expiry pruning, fail-closed: log critical warning
-            // But do NOT drop in-progress tasks (they represent real prover work).
             if self.active_tasks.len() > MAX_PROOF_MARKET_ACTIVE_TASKS {
                 tracing::error!(
                     "active_tasks ({}) still over cap ({}) after expiry pruning - \
@@ -1407,12 +1469,20 @@ impl ProofMarketState {
             }
         }
         if self.pending_receipts.len() > MAX_PROOF_MARKET_PENDING_RECEIPTS {
-            // Remove paid receipts first, then oldest
-            self.prune_paid_receipts();
+            // Prune only settled (paid or revoked) receipts; NEVER drain
+            // unpaid `Pending` receipts, which hold live escrowed BUD owed to
+            // provers whose proofs already passed verification.
+            let pruned = self.prune_paid_receipts();
+            if pruned > 0 {
+                tracing::info!("Pruned {pruned} settled proof receipts");
+            }
             if self.pending_receipts.len() > MAX_PROOF_MARKET_PENDING_RECEIPTS {
-                let to_remove = self.pending_receipts.len() - MAX_PROOF_MARKET_PENDING_RECEIPTS;
-                self.pending_receipts.drain(0..to_remove);
-                tracing::warn!("Pruned {to_remove} oldest pending receipts");
+                tracing::error!(
+                    "pending_receipts ({}) still over cap ({}) after settled pruning - \
+                     refusing to drop unpaid prover receipts",
+                    self.pending_receipts.len(),
+                    MAX_PROOF_MARKET_PENDING_RECEIPTS
+                );
             }
         }
     }
@@ -2646,5 +2716,104 @@ mod tests {
         market
             .add_task(task_with(honest_kind, honest, 1, 50, 1), 1)
             .expect("another creator must still be admitted under global ceiling");
+    }
+
+    #[test]
+    fn enforce_max_sizes_conserves_supply_across_expired_tasks_and_unpaid_receipts() {
+        let creator = test_address(0x51);
+        let prover = test_address(0x52);
+        let current_epoch = 500u64;
+        let mut state = ProofMarketState::new();
+
+        // 1. Over-cap expired tasks refund their reserved rewards to `escrowed`
+        //    and retire their IDs, preserving `total_locked_supply` bit-for-bit.
+        let expired_count = MAX_PROOF_MARKET_ACTIVE_TASKS + 50;
+        for i in 0..expired_count {
+            let kind = ProofTaskKind::DomainCommitment {
+                domain_id: 7,
+                domain_height: 42,
+                sequence: i as u64,
+            };
+            state
+                .active_tasks
+                .push(task_with(kind, creator, 1, current_epoch - 1, 100));
+        }
+        let supply_before_task_prune = state.total_locked_supply();
+        assert_eq!(supply_before_task_prune, (expired_count as u128) * 100);
+        state.enforce_max_sizes(current_epoch);
+        assert_eq!(state.active_tasks.len(), 0);
+        assert_eq!(state.total_locked_supply(), supply_before_task_prune);
+        assert_eq!(
+            state.escrowed.get(&creator).copied(),
+            Some((expired_count as u64) * 100)
+        );
+
+        // 2. Over-cap pending receipts prune settled entries ONLY; unpaid
+        //    `ReceiptStatus::Pending` entries are never dropped.
+        let unpaid_count = MAX_PROOF_MARKET_PENDING_RECEIPTS + 5;
+        for i in 0..unpaid_count {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            state.pending_receipts.push(ProofReceipt::new(
+                id,
+                prover,
+                current_epoch,
+                [0xAA; 32],
+                50,
+            ));
+        }
+        let mut paid = ProofReceipt::new([0xFF; 32], prover, current_epoch, [0xBB; 32], 50);
+        paid.mark_paid().unwrap();
+        state.pending_receipts.push(paid);
+
+        let supply_before_receipt_prune = state.total_locked_supply();
+        state.enforce_max_sizes(current_epoch);
+        assert_eq!(
+            state.pending_receipts.len(),
+            unpaid_count,
+            "paid receipt must be pruned while every unpaid Pending receipt survives"
+        );
+        assert_eq!(
+            state.total_locked_supply(),
+            supply_before_receipt_prune,
+            "enforce_max_sizes must never destroy unpaid receipt value"
+        );
+    }
+
+    #[test]
+    fn partial_completion_and_dispute_revocation_conserve_total_locked_supply() {
+        let creator = test_address(0x61);
+        let prover = test_address(0x62);
+        let mut market = ProofMarketState::new();
+        market.fund_escrow(creator, 1_000).unwrap();
+        let initial_supply = market.total_locked_supply();
+        assert_eq!(initial_supply, 1_000);
+
+        let task = ProofTask::new(task_kind(), creator, 1, 20, 700, [0x71; 32], 100);
+        let task_id = task.task_id;
+        market.add_task(task, 1).unwrap();
+        market.assign_task(task_id, prover, 500, 2).unwrap();
+        assert_eq!(market.escrowed.get(&creator).copied(), Some(300));
+        assert_eq!(market.total_locked_supply(), initial_supply);
+
+        // Prover claims 450 of the 700 reserved reward; 250 returns to creator escrow.
+        let receipt = ProofReceipt::new(task_id, prover, 3, [0x72; 32], 450);
+        market.complete_task(task_id, receipt, |_| Ok(())).unwrap();
+        assert_eq!(market.escrowed.get(&creator).copied(), Some(550));
+        assert_eq!(market.total_locked_supply(), initial_supply);
+
+        // Fraud dispute invalidates the unpaid receipt: remaining 450 returns to creator escrow.
+        let refunded = market
+            .revoke_receipt_for_task(task_id, creator, "invalid proof under dispute")
+            .unwrap();
+        assert_eq!(refunded, 450);
+        assert_eq!(market.escrowed.get(&creator).copied(), Some(1_000));
+        assert_eq!(market.total_locked_supply(), initial_supply);
+
+        // Second revocation is refused so escrow cannot be credited twice.
+        assert!(market
+            .revoke_receipt_for_task(task_id, creator, "duplicate dispute")
+            .is_err());
+        assert_eq!(market.total_locked_supply(), initial_supply);
     }
 }
