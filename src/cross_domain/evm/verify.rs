@@ -1,5 +1,5 @@
 //! WIRING: unwired - `verify_evm_receipt`'s production caller is adapter.rs, which declares itself unwired in this tree; the observed relayer path that wires it is not in this tree yet.
-//! F10.2 security core: `verify_evm_receipt`, the deterministic orchestrator.
+//! EVM receipt verification core: `verify_evm_receipt`, the deterministic orchestrator.
 //!
 //! Combines the steps of RFC section 4.1 (the ETH -> Budlum mint flow) into a
 //! single verification surface. It runs on-chain, inside Budlum consensus,
@@ -15,7 +15,7 @@
 //!    neither (RFC Q2, N-conf).
 //! 2. `proof_nodes` plus `target_header.receipts_root`: MPT verify yields the
 //!    receipt bytes.
-//! 3. `receipt` RLP decode (F10.2 `receipt.rs`) yields `{status, logs}`.
+//! 3. `receipt` RLP decode (`receipt.rs`) yields `{status, logs}`.
 //! 4. `status == true`, meaning the transaction succeeded.
 //! 5. Deposit log match: `find_log(emitter, topic0)` against the expected
 //!    payload.
@@ -172,7 +172,7 @@ pub struct EvmDepositProof<'a> {
     /// `None`, so nothing that verified before stops verifying now.
     ///
     /// `Some` is the stronger claim, and it is checked. This module's header
-    /// and `adapter.rs` have both said "F10.3 (sync-committee) is used"
+    /// and `adapter.rs` have both said "sync-committee verification is used"
     /// since they were written, and neither did: `verify_sync_aggregate`
     /// existed, was tested six ways, and no production path reached it. A
     /// bridge whose documentation claims `PoS` finality and whose code counts
@@ -828,7 +828,7 @@ mod tests {
     /// A proof that claims PoS finality has the claim checked.
     ///
     /// This is the defect. `sync_committee.rs` implements Altair verification
-    /// and is tested six ways; `adapter.rs` said "F10.3 (sync-committee)
+    /// and is tested six ways; `adapter.rs` said "sync-committee verification
     /// is used" in two places, and no production path called
     /// `verify_sync_aggregate`. A bridge whose documentation claims proof of
     /// stake finality and whose code counts confirmations is claiming a

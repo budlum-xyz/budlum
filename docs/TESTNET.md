@@ -44,14 +44,14 @@ TLS is terminated by Caddy (`ops/Caddyfile.testnet`); the node, the faucet
 and the indexer speak plain HTTP on loopback. The operator RPC listener
 (`127.0.0.1:18546`) is never exposed.
 
-**Public vs. operator RPC authentication (`BLG-008` / `TLG-20`).** On testnet
+**Public vs. operator RPC authentication.** On testnet
 (`config/testnet.toml`, `chain_id = 45261`), the public listener sets
 `auth_required = false` for keyless public reads and signed-transaction
 submission (`bud_sendRawTransaction` / `eth_sendRawTransaction`) at 600 requests
 per minute per client IP, while all operator and administrative methods are
 refused on the public listener and require `BUDLUM_RPC_API_KEY` on the loopback
 operator listener (`operator_auth_required = true`). See
-[TLG-20](audit/TLG_REPORT.md).
+[the launch-gate ledger](audit/TLG_REPORT.md).
 
 ## Use the testnet
 

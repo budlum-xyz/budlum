@@ -159,7 +159,7 @@ STARK proving on every call.
  `UEL_EXECUTION_ROOT` byte-for-byte between `ubuntu-24.04` (`x86_64`) and
  `ubuntu-24.04-arm` (`aarch64`).
 
-## 13. SVM and Move Stateless Pointers & `KR-UEL-REENTRANCY` (`the implementation track`)
+## 13. SVM and Move Stateless Pointers & Cross-Environment Reentrancy Guard
 
 - Active from genesis on testnet `45261`: the coordinator serves SVM and Move
  pointer calls with no activation height
@@ -167,7 +167,7 @@ STARK proving on every call.
 - Stateless pointer codecs in `execution/svm/src/pointer/` and `execution/move/src/pointer/`
  plus 4-way coordinator translation (`svm_pointer_holds_no_balance`,
  `move_pointer_holds_no_balance`, `pointer_allowance_lives_at_home`).
-- `KR-UEL-REENTRANCY` (`IP-52` item 3): cross-environment reentrancy prohibition
+- Cross-environment reentrancy prohibition
  (`Section 8.7.3` item 6) remains enforced (`ReentrancyForbidden`,
  `uel_reentrancy_forbidden`).
 

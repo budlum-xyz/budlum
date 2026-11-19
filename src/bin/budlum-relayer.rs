@@ -1,4 +1,4 @@
-//! F10.4 plus the Budlum relayer binary: the permissionless cross-chain relay
+//! Budlum relayer binary: the permissionless cross-chain relay
 //! service.
 //!
 //! ## Design, permissionless
@@ -13,7 +13,7 @@
 //!   `MaliciousBehaviour` and a 100 percent slash.
 //!   - The report is produced by the `consensus_invalid_relay_proof` helper.
 //!   - The bridge keeps an open relayer set plus a challenge window; see RFC
-//!     F10, sections 4 and 5.
+//!     the EVM bridge specification.
 //!
 //! ## Flows
 //!
@@ -421,7 +421,7 @@ impl EthClient {
         Ok(events)
     }
 
-    /// Builds the F10.1 and F10.2 proof package: the MPT proof, the header chain
+    /// Builds the EVM deposit proof package: the MPT proof, the header chain
     /// and the receipt.
     ///
     /// A real implementation would use `eth_getTransactionReceipt`,
@@ -544,7 +544,7 @@ const STATUS_NOTICE: &str = "STATUS: not mainnet ready. No direction relays yet:
 cannot build deposit proofs, bud-to-eth only reports burns. Nothing is submitted.";
 
 fn print_usage() {
-    eprintln!("budlum-relayer - F10 Universal Relayer (D1 permissionless + D4 unified registry)");
+    eprintln!("budlum-relayer - Universal Relayer (permissionless + unified registry)");
     eprintln!("{STATUS_NOTICE}");
     eprintln!();
     eprintln!("Usage:");
@@ -559,7 +559,7 @@ fn print_usage() {
     eprintln!("  --budlum-rpc <URL>         Budlum RPC endpoint");
     eprintln!("  --bridge-address <ADDR>    Ethereum bridge contract address");
     eprintln!("  --relayer-address <ADDR>   Relayer's Budlum address (hex, for registry check)");
-    eprintln!("  --direction <DIR>          eth-to-bud (F10.2) | bud-to-eth (F10.5)");
+    eprintln!("  --direction <DIR>          eth-to-bud | bud-to-eth");
     eprintln!("  --confirmations <N>        N-confirmation threshold (default: 64)");
     eprintln!("  --poll-interval <S>        Poll interval seconds (default: 10)");
     eprintln!(
@@ -912,7 +912,7 @@ const fn advance_cursor(
 ///
 /// It does not submit to Ethereum. The claim needs a Budlum finality proof
 /// (BLS aggregate / QC) and an Ethereum bridge contract to verify it; the
-/// Solidity side does not exist yet (RFC F10.5b). So a discovered burn is
+/// Solidity side does not exist yet (settlement contract pending). So a discovered burn is
 /// reported and counted, and the submit step **refuses loudly** instead of
 /// sending a placeholder. That is the same contract the `EthToBud` direction
 /// keeps: refuse, do not pretend.
@@ -935,7 +935,7 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
 
     eprintln!(
         "BudToEth: scanning for burn events. Submission to Ethereum is NOT available \
-         (no bridge contract, RFC F10.5b) - discovered burns are reported, never \
+         (no bridge contract deployed yet) - discovered burns are reported, never \
          submitted with a placeholder proof."
     );
 
@@ -974,7 +974,7 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
                         eprintln!(
                             "BudToEth: burn found at height {height} (tx {tx_hash}) - \
                              NOT submitted: finality proof + Ethereum bridge contract \
-                             missing (RFC F10.5b). Total seen: {total_burns}"
+                             missing (settlement contract pending). Total seen: {total_burns}"
                         );
                     }
                     next_height = Some(height + 1);

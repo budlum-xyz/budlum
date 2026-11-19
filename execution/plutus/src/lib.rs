@@ -22,7 +22,7 @@ pub const AUDITED_PLUTUS_SPDX: &str = "Apache-2.0";
 /// Budlum testnet chain ID (`45261`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed testnet activation height (open from block zero on `45261`, `IP-53`).
+/// Proposed testnet activation height (open from block zero on `45261`).
 pub const PROPOSED_PLUTUS_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing Plutus validator scripts and datum records.

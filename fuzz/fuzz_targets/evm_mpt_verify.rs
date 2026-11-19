@@ -1,6 +1,6 @@
 #![no_main]
 
-//! F10.1 EVM Merkle-Patricia proof verifier robustness target.
+//! EVM Merkle-Patricia proof verifier robustness target.
 //!
 //! Input layout is intentionally simple and bounded:
 //! - bytes 0..32: claimed trie root;

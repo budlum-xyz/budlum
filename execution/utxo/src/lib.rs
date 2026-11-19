@@ -22,7 +22,7 @@ pub const AUDITED_UTXO_SPDX: &str = "MIT";
 /// Budlum testnet chain ID (`45261`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed testnet activation height (open from block zero on `45261`, `IP-53`).
+/// Proposed testnet activation height (open from block zero on `45261`).
 pub const PROPOSED_UTXO_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing locked UTXO spending scripts and unspent notes.
