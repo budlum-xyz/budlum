@@ -606,11 +606,11 @@ pub fn run_relayer(config: &RelayerConfig) -> Result<(), String> {
             "bridge-address is placeholder (0x0); set real Ethereum bridge contract".into(),
         );
     }
-    // Strix B-0067: reject zero poll interval (infinite tight-spin DoS).
+    // Reject a zero poll interval: it is an infinite tight-spin DoS.
     if config.poll_interval_secs == 0 {
         return Err("poll-interval must be at least 1 second; 0 would spin in a tight loop".into());
     }
-    // Strix B-0067: reject non-http(s) RPC URLs.
+    // Reject non-http(s) RPC URLs.
     for (name, url) in [
         ("eth-rpc", &config.eth_rpc_url),
         ("budlum-rpc", &config.budlum_rpc_url),

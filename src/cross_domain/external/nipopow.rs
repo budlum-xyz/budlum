@@ -1,6 +1,13 @@
 //! Non-Interactive Proofs of Proof-of-Work (`NIPoPoW`, Kiayias-Miller-Zindros
 //! EUROCRYPT 2020) sublinear genesis-anchored external finality adapter.
 //!
+//! WIRING: unwired - the superblock verifier and its interlink checks are
+//! re-exported by `crate::cross_domain::external` but no production path
+//! constructs the adapter yet: sublinear sync is admitted only once an intake
+//! registration pins a genesis anchor for it, and admitting it before that
+//! would let an unpinned verifier answer for a chain nobody anchored. Until
+//! then this module's test suite is its only caller.
+//!
 //! Whereas linear SPV downloads every block header `O(|C|)`, `NIPoPoW` exploits
 //! rare high-work superblocks satisfying `id <= target >> mu` and per-header
 //! Merkle-committed interlink pointers so a verifier checks genesis-to-tip work

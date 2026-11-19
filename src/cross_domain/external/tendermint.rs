@@ -1,8 +1,15 @@
 //! Tendermint and CometBFT commit finality: the adapter for the family whose
 //! finality is a signed commit.
 //!
-//! WIRING: unwired - standalone ICS-07 bisection header-skip verifier lands
-//! with the non-adjacent Tendermint anchor rotation transaction door.
+//! WIRING: non-adjacent anchor rotation is production-reachable: `IntakeState`
+//! calls `verify_skipping_commit` in `src/cross_domain/external/intake.rs` and
+//! re-pins `validator_set_hash` from the proven `next_validators_hash`.
+//!
+//! WIRING: unwired - `verify_bisection` walks a multi-hop ICS-07 bisection path
+//! and has no production caller yet. Intake rotates a pinned anchor exactly one
+//! verified hop at a time; admitting a multi-hop walk before the anchor-gap
+//! policy is pinned would let the submitter choose the intermediate commits, so
+//! the walk stays behind this module's test suite until that policy lands.
 //!
 //! # What this adapter verifies, and what it refuses to assume
 //!
