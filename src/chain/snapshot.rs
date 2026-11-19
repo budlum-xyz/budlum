@@ -1394,10 +1394,13 @@ impl StateSnapshotV2 {
     /// An empty/corrupt snapshot. This is the exact failure class that hid the
     /// Registry tuple-key bug.
     ///
+    /// Convenience: fallible variant of [`Self::to_bytes`] used by snapshot
+    /// persistence and round-trip verification.
+    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails.
-    pub fn try_to_bytes(&self) -> Result<Vec<u8>, String> {
+    pub(crate) fn try_to_bytes(&self) -> Result<Vec<u8>, String> {
         serde_json::to_vec(self).map_err(|e| format!("Failed to serialize snapshot V2: {e}"))
     }
 

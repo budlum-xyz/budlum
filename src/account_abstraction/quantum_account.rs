@@ -344,6 +344,8 @@ impl RecoveryProposal {
     }
 }
 
+#[cfg(test)]
+pub(crate) use crate::storage::pact_binding::Pact;
 /// The PACT binding type lives in `src/storage/pact_binding.rs`.
 ///
 /// There used to be a duplicate five-field PACT binding struct here with the same 128-byte
@@ -356,7 +358,7 @@ impl RecoveryProposal {
 /// `is_residual_only` did not exist on this side, so it could not tell a pure-production PACT
 /// from a residual-only one. The copy was removed; the single definition
 /// is used from outside.
-pub use crate::storage::pact_binding::{Pact, PactRegistry};
+pub use crate::storage::pact_binding::PactRegistry;
 
 /// One guardian's vote on a recovery proposal: the guardian's ML-DSA-87
 /// public key, the digest of the proposal it approves, and its signature
