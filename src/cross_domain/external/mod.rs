@@ -114,6 +114,7 @@ pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
 pub mod external_tx;
+pub mod falsity;
 pub mod ghostdag;
 pub mod heterogeneous_multiprover;
 pub mod honeybadger_bft;

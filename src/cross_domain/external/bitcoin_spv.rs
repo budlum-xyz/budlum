@@ -1191,6 +1191,26 @@ impl ExternalFinalityAdapter for BitcoinSpvAdapter {
             .map(|chain| chain.attestation)
     }
 
+    /// The parent block digest, derived from the parent header *inside the same
+    /// payload*: `sha256d` of the second-to-last header, which is the hash form
+    /// [`Self::verify`] already reports as `attested_block_hash`.
+    ///
+    /// A single-header payload cannot answer this. Its `prev_block` field is a
+    /// pointer the submitter chose; hashing it would launder an unverified claim
+    /// into a slash. Two headers are the minimum witness that says "this block
+    /// exists and the tip descends from it".
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        let payload = &evidence.payload;
+        let count =
+            usize::try_from(u32::from_le_bytes(payload.get(0..4)?.try_into().ok()?)).ok()?;
+        if !(2..=MAX_HEADERS).contains(&count) {
+            return None;
+        }
+        let base = 4usize.checked_add(count.checked_sub(2)?.checked_mul(HEADER_LEN)?)?;
+        let raw = payload.get(base..base.checked_add(HEADER_LEN)?)?;
+        Some(sha256d(raw))
+    }
+
     fn fault_probes(&self) -> Vec<FaultProbe> {
         // Header layout is fixed at 80 bytes, so interior offsets are stable
         // across every Bitcoin network and every evidence sample: unlike the
@@ -1957,6 +1977,35 @@ mod tests {
         "0100000085144a84488ea88d221c8bd6c059da090e88f8a2c99690ee55dbba4e00000000e11c48fecdd9e72510ca84f023370c9a38bf91ac5cae88019bee94d24528526344c36649ffff001d1d03e477",
         "01000000fc33f596f822a0a1951ffdbf2a897b095636ad871707bf5d3162729b00000000379dfb96a5ea8c81700ea4ac6b97ae9a9312b2d4301a29580e924ee6761a2520adc46649ffff001d189c4c97",
     ];
+
+    /// The ancestry witness has to be the hash of a parent header that is
+    /// *inside the payload*, derived exactly the way `verify` derives the
+    /// attested block hash. A single-header payload has no parent to hash, so
+    /// it must answer `None` rather than echo the unverified `prev_block`
+    /// pointer it carries.
+    #[test]
+    fn attested_parent_is_the_parent_header_inside_the_payload_or_none() {
+        let headers = header_bytes();
+        let adapter = adapter();
+        let refs: Vec<&[u8; HEADER_LEN]> = headers.iter().collect();
+        let submitter = Address::from([0x11; 32]);
+
+        let single = spv_evidence(&adapter, "mainnet", &refs[0..1], submitter);
+        assert_eq!(adapter.attested_parent(&single), None);
+
+        let pair = spv_evidence(&adapter, "mainnet", &refs[0..2], submitter);
+        assert_eq!(
+            adapter.attested_parent(&pair),
+            Some(sha256d(headers[0].as_slice()))
+        );
+
+        let triple = spv_evidence(&adapter, "mainnet", &refs[0..3], submitter);
+        assert_eq!(
+            adapter.attested_parent(&triple),
+            Some(sha256d(headers[1].as_slice())),
+            "the parent is the second-to-last header, never the first and never the tip"
+        );
+    }
 
     fn header_bytes() -> Vec<[u8; HEADER_LEN]> {
         MAINNET_HEADERS

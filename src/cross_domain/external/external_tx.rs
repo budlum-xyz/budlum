@@ -79,8 +79,14 @@ pub enum ExternalDomainTx {
     /// `(height, evidence_version)` and distinct `state_root`. Atomically
     /// withdraws the false attestation, freezes the domain (`Faulted`),
     /// slashes the carrier's escrowed bond, and pays the challenger reward.
-    /// APPENDED LAST (tag `6`).
+    /// APPENDED (tag `6`).
     ChallengeContradiction(Box<RawConsensusEvidence>),
+    /// Refute an accepted attestation whose slot the external chain has moved
+    /// past, by supplying the successor proof that descends from a different
+    /// parent. The successor's own adapter verifies it; the predecessor it
+    /// contradicts is found from the accepted book at `height - 1`.
+    /// APPENDED LAST (tag `7`).
+    ChallengeAncestry(Box<RawConsensusEvidence>),
 }
 
 /// What the executor hands the door: the signer, the chain, the fee the
@@ -162,7 +168,8 @@ fn uses_ethereum_sync(state: &AccountState, tx: &ExternalDomainTx) -> bool {
             matches!(&request.spec, AdapterSpec::EthereumSync { .. })
         }
         ExternalDomainTx::SubmitEvidence(evidence)
-        | ExternalDomainTx::ChallengeContradiction(evidence) => {
+        | ExternalDomainTx::ChallengeContradiction(evidence)
+        | ExternalDomainTx::ChallengeAncestry(evidence) => {
             entry_is_sync(&DomainKey::from_parts(&evidence.adapter, &evidence.network))
         }
         ExternalDomainTx::BondProver { domain, .. }
@@ -231,6 +238,7 @@ pub fn execute_external_domain_tx(
         ExternalDomainTx::ChallengeContradiction(evidence) => {
             challenge_contradiction(state, ctx, evidence)
         }
+        ExternalDomainTx::ChallengeAncestry(evidence) => challenge_ancestry(state, ctx, evidence),
     }
 }
 
@@ -419,6 +427,66 @@ fn challenge_contradiction(
     if slashed > 0 {
         if let Err(err) =
             state.slash_external_bond(&outcome.slashed_prover, slashed, reward, &ctx.sender)
+        {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::Intake(err));
+        }
+    }
+    Ok(())
+}
+
+/// The cross-slot door: a successor proof refutes the slot it descends past.
+///
+/// The money half is identical to [`challenge_contradiction`]: the intake
+/// decides, then `slash_external_bond` moves the atoms, and any refusal on the
+/// way restores the intake snapshot so a failed challenge changes nothing.
+fn challenge_ancestry(
+    state: &mut AccountState,
+    ctx: &ExternalDomainTxContext,
+    evidence: &RawConsensusEvidence,
+) -> Result<(), ExternalDomainTxError> {
+    if evidence.submitter != ctx.sender {
+        return Err(ExternalDomainTxError::SubmitterIsNotSender);
+    }
+    let key = DomainKey::from_parts(&evidence.adapter, &evidence.network);
+    let Some(spec) = state
+        .settlement
+        .external_intake
+        .entries
+        .get(&key)
+        .map(|entry| entry.spec.clone())
+    else {
+        return Err(ExternalDomainTxError::UnknownDomain);
+    };
+    if is_testnet(ctx.chain_id) && matches!(spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
+    let bls = bls_for(&spec, ctx);
+    let intake_before = state.settlement.external_intake.clone();
+    let outcome = state
+        .settlement
+        .external_intake
+        .adjudicate_ancestry(evidence, ctx.sender, bls)?;
+    let refuted = outcome;
+    let slashed = match u64::try_from(refuted.slashed_atoms) {
+        Ok(v) => v,
+        Err(_) => {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::BondTooLarge(refuted.slashed_atoms));
+        }
+    };
+    let reward = match u64::try_from(refuted.challenger_reward_atoms) {
+        Ok(v) => v,
+        Err(_) => {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::BondTooLarge(
+                refuted.challenger_reward_atoms,
+            ));
+        }
+    };
+    if slashed > 0 {
+        if let Err(err) =
+            state.slash_external_bond(&refuted.slashed_prover, slashed, reward, &ctx.sender)
         {
             state.settlement.external_intake = intake_before;
             return Err(ExternalDomainTxError::Intake(err));
@@ -1070,6 +1138,41 @@ mod tests {
             &ExternalDomainTx::ChallengeContradiction(Box::new(valid_contradiction)),
         )
         .is_err());
+    }
+
+    /// The ancestry door must fail closed on an adapter that binds no parent
+    /// digest: the default is "cannot answer", never "assume the parent".
+    #[test]
+    fn challenge_ancestry_is_refused_when_the_adapter_binds_no_parent() {
+        let (mut state, _key, poster) = registered();
+        let challenger = addr(42);
+        state.add_balance(&challenger, 10_000);
+        let accepted = evidence(poster, 200, [0xAA; 32]);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(accepted)),
+        )
+        .expect("initial evidence accepted");
+        let pre_root = state.settlement.root();
+        let pre_escrow = state.external_bond_escrow.get(&poster).copied();
+
+        let successor = evidence(challenger, 201, [0xBB; 32]);
+        assert!(
+            execute_external_domain_tx(
+                &mut state,
+                &ctx(challenger),
+                &ExternalDomainTx::ChallengeAncestry(Box::new(successor)),
+            )
+            .is_err(),
+            "an unbound parent cannot refute anything"
+        );
+        assert_eq!(
+            state.settlement.root(),
+            pre_root,
+            "a refusal writes nothing"
+        );
+        assert_eq!(state.external_bond_escrow.get(&poster).copied(), pre_escrow);
     }
 
     #[test]
