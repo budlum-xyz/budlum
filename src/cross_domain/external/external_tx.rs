@@ -669,13 +669,16 @@ mod tests {
                 .external_intake
                 .pin_ethereum_committee(network, committee);
         }
+        let root_before = state.settlement.root();
         let mut bad = request(poster);
         // A golden sample with no signers cannot verify: admission refuses.
         bad.golden.payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0x00; 64]);
         let tx = ExternalDomainTx::Register(Box::new(bad));
         let err = execute_external_domain_tx(&mut state, &ctx(poster), &tx).unwrap_err();
         assert!(matches!(err, ExternalDomainTxError::Intake(_)), "{err}");
-        assert!(state.settlement.is_empty());
+        assert!(state.settlement.external_intake.registry.is_empty());
+        assert!(state.external_bond_escrow.is_empty());
+        assert_eq!(state.settlement.root(), root_before);
         assert_eq!(state.get_balance(&poster), bond() * 4);
     }
 

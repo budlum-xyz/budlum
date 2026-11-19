@@ -101,15 +101,18 @@ impl SettlementRegistries {
             && self.object_layer.is_empty()
     }
 
-    /// True when the external intake holds any record. The block clock does
-    /// not count, for the reason given at [`Self::is_empty`].
+    /// True when the external intake holds any record - including governance-
+    /// pinned sync committees submitted before the first external domain
+    /// registers. The block clock does not count, for the reason given at
+    /// [`Self::is_empty`].
     #[must_use]
     pub fn has_external_intake(&self) -> bool {
         let intake = &self.external_intake;
         !(intake.entries.is_empty()
             && intake.registry.is_empty()
             && intake.quorum.policies.is_empty()
-            && intake.quorum.rounds.is_empty())
+            && intake.quorum.rounds.is_empty()
+            && intake.pinned_ethereum_committees.is_empty())
     }
 
     /// Advance the registries' block clocks. Called once per block, at block
@@ -244,5 +247,33 @@ mod tests {
             .register(7, b"app".to_vec(), [2u8; 32], 1)
             .expect("the test AppBinding row is valid");
         assert_ne!(before, registries.root());
+    }
+
+    #[test]
+    fn pinned_external_committee_before_domain_registration_binds_state_root() {
+        use crate::core::account::AccountState;
+        use crate::cross_domain::external::ethereum::PinnedCommittee;
+
+        let mut empty = AccountState::new();
+        let empty_root = empty.state_root_body();
+        assert!(!empty.settlement.has_external_intake());
+        assert!(empty.settlement.is_empty());
+
+        let mut pinned = AccountState::new();
+        pinned
+            .settlement
+            .external_intake
+            .pinned_ethereum_committees
+            .insert(
+                "ethereum-mainnet".into(),
+                PinnedCommittee {
+                    period: 1_024,
+                    aggregate_pubkey: vec![0x33; 48],
+                    next_committee_root: [0x34; 32],
+                },
+            );
+        assert!(pinned.settlement.has_external_intake());
+        assert!(!pinned.settlement.is_empty());
+        assert_ne!(pinned.state_root_body(), empty_root);
     }
 }
