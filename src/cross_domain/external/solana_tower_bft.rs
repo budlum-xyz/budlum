@@ -71,7 +71,7 @@ const EVIDENCE_VERSION: u32 = 1;
 /// Root threshold: every attesting vote must be locked at this tower level.
 const ROOT_CONFIRMATIONS: u8 = 32;
 /// Attestation depth reported to consumers (root = 32 confirmations).
-const SOL_TOWER_DEPTH: u64 = u64::from(ROOT_CONFIRMATIONS);
+const SOL_TOWER_DEPTH: u64 = ROOT_CONFIRMATIONS as u64;
 /// Lockout exponent ceiling (`2^63` slots) guarding exponent arithmetic.
 const MAX_CONFIRMATIONS: u8 = 63;
 
