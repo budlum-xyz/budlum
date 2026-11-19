@@ -3497,9 +3497,9 @@ mod base_air_boundary_tests {
         // Every in-bounds row [0, program.len()) has IS_ACTIVE == 1; every
         // out-of-bounds row [program.len(), degree) - specifically `pc == program.len()` -
         // MUST have IS_ACTIVE == 0 so a prover cannot execute a phantom Halt past end.
-        for row in 0..program.len() {
+        for (row, word) in program.iter().enumerate() {
             assert_eq!(cell(row, 0), Goldilocks::from_u64(row as u64));
-            assert_eq!(cell(row, 1), Goldilocks::from_u64(program[row]));
+            assert_eq!(cell(row, 1), Goldilocks::from_u64(*word));
             assert_eq!(
                 cell(row, 2),
                 Goldilocks::ONE,
