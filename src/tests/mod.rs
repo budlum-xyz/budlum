@@ -270,3 +270,15 @@ pub mod wallet_safety;
 // Bitcoin SPV: the Nakamoto branch end to end (registration -> admission -> bridge).
 #[cfg(test)]
 pub mod bitcoin_spv;
+
+// End-to-end success and refusal coverage for the bud_ai* JSON-RPC family.
+#[cfg(test)]
+pub mod rpc_ai_coverage;
+
+// The Solana compatibility door: every row answered and refused on the real wire.
+#[cfg(test)]
+pub mod rpc_door_solana;
+
+// Success and refusal RPC coverage for BNS, bridge, encoding/relayer, and role registry.
+#[cfg(test)]
+pub mod rpc_bridge_bns_registry_coverage;

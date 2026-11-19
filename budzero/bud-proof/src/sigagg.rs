@@ -1,10 +1,10 @@
-//! `BLG-239`: Multi-scheme committee signature aggregation (`Ed25519`, `BLS`, `ML-DSA-87`).
+//! Multi-scheme committee signature aggregation (`Ed25519`, `BLS`, `ML-DSA-87`).
 //!
 //! Aggregates distinct sorted committee signatures into a compact Merkleized
 //! aggregate commitment bound to `committee_root` and `message_digest`, used by
 //! light-client and checkpoint batch verification.
 //!
-//! Convenience: exposed for BLG-239 light-client and checkpoint batch signature aggregation.
+//! Convenience: exposed for light-client and checkpoint batch signature aggregation.
 
 use std::collections::BTreeSet;
 
@@ -101,7 +101,7 @@ fn keccak256_bytes(input: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Supported committee signature algorithms for `BLG-239` aggregation.
+/// Supported committee signature algorithms for committee batch aggregation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum SignatureScheme {
@@ -152,7 +152,7 @@ pub struct SignerSignature {
     pub threshold_witness: Option<ThresholdWitness>,
 }
 
-/// Compact aggregated multi-signature commitment (`BLG-239`).
+/// Compact aggregated multi-signature commitment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregatedSignatureBatch {
     pub message_digest: [u8; 32],
@@ -163,7 +163,7 @@ pub struct AggregatedSignatureBatch {
     pub signatures: Vec<SignerSignature>,
 }
 
-/// Errors returned by `BLG-239` aggregation or verification.
+/// Errors returned by committee signature aggregation or verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SigAggError {
     EmptyBatch,

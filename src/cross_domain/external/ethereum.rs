@@ -1949,7 +1949,7 @@ mod slashable_policy_tests {
         );
     }
 
-    /// STRIX-ETH-01 regression: a 512-member BLS12-381 sync committee verifies a
+    /// Regression: a 512-member BLS12-381 sync committee verifies a
     /// real partial-quorum (350/512) pairing against the exact participating
     /// subset G1 sum and refuses any forged participation bitvector mask or
     /// mismatched signer set.

@@ -183,7 +183,7 @@ const RELAY_RETENTION_BLOCKS: u64 = 10 * crate::cross_domain::nonce::FINALITY_PR
 
 /// Configuration for the Universal Relayer.
 ///
-/// (karar B): the `relay_window_blocks`, `min_relayer_stake`
+/// (design option B): the `relay_window_blocks`, `min_relayer_stake`
 /// and `slash_ratio_*` fields are gone - nothing outside this file ever read
 /// them, and a config field nobody reads is a promise nobody keeps. Serde
 /// ignores them if an old config still carries them.

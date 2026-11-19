@@ -1,4 +1,4 @@
-//! Universal Light Proof (`ULP-1`) succinct multi-domain aggregation (`GOREV-21`).
+//! Universal Light Proof (`ULP-1`) succinct multi-domain aggregation.
 //!
 //! Folds `1..=MAX_ULP_DOMAINS` external finality snapshots over 128-bit `BudAir`
 //! FRI-STARKs, `StarkBackend` `MasterProof`, and split-STARK PCS verification.
@@ -66,6 +66,10 @@ pub const MAX_ULP_DOMAINS: usize = 6;
 pub const MAX_ULP_MERKLE_DEPTH: usize = 8;
 /// Hard per-domain and per-route settlement outflow ceiling in basis points (25%).
 pub const MAX_ULP_OUTFLOW_BPS: u16 = 2_500;
+/// Highest assigned [`UlpDomainKind`] wire/circuit discriminator (`1..=14`).
+///
+/// WIRING: range-checked inside `compile_ulp_program` and [`UlpDomainKind::from_code`].
+pub const MAX_ULP_DOMAIN_KIND_CODE: u8 = 14;
 /// Canonical 32-bit unsigned limb bitmask enforced inside `BudVM`.
 const U32_MASK: u64 = 0xFFFF_FFFF;
 /// Gas ceiling allocated to `BudVM` when proving a `ULP-1` guest trace.
@@ -86,25 +90,85 @@ pub enum UlpDomainKind {
     SuccinctRecursive = 5,
     /// Proof-of-Space coupled with sequential hash VDF finality (Chia lineage).
     PoSpaceVdf = 6,
+    /// L1-sequenced based rollup preconfirmation and FOCIL inclusion finality.
+    BasedPreconf = 7,
+    /// TON Masterchain Catchain BFT and dynamic Shardchain Merkle finality.
+    TonCatchain = 8,
+    /// Federated Byzantine Agreement / Stellar Consensus Protocol finality.
+    StellarScp = 9,
+    /// Dual-quorum restaking AVS + EOTS slashable finality.
+    RestakingAvs = 10,
+    /// Merged-mining `AuxPoW` + bonded Proof-of-Proof anchor finality.
+    AuxPowPop = 11,
+    /// 2-round Simplex / tail-forking-resistant `MonadBFT` finality.
+    SimplexBft = 12,
+    /// Forward-secure post-quantum ML-DSA-65 Algorand `StateProof` finality.
+    AlgorandStateProof = 13,
+    /// Hash-based STARK / zkVM validity-rollup state-transition finality.
+    ZkValidityRollup = 14,
 }
 
 impl UlpDomainKind {
+    /// Exhaustive table of every registered `ULP-1` consensus family (`1..=14`).
+    ///
+    /// WIRING: exercised by round-trip discriminator and circuit-binding checks.
+    pub const ALL: [Self; 14] = [
+        Self::TendermintBft,
+        Self::BitcoinSpv,
+        Self::EthereumSync,
+        Self::DagBft,
+        Self::SuccinctRecursive,
+        Self::PoSpaceVdf,
+        Self::BasedPreconf,
+        Self::TonCatchain,
+        Self::StellarScp,
+        Self::RestakingAvs,
+        Self::AuxPowPop,
+        Self::SimplexBft,
+        Self::AlgorandStateProof,
+        Self::ZkValidityRollup,
+    ];
+
     /// Canonical numeric code bound into the `ULP-1` leaf hash and `BudAir` trace.
     #[must_use]
     pub const fn code(self) -> u8 {
         self as u8
     }
 
+    /// Decode a canonical `ULP-1` consensus-family discriminator (`1..=14`).
+    ///
+    /// WIRING: validates serialized domain-kind codes against [`Self::ALL`].
+    #[must_use]
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::TendermintBft),
+            2 => Some(Self::BitcoinSpv),
+            3 => Some(Self::EthereumSync),
+            4 => Some(Self::DagBft),
+            5 => Some(Self::SuccinctRecursive),
+            6 => Some(Self::PoSpaceVdf),
+            7 => Some(Self::BasedPreconf),
+            8 => Some(Self::TonCatchain),
+            9 => Some(Self::StellarScp),
+            10 => Some(Self::RestakingAvs),
+            11 => Some(Self::AuxPowPop),
+            12 => Some(Self::SimplexBft),
+            13 => Some(Self::AlgorandStateProof),
+            14 => Some(Self::ZkValidityRollup),
+            _ => None,
+        }
+    }
+
     /// Returns whether a domain of this consensus family remains sound under an
     /// active CRQC Frost Alarm emergency given whether it carried a verified
     /// post-quantum (`ML-DSA-65` / `ML-DSA-87` / hash-STARK) attestation.
     ///
-    /// Pure hash-work (`BitcoinSpv`) retains Grover-halved preimage/work
-    /// resistance without elliptic-curve signatures when paired with a PQ relay
-    /// binding; `SuccinctRecursive` and `PoSpaceVdf` rely on hash-STARKs /
-    /// iterated SHA-256 plus PQ attestation; classical elliptic-curve committee
-    /// families (`TendermintBft`, `EthereumSync`, `DagBft`) are accepted under
-    /// Frost Alarm ONLY when upgraded with an explicit PQ quorum attestation.
+    /// Every family fails closed under Frost Alarm unless `pq_attested` is
+    /// `true`: hash-work, recursive hash-STARK, validity-rollup, and ML-DSA-65
+    /// `StateProof` domains must attach their verified PQ attestation or relay
+    /// binding, and hybrid committee domains (`TendermintBft`, `EthereumSync`,
+    /// `DagBft`, `BasedPreconf`, `TonCatchain`, `StellarScp`, `RestakingAvs`,
+    /// `AuxPowPop`, `SimplexBft`) must carry full PQ co-signature quorums.
     #[must_use]
     pub const fn is_post_quantum_safe(self, pq_attested: bool) -> bool {
         match self {
@@ -113,7 +177,15 @@ impl UlpDomainKind {
             | Self::PoSpaceVdf
             | Self::TendermintBft
             | Self::EthereumSync
-            | Self::DagBft => pq_attested,
+            | Self::DagBft
+            | Self::BasedPreconf
+            | Self::TonCatchain
+            | Self::StellarScp
+            | Self::RestakingAvs
+            | Self::AuxPowPop
+            | Self::SimplexBft
+            | Self::AlgorandStateProof
+            | Self::ZkValidityRollup => pq_attested,
         }
     }
 }
@@ -451,6 +523,7 @@ pub fn ulp_input_hash(
     limbs.extend_from_slice(&digest_limbs(hub_checkpoint_root));
     for snap in snapshots {
         limbs.push(u64::from(snap.domain_id));
+        limbs.push(u64::from(snap.kind.code()));
         limbs.extend_from_slice(&split_u64_limbs(snap.external_chain_id));
         limbs.extend_from_slice(&split_u64_limbs(snap.prev_height));
     }
@@ -458,8 +531,8 @@ pub fn ulp_input_hash(
 }
 
 /// Computes the canonical in-circuit `ULP-1` `output_hash` binding the
-/// multi-domain Merkle root, per-domain finalized heights and roots, minimum
-/// post-quantum flag, and maximum outflow utilization.
+/// multi-domain Merkle root, per-domain consensus families, finalized heights
+/// and roots, minimum post-quantum flag, and maximum outflow utilization.
 #[must_use]
 pub fn ulp_output_hash(
     hub_chain_id: DomainId,
@@ -470,7 +543,7 @@ pub fn ulp_output_hash(
     snapshots: &[UlpDomainSnapshot],
 ) -> Hash32 {
     let epoch = split_u64_limbs(settlement_epoch);
-    let mut limbs = Vec::with_capacity(6 + DIGEST_LIMBS + snapshots.len() * (6 + DIGEST_LIMBS));
+    let mut limbs = Vec::with_capacity(6 + DIGEST_LIMBS + snapshots.len() * (7 + DIGEST_LIMBS));
     limbs.push(u64::from(hub_chain_id));
     limbs.extend_from_slice(&epoch);
     limbs.push(snapshots.len() as u64);
@@ -479,6 +552,7 @@ pub fn ulp_output_hash(
     limbs.extend_from_slice(&digest_limbs(domains_merkle_root));
     for snap in snapshots {
         limbs.push(u64::from(snap.domain_id));
+        limbs.push(u64::from(snap.kind.code()));
         limbs.extend_from_slice(&split_u64_limbs(snap.finalized_height));
         limbs.extend_from_slice(&split_u64_limbs(snap.security_weight));
         limbs.push(u64::from(snap.outflow_bps));
@@ -533,6 +607,7 @@ fn push_cells(out: &mut Vec<LimbSource>, base: u64, count: usize) {
 #[derive(Debug, Clone, Copy)]
 struct DomainCells {
     domain_id: u64,
+    kind_code: u64,
     ext_chain_id: u64,
     prev_height: u64,
     finalized_height: u64,
@@ -594,6 +669,7 @@ pub fn compile_ulp_program(
     for _ in 0..domain_count {
         domains.push(DomainCells {
             domain_id: a.alloc(1),
+            kind_code: a.alloc(1),
             ext_chain_id: a.alloc(2),
             prev_height: a.alloc(2),
             finalized_height: a.alloc(2),
@@ -633,6 +709,15 @@ pub fn compile_ulp_program(
         }
         a.mov(R[7], R[1]);
         prev_domain_id_reg_set = true;
+
+        // Enforce registered consensus family code in 1..=MAX_ULP_DOMAIN_KIND_CODE.
+        a.load_abs(R[1], dc.kind_code);
+        a.li(R[2], 0);
+        a.lt(R[3], R[2], R[1]);
+        a.assert(R[3]);
+        a.li(R[2], u64::from(MAX_ULP_DOMAIN_KIND_CODE) + 1);
+        a.lt(R[3], R[1], R[2]);
+        a.assert(R[3]);
 
         // Reconstruct full 64-bit prev_height < finalized_height (safe since limbs < 2^32).
         a.load_abs(R[1], dc.prev_height);
@@ -691,13 +776,14 @@ pub fn compile_ulp_program(
     push_cells(&mut in_sources, hub_checkpoint_root, DIGEST_LIMBS);
     for dc in &domains {
         in_sources.push(LimbSource::Cell(dc.domain_id));
+        in_sources.push(LimbSource::Cell(dc.kind_code));
         push_cells(&mut in_sources, dc.ext_chain_id, 2);
         push_cells(&mut in_sources, dc.prev_height, 2);
     }
     emit_dual_poseidon_swrite(&mut a, TAG_ULP_INPUT, &in_sources, 0);
 
     // 4. Compute and publish output_hash to SWrite[8..16].
-    let mut out_sources = Vec::with_capacity(6 + DIGEST_LIMBS + domain_count * (7 + DIGEST_LIMBS));
+    let mut out_sources = Vec::with_capacity(6 + DIGEST_LIMBS + domain_count * (8 + DIGEST_LIMBS));
     out_sources.push(LimbSource::Const(u64::from(hub_chain_id)));
     push_cells(&mut out_sources, epoch, 2);
     out_sources.push(LimbSource::Const(domain_count as u64));
@@ -706,6 +792,7 @@ pub fn compile_ulp_program(
     push_cells(&mut out_sources, domains_merkle_root, DIGEST_LIMBS);
     for dc in &domains {
         out_sources.push(LimbSource::Cell(dc.domain_id));
+        out_sources.push(LimbSource::Cell(dc.kind_code));
         push_cells(&mut out_sources, dc.finalized_height, 2);
         push_cells(&mut out_sources, dc.security_weight, 2);
         out_sources.push(LimbSource::Cell(dc.outflow_bps));
@@ -956,6 +1043,7 @@ pub fn prove_universal_light_proof(
     );
     for (dc, snap) in compiled.cells.domains.iter().zip(sorted.iter()) {
         write_cell(&mut vm, dc.domain_id, u64::from(snap.domain_id));
+        write_cell(&mut vm, dc.kind_code, u64::from(snap.kind.code()));
         write_u64_cells(&mut vm, dc.ext_chain_id, snap.external_chain_id);
         write_u64_cells(&mut vm, dc.prev_height, snap.prev_height);
         write_u64_cells(&mut vm, dc.finalized_height, snap.finalized_height);
@@ -1301,4 +1389,108 @@ pub fn open_universal_light_proof(
         all_pq_attested: bundle.all_pq_attested,
         max_outflow_bps: bundle.max_outflow_bps,
     })
+}
+
+#[cfg(test)]
+mod modern_domain_kind_tests {
+    use super::*;
+
+    #[test]
+    fn ulp_proves_and_verifies_extended_2026_consensus_families_and_binds_kind_code() {
+        // 1. All 14 discriminators round-trip uniquely and enforce strict Frost Alarm PQ gating.
+        assert_eq!(UlpDomainKind::from_code(0), None);
+        assert_eq!(
+            UlpDomainKind::from_code(MAX_ULP_DOMAIN_KIND_CODE.saturating_add(1)),
+            None
+        );
+        for (idx, kind) in UlpDomainKind::ALL.iter().copied().enumerate() {
+            let expected = u8::try_from(idx + 1).expect("14 fits in u8");
+            assert_eq!(kind.code(), expected);
+            assert_eq!(UlpDomainKind::from_code(expected), Some(kind));
+            assert!(kind.is_post_quantum_safe(true));
+            assert!(!kind.is_post_quantum_safe(false));
+        }
+
+        // 2. Prove and verify a real 128-bit BudAir FRI-STARK + Phase 5 split-STARK bundle
+        //    aggregating 6 modern external consensus families (codes 7..=14).
+        let families = [
+            (71u32, UlpDomainKind::BasedPreconf, 7_100u64),
+            (72u32, UlpDomainKind::TonCatchain, 8_200u64),
+            (73u32, UlpDomainKind::StellarScp, 9_300u64),
+            (74u32, UlpDomainKind::RestakingAvs, 10_400u64),
+            (75u32, UlpDomainKind::AlgorandStateProof, 13_500u64),
+            (76u32, UlpDomainKind::ZkValidityRollup, 14_600u64),
+        ];
+        let snapshots: Vec<UlpDomainSnapshot> = families
+            .iter()
+            .enumerate()
+            .map(|(i, &(domain_id, kind, weight))| {
+                let tag = u8::try_from(i + 0x41).expect("fits u8");
+                UlpDomainSnapshot {
+                    domain_id,
+                    external_chain_id: u64::from(domain_id) * 100,
+                    kind,
+                    prev_height: 1_000 + i as u64,
+                    finalized_height: 1_010 + i as u64,
+                    state_root: [tag; 32],
+                    event_root: [tag.wrapping_add(0x10); 32],
+                    anchor_hash: [tag.wrapping_add(0x20); 32],
+                    security_weight: weight,
+                    pq_attested: true,
+                    outflow_bps: 400 + u16::try_from(i * 50).expect("fits u16"),
+                }
+            })
+            .collect();
+
+        // Changing a domain's consensus family (e.g. AuxPowPop vs SimplexBft) mutates
+        // leaf_hash, ulp_input_hash, and ulp_output_hash even with identical roots/heights.
+        let mut alt_a = snapshots[0].clone();
+        alt_a.kind = UlpDomainKind::AuxPowPop;
+        let mut alt_b = alt_a.clone();
+        alt_b.kind = UlpDomainKind::SimplexBft;
+        assert_ne!(alt_a.leaf_hash(), alt_b.leaf_hash());
+        assert_ne!(
+            ulp_input_hash(45_261, 77, &[0x99; 32], &[alt_a.clone()]),
+            ulp_input_hash(45_261, 77, &[0x99; 32], &[alt_b.clone()])
+        );
+        assert_ne!(
+            ulp_output_hash(45_261, 77, &[0x88; 32], true, 400, &[alt_a]),
+            ulp_output_hash(45_261, 77, &[0x88; 32], true, 400, &[alt_b])
+        );
+
+        let compiled = compile_ulp_program(45_261, snapshots.len()).expect("compile ULP-1");
+        let hub_root = [0xAB; 32];
+        let seed = [0xCD; 32];
+        let registry = SchemeStatusRegistry::genesis();
+        let (bundle, sorted, _metrics) =
+            prove_universal_light_proof(&compiled, 77, hub_root, &snapshots, &seed, 12, &registry)
+                .expect("prove real BudAir STARK over 6 modern consensus families");
+        let verified = open_universal_light_proof(
+            &bundle,
+            &compiled.program_hash,
+            45_261,
+            &hub_root,
+            &registry,
+        )
+        .expect("verify split-STARK bundle over extended families");
+        assert_eq!(verified.domain_count, 6);
+        assert!(verified.all_pq_attested);
+        assert_eq!(
+            verified.total_security_weight,
+            families.iter().map(|(_, _, w)| *w).sum::<u64>()
+        );
+
+        // Verify domain inclusion fails if a relayer lies about UlpDomainKind.
+        let inc = prove_ulp_domain_inclusion(&sorted, 75).expect("Algorand inclusion proof");
+        let algo_snap = sorted
+            .iter()
+            .find(|s| s.domain_id == 75)
+            .expect("Algorand snapshot")
+            .clone();
+        inc.verify(&algo_snap, &verified.domains_merkle_root)
+            .expect("honest Algorand inclusion verifies");
+        let mut spoofed = algo_snap;
+        spoofed.kind = UlpDomainKind::SimplexBft;
+        assert!(inc.verify(&spoofed, &verified.domains_merkle_root).is_err());
+    }
 }

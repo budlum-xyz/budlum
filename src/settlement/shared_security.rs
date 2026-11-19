@@ -1504,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn strix_stale_epoch_replay_refuses_to_exit_newer_operator_rebind() {
+    fn stale_epoch_replay_refuses_to_exit_newer_operator_rebind() {
         let operator = Address::from([1u8; 32]);
         let carrier = Address::from([3u8; 32]);
         let mut state = state_with_registrar(operator);
@@ -1541,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    fn strix_cold_zero_unit_allocation_refuses_to_squat_registry_slot() {
+    fn cold_zero_unit_allocation_refuses_to_squat_registry_slot() {
         let operator = Address::from([1u8; 32]);
         let carrier = Address::from([3u8; 32]);
         let mut state = state_with_registrar(operator);

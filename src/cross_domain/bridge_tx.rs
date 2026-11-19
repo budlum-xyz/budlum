@@ -460,6 +460,16 @@ pub fn mint_from_verified_event(
     state
         .ensure_mint_headroom(minted)
         .map_err(|e| format!("Bridge mint: {e}"))?;
+    // Any transfer claiming origin on an anchored external consensus domain
+    // must pass an explicitly configured BridgeEconomicGuard policy rather than
+    // falling through the internal-domain bypass.
+    if state.external_roots.contains_key(&message.source_domain) {
+        state
+            .bridge_state
+            .economic_guard
+            .ensure_domain_configured(message.source_domain)
+            .map_err(|e| e.to_string())?;
+    }
     ensure_relay_credits_fit(
         state,
         (transfer.recipient, final_amount.get()),
@@ -494,7 +504,9 @@ pub fn burn_with_event(
     reserve: u64,
     height: u64,
 ) -> Result<DomainEvent, String> {
-    if request.expiry_height == 0 || request.expiry_height <= height {
+    // `expiry_height == 0` means "no refund window": the burn is final and
+    // no sweep ever refunds it. A nonzero expiry must still be live.
+    if request.expiry_height != 0 && request.expiry_height <= height {
         return Err(format!(
             "Bridge burn expiry must be above current block height (current {height}, expiry {})",
             request.expiry_height
@@ -665,6 +677,13 @@ pub fn unlock_from_verified_event(
         .get_balance(&owner)
         .checked_add(returned)
         .ok_or_else(|| "Bridge unlock (owner credit) would overflow".to_string())?;
+    if state.external_roots.contains_key(&message.source_domain) {
+        state
+            .bridge_state
+            .economic_guard
+            .ensure_domain_configured(message.source_domain)
+            .map_err(|e| e.to_string())?;
+    }
 
     let bridge_before = state.bridge_state.clone();
     state
@@ -826,6 +845,13 @@ fn apply_relay_effects(
             state
                 .ensure_mint_headroom(minted)
                 .map_err(|e| format!("Bridge relay mint: {e}"))?;
+            if state.external_roots.contains_key(&message.source_domain) {
+                state
+                    .bridge_state
+                    .economic_guard
+                    .ensure_domain_configured(message.source_domain)
+                    .map_err(|e| e.to_string())?;
+            }
             ensure_relay_credits_fit(
                 state,
                 (transfer.recipient, final_amount.get()),
@@ -864,6 +890,13 @@ fn apply_relay_effects(
             }
             let returned = transfer.burned_amount;
             ensure_relay_credits_fit(state, (transfer.owner, returned), (relayer, 0))?;
+            if state.external_roots.contains_key(&message.source_domain) {
+                state
+                    .bridge_state
+                    .economic_guard
+                    .ensure_domain_configured(message.source_domain)
+                    .map_err(|e| e.to_string())?;
+            }
             let bridge_before = state.bridge_state.clone();
             state
                 .bridge_state
@@ -1133,6 +1166,23 @@ pub fn report_bridge_contradiction(
         }
     }
     Ok(outcome)
+}
+
+/// Bind `state.bridge_state.economic_guard` to `chain_id`'s fail-closed policy
+/// mode: strict mandatory domain policies on mainnet (`45260`) and public
+/// testnet (`45261`), permissive internal-domain mode on local devnets.
+///
+/// WIRING: production chain-mode configuration helper pairing
+/// [`crate::cross_domain::economic_guard::BridgeEconomicGuard::for_chain_id`]
+/// with consensus-committed bridge state.
+pub fn enable_chain_economic_guard_mode(state: &mut AccountState, chain_id: u64) -> bool {
+    let strict = crate::cross_domain::economic_guard::BridgeEconomicGuard::for_chain_id(chain_id)
+        .requires_configured_domains();
+    state
+        .bridge_state
+        .economic_guard
+        .set_require_configured_domains(strict);
+    strict
 }
 
 /// Apply one bridge write to `state`.
@@ -1761,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn burn_with_event_refuses_unbounded_caller_horizon_and_zero_expiry() {
+    fn burn_with_event_refuses_unbounded_horizon_and_accepts_final_zero_expiry() {
         let (mut state, _) = bridged();
         state.current_block_height = 50;
         let owner = Address::from([0x51; 32]);
@@ -1788,16 +1838,6 @@ mod tests {
         assert!(err.contains("expiry"), "got: {err}");
         assert_eq!(state.bridge_state.root(), root_before);
 
-        let zero_exp = BurnRequest {
-            domain_height: 50,
-            expiry_height: 0,
-            ..immortal
-        };
-        let zerr = burn_with_event(&mut state, &zero_exp, FEE, 50)
-            .expect_err("zero expiry_height must be refused");
-        assert!(zerr.contains("expiry"), "got: {zerr}");
-        assert_eq!(state.bridge_state.root(), root_before);
-
         let same_block = BurnRequest {
             domain_height: 10,
             expiry_height: 50,
@@ -1807,6 +1847,17 @@ mod tests {
             .expect_err("expiry_height == current block height must be refused");
         assert!(serr.contains("expiry"), "got: {serr}");
         assert_eq!(state.bridge_state.root(), root_before);
+
+        // `expiry_height == 0` is the final burn: no refund window, no sweep.
+        // The door accepts it and the burn lands.
+        let zero_exp = BurnRequest {
+            domain_height: 50,
+            expiry_height: 0,
+            ..immortal
+        };
+        burn_with_event(&mut state, &zero_exp, FEE, 50)
+            .expect("zero expiry_height is a final burn with no refund window");
+        assert_ne!(state.bridge_state.root(), root_before);
     }
 
     #[test]

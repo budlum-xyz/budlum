@@ -35,8 +35,25 @@ pub fn verify_execution_proof_stark(
     if proof.proof_bytes.len() > crate::execution::proof_verifier::MAX_PROOF_BYTES {
         return Err("execution proof_bytes exceed MAX_PROOF_BYTES".into());
     }
-    let envelope: ProofEnvelope = postcard::from_bytes(&proof.proof_bytes)
-        .map_err(|e| format!("execution proof deserialize: {e}"))?;
+    if program.is_empty() {
+        return Err("execution proof guest program cannot be empty".into());
+    }
+    let (envelope, trailing): (ProofEnvelope, &[u8]) =
+        postcard::take_from_bytes(&proof.proof_bytes)
+            .map_err(|e| format!("execution proof deserialize: {e}"))?;
+    if !trailing.is_empty() {
+        return Err(format!(
+            "execution proof carries {} unexpected trailing byte(s)",
+            trailing.len()
+        ));
+    }
+    let recomputed_program_hash =
+        crate::ai::execution::guest::stark_program_hash_from_words(program);
+    if recomputed_program_hash != expected_inputs.program_hash {
+        return Err(
+            "execution proof guest bytecode does not match public_inputs.program_hash".into(),
+        );
+    }
     if envelope.public_inputs_hash != expected_inputs.hash() {
         return Err("execution proof public_inputs_hash mismatch".into());
     }

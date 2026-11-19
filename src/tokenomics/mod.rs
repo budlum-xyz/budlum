@@ -322,7 +322,7 @@ impl TokenomicsParams {
         // through this function re-deriving it. Devnet keeps its own
         // deterministic (faster) payout cadence through its own
         // `epochs_per_year` value.
-        // (F21): the yield ratio is capped at 100%
+        // The yield ratio is capped at 100%
         // here too, not only at genesis - the cap is a property of the
         // formula, so a hand-built parameter set cannot mint u64::MAX money.
         let ratio = self

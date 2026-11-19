@@ -146,6 +146,12 @@ pub struct ObjectEntry {
     /// unconfirmed squatter cannot permanently poison a commitment.
     #[serde(default)]
     pub custody_confirmed: bool,
+    /// Per repair-root index, the lost baseline shares `(validator,
+    /// first_esi)` the repair was recorded to replace. Snapshotted at record
+    /// time so a loss marked later can never consume that root's budget
+    /// before the loss it was actually recorded for.
+    #[serde(default)]
+    pub repair_covers: BTreeMap<usize, Vec<(Address, u32)>>,
 }
 
 /// On-chain record of a paid G8 fallback decode authorization.
@@ -716,6 +722,7 @@ impl Bud3Registry {
                 next_esi,
                 endowment,
                 custody_confirmed: false,
+                repair_covers: BTreeMap::new(),
             },
         );
         Ok(Registered::New(key))
@@ -1869,6 +1876,7 @@ impl Bud3Registry {
                 next_esi,
                 endowment,
                 custody_confirmed: false,
+                repair_covers: BTreeMap::new(),
             },
         );
         if let Some(old) = self.objects.get_mut(old_key) {
@@ -2861,6 +2869,37 @@ impl Bud3Registry {
                 }
             }
         }
+        // Snapshot the lost baseline shares this repair replaces, skipping
+        // shares an earlier unsettled repair root already covers, so a loss
+        // marked after this record can never consume this root's budget.
+        let already_covered: BTreeSet<(Address, u32)> = obj
+            .repair_covers
+            .iter()
+            .filter(|(idx, _)| obj.roots.get(**idx).is_some_and(|r| !r.settled))
+            .flat_map(|(_, pairs)| pairs.iter().copied())
+            .collect();
+        let upload_root_count = obj.record.symbol_roots.len();
+        let mut covers: Vec<(Address, u32)> = Vec::new();
+        let mut cover_budget = u64::from(count);
+        for s in &obj.shares {
+            if s.segment != segment || !s.lost {
+                continue;
+            }
+            let is_baseline =
+                s.root < upload_root_count || obj.roots.get(s.root).is_some_and(|r| r.settled);
+            if !is_baseline {
+                continue;
+            }
+            let id = (s.share.validator, s.share.first_esi);
+            if already_covered.contains(&id) {
+                continue;
+            }
+            let need = u64::from(s.share.symbols);
+            if need <= cover_budget {
+                cover_budget -= need;
+                covers.push(id);
+            }
+        }
         obj.roots.push(SymbolRoot {
             segment,
             root: new_root,
@@ -2869,6 +2908,9 @@ impl Bud3Registry {
             settled: false,
         });
         let root = obj.roots.len() - 1;
+        if !covers.is_empty() {
+            obj.repair_covers.insert(root, covers);
+        }
         for share in sorted {
             obj.shares.push(ShareState {
                 segment,
@@ -2984,6 +3026,19 @@ impl Bud3Registry {
             if ready_by_seg.is_empty() {
                 continue;
             }
+            // The lost shares the ready roots were recorded to replace: these
+            // are retired first, so a loss marked after a repair was recorded
+            // can never consume that repair's budget before the loss it was
+            // actually recorded for.
+            let covered_now: BTreeSet<(u64, Address, u32)> = ready_by_seg
+                .values()
+                .flat_map(|(indices, _)| indices.iter())
+                .filter_map(|&i| {
+                    let seg = obj.roots.get(i)?.segment;
+                    Some((seg, obj.repair_covers.get(&i)?))
+                })
+                .flat_map(|(seg, pairs)| pairs.iter().map(move |&(v, e)| (seg, v, e)))
+                .collect();
             // Snapshot currently-settled root flags so we distinguish lost
             // baseline shares (which consume repair budget) from lost shares of
             // one of the roots settling right now (which never backed baseline
@@ -2994,20 +3049,31 @@ impl Bud3Registry {
                 // Only settle a segment's ready roots once their pooled
                 // confirmed symbols fully retire an exact subset of lost
                 // baseline shares (consuming the entire budget so no repair
-                // symbol is ever wasted or double-counted).
+                // symbol is ever wasted or double-counted). Covered losses
+                // consume the budget before uncovered ones.
                 let mut rem = *budget;
-                for s in &obj.shares {
-                    if s.segment != seg || !s.lost {
-                        continue;
-                    }
-                    let is_baseline =
-                        s.root < upload_roots || obj.roots.get(s.root).is_some_and(|r| r.settled);
-                    if !is_baseline {
-                        continue;
-                    }
-                    let need = u64::from(s.share.symbols);
-                    if need <= rem {
-                        rem -= need;
+                for pass in 0..2u8 {
+                    for s in &obj.shares {
+                        if s.segment != seg || !s.lost {
+                            continue;
+                        }
+                        let is_baseline = s.root < upload_roots
+                            || obj.roots.get(s.root).is_some_and(|r| r.settled);
+                        if !is_baseline {
+                            continue;
+                        }
+                        let covered = covered_now.contains(&(
+                            s.segment,
+                            s.share.validator,
+                            s.share.first_esi,
+                        ));
+                        if (pass == 0) != covered {
+                            continue;
+                        }
+                        let need = u64::from(s.share.symbols);
+                        if need <= rem {
+                            rem -= need;
+                        }
                     }
                 }
                 if rem == 0 {
@@ -3020,35 +3086,51 @@ impl Bud3Registry {
             if retire_rem.is_empty() {
                 continue;
             }
-            let roots_snapshot = obj.roots.clone();
+            // Decide the exact drop set in the same covered-first order the
+            // budget was proven against, then retain by index.
+            let mut drop_idx: BTreeSet<usize> = BTreeSet::new();
+            for (i, s) in obj.shares.iter().enumerate() {
+                if s.lost && ready_roots_set.contains(&s.root) {
+                    drop_idx.insert(i);
+                }
+            }
+            for pass in 0..2u8 {
+                for (i, s) in obj.shares.iter().enumerate() {
+                    if !s.lost || drop_idx.contains(&i) {
+                        continue;
+                    }
+                    let is_baseline =
+                        s.root < upload_roots || obj.roots.get(s.root).is_some_and(|r| r.settled);
+                    if !is_baseline {
+                        continue;
+                    }
+                    let covered =
+                        covered_now.contains(&(s.segment, s.share.validator, s.share.first_esi));
+                    if (pass == 0) != covered {
+                        continue;
+                    }
+                    let Some(rem) = retire_rem.get_mut(&s.segment) else {
+                        continue;
+                    };
+                    let need = u64::from(s.share.symbols);
+                    if need <= *rem {
+                        *rem -= need;
+                        drop_idx.insert(i);
+                    }
+                }
+            }
             let before = obj.shares.len();
-            obj.shares.retain(|s| {
-                if !s.lost {
-                    return true;
-                }
-                if ready_roots_set.contains(&s.root) {
-                    return false;
-                }
-                let is_baseline =
-                    s.root < upload_roots || roots_snapshot.get(s.root).is_some_and(|r| r.settled);
-                if !is_baseline {
-                    return true;
-                }
-                let Some(rem) = retire_rem.get_mut(&s.segment) else {
-                    return true;
-                };
-                let need = u64::from(s.share.symbols);
-                if need <= *rem {
-                    *rem -= need;
-                    false
-                } else {
-                    true
-                }
+            let mut walk = 0usize;
+            obj.shares.retain(|_| {
+                let keep = !drop_idx.contains(&walk);
+                walk += 1;
+                keep
             });
             for idx in ready_roots_set {
                 if let Some(r) = obj.roots.get_mut(idx) {
                     r.settled = true;
                 }
+                obj.repair_covers.remove(&idx);
             }
             dropped += before - obj.shares.len();
         }

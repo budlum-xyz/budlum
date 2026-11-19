@@ -228,23 +228,35 @@ pub struct TrainingDataGrant {
 }
 
 impl TrainingDataGrant {
-    /// Consume one training epoch (fail-closed: errors once the limit is reached).
+    /// Consume one training epoch (fail-closed: errors once the limit is reached
+    /// or when `issued_at_block > expires_at_block`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns an error if the epoch budget is exhausted or the window is invalid.
     pub fn consume_epoch(&mut self) -> Result<(), String> {
+        if self.issued_at_block > self.expires_at_block {
+            return Err("AI inference layer: training-data grant window invalid".into());
+        }
         if self.epochs_used >= self.max_epochs {
             return Err("AI inference layer: training-data grant epochs exhausted".into());
         }
-        self.epochs_used += 1;
+        let next = self
+            .epochs_used
+            .checked_add(1)
+            .ok_or_else(|| "AI inference layer: training-data grant epoch overflow".to_string())?;
+        self.epochs_used = next;
         Ok(())
     }
 
-    /// Whether it is still valid (time + epochs).
+    /// Whether the grant is live at `now_block`: within
+    /// `[issued_at_block, expires_at_block]` and strictly below `max_epochs`.
     #[must_use]
     pub fn is_valid(&self, now_block: u64) -> bool {
-        now_block <= self.expires_at_block && self.epochs_used < self.max_epochs
+        self.issued_at_block <= self.expires_at_block
+            && now_block >= self.issued_at_block
+            && now_block <= self.expires_at_block
+            && self.epochs_used < self.max_epochs
     }
 }
 

@@ -45,7 +45,7 @@ pub const FRAMEWORK_ADDRESS: [u8; 32] = {
 };
 
 /// Disabled Aptos-specific governance and staking module names under `0x1`
-/// (Section 8.15 and IP-32 item 3).
+/// (canonical Move block context specification).
 pub const DISABLED_FRAMEWORK_MODULES: &[&str] = &[
     "aptos_governance",
     "delegation_pool",
@@ -82,7 +82,7 @@ pub fn is_disabled_framework_module(address: &[u8; 32], module_name: &str) -> bo
 }
 
 /// Deterministic Budlum epoch/block randomness seed bound to `0x1::randomness`
-/// (`IP-32` item 3 and Section 8.15).
+/// (canonical Move block context specification).
 #[must_use]
 pub fn derive_move_randomness(block: &BlockContext, caller: &[u8; 32], call_seq: u64) -> [u8; 32] {
     let mut h = Sha3_256::new();

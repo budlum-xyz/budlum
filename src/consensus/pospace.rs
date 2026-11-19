@@ -476,8 +476,7 @@ impl PoSpaceEngine {
     }
 
     /// Register a validator's plot commitment in production after verifying a
-    /// deterministic challenge-selected Merkle inclusion proof against `plot_id`
-    /// (`B-0045` / `STRIX-COC-03`).
+    /// deterministic challenge-selected Merkle inclusion proof against `plot_id`.
     ///
     /// # Errors
     ///
@@ -762,7 +761,7 @@ impl ConsensusEngine for PoSpaceEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
-        // B-0045 fix: fail closed unless every block links contiguously, passes
+        // Fail closed unless every block links contiguously, passes
         // full challenge-selected Merkle plot opening verification, AND matches
         // a plot registered in `self.plots`. Unregistered capacity always scores 0.
         if chain.is_empty() {
@@ -1335,7 +1334,7 @@ mod tests {
             .prepare_block(&mut b_large, &AccountState::new())
             .expect("prepare large");
 
-        // B-0045 regression: attacker self-generates a valid 1 PiB Merkle plot
+        // Regression: attacker self-generates a valid 1 PiB Merkle plot
         // that was NEVER registered in consensus state -> scores 0 and NEVER wins!
         let sybil_leaves = sample_leaves(0x99, 8);
         let sybil_miner = PoSpaceEngine::new(PoSpaceConfig::default());

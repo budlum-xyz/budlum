@@ -85,7 +85,7 @@ pub struct BpqsSignature<P: BpqsParams> {
 /// Held by cold devices between ceremonies.
 pub struct BpqsSigner<P: BpqsParams, H: BpqsHash> {
     levels: merkle::Levels,
-    /// Zeroed on drop (F11): the root seed is the master secret of every
+    /// Zeroed on drop: the root seed is the master secret of every
     /// epoch key this device will ever mint.
     root_seed: [u8; 32],
     public: BpqsPublicKey<P>,
@@ -736,7 +736,7 @@ mod sign_tests {
     }
 }
 
-/// F11: zero the root seed when the signer is dropped.
+/// Zero the root seed when the signer is dropped.
 impl<P: BpqsParams, H: BpqsHash> Drop for BpqsSigner<P, H> {
     fn drop(&mut self) {
         self.root_seed.fill(0);

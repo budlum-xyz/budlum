@@ -12,7 +12,7 @@ use crate::ai::types::{
 };
 use crate::ai::AiRegistry;
 use crate::core::address::Address;
-use crate::pollen::data_rights::AccessGrant;
+use crate::pollen::data_rights::{AccessGrant, AiDataInputRef};
 
 /// Register an AI inference layer model on chain (`AiModelSpec` + `register_model`).
 ///
@@ -78,6 +78,22 @@ pub fn build_ai_request(
     // permission learning why their request was rejected must not reveal
     // information about the shape of the request.
     crate::ai_inference::validate_inference_grant(grant, &requester, submitted_at_block)?;
+
+    if let Some(ref decl) = perception {
+        if decl.asset_id != grant.asset_id {
+            return Err(
+                "AI inference layer: perception declaration asset_id does not match grant asset_id"
+                    .into(),
+            );
+        }
+    }
+    if let Some(data_ref) = AiDataInputRef::decode(&input_ref)? {
+        if data_ref.asset_id != grant.asset_id {
+            return Err(
+                "AI inference layer: input_ref asset_id does not match grant asset_id".into(),
+            );
+        }
+    }
     let bounded = BoundedBytes::try_new(input_ref.clone())?;
     // The canonical commitment: the admission gate verifies with the same
     // function (see crate::ai::types::canonical_input_commitment).
@@ -132,6 +148,7 @@ pub fn build_ai_result(
 mod tests {
     use super::super::{operator_bond, operator_eligible, register_operator, MIN_OPERATOR_BOND};
     use super::*;
+    use crate::pollen::AssetId;
 
     fn addr(b: u8) -> Address {
         Address([b; 32])
@@ -165,7 +182,7 @@ mod tests {
             1000,
             &grant,
             Some(crate::ai_inference::perception::PerceptionRequest {
-                asset_id: crate::pollen::AssetId([9; 32]),
+                asset_id: AssetId([9; 32]),
                 content_id: crate::storage::content_id::ContentId([7; 32]),
                 kind: crate::ai_inference::perception::PerceptionKind::Text,
                 declared_units: 18,
@@ -190,7 +207,7 @@ mod tests {
     /// A grant that is live for `consumer` at `block`.
     fn test_grant(consumer: Address, block: u64) -> AccessGrant {
         AccessGrant::new_unsigned(
-            crate::pollen::AssetId([9; 32]),
+            AssetId([9; 32]),
             Address([8; 32]),
             consumer,
             consumer,
@@ -274,5 +291,26 @@ mod tests {
             None,
         )
         .expect("a live grant must still build a request");
+
+        // Cross-asset substitution: a valid grant for asset [9; 32] must not
+        // build a request whose perception declaration or input_ref reads asset [0xEE; 32].
+        let mismatched_decl = crate::ai_inference::perception::PerceptionRequest {
+            asset_id: AssetId([0xEE; 32]),
+            content_id: crate::storage::content_id::ContentId([7; 32]),
+            kind: crate::ai_inference::perception::PerceptionKind::Text,
+            declared_units: 18,
+        };
+        let cross_err = build_ai_request(
+            requester,
+            model_id,
+            b"input".to_vec(),
+            1,
+            1,
+            1000,
+            &live,
+            Some(mismatched_decl),
+        )
+        .expect_err("grant for asset A must not build a request reading asset B");
+        assert!(cross_err.contains("asset_id"), "got: {cross_err}");
     }
 }

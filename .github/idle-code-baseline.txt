@@ -1035,7 +1035,6 @@ src/ai/execution/guest.rs	const	GAS_PER_LAYER
 src/ai/execution/guest.rs	const	GAS_PER_PARAM
 src/ai/execution/guest.rs	const	MAX_GUEST_OPS
 src/ai/execution/guest.rs	const	MLP_GUEST_VERSION
-src/ai/execution/guest.rs	const	WORD_BYTES
 src/ai/execution/guest.rs	fn	build_fixed_point_mlp_guest
 src/ai/execution/guest.rs	fn	commit_i32_limbs
 src/ai/execution/guest.rs	fn	estimate_full_gas
@@ -1043,7 +1042,6 @@ src/ai/execution/guest.rs	fn	estimate_guest_instruction_count
 src/ai/execution/guest.rs	fn	estimate_structural_gas
 src/ai/execution/guest.rs	fn	for_spec
 src/ai/execution/guest.rs	fn	input_dim
-src/ai/execution/guest.rs	fn	output_dim
 src/ai/execution/guest.rs	fn	program_hash_from_words
 src/ai/execution/guest.rs	fn	prove_mlp_inference
 src/ai/execution/guest.rs	fn	read_guest_output
@@ -1528,7 +1526,6 @@ src/pollen/offers.rs	fn	purchase_signing_hash
 src/privacy/note_registry.rs	const	MAX_LIVE_COMMITMENTS
 src/privacy/note_registry.rs	const	MAX_SPENT_NULLIFIERS
 src/privacy/note_registry.rs	fn	contains_commitment
-src/privacy/note_registry.rs	fn	derive_nullifier
 src/privacy/note_registry.rs	fn	is_nullifier_spent
 src/privacy/note_registry.rs	fn	prune_spent_nullifiers
 src/privacy/note_registry.rs	fn	spent_nullifier_count
@@ -1692,9 +1689,6 @@ src/storage/manifest.rs	fn	overhead_per_mille
 src/storage/manifest.rs	fn	replication
 src/persistence/state_trie.rs	fn	bulk_insert
 src/persistence/state_trie.rs	fn	root_ref
-src/storage/mobile_self.rs	enum	ReplicaRecommendation
-src/storage/mobile_self.rs	fn	availability_label
-src/storage/mobile_self.rs	fn	recommendation_for_content
 src/storage/msr.rs	const	TRAFFIC_SCALE
 src/storage/msr.rs	enum	MsrError
 src/storage/msr.rs	fn	lrc_repair_traffic_scaled
@@ -1751,7 +1745,7 @@ src/tokenomics/reward_pool.rs	fn	total_epoch_payout
 # wiring, and they come out when the settlement layer starts calling them.
 
 #
-# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
+# 2026-08-31 (operator-approved hybrid schedule; remaining entries tracked
 # DENETIM-PLANI-3.0.md): the ai-serve economics modules (fee_scenario,
 # cost_forecast, validator_cost, staging, metric) are the published fee
 # schedule and cost model as code, the single source every doc number
@@ -1760,7 +1754,7 @@ src/tokenomics/reward_pool.rs	fn	total_epoch_payout
 # come out when the settlement layer starts calling them.
 
 #
-# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
+# 2026-08-31 (operator-approved hybrid schedule; remaining entries tracked
 # DENETIM-PLANI-3.0.md): the ai-serve economics modules (fee_scenario,
 # cost_forecast, validator_cost, staging, metric, residency) are the
 # published fee schedule and cost model as code, the single source every
@@ -1854,21 +1848,6 @@ crates/ai-inference/crates/ai-serve/src/validator_cost.rs	struct	ValidatorBudget
 #                          the teammate working the same PR).
 #   ScreenItem/contract_digest/honest_custody/network_held_bytes ride the
 #   screen surface above.
-src/storage/mobile_self.rs	enum	UploadCustodyRefusal
-src/storage/mobile_self.rs	fn	decide_upload_custody
-src/storage/mobile_self.rs	fn	put_user_content
-src/storage/mobile_self.rs	fn	record_network_default_attempt
-src/storage/mobile_self.rs	fn	record_network_held
-src/storage/mobile_self.rs	fn	user_held_items
-src/storage/one_share.rs	enum	ShareRefusal
-src/storage/one_share.rs	fn	admit_as_server
-src/storage/one_share.rs	fn	all_user_held
-src/storage/one_share.rs	fn	screen
-src/storage/one_share.rs	fn	storage_fee_owed_usd
-src/storage/one_view.rs	fn	contract_digest
-src/storage/one_view.rs	fn	honest_custody
-src/storage/one_view.rs	fn	network_held_bytes
-src/storage/one_view.rs	struct	ScreenItem
 src/storage/three_nft.rs	enum	ThreeNftRegistryError
 src/storage/three_nft.rs	fn	drop_validator
 src/storage/three_nft.rs	fn	reemit_video_from_pin

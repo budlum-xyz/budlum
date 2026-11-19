@@ -704,10 +704,31 @@ mod tests {
         if method == "bud_getCharter" || method == "bud_bnsGetOffer" {
             return false;
         }
+        // A generated unsubscribe door is total by construction: jsonrpsee's
+        // `verify_and_register_unsubscribe` answers every call with
+        // `result: true/false` and never a JSON-RPC error, so no invalid call
+        // exists at this layer to refuse. Asking for one would ask for an
+        // invented test, exactly like `bud_getCharter` above. The totality is
+        // asserted by
+        // `rpc_door_solana::solana_unsubscribe_doors_answer_a_boolean_and_never_an_error`.
+        if is_generated_unsubscribe(method) {
+            return false;
+        }
         match declared_arguments(method) {
             Some(count) => count > 0,
             None => true,
         }
+    }
+
+    /// The wire names jsonrpsee generates as unsubscribe doors, read from the
+    /// `unsubscribe = "..."` attributes of `src/rpc/api.rs`.
+    fn is_generated_unsubscribe(method: &str) -> bool {
+        let api = include_str!("api.rs");
+        let needle = "unsubscribe = \"";
+        api.match_indices(needle).any(|(at, _)| {
+            let rest = &api[at + needle.len()..];
+            rest.split('"').next() == Some(method)
+        })
     }
 
     /// The number of parameters a method takes, as the trait declares them, with

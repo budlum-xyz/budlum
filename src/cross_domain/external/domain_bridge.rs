@@ -33,6 +33,14 @@ use crate::domain::types::{ConsensusDomain, DomainCommitment};
 /// its adapter descriptor; this value only selects the local translation.
 pub const EXTERNAL_DOMAIN_FINALITY_ADAPTER: &str = "external-domain-finality-v1";
 
+/// Maximum byte budget for an encoded external-evidence carrier: matches the
+/// largest admitted adapter payload (`zkvm_proof::MAX_PAYLOAD_BYTES`) plus a
+/// bounded 64 KiB envelope margin for metadata fields, enforced symmetrically
+/// on both encoding and decoding so no proof accepted by an adapter is dropped
+/// at the bridge carrier boundary and no oversized envelope is serialized.
+pub const MAX_EXTERNAL_EVIDENCE_BYTES: usize =
+    crate::cross_domain::external::zkvm_proof::MAX_PAYLOAD_BYTES + 64 * 1024;
+
 /// Encodes external evidence into the existing raw finality-proof envelope.
 ///
 /// Keeping this as a function, rather than making every caller know that the
@@ -42,17 +50,27 @@ pub const EXTERNAL_DOMAIN_FINALITY_ADAPTER: &str = "external-domain-finality-v1"
 ///
 /// # Errors
 ///
-/// Returns an error if the carrier cannot serialize the evidence.
+/// Returns an error if the evidence exceeds [`MAX_EXTERNAL_EVIDENCE_BYTES`]
+/// or if the carrier cannot serialize it.
 pub fn encode_external_evidence(
     evidence: &RawConsensusEvidence,
 ) -> Result<FinalityProof, FinalityError> {
+    if evidence.payload.len() > MAX_EXTERNAL_EVIDENCE_BYTES {
+        return Err(FinalityError(format!(
+            "external evidence payload is {} bytes, above the {MAX_EXTERNAL_EVIDENCE_BYTES} carrier limit",
+            evidence.payload.len()
+        )));
+    }
     let payload = bincode::serialize(evidence)
         .map_err(|error| FinalityError(format!("external evidence cannot be encoded: {error}")))?;
+    if payload.len() > MAX_EXTERNAL_EVIDENCE_BYTES {
+        return Err(FinalityError(format!(
+            "encoded external evidence carrier is {} bytes, above the {MAX_EXTERNAL_EVIDENCE_BYTES} carrier limit",
+            payload.len()
+        )));
+    }
     Ok(FinalityProof::Raw(payload))
 }
-
-/// Maximum byte budget for an encoded external-evidence carrier.
-const MAX_EXTERNAL_EVIDENCE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Decodes the local carrier. It does not validate the evidence: only the
 /// bound adapter may interpret its payload or decide whether it is final.
@@ -531,5 +549,27 @@ mod tests {
             .verify_finality(&domain, &commitment, &proof)
             .unwrap();
         assert!(matches!(wrong_id, FinalityStatus::Rejected(_)));
+    }
+
+    #[test]
+    fn carrier_cap_covers_zkvm_payload_ceiling_and_rejects_oversize_symmetrically() {
+        use crate::cross_domain::external::zkvm_proof::MAX_PAYLOAD_BYTES;
+
+        const {
+            assert!(MAX_EXTERNAL_EVIDENCE_BYTES > MAX_PAYLOAD_BYTES);
+        };
+        let (mut adapter, _domain, _commitment) = fixture();
+        // A full-size zkVM-class payload inside MAX_PAYLOAD_BYTES round-trips cleanly.
+        adapter.evidence.payload = vec![0x5Au8; MAX_PAYLOAD_BYTES];
+        let encoded =
+            encode_external_evidence(&adapter.evidence).expect("zkVM-sized evidence fits");
+        let decoded = decode_external_evidence(&encoded).expect("round-trips");
+        assert_eq!(decoded.payload.len(), MAX_PAYLOAD_BYTES);
+
+        // Exceeding MAX_EXTERNAL_EVIDENCE_BYTES fails on BOTH encode and decode.
+        adapter.evidence.payload = vec![0xA5u8; MAX_EXTERNAL_EVIDENCE_BYTES];
+        assert!(encode_external_evidence(&adapter.evidence).is_err());
+        let oversized_wire = FinalityProof::Raw(vec![0u8; MAX_EXTERNAL_EVIDENCE_BYTES + 1]);
+        assert!(decode_external_evidence(&oversized_wire).is_err());
     }
 }

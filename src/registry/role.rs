@@ -77,8 +77,8 @@ pub mod roles {
     /// B.U.D. storage operator.
     ///
     /// Registration is OPTIONAL - opening a `StorageDeal` is itself
-    /// Permissionless (the deal's `operator_bond` is the only gate, see
-    /// `domain::storage_deal::StorageRegistry::open_deal`). Registering as
+    /// Permissionless (the deal's `operator_bond` is the only gate on
+    /// `open_deal`). Registering as
     /// `STORAGE_OPERATOR` is only required to be eligible for the
     /// Per-deal reward stream.
     ///

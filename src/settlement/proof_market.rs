@@ -1,4 +1,4 @@
-//! P12-11: Proof Verification Market - settlement-side proof task/receipt model.
+//! Proof Verification Market - settlement-side proof task/receipt model.
 //!
 //! This module is intentionally LUM-adapter free. It models bounded proof tasks,
 //! Prover receipts and settlement accounting in $BUD-compatible commitments so
@@ -2233,7 +2233,7 @@ mod tests {
              (before: {before})"
         );
     }
-    // ---- (F09) ----
+    // ---- Settlement invariants ----
 
     fn sample_task() -> ProofTask {
         ProofTask::new(

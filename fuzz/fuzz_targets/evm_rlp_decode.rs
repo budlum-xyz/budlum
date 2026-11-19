@@ -1,6 +1,6 @@
 #![no_main]
 
-//! F10.1 EVM RLP decoder robustness target.
+//! EVM RLP decoder robustness target.
 //!
 //! Any byte string may be supplied by an untrusted relayer. Success and typed
 //! Decode errors are both expected outcomes; a panic, abort, or sanitizer

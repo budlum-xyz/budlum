@@ -1677,12 +1677,12 @@ jobs:
           cargo build --manifest-path crates/wallet-core/Cargo.toml --lib --release \
             --target wasm32-unknown-unknown --features wasm
 
-  # ============================ Mobile core (WP-11) ============================
+  # ============================ Mobile core ============================
   mobile-core:
     # The mobile validator core is its own crate so a phone does not link
     # budlum-core. Root `cargo test --lib` never runs it. Without this job a
     # break in custody proofs, presence, quota or relay switch stays green.
-    name: Mobile core (WP-11)
+    name: Mobile core
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1710,7 +1710,7 @@ jobs:
         run: cargo test --manifest-path mobile/core/Cargo.toml --locked
 
   mobile-core-targets:
-    # WP-11 job 2 names five phone targets and the card's test
+    # Cross-check five mobile targets and run the host test suite
     # `mobile_core_builds_for_all_targets` is this job. A host-only build hides
     # a target break (a pointer-width assumption on armv7, a dependency with no
     # Android or iOS support) until somebody tries a phone build. The library
@@ -1751,13 +1751,13 @@ jobs:
         run: cargo build --manifest-path mobile/core/Cargo.toml --locked --lib --target "$TARGET"
 
   mobile-ffi:
-    # WP-11 job 2: the Kotlin and Swift bindings of the mobile core come from
+    # The Kotlin and Swift bindings of the mobile core come from
     # mobile/ffi. Besides format, clippy and tests, the job builds the shared
     # library and generates both bindings from it with the pinned generator,
     # so a type UniFFI cannot express fails here and not in the app builds.
     # The phone targets are type-checked only: linking the cdylib needs the
-    # NDK and Xcode, which belong to the app jobs (WP-36, WP-38).
-    name: Mobile FFI bindings (WP-11)
+    # NDK and Xcode, which belong to the mobile app build jobs.
+    name: Mobile FFI bindings
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -2762,7 +2762,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      code-quality: write
     # 45 minutes used to be enough and stopped being enough without the suite
     # getting slower: it got longer. The run on `7535554` was still walking the
     # suite at 44 minutes (2383 of 4355 tests at 17 minutes, plus the instrumented
@@ -3033,6 +3032,10 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes
+      - name: internal identifier and commit identity gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-internal-ids --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-internal-ids
       # BudZero proofs are STARKs and rest on a hash only. A Groth16, KZG or
       # BN254 crate in any manifest, or a verifier arm for the external labels,
       # would put a pairing assumption on a verification path.
@@ -3609,7 +3612,7 @@ jobs:
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/budlum-types/Cargo.toml --locked
 
-# WP-04 / WP-42 continuation: the integrated tree is checked without a Rust
+# The integrated tree is checked without a Rust
   # toolchain. Several open pull requests are merged into one branch here, and
   # a merge can break a cross-file table without breaking any single file.
   # The self-test injects a real violation for every check, then the plain run

@@ -26,6 +26,9 @@ use super::verification_level::{LevelRecord, LevelRefusal, VerificationLevel};
 
 /// Domain tag for selective-opening document leaves.
 pub const APB_LEAF_TAG: &[u8] = b"BDLM_AI_APB_LEAF_V1";
+/// Domain tag for power-of-two tree padding slots (disjoint from real chunks).
+/// Convenience: exposed for proof-bundle tree verification.
+pub const APB_PAD_TAG: &[u8] = b"BDLM_AI_APB_PAD_V1";
 /// Domain tag for selective-opening internal Merkle nodes.
 pub const APB_NODE_TAG: &[u8] = b"BDLM_AI_APB_NODE_V1";
 /// Domain tag for `BudZero` calculator proof transcripts.
@@ -122,6 +125,13 @@ fn hash_chunk_leaf(chunk_index: u32, bytes: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
+fn hash_padding_leaf(slot_index: u32) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(APB_PAD_TAG);
+    h.update(slot_index.to_le_bytes());
+    h.finalize().into()
+}
+
 fn hash_merkle_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(APB_NODE_TAG);
@@ -132,7 +142,9 @@ fn hash_merkle_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 
 impl CommittedSourceDocument {
     /// Commit `chunks` into a binary Merkle tree supporting single-chunk
-    /// selective openings.
+    /// selective openings. Padding slots carry a dedicated domain tag so an
+    /// out-of-range padding leaf can never authenticate as an empty source chunk.
+    /// Convenience: kept for the CLI proof-bundle builder.
     #[must_use]
     pub fn from_chunks(chunks: Vec<String>) -> Self {
         let base_count = chunks.len().max(1);
@@ -141,7 +153,7 @@ impl CommittedSourceDocument {
         for idx in 0..cap {
             let leaf = match chunks.get(idx) {
                 Some(text) => hash_chunk_leaf(idx as u32, text.as_bytes()),
-                None => hash_chunk_leaf(idx as u32, b""),
+                None => hash_padding_leaf(idx as u32),
             };
             padded_leaves.push(leaf);
         }
@@ -210,23 +222,29 @@ impl CommittedSourceDocument {
 }
 
 impl SourceCitationProof {
-    /// Audit the selective Merkle branch and consent redaction invariants.
+    /// Audit the selective Merkle branch, domain separation against padding
+    /// slots, and exact consent/disclosure agreement.
     #[must_use]
     pub fn is_authentic(&self) -> bool {
         let cap = self.tree_leaf_count as usize;
-        if !cap.is_power_of_two() || (self.chunk_index as usize) >= cap {
+        if cap == 0 || !cap.is_power_of_two() || (self.chunk_index as usize) >= cap {
             return false;
         }
         let expected_depth = cap.trailing_zeros() as usize;
         if self.merkle_siblings.len() != expected_depth {
             return false;
         }
-        if !self.consent_granted && self.disclosed_excerpt.is_some() {
+        // Reject padding slots even on unconsented existence-only openings.
+        if self.leaf_digest == hash_padding_leaf(self.chunk_index) {
             return false;
         }
-        if let Some(excerpt) = &self.disclosed_excerpt {
-            if hash_chunk_leaf(self.chunk_index, excerpt.as_bytes()) != self.leaf_digest {
-                return false;
+        match (self.consent_granted, &self.disclosed_excerpt) {
+            (false, Some(_)) | (true, None) => return false,
+            (false, None) => {}
+            (true, Some(excerpt)) => {
+                if hash_chunk_leaf(self.chunk_index, excerpt.as_bytes()) != self.leaf_digest {
+                    return false;
+                }
             }
         }
         let mut acc = self.leaf_digest;
@@ -242,14 +260,17 @@ impl SourceCitationProof {
         acc == self.document_root
     }
 
-    /// Public view honoring owner consent.
+    /// Public view honoring owner consent and cryptographic authenticity: an
+    /// excerpt is emitted only when both `consent_granted` and `is_authentic()`
+    /// hold.
     #[must_use]
     /// Convenience: exposed for RPC/explorer proof-bundle projection.
     pub fn public_view(&self) -> PublicCitationView {
+        let authentic = self.is_authentic();
         PublicCitationView {
             document_root: self.document_root,
-            exists_in_committed_source: self.is_authentic(),
-            excerpt: if self.consent_granted {
+            exists_in_committed_source: authentic,
+            excerpt: if authentic && self.consent_granted {
                 self.disclosed_excerpt.clone()
             } else {
                 None
@@ -510,7 +531,7 @@ impl AnswerProofBundle {
         }
         let mut sentences = Vec::with_capacity(candidates.len());
         for (index, item) in candidates.into_iter().enumerate() {
-            if item.text.trim().is_empty() {
+            if item.text.trim().is_empty() || item.text.contains("```apb") {
                 return Err(ApbError::EmptySentence { index });
             }
             let Some(kind) = item.claim_kind else {
@@ -564,6 +585,7 @@ impl AnswerProofBundle {
         }
         self.sentences.iter().all(|s| {
             !s.text.trim().is_empty()
+                && !s.text.contains("```apb")
                 && match &s.claim_kind {
                     SentenceClaimKind::SourceBacked(src) => src.is_authentic(),
                     SentenceClaimKind::ComputationBacked(calc) => calc.is_authentic(),
@@ -638,6 +660,15 @@ impl AnswerProofBundle {
         let Some(close_rel) = rest.find(APB_FENCE_CLOSE) else {
             return Err(ApbError::MalformedMarkdown("unclosed ```apb block"));
         };
+        let after_close = close_rel + APB_FENCE_CLOSE.len();
+        let trailing = rest
+            .get(after_close..)
+            .ok_or(ApbError::MalformedMarkdown("invalid trailing slice"))?;
+        if !trailing.trim().is_empty() {
+            return Err(ApbError::MalformedMarkdown(
+                "unexpected trailing content or extra apb block after closing fence",
+            ));
+        }
         let json_slice = rest
             .get(..close_rel)
             .ok_or(ApbError::MalformedMarkdown("invalid apb json slice"))?;
@@ -864,5 +895,52 @@ mod tests {
         }
         assert!(AnswerProofBundle::from_markdown_document("").is_err());
         assert!(AnswerProofBundle::from_markdown_document("```apb\n").is_err());
+    }
+
+    #[test]
+    fn rejects_padding_leaf_forgery_unverified_public_excerpt_and_trailing_prose() {
+        // 3 chunks -> padded to 4 leaves; slot 3 is domain-separated padding.
+        let doc = CommittedSourceDocument::from_chunks(vec![
+            "chunk-0".to_owned(),
+            "chunk-1".to_owned(),
+            "chunk-2".to_owned(),
+        ]);
+        let valid = doc.open_chunk(2, false).unwrap();
+        assert!(valid.is_authentic());
+
+        let forged_pad = SourceCitationProof {
+            document_root: doc.root(),
+            chunk_index: 3,
+            tree_leaf_count: valid.tree_leaf_count,
+            merkle_siblings: vec![valid.leaf_digest, *valid.merkle_siblings.get(1).unwrap()],
+            consent_granted: false,
+            disclosed_excerpt: None,
+            leaf_digest: *valid.merkle_siblings.first().unwrap(),
+        };
+        assert!(
+            !forged_pad.is_authentic(),
+            "padding leaf must never authenticate as a source chunk"
+        );
+
+        let mut stripped = doc.open_chunk(0, true).unwrap();
+        stripped.disclosed_excerpt = None;
+        assert!(!stripped.is_authentic());
+
+        let mut forged_quote = doc.open_chunk(0, true).unwrap();
+        forged_quote.disclosed_excerpt = Some("tampered quote".to_owned());
+        let view = forged_quote.public_view();
+        assert!(!view.exists_in_committed_source);
+        assert_eq!(view.excerpt, None);
+
+        let bundle = AnswerProofBundle::build(vec![CandidateSentence {
+            text: "Verified statement.".to_owned(),
+            claim_kind: Some(SentenceClaimKind::SourceBacked(
+                doc.open_chunk(0, true).unwrap(),
+            )),
+        }])
+        .unwrap();
+        let mut md = bundle.to_markdown_document().unwrap();
+        md.push_str("\nUnverified trailing paragraph.");
+        assert!(AnswerProofBundle::from_markdown_document(&md).is_err());
     }
 }

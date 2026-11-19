@@ -234,9 +234,11 @@ pub fn weights_digest(spec: &FixedPointMlpSpec) -> [u8; 32] {
     for d in &spec.dims {
         h.update(d.to_le_bytes());
     }
+    h.update((spec.weights.len() as u64).to_le_bytes());
     for w in &spec.weights {
         h.update(w.to_le_bytes());
     }
+    h.update((spec.biases.len() as u64).to_le_bytes());
     for b in &spec.biases {
         h.update(b.to_le_bytes());
     }
@@ -314,6 +316,7 @@ pub fn program_hash_from_words(words: &[u64]) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(b"BDLM_AI_GUEST_PROGRAM_V1");
     h.update(MLP_GUEST_VERSION.to_le_bytes());
+    h.update((words.len() as u64).to_le_bytes());
     for w in words {
         h.update(w.to_le_bytes());
     }

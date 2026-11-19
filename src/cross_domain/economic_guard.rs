@@ -36,8 +36,19 @@
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
+use crate::cross_domain::external::algorand_stateproof::{
+    algorand_pubkey_commitment, verify_algorand_equivocation, AlgorandEquivocationProof,
+    AlgorandStateProofAdapter, PinnedAlgorandVerifier,
+};
 use crate::cross_domain::external::auxpow_pop::{
     verify_pop_equivocation, AuxPowPopAdapter, PinnedAuxPowAnchor, PopEquivocationProof,
+};
+use crate::cross_domain::external::based_preconf::{
+    verify_based_preconf_equivocation, BasedPreconfAdapter, BasedPreconfEquivocationProof,
+    PinnedBasedPreconfCommittee,
+};
+use crate::cross_domain::external::mina_recursive::{
+    PinnedSuccinctGenesis, SuccinctRecursiveAdapter,
 };
 use crate::cross_domain::external::prover::{ProverBond, Slashing, BPS_DEN};
 use crate::cross_domain::external::restaking_avs::{
@@ -50,6 +61,14 @@ use crate::cross_domain::external::spec::{
     ExternalFinalityAdapter, FinalityAttestation, RawConsensusEvidence, SecurityBacking,
     VerificationPolicy,
 };
+use crate::cross_domain::external::stellar_fba::{
+    verify_stellar_ballot_equivocation, PinnedScpTier, StellarBallotEquivocationProof,
+    StellarScpAdapter,
+};
+use crate::cross_domain::external::ton_catchain::{
+    verify_ton_catchain_equivocation, PinnedTonMasterchainAnchor, TonCatchainAdapter,
+    TonCatchainEquivocationProof,
+};
 use crate::crypto::facts::AssumptionClass;
 use crate::crypto::pq;
 use crate::crypto::primitives::verify_signature;
@@ -58,6 +77,26 @@ use crate::domain::types::{DomainId, Hash32};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use subtle::ConstantTimeEq;
+
+/// Canonical Budlum mainnet chain identifier where strict economic-guard domain
+/// registration is mandatory.
+///
+/// WIRING: checked by [`BridgeEconomicGuard::for_chain_id`] and
+/// [`crate::cross_domain::bridge_tx::enable_chain_economic_guard_mode`].
+pub const MAINNET_GUARD_CHAIN_ID: u64 = 45_260;
+/// Canonical Budlum public testnet chain identifier where strict economic-guard
+/// domain registration is mandatory.
+///
+/// WIRING: checked by [`BridgeEconomicGuard::for_chain_id`] and
+/// [`crate::cross_domain::bridge_tx::enable_chain_economic_guard_mode`].
+pub const TESTNET_GUARD_CHAIN_ID: u64 = 45_261;
+/// Hard fail-closed upper bound on stored contradiction and per-offender replay
+/// entries. Entries are never evicted (FIFO/LRU eviction would reopen historical
+/// slashing replays); once full, governance snapshot pruning is required.
+///
+/// WIRING: enforced prior to insertion inside
+/// [`BridgeEconomicGuard::submit_contradiction`].
+pub const MAX_GUARD_REPLAY_ENTRIES: usize = 65_536;
 
 /// Default Byzantine corruption haircut on slashable validator stake (`33.33%`).
 ///
@@ -120,6 +159,11 @@ pub struct DomainCeilingPolicy {
     /// Optional ML-DSA-65 public key paired with `prover_ed25519_pubkey`.
     #[serde(default)]
     pub prover_pq_pubkey: Vec<u8>,
+    /// Governance-pinned external finality adapter and committee configuration
+    /// required by [`BridgeEconomicGuard::refresh_backing_from_adapter`] and
+    /// external-adapter variants of [`BridgeEconomicGuard::submit_contradiction`].
+    #[serde(default)]
+    pub pinned_adapter: Option<GuardedExternalAdapter>,
 }
 
 impl Default for DomainCeilingPolicy {
@@ -136,6 +180,7 @@ impl Default for DomainCeilingPolicy {
             window_blocks: DEFAULT_GUARD_WINDOW_BLOCKS,
             prover_ed25519_pubkey: None,
             prover_pq_pubkey: Vec::new(),
+            pinned_adapter: None,
         }
     }
 }
@@ -158,8 +203,9 @@ pub struct DomainEconomicRecord {
     pub prover_bond: Option<ProverBond>,
 }
 
-/// Pinned external adapter configuration dispatched by
-/// [`BridgeEconomicGuard::refresh_backing_from_adapter`].
+/// Governance-pinned external adapter configuration enforced by
+/// [`BridgeEconomicGuard::refresh_backing_from_adapter`] and
+/// [`BridgeEconomicGuard::submit_contradiction`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuardedExternalAdapter {
     /// Dual-quorum restaking AVS + Babylon-class EOTS adapter.
@@ -174,7 +220,7 @@ pub enum GuardedExternalAdapter {
         /// External network identifier.
         network: String,
         /// Governance-pinned parent `PoW` and `PoP` anchor parameters.
-        pinned: PinnedAuxPowAnchor,
+        pinned: Box<PinnedAuxPowAnchor>,
     },
     /// 2-round Simplex / tail-forking-resistant `MonadBFT` adapter.
     SimplexBft {
@@ -183,6 +229,98 @@ pub enum GuardedExternalAdapter {
         /// Governance-pinned Simplex epoch committee.
         pinned: PinnedSimplexCommittee,
     },
+    /// Post-quantum ML-DSA-65 Algorand `StateProof` interval verifier.
+    AlgorandStateProof {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned Algorand `StateProof` verifier root.
+        pinned: Box<PinnedAlgorandVerifier>,
+    },
+    /// L1-sequenced based rollup preconfirmation + FOCIL committee.
+    BasedPreconf {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned based preconfirmation committee.
+        pinned: PinnedBasedPreconfCommittee,
+    },
+    /// TON Masterchain Catchain BFT + dynamic Shardchain anchor.
+    TonCatchain {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned TON key-block validator set anchor.
+        pinned: PinnedTonMasterchainAnchor,
+    },
+    /// Federated Byzantine Agreement / Stellar Consensus Protocol top tier.
+    StellarScp {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned SCP top tier with verified quorum intersection.
+        pinned: PinnedScpTier,
+    },
+    /// Succinct recursive proof + Samasika window-density genesis anchor.
+    MinaRecursive {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned succinct genesis and ML-DSA-65 aggregator anchor.
+        pinned: Box<PinnedSuccinctGenesis>,
+    },
+}
+
+impl GuardedExternalAdapter {
+    /// Canonical single-byte adapter discriminator.
+    #[must_use]
+    const fn adapter_tag(&self) -> u8 {
+        match self {
+            Self::RestakingAvs { .. } => 1,
+            Self::AuxPowPop { .. } => 2,
+            Self::SimplexBft { .. } => 3,
+            Self::AlgorandStateProof { .. } => 4,
+            Self::BasedPreconf { .. } => 5,
+            Self::TonCatchain { .. } => 6,
+            Self::StellarScp { .. } => 7,
+            Self::MinaRecursive { .. } => 8,
+        }
+    }
+
+    /// Configured external network identifier.
+    #[must_use]
+    pub fn network(&self) -> &str {
+        match self {
+            Self::RestakingAvs { network, .. }
+            | Self::AuxPowPop { network, .. }
+            | Self::SimplexBft { network, .. }
+            | Self::AlgorandStateProof { network, .. }
+            | Self::BasedPreconf { network, .. }
+            | Self::TonCatchain { network, .. }
+            | Self::StellarScp { network, .. }
+            | Self::MinaRecursive { network, .. } => network,
+        }
+    }
+
+    /// Canonical domain-separated SHA3-256 commitment binding the adapter kind,
+    /// external network name, and pinned committee digest.
+    ///
+    /// WIRING: compared in constant time before any external backing update,
+    /// circuit-breaker freeze, or prover bond slash.
+    #[must_use]
+    pub fn canonical_pin_digest(&self) -> Hash32 {
+        let inner = match self {
+            Self::RestakingAvs { pinned, .. } => pinned.canonical_pin_digest(),
+            Self::AuxPowPop { pinned, .. } => pinned.canonical_pin_digest(),
+            Self::SimplexBft { pinned, .. } => pinned.canonical_pin_digest(),
+            Self::AlgorandStateProof { pinned, .. } => pinned.canonical_pin_digest(),
+            Self::BasedPreconf { pinned, .. } => pinned.canonical_pin_digest(),
+            Self::TonCatchain { pinned, .. } => pinned.canonical_pin_digest(),
+            Self::StellarScp { pinned, .. } => pinned.canonical_pin_digest(),
+            Self::MinaRecursive { pinned, .. } => pinned.canonical_pin_digest(),
+        };
+        hash_fields_bytes(&[
+            b"BDLM_ECON_GUARD_PIN_V1",
+            &[self.adapter_tag()],
+            self.network().as_bytes(),
+            &inner,
+        ])
+    }
 }
 
 /// Permissionless contradiction evidence capable of freezing a domain and
@@ -216,16 +354,16 @@ pub enum ContradictionEvidence {
         /// Governance-pinned restaking AVS quorum configuration.
         pinned: PinnedRestakingAvsSet,
         /// Cryptographic slashing proof.
-        proof: RestakingSlashingProof,
+        proof: Box<RestakingSlashingProof>,
     },
     /// Verified `AuxPoW`/`PoP` bonded double-anchor equivocation.
     AuxPowPopFault {
         /// External network name.
         network: String,
         /// Governance-pinned `AuxPoW`/`PoP` anchor configuration.
-        pinned: PinnedAuxPowAnchor,
+        pinned: Box<PinnedAuxPowAnchor>,
         /// Cryptographic `PoP` double-anchor proof.
-        proof: PopEquivocationProof,
+        proof: Box<PopEquivocationProof>,
     },
     /// Verified Simplex/`MonadBFT` `DoubleNotarize` or `FinalizeAndSkip` fault.
     SimplexFault {
@@ -234,7 +372,43 @@ pub enum ContradictionEvidence {
         /// Governance-pinned Simplex committee.
         pinned: PinnedSimplexCommittee,
         /// Cryptographic Simplex safety-violation proof.
-        proof: SimplexSlashingProof,
+        proof: Box<SimplexSlashingProof>,
+    },
+    /// Verified Algorand `StateProof` voter double-signature equivocation.
+    AlgorandFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned Algorand `StateProof` verifier root.
+        pinned: Box<PinnedAlgorandVerifier>,
+        /// Cryptographic Algorand equivocation proof.
+        proof: Box<AlgorandEquivocationProof>,
+    },
+    /// Verified based-rollup double-preconfirmation equivocation.
+    BasedPreconfFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned based preconfirmation committee.
+        pinned: PinnedBasedPreconfCommittee,
+        /// Cryptographic based preconfirmation equivocation proof.
+        proof: Box<BasedPreconfEquivocationProof>,
+    },
+    /// Verified TON Masterchain Catchain validator double-commit equivocation.
+    TonCatchainFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned TON Masterchain key-block anchor.
+        pinned: PinnedTonMasterchainAnchor,
+        /// Cryptographic Catchain double-commit proof.
+        proof: Box<TonCatchainEquivocationProof>,
+    },
+    /// Verified Stellar/FBA `SCPStatementExternalize` ballot equivocation.
+    StellarFbaFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned SCP top tier.
+        pinned: PinnedScpTier,
+        /// Cryptographic SCP ballot equivocation proof.
+        proof: Box<StellarBallotEquivocationProof>,
     },
 }
 
@@ -286,8 +460,21 @@ pub enum EconomicGuardError {
         /// Maximum effective ceiling for the active window.
         ceiling_atoms: u128,
     },
-    /// Contradiction evidence digest was already processed.
+    /// Contradiction evidence digest or offender fault set was already processed.
     DuplicateEvidence(Hash32),
+    /// Supplied external adapter or pinned committee does not match the
+    /// domain's governance-pinned [`DomainCeilingPolicy::pinned_adapter`].
+    AdapterPinMismatch {
+        /// Guarded domain identifier.
+        domain_id: DomainId,
+        /// Diagnostic mismatch reason.
+        reason: String,
+    },
+    /// Contradiction or offender replay ledger reached its hard fail-closed cap.
+    ReplayLedgerFull {
+        /// Maximum entries permitted without governance snapshot pruning.
+        capacity: usize,
+    },
     /// Contradiction or external adapter proof failed verification.
     InvalidEvidence(String),
 }
@@ -319,6 +506,14 @@ impl std::fmt::Display for EconomicGuardError {
                 f,
                 "contradiction evidence {} already applied",
                 hex::encode(d)
+            ),
+            Self::AdapterPinMismatch { domain_id, reason } => write!(
+                f,
+                "domain {domain_id} external adapter pin mismatch: {reason}"
+            ),
+            Self::ReplayLedgerFull { capacity } => write!(
+                f,
+                "economic guard replay ledger reached fail-closed capacity {capacity}"
             ),
             Self::InvalidEvidence(msg) => write!(f, "invalid contradiction evidence: {msg}"),
         }
@@ -389,7 +584,101 @@ fn validate_policy(policy: &DomainCeilingPolicy) -> Result<(), EconomicGuardErro
             EconomicGuardError::InvalidPolicy(format!("invalid prover ML-DSA-65 public key: {e}"))
         })?;
     }
+    if let Some(pin) = &policy.pinned_adapter {
+        if pin.network().trim().is_empty() {
+            return Err(EconomicGuardError::InvalidPolicy(
+                "pinned_adapter network cannot be empty".into(),
+            ));
+        }
+    }
     Ok(())
+}
+
+fn verify_domain_adapter_pin(
+    domain_id: DomainId,
+    expected: Option<&GuardedExternalAdapter>,
+    supplied: &GuardedExternalAdapter,
+) -> Result<(), EconomicGuardError> {
+    let Some(exp) = expected else {
+        return Err(EconomicGuardError::AdapterPinMismatch {
+            domain_id,
+            reason: "domain policy has no governance-pinned external adapter".into(),
+        });
+    };
+    let exp_digest = exp.canonical_pin_digest();
+    let sup_digest = supplied.canonical_pin_digest();
+    if !bool::from(exp_digest.ct_eq(&sup_digest)) || exp != supplied {
+        return Err(EconomicGuardError::AdapterPinMismatch {
+            domain_id,
+            reason: "supplied external adapter or committee disagrees with governance pin".into(),
+        });
+    }
+    Ok(())
+}
+
+#[must_use]
+fn offender_replay_key(
+    domain_id: DomainId,
+    adapter_tag: u8,
+    fault_locus: &[u8],
+    scheme: SchemeId,
+    offender_identity: &[u8],
+) -> Hash32 {
+    hash_fields_bytes(&[
+        b"BDLM_ECON_GUARD_OFFENDER_V1",
+        &domain_id.to_le_bytes(),
+        &[adapter_tag],
+        fault_locus,
+        &scheme.to_be_bytes(),
+        offender_identity,
+    ])
+}
+
+#[must_use]
+const fn hybrid_or_ed25519_scheme(has_pq: bool) -> SchemeId {
+    if has_pq {
+        SchemeId::ML_DSA_65
+    } else {
+        SchemeId::ED25519
+    }
+}
+
+fn compute_incremental_slash<F>(
+    slashed_offenders: &BTreeSet<Hash32>,
+    domain_id: DomainId,
+    adapter_tag: u8,
+    fault_locus: &[u8],
+    offenders: &[[u8; 32]],
+    evidence_digest: Hash32,
+    mut lookup: F,
+) -> Result<(u128, Vec<Hash32>), EconomicGuardError>
+where
+    F: FnMut(&[u8; 32]) -> Option<(u128, bool)>,
+{
+    let mut fresh_weight = 0u128;
+    let mut fresh_keys = Vec::new();
+    for pk in offenders {
+        let (weight, has_pq) = lookup(pk).ok_or_else(|| {
+            EconomicGuardError::InvalidEvidence(
+                "verified offender missing from governance-pinned committee".into(),
+            )
+        })?;
+        let key = offender_replay_key(
+            domain_id,
+            adapter_tag,
+            fault_locus,
+            hybrid_or_ed25519_scheme(has_pq),
+            pk,
+        );
+        if !slashed_offenders.contains(&key) {
+            fresh_weight = fresh_weight.saturating_add(weight);
+            fresh_keys.push(key);
+        }
+    }
+    if fresh_keys.is_empty() {
+        return Err(EconomicGuardError::DuplicateEvidence(evidence_digest));
+    }
+    Ok((fresh_weight, fresh_keys))
 }
 
 fn hash_security_backing(backing: &SecurityBacking) -> Hash32 {
@@ -543,19 +832,83 @@ pub fn effective_ceiling_atoms(record: &DomainEconomicRecord) -> u128 {
 pub struct BridgeEconomicGuard {
     domains: BTreeMap<DomainId, DomainEconomicRecord>,
     consumed_evidence: BTreeSet<Hash32>,
+    #[serde(default)]
+    slashed_offenders: BTreeSet<Hash32>,
+    #[serde(default)]
+    require_configured_domains: bool,
 }
 
 impl BridgeEconomicGuard {
-    /// Construct an empty economic guard.
+    /// Construct an empty economic guard in permissive internal-domain mode.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Return `true` when no domains or evidence records are stored.
+    /// Construct a fail-closed production economic guard where every inbound
+    /// bridge domain MUST have an explicit [`DomainCeilingPolicy`] before any
+    /// mint or unlock flow can succeed.
+    ///
+    /// WIRING: canonical mainnet/public-testnet constructor enforced by
+    /// [`Self::for_chain_id`].
+    #[must_use]
+    pub fn production() -> Self {
+        Self {
+            require_configured_domains: true,
+            ..Self::default()
+        }
+    }
+
+    /// Construct an economic guard scoped to `chain_id`: strict fail-closed on
+    /// mainnet ([`MAINNET_GUARD_CHAIN_ID`]) and public testnet
+    /// ([`TESTNET_GUARD_CHAIN_ID`]), permissive on local devnet IDs.
+    ///
+    /// WIRING: invoked by
+    /// [`crate::cross_domain::bridge_tx::enable_chain_economic_guard_mode`].
+    #[must_use]
+    pub fn for_chain_id(chain_id: u64) -> Self {
+        if matches!(chain_id, MAINNET_GUARD_CHAIN_ID | TESTNET_GUARD_CHAIN_ID) {
+            Self::production()
+        } else {
+            Self::new()
+        }
+    }
+
+    /// Toggle whether inbound bridge flows on unconfigured domains fail closed
+    /// with [`EconomicGuardError::UnknownDomain`].
+    pub const fn set_require_configured_domains(&mut self, require: bool) {
+        self.require_configured_domains = require;
+    }
+
+    /// Return `true` when unconfigured inbound domains fail closed.
+    #[must_use]
+    pub const fn requires_configured_domains(&self) -> bool {
+        self.require_configured_domains
+    }
+
+    /// Require that `domain_id` has an explicit [`DomainCeilingPolicy`].
+    ///
+    /// WIRING: enforced by [`crate::cross_domain::bridge_tx`] for every flow
+    /// arriving from a foreign domain registered in `external_roots`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EconomicGuardError::UnknownDomain`] when `domain_id` is absent.
+    pub fn ensure_domain_configured(&self, domain_id: DomainId) -> Result<(), EconomicGuardError> {
+        if self.domains.contains_key(&domain_id) {
+            Ok(())
+        } else {
+            Err(EconomicGuardError::UnknownDomain(domain_id))
+        }
+    }
+
+    /// Return `true` when no domains, replay records, or strict flags are active.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.domains.is_empty() && self.consumed_evidence.is_empty()
+        self.domains.is_empty()
+            && self.consumed_evidence.is_empty()
+            && self.slashed_offenders.is_empty()
+            && !self.require_configured_domains
     }
 
     /// Inspect the guard record for `domain_id`, if configured.
@@ -626,17 +979,42 @@ impl BridgeEconomicGuard {
                 evidence_digest,
             });
         }
+        verify_domain_adapter_pin(
+            domain_id,
+            existing.policy.pinned_adapter.as_ref(),
+            adapter_cfg,
+        )?;
         let attestation = match adapter_cfg {
             GuardedExternalAdapter::RestakingAvs { network, pinned } => {
                 RestakingAvsAdapter::new(network.clone(), Some(pinned.clone()))
                     .verify(evidence, verification_policy)
             }
             GuardedExternalAdapter::AuxPowPop { network, pinned } => {
-                AuxPowPopAdapter::new(network.clone(), Some(pinned.clone()))
+                AuxPowPopAdapter::new(network.clone(), Some((**pinned).clone()))
                     .verify(evidence, verification_policy)
             }
             GuardedExternalAdapter::SimplexBft { network, pinned } => {
                 SimplexBftAdapter::new(network.clone(), Some(pinned.clone()))
+                    .verify(evidence, verification_policy)
+            }
+            GuardedExternalAdapter::AlgorandStateProof { network, pinned } => {
+                AlgorandStateProofAdapter::new(network.clone(), Some((**pinned).clone()))
+                    .verify(evidence, verification_policy)
+            }
+            GuardedExternalAdapter::BasedPreconf { network, pinned } => {
+                BasedPreconfAdapter::new(network.clone(), Some(pinned.clone()))
+                    .verify(evidence, verification_policy)
+            }
+            GuardedExternalAdapter::TonCatchain { network, pinned } => {
+                TonCatchainAdapter::new(network.clone(), Some(pinned.clone()))
+                    .verify(evidence, verification_policy)
+            }
+            GuardedExternalAdapter::StellarScp { network, pinned } => {
+                StellarScpAdapter::new(network.clone(), Some(pinned.clone()))
+                    .verify(evidence, verification_policy)
+            }
+            GuardedExternalAdapter::MinaRecursive { network, pinned } => {
+                SuccinctRecursiveAdapter::new(network.clone(), Some((**pinned).clone()))
                     .verify(evidence, verification_policy)
             }
         }
@@ -648,22 +1026,28 @@ impl BridgeEconomicGuard {
         Ok(attestation)
     }
 
-    /// Ensure `domain_id` is not frozen by a verified contradiction proof.
+    /// Ensure `domain_id` is not frozen by a verified contradiction proof and,
+    /// in strict production mode, has an explicit guard policy.
     ///
     /// # Errors
     ///
-    /// Returns [`EconomicGuardError::DomainFrozen`] when `domain_id` is halted.
+    /// Returns [`EconomicGuardError::UnknownDomain`] in strict mode when
+    /// `domain_id` is absent, or [`EconomicGuardError::DomainFrozen`] when halted.
     pub fn ensure_domain_not_frozen(&self, domain_id: DomainId) -> Result<(), EconomicGuardError> {
-        if let Some(rec) = self.domains.get(&domain_id) {
-            if let DomainGuardStatus::FrozenByContradiction {
-                evidence_digest, ..
-            } = rec.status
-            {
-                return Err(EconomicGuardError::DomainFrozen {
-                    domain_id,
-                    evidence_digest,
-                });
+        let Some(rec) = self.domains.get(&domain_id) else {
+            if self.require_configured_domains {
+                return Err(EconomicGuardError::UnknownDomain(domain_id));
             }
+            return Ok(());
+        };
+        if let DomainGuardStatus::FrozenByContradiction {
+            evidence_digest, ..
+        } = rec.status
+        {
+            return Err(EconomicGuardError::DomainFrozen {
+                domain_id,
+                evidence_digest,
+            });
         }
         Ok(())
     }
@@ -671,12 +1055,14 @@ impl BridgeEconomicGuard {
     /// Verify that `domain_id` is not frozen and that recording `amount_atoms`
     /// at `current_height` fits inside its adaptive escrow ceiling.
     ///
-    /// Unconfigured domains return `Ok(())`; configured domains mutate nothing
-    /// on refusal.
+    /// When [`Self::requires_configured_domains`] is enabled, unconfigured
+    /// domains fail closed with [`EconomicGuardError::UnknownDomain`];
+    /// configured domains mutate nothing on refusal.
     ///
     /// # Errors
     ///
-    /// Returns [`EconomicGuardError::DomainFrozen`] or
+    /// Returns [`EconomicGuardError::UnknownDomain`],
+    /// [`EconomicGuardError::DomainFrozen`], or
     /// [`EconomicGuardError::CeilingExceeded`] before any state change.
     pub fn check_and_record_flow(
         &mut self,
@@ -685,6 +1071,9 @@ impl BridgeEconomicGuard {
         current_height: u64,
     ) -> Result<(), EconomicGuardError> {
         let Some(rec) = self.domains.get(&domain_id) else {
+            if self.require_configured_domains {
+                return Err(EconomicGuardError::UnknownDomain(domain_id));
+            }
             return Ok(());
         };
         if let DomainGuardStatus::FrozenByContradiction {
@@ -744,7 +1133,7 @@ impl BridgeEconomicGuard {
         let Some(rec) = self.domains.get(&domain_id) else {
             return Err(EconomicGuardError::UnknownDomain(domain_id));
         };
-        let (evidence_digest, external_slashed_weight) = match evidence {
+        let (evidence_digest, external_slashed_weight, new_offender_keys) = match evidence {
             ContradictionEvidence::SignedProverDoubleRoot {
                 domain_height,
                 state_root_a,
@@ -831,65 +1220,351 @@ impl BridgeEconomicGuard {
                     low_root,
                     high_root,
                 ]);
-                (digest, 0u128)
+                let scheme = hybrid_or_ed25519_scheme(!pq_pk.is_empty());
+                let offender_key =
+                    offender_replay_key(domain_id, 0, &domain_height.to_le_bytes(), scheme, &ed_pk);
+                if self.slashed_offenders.contains(&offender_key) {
+                    return Err(EconomicGuardError::DuplicateEvidence(digest));
+                }
+                (digest, 0u128, vec![offender_key])
             }
             ContradictionEvidence::RestakingFault {
                 network,
                 pinned,
                 proof,
             } => {
+                let supplied = GuardedExternalAdapter::RestakingAvs {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
                 let res = verify_restaking_slashing(network, pinned, proof)
                     .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
-                (
-                    hash_fields_bytes(&[
-                        b"BDLM_ECON_GUARD_EVIDENCE_V1",
-                        &[1u8],
-                        &domain_id.to_le_bytes(),
-                        &res.evidence_digest,
-                    ]),
-                    res.slashed_effective_weight,
-                )
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[1u8],
+                    &domain_id.to_le_bytes(),
+                    &res.evidence_digest,
+                ]);
+                let (incremental, keys) = match proof.as_ref() {
+                    RestakingSlashingProof::RestakedEquivocation { epoch, height, .. } => {
+                        let locus = hash_fields_bytes(&[
+                            b"BDLM_ECON_GUARD_OFFENDER_V1",
+                            &[1u8],
+                            &epoch.to_le_bytes(),
+                            &height.to_le_bytes(),
+                        ]);
+                        compute_incremental_slash(
+                            &self.slashed_offenders,
+                            domain_id,
+                            1,
+                            &locus,
+                            &res.offenders,
+                            digest,
+                            |pk| pinned.restaked_member_info(pk),
+                        )?
+                    }
+                    RestakingSlashingProof::EotsDoubleSign { epoch, height, .. } => {
+                        let locus = hash_fields_bytes(&[
+                            b"BDLM_ECON_GUARD_OFFENDER_V1",
+                            &[2u8],
+                            &epoch.to_le_bytes(),
+                            &height.to_le_bytes(),
+                        ]);
+                        compute_incremental_slash(
+                            &self.slashed_offenders,
+                            domain_id,
+                            1,
+                            &locus,
+                            &res.offenders,
+                            digest,
+                            |pk| pinned.eots_member_info(pk),
+                        )?
+                    }
+                };
+                (digest, incremental, keys)
             }
             ContradictionEvidence::AuxPowPopFault {
                 network,
                 pinned,
                 proof,
             } => {
+                let supplied = GuardedExternalAdapter::AuxPowPop {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
                 let res = verify_pop_equivocation(network, pinned, proof)
                     .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
-                (
-                    hash_fields_bytes(&[
-                        b"BDLM_ECON_GUARD_EVIDENCE_V1",
-                        &[2u8],
-                        &domain_id.to_le_bytes(),
-                        &res.evidence_digest,
-                    ]),
-                    res.slashed_bond_weight,
-                )
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[2u8],
+                    &domain_id.to_le_bytes(),
+                    &res.evidence_digest,
+                ]);
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &proof.aux_chain_id.to_le_bytes(),
+                    &proof.aux_height.to_le_bytes(),
+                ]);
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    2,
+                    &locus,
+                    &res.offenders,
+                    digest,
+                    |pk| pinned.pop_member_info(pk),
+                )?;
+                (digest, incremental, keys)
             }
             ContradictionEvidence::SimplexFault {
                 network,
                 pinned,
                 proof,
             } => {
+                let supplied = GuardedExternalAdapter::SimplexBft {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
                 let res = verify_simplex_slashing(network, pinned, proof)
                     .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
-                (
-                    hash_fields_bytes(&[
-                        b"BDLM_ECON_GUARD_EVIDENCE_V1",
-                        &[3u8],
-                        &domain_id.to_le_bytes(),
-                        &res.evidence_digest,
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[3u8],
+                    &domain_id.to_le_bytes(),
+                    &res.evidence_digest,
+                ]);
+                let locus = match proof.as_ref() {
+                    SimplexSlashingProof::DoubleNotarize {
+                        epoch,
+                        view,
+                        height,
+                        ..
+                    } => hash_fields_bytes(&[
+                        b"BDLM_ECON_GUARD_OFFENDER_V1",
+                        &[1u8],
+                        &epoch.to_le_bytes(),
+                        &view.to_le_bytes(),
+                        &height.to_le_bytes(),
                     ]),
-                    res.slashed_stake_weight,
-                )
+                    SimplexSlashingProof::FinalizeAndSkip { epoch, view, .. } => {
+                        hash_fields_bytes(&[
+                            b"BDLM_ECON_GUARD_OFFENDER_V1",
+                            &[2u8],
+                            &epoch.to_le_bytes(),
+                            &view.to_le_bytes(),
+                        ])
+                    }
+                };
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    3,
+                    &locus,
+                    &res.offenders,
+                    digest,
+                    |pk| pinned.validator_member_info(pk),
+                )?;
+                (digest, incremental, keys)
+            }
+            ContradictionEvidence::AlgorandFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::AlgorandStateProof {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let slashed_weight = verify_algorand_equivocation(network, pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                // Sort the conflicting message digests canonically so swapping
+                // (message_a, message_b) collapses to the same digest, while
+                // binding voter position and ML-DSA-65 key commitment so two
+                // distinct Byzantine voters on the same pair slash independently.
+                let digest_a = proof.message_a.digest();
+                let digest_b = proof.message_b.digest();
+                let (lo_digest, hi_digest) = if digest_a <= digest_b {
+                    (&digest_a, &digest_b)
+                } else {
+                    (&digest_b, &digest_a)
+                };
+                let pk_commit = algorand_pubkey_commitment(&proof.reveal_a.mldsa65_pubkey);
+                let pos_le = proof.reveal_a.position.to_le_bytes();
+                let ivl_le = pinned.interval_index.to_le_bytes();
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[4u8],
+                    &domain_id.to_le_bytes(),
+                    &ivl_le,
+                    &pos_le,
+                    &pk_commit,
+                    lo_digest,
+                    hi_digest,
+                ]);
+                let locus = hash_fields_bytes(&[b"BDLM_ECON_GUARD_OFFENDER_V1", &ivl_le, &pos_le]);
+                let offender_key =
+                    offender_replay_key(domain_id, 4, &locus, SchemeId::ML_DSA_65, &pk_commit);
+                if self.slashed_offenders.contains(&offender_key) {
+                    return Err(EconomicGuardError::DuplicateEvidence(digest));
+                }
+                (digest, slashed_weight, vec![offender_key])
+            }
+            ContradictionEvidence::BasedPreconfFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::BasedPreconf {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let res = verify_based_preconf_equivocation(network, pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[5u8],
+                    &domain_id.to_le_bytes(),
+                    &res.evidence_digest,
+                ]);
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &pinned.l1_chain_id.to_le_bytes(),
+                    &proof.epoch.to_le_bytes(),
+                    &proof.l1_slot.to_le_bytes(),
+                    &proof.l2_sequence.to_le_bytes(),
+                ]);
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    5,
+                    &locus,
+                    &res.offenders,
+                    digest,
+                    |pk| pinned.member_info(pk),
+                )?;
+                (digest, incremental, keys)
+            }
+            ContradictionEvidence::TonCatchainFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::TonCatchain {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let res = verify_ton_catchain_equivocation(network, pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[6u8],
+                    &domain_id.to_le_bytes(),
+                    &res.evidence_digest,
+                ]);
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &proof.key_block_seqno.to_le_bytes(),
+                    &proof.catchain_seqno.to_le_bytes(),
+                    &proof.mc_seqno.to_le_bytes(),
+                ]);
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    6,
+                    &locus,
+                    &res.offenders,
+                    digest,
+                    |pk| pinned.validator_member_info(pk),
+                )?;
+                (digest, incremental, keys)
+            }
+            ContradictionEvidence::StellarFbaFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::StellarScp {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let res = verify_stellar_ballot_equivocation(network, pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[7u8],
+                    &domain_id.to_le_bytes(),
+                    &res.evidence_digest,
+                ]);
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &proof.slot_index.to_le_bytes(),
+                ]);
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    7,
+                    &locus,
+                    &res.offenders,
+                    digest,
+                    |pk| pinned.node_member_info(pk),
+                )?;
+                (digest, incremental, keys)
             }
         };
 
         if self.consumed_evidence.contains(&evidence_digest) {
             return Err(EconomicGuardError::DuplicateEvidence(evidence_digest));
         }
+        if self.consumed_evidence.len().saturating_add(1) > MAX_GUARD_REPLAY_ENTRIES
+            || self
+                .slashed_offenders
+                .len()
+                .saturating_add(new_offender_keys.len())
+                > MAX_GUARD_REPLAY_ENTRIES
+        {
+            return Err(EconomicGuardError::ReplayLedgerFull {
+                capacity: MAX_GUARD_REPLAY_ENTRIES,
+            });
+        }
         self.consumed_evidence.insert(evidence_digest);
+        for key in new_offender_keys {
+            self.slashed_offenders.insert(key);
+        }
 
         let Some(rec_mut) = self.domains.get_mut(&domain_id) else {
             return Err(EconomicGuardError::UnknownDomain(domain_id));
@@ -951,14 +1626,19 @@ impl BridgeEconomicGuard {
                     evidence_digest,
                 } => (1u8, frozen_at_height, evidence_digest),
             };
-            let (has_ed, ed_pk) = match rec.policy.prover_ed25519_pubkey {
-                Some(pk) => (1u8, pk),
-                None => (0u8, [0u8; 32]),
-            };
-            let (has_bond, bond_hash) = match &rec.prover_bond {
-                Some(b) => (1u8, hash_prover_bond(b)),
-                None => (0u8, [0u8; 32]),
-            };
+            let (has_ed, ed_pk) = rec
+                .policy
+                .prover_ed25519_pubkey
+                .map_or((0u8, [0u8; 32]), |pk| (1u8, pk));
+            let (has_bond, bond_hash) = rec
+                .prover_bond
+                .as_ref()
+                .map_or((0u8, [0u8; 32]), |b| (1u8, hash_prover_bond(b)));
+            let (has_pin, pin_hash) = rec
+                .policy
+                .pinned_adapter
+                .as_ref()
+                .map_or((0u8, [0u8; 32]), |pin| (1u8, pin.canonical_pin_digest()));
             domain_leaves.push(hash_fields_bytes(&[
                 b"BDLM_ECON_GUARD_DOMAIN_V1",
                 &domain_id.to_le_bytes(),
@@ -974,6 +1654,8 @@ impl BridgeEconomicGuard {
                 &[has_ed],
                 &ed_pk,
                 &rec.policy.prover_pq_pubkey,
+                &[has_pin],
+                &pin_hash,
                 &[status_tag],
                 &frozen_h.to_le_bytes(),
                 &frozen_ev,
@@ -983,19 +1665,25 @@ impl BridgeEconomicGuard {
                 &bond_hash,
             ]));
         }
+        let strict_flag = [u8::from(self.require_configured_domains)];
         let dom_count_le = u64::try_from(domain_leaves.len())
             .unwrap_or(u64::MAX)
             .to_le_bytes();
         let ev_count_le = u64::try_from(self.consumed_evidence.len())
             .unwrap_or(u64::MAX)
             .to_le_bytes();
+        let off_count_le = u64::try_from(self.slashed_offenders.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes();
         let mut fields: Vec<&[u8]> = Vec::with_capacity(
             domain_leaves
                 .len()
                 .saturating_add(self.consumed_evidence.len())
-                .saturating_add(3),
+                .saturating_add(self.slashed_offenders.len())
+                .saturating_add(5),
         );
         fields.push(b"BDLM_ECON_GUARD_ROOT_V1");
+        fields.push(&strict_flag);
         fields.push(&dom_count_le);
         for leaf in &domain_leaves {
             fields.push(leaf);
@@ -1003,6 +1691,10 @@ impl BridgeEconomicGuard {
         fields.push(&ev_count_le);
         for ev in &self.consumed_evidence {
             fields.push(ev);
+        }
+        fields.push(&off_count_le);
+        for offender in &self.slashed_offenders {
+            fields.push(offender);
         }
         hash_fields_bytes(&fields)
     }
@@ -1208,22 +1900,28 @@ mod tests {
             eots_providers: vec![],
         };
 
+        let net = "avs-guard-net";
         let mut guard = BridgeEconomicGuard::new();
         guard
             .configure_domain(
                 31,
-                DomainCeilingPolicy::default(),
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::RestakingAvs {
+                        network: net.into(),
+                        pinned: pinned.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
                 Some(make_bond(Address::from([0x91; 32]), 20_000)),
             )
             .unwrap();
 
-        let net = "avs-guard-net";
         let ma = restake_vote_sign_bytes(net, 2, 300, 400, &[0x01; 32]);
         let mb = restake_vote_sign_bytes(net, 2, 300, 400, &[0x02; 32]);
         let fault = ContradictionEvidence::RestakingFault {
             network: net.into(),
             pinned,
-            proof: RestakingSlashingProof::RestakedEquivocation {
+            proof: Box::new(RestakingSlashingProof::RestakedEquivocation {
                 epoch: 2,
                 height: 300,
                 horizon_a: 400,
@@ -1244,7 +1942,7 @@ mod tests {
                         .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &mb)
                         .unwrap(),
                 }],
-            },
+            }),
         };
         let out = guard
             .submit_contradiction(31, &fault, Address::from([0xC9; 32]), 310)
@@ -1259,6 +1957,72 @@ mod tests {
                 evidence_digest: out.evidence_digest,
             }
         );
+    }
+
+    #[test]
+    fn algorand_stateproof_fault_dispatch_slashes_bond_and_refuses_replay_or_forgery() {
+        let net = "algorand-guard-net";
+        let (pinned, proof, culpable_weight) =
+            crate::cross_domain::external::algorand_stateproof::equivocation_support::conflicting_voter_fixture(net);
+
+        let mut guard = BridgeEconomicGuard::new();
+        guard
+            .configure_domain(
+                41,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::AlgorandStateProof {
+                        network: net.into(),
+                        pinned: Box::new(pinned.clone()),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0x92; 32]), 20_000)),
+            )
+            .unwrap();
+
+        let fault = ContradictionEvidence::AlgorandFault {
+            network: net.into(),
+            pinned: Box::new(pinned.clone()),
+            proof: Box::new(proof.clone()),
+        };
+        let out = guard
+            .submit_contradiction(41, &fault, Address::from([0xCA; 32]), 410)
+            .expect(
+                "a verified Algorand voter equivocation freezes the domain and slashes the bond",
+            );
+        assert_eq!(out.external_slashed_weight, culpable_weight);
+        assert_eq!(out.slashed_bond_atoms, 20_000);
+        assert_eq!(out.challenger_reward_atoms, 2_000);
+        assert_eq!(
+            guard.record(41).unwrap().status,
+            DomainGuardStatus::FrozenByContradiction {
+                frozen_at_height: 410,
+                evidence_digest: out.evidence_digest,
+            }
+        );
+
+        // The same proof submitted twice is a replay, not a second slashing.
+        assert!(matches!(
+            guard.submit_contradiction(41, &fault, Address::from([0xCA; 32]), 411),
+            Err(EconomicGuardError::DuplicateEvidence(_))
+        ));
+
+        // A forged second signature never reaches the ledger.
+        let mut forged = proof;
+        forged.sig_b = vec![0u8; forged.sig_b.len()];
+        assert!(matches!(
+            guard.submit_contradiction(
+                41,
+                &ContradictionEvidence::AlgorandFault {
+                    network: net.into(),
+                    pinned: Box::new(pinned),
+                    proof: Box::new(forged),
+                },
+                Address::from([0xCA; 32]),
+                412
+            ),
+            Err(EconomicGuardError::InvalidEvidence(_))
+        ));
     }
 
     #[test]
@@ -1345,5 +2109,976 @@ mod tests {
         assert_eq!(out.slashed_bond_atoms, 12_000);
         assert_eq!(out.challenger_reward_atoms, 1_200);
         assert_eq!(state.get_balance(&challenger), 1_200);
+    }
+
+    #[test]
+    fn adapter_pin_mismatch_blocks_synthetic_committee_griefing_and_backing_inflation() {
+        let honest_ed = KeyPair::from_seed(&[0x51; 32]).unwrap();
+        let honest_pq = PqKeyPair::generate();
+        let attacker_ed = KeyPair::from_seed(&[0x52; 32]).unwrap();
+        let attacker_pq = PqKeyPair::generate();
+        let honest_pinned = PinnedRestakingAvsSet {
+            epoch: 5,
+            min_withdrawal_delay: 50,
+            max_shared_avs_per_operator: 4,
+            min_effective_restaked_stake: 500,
+            native_validators: vec![AvsQuorumMember {
+                ed25519_pubkey: honest_ed.public_key_bytes(),
+                stake_weight: 1_000,
+                pq_pubkey: honest_pq.public_key_bytes().to_vec(),
+            }],
+            restaked_operators: vec![RestakedOperator {
+                ed25519_pubkey: honest_ed.public_key_bytes(),
+                raw_stake: 2_000,
+                shared_avs_count: 2,
+                pq_pubkey: honest_pq.public_key_bytes().to_vec(),
+            }],
+            eots_providers: Vec::new(),
+        };
+        let mut synthetic_pinned = honest_pinned.clone();
+        synthetic_pinned.restaked_operators[0].ed25519_pubkey = attacker_ed.public_key_bytes();
+        synthetic_pinned.restaked_operators[0].pq_pubkey = attacker_pq.public_key_bytes().to_vec();
+
+        let net = "pin-guard-net";
+        let ma = restake_vote_sign_bytes(net, 5, 100, 200, &[0x11; 32]);
+        let mb = restake_vote_sign_bytes(net, 5, 100, 200, &[0x22; 32]);
+        let synthetic_fault = ContradictionEvidence::RestakingFault {
+            network: net.into(),
+            pinned: synthetic_pinned.clone(),
+            proof: Box::new(RestakingSlashingProof::RestakedEquivocation {
+                epoch: 5,
+                height: 100,
+                horizon_a: 200,
+                batch_digest_a: [0x11; 32],
+                sigs_a: vec![AvsSignature {
+                    signer_pubkey: attacker_ed.public_key_bytes(),
+                    ed25519_sig: attacker_ed.sign(&ma).to_vec(),
+                    pq_sig: attacker_pq
+                        .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &ma)
+                        .unwrap(),
+                }],
+                horizon_b: 200,
+                batch_digest_b: [0x22; 32],
+                sigs_b: vec![AvsSignature {
+                    signer_pubkey: attacker_ed.public_key_bytes(),
+                    ed25519_sig: attacker_ed.sign(&mb).to_vec(),
+                    pq_sig: attacker_pq
+                        .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &mb)
+                        .unwrap(),
+                }],
+            }),
+        };
+
+        // 1. Unpinned domain refuses external fault and external refresh.
+        let mut guard = BridgeEconomicGuard::new();
+        guard
+            .configure_domain(
+                51,
+                DomainCeilingPolicy::default(),
+                Some(make_bond(Address::from([0x51; 32]), 50_000)),
+            )
+            .unwrap();
+        assert!(matches!(
+            guard.submit_contradiction(51, &synthetic_fault, Address::from([0xAA; 32]), 10),
+            Err(EconomicGuardError::AdapterPinMismatch { domain_id: 51, .. })
+        ));
+        assert_eq!(guard.record(51).unwrap().status, DomainGuardStatus::Active);
+        assert_eq!(
+            guard
+                .record(51)
+                .unwrap()
+                .prover_bond
+                .as_ref()
+                .unwrap()
+                .live_atoms(),
+            50_000
+        );
+
+        // 2. Domain pinned to the honest committee rejects both synthetic
+        //    contradiction griefing and synthetic backing refresh.
+        guard
+            .configure_domain(
+                51,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::RestakingAvs {
+                        network: net.into(),
+                        pinned: honest_pinned.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0x51; 32]), 50_000)),
+            )
+            .unwrap();
+        assert!(matches!(
+            guard.submit_contradiction(51, &synthetic_fault, Address::from([0xAA; 32]), 11),
+            Err(EconomicGuardError::AdapterPinMismatch { domain_id: 51, .. })
+        ));
+        let dummy_raw = RawConsensusEvidence {
+            adapter: crate::cross_domain::external::spec::AdapterId::from_name("restaking-avs-v1"),
+            evidence_version: 1,
+            network: net.into(),
+            payload: Vec::new(),
+            declared_height: 100,
+            declared_root: [0x11; 32],
+            submitter: Address::from([0x51; 32]),
+        };
+        let strict_policy = VerificationPolicy::strict(1_700_000_000);
+        assert!(matches!(
+            guard.refresh_backing_from_adapter(
+                51,
+                &GuardedExternalAdapter::RestakingAvs {
+                    network: net.into(),
+                    pinned: synthetic_pinned,
+                },
+                &dummy_raw,
+                &strict_policy,
+            ),
+            Err(EconomicGuardError::AdapterPinMismatch { domain_id: 51, .. })
+        ));
+        // Even with identical committee keys, a mismatched network name is rejected.
+        assert!(matches!(
+            guard.refresh_backing_from_adapter(
+                51,
+                &GuardedExternalAdapter::RestakingAvs {
+                    network: "wrong-network".into(),
+                    pinned: honest_pinned,
+                },
+                &dummy_raw,
+                &strict_policy,
+            ),
+            Err(EconomicGuardError::AdapterPinMismatch { domain_id: 51, .. })
+        ));
+        assert_eq!(guard.record(51).unwrap().status, DomainGuardStatus::Active);
+        assert_eq!(
+            guard
+                .record(51)
+                .unwrap()
+                .prover_bond
+                .as_ref()
+                .unwrap()
+                .live_atoms(),
+            50_000
+        );
+    }
+
+    #[test]
+    fn strict_production_guard_and_external_roots_fail_closed_on_unconfigured_domains() {
+        use crate::core::account::AccountState;
+        use crate::cross_domain::bridge::AssetId;
+        use crate::cross_domain::bridge_tx::{
+            enable_chain_economic_guard_mode, execute_bridge_tx, lock, register_asset, BridgeTx,
+            BridgeTxContext, BridgeTxError, LockRequest, ProvenBridgeEvent,
+        };
+        use crate::cross_domain::event_tree::DomainEventTree;
+        use crate::domain::plugin::default_domain;
+        use crate::domain::types::{ConsensusKind, DomainCommitment};
+        use crate::domain::POW_HEADER_CHAIN_ADAPTER;
+        use crate::registry::role::roles::RELAYER;
+        use crate::settlement::domains::accept_verified_commitment;
+
+        // 1. Mainnet (45260) and public testnet (45261) fail closed; local devnet stays permissive.
+        let mut mainnet_guard = BridgeEconomicGuard::for_chain_id(MAINNET_GUARD_CHAIN_ID);
+        let testnet_guard = BridgeEconomicGuard::for_chain_id(TESTNET_GUARD_CHAIN_ID);
+        let mut devnet_guard = BridgeEconomicGuard::for_chain_id(45_262);
+        assert!(mainnet_guard.requires_configured_domains());
+        assert!(testnet_guard.requires_configured_domains());
+        assert!(!devnet_guard.requires_configured_domains());
+        assert!(!mainnet_guard.is_empty());
+        assert_eq!(
+            mainnet_guard.check_and_record_flow(99, 1, 1),
+            Err(EconomicGuardError::UnknownDomain(99))
+        );
+        assert_eq!(
+            testnet_guard.ensure_domain_not_frozen(99),
+            Err(EconomicGuardError::UnknownDomain(99))
+        );
+        assert!(devnet_guard.check_and_record_flow(99, 1_000, 1).is_ok());
+
+        // 2. Even on a devnet state, an external_roots-anchored foreign domain cannot mint
+        //    through bridge execution without an explicit DomainCeilingPolicy.
+        let mut state = AccountState::new();
+        let owner = Address::from([0x61; 32]);
+        let recipient = Address::from([0x62; 32]);
+        let carrier = Address::from([0x63; 32]);
+        let min_stake = state.registry.params().min_stake;
+        state.add_balance(&owner, 500_000);
+        state.add_balance(&carrier, min_stake.saturating_add(10_000));
+        state
+            .registry
+            .register(carrier, RELAYER, min_stake, 0)
+            .unwrap();
+        let d77 = default_domain(77, ConsensusKind::PoW, 45_277, POW_HEADER_CHAIN_ADAPTER, 1);
+        let d78 = default_domain(78, ConsensusKind::PoW, 45_278, POW_HEADER_CHAIN_ADAPTER, 1);
+        crate::settlement::domains::register_domain(&mut state, d77).unwrap();
+        crate::settlement::domains::register_domain(&mut state, d78).unwrap();
+        let asset = AssetId::for_domain(77, b"ext-wrapped");
+        register_asset(&mut state, asset, 77).unwrap();
+        let (_, lock_event) = lock(
+            &mut state,
+            owner,
+            &LockRequest {
+                source_domain: 77,
+                target_domain: 78,
+                source_height: 1,
+                event_index: 0,
+                asset_id: asset,
+                recipient,
+                amount: 10_000,
+                expiry_height: 500,
+            },
+            0,
+            1,
+        )
+        .unwrap();
+        let mut tree = DomainEventTree::new();
+        tree.push(lock_event.clone());
+        let proof = tree.proof(0).unwrap();
+        let block_hash = [0xD7; 32];
+        accept_verified_commitment(
+            &mut state,
+            DomainCommitment {
+                domain_id: 77,
+                domain_height: 1,
+                domain_block_hash: block_hash,
+                parent_domain_block_hash: [0u8; 32],
+                state_root: [0x11; 32],
+                tx_root: [0u8; 32],
+                event_root: tree.root(),
+                validator_set_hash: [0u8; 32],
+                consensus_kind: ConsensusKind::PoW,
+                finality_proof_hash: [0x22; 32],
+                timestamp_ms: 1_000,
+                sequence: 0,
+                producer: None,
+                state_updates: std::collections::BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        // Anchor domain 77 in external_roots without configuring BridgeEconomicGuard.
+        state.external_roots.insert(77, [0x77; 32]);
+        let proven_lock = ProvenBridgeEvent {
+            domain: 77,
+            height: 1,
+            sequence: 0,
+            expected_block_hash: block_hash,
+            event: lock_event,
+            proof,
+        };
+        let ctx = BridgeTxContext {
+            sender: carrier,
+            fee: 0,
+            height: 2,
+        };
+        let err = execute_bridge_tx(&mut state, &ctx, &BridgeTx::Mint(Box::new(proven_lock)))
+            .expect_err("anchored external domain without guard policy must fail closed");
+        assert!(
+            matches!(err, BridgeTxError::Refused(ref msg) if msg.contains("no economic guard record")),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(state.get_balance(&recipient), 0);
+
+        // Toggle strict mode on state and confirm root commits the flag.
+        let r_before = state.bridge_state.economic_guard.root();
+        assert!(enable_chain_economic_guard_mode(
+            &mut state,
+            TESTNET_GUARD_CHAIN_ID
+        ));
+        assert_ne!(state.bridge_state.economic_guard.root(), r_before);
+    }
+
+    #[test]
+    fn canonical_swap_subset_superset_algorand_and_cap_invariants_hold() {
+        // 1. Restaking: incremental superset credits only the new offender;
+        //    swapped (A, B) <-> (B, A) and pure subset replays are rejected.
+        let op1_ed = KeyPair::from_seed(&[0x61; 32]).unwrap();
+        let op1_pq = PqKeyPair::generate();
+        let op2_ed = KeyPair::from_seed(&[0x62; 32]).unwrap();
+        let op2_pq = PqKeyPair::generate();
+        let pinned = PinnedRestakingAvsSet {
+            epoch: 3,
+            min_withdrawal_delay: 20,
+            max_shared_avs_per_operator: 4,
+            min_effective_restaked_stake: 500,
+            native_validators: vec![AvsQuorumMember {
+                ed25519_pubkey: op1_ed.public_key_bytes(),
+                stake_weight: 1_000,
+                pq_pubkey: op1_pq.public_key_bytes().to_vec(),
+            }],
+            restaked_operators: vec![
+                RestakedOperator {
+                    ed25519_pubkey: op1_ed.public_key_bytes(),
+                    raw_stake: 2_000, // haircut -> 1_000
+                    shared_avs_count: 2,
+                    pq_pubkey: op1_pq.public_key_bytes().to_vec(),
+                },
+                RestakedOperator {
+                    ed25519_pubkey: op2_ed.public_key_bytes(),
+                    raw_stake: 3_000, // haircut -> 1_500
+                    shared_avs_count: 2,
+                    pq_pubkey: op2_pq.public_key_bytes().to_vec(),
+                },
+            ],
+            eots_providers: Vec::new(),
+        };
+        let net = "dedup-avs-net";
+        let mut guard = BridgeEconomicGuard::new();
+        guard
+            .configure_domain(
+                61,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::RestakingAvs {
+                        network: net.into(),
+                        pinned: pinned.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0x71; 32]), 10_000)),
+            )
+            .unwrap();
+
+        let sign_op = |ed: &KeyPair, pq: &PqKeyPair, msg: &[u8]| AvsSignature {
+            signer_pubkey: ed.public_key_bytes(),
+            ed25519_sig: ed.sign(msg).to_vec(),
+            pq_sig: pq.sign(crate::crypto::ctx::CROSS_DOMAIN_V1, msg).unwrap(),
+        };
+        let ma = restake_vote_sign_bytes(net, 3, 50, 90, &[0x10; 32]);
+        let mb = restake_vote_sign_bytes(net, 3, 50, 90, &[0x20; 32]);
+
+        // Submit op1 alone -> slashes 1_000 external weight and full 10_000 bond once.
+        let single_op1 = ContradictionEvidence::RestakingFault {
+            network: net.into(),
+            pinned: pinned.clone(),
+            proof: Box::new(RestakingSlashingProof::RestakedEquivocation {
+                epoch: 3,
+                height: 50,
+                horizon_a: 90,
+                batch_digest_a: [0x10; 32],
+                sigs_a: vec![sign_op(&op1_ed, &op1_pq, &ma)],
+                horizon_b: 90,
+                batch_digest_b: [0x20; 32],
+                sigs_b: vec![sign_op(&op1_ed, &op1_pq, &mb)],
+            }),
+        };
+        let out1 = guard
+            .submit_contradiction(61, &single_op1, Address::from([0xC1; 32]), 60)
+            .unwrap();
+        assert_eq!(out1.external_slashed_weight, 1_000);
+        assert_eq!(out1.slashed_bond_atoms, 10_000);
+
+        // Swapping (A, B) <-> (B, A) produces the exact same canonical digest and is rejected.
+        let swapped_op1 = ContradictionEvidence::RestakingFault {
+            network: net.into(),
+            pinned: pinned.clone(),
+            proof: Box::new(RestakingSlashingProof::RestakedEquivocation {
+                epoch: 3,
+                height: 50,
+                horizon_a: 90,
+                batch_digest_a: [0x20; 32],
+                sigs_a: vec![sign_op(&op1_ed, &op1_pq, &mb)],
+                horizon_b: 90,
+                batch_digest_b: [0x10; 32],
+                sigs_b: vec![sign_op(&op1_ed, &op1_pq, &ma)],
+            }),
+        };
+        assert_eq!(
+            guard.submit_contradiction(61, &swapped_op1, Address::from([0xC1; 32]), 61),
+            Err(EconomicGuardError::DuplicateEvidence(out1.evidence_digest))
+        );
+
+        // Submitting superset {op1, op2} credits ONLY op2's incremental 1_500 (never re-counting op1).
+        let superset = ContradictionEvidence::RestakingFault {
+            network: net.into(),
+            pinned: pinned.clone(),
+            proof: Box::new(RestakingSlashingProof::RestakedEquivocation {
+                epoch: 3,
+                height: 50,
+                horizon_a: 90,
+                batch_digest_a: [0x10; 32],
+                sigs_a: vec![
+                    sign_op(&op1_ed, &op1_pq, &ma),
+                    sign_op(&op2_ed, &op2_pq, &ma),
+                ],
+                horizon_b: 90,
+                batch_digest_b: [0x20; 32],
+                sigs_b: vec![
+                    sign_op(&op1_ed, &op1_pq, &mb),
+                    sign_op(&op2_ed, &op2_pq, &mb),
+                ],
+            }),
+        };
+        let out2 = guard
+            .submit_contradiction(61, &superset, Address::from([0xC2; 32]), 62)
+            .unwrap();
+        assert_eq!(out2.external_slashed_weight, 1_500);
+        assert_eq!(out2.slashed_bond_atoms, 0);
+
+        // Pure subset {op2} after {op1, op2} is now rejected as already slashed.
+        let subset_op2 = ContradictionEvidence::RestakingFault {
+            network: net.into(),
+            pinned,
+            proof: Box::new(RestakingSlashingProof::RestakedEquivocation {
+                epoch: 3,
+                height: 50,
+                horizon_a: 90,
+                batch_digest_a: [0x10; 32],
+                sigs_a: vec![sign_op(&op2_ed, &op2_pq, &ma)],
+                horizon_b: 90,
+                batch_digest_b: [0x20; 32],
+                sigs_b: vec![sign_op(&op2_ed, &op2_pq, &mb)],
+            }),
+        };
+        assert!(matches!(
+            guard.submit_contradiction(61, &subset_op2, Address::from([0xC2; 32]), 63),
+            Err(EconomicGuardError::DuplicateEvidence(_))
+        ));
+
+        // 2. Algorand: swapped (message_a, message_b) is rejected for voter 0,
+        //    expired forward-secure key is rejected, and distinct voter 1 on the
+        //    same conflicting pair is accepted with its own 300 stake weight.
+        let algo_net = "dedup-algo-net";
+        let (algo_pin, (proof_v0, w0), (proof_v1, w1)) =
+            crate::cross_domain::external::algorand_stateproof::equivocation_support::two_conflicting_voters_fixture(algo_net);
+        guard
+            .configure_domain(
+                62,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::AlgorandStateProof {
+                        network: algo_net.into(),
+                        pinned: Box::new(algo_pin.clone()),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .unwrap();
+        let a0 = guard
+            .submit_contradiction(
+                62,
+                &ContradictionEvidence::AlgorandFault {
+                    network: algo_net.into(),
+                    pinned: Box::new(algo_pin.clone()),
+                    proof: Box::new(proof_v0.clone()),
+                },
+                Address::from([0xC3; 32]),
+                70,
+            )
+            .unwrap();
+        assert_eq!(a0.external_slashed_weight, w0);
+
+        // Swap message_a <-> message_b and sig_a <-> sig_b for voter 0 -> rejected!
+        let mut swapped_v0 = proof_v0.clone();
+        swapped_v0.message_a = proof_v0.message_b.clone();
+        swapped_v0.message_b = proof_v0.message_a.clone();
+        swapped_v0.reveal_a.mldsa65_sig = proof_v0.sig_b.clone();
+        swapped_v0.sig_b = proof_v0.reveal_a.mldsa65_sig.clone();
+        assert_eq!(
+            guard.submit_contradiction(
+                62,
+                &ContradictionEvidence::AlgorandFault {
+                    network: algo_net.into(),
+                    pinned: Box::new(algo_pin.clone()),
+                    proof: Box::new(swapped_v0),
+                },
+                Address::from([0xC3; 32]),
+                71,
+            ),
+            Err(EconomicGuardError::DuplicateEvidence(a0.evidence_digest))
+        );
+
+        // Voter 1 on the exact same conflicting (message_a, message_b) succeeds!
+        let a1 = guard
+            .submit_contradiction(
+                62,
+                &ContradictionEvidence::AlgorandFault {
+                    network: algo_net.into(),
+                    pinned: Box::new(algo_pin.clone()),
+                    proof: Box::new(proof_v1.clone()),
+                },
+                Address::from([0xC4; 32]),
+                72,
+            )
+            .unwrap();
+        assert_eq!(a1.external_slashed_weight, w1);
+        assert_ne!(a1.evidence_digest, a0.evidence_digest);
+
+        // Expired forward-secure key window check: rounds outside key_last_round fail closed.
+        let mut expired = proof_v0;
+        expired.reveal_a.key_last_round = 10_050; // attested round is 10_100..=10_102
+        let exp_err = verify_algorand_equivocation(algo_net, &algo_pin, &expired)
+            .expect_err("rounds past forward-secure key_last_round must fail closed");
+        assert!(exp_err.to_string().contains("key lifetime"), "{exp_err}");
+
+        // 3. Hard replay cap fails closed without evicting any existing entry.
+        let mut capped = BridgeEconomicGuard::new();
+        capped
+            .configure_domain(
+                63,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::AlgorandStateProof {
+                        network: algo_net.into(),
+                        pinned: Box::new(algo_pin.clone()),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .unwrap();
+        for i in 0..MAX_GUARD_REPLAY_ENTRIES {
+            let mut h = [0u8; 32];
+            h[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            capped.consumed_evidence.insert(h);
+        }
+        assert_eq!(
+            capped.submit_contradiction(
+                63,
+                &ContradictionEvidence::AlgorandFault {
+                    network: algo_net.into(),
+                    pinned: Box::new(algo_pin),
+                    proof: Box::new(proof_v1),
+                },
+                Address::from([0xC5; 32]),
+                80,
+            ),
+            Err(EconomicGuardError::ReplayLedgerFull {
+                capacity: MAX_GUARD_REPLAY_ENTRIES,
+            })
+        );
+        assert_eq!(capped.consumed_evidence.len(), MAX_GUARD_REPLAY_ENTRIES);
+        assert_eq!(capped.record(63).unwrap().status, DomainGuardStatus::Active);
+    }
+
+    #[test]
+    fn based_ton_stellar_slashing_and_mina_pin_digest_enforce_hybrid_pq_and_freeze() {
+        use crate::cross_domain::external::based_preconf::{
+            preconf_cert_sign_bytes, BasedPreconfValidator, BasedSig,
+        };
+        use crate::cross_domain::external::stellar_fba::{
+            compute_network_id_hash, externalize_sign_bytes, ScpExternalizeEnvelope, ScpQuorumSet,
+            ScpValidatorNode,
+        };
+        use crate::cross_domain::external::ton_catchain::{
+            catchain_commit_sign_bytes, compute_validator_list_hash, CatchainSig, TonValidator,
+        };
+
+        let k_ed = KeyPair::from_seed(&[0x73; 32]).unwrap();
+        let k_pq = PqKeyPair::generate();
+        let challenger = Address::from([0xD1; 32]);
+        let mut guard = BridgeEconomicGuard::production();
+
+        // 1. BasedPreconfFault: mandatory ML-DSA-65 + canonical swap replay refusal.
+        let based_pin = PinnedBasedPreconfCommittee {
+            epoch: 9,
+            l1_chain_id: 1,
+            require_focil: true,
+            members: vec![BasedPreconfValidator {
+                ed25519_pubkey: k_ed.public_key_bytes(),
+                voting_weight: 4_200,
+                pq_pubkey: k_pq.public_key_bytes().to_vec(),
+            }],
+        };
+        guard
+            .configure_domain(
+                71,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::BasedPreconf {
+                        network: "based-net".into(),
+                        pinned: based_pin.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0x81; 32]), 30_000)),
+            )
+            .unwrap();
+        let ba = preconf_cert_sign_bytes("based-net", 9, 100, 7, &[0xA1; 32]);
+        let bb = preconf_cert_sign_bytes("based-net", 9, 100, 7, &[0xB2; 32]);
+        // Stripped PQ signature fails closed.
+        let stripped_based = ContradictionEvidence::BasedPreconfFault {
+            network: "based-net".into(),
+            pinned: based_pin.clone(),
+            proof: Box::new(BasedPreconfEquivocationProof {
+                epoch: 9,
+                l1_slot: 100,
+                l2_sequence: 7,
+                batch_digest_a: [0xA1; 32],
+                sigs_a: vec![BasedSig {
+                    signer_pubkey: k_ed.public_key_bytes(),
+                    ed25519_sig: k_ed.sign(&ba).to_vec(),
+                    pq_sig: Vec::new(),
+                }],
+                batch_digest_b: [0xB2; 32],
+                sigs_b: vec![BasedSig {
+                    signer_pubkey: k_ed.public_key_bytes(),
+                    ed25519_sig: k_ed.sign(&bb).to_vec(),
+                    pq_sig: k_pq.sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &bb).unwrap(),
+                }],
+            }),
+        };
+        assert!(matches!(
+            guard.submit_contradiction(71, &stripped_based, challenger, 90),
+            Err(EconomicGuardError::InvalidEvidence(_))
+        ));
+        let valid_based = ContradictionEvidence::BasedPreconfFault {
+            network: "based-net".into(),
+            pinned: based_pin,
+            proof: Box::new(BasedPreconfEquivocationProof {
+                epoch: 9,
+                l1_slot: 100,
+                l2_sequence: 7,
+                batch_digest_a: [0xA1; 32],
+                sigs_a: vec![BasedSig {
+                    signer_pubkey: k_ed.public_key_bytes(),
+                    ed25519_sig: k_ed.sign(&ba).to_vec(),
+                    pq_sig: k_pq.sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &ba).unwrap(),
+                }],
+                batch_digest_b: [0xB2; 32],
+                sigs_b: vec![BasedSig {
+                    signer_pubkey: k_ed.public_key_bytes(),
+                    ed25519_sig: k_ed.sign(&bb).to_vec(),
+                    pq_sig: k_pq.sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &bb).unwrap(),
+                }],
+            }),
+        };
+        let based_out = guard
+            .submit_contradiction(71, &valid_based, challenger, 91)
+            .unwrap();
+        assert_eq!(based_out.external_slashed_weight, 4_200);
+        assert_eq!(based_out.slashed_bond_atoms, 30_000);
+        assert_eq!(based_out.challenger_reward_atoms, 3_000);
+
+        // 2. TonCatchainFault: verifies validator list hash + hybrid signatures + slashes weight.
+        let ton_pin = PinnedTonMasterchainAnchor {
+            key_block_seqno: 500,
+            utime_since: 1_700_000_000,
+            utime_until: 1_700_065_536,
+            validators: vec![TonValidator {
+                ed25519_pubkey: k_ed.public_key_bytes(),
+                weight: 7_700,
+                pq_pubkey: k_pq.public_key_bytes().to_vec(),
+            }],
+        };
+        guard
+            .configure_domain(
+                72,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::TonCatchain {
+                        network: "ton-net".into(),
+                        pinned: ton_pin.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0x82; 32]), 15_000)),
+            )
+            .unwrap();
+        let vhash = compute_validator_list_hash(
+            ton_pin.utime_since,
+            ton_pin.utime_until,
+            &ton_pin.validators,
+        );
+        let ta = catchain_commit_sign_bytes("ton-net", 12, &vhash, 510, &[0x31; 32], &[0x41; 32]);
+        let tb = catchain_commit_sign_bytes("ton-net", 12, &vhash, 510, &[0x32; 32], &[0x42; 32]);
+        let ton_fault = ContradictionEvidence::TonCatchainFault {
+            network: "ton-net".into(),
+            pinned: ton_pin,
+            proof: Box::new(TonCatchainEquivocationProof {
+                key_block_seqno: 500,
+                catchain_seqno: 12,
+                mc_seqno: 510,
+                root_hash_a: [0x31; 32],
+                file_hash_a: [0x41; 32],
+                sigs_a: vec![CatchainSig {
+                    signer_pubkey: k_ed.public_key_bytes(),
+                    ed25519_sig: k_ed.sign(&ta).to_vec(),
+                    pq_sig: k_pq.sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &ta).unwrap(),
+                }],
+                root_hash_b: [0x32; 32],
+                file_hash_b: [0x42; 32],
+                sigs_b: vec![CatchainSig {
+                    signer_pubkey: k_ed.public_key_bytes(),
+                    ed25519_sig: k_ed.sign(&tb).to_vec(),
+                    pq_sig: k_pq.sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &tb).unwrap(),
+                }],
+            }),
+        };
+        let ton_out = guard
+            .submit_contradiction(72, &ton_fault, challenger, 92)
+            .unwrap();
+        assert_eq!(ton_out.external_slashed_weight, 7_700);
+        assert_eq!(ton_out.slashed_bond_atoms, 15_000);
+
+        // 3. StellarFbaFault: verifies Mazieres quorum intersection + conflicting EXTERNALIZE
+        //    ballots even at distinct ballot counters + slashes bonded tier node.
+        let qset = ScpQuorumSet {
+            threshold: 1,
+            validators: vec![k_ed.public_key_bytes()],
+            inner_sets: Vec::new(),
+        };
+        let qhash = qset.hash();
+        let scp_pin = PinnedScpTier {
+            network_passphrase: "Public Global Stellar Network ; September 2015".into(),
+            has_bonded_slash_escrow: true,
+            nodes: vec![ScpValidatorNode {
+                ed25519_pubkey: k_ed.public_key_bytes(),
+                quorum_set: qset,
+                pq_pubkey: k_pq.public_key_bytes().to_vec(),
+            }],
+        };
+        guard
+            .configure_domain(
+                73,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::StellarScp {
+                        network: "stellar-net".into(),
+                        pinned: scp_pin.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0x83; 32]), 10_000)),
+            )
+            .unwrap();
+        let net_hash = compute_network_id_hash("stellar-net", &scp_pin.network_passphrase);
+        let sa = externalize_sign_bytes(&net_hash, 888, 1, 2, &[0x51; 32], &qhash);
+        let sb = externalize_sign_bytes(&net_hash, 888, 3, 5, &[0x52; 32], &qhash);
+        let scp_fault = ContradictionEvidence::StellarFbaFault {
+            network: "stellar-net".into(),
+            pinned: scp_pin,
+            proof: Box::new(StellarBallotEquivocationProof {
+                slot_index: 888,
+                ledger_header_hash_a: [0x51; 32],
+                envelopes_a: vec![ScpExternalizeEnvelope {
+                    node_id: k_ed.public_key_bytes(),
+                    commit_counter: 1,
+                    highest_counter: 2,
+                    quorum_set_hash: qhash,
+                    ed25519_sig: k_ed.sign(&sa).to_vec(),
+                    pq_sig: k_pq.sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &sa).unwrap(),
+                }],
+                ledger_header_hash_b: [0x52; 32],
+                envelopes_b: vec![ScpExternalizeEnvelope {
+                    node_id: k_ed.public_key_bytes(),
+                    commit_counter: 3,
+                    highest_counter: 5,
+                    quorum_set_hash: qhash,
+                    ed25519_sig: k_ed.sign(&sb).to_vec(),
+                    pq_sig: k_pq.sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &sb).unwrap(),
+                }],
+            }),
+        };
+        let scp_out = guard
+            .submit_contradiction(73, &scp_fault, challenger, 93)
+            .unwrap();
+        assert_eq!(scp_out.external_slashed_weight, 1);
+        assert_eq!(scp_out.slashed_bond_atoms, 10_000);
+
+        // 4. MinaRecursive canonical pin digest binds every succinct genesis field.
+        let mina_a = PinnedSuccinctGenesis {
+            genesis_state_hash: [0x11; 32],
+            genesis_staking_ledger_root: [0x22; 32],
+            step_program_hash: [0x33; 32],
+            slots_per_sub_window: 8,
+            slots_per_epoch: 88,
+            min_window_density_slots: 66,
+            aggregator_pq_pubkey: k_pq.public_key_bytes().to_vec(),
+        };
+        let mut mina_b = mina_a.clone();
+        mina_b.min_window_density_slots = 65;
+        assert_ne!(
+            GuardedExternalAdapter::MinaRecursive {
+                network: "mina-net".into(),
+                pinned: Box::new(mina_a),
+            }
+            .canonical_pin_digest(),
+            GuardedExternalAdapter::MinaRecursive {
+                network: "mina-net".into(),
+                pinned: Box::new(mina_b),
+            }
+            .canonical_pin_digest(),
+        );
+    }
+
+    #[test]
+    fn auxpow_and_simplex_faults_reject_swapped_replays_and_slash_pinned_signers() {
+        use crate::cross_domain::external::auxpow_pop::{
+            pop_anchor_sign_bytes, PopAnchorSigner, PopSignature,
+        };
+        use crate::cross_domain::external::simplex_bft::{
+            notarize_sign_bytes, SimplexSignature, SimplexValidator,
+        };
+
+        let k_ed = KeyPair::from_seed(&[0x83; 32]).unwrap();
+        let k_pq = PqKeyPair::generate();
+        let challenger = Address::from([0xE1; 32]);
+        let mut guard = BridgeEconomicGuard::production();
+
+        // 1. AuxPowPopFault swap invariance + exact bond weight slashing.
+        let aux_pin = PinnedAuxPowAnchor {
+            aux_chain_id: 42,
+            trusted_parent_hash: [0x99; 32],
+            max_target_bits: 0x207f_ffff,
+            min_cumulative_work: [0; 32],
+            min_confirmations: 1,
+            pop_signers: vec![PopAnchorSigner {
+                ed25519_pubkey: k_ed.public_key_bytes(),
+                bond_weight: 2_500,
+                pq_pubkey: k_pq.public_key_bytes().to_vec(),
+            }],
+        };
+        guard
+            .configure_domain(
+                81,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::AuxPowPop {
+                        network: "aux-net".into(),
+                        pinned: Box::new(aux_pin.clone()),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .unwrap();
+        let pop_msg_first = pop_anchor_sign_bytes("aux-net", 42, 700, &[0x11; 32], &[0x21; 32]);
+        let pop_msg_second = pop_anchor_sign_bytes("aux-net", 42, 700, &[0x12; 32], &[0x22; 32]);
+        let pop_first = PopSignature {
+            signer_pubkey: k_ed.public_key_bytes(),
+            ed25519_sig: k_ed.sign(&pop_msg_first).to_vec(),
+            pq_sig: k_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &pop_msg_first)
+                .unwrap(),
+        };
+        let pop_second = PopSignature {
+            signer_pubkey: k_ed.public_key_bytes(),
+            ed25519_sig: k_ed.sign(&pop_msg_second).to_vec(),
+            pq_sig: k_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &pop_msg_second)
+                .unwrap(),
+        };
+        let aux_out = guard
+            .submit_contradiction(
+                81,
+                &ContradictionEvidence::AuxPowPopFault {
+                    network: "aux-net".into(),
+                    pinned: Box::new(aux_pin.clone()),
+                    proof: Box::new(PopEquivocationProof {
+                        aux_chain_id: 42,
+                        aux_height: 700,
+                        parent_hash_a: [0x11; 32],
+                        aux_digest_a: [0x21; 32],
+                        sigs_a: vec![pop_first.clone()],
+                        parent_hash_b: [0x12; 32],
+                        aux_digest_b: [0x22; 32],
+                        sigs_b: vec![pop_second.clone()],
+                    }),
+                },
+                challenger,
+                100,
+            )
+            .unwrap();
+        assert_eq!(aux_out.external_slashed_weight, 2_500);
+        assert_eq!(
+            guard.submit_contradiction(
+                81,
+                &ContradictionEvidence::AuxPowPopFault {
+                    network: "aux-net".into(),
+                    pinned: Box::new(aux_pin),
+                    proof: Box::new(PopEquivocationProof {
+                        aux_chain_id: 42,
+                        aux_height: 700,
+                        parent_hash_a: [0x12; 32],
+                        aux_digest_a: [0x22; 32],
+                        sigs_a: vec![pop_second],
+                        parent_hash_b: [0x11; 32],
+                        aux_digest_b: [0x21; 32],
+                        sigs_b: vec![pop_first],
+                    }),
+                },
+                challenger,
+                101,
+            ),
+            Err(EconomicGuardError::DuplicateEvidence(
+                aux_out.evidence_digest
+            ))
+        );
+
+        // 2. SimplexFault DoubleNotarize swap invariance + exact stake slashing.
+        let sx_pin = PinnedSimplexCommittee {
+            epoch: 4,
+            validators: vec![SimplexValidator {
+                ed25519_pubkey: k_ed.public_key_bytes(),
+                stake_weight: 6_400,
+                pq_pubkey: k_pq.public_key_bytes().to_vec(),
+            }],
+        };
+        guard
+            .configure_domain(
+                82,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::SimplexBft {
+                        network: "sx-net".into(),
+                        pinned: sx_pin.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .unwrap();
+        let sx_msg_first = notarize_sign_bytes("sx-net", 4, 25, &[0x61; 32]);
+        let sx_msg_second = notarize_sign_bytes("sx-net", 4, 25, &[0x62; 32]);
+        let sx_first = SimplexSignature {
+            signer_pubkey: k_ed.public_key_bytes(),
+            ed25519_sig: k_ed.sign(&sx_msg_first).to_vec(),
+            pq_sig: k_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &sx_msg_first)
+                .unwrap(),
+        };
+        let sx_second = SimplexSignature {
+            signer_pubkey: k_ed.public_key_bytes(),
+            ed25519_sig: k_ed.sign(&sx_msg_second).to_vec(),
+            pq_sig: k_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &sx_msg_second)
+                .unwrap(),
+        };
+        let sx_out = guard
+            .submit_contradiction(
+                82,
+                &ContradictionEvidence::SimplexFault {
+                    network: "sx-net".into(),
+                    pinned: sx_pin.clone(),
+                    proof: Box::new(SimplexSlashingProof::DoubleNotarize {
+                        epoch: 4,
+                        view: 25,
+                        height: 25,
+                        block_digest_a: [0x61; 32],
+                        sigs_a: vec![sx_first.clone()],
+                        block_digest_b: [0x62; 32],
+                        sigs_b: vec![sx_second.clone()],
+                    }),
+                },
+                challenger,
+                102,
+            )
+            .unwrap();
+        assert_eq!(sx_out.external_slashed_weight, 6_400);
+        assert_eq!(
+            guard.submit_contradiction(
+                82,
+                &ContradictionEvidence::SimplexFault {
+                    network: "sx-net".into(),
+                    pinned: sx_pin,
+                    proof: Box::new(SimplexSlashingProof::DoubleNotarize {
+                        epoch: 4,
+                        view: 25,
+                        height: 25,
+                        block_digest_a: [0x62; 32],
+                        sigs_a: vec![sx_second],
+                        block_digest_b: [0x61; 32],
+                        sigs_b: vec![sx_first],
+                    }),
+                },
+                challenger,
+                103,
+            ),
+            Err(EconomicGuardError::DuplicateEvidence(
+                sx_out.evidence_digest
+            ))
+        );
     }
 }

@@ -999,22 +999,15 @@ mod tests {
     use crate::cross_domain::external::selftest::{admit, admit_observed};
     use crate::crypto::primitives::PqKeyPair;
 
-    // Nine arguments are one mined block: the chain, the parent it extends,
-    // the slot it sits in, the plot it was drawn from and the difficulty it
-    // was drawn against. Every caller passes the same nine, so a bundle
-    // would be a type that exists only to satisfy the arity lint.
-    #[allow(clippy::too_many_arguments)]
     fn mine_valid_block(
         network: &str,
         parent_infusion: &Hash32,
-        height: u64,
-        sub_slot: u64,
-        signage_index: u8,
-        plot_k: u8,
-        difficulty: u64,
-        vdf_iterations: u64,
+        slot_pos: (u64, u64, u8),
+        plot_params: (u8, u64, u64),
         prev_weight: u128,
     ) -> PoSpaceVdfBlock {
+        let (height, sub_slot, signage_index) = slot_pos;
+        let (plot_k, difficulty, vdf_iterations) = plot_params;
         let farmer_pubkey_hash = [0x33; 32];
         let plot_nonce = [height as u8 ^ 0x5A; 32];
         let plot_id = PoSpaceVdfBlock::derive_plot_id(&farmer_pubkey_hash, plot_k, &plot_nonce);
@@ -1089,7 +1082,7 @@ mod tests {
             let h = 100 + i as u64;
             let slot = 10 + (i as u64) / 4;
             let sig_idx = ((i % 4) * 7 + 1) as u8;
-            let blk = mine_valid_block(network, &parent, h, slot, sig_idx, 32, 4, 64, weight);
+            let blk = mine_valid_block(network, &parent, (h, slot, sig_idx), (32, 4, 64), weight);
             parent = blk.infusion_block_hash;
             weight = blk.cumulative_weight;
             blocks.push(blk);

@@ -115,6 +115,28 @@ pub struct PinnedAlgorandVerifier {
     pub threshold_bps: u16,
 }
 
+impl PinnedAlgorandVerifier {
+    /// Canonical length-prefixed SHA3-256 commitment over all pinned Algorand
+    /// `StateProof` interval and voter-vector parameters.
+    ///
+    /// WIRING: checked in constant time by `crate::cross_domain::economic_guard`
+    /// on both backing refreshes and contradiction submissions.
+    #[must_use]
+    pub fn canonical_pin_digest(&self) -> Hash32 {
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_ALGORAND_PIN_V1",
+            &self.genesis_hash,
+            &self.interval_index.to_le_bytes(),
+            &self.first_round.to_le_bytes(),
+            &self.last_round.to_le_bytes(),
+            &self.voters_commitment,
+            &self.voter_count.to_le_bytes(),
+            &self.total_weight.to_le_bytes(),
+            &self.threshold_bps.to_le_bytes(),
+        ])
+    }
+}
+
 /// Canonical `StateProof` message signed by forward-secure ML-DSA-65 voters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlgorandStateProofMessage {
@@ -838,6 +860,15 @@ pub fn verify_algorand_equivocation(
             rule: "Algorand equivocation message has inverted round range".into(),
         });
     }
+    if a.first_attested_round < pinned.first_round
+        || a.last_attested_round > pinned.last_round
+        || b.first_attested_round < pinned.first_round
+        || b.last_attested_round > pinned.last_round
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Algorand equivocation message rounds fall outside pinned interval".into(),
+        });
+    }
     let overlaps = a.first_attested_round <= b.last_attested_round
         && b.first_attested_round <= a.last_attested_round;
     if !overlaps {
@@ -857,6 +888,24 @@ pub fn verify_algorand_equivocation(
     if rev.lower_weight >= rev.upper_weight || rev.upper_weight > pinned.total_weight {
         return Err(AdapterError::ConsensusRule {
             rule: "Algorand equivocation reveal has invalid weight bounds".into(),
+        });
+    }
+    // Forward-secure participation keys are valid strictly over
+    // [key_first_round, key_last_round]; a key leaked after expiration cannot
+    // forge a slashable equivocation for rounds outside its committed lifetime.
+    if rev.key_first_round > a.first_attested_round
+        || rev.key_last_round < a.last_attested_round
+        || rev.key_first_round > b.first_attested_round
+        || rev.key_last_round < b.last_attested_round
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Algorand equivocation rounds lie outside voter forward-secure key lifetime"
+                .into(),
+        });
+    }
+    if rev.mldsa65_pubkey.is_empty() || rev.mldsa65_sig.is_empty() || proof.sig_b.is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Algorand equivocation proof missing mandatory ML-DSA-65 key or signature".into(),
         });
     }
     let leaf = AlgorandVoterLeaf {
@@ -1481,5 +1530,168 @@ mod tests {
             u128::MAX,
             6_667
         ));
+    }
+}
+
+/// Cross-module test support: one minimal, valid Algorand voter equivocation.
+///
+/// WIRING: consumed by the `crate::cross_domain::economic_guard` test suite,
+/// which submits this proof through the production slashing dispatch so the
+/// equivocation verifier is proven reachable from a production entry point.
+#[cfg(test)]
+pub(crate) mod equivocation_support {
+    use super::*;
+    use crate::crypto::primitives::PqKeyPair;
+
+    /// Four voters holding disjoint stake intervals covering `[0, 1000)`; voter
+    /// zero signs two conflicting `StateProof` messages inside one interval.
+    ///
+    /// Returns the pinned verifier root, the equivocation proof, and the voter
+    /// stake weight the proof proves culpable (`upper_weight - lower_weight`).
+    pub(crate) fn conflicting_voter_fixture(
+        network: &str,
+    ) -> (PinnedAlgorandVerifier, AlgorandEquivocationProof, u128) {
+        let intervals = [(0u128, 300u128), (300, 600), (600, 850), (850, 1_000)];
+        let keys: Vec<PqKeyPair> = (0..4).map(|_| PqKeyPair::generate()).collect();
+        let voters: Vec<AlgorandVoterLeaf> = intervals
+            .iter()
+            .enumerate()
+            .map(|(i, &(lo, hi))| AlgorandVoterLeaf {
+                position: i as u32,
+                lower_weight: lo,
+                upper_weight: hi,
+                key_first_round: 10_000,
+                key_last_round: 10_255,
+                pubkey_commitment: algorand_pubkey_commitment(keys[i].public_key_bytes()),
+            })
+            .collect();
+        let (voters_commitment, first_path) = build_voters_commitment(&voters, Some(0));
+        let genesis_hash = [0xA1; 32];
+        let pinned = PinnedAlgorandVerifier {
+            genesis_hash,
+            interval_index: 40,
+            first_round: 10_000,
+            last_round: 10_255,
+            voters_commitment,
+            voter_count: 4,
+            total_weight: 1_000,
+            threshold_bps: 7_000,
+        };
+        let message_a = AlgorandStateProofMessage {
+            genesis_hash,
+            interval_index: 40,
+            first_attested_round: 10_100,
+            last_attested_round: 10_102,
+            block_headers_commitment: [0x11; 32],
+            next_voters_commitment: [0x22; 32],
+            next_voter_count: 1,
+            next_total_weight: 2_000,
+        };
+        let mut message_b = message_a.clone();
+        message_b.block_headers_commitment = [0xFE; 32];
+        let reveal_a = AlgorandVoterReveal {
+            position: voters[0].position,
+            lower_weight: voters[0].lower_weight,
+            upper_weight: voters[0].upper_weight,
+            key_first_round: voters[0].key_first_round,
+            key_last_round: voters[0].key_last_round,
+            mldsa65_pubkey: keys[0].public_key_bytes().to_vec(),
+            mldsa65_sig: keys[0]
+                .sign(
+                    crate::crypto::ctx::CROSS_DOMAIN_V1,
+                    &stateproof_sign_digest(network, &message_a),
+                )
+                .expect("ML-DSA-65 sign"),
+            merkle_path: first_path,
+        };
+        let sig_b = keys[0]
+            .sign(
+                crate::crypto::ctx::CROSS_DOMAIN_V1,
+                &stateproof_sign_digest(network, &message_b),
+            )
+            .expect("ML-DSA-65 sign");
+        let proof = AlgorandEquivocationProof {
+            message_a,
+            reveal_a,
+            message_b,
+            sig_b,
+        };
+        (pinned, proof, intervals[0].1 - intervals[0].0)
+    }
+
+    /// Four voters where BOTH voter 0 (`[0, 300)`) and voter 1 (`[300, 600)`)
+    /// equivocate on the exact same conflicting `(message_a, message_b)` pair.
+    pub fn two_conflicting_voters_fixture(
+        network: &str,
+    ) -> (
+        PinnedAlgorandVerifier,
+        (AlgorandEquivocationProof, u128),
+        (AlgorandEquivocationProof, u128),
+    ) {
+        let intervals = [(0u128, 300u128), (300, 600), (600, 850), (850, 1_000)];
+        let keys: Vec<PqKeyPair> = (0..4).map(|_| PqKeyPair::generate()).collect();
+        let voters: Vec<AlgorandVoterLeaf> = intervals
+            .iter()
+            .enumerate()
+            .map(|(i, &(lo, hi))| AlgorandVoterLeaf {
+                position: u32::try_from(i).expect("4 voters"),
+                lower_weight: lo,
+                upper_weight: hi,
+                key_first_round: 10_000,
+                key_last_round: 10_255,
+                pubkey_commitment: algorand_pubkey_commitment(keys[i].public_key_bytes()),
+            })
+            .collect();
+        let (voters_commitment, path_0) = build_voters_commitment(&voters, Some(0));
+        let (_, path_1) = build_voters_commitment(&voters, Some(1));
+        let genesis_hash = [0xA1; 32];
+        let pinned = PinnedAlgorandVerifier {
+            genesis_hash,
+            interval_index: 40,
+            first_round: 10_000,
+            last_round: 10_255,
+            voters_commitment,
+            voter_count: 4,
+            total_weight: 1_000,
+            threshold_bps: 7_000,
+        };
+        let message_a = AlgorandStateProofMessage {
+            genesis_hash,
+            interval_index: 40,
+            first_attested_round: 10_100,
+            last_attested_round: 10_102,
+            block_headers_commitment: [0x11; 32],
+            next_voters_commitment: [0x22; 32],
+            next_voter_count: 1,
+            next_total_weight: 2_000,
+        };
+        let mut message_b = message_a.clone();
+        message_b.block_headers_commitment = [0xFE; 32];
+        let sign_a = stateproof_sign_digest(network, &message_a);
+        let sign_b = stateproof_sign_digest(network, &message_b);
+        let build = |idx: usize, path: Vec<StateProofMerkleStep>| AlgorandEquivocationProof {
+            message_a: message_a.clone(),
+            reveal_a: AlgorandVoterReveal {
+                position: voters[idx].position,
+                lower_weight: voters[idx].lower_weight,
+                upper_weight: voters[idx].upper_weight,
+                key_first_round: voters[idx].key_first_round,
+                key_last_round: voters[idx].key_last_round,
+                mldsa65_pubkey: keys[idx].public_key_bytes().to_vec(),
+                mldsa65_sig: keys[idx]
+                    .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &sign_a)
+                    .expect("ML-DSA-65 sign"),
+                merkle_path: path,
+            },
+            message_b: message_b.clone(),
+            sig_b: keys[idx]
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &sign_b)
+                .expect("ML-DSA-65 sign"),
+        };
+        (
+            pinned,
+            (build(0, path_0), intervals[0].1 - intervals[0].0),
+            (build(1, path_1), intervals[1].1 - intervals[1].0),
+        )
     }
 }

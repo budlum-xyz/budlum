@@ -119,10 +119,12 @@ fn mint_refuses_expired_and_replayed_messages() {
         .lock(1, 2, 20, 0, a, owner, recipient, 100, 1_000)
         .expect("lock");
     let message = event.message.expect("message");
-    assert!(bs.mint(&message, 1_001).is_err(), "expired mint refused");
-    bs.mint(&message, 1_000)
-        .expect("the expiry block itself is live");
-    assert!(bs.mint(&message, 1_000).is_err(), "replay refused");
+    // Half-open live window `[created, expiry)`: at the expiry height the
+    // sweep owns the row, so the mint must already be refused there.
+    assert!(bs.mint(&message, 1_000).is_err(), "expired mint refused");
+    bs.mint(&message, 999)
+        .expect("the last pre-expiry block is live");
+    assert!(bs.mint(&message, 999).is_err(), "replay refused");
     let (held, fee) = crate::cross_domain::bridge::split_bridge_fee(
         crate::core::money::Bud::new(u64::MAX),
         10_000,

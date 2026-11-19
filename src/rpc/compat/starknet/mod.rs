@@ -16,7 +16,7 @@ use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 ///
 /// Convenience: shared by Starknet RPC policy and activation checks.
 pub const PROPOSED_CAIRO_ACTIVATION_HEIGHT: u64 = 0;
-/// Maximum Starknet RPC request envelope size (1 MiB). Strix B-0063.
+/// Maximum Starknet RPC request envelope size (1 MiB).
 pub const MAX_STARKNET_RPC_REQUEST_BYTES: usize = 1 << 20;
 
 /// Starknet JSON-RPC specification version supported by this gateway.
@@ -142,7 +142,7 @@ pub fn handle_starknet_rpc(
             "Cairo (Starknet) RPC is closed on testnet before activation height",
         );
     }
-    // Strix B-0063: strict JSON-RPC 2.0 version enforcement.
+    // strict JSON-RPC 2.0 version enforcement.
     if req.jsonrpc != "2.0" {
         return StarknetRpcResponse::err(
             req.id,
@@ -161,7 +161,7 @@ pub fn handle_starknet_rpc(
         }
         "starknet_blockNumber" => StarknetRpcResponse::ok(req.id, json!(policy.block_height)),
         "starknet_getNonce" => {
-            // block_id validation (Strix B-0063): must be present and valid.
+            // block_id validation: must be present and valid.
             if let Some(block_id) = req.params.first() {
                 let valid = match block_id {
                     Value::String(s) => {
@@ -273,7 +273,8 @@ mod tests {
                 params: vec![],
             },
         );
-        assert!(!resp.error.is_none());
+        assert!(resp.result.is_none() && !resp.error.is_none());
+        assert!(resp.error.is_some());
         assert!(resp.error.unwrap()["message"]
             .as_str()
             .unwrap()
@@ -298,7 +299,8 @@ mod tests {
                 params: vec![json!(42), json!("0x1234")],
             },
         );
-        assert!(!resp.error.is_none());
+        assert!(resp.result.is_none() && !resp.error.is_none());
+        assert!(resp.error.is_some());
         assert!(resp.error.unwrap()["message"]
             .as_str()
             .unwrap()

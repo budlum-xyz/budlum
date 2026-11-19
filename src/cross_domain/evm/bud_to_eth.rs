@@ -1,4 +1,4 @@
-//! F10.5, the Bud-to-Ethereum direction: a Budlum burn event plus a finality
+//! Bud-to-Ethereum bridge direction: a Budlum burn event plus a finality
 //! proof turned into an Ethereum claim.
 //!
 //! There are two sides:
@@ -168,7 +168,7 @@ pub fn build_bud_to_eth_claim(
             }
         }
 
-        // BLG-0116 (P05-F09): the recipient is the one the burn committed,
+        // The recipient is the one the burn committed,
         // not a free parameter the caller picks here.
         let recipient_eth = transfer
             .recipient_eth

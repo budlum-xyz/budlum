@@ -48,13 +48,13 @@ pub const BFT_CORRUPTION_CEILING_PPM: u32 = 333_333;
 /// One hundred percent in parts per million.
 pub const FULL_SCALE_PPM: u32 = 1_000_000;
 
-/// Canonical Budlum Testnet EVM chain identifier (`TLG-01`).
+/// Canonical Budlum Testnet EVM chain identifier.
 pub const CANONICAL_TESTNET_EVM_CHAIN_ID: u64 = 45_261;
 
-/// Canonical Budlum Testnet Aptos chain identifier (`TLG-01`).
+/// Canonical Budlum Testnet Aptos chain identifier.
 pub const CANONICAL_TESTNET_APTOS_CHAIN_ID: u8 = 205;
 
-/// Canonical Budlum Testnet Cosmos chain identifier (`TLG-01`).
+/// Canonical Budlum Testnet Cosmos chain identifier.
 pub const CANONICAL_TESTNET_COSMOS_CHAIN_ID: &str = "budlum-testnet-1";
 
 fn update_lp(hasher: &mut Sha256, bytes: &[u8]) {
@@ -998,40 +998,40 @@ impl ConsensusSentry {
 }
 
 /// Canonical snapshot of all hard protocol, audit, CI, and operational criteria
-/// required to declare Budlum Testnet launch-ready (`TLG-01..TLG-27`).
+/// required to declare Budlum Testnet launch-ready.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestnetReadinessSnapshot {
-    /// Configured EVM chain ID (must equal `45261`, `TLG-01`).
+    /// Configured EVM chain ID (must equal `45261`).
     pub evm_chain_id: u64,
-    /// Configured Aptos chain ID (must equal `205`, `TLG-01`).
+    /// Configured Aptos chain ID (must equal `205`).
     pub aptos_chain_id: u8,
-    /// Configured Cosmos chain ID (must equal `"budlum-testnet-1"`, `TLG-01`).
+    /// Configured Cosmos chain ID (must equal `"budlum-testnet-1"`).
     pub cosmos_chain_id: String,
-    /// ML-DSA-65/87 + ML-KEM-768/1024 + SLH-DSA active on consensus core (`TLG-02`).
+    /// ML-DSA-65/87 + ML-KEM-768/1024 + SLH-DSA active on consensus core.
     pub pq_core_active: bool,
-    /// Remaining entries in `.github/no-legacy-storage-baseline.txt` (`TLG-03`, must be `0`).
+    /// Remaining entries in `.github/no-legacy-storage-baseline.txt` (must be `0`).
     pub legacy_storage_baseline_entries: u32,
-    /// Admin backdoor or super-user bypass keys present (`TLG-04`, must be `0`).
+    /// Admin backdoor or super-user bypass keys present (must be `0`).
     pub admin_key_count: u32,
-    /// Slash amount applied for pure offline downtime (`TLG-08`, must be `0`).
+    /// Slash amount applied for pure offline downtime (must be `0`).
     pub offline_slash_atoms: u64,
     /// Peak shared-security restaking concentration across all domains (`<= 300_000 ppm`).
     pub max_observed_restake_share_ppm: u32,
-    /// All closed-at-testnet modules (`KR-26..KR-29`) gated fail-closed (`TLG-16`).
+    /// All closed-at-testnet modules gated fail-closed.
     pub closed_testnet_features_gated: bool,
-    /// All 140+ `budlum-gates` passing (`TLG-17`).
+    /// All 140+ `budlum-gates` passing.
     pub static_gates_all_green: bool,
-    /// All GitHub Actions CI workflows green on target branch (`TLG-17`).
+    /// All GitHub Actions CI workflows green on target branch.
     pub ci_all_green: bool,
-    /// Open `CRITICAL` or `HIGH` Strix/audit findings (`TLG-18`, must be `0`).
+    /// Open `CRITICAL` or `HIGH` security review defects (must be `0`).
     pub open_critical_or_high_findings: u32,
-    /// Linux `x86_64` vs `aarch64` replay state root bit-identical (`TLG-19`).
+    /// Linux `x86_64` vs `aarch64` replay state root bit-identical.
     pub cross_arch_state_digest_equal: bool,
-    /// At least 4 geographically independent validator Genesis rehearsal (`TLG-21`).
+    /// At least 4 geographically independent validator Genesis rehearsal.
     pub genesis_rehearsal_passed: bool,
-    /// Monitoring, alert routing, and incident runbook verified (`TLG-23`).
+    /// Monitoring, alert routing, and incident runbook verified.
     pub monitoring_and_runbook_ready: bool,
-    /// Independent external third-party security audit closed (`TLG-26`).
+    /// Independent external third-party security audit closed.
     pub external_audit_complete: bool,
     /// Number of watched domains currently frozen by `ConsensusSentry` (must be `0`).
     pub sentry_frozen_domains: u32,
@@ -1049,7 +1049,7 @@ pub struct TestnetLaunchVerdict {
 }
 
 /// Deterministically interrogate `snapshot` against Budlum's non-negotiable
-/// testnet readiness invariants (`TLG-01..TLG-27`). Any single unmet gate forces
+/// testnet readiness invariants. Any single unmet gate forces
 /// `ready = false` and lists the exact blocker.
 ///
 /// Convenience: exposed for release gates, Sentry pre-flight, and rehearsal tools.
@@ -1059,75 +1059,76 @@ pub fn evaluate_testnet_readiness(snapshot: &TestnetReadinessSnapshot) -> Testne
 
     if snapshot.evm_chain_id != CANONICAL_TESTNET_EVM_CHAIN_ID {
         blockers.push(format!(
-            "TLG-01: evm_chain_id={} != {CANONICAL_TESTNET_EVM_CHAIN_ID}",
+            "CHAIN_ID: evm_chain_id={} != {CANONICAL_TESTNET_EVM_CHAIN_ID}",
             snapshot.evm_chain_id
         ));
     }
     if snapshot.aptos_chain_id != CANONICAL_TESTNET_APTOS_CHAIN_ID {
         blockers.push(format!(
-            "TLG-01: aptos_chain_id={} != {CANONICAL_TESTNET_APTOS_CHAIN_ID}",
+            "CHAIN_ID: aptos_chain_id={} != {CANONICAL_TESTNET_APTOS_CHAIN_ID}",
             snapshot.aptos_chain_id
         ));
     }
     if snapshot.cosmos_chain_id != CANONICAL_TESTNET_COSMOS_CHAIN_ID {
         blockers.push(format!(
-            "TLG-01: cosmos_chain_id='{}' != '{CANONICAL_TESTNET_COSMOS_CHAIN_ID}'",
+            "CHAIN_ID: cosmos_chain_id='{}' != '{CANONICAL_TESTNET_COSMOS_CHAIN_ID}'",
             snapshot.cosmos_chain_id
         ));
     }
     if !snapshot.pq_core_active {
-        blockers.push("TLG-02: post-quantum core (ML-DSA/ML-KEM/SLH-DSA) is not active".into());
+        blockers.push("PQ_CORE: post-quantum core (ML-DSA/ML-KEM/SLH-DSA) is not active".into());
     }
     if snapshot.legacy_storage_baseline_entries > 0 {
         blockers.push(format!(
-            "TLG-03: legacy storage baseline has {} remaining entries (expected 0)",
+            "LEGACY_STORAGE: legacy storage baseline has {} remaining entries (expected 0)",
             snapshot.legacy_storage_baseline_entries
         ));
     }
     if snapshot.admin_key_count > 0 {
         blockers.push(format!(
-            "TLG-04: {} privileged admin key(s) present (expected 0)",
+            "ADMIN_KEYS: {} privileged admin key(s) present (expected 0)",
             snapshot.admin_key_count
         ));
     }
     if snapshot.offline_slash_atoms > 0 {
         blockers.push(format!(
-            "TLG-08: offline downtime slashes {} atoms (expected 0)",
+            "OFFLINE_SLASH: offline downtime slashes {} atoms (expected 0)",
             snapshot.offline_slash_atoms
         ));
     }
     if snapshot.max_observed_restake_share_ppm > DEFAULT_MAX_RESTAKE_SHARE_PPM {
         blockers.push(format!(
-            "TLG-09: restake concentration {} ppm exceeds {DEFAULT_MAX_RESTAKE_SHARE_PPM} ppm cap",
+            "RESTAKE_CAP: restake concentration {} ppm exceeds {DEFAULT_MAX_RESTAKE_SHARE_PPM} ppm cap",
             snapshot.max_observed_restake_share_ppm
         ));
     }
     if !snapshot.closed_testnet_features_gated {
-        blockers.push("TLG-16: closed-at-testnet modules (KR-26..KR-29) are not all gated".into());
+        blockers.push("FEATURE_GATES: closed-at-testnet modules are not all gated".into());
     }
     if !snapshot.static_gates_all_green {
-        blockers.push("TLG-17: one or more static budlum-gates failed".into());
+        blockers.push("STATIC_GATES: one or more static budlum-gates failed".into());
     }
     if !snapshot.ci_all_green {
-        blockers.push("TLG-17: GitHub Actions CI is not completely green".into());
+        blockers.push("CI_STATUS: GitHub Actions CI is not completely green".into());
     }
     if snapshot.open_critical_or_high_findings > 0 {
         blockers.push(format!(
-            "TLG-18: {} CRITICAL/HIGH security finding(s) remain open",
+            "SECURITY_REVIEW: {} CRITICAL/HIGH security finding(s) remain open",
             snapshot.open_critical_or_high_findings
         ));
     }
     if !snapshot.cross_arch_state_digest_equal {
-        blockers.push("TLG-19: x86_64 and aarch64 state digests are not verified equal".into());
+        blockers.push("CROSS_ARCH: x86_64 and aarch64 state digests are not verified equal".into());
     }
     if !snapshot.genesis_rehearsal_passed {
-        blockers.push("TLG-21: multi-operator Genesis rehearsal not yet passed".into());
+        blockers.push("GENESIS_REHEARSAL: multi-operator Genesis rehearsal not yet passed".into());
     }
     if !snapshot.monitoring_and_runbook_ready {
-        blockers.push("TLG-23: monitoring alerts and incident runbook not verified".into());
+        blockers.push("MONITORING: monitoring alerts and incident runbook not verified".into());
     }
     if !snapshot.external_audit_complete {
-        blockers.push("TLG-26: independent external security audit not yet completed".into());
+        blockers
+            .push("EXTERNAL_AUDIT: independent external security audit not yet completed".into());
     }
     if snapshot.sentry_frozen_domains > 0 {
         blockers.push(format!(
@@ -1507,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    fn testnet_readiness_evaluator_fails_closed_on_every_unmet_tlg_gate() {
+    fn testnet_readiness_evaluator_fails_closed_on_every_unmet_launch_gate() {
         let ok = evaluate_testnet_readiness(&green_snapshot());
         assert!(ok.ready);
         assert!(ok.blockers.is_empty());
@@ -1524,11 +1525,23 @@ mod tests {
         assert!(!verdict.ready);
         assert_eq!(verdict.blockers.len(), 6);
         assert_ne!(verdict.commitment, ok.commitment);
-        assert!(verdict.blockers.iter().any(|b| b.starts_with("TLG-03:")));
-        assert!(verdict.blockers.iter().any(|b| b.starts_with("TLG-17:")));
-        assert!(verdict.blockers.iter().any(|b| b.starts_with("TLG-18:")));
-        assert!(verdict.blockers.iter().any(|b| b.starts_with("TLG-21:")));
-        assert!(verdict.blockers.iter().any(|b| b.starts_with("TLG-26:")));
+        assert!(verdict
+            .blockers
+            .iter()
+            .any(|b| b.starts_with("LEGACY_STORAGE:")));
+        assert!(verdict.blockers.iter().any(|b| b.starts_with("CI_STATUS:")));
+        assert!(verdict
+            .blockers
+            .iter()
+            .any(|b| b.starts_with("SECURITY_REVIEW:")));
+        assert!(verdict
+            .blockers
+            .iter()
+            .any(|b| b.starts_with("GENESIS_REHEARSAL:")));
+        assert!(verdict
+            .blockers
+            .iter()
+            .any(|b| b.starts_with("EXTERNAL_AUDIT:")));
         assert!(verdict.blockers.iter().any(|b| b.starts_with("SENTRY:")));
     }
 }

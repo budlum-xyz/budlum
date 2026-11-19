@@ -90,6 +90,46 @@ pub struct PinnedSimplexCommittee {
     pub validators: Vec<SimplexValidator>,
 }
 
+impl PinnedSimplexCommittee {
+    /// Canonical length-prefixed SHA3-256 commitment over the pinned epoch and
+    /// ordered validator committee.
+    ///
+    /// WIRING: checked in constant time by `crate::cross_domain::economic_guard`
+    /// on both backing refreshes and contradiction submissions.
+    #[must_use]
+    pub fn canonical_pin_digest(&self) -> Hash32 {
+        let mut acc = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_SIMPLEX_PIN_V1",
+            &self.epoch.to_le_bytes(),
+            &(self.validators.len() as u64).to_le_bytes(),
+        ]);
+        for v in &self.validators {
+            acc = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_SIMPLEX_PIN_V1",
+                &[1u8],
+                &acc,
+                &v.ed25519_pubkey,
+                &v.stake_weight.to_le_bytes(),
+                &v.pq_pubkey,
+            ]);
+        }
+        acc
+    }
+
+    /// Return the slashable stake weight and whether an ML-DSA-65 key is bound
+    /// for `pubkey`.
+    ///
+    /// WIRING: used by `crate::cross_domain::economic_guard` for incremental
+    /// per-offender Simplex slashing accounting.
+    #[must_use]
+    pub fn validator_member_info(&self, pubkey: &[u8; 32]) -> Option<(u128, bool)> {
+        self.validators
+            .iter()
+            .find(|v| bool::from(v.ed25519_pubkey.ct_eq(pubkey)))
+            .map(|v| (u128::from(v.stake_weight), !v.pq_pubkey.is_empty()))
+    }
+}
+
 /// Detached hybrid vote signature for Simplex Notarize, Finalize, Skip, or NEC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimplexSignature {
@@ -640,6 +680,11 @@ pub fn verify_simplex_slashing(
             let epoch_le = epoch.to_le_bytes();
             let view_le = view.to_le_bytes();
             let height_le = height.to_le_bytes();
+            let (lo_block, hi_block) = if block_digest_a <= block_digest_b {
+                (block_digest_a, block_digest_b)
+            } else {
+                (block_digest_b, block_digest_a)
+            };
             let count_le = u64::try_from(offenders.len())
                 .unwrap_or(u64::MAX)
                 .to_le_bytes();
@@ -650,8 +695,8 @@ pub fn verify_simplex_slashing(
             fields.push(&epoch_le);
             fields.push(&view_le);
             fields.push(&height_le);
-            fields.push(block_digest_a);
-            fields.push(block_digest_b);
+            fields.push(lo_block);
+            fields.push(hi_block);
             fields.push(&count_le);
             for pk in &offenders {
                 fields.push(pk);

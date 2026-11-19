@@ -1,4 +1,4 @@
-409
+405
 # ---------------------------------------------------------------------------
 # cargo-vet ratchet baseline: the number of unvetted dependencies.
 # The FIRST bare-number line of this file is the baseline.
@@ -28,3 +28,12 @@
 #
 # Debt paydown priority (the crypto/FFI surface first):
 #   ring, pqcrypto-dilithium, cryptoki, bls12_381, aes-gcm, chacha20
+#
+# 2026-11-19: 409 -> 405. Dropping the unused default feature of a
+# serialization dependency removed a fixed-capacity collection crate and its
+# three transitive crates from all three lockfiles, so four entries left the
+# unvetted set. The gate printed the improvement line itself, so the ratchet is
+# tightened in the same breath: `cargo-vet 0.10.3` on the pinned toolchain now
+# reports `unvetted dependencies: 405 | baseline: 405` with no slack. Tightened
+# on this branch and on the one it merges into together, so no branch carries a
+# ratchet sitting above the debt it measures.

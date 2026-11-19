@@ -67,9 +67,30 @@
 //!
 //! **Limit of that claim.** The intake is in the state root and its digest
 //! is in the header when the intake holds any record (presence-tagged
-//! `external_intake_root`, commit `fb58775c`). Prover slashing still has no
-//! door: it needs a proof that an accepted attestation was false, which is
-//! not defined yet, so `bud_slashExternalProver` is closed.
+//! `external_intake_root`, commit `fb58775c`).
+//!
+//! The prover slashing door exists, but only for one shape of falsity. An
+//! accepted attestation is refuted by
+//! `ExternalDomainTx::ChallengeContradiction`: a challenger supplies a second
+//! finality proof that its own adapter verifies, for the *same* external
+//! `(height, evidence_version)`, with a distinct committed root, and the
+//! transaction withdraws the false attestation, freezes the domain, slashes
+//! the carrier's escrowed bond and pays the challenger out of the slash
+//! (`IntakeState::slash_on_contradiction` -> `slash_external_bond`, tests in
+//! `external_tx.rs` and `core::account`). The `bud_slashExternalProver` RPC
+//! stays refused on purpose: the only way to slash is a signed in-block
+//! challenge that carries the refuting proof, so no operator key can slash
+//! anyone and no slash can be manufactured without evidence.
+//!
+//! The limit that remains is *cross-slot*: refutation is defined only for the
+//! slot the challenged attestation occupies. A false attestation whose slot
+//! can no longer be re-proved - an abandoned branch left behind by a deeper
+//! chain, the Bitcoin reorg case - cannot be refuted from the record today,
+//! because `FinalityAttestation` carries no attested parent hash while
+//! `FinalityProofShape` already declares a `BINDS_PARENT_HASH` class. Closing
+//! that gap means carrying the ancestry commitment into the attestation and
+//! walking the accepted book backwards with it; until then the honest claim
+//! is "refutable at its own slot", not "refutable".
 //!
 //! # The rule underneath all six
 //!
@@ -95,8 +116,10 @@ pub mod evm_hybrid;
 pub mod external_tx;
 pub mod ghostdag;
 pub mod heterogeneous_multiprover;
+pub mod honeybadger_bft;
 pub mod hotstuff;
 pub mod intake;
+pub mod intake_guard;
 pub mod intake_quorum;
 pub mod mina_recursive;
 pub mod near_doomslug;
@@ -114,6 +137,7 @@ pub mod sentry;
 pub mod simplex_bft;
 pub mod solana_tower_bft;
 pub mod spec;
+pub mod stark_validity_rollup;
 pub mod stellar_fba;
 pub mod symbiotic_vault;
 pub mod tendermint;
@@ -154,7 +178,7 @@ pub use chain_key_ni_dkg::{
 pub use dag_bft::{BullsharkDagAdapter, DagBftValidator, PinnedDagCommittee};
 pub use domain_bridge::{
     decode_external_evidence, encode_external_evidence, ExternalDomainFinalityBridge,
-    EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+    EXTERNAL_DOMAIN_FINALITY_ADAPTER, MAX_EXTERNAL_EVIDENCE_BYTES,
 };
 pub use ethereum::{
     bits_for, epoch_of_slot, has_supermajority, minimum_signers, parse_update, participation,
@@ -181,6 +205,11 @@ pub use heterogeneous_multiprover::{
     MultiProverEvidence, PinnedFaultProposer, PinnedMultiProverConfig, ProverFamily,
     RollupBatchClaim, StarkProverLeg,
 };
+pub use honeybadger_bft::{
+    acs_certificate_digest, derive_acs_roots, encode_honeybadger_evidence, required_acs_count,
+    verify_rbc_equivocation, AcsValidatorVote, HoneyBadgerBftAdapter, HoneyBadgerEvidence,
+    HoneyBadgerValidator, PinnedHoneyBadgerCommittee, RbcBatchContribution, RbcEquivocationProof,
+};
 pub use hotstuff::{
     verify_hotstuff_equivocation, verify_hotstuff_timeout_certificate, HotStuffEquivocationProof,
     HotStuffThreeChainAdapter, HotStuffTimeoutCertificate, HotStuffTimeoutVote, HotStuffValidator,
@@ -191,6 +220,7 @@ pub use intake::{
     AdapterSpec, ContradictionSlashOutcome, IntakeEntry, IntakeError, IntakeState,
     RegistrationRequest,
 };
+pub use intake_guard::{ContradictedClaim, DomainGuardRecord, IntakeGuard, IntakeGuardError};
 pub use intake_quorum::{
     QuorumRound, QuorumRounds, RoundEntry, RoundError, RoundKey, RoundProgress, RoundState,
     ROUND_RETENTION_BLOCKS,
@@ -245,6 +275,12 @@ pub use spec::{
     AdapterDescriptor, AdapterError, AdapterId, DomainKey, ExternalFinalityAdapter,
     FinalityAttestation, FinalityKind, ProofSystem, RawConsensusEvidence, SecurityBacking,
     TimeUnit, TrustModel, VerificationPolicy,
+};
+pub use stark_validity_rollup::{
+    advance_stark_rollup_anchor, batch_binding_context_words, compute_batch_da_binding,
+    compute_forced_queue_head, compute_state_diff_root, encode_stark_rollup_evidence,
+    ContractStateDiff, ForcedInclusionEntry, PinnedStarkRollupConfig, StarkRollupBatchHeader,
+    StarkRollupEvidence, StarkValidityRollupAdapter,
 };
 pub use stellar_fba::{PinnedScpTier, ScpQuorumSet, ScpValidatorNode, StellarScpAdapter};
 pub use symbiotic_vault::{SymbioticVaultAdapter, SymbioticVaultEvidence};

@@ -877,7 +877,7 @@ mod tests {
         assert!(onboarding.is_authorized_now(0, &applicant, 50));
     }
 
-    /// +(F12): renewal writes the new dossier
+    /// Renewal writes the new dossier
     /// and reopens the expiry log for the NEXT expiry.
     #[test]
     fn renew_kyc_writes_the_dossier_and_reopens_the_expiry_log() {
