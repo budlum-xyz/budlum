@@ -149,7 +149,10 @@ shake = "=0.1.0"
 p192 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic"] }
 p224 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic"] }
 hash2curve = { version = "0.14.0", default-features = false }
-k256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "hash2curve", "std"] }
+# `schnorr`: the Babylon EOTS adapter verifies BIP340 signatures over
+# secp256k1. Pinned to the same k256 release as the ECDSA paths so one
+# arithmetic backend serves both.
+k256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "hash2curve", "schnorr", "std"] }
 p256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "hash2curve"] }
 curve25519-dalek = { version = "=5.0.0", default-features = false, features = ["alloc"] }
 jsonrpsee = { version = "0.26", features = ["server", "macros"] }
