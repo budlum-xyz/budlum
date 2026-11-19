@@ -623,6 +623,10 @@ impl GenesisConfig {
     /// nothing while telling operators the pool is live. Refusing names the
     /// owner instead of failing later as an empty epoch payout.
     /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+    /// # Errors
+    ///
+    /// Returns an error when the genesis enables the reward pool on a chain that has no
+    /// reward-pool schedule in the binary.
     pub fn validate_reward_pool_flag(&self) -> Result<(), String> {
         let Some(flag) = self.reward_pool else {
             return Ok(());
@@ -647,6 +651,10 @@ impl GenesisConfig {
     /// arrives with the anchor key ceremony, and production anchoring refuses
     /// to start without it.
     /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+    /// # Errors
+    ///
+    /// Returns an error when the anchor-key ledger is present but malformed, or names a
+    /// chain other than this genesis.
     pub fn validate_anchor_ledger(&self) -> Result<(), String> {
         let Some(ledger) = &self.anchor_ledger else {
             return Ok(());
