@@ -5249,11 +5249,25 @@ impl Executor {
                 } => {
                     // The anchor is inside `external_intake_root`, so this arm is
                     // the only production writer and every node reaches it with
-                    // the same inputs. A vote that names the anchor it expected
-                    // to find is applied only if that is what is installed: a
-                    // vote taken against one sync committee or checkpoint must
-                    // not land on its successor, which is what an unbound
-                    // "replace whatever is there" would allow.
+                    // the same inputs. The network name is a key in a consensus
+                    // map, so the bound proposal validation applies is enforced
+                    // again here: a write that reached state without it would be
+                    // a key nobody bounded.
+                    if network.len() > crate::core::governance::MAX_PINNED_NETWORK_BYTES {
+                        return Err(BudlumError::validation(
+                            "external_anchor_network_too_long",
+                            format!(
+                                "network name is {} bytes; the limit is {}",
+                                network.len(),
+                                crate::core::governance::MAX_PINNED_NETWORK_BYTES
+                            ),
+                        ));
+                    }
+                    // A vote that names the anchor it expected to find is
+                    // applied only if that is what is installed: a vote taken
+                    // against one sync committee or checkpoint must not land on
+                    // its successor, which is what an unbound "replace whatever
+                    // is there" would allow.
                     let observed = state
                         .settlement
                         .external_intake
@@ -5270,11 +5284,39 @@ impl Executor {
                             ),
                         ));
                     }
-                    let family = anchor.family();
+                    let family: crate::cross_domain::external::intake::AnchorFamily =
+                        anchor.family();
                     state
                         .settlement
                         .external_intake
-                        .install_pinned_anchor(&network, anchor);
+                        .install_pinned_anchor(&network, anchor.clone());
+                    // Read back through the family-keyed view the adapters use,
+                    // not the bare map the install wrote. The two keyings agree
+                    // here because `family` came off the value that was
+                    // installed; a disagreement would mean the name is holding
+                    // one family's anchor where another family reads.
+                    let installed = state
+                        .settlement
+                        .external_intake
+                        .pinned_anchor(family, &network)
+                        .ok_or_else(|| {
+                            BudlumError::validation(
+                                "external_anchor_install_readback",
+                                format!(
+                                    "the {} anchor for network {network} did not install",
+                                    family.as_str()
+                                ),
+                            )
+                        })?;
+                    if installed != anchor {
+                        return Err(BudlumError::validation(
+                            "external_anchor_install_mismatch",
+                            format!(
+                                "the {} anchor installed for network {network} is not the one the vote named",
+                                family.as_str()
+                            ),
+                        ));
+                    }
                     tracing::info!(
                         "Installed external anchor: family={} network={} justification={}",
                         family.as_str(),
