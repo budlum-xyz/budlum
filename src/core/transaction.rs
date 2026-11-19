@@ -2745,7 +2745,8 @@ impl Transaction {
             ) => schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8,
             TransactionType::ExternalDomain(
                 crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_)
-                | crate::cross_domain::external::ExternalDomainTx::ChallengeContradiction(_),
+                | crate::cross_domain::external::ExternalDomainTx::ChallengeContradiction(_)
+                | crate::cross_domain::external::ExternalDomainTx::ChallengeAncestry(_),
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
             TransactionType::ExternalDomain(_) => schedule.contract_call_gas * 2,
             // Registration validates the domain record and escrows a bond; a
@@ -5031,9 +5032,14 @@ fn encode_external_domain_tx(
                 },
             );
         }
-        // Tag 6: cryptographic contradiction challenge, appended last.
+        // Tag 6: cryptographic contradiction challenge, appended first.
         ExternalDomainTx::ChallengeContradiction(evidence) => {
             put_u8(out, 6);
+            encode_raw_evidence(evidence, out);
+        }
+        // Tag 7: cross-slot ancestry challenge, appended last.
+        ExternalDomainTx::ChallengeAncestry(evidence) => {
+            put_u8(out, 7);
             encode_raw_evidence(evidence, out);
         }
     }

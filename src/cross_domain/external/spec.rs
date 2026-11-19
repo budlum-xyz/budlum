@@ -595,4 +595,26 @@ pub trait ExternalFinalityAdapter: Send + Sync {
     fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
         None
     }
+
+    /// The parent block digest this evidence binds, when the adapter's own
+    /// verification checks one.
+    ///
+    /// This is the witness
+    /// [`crate::cross_domain::external::falsity`] uses to refute an accepted
+    /// attestation whose slot can no longer be re-proved - the abandoned-branch
+    /// case. It is `None` by default, which is the honest default: an adapter
+    /// that cannot bind a parent cannot answer an ancestry challenge, and
+    /// guessing one would turn a slash into an unprovable claim.
+    ///
+    /// # Contract
+    ///
+    /// Callers invoke this only on evidence that [`Self::verify`] has already
+    /// accepted, and an implementation must derive the digest from the same
+    /// bytes `verify` checked - never from a caller-supplied field, and never
+    /// from a value it did not authenticate. Returning `Some` claims "the proof
+    /// I just verified binds this parent"; returning `None` claims nothing.
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        let _ = evidence;
+        None
+    }
 }
