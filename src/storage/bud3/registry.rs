@@ -115,6 +115,9 @@ pub struct SymbolRoot {
     pub first_esi: u32,
     /// Symbols under it.
     pub count: u32,
+    /// Whether this repair root has already retired the lost shares it replaced.
+    #[serde(default)]
+    pub settled: bool,
 }
 
 /// One object.
@@ -440,6 +443,7 @@ fn initial_state(
             root: *r,
             first_esi: 0,
             count: record.symbols_per_segment,
+            settled: false,
         })
         .collect();
     let next_esi = vec![record.symbols_per_segment; record.symbol_roots.len()];
@@ -2167,7 +2171,9 @@ impl Bud3Registry {
                     .iter()
                     .filter(|s| {
                         s.segment == index
-                            && (s.root < upload_roots || s.status == ShareStatus::Confirmed)
+                            && (s.root < upload_roots
+                                || (s.status == ShareStatus::Confirmed
+                                    && obj.roots.get(s.root).is_some_and(|r| r.settled)))
                     })
                     .map(|s| u64::from(s.share.symbols))
                     .collect();
@@ -2239,6 +2245,25 @@ impl Bud3Registry {
         if !self.repairs_due(key).contains(&segment) {
             return Err(RegistryError::BadRepair("segment needs no repair"));
         }
+        // Compute current held custody bytes per declared-quota validator once so
+        // repair placements cannot force unlimited bytes onto a validator that
+        // declared a smaller (or zero) custody quota.
+        let held_by_validator: BTreeMap<Address, u64> = if self.validator_quotas.is_empty() {
+            BTreeMap::new()
+        } else {
+            let mut held = BTreeMap::new();
+            for other in self.objects.values() {
+                let sym_b = u64::from(other.record.profile.symbol_size);
+                for st in &other.shares {
+                    if !st.lost && self.validator_quotas.contains_key(&st.share.validator) {
+                        let bytes = u64::from(st.share.symbols).saturating_mul(sym_b);
+                        let entry = held.entry(st.share.validator).or_insert(0u64);
+                        *entry = entry.saturating_add(bytes);
+                    }
+                }
+            }
+            held
+        };
         let obj = self
             .objects
             .get_mut(key)
@@ -2329,22 +2354,55 @@ impl Bud3Registry {
                     "repair recipient is not an active consensus Full validator",
                 ));
             }
-            next += u64::from(s.symbols);
+            if let Some(&quota) = self.validator_quotas.get(&s.validator) {
+                let add_bytes =
+                    u64::from(s.symbols).saturating_mul(u64::from(obj.record.profile.symbol_size));
+                let already = held_by_validator.get(&s.validator).copied().unwrap_or(0);
+                if already.saturating_add(add_bytes) > quota {
+                    return Err(RegistryError::BadRepair(
+                        "repair recipient custody quota exceeded",
+                    ));
+                }
+            }
+            next = next
+                .checked_add(u64::from(s.symbols))
+                .ok_or(RegistryError::BadRepair("ESI range"))?;
         }
         if next > u64::from(super::fountain::MAX_ESI) {
             return Err(RegistryError::BadRepair("ESI range"));
         }
         let added = next - u64::from(first);
+        let is_settled_or_upload = |s: &ShareState, roots: &[SymbolRoot]| {
+            s.root < upload_roots || roots.get(s.root).is_some_and(|r| r.settled)
+        };
         let lost: u64 = obj
             .shares
             .iter()
-            .filter(|s| s.segment == segment && s.lost)
+            .filter(|s| s.segment == segment && s.lost && is_settled_or_upload(s, &obj.roots))
             .map(|s| u64::from(s.share.symbols))
             .sum();
-        if added < lost {
+        // Subtract any already-confirmed live symbols belonging to an earlier
+        // unsettled partial repair root (whose other pending share expired) so
+        // retrying the repair replaces only the still-uncovered deficit.
+        let unsettled_confirmed_repair: u64 = obj
+            .shares
+            .iter()
+            .filter(|s| {
+                s.segment == segment
+                    && !is_settled_or_upload(s, &obj.roots)
+                    && s.status == ShareStatus::Confirmed
+                    && !s.lost
+            })
+            .map(|s| u64::from(s.share.symbols))
+            .sum();
+        let deficit = lost.saturating_sub(unsettled_confirmed_repair);
+        if deficit == 0 {
+            return Err(RegistryError::BadRepair("segment needs no repair"));
+        }
+        if added < deficit {
             return Err(RegistryError::BadRepair("fewer new symbols than lost"));
         }
-        if added > lost {
+        if added > deficit {
             return Err(RegistryError::BadRepair("more new symbols than lost"));
         }
         let count = u32::try_from(added).map_err(|_| RegistryError::BadRepair("ESI range"))?;
@@ -2447,13 +2505,40 @@ impl Bud3Registry {
             }
         }
         // Drop any expired unacknowledged repair shares on this segment only
-        // after every validation check above has passed.
+        // after every validation check above has passed, and shrink any partial
+        // repair root's expected count to its already-confirmed live symbols so
+        // those confirmed symbols can retire their portion of the deficit once.
+        let mut expired_by_root: BTreeMap<usize, u32> = BTreeMap::new();
+        for s in &obj.shares {
+            if is_expired_pending_repair(s) {
+                let entry = expired_by_root.entry(s.root).or_insert(0);
+                *entry = entry.saturating_add(s.share.symbols);
+            }
+        }
         obj.shares.retain(|s| !is_expired_pending_repair(s));
+        for (root_idx, pruned_syms) in expired_by_root {
+            if let Some(r) = obj.roots.get_mut(root_idx) {
+                if !r.settled {
+                    let confirmed_live: u32 = obj
+                        .shares
+                        .iter()
+                        .filter(|s| {
+                            s.root == root_idx && s.status == ShareStatus::Confirmed && !s.lost
+                        })
+                        .fold(0u32, |acc, s| acc.saturating_add(s.share.symbols));
+                    let _ = pruned_syms;
+                    if confirmed_live == 0 {
+                        r.settled = true;
+                    }
+                }
+            }
+        }
         obj.roots.push(SymbolRoot {
             segment,
             root: new_root,
             first_esi: first,
             count,
+            settled: false,
         });
         let root = obj.roots.len() - 1;
         for share in sorted {
@@ -2476,36 +2561,110 @@ impl Bud3Registry {
         Ok(())
     }
 
-    /// Drop the lost shares of every segment whose repair shares are all
-    /// confirmed. Old shares never go before the new ones hold. Returns how
-    /// many were dropped.
+    /// Drop the lost shares covered by each newly confirmed repair root.
+    ///
+    /// Each repair root settles at most once and retires at most the number of
+    /// confirmed non-lost symbols it added, so a previously settled repair can
+    /// never silently erase subsequent share losses and a concurrent extra loss
+    /// stays marked `lost` until its own repair is confirmed.
     pub fn settle_repairs(&mut self) -> usize {
         let mut dropped = 0;
         for obj in self.objects.values_mut() {
             let upload_roots = obj.record.symbol_roots.len();
-            let settled: BTreeSet<u64> = obj
-                .roots
-                .iter()
-                .enumerate()
-                .skip(upload_roots)
-                .filter(|(i, r)| {
-                    r.count > 0 && {
-                        let confirmed_symbols: u64 = obj
-                            .shares
-                            .iter()
-                            .filter(|s| {
-                                s.root == *i && s.status == ShareStatus::Confirmed && !s.lost
-                            })
-                            .map(|s| u64::from(s.share.symbols))
-                            .sum();
-                        confirmed_symbols == u64::from(r.count)
+            // Group ready (all-confirmed, unsettled) repair roots by segment.
+            let mut ready_by_seg: BTreeMap<u64, (Vec<usize>, u64)> = BTreeMap::new();
+            for (i, r) in obj.roots.iter().enumerate().skip(upload_roots) {
+                if r.settled || r.count == 0 {
+                    continue;
+                }
+                let has_pending = obj
+                    .shares
+                    .iter()
+                    .any(|s| s.root == i && s.status != ShareStatus::Confirmed && !s.lost);
+                if has_pending {
+                    continue;
+                }
+                let confirmed_symbols: u64 = obj
+                    .shares
+                    .iter()
+                    .filter(|s| s.root == i && s.status == ShareStatus::Confirmed && !s.lost)
+                    .map(|s| u64::from(s.share.symbols))
+                    .sum();
+                if confirmed_symbols > 0 && confirmed_symbols <= u64::from(r.count) {
+                    let entry = ready_by_seg.entry(r.segment).or_insert((Vec::new(), 0));
+                    entry.0.push(i);
+                    entry.1 = entry.1.saturating_add(confirmed_symbols);
+                }
+            }
+            if ready_by_seg.is_empty() {
+                continue;
+            }
+            // Snapshot currently-settled root flags so we distinguish lost
+            // baseline shares (which consume repair budget) from lost shares of
+            // one of the roots settling right now (which never backed baseline
+            // coverage and can be cleaned up once spent == budget).
+            let mut retire_rem: BTreeMap<u64, u64> = BTreeMap::new();
+            let mut ready_roots_set: BTreeSet<usize> = BTreeSet::new();
+            for (&seg, (indices, budget)) in &ready_by_seg {
+                // Only settle a segment's ready roots once their pooled
+                // confirmed symbols fully retire an exact subset of lost
+                // baseline shares (consuming the entire budget so no repair
+                // symbol is ever wasted or double-counted).
+                let mut rem = *budget;
+                for s in &obj.shares {
+                    if s.segment != seg || !s.lost {
+                        continue;
                     }
-                })
-                .map(|(_, r)| r.segment)
-                .collect();
+                    let is_baseline =
+                        s.root < upload_roots || obj.roots.get(s.root).is_some_and(|r| r.settled);
+                    if !is_baseline {
+                        continue;
+                    }
+                    let need = u64::from(s.share.symbols);
+                    if need <= rem {
+                        rem -= need;
+                    }
+                }
+                if rem == 0 {
+                    retire_rem.insert(seg, *budget);
+                    for &idx in indices {
+                        ready_roots_set.insert(idx);
+                    }
+                }
+            }
+            if retire_rem.is_empty() {
+                continue;
+            }
+            let roots_snapshot = obj.roots.clone();
             let before = obj.shares.len();
-            obj.shares
-                .retain(|s| !(s.lost && settled.contains(&s.segment)));
+            obj.shares.retain(|s| {
+                if !s.lost {
+                    return true;
+                }
+                if ready_roots_set.contains(&s.root) {
+                    return false;
+                }
+                let is_baseline =
+                    s.root < upload_roots || roots_snapshot.get(s.root).is_some_and(|r| r.settled);
+                if !is_baseline {
+                    return true;
+                }
+                let Some(rem) = retire_rem.get_mut(&s.segment) else {
+                    return true;
+                };
+                let need = u64::from(s.share.symbols);
+                if need <= *rem {
+                    *rem -= need;
+                    false
+                } else {
+                    true
+                }
+            });
+            for idx in ready_roots_set {
+                if let Some(r) = obj.roots.get_mut(idx) {
+                    r.settled = true;
+                }
+            }
             dropped += before - obj.shares.len();
         }
         dropped
@@ -2702,6 +2861,13 @@ impl Bud3Registry {
                     &r.first_esi.to_le_bytes(),
                     &r.count.to_le_bytes(),
                 ]);
+                if r.settled {
+                    fold(&[
+                        b"root_settled",
+                        &r.segment.to_le_bytes(),
+                        &r.first_esi.to_le_bytes(),
+                    ]);
+                }
             }
             for n in &o.next_esi {
                 fold(&[b"next", &n.to_le_bytes()]);
@@ -4214,5 +4380,127 @@ mod tests {
         }
         assert_eq!(r.nft_binding(&existing_nft), Some((new_key, addr(1))));
         assert_eq!(r.nft_binding(&late_nft), Some((new_key, addr(2))));
+    }
+
+    #[test]
+    fn settle_repairs_never_erases_post_settlement_or_concurrent_losses_and_enforces_quota() {
+        let mut r = Bud3Registry::default();
+        let content: Vec<u8> = (0u16..1500).map(|i| (i.wrapping_mul(37)) as u8).collect();
+        let (up, shares) = upload(&content);
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record.clone(), shares, 0, 1000)
+            .unwrap();
+        for h in 0..4u8 {
+            r.ack(&key, &addr(10 + h)).unwrap();
+        }
+
+        // First custody loss on segment 0: addr(13) loses its 5 symbols.
+        assert_eq!(r.mark_unseen(&addr(13)), 1);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        let obj_bytes = super::super::bof1::Object::raw_public(&content).encode();
+        let enc = SegmentEncoder::new(0, &obj_bytes, &P).unwrap();
+        let k = enc.k();
+        let witness = super::super::repair::RepairWitness::ProvenSymbols(
+            super::super::repair::build_repair_proven_witness(0, &up.segments[0], &up.segments[0])
+                .unwrap(),
+        );
+        let batch1 = enc.repair_symbols(20 - k, 5).unwrap();
+        let root1 = symbol_root(
+            &batch1
+                .iter()
+                .map(|x| (x.esi, symbol_leaf(&x.data)))
+                .collect::<Vec<_>>(),
+        );
+
+        // Recipient quota must be honored on repair just like upload.
+        r.set_validator_quota(addr(30), 64);
+        assert_eq!(
+            r.record_repair(
+                &key,
+                SegmentRepair {
+                    segment: 0,
+                    new_shares: vec![Share {
+                        validator: addr(30),
+                        class: Class::Full,
+                        first_esi: 20,
+                        symbols: 5,
+                    }],
+                    new_symbols: batch1.clone(),
+                    new_root: root1,
+                    witness: &witness,
+                },
+                5,
+            ),
+            Err(RegistryError::BadRepair(
+                "repair recipient custody quota exceeded"
+            ))
+        );
+
+        // Place repair #1 on addr(20), then lose a second share addr(12) before settling:
+        // settle_repairs may retire only the single 5-symbol loss covered by repair #1,
+        // leaving addr(12)'s 5-symbol loss intact and still due for repair.
+        r.record_repair(
+            &key,
+            SegmentRepair {
+                segment: 0,
+                new_shares: vec![Share {
+                    validator: addr(20),
+                    class: Class::Full,
+                    first_esi: 20,
+                    symbols: 5,
+                }],
+                new_symbols: batch1,
+                new_root: root1,
+                witness: &witness,
+            },
+            5,
+        )
+        .unwrap();
+        assert_eq!(r.mark_unseen(&addr(12)), 1);
+        assert_eq!(r.ack(&key, &addr(20)).unwrap(), 1);
+        let root_before = r.state_root();
+        assert_eq!(r.settle_repairs(), 1);
+        assert_ne!(r.state_root(), root_before);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        // Re-running settle_repairs without a new confirmed repair must drop zero shares.
+        assert_eq!(r.settle_repairs(), 0);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        // Repair #2 covers addr(12)'s 5-symbol deficit and settles cleanly.
+        let batch2 = enc.repair_symbols(25 - k, 5).unwrap();
+        let root2 = symbol_root(
+            &batch2
+                .iter()
+                .map(|x| (x.esi, symbol_leaf(&x.data)))
+                .collect::<Vec<_>>(),
+        );
+        r.record_repair(
+            &key,
+            SegmentRepair {
+                segment: 0,
+                new_shares: vec![Share {
+                    validator: addr(21),
+                    class: Class::Full,
+                    first_esi: 25,
+                    symbols: 5,
+                }],
+                new_symbols: batch2,
+                new_root: root2,
+                witness: &witness,
+            },
+            6,
+        )
+        .unwrap();
+        assert_eq!(r.ack(&key, &addr(21)).unwrap(), 1);
+        assert_eq!(r.settle_repairs(), 1);
+        assert!(r.repairs_due(&key).is_empty());
+
+        // Subsequent custody loss after prior settled repairs MUST NOT be erased by
+        // settle_repairs; live + lost symbol accounting stays at the full segment size.
+        assert_eq!(r.mark_unseen(&addr(11)), 1);
+        assert_eq!(r.settle_repairs(), 0);
+        assert_eq!(r.repairs_due(&key), vec![0]);
     }
 }
