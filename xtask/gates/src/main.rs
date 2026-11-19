@@ -137,6 +137,7 @@ mod gates {
     pub mod module_coverage;
     pub mod multi_ratio_consensus;
     pub mod named_tests;
+    pub mod native_security_review;
     pub mod network_hardening_gate;
     pub mod nightly_workflows_are_required;
     pub mod no_conflict_markers;
@@ -1679,6 +1680,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::nightly_workflows_are_required::self_test,
+    },
+    Gate {
+        name: "native-security-review",
+        replaces: None,
+        run: gates::native_security_review::run,
+        run_log: None,
+        run_args: Some(gates::native_security_review::run_args),
+        self_test: gates::native_security_review::self_test,
     },
     Gate {
         name: "launch-evidence",
