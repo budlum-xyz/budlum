@@ -54,7 +54,7 @@ proves the evaluator accepts those hand-entered values.
 
 ## All 267 BLG findings: verification protocol and coverage gap
 
-[Live source index](LIVE_STATUS.md) maps each BLG-001..267 to a directive
+[Live source index](LIVE_STATUS.md) maps each F-001..267 to a directive
 line, severity, and planned package; [closure ledger](FINDINGS.md) has a row
 for each ID with named-test, live file:line, closing SHA, CI run, reviewer and
 closed-feature evidence fields. **All 267 production paths remain unverified**
@@ -62,16 +62,16 @@ in that ledger. The historical Section 14 "code traces", source titles and
 planned removal packages are not a live reproduction or proof of production
 wiring. No finding is marked fixed, removed or invalid by this audit.
 
-- **BLG-001..207:** prior finding-ledger snapshot; verify each alleged issue
-  on live code with a regression, including BLG-005 (historically "closed")
-  and BLG-008 (testnet public RPC auth mismatch). Do not import old severity
+- **F-001..207:** prior finding-ledger snapshot; verify each alleged issue
+  on live code with a regression, including F-005 (historically "closed")
+  and F-008 (testnet public RPC auth mismatch). Do not import old severity
   counts as today's open count.
-- **BLG-208..245:** storage/BudZero source-directive issues. A listed
+- **F-208..245:** storage/BudZero source-directive issues. A listed
   `src/storage/*` or `bud/*` file is not proof of reachability or deletion;
   removed-code closures require the actual path list and green
   `no-legacy-storage` run on the closing commit.
-- **BLG-246..267:** newer directive observations; e.g. BLG-257 mobile
-  onboarding and BLG-249 ecosystem RPC are *source observations*, not proof
+- **F-246..267:** newer directive observations; e.g. F-257 mobile
+  onboarding and F-249 ecosystem RPC are *source observations*, not proof
   that an app or foreign ecosystem tool works on an open testnet.
 - Prioritize complete flows through signed request -> admission -> block
   execution -> persisted state -> RPC/readback on the same chain ID. For
