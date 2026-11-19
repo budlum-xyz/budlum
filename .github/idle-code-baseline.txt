@@ -459,7 +459,6 @@ bud/src/bud_format_ratioconsensus.rs	const	DOMAIN
 bud/src/bud_format_ratioconsensus.rs	const	RATIO_CONS_MAGIC
 bud/src/bud_format_ratioconsensus.rs	const	RATIO_CONS_VERSION
 bud/src/bud_format_ratioconsensus.rs	fn	candidate_pool
-bud/src/bud_format_ratioconsensus.rs	fn	consensus_hash
 bud/src/bud_format_ratioconsensus.rs	fn	holds_ceiling
 bud/src/bud_format_ratioconsensus.rs	fn	weighted_score
 bud/src/bud_format_ratioconsensus.rs	struct	RatioCandidateAgent

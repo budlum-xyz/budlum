@@ -1813,7 +1813,8 @@ mod l4_tests {
             activation_delay_epochs(&p_type),
             GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS
         );
-        gov.create_proposal(proposer, p_type, 0, 10).expect("proposal");
+        gov.create_proposal(proposer, p_type, 0, 10)
+            .expect("proposal");
         let proposal = gov.find_proposal_mut(0).expect("stored");
         proposal.add_vote(proposer, 100_000, true, 0).expect("vote");
         proposal.status = ProposalStatus::Passed;
@@ -1849,13 +1850,13 @@ mod l4_tests {
             chain_id: "noble-1".to_string(),
             validator_set_hash: [0u8; 32],
         });
-        let vote = |network: &str,
-                    anchor: PinnedExternalAnchor,
-                    justification: [u8; 32]| ProposalType::PinExternalAnchor {
-            network: network.to_string(),
-            anchor,
-            expected_previous: None,
-            justification_hash: justification,
+        let vote = |network: &str, anchor: PinnedExternalAnchor, justification: [u8; 32]| {
+            ProposalType::PinExternalAnchor {
+                network: network.to_string(),
+                anchor,
+                expected_previous: None,
+                justification_hash: justification,
+            }
         };
 
         assert!(gov
@@ -1864,13 +1865,22 @@ mod l4_tests {
         assert!(gov
             .create_proposal(
                 proposer,
-                vote(&"n".repeat(MAX_PINNED_NETWORK_BYTES + 1), real.clone(), [0x42; 32]),
+                vote(
+                    &"n".repeat(MAX_PINNED_NETWORK_BYTES + 1),
+                    real.clone(),
+                    [0x42; 32]
+                ),
                 0,
                 10
             )
             .is_err());
         assert!(gov
-            .create_proposal(proposer, vote("noble-mainnet", real.clone(), [0u8; 32]), 0, 10)
+            .create_proposal(
+                proposer,
+                vote("noble-mainnet", real.clone(), [0u8; 32]),
+                0,
+                10
+            )
             .is_err());
         assert!(gov
             .create_proposal(

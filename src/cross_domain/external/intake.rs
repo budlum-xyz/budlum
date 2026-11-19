@@ -2683,8 +2683,7 @@ mod tests {
             RegistrationRequest {
                 golden: RawConsensusEvidence {
                     adapter: id,
-                    evidence_version:
-                        crate::cross_domain::external::tendermint::EVIDENCE_VERSION,
+                    evidence_version: crate::cross_domain::external::tendermint::EVIDENCE_VERSION,
                     network: "noble-testnet".to_string(),
                     payload: payload.clone(),
                     declared_height: 100,
