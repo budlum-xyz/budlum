@@ -36,6 +36,7 @@
 //! share is acknowledged, and then keeps the old commitment as a redirect.
 
 pub mod access_tiering;
+pub mod app_bundle;
 pub mod bof1;
 pub mod compression_context;
 pub mod content_gateway;
