@@ -2940,6 +2940,10 @@ jobs:
             n=$((n + 1))
           done < <(find . -name Cargo.lock -not -path '*/target/*' | sort)
           echo "lock freshness: $n workspace lockfile(s) verified."
+      - name: Gate source provenance canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --self-test
+      - name: Gate source provenance
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance
       - name: Rust gates canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
       - name: Rust gates
