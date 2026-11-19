@@ -346,8 +346,8 @@ impl RecoveryProposal {
 
 /// The PACT binding type lives in `src/storage/pact_binding.rs`.
 ///
-/// There used to be a second `PactBinding` definition here: the same five fields, the same 128-byte
-/// budget check, the same `verify_commitment`. `storage::Pact` is a superset of it -
+/// There used to be a duplicate five-field PACT binding struct here with the same 128-byte
+/// budget check and the same `verify_commitment`. `storage::Pact` is a superset of it -
 /// it also carries `id` and `mod_flag`, and binds to a root through
 /// `PactRegistry`.
 ///

@@ -712,7 +712,7 @@ impl ViewGrantRegistry {
     /// the key handle. `NamedGrantee` requires address match. A row counts only
     /// when its issuer is that owner: a grant is the owner's word, so a row
     /// minted by anybody else is inert here even if it reached the book, and the
-    /// `StorageRegistry` decides who the owner is from the manifest.
+    /// on-chain storage registry decides who the owner is from the object record.
     #[must_use]
     pub fn may_view(
         &self,
@@ -751,7 +751,7 @@ impl ViewGrantRegistry {
     }
 
     /// Domain-tagged digest of the whole book: the next id and every row's
-    /// commitment. The storage registry folds this into `StorageRegistry::root`
+    /// commitment. The storage registry folds this into its state root
     /// once an id has been issued, so the grant set is state-root committed.
     #[must_use]
     pub fn root(&self) -> [u8; 32] {
@@ -1077,7 +1077,7 @@ mod tests {
             "a row issued by a stranger must not open the owner's content"
         );
         // The same row does open when the query names the stranger as owner: the
-        // rule binds a grant to an owner, it is `StorageRegistry` that decides
+        // rule binds a grant to an owner, and the storage registry decides
         // which owner is real.
         assert!(reg.may_view(&content, &bob, &key, &stranger));
     }

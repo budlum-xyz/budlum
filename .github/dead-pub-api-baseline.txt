@@ -29,7 +29,6 @@ src/ai/registry.rs:get_request
 src/ai/registry.rs:get_settled_agent_payment
 src/ai/registry.rs:is_whitelist_mode
 src/ai/registry.rs:record_reputation_equivocation
-src/ai/registry.rs:record_reputation_payment_completed
 src/ai/registry.rs:record_reputation_payment_defaulted
 src/ai/registry.rs:record_reputation_request
 src/ai/registry.rs:record_reputation_result_finalized
@@ -160,15 +159,6 @@ src/storage/manifest.rs:loss_tolerance
 src/storage/manifest.rs:overhead_per_mille
 src/storage/manifest.rs:with_edition
 src/persistence/state_trie.rs:bulk_insert
-src/storage/mobile_self.rs:availability_label
-src/storage/mobile_self.rs:put_user_content
-src/storage/mobile_self.rs:recommendation_for_content
-src/storage/mobile_self.rs:user_held_items
-src/storage/one_share.rs:all_user_held
-src/storage/one_share.rs:storage_fee_owed_usd
-src/storage/one_view.rs:contract_digest
-src/storage/one_view.rs:honest_custody
-src/storage/one_view.rs:network_held_bytes
 src/storage/pact_binding.rs:add_pact
 src/storage/pact_binding.rs:kq_pact_registry
 src/storage/pact_binding.rs:kq_storage_pact

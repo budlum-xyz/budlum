@@ -70,40 +70,6 @@ bud_adminUpdateSentries missing=success
 
 # AI inference layer (34 rows)
 
-bud_aiAgentPayment missing=refusal
-bud_aiAgentPayment missing=success
-bud_aiAgentPayments missing=refusal
-bud_aiAgentPayments missing=success
-bud_aiAgentReputation missing=refusal
-bud_aiAgentReputation missing=success
-bud_aiCallbackQueue missing=refusal
-bud_aiCallbackQueue missing=success
-bud_aiCancelStatus missing=refusal
-bud_aiCancelStatus missing=success
-bud_aiDisputeSlash missing=refusal
-bud_aiDisputeSlash missing=success
-bud_aiEquivocationStatus missing=refusal
-bud_aiEquivocationStatus missing=success
-bud_aiExecutionProof missing=refusal
-bud_aiExecutionProof missing=success
-bud_aiGetModel missing=refusal
-bud_aiGetModel missing=success
-bud_aiGetOutcome missing=refusal
-bud_aiGetOutcome missing=success
-bud_aiReclaimFee missing=refusal
-bud_aiReclaimFee missing=success
-bud_aiRegisterModel missing=refusal
-bud_aiRegisterModel missing=success
-bud_aiSlashingStatus missing=refusal
-bud_aiSlashingStatus missing=success
-bud_aiSubmitRequest missing=refusal
-bud_aiSubmitRequest missing=success
-bud_aiSubmitResult missing=refusal
-bud_aiSubmitResult missing=success
-bud_aiVerifierQos missing=refusal
-bud_aiVerifierQos missing=success
-bud_aiVerifierStake missing=refusal
-bud_aiVerifierStake missing=success
 
 # record and wallet doors (59 rows)
 

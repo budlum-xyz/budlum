@@ -74,6 +74,10 @@ pub struct RoundEntry {
     pub prover: Address,
     pub answer: Answer,
     pub evidence_digest: [u8; 32],
+    /// Submitter-independent payload substance digest so `AgreedRefusal` closes
+    /// every refused payload recorded in the round, not only the closing vote.
+    #[serde(default)]
+    pub substance_digest: [u8; 32],
     pub attestation: Option<Box<FinalityAttestation>>,
 }
 
@@ -111,6 +115,13 @@ pub struct QuorumRound {
     /// Height of the local chain when the round opened, for staleness
     /// sweeping: a round nobody finished is not kept forever.
     pub opened_at: u64,
+    /// Submitter-independent [`RawConsensusEvidence::substance_digest`] values
+    /// already answered with [`RoundState::AgreedRefusal`] at this height,
+    /// bounded by `MAX_REFUSED_SUBSTANCES_PER_ROUND`. Prevents rotating
+    /// prover addresses from reopening a refused round with identical payload
+    /// bytes while still letting genuinely distinct evidence start a fresh vote.
+    #[serde(default)]
+    pub refused_substances: Vec<[u8; 32]>,
 }
 
 impl QuorumRound {
@@ -279,21 +290,38 @@ impl QuorumRounds {
         }
         let height = evidence.declared_height;
         let digest = evidence.digest();
+        let substance = evidence.substance_digest();
         let key = RoundKey { domain, height };
         match self.rounds.get_mut(&key) {
             Some(round) => {
-                // An AgreedRefusal answered
-                // the bytes that were actually submitted. A later, DIFFERENT
-                // evidence at the same height is a new question and must not
-                // be censored by it. Same bytes after a refusal stay closed.
-                let seen = round.entries.iter().any(|e| e.evidence_digest == digest);
-                if matches!(round.state, RoundState::AgreedRefusal { .. }) && !seen {
+                // An AgreedRefusal answers the consensus substance that was
+                // submitted, independent of which bonded address carried it.
+                // Rotating submitter addresses on the same refused payload
+                // stays closed; genuinely distinct evidence at the same height
+                // reopens a fresh vote while preserving the bounded refusal
+                // memory up to MAX_REFUSED_SUBSTANCES_PER_ROUND.
+                use subtle::ConstantTimeEq;
+                let seen_digest = round
+                    .entries
+                    .iter()
+                    .any(|e| bool::from(e.evidence_digest.ct_eq(&digest)));
+                let seen_substance = round
+                    .refused_substances
+                    .iter()
+                    .any(|s| bool::from(s.ct_eq(&substance)));
+                if matches!(round.state, RoundState::AgreedRefusal { .. })
+                    && !seen_digest
+                    && !seen_substance
+                    && round.refused_substances.len() < MAX_REFUSED_SUBSTANCES_PER_ROUND
+                {
+                    let carried = std::mem::take(&mut round.refused_substances);
                     *round = QuorumRound {
                         domain,
                         height,
                         state: RoundState::Open,
                         entries: Vec::new(),
                         opened_at: local_height,
+                        refused_substances: carried,
                     };
                 } else if !matches!(round.state, RoundState::Open) {
                     return Err(RoundError::RoundClosed {
@@ -373,6 +401,7 @@ impl QuorumRounds {
                         state: RoundState::Open,
                         entries: Vec::new(),
                         opened_at: local_height,
+                        refused_substances: Vec::new(),
                     },
                 );
             }
@@ -395,7 +424,7 @@ impl QuorumRounds {
 
         let (answer, attestation) = match verified {
             Ok(attestation) => (
-                Answer::Claim(attestation.state_root),
+                Answer::Claim(attestation.claim_digest()),
                 Some(Box::new(attestation.clone())),
             ),
             Err(err) => (answer_of_error(err), None),
@@ -403,7 +432,8 @@ impl QuorumRounds {
         round.entries.push(RoundEntry {
             prover: evidence.submitter,
             answer,
-            evidence_digest: evidence.digest(),
+            evidence_digest: digest,
+            substance_digest: substance,
             attestation,
         });
 
@@ -411,9 +441,9 @@ impl QuorumRounds {
         round.state = match outcome {
             QuorumOutcome::AgreedClaim { claim, count } => {
                 // The representative attestation: the first entry in arrival
-                // order whose claim matches the winner. Arrival order is
-                // block order behind the chain actor, so every node picks
-                // the same representative.
+                // order whose full claim digest matches the winner. Arrival
+                // order is block order behind the chain actor, so every node
+                // picks the same representative.
                 match find_attestation(&round.entries, claim) {
                     Some(att) => RoundState::AgreedClaim {
                         claim,
@@ -428,6 +458,26 @@ impl QuorumRounds {
                 }
             }
             QuorumOutcome::AgreedRefusal { kind, count } => {
+                use subtle::ConstantTimeEq;
+                let refused_list: Vec<[u8; 32]> = round
+                    .entries
+                    .iter()
+                    .filter(|e| matches!(e.answer, Answer::ConsensusRefusal(_)))
+                    .map(|e| e.substance_digest)
+                    .collect();
+                for sub in refused_list {
+                    if bool::from(sub.ct_eq(&[0u8; 32])) {
+                        continue;
+                    }
+                    let already = round
+                        .refused_substances
+                        .iter()
+                        .any(|s| bool::from(s.ct_eq(&sub)));
+                    if !already && round.refused_substances.len() < MAX_REFUSED_SUBSTANCES_PER_ROUND
+                    {
+                        round.refused_substances.push(sub);
+                    }
+                }
                 RoundState::AgreedRefusal { kind, count }
             }
             QuorumOutcome::Dispute { ref groups } => {
@@ -512,6 +562,10 @@ pub const MAX_OPEN_ROUNDS_PER_DOMAIN: usize = 64;
 /// solo rounds are recycled, preserving at least half the pool for peers.
 const MAX_OPEN_ROUNDS_PER_PROVER: usize = MAX_OPEN_ROUNDS_PER_DOMAIN / 2;
 
+/// Maximum distinct refused consensus substances retained per `(domain, height)`
+/// round to bound state growth while blocking submitter-rotation churn.
+const MAX_REFUSED_SUBSTANCES_PER_ROUND: usize = 64;
+
 /// Whether an adapter refusal says nothing about a claim - the bytes could
 /// not be read as evidence at all (wrong adapter, wrong version, malformed,
 /// declaration mismatch). Such a refusal is the caller's problem and is not
@@ -541,9 +595,10 @@ fn answer_of_error(err: &AdapterError) -> Answer {
 /// attestation. Arrival order is block order behind the chain actor, so the
 /// representative is the same on every node.
 fn find_attestation(entries: &[RoundEntry], claim: [u8; 32]) -> Option<Box<FinalityAttestation>> {
+    use subtle::ConstantTimeEq;
     entries
         .iter()
-        .find(|e| matches!(e.answer, Answer::Claim(c) if c == claim))
+        .find(|e| matches!(e.answer, Answer::Claim(c) if bool::from(c.ct_eq(&claim))))
         .and_then(|e| e.attestation.clone())
 }
 
@@ -635,8 +690,13 @@ mod tests {
             .submit(key(), &evidence(2, 5), &verdict, 100)
             .expect("second answer enters");
         match second {
-            RoundState::AgreedClaim { claim, count, .. } => {
-                assert_eq!(claim, [7; 32]);
+            RoundState::AgreedClaim {
+                claim,
+                count,
+                attestation: won,
+            } => {
+                assert_eq!(claim, attestation([7; 32], 5).claim_digest());
+                assert_eq!(won.state_root, [7; 32]);
                 assert_eq!(count, 2);
             }
             other => panic!("expected agreement, got {other:?}"),
@@ -967,5 +1027,75 @@ mod tests {
             finalized,
             RoundState::AgreedClaim { count: 2, .. }
         ));
+    }
+
+    #[test]
+    fn subroot_divergence_splits_quorum_claim_and_submitter_rotation_keeps_refusal_closed() {
+        // Part 1: identical state_root with distinct attested_event_root must NOT
+        // collapse into a single AgreedClaim.
+        let mut rounds = QuorumRounds::default();
+        rounds.set_policy(key(), QuorumPolicy::strict(2, 3));
+        let ev1 = evidence(1, 77);
+        let ev2 = evidence(2, 77);
+        let ev3 = evidence(3, 77);
+        let mut att_a = attestation([0x44; 32], 77);
+        att_a.attested_event_root = Some([0xA1; 32]);
+        att_a.attested_tx_root = Some([0xB1; 32]);
+        att_a.attested_block_hash = Some([0xC1; 32]);
+
+        let mut att_b = att_a.clone();
+        att_b.attested_event_root = Some([0xA2; 32]);
+        assert_ne!(att_a.claim_digest(), att_b.claim_digest());
+        assert!(!att_a.commits_same_roots(&att_b));
+
+        let s1 = rounds.submit(key(), &ev1, &Ok(att_a.clone()), 10).unwrap();
+        assert!(matches!(s1, RoundState::Open));
+        let s2 = rounds.submit(key(), &ev2, &Ok(att_b), 10).unwrap();
+        assert!(
+            matches!(s2, RoundState::Open),
+            "divergent event_root must not form a 2-of-3 quorum"
+        );
+        let s3 = rounds.submit(key(), &ev3, &Ok(att_a.clone()), 10).unwrap();
+        match s3 {
+            RoundState::AgreedClaim {
+                claim,
+                attestation,
+                count,
+            } => {
+                assert_eq!(count, 2);
+                assert_eq!(claim, att_a.claim_digest());
+                assert_eq!(attestation.attested_event_root, Some([0xA1; 32]));
+            }
+            other => panic!("expected honest sub-root claim to win 2-of-3, got {other:?}"),
+        }
+
+        // Part 2: rotating submitters on identical refused payload bytes cannot
+        // reopen AgreedRefusal, whereas genuinely distinct payload bytes can.
+        let mut ref_rounds = QuorumRounds::default();
+        ref_rounds.set_policy(key(), QuorumPolicy::strict(2, 3));
+        let bad_err = Err(AdapterError::Crypto {
+            what: "forged certificate".into(),
+        });
+        let ref_ev1 = evidence(10, 88);
+        let mut ref_ev2 = ref_ev1.clone();
+        ref_ev2.submitter = addr(11);
+        let r1 = ref_rounds.submit(key(), &ref_ev1, &bad_err, 20).unwrap();
+        assert!(matches!(r1, RoundState::Open));
+        let r2 = ref_rounds.submit(key(), &ref_ev2, &bad_err, 20).unwrap();
+        assert!(matches!(r2, RoundState::AgreedRefusal { count: 2, .. }));
+
+        // Submitter 12 rotates the address on identical payload + declared fields -> refused.
+        let mut rotated = ref_ev1.clone();
+        rotated.submitter = addr(12);
+        let replay = ref_rounds.submit(key(), &rotated, &bad_err, 21);
+        assert!(matches!(replay, Err(RoundError::RoundClosed { .. })));
+
+        // Submitter 12 carries genuinely distinct consensus payload -> reopens.
+        let mut fresh = rotated;
+        fresh.payload = vec![0x99, 0x88, 0x77];
+        let reopened = ref_rounds
+            .submit(key(), &fresh, &Ok(attestation([0x55; 32], 88)), 22)
+            .unwrap();
+        assert!(matches!(reopened, RoundState::Open));
     }
 }

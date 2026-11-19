@@ -84,7 +84,7 @@
 //!
 //! WIRING: wired. The demand half of this module is on a production path.
 //!
-//! [`AccessEvent`] is recorded by `StorageRegistry` every time a retrieval
+//! [`AccessEvent`] is recorded by the on-chain storage ledger every time a retrieval
 //! challenge is answered correctly, and [`AccessEstimate::from_events`]
 //! derives the rate from that log. `required_replicas_with_demand` turns the
 //! rate into a replica target, and the maintenance sweep in the chain actor

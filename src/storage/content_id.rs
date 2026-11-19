@@ -25,8 +25,7 @@ use crate::domain::Hash32;
 use serde::{Deserialize, Serialize};
 
 /// Default chunk size, mirrored from `domain::storage_params::DEFAULT_CHUNK_SIZE`
-/// For ergonomics. Tests and the `ContentManifest::from_chunks` helper use
-/// This when the caller does not pin an explicit size.
+/// for ergonomics when a caller does not pin an explicit chunk size.
 pub const DEFAULT_CHUNK_SIZE_BYTES: u32 = 262_144; // 256 KiB
 
 /// A canonical content identifier.

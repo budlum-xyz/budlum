@@ -172,6 +172,7 @@ pub fn compute_weights_root(spec: &FixedPointMlpSpec) -> [u8; 32] {
         h.update(MODEL_WEIGHTS_ROOT_TAG);
         h.update(b"W");
         h.update((chunk_idx as u64).to_le_bytes());
+        h.update((chunk.len() as u64).to_le_bytes());
         for w in chunk {
             h.update(w.to_le_bytes());
         }
@@ -180,9 +181,11 @@ pub fn compute_weights_root(spec: &FixedPointMlpSpec) -> [u8; 32] {
     let mut bias_h = Sha256::new();
     bias_h.update(MODEL_WEIGHTS_ROOT_TAG);
     bias_h.update(b"B");
+    bias_h.update((spec.dims.len() as u64).to_le_bytes());
     for d in &spec.dims {
         bias_h.update(d.to_le_bytes());
     }
+    bias_h.update((spec.biases.len() as u64).to_le_bytes());
     for b in &spec.biases {
         bias_h.update(b.to_le_bytes());
     }
@@ -199,12 +202,18 @@ fn fold_merkle_leaves(leaves: &[[u8; 32]]) -> [u8; 32] {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
             let left = pair.first().copied().unwrap_or([0u8; 32]);
-            let right = pair.get(1).copied().unwrap_or(left);
             let mut h = Sha256::new();
             h.update(MODEL_WEIGHTS_ROOT_TAG);
-            h.update(b"N");
-            h.update(left);
-            h.update(right);
+            if let Some(right) = pair.get(1).copied() {
+                h.update(b"N");
+                h.update(left);
+                h.update(right);
+            } else {
+                // Domain-separate unpaired odd nodes so `[A, B, C]` never collides
+                // with `[A, B, C, C]`.
+                h.update(b"O");
+                h.update(left);
+            }
             next.push(h.finalize().into());
         }
         level = next;
@@ -288,13 +297,40 @@ pub fn eval_dip_inference(
     trace_h.update(DIP_PROFILE_TAG);
     trace_h.update(dip.digest());
     trace_h.update(compute_weights_root(spec));
+    trace_h.update((prompt_tokens.len() as u64).to_le_bytes());
     for tok in prompt_tokens {
         trace_h.update(tok.to_le_bytes());
     }
+    trace_h.update((current.len() as u64).to_le_bytes());
     for y in &current {
         trace_h.update(y.to_le_bytes());
     }
     Ok((current, trace_h.finalize().into()))
+}
+
+/// Rejection-sample a uniform integer in `0..modulus` (`modulus >= 1`) from
+/// a SHA-256 stream so committee and audit selection exhibit zero modulo bias.
+fn sample_uniform_u128(modulus: u128, mut draw_digest: impl FnMut(u64) -> [u8; 32]) -> u128 {
+    if modulus <= 1 {
+        return 0;
+    }
+    // `zone = u128::MAX - ((u128::MAX - modulus + 1) % modulus)` rejects the
+    // incomplete top tail of length `(2^128 mod modulus)`.
+    let reject_tail = u128::MAX.wrapping_sub(modulus).wrapping_add(1) % modulus;
+    let max_accept = u128::MAX - reject_tail;
+    let mut counter = 0u64;
+    loop {
+        let digest = draw_digest(counter);
+        let mut raw = [0u8; 16];
+        if let Some(prefix) = digest.get(..16) {
+            raw.copy_from_slice(prefix);
+        }
+        let sample = u128::from_le_bytes(raw);
+        if sample <= max_accept {
+            return sample % modulus;
+        }
+        counter = counter.saturating_add(1);
+    }
 }
 
 /// Draw a stake-weighted committee using integer arithmetic from epoch `e + 1`
@@ -302,8 +338,9 @@ pub fn eval_dip_inference(
 ///
 /// # Errors
 ///
-/// Refuses any randomness from an epoch `<= request_epoch` so the requester and
-/// verifiers cannot predict the committee at request submission time.
+/// Refuses zero committee sizes, duplicate candidate entries with conflicting
+/// stakes, or any randomness from an epoch `<= request_epoch` so the requester
+/// and verifiers cannot predict the committee at request submission time.
 /// Convenience: exposed for AI verifier committee selector.
 pub fn draw_committee_for_request(
     request_id: &AiRequestId,
@@ -313,19 +350,33 @@ pub fn draw_committee_for_request(
     staked_candidates: &[(Address, u64)],
     committee_size: usize,
 ) -> Result<Vec<Address>, VerificationLayerError> {
+    if committee_size == 0 {
+        return Err(VerificationLayerError::InvalidModelOrInput(
+            "committee_size must be >= 1".to_owned(),
+        ));
+    }
     if randomness_epoch <= request_epoch {
         return Err(VerificationLayerError::FutureEpochRandomnessRequired {
             request_epoch,
             randomness_epoch,
         });
     }
-    let mut pool: Vec<(Address, u64)> = staked_candidates
-        .iter()
-        .copied()
+    let mut canonical: BTreeMap<Address, u64> = BTreeMap::new();
+    for &(addr, stake) in staked_candidates {
+        if let Some(&prev) = canonical.get(&addr) {
+            if prev != stake {
+                return Err(VerificationLayerError::InvalidModelOrInput(
+                    "duplicate candidate with conflicting stake".to_owned(),
+                ));
+            }
+        } else {
+            canonical.insert(addr, stake);
+        }
+    }
+    let mut pool: Vec<(Address, u64)> = canonical
+        .into_iter()
         .filter(|(_, stake)| *stake > 0)
         .collect();
-    pool.sort_by_key(|(addr, _)| *addr);
-    pool.dedup_by_key(|(addr, _)| *addr);
 
     if pool.len() < committee_size {
         return Err(VerificationLayerError::InsufficientCandidates {
@@ -340,18 +391,18 @@ pub fn draw_committee_for_request(
         if total_stake == 0 {
             break;
         }
-        let mut h = Sha256::new();
-        h.update(LOTTERY_TAG);
-        h.update(epoch_randomness);
-        h.update(randomness_epoch.to_le_bytes());
-        h.update(request_id.0);
-        h.update((draw_idx as u64).to_le_bytes());
-        let digest: [u8; 32] = h.finalize().into();
-        let mut raw_u128 = [0u8; 16];
-        if let Some(prefix) = digest.get(..16) {
-            raw_u128.copy_from_slice(prefix);
-        }
-        let target = u128::from_le_bytes(raw_u128) % total_stake;
+        let target = sample_uniform_u128(total_stake, |attempt| {
+            let mut h = Sha256::new();
+            h.update(LOTTERY_TAG);
+            h.update(epoch_randomness);
+            h.update(randomness_epoch.to_le_bytes());
+            h.update(request_id.0);
+            h.update((draw_idx as u64).to_le_bytes());
+            if attempt > 0 {
+                h.update(attempt.to_le_bytes());
+            }
+            h.finalize().into()
+        });
 
         let mut cumulative = 0u128;
         let mut chosen_pos = 0usize;
@@ -444,14 +495,31 @@ impl CommitRevealSession {
         }
     }
 
+    fn is_slashed(&self, member: &Address) -> bool {
+        self.slashed.iter().any(|(addr, _)| addr == member)
+    }
+
+    fn record_slash(&mut self, member: Address, offense: SlashOffense) {
+        if !self
+            .slashed
+            .iter()
+            .any(|(addr, recorded)| *addr == member && *recorded == offense)
+        {
+            self.slashed.push((member, offense));
+        }
+    }
+
     /// Submit a salted vote commitment before `commit_deadline_block`.
     ///
-    /// Copying another member's commitment bytes is immediately flagged and
-    /// penalized because honest commitments bind `member.as_bytes()`.
+    /// Commitments are strictly write-once per member, barred for already
+    /// slashed members, and copying another member's commitment bytes is
+    /// immediately flagged and penalized because honest commitments bind
+    /// `member.as_bytes()`.
     ///
     /// # Errors
     ///
-    /// Refuses non-committee members or late commits.
+    /// Refuses non-committee members, late commits, slashed members, or commit
+    /// replacement attempts.
     /// Convenience: exposed for AI verifier commit submission door.
     pub fn submit_commit(
         &mut self,
@@ -462,7 +530,10 @@ impl CommitRevealSession {
         if !self.committee.contains(&member) {
             return Err(VerificationLayerError::NotCommitteeMember(member));
         }
-        if block_height > self.commit_deadline_block {
+        if block_height > self.commit_deadline_block
+            || self.is_slashed(&member)
+            || self.commits.contains_key(&member)
+        {
             return Err(VerificationLayerError::PhaseClosed);
         }
         let copied = self
@@ -470,7 +541,7 @@ impl CommitRevealSession {
             .iter()
             .any(|(other, hash)| *other != member && *hash == commitment);
         if copied {
-            self.slashed.push((member, SlashOffense::CopiedCommitment));
+            self.record_slash(member, SlashOffense::CopiedCommitment);
             return Ok(());
         }
         self.commits.insert(member, commitment);
@@ -483,7 +554,7 @@ impl CommitRevealSession {
     ///
     /// Slashes and returns [`VerificationLayerError::RevealHashMismatch`] if the
     /// member tries to reveal a copied digest that does not match its own bound
-    /// commitment.
+    /// commitment; refuses slashed members and duplicate reveals.
     /// Convenience: exposed for AI verifier reveal submission door.
     pub fn submit_reveal(
         &mut self,
@@ -495,7 +566,11 @@ impl CommitRevealSession {
         if !self.committee.contains(&member) {
             return Err(VerificationLayerError::NotCommitteeMember(member));
         }
-        if block_height <= self.commit_deadline_block || block_height > self.reveal_deadline_block {
+        if block_height <= self.commit_deadline_block
+            || block_height > self.reveal_deadline_block
+            || self.is_slashed(&member)
+            || self.reveals.contains_key(&member)
+        {
             return Err(VerificationLayerError::PhaseClosed);
         }
         let Some(committed) = self.commits.get(&member).copied() else {
@@ -503,7 +578,7 @@ impl CommitRevealSession {
         };
         let expected = compute_vote_commitment(&self.request_id, &member, &result_digest, &salt);
         if expected != committed {
-            self.slashed.push((member, SlashOffense::InvalidReveal));
+            self.record_slash(member, SlashOffense::InvalidReveal);
             return Err(VerificationLayerError::RevealHashMismatch);
         }
         self.reveals.insert(member, result_digest);
@@ -512,36 +587,61 @@ impl CommitRevealSession {
 
     /// Close the reveal phase after `reveal_deadline_block`, penalizing every
     /// committee member who failed to reveal and promoting the outcome to
-    /// `VL-1` (`CommitteeAgreement`) if `quorum_threshold` members agreed.
+    /// `VL-1` (`CommitteeAgreement`) iff a single unique digest reached
+    /// `quorum_threshold` and strictly dominates all alternatives.
     ///
     /// # Errors
     ///
-    /// Refuses calls before `reveal_deadline_block` has passed.
+    /// Refuses calls before `reveal_deadline_block` has passed or after phase
+    /// settlement.
     /// Convenience: exposed for AI commit-reveal phase finalizer.
     pub fn finalize_reveal_phase(
         &mut self,
         block_height: u64,
     ) -> Result<Option<[u8; 32]>, VerificationLayerError> {
-        if block_height <= self.reveal_deadline_block {
+        if block_height <= self.reveal_deadline_block || self.level.is_refuted() {
+            return Err(VerificationLayerError::PhaseClosed);
+        }
+        if self.agreed_digest.is_some() {
             return Err(VerificationLayerError::PhaseClosed);
         }
         let already_slashed: BTreeSet<Address> =
             self.slashed.iter().map(|(addr, _)| *addr).collect();
-        for member in &self.committee {
-            if !self.reveals.contains_key(member) && !already_slashed.contains(member) {
-                self.slashed.push((*member, SlashOffense::MissedReveal));
-            }
+        let missed: Vec<Address> = self
+            .committee
+            .iter()
+            .copied()
+            .filter(|member| {
+                !self.reveals.contains_key(member) && !already_slashed.contains(member)
+            })
+            .collect();
+        for member in missed {
+            self.record_slash(member, SlashOffense::MissedReveal);
         }
 
+        let slashed_now: BTreeSet<Address> = self.slashed.iter().map(|(addr, _)| *addr).collect();
         let mut tallies: BTreeMap<[u8; 32], usize> = BTreeMap::new();
-        for digest in self.reveals.values() {
+        for (member, digest) in &self.reveals {
+            if slashed_now.contains(member) {
+                continue;
+            }
             let entry = tallies.entry(*digest).or_insert(0);
             *entry = entry.saturating_add(1);
         }
-        let winner = tallies
-            .into_iter()
-            .find(|(_, count)| *count >= self.quorum_threshold)
-            .map(|(digest, _)| digest);
+        let max_count = tallies.values().copied().max().unwrap_or(0);
+        let winner = if max_count >= self.quorum_threshold {
+            let mut leaders = tallies.into_iter().filter(|(_, c)| *c == max_count);
+            let first = leaders.next().map(|(d, _)| d);
+            // Split-brain tie at or above quorum must never pick arbitrarily by
+            // digest byte order.
+            if leaders.next().is_some() {
+                None
+            } else {
+                first
+            }
+        } else {
+            None
+        };
         if let Some(digest) = winner {
             self.level
                 .raise(VerificationLevel::CommitteeAgreement)
@@ -549,6 +649,37 @@ impl CommitRevealSession {
             self.agreed_digest = Some(digest);
         }
         Ok(self.agreed_digest)
+    }
+
+    /// Record an upheld fraud challenge during `(reveal_deadline_block, challenge_deadline_block]`:
+    /// permanently refutes `self.level`, clears `agreed_digest` so `VL-2`
+    /// promotion is impossible, and slashes every member who voted for the
+    /// refuted digest.
+    ///
+    /// # Errors
+    ///
+    /// Refuses calls outside the open challenge window or when no `VL-1` digest
+    /// is pending challenge.
+    /// Convenience: exposed for AI dispute-refutation settlement driver.
+    pub fn uphold_challenge(&mut self, block_height: u64) -> Result<(), VerificationLayerError> {
+        if block_height <= self.reveal_deadline_block
+            || block_height > self.challenge_deadline_block
+        {
+            return Err(VerificationLayerError::PhaseClosed);
+        }
+        let Some(refuted_digest) = self.agreed_digest.take() else {
+            return Err(VerificationLayerError::PhaseClosed);
+        };
+        let dishonest: Vec<Address> = self
+            .reveals
+            .iter()
+            .filter_map(|(member, d)| (*d == refuted_digest).then_some(*member))
+            .collect();
+        for member in dishonest {
+            self.record_slash(member, SlashOffense::InvalidReveal);
+        }
+        self.level.refute();
+        Ok(())
     }
 
     /// Promote a `VL-1` outcome to `VL-2` (`ChallengeWindowClosed`) once
@@ -562,6 +693,11 @@ impl CommitRevealSession {
         &mut self,
         block_height: u64,
     ) -> Result<VerificationLevel, VerificationLayerError> {
+        if self.level.is_refuted() {
+            self.level
+                .raise(VerificationLevel::ChallengeWindowClosed)
+                .map_err(VerificationLayerError::LevelTransition)?;
+        }
         if block_height <= self.challenge_deadline_block || self.agreed_digest.is_none() {
             return Err(VerificationLayerError::PhaseClosed);
         }
@@ -572,7 +708,8 @@ impl CommitRevealSession {
     }
 }
 
-/// Deterministic statistical draw for second-committee audit (Step 4).
+/// Deterministic statistical draw for second-committee audit (Step 4) using
+/// rejection sampling so no request experiences modulo bias.
 #[must_use]
 /// Convenience: exposed for AI second-committee audit sampler.
 pub fn should_sample_for_second_committee(
@@ -586,16 +723,17 @@ pub fn should_sample_for_second_committee(
     if sampling_rate_bps >= 10_000 {
         return true;
     }
-    let mut h = Sha256::new();
-    h.update(SAMPLING_AUDIT_TAG);
-    h.update(epoch_randomness);
-    h.update(request_id.0);
-    let digest: [u8; 32] = h.finalize().into();
-    let mut limb = [0u8; 8];
-    if let Some(prefix) = digest.get(..8) {
-        limb.copy_from_slice(prefix);
-    }
-    (u64::from_le_bytes(limb) % 10_000) < sampling_rate_bps
+    let roll = sample_uniform_u128(10_000, |attempt| {
+        let mut h = Sha256::new();
+        h.update(SAMPLING_AUDIT_TAG);
+        h.update(epoch_randomness);
+        h.update(request_id.0);
+        if attempt > 0 {
+            h.update(attempt.to_le_bytes());
+        }
+        h.finalize().into()
+    });
+    roll < u128::from(sampling_rate_bps)
 }
 
 /// Interactive bisection game over `total_steps` execution checkpoints (Step 3,
@@ -609,16 +747,18 @@ pub struct DisputeBisectionGame {
 
 impl DisputeBisectionGame {
     /// Open a dispute over `[0, total_steps]`, where step `0` is the agreed
-    /// initial input commitment and `total_steps >= 1` is the disputed final
-    /// checkpoint.
+    /// initial input commitment and `1 <= total_steps <= 2^MAX_BISECTION_ROUNDS`
+    /// is the disputed final checkpoint (guaranteed to converge within
+    /// [`MAX_BISECTION_ROUNDS`] halvings).
     ///
     /// # Errors
     ///
-    /// Refuses `total_steps == 0`.
+    /// Refuses `total_steps == 0` or `total_steps > (1u64 << MAX_BISECTION_ROUNDS)`.
     pub fn new(total_steps: u64) -> Result<Self, VerificationLayerError> {
-        if total_steps == 0 {
+        let max_steps = 1u64 << MAX_BISECTION_ROUNDS;
+        if total_steps == 0 || total_steps > max_steps {
             return Err(VerificationLayerError::InvalidBisectionState(
-                "total_steps must be >= 1",
+                "total_steps must be in 1..=2^MAX_BISECTION_ROUNDS",
             ));
         }
         Ok(Self {
@@ -780,11 +920,14 @@ pub struct SmallModelBoundProof {
     pub proof_binding: [u8; 32],
 }
 
-fn derive_journal_output_commit(vm_journal_word: u64, output_limbs: &[i32]) -> [u8; 32] {
+fn derive_journal_output_commit(vm_events: &[u64], output_limbs: &[i32]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(BOUND_PROOF_TAG);
     h.update(b"JOURNAL");
-    h.update(vm_journal_word.to_le_bytes());
+    h.update((vm_events.len() as u64).to_le_bytes());
+    for word in vm_events {
+        h.update(word.to_le_bytes());
+    }
     h.update(output_commitment(output_limbs));
     h.finalize().into()
 }
@@ -829,6 +972,13 @@ pub fn prove_small_model_bound(
             "weights_root does not match registered ModelRecordV2".to_owned(),
         ));
     }
+    let actual_program_hash =
+        matmul_program_hash(spec).map_err(VerificationLayerError::InvalidModelOrInput)?;
+    if actual_program_hash != model.program_hash {
+        return Err(VerificationLayerError::InvalidModelOrInput(
+            "program_hash does not match canonical guest for spec".to_owned(),
+        ));
+    }
     let host_out =
         eval_fixed_point_mlp(spec, input).map_err(VerificationLayerError::InvalidModelOrInput)?;
     let (guest_out, receipt) = run_matmul_guest(spec, input, 500_000)
@@ -843,7 +993,7 @@ pub fn prove_small_model_bound(
     };
     let input_commit = input_commitment(input);
     let output_commit = output_commitment(&guest_out);
-    let journal_derived_commit = derive_journal_output_commit(vm_journal_word, &guest_out);
+    let journal_derived_commit = derive_journal_output_commit(&receipt.events, &guest_out);
     let proof_binding = compute_proof_binding(
         &request_id,
         &model.model_id,
@@ -882,7 +1032,10 @@ pub fn is_valid_small_model_bound_proof(
     {
         return false;
     }
-    if proof.program_hash != model.program_hash {
+    let Ok(expected_program_hash) = matmul_program_hash(spec) else {
+        return false;
+    };
+    if proof.program_hash != model.program_hash || model.program_hash != expected_program_hash {
         return false;
     }
     if proof.input_commit != input_commitment(input) {
@@ -900,7 +1053,7 @@ pub fn is_valid_small_model_bound_proof(
     if proof.output_commit != output_commitment(&guest_out) {
         return false;
     }
-    let expected_journal_commit = derive_journal_output_commit(expected_log, &guest_out);
+    let expected_journal_commit = derive_journal_output_commit(&receipt.events, &guest_out);
     if proof.journal_derived_commit != expected_journal_commit {
         return false;
     }
@@ -1273,5 +1426,70 @@ mod tests {
         assert!(!is_valid_small_model_bound_proof(
             &proof, &req_b, &model, &spec, &input
         ));
+    }
+
+    #[test]
+    fn commit_reveal_challenge_refutation_ties_and_committee_guards_fail_closed() {
+        let req = AiRequestId([0x99; 32]);
+        let a = Address::from([1u8; 32]);
+        let b = Address::from([2u8; 32]);
+        let c = Address::from([3u8; 32]);
+        let d = Address::from([4u8; 32]);
+
+        // Zero committee and conflicting duplicate candidate stakes fail closed.
+        assert!(draw_committee_for_request(&req, 1, 2, &[7; 32], &[(a, 100)], 0).is_err());
+        assert!(draw_committee_for_request(
+            &req,
+            1,
+            2,
+            &[7; 32],
+            &[(a, 100), (a, 9_999), (b, 100)],
+            1
+        )
+        .is_err());
+
+        // Oversized bisection range (> 2^32) is refused up front; odd-leaf Merkle
+        // roots never collide with duplicated-tail trees.
+        assert!(DisputeBisectionGame::new((1u64 << MAX_BISECTION_ROUNDS) + 1).is_err());
+        assert_ne!(
+            fold_merkle_leaves(&[[1; 32], [2; 32], [3; 32]]),
+            fold_merkle_leaves(&[[1; 32], [2; 32], [3; 32], [3; 32]])
+        );
+
+        // Split-brain 2-vs-2 tie with quorum=2 refuses arbitrary byte-order winner.
+        let mut tied = CommitRevealSession::new(req, vec![a, b, c, d], 2, 0, 5, 5, 10);
+        let d1 = [0x01; 32];
+        let d2 = [0xFF; 32];
+        let s = [0xAA; 32];
+        for (m, dig) in [(a, d1), (b, d1), (c, d2), (d, d2)] {
+            tied.submit_commit(m, compute_vote_commitment(&req, &m, &dig, &s), 2)
+                .unwrap();
+        }
+        // Commit overwrite and slashed re-entry are rejected.
+        assert!(tied.submit_commit(a, [0x42; 32], 3).is_err());
+        for (m, dig) in [(a, d1), (b, d1), (c, d2), (d, d2)] {
+            tied.submit_reveal(m, dig, s, 7).unwrap();
+        }
+        assert_eq!(tied.finalize_reveal_phase(11).unwrap(), None);
+
+        // Upheld challenge during VL-1 -> VL-2 window refutes level, slashes dishonest
+        // voters, and permanently blocks VL-2 promotion.
+        let mut sess = CommitRevealSession::new(req, vec![a, b, c], 2, 0, 5, 5, 10);
+        for m in [a, b] {
+            sess.submit_commit(m, compute_vote_commitment(&req, &m, &d1, &s), 1)
+                .unwrap();
+            sess.submit_reveal(m, d1, s, 6).unwrap();
+        }
+        // Member `c` fails reveal then tries to recover with the real salt: barred.
+        sess.submit_commit(c, compute_vote_commitment(&req, &c, &d2, &s), 1)
+            .unwrap();
+        assert!(sess.submit_reveal(c, d1, s, 6).is_err());
+        assert!(sess.submit_reveal(c, d2, s, 7).is_err());
+        assert_eq!(sess.finalize_reveal_phase(11).unwrap(), Some(d1));
+        sess.uphold_challenge(15).unwrap();
+        assert!(sess.level.is_refuted());
+        assert!(sess.close_challenge_window(25).is_err());
+        assert!(sess.slashed.contains(&(a, SlashOffense::InvalidReveal)));
+        assert!(sess.slashed.contains(&(b, SlashOffense::InvalidReveal)));
     }
 }

@@ -62,7 +62,10 @@ use crate::domain::types::ConsensusKind;
 
 #[cfg(test)]
 pub(crate) use super::pq_anchor_verify::check_signature_list;
-pub use super::pq_anchor_verify::{verify_anchor_full, verify_anchor_light, MAX_ANCHOR_SIGNATURES};
+pub use super::pq_anchor_verify::{
+    verify_anchor_full, verify_anchor_leaf_light, verify_anchor_light, MAX_ANCHOR_MERKLE_DEPTH,
+    MAX_ANCHOR_SIGNATURES,
+};
 
 /// Blocks between two anchors: one per 360 blocks, six minutes at the
 /// one second block time.
@@ -271,6 +274,11 @@ pub enum AnchorError {
     /// contract, never consensus state - the reason is reported, nothing is
     /// retried silently.
     EmissionIo(&'static str),
+    /// An all-zero digest was supplied for an anchor leaf or committed root.
+    ZeroDigest { field: &'static str },
+    /// A domain-leaf Merkle inclusion proof against [`PqAnchor::aggregate_root`]
+    /// is malformed or does not rebuild the signed root.
+    InvalidInclusionProof(&'static str),
 }
 
 impl AnchorError {
@@ -294,6 +302,8 @@ impl AnchorError {
             Self::Rotation(..) => "anchor-committee-rotation",
             Self::SigningBackendUnavailable(_) => "anchor-signing-backend-unavailable",
             Self::EmissionIo(_) => "anchor-emission-io",
+            Self::ZeroDigest { .. } => "anchor-zero-digest",
+            Self::InvalidInclusionProof(_) => "anchor-invalid-inclusion-proof",
         }
     }
 }
@@ -349,6 +359,12 @@ impl std::fmt::Display for AnchorError {
                 write!(f, "anchor signing backend unavailable: enable {feature}")
             }
             Self::EmissionIo(stage) => write!(f, "anchor emission log io: {stage}"),
+            Self::ZeroDigest { field } => {
+                write!(f, "anchor {field} must not be all zeros")
+            }
+            Self::InvalidInclusionProof(reason) => {
+                write!(f, "anchor inclusion proof rejected: {reason}")
+            }
         }
     }
 }
@@ -414,6 +430,89 @@ pub fn anchor_leaf_digest(leaf: &AnchorLeaf) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Compact Merkle inclusion proof authenticating one domain [`AnchorLeaf`]
+/// (both its `finality_digest` and its [`QuantumClass`]) against a signed
+/// [`PqAnchor::aggregate_root`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnchorInclusionProof {
+    /// The domain finality leaf whose membership is proven.
+    pub leaf: AnchorLeaf,
+    /// Zero-based position of `leaf` inside the ordered aggregation window.
+    pub leaf_index: u64,
+    /// Total number of leaves in the ordered aggregation window (`>= 1`),
+    /// pinning exact layer widths so promoted odd tails are bijective.
+    pub leaf_count: u64,
+    /// Sibling digests from leaf layer up to root, using
+    /// [`crate::consensus::merkle_tree::odd_promotion_sentinel`] for promoted
+    /// odd-layer tail steps; length bounded by [`MAX_ANCHOR_MERKLE_DEPTH`].
+    pub siblings: Vec<[u8; 32]>,
+}
+
+/// Builds a bounded Merkle inclusion proof for `leaves[leaf_index]` matching
+/// [`aggregate_finality_roots`] over [`anchor_leaf_digest`].
+///
+/// Convenience: exposed for light-client and cross-domain anchor consumers.
+///
+/// # Errors
+///
+/// Returns [`AnchorError::EmptyAggregation`] if `leaves` is empty,
+/// [`AnchorError::ZeroDigest`] if any leaf carries an all-zero finality digest,
+/// or [`AnchorError::InvalidInclusionProof`] if `leaf_index` is out of bounds
+/// or the resulting path exceeds [`MAX_ANCHOR_MERKLE_DEPTH`].
+pub fn build_anchor_inclusion_proof(
+    leaves: &[AnchorLeaf],
+    leaf_index: usize,
+) -> Result<AnchorInclusionProof, AnchorError> {
+    use subtle::ConstantTimeEq;
+    if leaves.is_empty() {
+        return Err(AnchorError::EmptyAggregation);
+    }
+    if leaf_index >= leaves.len() {
+        return Err(AnchorError::InvalidInclusionProof(
+            "leaf index out of range",
+        ));
+    }
+    let mut digests = Vec::with_capacity(leaves.len());
+    for leaf in leaves {
+        if bool::from(leaf.finality_digest.ct_eq(&[0u8; 32])) {
+            return Err(AnchorError::ZeroDigest {
+                field: "leaf finality_digest",
+            });
+        }
+        digests.push(anchor_leaf_digest(leaf));
+    }
+    let siblings = crate::consensus::merkle_tree::merkle_proof(
+        &digests,
+        leaf_index,
+        combine_sha3,
+        promote_sha3,
+    )
+    .ok_or(AnchorError::InvalidInclusionProof(
+        "leaf index out of range",
+    ))?;
+    if siblings.len() > MAX_ANCHOR_MERKLE_DEPTH {
+        return Err(AnchorError::InvalidInclusionProof(
+            "inclusion path exceeds maximum Merkle depth",
+        ));
+    }
+    let idx_u64 = u64::try_from(leaf_index)
+        .map_err(|_| AnchorError::InvalidInclusionProof("leaf index overflows u64"))?;
+    let count_u64 = u64::try_from(leaves.len())
+        .map_err(|_| AnchorError::InvalidInclusionProof("leaf count overflows u64"))?;
+    let leaf = leaves
+        .get(leaf_index)
+        .copied()
+        .ok_or(AnchorError::InvalidInclusionProof(
+            "leaf index out of range for aggregation window",
+        ))?;
+    Ok(AnchorInclusionProof {
+        leaf,
+        leaf_index: idx_u64,
+        leaf_count: count_u64,
+        siblings,
+    })
+}
+
 /// Aggregates ordered leaf digests into the single root the anchor signs.
 /// Uses the same SHA-3 helpers the QC blob trees use; the ordering contract
 /// (domain-id ascending, as the caller presents it) is part of the signed
@@ -421,12 +520,28 @@ pub fn anchor_leaf_digest(leaf: &AnchorLeaf) -> [u8; 32] {
 ///
 /// # Errors
 ///
-/// [`AnchorError::EmptyAggregation`] for no leaves.
+/// [`AnchorError::EmptyAggregation`] for no leaves, or
+/// [`AnchorError::ZeroDigest`] when any leaf digest or the derived root is all
+/// zeros.
 pub fn aggregate_finality_roots(leaves: &[[u8; 32]]) -> Result<[u8; 32], AnchorError> {
+    use subtle::ConstantTimeEq;
     if leaves.is_empty() {
         return Err(AnchorError::EmptyAggregation);
     }
-    Ok(merkle_root(leaves, combine_sha3, promote_sha3))
+    for leaf in leaves {
+        if bool::from(leaf.ct_eq(&[0u8; 32])) {
+            return Err(AnchorError::ZeroDigest {
+                field: "leaf digest",
+            });
+        }
+    }
+    let root = merkle_root(leaves, combine_sha3, promote_sha3);
+    if bool::from(root.ct_eq(&[0u8; 32])) {
+        return Err(AnchorError::ZeroDigest {
+            field: "aggregate_root",
+        });
+    }
+    Ok(root)
 }
 
 /// Where a signer's key lives.
@@ -597,6 +712,23 @@ pub fn assemble_anchor(
     signers: &[&dyn AnchorSigner],
 ) -> Result<PqAnchor, AnchorError> {
     let (stark_root, crossdomain_root) = roots;
+    {
+        use subtle::ConstantTimeEq;
+        if let Some(sr) = stark_root.as_ref() {
+            if bool::from(sr.ct_eq(&[0u8; 32])) {
+                return Err(AnchorError::ZeroDigest {
+                    field: "stark_root",
+                });
+            }
+        }
+        if let Some(cr) = crossdomain_root.as_ref() {
+            if bool::from(cr.ct_eq(&[0u8; 32])) {
+                return Err(AnchorError::ZeroDigest {
+                    field: "crossdomain_root",
+                });
+            }
+        }
+    }
     let aggregate_root = aggregate_finality_roots(leaf_digests)?;
     let mut anchor = PqAnchor {
         chain_id,
@@ -662,11 +794,16 @@ pub fn build_anchor_for_height(
     request: &EmissionRequest<'_>,
     signers: &[&dyn AnchorSigner],
 ) -> Result<PqAnchor, AnchorError> {
-    let leaf_digests: Vec<[u8; 32]> = request
-        .window_leaves
-        .iter()
-        .map(anchor_leaf_digest)
-        .collect();
+    use subtle::ConstantTimeEq;
+    let mut leaf_digests = Vec::with_capacity(request.window_leaves.len());
+    for leaf in request.window_leaves {
+        if bool::from(leaf.finality_digest.ct_eq(&[0u8; 32])) {
+            return Err(AnchorError::ZeroDigest {
+                field: "leaf finality_digest",
+            });
+        }
+        leaf_digests.push(anchor_leaf_digest(leaf));
+    }
     assemble_anchor(
         request.chain_id,
         request.height,
@@ -810,7 +947,7 @@ mod tests {
     }
 
     fn leaves(n: usize) -> Vec<AnchorLeaf> {
-        (0..n).map(|i| leaf(i as u8)).collect()
+        (1..=n).map(|i| leaf(i as u8)).collect()
     }
 
     fn leaf_digests(n: usize) -> Vec<[u8; 32]> {
@@ -1329,6 +1466,123 @@ mod tests {
             assert_eq!(err.kind(), "anchor-committee-quorum");
             assert_eq!(cold.key_epoch, 2);
             assert_eq!(cold.rotations.len(), 1);
+        }
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn anchor_rejects_zero_roots_and_verifies_inclusion_proofs_across_all_shapes() {
+        use crate::consensus::merkle_tree::odd_promotion_sentinel;
+        use crate::settlement::anchor_ledger::test_support;
+
+        let ledger = test_support::software_ledger(CHAIN, 1);
+        let s0 = test_support::signer(0);
+        let s2 = test_support::signer(2);
+        let signers: [&dyn AnchorSigner; 2] = [&s0, &s2];
+
+        // Zero finality leaf is rejected at aggregate assembly and anchor emission.
+        let zero_leaf = AnchorLeaf {
+            finality_digest: [0u8; 32],
+            quantum_class: QuantumClass::Lattice,
+        };
+        assert!(matches!(
+            build_anchor_inclusion_proof(&[zero_leaf], 0),
+            Err(AnchorError::ZeroDigest { .. })
+        ));
+        assert!(matches!(
+            assemble_anchor(CHAIN, 360, &[[0u8; 32]], (None, None), 1, &signers),
+            Err(AnchorError::ZeroDigest { .. })
+        ));
+
+        // Optional Some([0; 32]) stark_root or crossdomain_root is rejected.
+        let good_leaf = AnchorLeaf {
+            finality_digest: [0x33; 32],
+            quantum_class: QuantumClass::Hash,
+        };
+        let good_digest = anchor_leaf_digest(&good_leaf);
+        assert!(matches!(
+            assemble_anchor(
+                CHAIN,
+                360,
+                &[good_digest],
+                (Some([0u8; 32]), None),
+                1,
+                &signers
+            ),
+            Err(AnchorError::ZeroDigest { .. })
+        ));
+        assert!(matches!(
+            assemble_anchor(
+                CHAIN,
+                360,
+                &[good_digest],
+                (None, Some([0u8; 32])),
+                1,
+                &signers
+            ),
+            Err(AnchorError::ZeroDigest { .. })
+        ));
+
+        // Verify exact bijective inclusion proofs across every tree size N = 1..=9
+        // (including N = 6 where leaf 4 pairs at layer 0 then promotes at layer 1).
+        for count in 1u64..=9 {
+            let leaves: Vec<AnchorLeaf> = (0..count)
+                .map(|i| {
+                    let b = u8::try_from(i + 1).expect("fits u8");
+                    let class = if i % 2 == 0 {
+                        QuantumClass::Hash
+                    } else {
+                        QuantumClass::Lattice
+                    };
+                    AnchorLeaf {
+                        finality_digest: [b; 32],
+                        quantum_class: class,
+                    }
+                })
+                .collect();
+            let leaf_digests: Vec<[u8; 32]> = leaves.iter().map(anchor_leaf_digest).collect();
+            let height = 360 * count;
+            let anchor = assemble_anchor(
+                CHAIN,
+                height,
+                &leaf_digests,
+                (Some([0x91; 32]), None),
+                1,
+                &signers,
+            )
+            .expect("anchor assembles");
+            verify_anchor_light(&anchor, &ledger).expect("anchor verifies");
+
+            for idx in 0..leaves.len() {
+                let proof = build_anchor_inclusion_proof(&leaves, idx).expect("builds proof");
+                let observed_class = verify_anchor_leaf_light(&anchor, &ledger, &proof)
+                    .unwrap_or_else(|e| {
+                        panic!("valid proof failed for count={count}, idx={idx}: {e:?}")
+                    });
+                assert_eq!(observed_class, leaves[idx].quantum_class);
+
+                // Downgrading or altering quantum_class breaks leaf digest binding.
+                let mut downgraded = proof.clone();
+                downgraded.leaf.quantum_class = QuantumClass::Classical;
+                assert!(verify_anchor_leaf_light(&anchor, &ledger, &downgraded).is_err());
+
+                // Odd-count tail promotion is rejected if leaf_count expands to even.
+                if count % 2 == 1 && idx + 1 == leaves.len() {
+                    let mut wrong_tail = proof.clone();
+                    wrong_tail.leaf_count = count + 1;
+                    assert!(verify_anchor_leaf_light(&anchor, &ledger, &wrong_tail).is_err());
+                }
+
+                // Inflating leaf_count past the path's tree capacity truncates before root.
+                let mut wrong_depth_count = proof.clone();
+                wrong_depth_count.leaf_count = (1u64 << proof.siblings.len()) + 1;
+                assert!(verify_anchor_leaf_light(&anchor, &ledger, &wrong_depth_count).is_err());
+
+                // Extra sibling past root is rejected immediately.
+                let mut extra = proof;
+                extra.siblings.push(odd_promotion_sentinel());
+                assert!(verify_anchor_leaf_light(&anchor, &ledger, &extra).is_err());
+            }
         }
     }
 }
