@@ -522,7 +522,11 @@ impl SolanaTowerBftAdapter {
                     what: "invalid ML-DSA-65 co-signature on Solana Tower vote".into(),
                 })?;
             }
-            signed_stake += u128::from(validator.stake_lamports);
+            signed_stake = signed_stake
+                .checked_add(u128::from(validator.stake_lamports))
+                .ok_or_else(|| AdapterError::ConsensusRule {
+                    rule: "Solana Tower signed stake sum overflows u128".into(),
+                })?;
         }
 
         // Strict stake supermajority: signed > 2/3 of total pinned stake.

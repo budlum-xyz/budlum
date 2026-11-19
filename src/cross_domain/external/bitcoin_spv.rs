@@ -5,6 +5,8 @@
 //! helper and consensus limits are deliberately exposed for the pinned-mainnet
 //! test corpus and the canonical spec encoding; those callers do not name every
 //! helper in a production `.rs` file yet.
+//! WIRING: unwired - standalone SPV tx-inclusion and recursive header-STARK
+//! verifiers land with the BTC bridge redemption transaction door.
 //!
 //! # Why this adapter exists
 //!

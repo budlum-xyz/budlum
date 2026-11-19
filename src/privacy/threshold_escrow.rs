@@ -108,6 +108,9 @@ pub struct EscrowUnlockShare {
 /// Errors emitted while creating or unlocking a `7-of-4` threshold escrow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThresholdEscrowError {
+    ZeroEscrowParameter(&'static str),
+    ZeroRecipient,
+    TooManyShares { got: usize, max: usize },
     InvalidCommitteeSize { got: usize, expected: usize },
     UnknownMember(u8),
     DuplicateCommitteeMember(u8),
@@ -144,6 +147,17 @@ impl ThresholdEscrow {
         committee: EscrowCommittee,
         amount_commitment: [u8; 32],
     ) -> Result<Self, ThresholdEscrowError> {
+        if committee.escrow_id == [0u8; 32] {
+            return Err(ThresholdEscrowError::ZeroEscrowParameter("escrow_id"));
+        }
+        if committee.chain_id == 0 {
+            return Err(ThresholdEscrowError::ZeroEscrowParameter("chain_id"));
+        }
+        if amount_commitment == [0u8; 32] {
+            return Err(ThresholdEscrowError::ZeroEscrowParameter(
+                "amount_commitment",
+            ));
+        }
         committee.validate()?;
         Ok(Self {
             committee,
@@ -186,6 +200,20 @@ impl ThresholdEscrow {
         seed: &[u8; ML_DSA_SEED_LEN],
         recipient: &Address,
     ) -> Result<EscrowUnlockShare, ThresholdEscrowError> {
+        if *recipient == Address::zero() {
+            return Err(ThresholdEscrowError::ZeroRecipient);
+        }
+        let member = self
+            .committee
+            .members
+            .iter()
+            .find(|m| m.index == member_index)
+            .ok_or(ThresholdEscrowError::UnknownMember(member_index))?;
+        let derived_pk = ml_dsa_public_key(SchemeId::ML_DSA_65, seed)
+            .map_err(|_| ThresholdEscrowError::InvalidMemberKey(member_index))?;
+        if derived_pk != member.public_key {
+            return Err(ThresholdEscrowError::InvalidMemberKey(member_index));
+        }
         let msg = Self::signing_message(&self.committee, recipient, &self.amount_commitment);
         let signature = ml_dsa_sign(
             SchemeId::ML_DSA_65,
@@ -251,6 +279,15 @@ impl ThresholdEscrow {
         if self.unlocked {
             return Err(ThresholdEscrowError::AlreadyUnlocked);
         }
+        if *recipient == Address::zero() {
+            return Err(ThresholdEscrowError::ZeroRecipient);
+        }
+        if shares.len() > THRESHOLD_ESCROW_N {
+            return Err(ThresholdEscrowError::TooManyShares {
+                got: shares.len(),
+                max: THRESHOLD_ESCROW_N,
+            });
+        }
         self.committee.validate()?;
         if quorum_proof.statement.chain_id != self.committee.chain_id {
             return Err(ThresholdEscrowError::WrongQuorumChain {
@@ -308,13 +345,97 @@ impl ThresholdEscrow {
         verify_predicate(quorum_proof)
             .map_err(|e| ThresholdEscrowError::InvalidQuorumStark(format!("{e:?}")))?;
 
+        // Bind the exact sorted signing coalition into the receipt digest so
+        // two distinct 4-of-7 subsets yield distinct forensic audit receipts.
         let mut h = Sha3_256::new();
         h.update(b"BDLM_THRESHOLD_ESCROW_RECEIPT_V1");
         h.update(msg);
         h.update((seen_signers.len() as u64).to_le_bytes());
+        for idx in &seen_signers {
+            h.update([*idx]);
+        }
         let receipt: [u8; 32] = h.finalize().into();
         self.unlocked = true;
         self.unlock_receipt_digest = Some(receipt);
         Ok(receipt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_escrow() -> (ThresholdEscrow, Vec<[u8; ML_DSA_SEED_LEN]>) {
+        let seeds: Vec<[u8; ML_DSA_SEED_LEN]> = (0..THRESHOLD_ESCROW_N)
+            .map(|i| [0x20 + i as u8; ML_DSA_SEED_LEN])
+            .collect();
+        let members = seeds
+            .iter()
+            .enumerate()
+            .map(|(i, s)| EscrowCommittee::member_from_seed(i as u8, s).unwrap())
+            .collect();
+        let committee = EscrowCommittee {
+            escrow_id: [0xA1; 32],
+            chain_id: 45_261,
+            epoch: 9,
+            nonce: 1,
+            members,
+        };
+        (ThresholdEscrow::open(committee, [0xB2; 32]).unwrap(), seeds)
+    }
+
+    #[test]
+    fn strix_threshold_escrow_rejects_zero_recipient_oversized_shares_and_binds_coalition() {
+        let (mut a, seeds) = make_escrow();
+        let mut b = a.clone();
+        let recipient = Address([0x55; 32]);
+
+        // 1. Zero escrow parameters and zero recipient fail closed.
+        let mut bad_comm = a.committee.clone();
+        bad_comm.chain_id = 0;
+        assert_eq!(
+            ThresholdEscrow::open(bad_comm, [0xB2; 32]),
+            Err(ThresholdEscrowError::ZeroEscrowParameter("chain_id"))
+        );
+        assert_eq!(
+            a.sign_share(0, &seeds[0], &Address::zero()),
+            Err(ThresholdEscrowError::ZeroRecipient)
+        );
+        // Wrong seed for member 0 is rejected at sign_share.
+        assert_eq!(
+            a.sign_share(0, &seeds[1], &recipient),
+            Err(ThresholdEscrowError::InvalidMemberKey(0))
+        );
+
+        let proof = a.prove_quorum_predicate(4, &recipient).unwrap();
+        let oversized = vec![
+            EscrowUnlockShare {
+                member_index: 0,
+                signature: Vec::new(),
+            };
+            THRESHOLD_ESCROW_N + 1
+        ];
+        assert_eq!(
+            a.unlock(&recipient, &oversized, &proof),
+            Err(ThresholdEscrowError::TooManyShares {
+                got: THRESHOLD_ESCROW_N + 1,
+                max: THRESHOLD_ESCROW_N,
+            })
+        );
+        assert_eq!(
+            a.unlock(&Address::zero(), &[], &proof),
+            Err(ThresholdEscrowError::ZeroRecipient)
+        );
+
+        // 2. Distinct 4-of-7 coalitions {0,1,2,3} vs {3,4,5,6} commit distinct receipts!
+        let shares_a: Vec<_> = (0..4u8)
+            .map(|i| a.sign_share(i, &seeds[usize::from(i)], &recipient).unwrap())
+            .collect();
+        let shares_b: Vec<_> = (3..7u8)
+            .map(|i| b.sign_share(i, &seeds[usize::from(i)], &recipient).unwrap())
+            .collect();
+        let rcpt_a = a.unlock(&recipient, &shares_a, &proof).unwrap();
+        let rcpt_b = b.unlock(&recipient, &shares_b, &proof).unwrap();
+        assert_ne!(rcpt_a, rcpt_b);
     }
 }
