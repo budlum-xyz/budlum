@@ -63,6 +63,10 @@ pub enum BudToEthError {
     BurnDebitNotRecorded,
     /// The burn's refund expiry height has already passed at `finalized_height`.
     BurnExpired,
+    /// An external claim or delivery was already recorded for this burn.
+    ClaimAlreadyIssued,
+    /// The finalized Budlum height is zero (genesis cannot hold a burn).
+    InvalidFinalizedHeight,
 }
 
 impl std::fmt::Display for BudToEthError {
@@ -80,6 +84,12 @@ impl std::fmt::Display for BudToEthError {
             }
             Self::BurnExpired => {
                 write!(f, "bud-to-eth: burn expired before finalized claim height")
+            }
+            Self::ClaimAlreadyIssued => {
+                write!(f, "bud-to-eth: claim or delivery already recorded for burn")
+            }
+            Self::InvalidFinalizedHeight => {
+                write!(f, "bud-to-eth: finalized height must be non-zero")
             }
         }
     }
@@ -118,6 +128,12 @@ pub fn build_bud_to_eth_claim(
             .ok_or(BudToEthError::BurnEventNotFound)?;
         if !matches!(transfer.status, BridgeStatus::Burned { .. }) {
             return Err(BudToEthError::NotBurned);
+        }
+        if finalized_height == 0 {
+            return Err(BudToEthError::InvalidFinalizedHeight);
+        }
+        if transfer.claim_issued_height.is_some() || transfer.delivered_height.is_some() {
+            return Err(BudToEthError::ClaimAlreadyIssued);
         }
         if transfer.expiry_height > 0 && finalized_height >= transfer.expiry_height {
             return Err(BudToEthError::BurnExpired);
@@ -410,6 +426,67 @@ mod tests {
         assert!(
             bridge.sweep_expired_locks(200).is_empty(),
             "a burn with an issued external claim must never be refunded on expiry"
+        );
+    }
+
+    #[test]
+    fn duplicate_or_genesis_height_bud_to_eth_claim_is_refused() {
+        use crate::core::address::Address;
+        use crate::core::hash::hash_fields_bytes;
+        use crate::cross_domain::bridge::AssetId;
+
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"bte-single-claim"]));
+        bridge.register_asset(asset, 1).unwrap();
+        let owner = Address::from([5u8; 32]);
+        let recipient = Address::from([6u8; 32]);
+        let (transfer, event) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 500)
+            .unwrap();
+        let id = transfer.message_id;
+        bridge.mint(&event.message.unwrap(), 11).unwrap();
+        bridge
+            .burn_with_event(id, 2, 25, 0, 500, [8u8; 20])
+            .unwrap();
+
+        assert!(
+            build_bud_to_eth_claim(
+                &mut bridge,
+                &id,
+                0,
+                [0xCD; 32],
+                vec![1, 2],
+                vec![3, 4],
+                DEFAULT_BRIDGE_CAP,
+            )
+            .is_err(),
+            "genesis finalized_height 0 must be refused"
+        );
+
+        let first = build_bud_to_eth_claim(
+            &mut bridge,
+            &id,
+            120,
+            [0xCD; 32],
+            vec![1, 2],
+            vec![3, 4],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .expect("first claim succeeds");
+        assert_eq!(first.finalized_height, 120);
+
+        assert!(
+            build_bud_to_eth_claim(
+                &mut bridge,
+                &id,
+                130,
+                [0xEF; 32],
+                vec![1, 2],
+                vec![3, 4],
+                DEFAULT_BRIDGE_CAP,
+            )
+            .is_err(),
+            "second outbound claim for an already-claimed burn must be refused"
         );
     }
 }

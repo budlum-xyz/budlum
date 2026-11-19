@@ -1,5 +1,7 @@
-//! WIRING: unwired - `verify_registration` is reached only from the registration tests in this tree; the block path validates registrations through its own inline check.
-//! The validator key binding of a registration.
+//! WIRING: unwired - `verify_registration` is reached only from the registration tests in this tree.
+//!
+//! The block path validates registrations through its own inline check.
+//! This module defines the validator key binding of a registration.
 //!
 //! A validator's address is its Ed25519 public key. Its primary signing key is ML-DSA-65. The
 //! registration binds the two with two signatures over one payload: the Ed25519 key signs that
@@ -20,8 +22,12 @@ const BINDING_TAG: &[u8] = b"BDLM_VALIDATOR_BINDING_V1";
 /// Why a registration was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistrationError {
-    /// The Ed25519 address is not 32 bytes.
+    /// The chain id is zero (uninitialized network identifier).
+    InvalidChainId,
+    /// The Ed25519 address is not 32 bytes or is all zeros.
     BadAddress,
+    /// The Ed25519 scheme is not active for verification in the status registry.
+    Ed25519SchemeDisabled,
     /// The Ed25519 signature over the binding payload is invalid.
     Ed25519Signature,
     /// The ML-DSA-65 key or signature over the binding payload is invalid or not verifiable.
@@ -67,8 +73,19 @@ pub fn verify_registration(
     chain_id: u64,
     registration: &KeyRegistration,
 ) -> Result<(), RegistrationError> {
-    if registration.ed25519_public_key.len() != 32 {
+    if chain_id == 0 {
+        return Err(RegistrationError::InvalidChainId);
+    }
+    if registration.ed25519_public_key.len() != 32
+        || registration.ed25519_public_key.iter().all(|&b| b == 0)
+    {
         return Err(RegistrationError::BadAddress);
+    }
+    if !registry
+        .scheme_status(SchemeId::ED25519)
+        .is_some_and(crate::crypto::scheme::SchemeStatus::verifies)
+    {
+        return Err(RegistrationError::Ed25519SchemeDisabled);
     }
     let payload = binding_payload(
         chain_id,
@@ -162,5 +179,35 @@ mod tests {
         reg.pq_public_key =
             pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &[99; 32]).expect("other key");
         assert!(verify_registration(&SchemeStatusRegistry::genesis(), 7, &reg).is_err());
+    }
+
+    #[test]
+    fn registration_refuses_zero_chain_id_and_retired_ed25519_scheme() {
+        let zero_chain = registration(0);
+        assert!(
+            verify_registration(&SchemeStatusRegistry::genesis(), 0, &zero_chain).is_err(),
+            "chain_id 0 must never be accepted for validator key registration"
+        );
+
+        let reg = registration(7);
+        let mut statuses = SchemeStatusRegistry::genesis();
+        statuses
+            .transition_scheme(
+                SchemeId::ED25519,
+                crate::crypto::scheme::SchemeStatus::Deprecated,
+                crate::crypto::scheme::TransitionSource::ColdCommittee,
+            )
+            .expect("deprecate ed25519");
+        statuses
+            .transition_scheme(
+                SchemeId::ED25519,
+                crate::crypto::scheme::SchemeStatus::Disabled,
+                crate::crypto::scheme::TransitionSource::ColdCommittee,
+            )
+            .expect("disable ed25519");
+        assert!(
+            verify_registration(&statuses, 7, &reg).is_err(),
+            "disabled Ed25519 scheme must refuse registration verification"
+        );
     }
 }

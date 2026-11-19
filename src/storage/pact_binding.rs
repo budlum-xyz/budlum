@@ -1,4 +1,4 @@
-//! Storage PACT binding: recipe + residual commitment and the registry root.
+//! Storage PACT binding: generator + residual commitment and the registry root.
 //!
 //! # Where it is called from
 //!
@@ -67,10 +67,37 @@ impl Pact {
         })
     }
 
+    /// Validate all structural invariants of a pact (used by both [`Self::new`]
+    /// and [`PactRegistry::verify_root`] so directly constructed or deserialized
+    /// pacts cannot bypass bounds).
+    ///
     /// # Errors
     ///
-    /// Returns an error when the payload does not hash to the committed value.
+    /// Returns an error when any field violates the pact invariants.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.byte_budget > 128 {
+            return Err("storage pact: byte_budget >128");
+        }
+        if self.mode_flag > 2 {
+            return Err("storage pact: mode_flag >2");
+        }
+        if (self.mode_flag == 0) != (self.residual_commitment == [0u8; 32]) {
+            return Err("storage pact: mode_flag does not match residual_commitment");
+        }
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the payload exceeds `byte_budget` or does not hash
+    /// to the committed value.
     pub fn verify_commitment(&self, payload: &[u8]) -> Result<(), &'static str> {
+        self.validate()?;
+        let payload_len = u64::try_from(payload.len())
+            .map_err(|_| "storage pact: payload exceeds byte_budget")?;
+        if payload_len > self.byte_budget {
+            return Err("storage pact: payload exceeds byte_budget");
+        }
         let mut h = Sha3_256::new();
         h.update(payload);
         let calc: [u8; 32] = h.finalize().into();
@@ -180,9 +207,19 @@ impl PactRegistry {
 
     /// # Errors
     ///
-    /// Returns an error when the recomputed root does not match the stored
-    /// root.
+    /// Returns an error when any pact violates structural invariants, ids collide,
+    /// capacity is exceeded, or the recomputed root differs from the stored root.
     pub fn verify_root(&self) -> Result<(), &'static str> {
+        if self.pacts.len() > MAX_PACTS {
+            return Err("storage pact: registry is full");
+        }
+        let mut seen_ids = std::collections::BTreeSet::new();
+        for pact in &self.pacts {
+            pact.validate()?;
+            if !seen_ids.insert(pact.id) {
+                return Err("storage pact: duplicate pact id");
+            }
+        }
         if self.computed_root() != self.root {
             return Err("storage pact: root mismatch");
         }
@@ -338,5 +375,48 @@ mod tests {
         assert!(Pact::new([1u8; 32], z, z, z, z, 10, 0).is_ok());
         assert!(Pact::new([1u8; 32], z, z, z, r, 10, 1).is_ok());
         assert!(Pact::new([1u8; 32], z, z, z, r, 10, 2).is_ok());
+    }
+
+    #[test]
+    fn verify_root_and_verify_commitment_enforce_pact_invariants_against_direct_construction() {
+        let payload = b"over-budget-payload";
+        let mut h = Sha3_256::new();
+        h.update(payload);
+        let comm: [u8; 32] = h.finalize().into();
+        let pact = Pact::new([1u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 4, 0).unwrap();
+        assert!(
+            pact.verify_commitment(payload).is_err(),
+            "payload larger than declared byte_budget must be refused"
+        );
+
+        // Direct struct literal with forged mode_flag / budget / duplicate ids + matching root:
+        let mut forged_mode = PactRegistry {
+            pacts: vec![Pact {
+                id: [2u8; 32],
+                recipe_hash: [0u8; 32],
+                seed: [0u8; 32],
+                commitment: comm,
+                residual_commitment: [9u8; 32], // contradicts mode_flag 0
+                byte_budget: 10,
+                mode_flag: 0,
+            }],
+            root: [0u8; 32],
+        };
+        forged_mode.recompute_root();
+        assert!(
+            forged_mode.verify_root().is_err(),
+            "verify_root must refuse malformed pact even when root matches"
+        );
+
+        let valid = Pact::new([3u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 32, 0).unwrap();
+        let mut dup = PactRegistry {
+            pacts: vec![valid.clone(), valid],
+            root: [0u8; 32],
+        };
+        dup.recompute_root();
+        assert!(
+            dup.verify_root().is_err(),
+            "verify_root must refuse duplicate pact ids"
+        );
     }
 }
