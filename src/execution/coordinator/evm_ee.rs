@@ -3705,8 +3705,58 @@ mod tests {
             name: "Test".to_string(),
         })
         .unwrap();
-        drop(host);
-        deploy(&mut mem_host, ptr_addr, ptr_code);
+        // A pointer is installed by the asset door, which writes the code and
+        // the account metadata straight into the EVM namespaces; the raw
+        // `Deploy` path refuses the reserved prefix (see
+        // `conformance_tests::forged_or_misplaced_pointer_bytecode_is_refused`).
+        // Deploying it here would assert a door that no longer exists.
+        assert_ne!(
+            EvmEe::new()
+                .execute(
+                    &ctx,
+                    &EeCall {
+                        kind: EeCallKind::Deploy,
+                        caller: EeIdentity {
+                            ee: EeId::EVM,
+                            id: vec![0x01; 20],
+                        },
+                        target: EeIdentity {
+                            ee: EeId::EVM,
+                            id: ptr_addr.to_vec(),
+                        },
+                        value: BudAmount(0),
+                        input: ptr_code.clone(),
+                        gas_limit: 500_000,
+                        depth: 0,
+                        tx_hash: [0u8; 32],
+                    },
+                    &mut mem_host,
+                )
+                .expect("deploy is answered")
+                .status,
+            OutcomeStatus::Success,
+            "the raw EVM deploy door must refuse system pointer bytecode"
+        );
+        let ptr_code_hash: [u8; 32] = Keccak256::digest(&ptr_code).into();
+        mem_host
+            .write(
+                &Namespace::new(NS_EVM_CODE).expect("code namespace"),
+                &ptr_code_hash,
+                Some(&ptr_code),
+            )
+            .expect("write pointer code");
+        mem_host
+            .write(
+                &Namespace::new(NS_EVM_ACCOUNT).expect("account namespace"),
+                &ptr_addr,
+                Some(
+                    &serde_json::to_vec(
+                        &serde_json::json!({"nonce": 1u64, "code_hash": hex::encode(ptr_code_hash)}),
+                    )
+                    .expect("account metadata"),
+                ),
+            )
+            .expect("write pointer account");
         let mut host = EvmStackHost::new(&mut mem_host);
 
         let prep_ptr = prepare_evm_target(

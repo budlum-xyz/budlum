@@ -2164,6 +2164,11 @@ fn run_domain_register_poa(
 /// `bud domain selftest`: the admission harness
 /// (`cross_domain::external::admit`) run locally, so an adapter author sees
 /// the report before bonding anything.
+///
+/// One flag per adapter pin: the command's options are the function's
+/// arguments, and grouping them would make the option parsing read worse
+/// than the arity lint does.
+#[allow(clippy::too_many_arguments)]
 fn run_domain_selftest(
     adapter: &str,
     network: &str,

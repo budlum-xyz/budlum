@@ -668,6 +668,11 @@ impl BeaconBinding {
     /// SIGNATURE slot, which is the block after the signed header. For the
     /// last slot of a period `slot / N` named the previous period and refused
     /// a genuine aggregate; the signature slot is `slot + 1`.
+    ///
+    /// Test-only: production reads the same number from `verify_finality` at
+    /// the signature slot, so a second copy here would be a second thing to
+    /// keep correct.
+    #[cfg(test)]
     fn period(&self) -> u64 {
         self.slot.saturating_add(1) / SLOTS_PER_SYNC_COMMITTEE_PERIOD
     }
@@ -885,10 +890,17 @@ pub fn rotate_period_with_branch(
 ///
 /// Convenience: exposed for fork-aware Ethereum sync-committee rotation.
 ///
+/// The eight arguments are one rotation: the state and params, the new
+/// period, the committee material (keys, aggregate, branch) and the fork's
+/// generalized index. They are passed straight through to
+/// [`rotate_period_with_branch`] after the index check, so bundling them
+/// would add a type that exists only to satisfy the arity lint.
+///
 /// # Errors
 ///
 /// Returns [`SyncCommitteeError::ForkGindexMismatch`] if `gindex` does not
 /// match `params`, or forwards any error from [`rotate_period_with_branch`].
+#[allow(clippy::too_many_arguments)]
 pub fn rotate_period_for_fork(
     state: &mut SyncCommitteeState,
     params: &BeaconChainParams,
