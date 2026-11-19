@@ -10199,6 +10199,7 @@ impl Blockchain {
             now_unix_secs,
             domain_params.min_operator_bond,
             0,
+            domain_params.require_merkle_proof,
         )?;
         // Persistence rides the block commit: on this branch the door the
         // RPC points at is the signed storage transaction, whose effects
@@ -10218,9 +10219,10 @@ impl Blockchain {
     /// untouched and there is nothing to refund.
     ///
     /// The registry's `accept_reallocation_ticket` keeps the one-shot
-    /// guarantee (a filled ticket refuses a second acceptance) and the
-    /// merkle envelope stays mandatory, so a replacement cannot claim a
-    /// shard it cannot prove. Until this path existed, a repair ticket
+    /// guarantee (a filled ticket refuses a second acceptance) and, with the
+    /// domain's VerifyMerkle gate open, the merkle envelope is mandatory, so
+    /// a replacement cannot claim a shard it cannot prove. Until this path
+    /// existed, a repair ticket
     /// opened by the maintenance sweep could never be filled on-chain:
     /// the trigger ran, and the acceptance was test-only.
     /// Test harness only, and for the same reason as
@@ -10259,6 +10261,7 @@ impl Blockchain {
             now_unix_secs,
             domain_params.min_operator_bond,
             0,
+            domain_params.require_merkle_proof,
         )?;
         // Persistence rides the block commit; see `open_storage_deal_with_escrow`.
         Ok(replacement_deal_id)
@@ -14579,6 +14582,7 @@ mod bond_and_reorg_tests {
             0,
             crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND,
             0,
+            crate::domain::storage_params::STORAGE_REQUIRE_MERKLE_PROOF,
         )
         .unwrap();
 
@@ -14604,6 +14608,7 @@ mod bond_and_reorg_tests {
             0,
             crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND,
             0,
+            crate::domain::storage_params::STORAGE_REQUIRE_MERKLE_PROOF,
         )
         .unwrap();
 

@@ -884,7 +884,7 @@ impl IntakeState {
     /// domain adapter at an already-accepted `(height, evidence_version)` and,
     /// when it certifies a distinct `state_root`, atomically withdraw the false
     /// attestation, slash its bonded carrier at the domain's routing ceiling,
-    /// and transition the domain to [`DomainState::Faulted`].
+    /// and transition the domain to [`crate::cross_domain::external::profile::DomainState::Faulted`].
     ///
     /// Security invariants:
     /// 1. The contradicting evidence MUST pass full cryptographic adapter

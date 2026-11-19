@@ -47,6 +47,19 @@ pub const MAX_STORAGE_CHALLENGE_INTERVAL: u64 = 2_592_000;
 /// `deal_open::open_deal_escrowed`; that step follows this one.
 pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
 
+/// Whether the in-block deal doors demand a `VerifyMerkle` proof envelope
+/// and a `storage_root` at open/accept time.
+///
+/// The gate is the network's activation schedule, stated per domain. Every
+/// checked-in profile ships `require_merkle_proof = false` until the 64-depth
+/// Merkle verifier exists (requiring a blob the node cannot verify protects
+/// nothing), so the in-block doors state the same `false` here - the same
+/// pattern as the bond floor constant above. The flag is threaded through
+/// the doors so the day the schedule flips, this one constant moves and both
+/// doors enforce it. The registry-level gate itself is live and tested under
+/// `storage_deal::tests::deal_open_rejects_missing_merkle_proof`.
+pub const STORAGE_REQUIRE_MERKLE_PROOF: bool = false;
+
 /// Per-domain parameters for a `StorageAttestation` domain.
 ///
 /// The vision document calls these `StorageDomainParams` in We follow

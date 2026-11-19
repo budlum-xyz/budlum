@@ -27,7 +27,7 @@ use crate::domain::storage_deal::{
     ChallengeOutcome, DealStatus, OperatorClass, RetrievalChallengeRequest, StorageEconomicsParams,
     StorageError, StorageReallocationTicket, StorageRegistry,
 };
-use crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND;
+use crate::domain::storage_params::{STORAGE_MIN_OPERATOR_BOND, STORAGE_REQUIRE_MERKLE_PROOF};
 use crate::domain::Hash32;
 use crate::storage::{
     ConfidentialBodyCommit, ContentId, ContentManifest, GrantAuthorization, GrantIssueTerms,
@@ -638,6 +638,7 @@ fn accept_reallocation(
         now_unix_secs,
         STORAGE_MIN_OPERATOR_BOND,
         payer_reserve,
+        STORAGE_REQUIRE_MERKLE_PROOF,
     )
     .map(|_| ())
     .map_err(StorageTxError::ReallocationRefused)
@@ -1056,6 +1057,7 @@ fn open_deal(
         now_unix_secs,
         STORAGE_MIN_OPERATOR_BOND,
         payer_reserve,
+        STORAGE_REQUIRE_MERKLE_PROOF,
     )
     .map(|_| ())
     .map_err(StorageTxError::DealRefused)
@@ -2040,6 +2042,7 @@ mod tests {
             100,
             STORAGE_MIN_OPERATOR_BOND,
             0,
+            STORAGE_REQUIRE_MERKLE_PROOF,
         )
         .expect("the escrowed deal opens");
         let deal_id = state
@@ -2267,6 +2270,7 @@ mod tests {
             100,
             STORAGE_MIN_OPERATOR_BOND,
             0,
+            STORAGE_REQUIRE_MERKLE_PROOF,
         )
         .unwrap();
         open_deal_escrowed(
@@ -2287,6 +2291,7 @@ mod tests {
             100,
             STORAGE_MIN_OPERATOR_BOND,
             0,
+            STORAGE_REQUIRE_MERKLE_PROOF,
         )
         .unwrap();
 
@@ -2385,6 +2390,7 @@ mod tests {
             100,
             STORAGE_MIN_OPERATOR_BOND,
             0,
+            STORAGE_REQUIRE_MERKLE_PROOF,
         )
         .unwrap();
         state.epoch_index = 120;
