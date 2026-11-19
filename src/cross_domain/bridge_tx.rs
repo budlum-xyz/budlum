@@ -504,7 +504,9 @@ pub fn burn_with_event(
     reserve: u64,
     height: u64,
 ) -> Result<DomainEvent, String> {
-    if request.expiry_height == 0 || request.expiry_height <= height {
+    // `expiry_height == 0` means "no refund window": the burn is final and
+    // no sweep ever refunds it. A nonzero expiry must still be live.
+    if request.expiry_height != 0 && request.expiry_height <= height {
         return Err(format!(
             "Bridge burn expiry must be above current block height (current {height}, expiry {})",
             request.expiry_height
@@ -1809,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn burn_with_event_refuses_unbounded_caller_horizon_and_zero_expiry() {
+    fn burn_with_event_refuses_unbounded_horizon_and_accepts_final_zero_expiry() {
         let (mut state, _) = bridged();
         state.current_block_height = 50;
         let owner = Address::from([0x51; 32]);
@@ -1836,16 +1838,6 @@ mod tests {
         assert!(err.contains("expiry"), "got: {err}");
         assert_eq!(state.bridge_state.root(), root_before);
 
-        let zero_exp = BurnRequest {
-            domain_height: 50,
-            expiry_height: 0,
-            ..immortal
-        };
-        let zerr = burn_with_event(&mut state, &zero_exp, FEE, 50)
-            .expect_err("zero expiry_height must be refused");
-        assert!(zerr.contains("expiry"), "got: {zerr}");
-        assert_eq!(state.bridge_state.root(), root_before);
-
         let same_block = BurnRequest {
             domain_height: 10,
             expiry_height: 50,
@@ -1855,6 +1847,17 @@ mod tests {
             .expect_err("expiry_height == current block height must be refused");
         assert!(serr.contains("expiry"), "got: {serr}");
         assert_eq!(state.bridge_state.root(), root_before);
+
+        // `expiry_height == 0` is the final burn: no refund window, no sweep.
+        // The door accepts it and the burn lands.
+        let zero_exp = BurnRequest {
+            domain_height: 50,
+            expiry_height: 0,
+            ..immortal
+        };
+        burn_with_event(&mut state, &zero_exp, FEE, 50)
+            .expect("zero expiry_height is a final burn with no refund window");
+        assert_ne!(state.bridge_state.root(), root_before);
     }
 
     #[test]
