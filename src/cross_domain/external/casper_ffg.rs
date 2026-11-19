@@ -206,14 +206,20 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], AdapterError> {
-        let end = self.at.checked_add(len).ok_or_else(|| AdapterError::Malformed {
-            offset: self.at,
-            reason: "length overflow".to_string(),
-        })?;
-        let slice = self.bytes.get(self.at..end).ok_or_else(|| AdapterError::Malformed {
-            offset: self.at,
-            reason: format!("needs {len} bytes past the end"),
-        })?;
+        let end = self
+            .at
+            .checked_add(len)
+            .ok_or_else(|| AdapterError::Malformed {
+                offset: self.at,
+                reason: "length overflow".to_string(),
+            })?;
+        let slice = self
+            .bytes
+            .get(self.at..end)
+            .ok_or_else(|| AdapterError::Malformed {
+                offset: self.at,
+                reason: format!("needs {len} bytes past the end"),
+            })?;
         self.at = end;
         Ok(slice)
     }
@@ -495,7 +501,9 @@ impl CasperFfgAdapter {
             && (evidence.declared_height != parsed.target_epoch
                 || evidence.declared_root != parsed.target_root)
         {
-            return Err(AdapterError::DeclarationMismatch { field: "checkpoint" });
+            return Err(AdapterError::DeclarationMismatch {
+                field: "checkpoint",
+            });
         }
         if policy.min_depth > FINALITY_DEPTH {
             return Err(AdapterError::InsufficientDepth {
@@ -672,10 +680,19 @@ mod tests {
             });
             signers.push(Signer { key, pubkey });
         }
-        (signers, PinnedFfgCommittee::new(members).expect("committee"))
+        (
+            signers,
+            PinnedFfgCommittee::new(members).expect("committee"),
+        )
     }
 
-    fn vote(signer: &Signer, source: u64, source_root: [u8; 32], target: u64, target_root: [u8; 32]) -> FfgVote {
+    fn vote(
+        signer: &Signer,
+        source: u64,
+        source_root: [u8; 32],
+        target: u64,
+        target_root: [u8; 32],
+    ) -> FfgVote {
         let mut vote = FfgVote {
             signer: signer.pubkey,
             source_epoch: source,
@@ -729,7 +746,11 @@ mod tests {
     const PARENT_ROOT: [u8; 32] = [0x10; 32];
     const TARGET_ROOT: [u8; 32] = [0x12; 32];
 
-    fn evidence_with(signers: &[Signer], source_take: usize, target_take: usize) -> RawConsensusEvidence {
+    fn evidence_with(
+        signers: &[Signer],
+        source_take: usize,
+        target_take: usize,
+    ) -> RawConsensusEvidence {
         let source_votes: Vec<FfgVote> = signers
             .iter()
             .take(source_take)
@@ -740,7 +761,15 @@ mod tests {
             .take(target_take)
             .map(|s| vote(s, SOURCE_EPOCH, SOURCE_ROOT, TARGET_EPOCH, TARGET_ROOT))
             .collect();
-        let payload = encode(SOURCE_EPOCH, SOURCE_ROOT, PARENT_ROOT, TARGET_EPOCH, TARGET_ROOT, &source_votes, &target_votes);
+        let payload = encode(
+            SOURCE_EPOCH,
+            SOURCE_ROOT,
+            PARENT_ROOT,
+            TARGET_EPOCH,
+            TARGET_ROOT,
+            &source_votes,
+            &target_votes,
+        );
         RawConsensusEvidence {
             adapter: AdapterId::from_name(CASPER_FFG_ADAPTER_NAME),
             evidence_version: EVIDENCE_VERSION,
@@ -770,15 +799,28 @@ mod tests {
         assert_eq!(attestation.height, TARGET_EPOCH);
         assert_eq!(attestation.state_root, TARGET_ROOT);
         assert_eq!(attestation.time_unit, TimeUnit::Epoch);
-        assert_eq!(attestation.security.observed_scheme(), Some(ObservedScheme::Scheme(SchemeId::ED25519)));
+        assert_eq!(
+            attestation.security.observed_scheme(),
+            Some(ObservedScheme::Scheme(SchemeId::ED25519))
+        );
         match attestation.security {
-            SecurityBacking::SignatureSet { slashable, total_weight, .. } => {
-                assert!(slashable, "Casper FFG backing is economic, so it must be slashable");
+            SecurityBacking::SignatureSet {
+                slashable,
+                total_weight,
+                ..
+            } => {
+                assert!(
+                    slashable,
+                    "Casper FFG backing is economic, so it must be slashable"
+                );
                 assert_eq!(total_weight, committee.total_stake());
             }
             other => panic!("unexpected backing: {other:?}"),
         }
-        assert_eq!(attestation.adapter, AdapterId::from_name(CASPER_FFG_ADAPTER_NAME));
+        assert_eq!(
+            attestation.adapter,
+            AdapterId::from_name(CASPER_FFG_ADAPTER_NAME)
+        );
     }
 
     #[test]
@@ -804,7 +846,10 @@ mod tests {
         let adapter = adapter_with(&signers, committee);
         let evidence = evidence_with(&signers, 2, 2);
         let err = adapter.verify(&evidence, &policy()).unwrap_err();
-        assert!(matches!(err, AdapterError::ConsensusRule { .. }), "unexpected: {err:?}");
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { .. }),
+            "unexpected: {err:?}"
+        );
     }
 
     #[test]
@@ -814,20 +859,38 @@ mod tests {
         let source_votes: Vec<FfgVote> = signers
             .iter()
             .take(3)
-            .map(|s| vote(s, SOURCE_EPOCH - 2, PARENT_ROOT, SOURCE_EPOCH - 1, SOURCE_ROOT))
+            .map(|s| {
+                vote(
+                    s,
+                    SOURCE_EPOCH - 2,
+                    PARENT_ROOT,
+                    SOURCE_EPOCH - 1,
+                    SOURCE_ROOT,
+                )
+            })
             .collect();
         let target_votes: Vec<FfgVote> = signers
             .iter()
             .take(3)
             .map(|s| vote(s, SOURCE_EPOCH, SOURCE_ROOT, TARGET_EPOCH + 1, TARGET_ROOT))
             .collect();
-        let payload = encode(SOURCE_EPOCH, SOURCE_ROOT, PARENT_ROOT, TARGET_EPOCH + 1, TARGET_ROOT, &source_votes, &target_votes);
+        let payload = encode(
+            SOURCE_EPOCH,
+            SOURCE_ROOT,
+            PARENT_ROOT,
+            TARGET_EPOCH + 1,
+            TARGET_ROOT,
+            &source_votes,
+            &target_votes,
+        );
         let mut evidence = evidence_with(&signers, 3, 3);
         evidence.payload = payload;
         evidence.declared_height = TARGET_EPOCH + 1;
         let err = adapter.verify(&evidence, &policy()).unwrap_err();
         match err {
-            AdapterError::ConsensusRule { rule } => assert!(rule.contains("not adjacent"), "unexpected: {rule}"),
+            AdapterError::ConsensusRule { rule } => {
+                assert!(rule.contains("not adjacent"), "unexpected: {rule}")
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -841,10 +904,20 @@ mod tests {
         let parsed = parse_payload(&evidence.payload).expect("payload");
         let mut duplicated = parsed.target_votes.clone();
         duplicated.push(parsed.target_votes[0].clone());
-        evidence.payload = encode(SOURCE_EPOCH, SOURCE_ROOT, PARENT_ROOT, TARGET_EPOCH, TARGET_ROOT, &parsed.source_votes, &duplicated);
+        evidence.payload = encode(
+            SOURCE_EPOCH,
+            SOURCE_ROOT,
+            PARENT_ROOT,
+            TARGET_EPOCH,
+            TARGET_ROOT,
+            &parsed.source_votes,
+            &duplicated,
+        );
         let err = adapter.verify(&evidence, &policy()).unwrap_err();
         match err {
-            AdapterError::ConsensusRule { rule } => assert!(rule.contains("twice"), "unexpected: {rule}"),
+            AdapterError::ConsensusRule { rule } => {
+                assert!(rule.contains("twice"), "unexpected: {rule}")
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -854,15 +927,35 @@ mod tests {
         let (signers, committee) = signers();
         let adapter = adapter_with(&signers, committee);
         let outsider_key = KeyPair::from_seed(&[0x77; 32]).expect("key");
-        let outsider = Signer { pubkey: outsider_key.public_key_bytes(), key: outsider_key };
+        let outsider = Signer {
+            pubkey: outsider_key.public_key_bytes(),
+            key: outsider_key,
+        };
         let parsed = parse_payload(&evidence_with(&signers, 3, 3).payload).expect("payload");
         let mut target_votes = parsed.target_votes.clone();
-        target_votes.push(vote(&outsider, SOURCE_EPOCH, SOURCE_ROOT, TARGET_EPOCH, TARGET_ROOT));
+        target_votes.push(vote(
+            &outsider,
+            SOURCE_EPOCH,
+            SOURCE_ROOT,
+            TARGET_EPOCH,
+            TARGET_ROOT,
+        ));
         let mut evidence = evidence_with(&signers, 3, 3);
-        evidence.payload = encode(SOURCE_EPOCH, SOURCE_ROOT, PARENT_ROOT, TARGET_EPOCH, TARGET_ROOT, &parsed.source_votes, &target_votes);
+        evidence.payload = encode(
+            SOURCE_EPOCH,
+            SOURCE_ROOT,
+            PARENT_ROOT,
+            TARGET_EPOCH,
+            TARGET_ROOT,
+            &parsed.source_votes,
+            &target_votes,
+        );
         let err = adapter.verify(&evidence, &policy()).unwrap_err();
         match err {
-            AdapterError::ConsensusRule { rule } => assert!(rule.contains("outside the pinned committee"), "unexpected: {rule}"),
+            AdapterError::ConsensusRule { rule } => assert!(
+                rule.contains("outside the pinned committee"),
+                "unexpected: {rule}"
+            ),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -882,10 +975,21 @@ mod tests {
             .map(|s| vote(s, SOURCE_EPOCH, [0x99; 32], TARGET_EPOCH, TARGET_ROOT))
             .collect();
         let mut evidence = evidence_with(&signers, 3, 3);
-        evidence.payload = encode(SOURCE_EPOCH, SOURCE_ROOT, PARENT_ROOT, TARGET_EPOCH, TARGET_ROOT, &source_votes, &target_votes);
+        evidence.payload = encode(
+            SOURCE_EPOCH,
+            SOURCE_ROOT,
+            PARENT_ROOT,
+            TARGET_EPOCH,
+            TARGET_ROOT,
+            &source_votes,
+            &target_votes,
+        );
         let err = adapter.verify(&evidence, &policy()).unwrap_err();
         match err {
-            AdapterError::ConsensusRule { rule } => assert!(rule.contains("another checkpoint pair"), "unexpected: {rule}"),
+            AdapterError::ConsensusRule { rule } => assert!(
+                rule.contains("another checkpoint pair"),
+                "unexpected: {rule}"
+            ),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -900,9 +1004,20 @@ mod tests {
             first.signature[0] ^= 0xff;
         }
         let mut evidence = evidence_with(&signers, 3, 3);
-        evidence.payload = encode(SOURCE_EPOCH, SOURCE_ROOT, PARENT_ROOT, TARGET_EPOCH, TARGET_ROOT, &parsed.source_votes, &target_votes);
+        evidence.payload = encode(
+            SOURCE_EPOCH,
+            SOURCE_ROOT,
+            PARENT_ROOT,
+            TARGET_EPOCH,
+            TARGET_ROOT,
+            &parsed.source_votes,
+            &target_votes,
+        );
         let err = adapter.verify(&evidence, &policy()).unwrap_err();
-        assert!(matches!(err, AdapterError::Crypto { .. }), "unexpected: {err:?}");
+        assert!(
+            matches!(err, AdapterError::Crypto { .. }),
+            "unexpected: {err:?}"
+        );
     }
 
     #[test]
@@ -912,7 +1027,10 @@ mod tests {
         let mut evidence = evidence_with(&signers, 3, 3);
         evidence.declared_height = TARGET_EPOCH + 5;
         let err = adapter.verify(&evidence, &policy()).unwrap_err();
-        assert!(matches!(err, AdapterError::DeclarationMismatch { field } if field == "checkpoint"), "unexpected: {err:?}");
+        assert!(
+            matches!(err, AdapterError::DeclarationMismatch { field } if field == "checkpoint"),
+            "unexpected: {err:?}"
+        );
     }
 
     #[test]
@@ -921,8 +1039,19 @@ mod tests {
         let adapter = adapter_with(&signers, committee);
         let mut strict = policy();
         strict.min_depth = 3;
-        let err = adapter.verify(&evidence_with(&signers, 3, 3), &strict).unwrap_err();
-        assert!(matches!(err, AdapterError::InsufficientDepth { observed: 2, required: 3 }), "unexpected: {err:?}");
+        let err = adapter
+            .verify(&evidence_with(&signers, 3, 3), &strict)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AdapterError::InsufficientDepth {
+                    observed: 2,
+                    required: 3
+                }
+            ),
+            "unexpected: {err:?}"
+        );
     }
 
     #[test]
@@ -932,8 +1061,13 @@ mod tests {
         let mut aged = policy();
         aged.max_age = 2;
         aged.now = TARGET_EPOCH + 9;
-        let err = adapter.verify(&evidence_with(&signers, 3, 3), &aged).unwrap_err();
-        assert!(matches!(err, AdapterError::Stale { age: 9, max_age: 2 }), "unexpected: {err:?}");
+        let err = adapter
+            .verify(&evidence_with(&signers, 3, 3), &aged)
+            .unwrap_err();
+        assert!(
+            matches!(err, AdapterError::Stale { age: 9, max_age: 2 }),
+            "unexpected: {err:?}"
+        );
     }
 
     #[test]
@@ -944,7 +1078,10 @@ mod tests {
         assert!(report.golden_verified, "the golden sample must verify");
         for (name, outcome) in &report.probes {
             assert!(
-                matches!(outcome, crate::cross_domain::external::selftest::ProbeOutcome::Refused { .. }),
+                matches!(
+                    outcome,
+                    crate::cross_domain::external::selftest::ProbeOutcome::Refused { .. }
+                ),
                 "probe {name} did not refuse: {outcome:?}"
             );
         }

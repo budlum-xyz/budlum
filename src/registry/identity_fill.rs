@@ -7,7 +7,7 @@
 //!
 //! The registry (see [`crate::registry::identity`]) answers "what did this
 //! subject commit to". This module answers the question a wallet actually
-//! faces: a document names slots ("legal_name", "birth_date"), the holder's
+//! faces: a document names slots ("`legal_name`", "`birth_date`"), the holder's
 //! wallet holds the salts and preimages, and disclosure happens - or does not
 //! happen - through here. Three rules shape everything below, and each one
 //! refuses rather than warns:

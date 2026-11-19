@@ -1,5 +1,5 @@
-//! The SocialFi module - the categorisation rename from `src/nft` to
-//! `src/socialfi` (scope_v1). Only the module path changed; the RPC method
+//! The `SocialFi` module - the categorisation rename from `src/nft` to
+//! `src/socialfi` (`scope_v1`). Only the module path changed; the RPC method
 //! strings and the types are the same, so nothing public broke.
 pub mod types;
 
@@ -235,7 +235,7 @@ impl NftRegistry {
         self.nfts.get(&id)
     }
 
-    /// Return whether `signer` currently owns a live SocialFi NFT whose
+    /// Return whether `signer` currently owns a live `SocialFi` NFT whose
     /// derived 32-byte B.U.D. 3.0 id matches `bud3_nft_id`.
     ///
     /// Bounded by `MAX_NFTS_PER_OWNER` because lookup scans only `signer`'s
@@ -397,7 +397,7 @@ mod tests {
         assert!(matches!(err, NftError::DuplicateId));
     }
 
-    /// Regression: luminance overflow to u64::MAX must be clamped.
+    /// Regression: luminance overflow to `u64::MAX` must be clamped.
     #[test]
     fn luminance_overflow_clamped() {
         let mut reg = NftRegistry::new();

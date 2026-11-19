@@ -278,7 +278,7 @@ pub enum FinalityProof {
         authorities: Vec<crate::core::address::Address>,
         signatures: Vec<PoAAuthoritySignature>,
     },
-    /// PoH structural finality: a hash ladder a verifier recomputes tick by
+    /// `PoH` structural finality: a hash ladder a verifier recomputes tick by
     /// tick, plus the authority quorum over a root that binds the ladder to the
     /// commitment.
     Poh {
@@ -288,7 +288,7 @@ pub enum FinalityProof {
         authorities: Vec<crate::core::address::Address>,
         signatures: Vec<PoAAuthoritySignature>,
     },
-    /// PoSpace structural finality: a plot quality recomputed from a challenge
+    /// `PoSpace` structural finality: a plot quality recomputed from a challenge
     /// derived from the commitment, the plot owner's signature over the
     /// commitment, and the authority quorum.
     Pospace {
@@ -310,14 +310,14 @@ pub enum FinalityProof {
         authorities: Vec<PoAAuthorityKey>,
         signatures: Vec<PoAAuthoritySignature>,
     },
-    /// Post-quantum PoH structural finality: sequential PoH hash-ladder
+    /// Post-quantum `PoH` structural finality: sequential `PoH` hash-ladder
     /// verification plus a composite (`Ed25519 + ML-DSA-65`) authority quorum.
     PohPq {
         chain: Vec<Hash32>,
         authorities: Vec<PoAAuthorityKey>,
         signatures: Vec<PoAAuthoritySignature>,
     },
-    /// Post-quantum PoSpace structural finality: recomputed plot quality, a
+    /// Post-quantum `PoSpace` structural finality: recomputed plot quality, a
     /// composite (`Ed25519 + ML-DSA-65`) plot-owner signature bound to
     /// `prover` (a member of `authorities`), and a composite authority quorum.
     PospacePq {
@@ -1410,7 +1410,7 @@ impl PoAFinalityAdapter {
         }
     }
 
-    /// Verify a PoA commitment against an optional live `poa_onboarding`
+    /// Verify a `PoA` commitment against an optional live `poa_onboarding`
     /// admission set, deriving the active authority set and quorum threshold
     /// from currently admitted (unrevoked, non-expired) members.
     pub(crate) fn verify_finality_admitted_observed_in(
@@ -1480,12 +1480,12 @@ impl PoAFinalityAdapter {
     }
 }
 
-/// Re-derive the `validator_set_hash` a PoA domain would have been registered
+/// Re-derive the `validator_set_hash` a `PoA` domain would have been registered
 /// with, from an authority list carried inside a finality proof.
 ///
-/// A PoA domain records its authority set as a `validator_set_hash` at
+/// A `PoA` domain records its authority set as a `validator_set_hash` at
 /// registration: `genesis.rs` builds one `ValidatorEntry` per authority with
-/// `stake: 1` (PoA is equal-weight and has no stake concept), hashes them with
+/// `stake: 1` (`PoA` is equal-weight and has no stake concept), hashes them with
 /// `ValidatorSetSnapshot::compute_hash`, and normalises the result. This
 /// reproduces that derivation so an adapter can check a proof's claimed
 /// authorities against the registered commitment instead of trusting them.
@@ -2461,17 +2461,17 @@ pub fn block_finality_proof_hash(_block: &Block) -> [u8; 32] {
 // Nothing in this module promotes a commitment on the size of a payload.
 // ---------------------------------------------------------------------------
 
-/// Leading zero bits a PoSpace quality hash must show before the plot may
+/// Leading zero bits a `PoSpace` quality hash must show before the plot may
 /// claim a slot. A registered floor rather than a per-domain parameter: the
 /// domain's `pow_parameters` describe a header chain, and borrowing them here
 /// would let a registrant lower a difficulty this adapter never claimed.
 /// Convenience: exposed for external DAG-family domain producers.
 pub const DAG_FAMILY_QUALITY_BITS: u32 = 16;
 
-/// The longest PoH ladder one commitment may carry. One tick is one hash, so
+/// The longest `PoH` ladder one commitment may carry. One tick is one hash, so
 /// this is also the exact number of hashes a verifier performs: an unbounded
 /// ladder is a denial-of-service lever inside a block, not a proof.
-/// Convenience: exposed for external PoH domain producers.
+/// Convenience: exposed for external `PoH` domain producers.
 pub const DAG_FAMILY_MAX_POH_TICKS: usize = 1024;
 
 /// The largest authority set a DAG-family proof may declare.
@@ -2506,7 +2506,7 @@ pub fn dag_anchor_hash(
 }
 
 /// The digest a DAG authority signs: the anchor-bearing header followed by the
-/// full commitment binding message, so every field a PoA authority covers is
+/// full commitment binding message, so every field a `PoA` authority covers is
 /// covered here as well.
 /// Convenience: exposed for external DAG domain authorities signing proofs.
 #[must_use]
@@ -2529,8 +2529,8 @@ pub fn dag_commit_signing_message(
     msg
 }
 
-/// The root of a PoH ladder, bound to the commitment it orders.
-/// Convenience: exposed for external PoH domain producers constructing proofs.
+/// The root of a `PoH` ladder, bound to the commitment it orders.
+/// Convenience: exposed for external `PoH` domain producers constructing proofs.
 #[must_use]
 pub fn poh_ladder_root(
     chain_id: u64,
@@ -2549,15 +2549,15 @@ pub fn poh_ladder_root(
     ])
 }
 
-/// One PoH tick: the hash a verifier must reproduce to accept the ladder.
-/// Convenience: exposed for external PoH domain producers constructing proofs.
+/// One `PoH` tick: the hash a verifier must reproduce to accept the ladder.
+/// Convenience: exposed for external `PoH` domain producers constructing proofs.
 #[must_use]
 pub fn poh_next_tick(previous: &Hash32) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_POH_TICK_V1", previous])
 }
 
-/// The digest a PoH authority signs: the ladder root plus the commitment.
-/// Convenience: exposed for external PoH domain authorities signing proofs.
+/// The digest a `PoH` authority signs: the ladder root plus the commitment.
+/// Convenience: exposed for external `PoH` domain authorities signing proofs.
 #[must_use]
 pub fn poh_commit_signing_message(
     chain_id: u64,
@@ -2580,7 +2580,7 @@ pub fn poh_commit_signing_message(
 /// a prover cannot present another prover's plot: the identifier would not
 /// match the key that has to sign the claim, and a plot built for one farm
 /// cannot be replayed at another.
-/// Convenience: exposed for external PoSpace domain producers constructing proofs.
+/// Convenience: exposed for external `PoSpace` domain producers constructing proofs.
 #[must_use]
 pub fn pospace_plot_id(prover: &crate::core::address::Address, config_hash: &Hash32) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_POSPACE_PLOT_V1", prover.as_bytes(), config_hash])
@@ -2588,7 +2588,7 @@ pub fn pospace_plot_id(prover: &crate::core::address::Address, config_hash: &Has
 
 /// The challenge a plot answers: a value the prover cannot choose, derived from
 /// the commitment being finalized.
-/// Convenience: exposed for external PoSpace domain producers constructing proofs.
+/// Convenience: exposed for external `PoSpace` domain producers constructing proofs.
 #[must_use]
 pub fn pospace_challenge(domain: &ConsensusDomain, commitment: &DomainCommitment) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[
@@ -2602,16 +2602,16 @@ pub fn pospace_challenge(domain: &ConsensusDomain, commitment: &DomainCommitment
 }
 
 /// The quality a plot reaches for a challenge: the leading zero bits of this
-/// hash are the work the space buys, exactly as a PoW hash's leading zero bits
+/// hash are the work the space buys, exactly as a `PoW` hash's leading zero bits
 /// are the work the computation buys.
-/// Convenience: exposed for external PoSpace domain producers constructing proofs.
+/// Convenience: exposed for external `PoSpace` domain producers constructing proofs.
 #[must_use]
 pub fn pospace_quality(plot_id: &Hash32, challenge: &Hash32) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_POSPACE_QUALITY_V1", plot_id, challenge])
 }
 
-/// The digest a PoSpace authority signs.
-/// Convenience: exposed for external PoSpace domain authorities signing proofs.
+/// The digest a `PoSpace` authority signs.
+/// Convenience: exposed for external `PoSpace` domain authorities signing proofs.
 #[must_use]
 pub fn pospace_commit_signing_message(
     chain_id: u64,
@@ -2652,7 +2652,7 @@ pub fn dag_pq_commit_digest(
     crate::core::hash::hash_fields_bytes(&[b"BDLM_DAG_PQ_COMMIT_V1", &body])
 }
 
-/// Composite (`Ed25519 + ML-DSA-65`) digest a post-quantum PoH authority signs.
+/// Composite (`Ed25519 + ML-DSA-65`) digest a post-quantum `PoH` authority signs.
 /// WIRING: domain producer signing surface paired with `verify_poh_pq_ladder_finality`.
 #[must_use]
 pub fn poh_pq_commit_digest(
@@ -2979,13 +2979,13 @@ fn verify_dag_pq_anchor_finality(
     )
 }
 
-/// PoH structural finality: a hash ladder recomputed tick by tick, plus a
+/// `PoH` structural finality: a hash ladder recomputed tick by tick, plus a
 /// two-thirds vote on a root that binds the ladder to the commitment.
 /// Convenience: called by `PohFinalityAdapter::verify_finality` and exposed for direct verifier calls.
 ///
 /// # Errors
 ///
-/// The proof is not a PoH proof.
+/// The proof is not a `PoH` proof.
 fn verify_poh_ladder_finality_in(
     registry: &crate::crypto::scheme::SchemeStatusRegistry,
     domain: &ConsensusDomain,
@@ -3107,14 +3107,14 @@ fn verify_poh_pq_ladder_finality(
     )
 }
 
-/// PoSpace structural finality: a plot quality recomputed from a challenge
+/// `PoSpace` structural finality: a plot quality recomputed from a challenge
 /// nobody chose, the plot owner's signature over the commitment, and the
 /// authority quorum.
 /// Convenience: called by `PospaceFinalityAdapter::verify_finality` and exposed for direct verifier calls.
 ///
 /// # Errors
 ///
-/// The proof is not a PoSpace proof.
+/// The proof is not a `PoSpace` proof.
 fn verify_pospace_quality_finality_in(
     registry: &crate::crypto::scheme::SchemeStatusRegistry,
     domain: &ConsensusDomain,
@@ -3333,7 +3333,7 @@ impl DomainFinalityAdapter for DagFinalityAdapter {
     }
 }
 
-/// PoH finality adapter: verifies PoH parent-hash linkage and cryptographic quorum finality.
+/// `PoH` finality adapter: verifies `PoH` parent-hash linkage and cryptographic quorum finality.
 #[derive(Debug, Clone, Default)]
 pub struct PohFinalityAdapter;
 
@@ -3424,7 +3424,7 @@ impl DomainFinalityAdapter for PohFinalityAdapter {
     }
 }
 
-/// PoSpace finality adapter: verifies plot challenge-response binding and quorum finality.
+/// `PoSpace` finality adapter: verifies plot challenge-response binding and quorum finality.
 #[derive(Debug, Clone, Default)]
 pub struct PospaceFinalityAdapter;
 
@@ -4210,7 +4210,7 @@ mod tests {
         ));
     }
 
-    /// The PoA attestation preimage is `(chain_id, domain, height, hash)`, not
+    /// The `PoA` attestation preimage is `(chain_id, domain, height, hash)`, not
     /// `(domain, height, hash)`. Domain ids are small integers handed out by
     /// permissionless registration, so two networks can each have a domain 7;
     /// without the chain id the same triple would produce the same message on
@@ -4265,10 +4265,10 @@ mod tests {
         ));
     }
 
-    /// A PoA attestation covers the nonce writes the commitment carries.
+    /// A `PoA` attestation covers the nonce writes the commitment carries.
     ///
     /// The settlement door applies `state_updates` to accounts on this chain
-    /// once a commitment advances, and the PoA digest used to attest only
+    /// once a commitment advances, and the `PoA` digest used to attest only
     /// `(chain, domain, height, hash)`. A relayer could therefore take an
     /// honestly signed commitment and append writes of its choosing; the
     /// signatures still verified and the writes landed. Here the same signature
@@ -4494,8 +4494,8 @@ mod tests {
         }
     }
 
-    /// The BFT adapter had the fall-through the PoS test above closes for
-    /// PoS: an undecodable snapshot set hash skipped both validator-set
+    /// The BFT adapter had the fall-through the `PoS` test above closes for
+    /// `PoS`: an undecodable snapshot set hash skipped both validator-set
     /// bindings and went straight to `cert.verify`, which only compares two
     /// relayer-supplied strings. With a non-empty snapshot the proof names
     /// its own validator set. It has to be refused before the certificate.
@@ -4754,7 +4754,7 @@ mod tests {
         }
     }
 
-    /// the native PoS and BFT adapters name BLS12-381 and ML-DSA-65.
+    /// the native `PoS` and BFT adapters name BLS12-381 and ML-DSA-65.
     /// ML-DSA-65 is named only when every signer's entry binds a PQ key; a
     /// signer without one leaves BLS as the only fact.
     #[test]
@@ -4850,7 +4850,7 @@ mod tests {
         assert!(facts.is_empty());
     }
 
-    /// the ZK adapter shows a hash assumption, and the PoA adapter the
+    /// the ZK adapter shows a hash assumption, and the `PoA` adapter the
     /// Ed25519 signatures it verifies today.
     #[test]
     fn zk_and_poa_adapters_report_their_assumptions() {

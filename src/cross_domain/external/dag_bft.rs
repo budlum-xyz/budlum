@@ -3,7 +3,7 @@
 //! and wave-anchor commit quorums.
 //!
 //! Under Spiegelman et al. (`Bullshark`, CCS 2022) and Danezis et al.
-//! (`Narwhal`, EuroSys 2022), validators build a round-structured Directed
+//! (`Narwhal`, `EuroSys` 2022), validators build a round-structured Directed
 //! Acyclic Graph whose vertices separate data dissemination from deterministic
 //! ordering. An anchor vertex `A` at even wave round `r >= 2` is irrevocably
 //! committed once all four properties hold under a governance-pinned epoch

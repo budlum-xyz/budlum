@@ -1382,7 +1382,7 @@ mod tests {
         );
     }
 
-    /// The constitution's MinConstitutionProposalEpochs binds
+    /// The constitution's `MinConstitutionProposalEpochs` binds
     /// constitution amendments instead of the hard coded 10.
     #[test]
     fn amendment_respects_min_constitution_proposal_epochs() {

@@ -664,7 +664,7 @@ mod tests {
         assert!(matches!(decode(&enc), Err(RlpError::TooManyItems)));
     }
 
-    /// A nested list past MAX_DEPTH is refused, not
+    /// A nested list past `MAX_DEPTH` is refused, not
     /// recursed into.
     #[test]
     fn neg_nesting_too_deep_rejected() {

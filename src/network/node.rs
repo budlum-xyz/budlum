@@ -701,7 +701,7 @@ pub enum NodeCommand {
     ListPeers,
     /// Hard Pruning - physical deletion of B.U.D. content.
     /// Triggered ONLY by local Executor after verified `NftBurn` (`SECURITY_AUDIT_HACKER`.md).
-    /// Payload is 32-byte ContentId (mirrors budlum_core::storage::content_id::ContentId and bud_node::store::ContentId).
+    /// Payload is 32-byte `ContentId` (mirrors `budlum_core::storage::content_id::ContentId` and `bud_node::store::ContentId`).
     StoragePrune {
         cid: [u8; 32],
     },

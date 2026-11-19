@@ -1,8 +1,8 @@
 //! The scrape topology reaches every exporter the rules read.
 //!
 //! An alert rule is only as good as the series behind it. Two of the rules in
-//! `ops/monitoring/alerts.yml` read the node_exporter filesystem gauges, and
-//! nothing in either scrape config enumerated a node_exporter job, so those two
+//! `ops/monitoring/alerts.yml` read the `node_exporter` filesystem gauges, and
+//! nothing in either scrape config enumerated a `node_exporter` job, so those two
 //! alerts could not fire on any node - a red rule that reports green forever.
 //!
 //! The same shape of mistake hides in the rule chain: a rule file nothing

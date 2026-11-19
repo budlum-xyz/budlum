@@ -5,7 +5,7 @@
 //! (`query balance`/`query block`/`query status`), and guidance for running
 //! a validator (`validator run`).
 //!
-//! The BudZKVM toolchain (`budzero/bud-cli`) is a separate workspace; this binary
+//! The `BudZKVM` toolchain (`budzero/bud-cli`) is a separate workspace; this binary
 //! is for chain interaction and uses the core types directly.
 //!
 //! # Design
@@ -222,7 +222,7 @@ enum Command {
         #[command(subcommand)]
         action: DevAction,
     },
-    /// AppBinding: use an application of another network from Budlum, in BUD.
+    /// `AppBinding`: use an application of another network from Budlum, in BUD.
     AppBinding {
         #[command(subcommand)]
         action: AppBindingAction,
@@ -456,7 +456,7 @@ enum DomainAction {
     /// verify and every fault probe must be refused. Exits non-zero when
     /// the adapter would not be admitted.
     Selftest {
-        /// Adapter family. `zkvm` is the BudZKVM proof adapter.
+        /// Adapter family. `zkvm` is the `BudZKVM` proof adapter.
         #[arg(long, default_value = "zkvm")]
         adapter: String,
         /// The external network label the adapter serves.
@@ -505,7 +505,7 @@ enum FaucetAction {
 
 #[derive(Subcommand)]
 enum AppBindingAction {
-    /// Print the AppBinding id and the mirror account of an application.
+    /// Print the `AppBinding` id and the mirror account of an application.
     Id {
         #[arg(long, required = true)]
         domain: u32,
@@ -617,7 +617,7 @@ enum AppBindingAction {
         evidence: std::path::PathBuf,
     },
     /// Claim an externally owned application with its EIP-191 signature
-    /// over `eoa_claim_hash` (docs/APP_BINDING.md, section 4).
+    /// over `eoa_claim_hash` (`docs/APP_BINDING.md`, section 4).
     ClaimSigned {
         #[command(flatten)]
         signer: V5Signer,
@@ -959,7 +959,7 @@ enum ProjectAction {
         /// Project name.
         #[arg(long, required = true)]
         name: String,
-        /// The 32-byte hash of the BudL source tree (hex, `0x` prefix optional).
+        /// The 32-byte hash of the `BudL` source tree (hex, `0x` prefix optional).
         #[arg(long, required = true)]
         source_hash: String,
     },
@@ -2082,7 +2082,7 @@ fn evidence_file(
         .map_err(|e| format!("{} is not an external result: {e}", path.display()))
 }
 
-/// `bud domain register-pow`: a PoW domain with the header-chain adapter,
+/// `bud domain register-pow`: a `PoW` domain with the header-chain adapter,
 /// the wallet as operator.
 fn run_domain_register_pow(
     rpc_url: &str,
@@ -2106,7 +2106,7 @@ fn run_domain_register_pow(
     send_v5(rpc_url, &key, v5_template(tx_type, 0, signer.fee), None)
 }
 
-/// Build the exact PoA domain row committed by `bud domain register-poa`.
+/// Build the exact `PoA` domain row committed by `bud domain register-poa`.
 ///
 /// The authority list is part of consensus security, not display metadata: a
 /// future finality proof is accepted only when its authority set reproduces
@@ -2144,7 +2144,7 @@ fn poa_domain(
     Ok(domain)
 }
 
-/// `bud domain register-poa`: a PoA domain with a committed authority set and
+/// `bud domain register-poa`: a `PoA` domain with a committed authority set and
 /// the wallet as operator.
 fn run_domain_register_poa(
     rpc_url: &str,
@@ -2273,7 +2273,7 @@ fn run_faucet(action: &FaucetAction) -> Result<(), String> {
     }
 }
 
-/// `bud app-binding ...`: build the AppBinding settlement transaction here and sign it
+/// `bud app-binding ...`: build the `AppBinding` settlement transaction here and sign it
 /// with the V5 wallet.
 fn run_app_binding(rpc_url: &str, action: &AppBindingAction) -> Result<(), String> {
     use budlum_core::settlement::app_binding::AppBindingTx;

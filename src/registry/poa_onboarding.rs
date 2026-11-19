@@ -935,7 +935,7 @@ mod tests {
     }
 
     /// Admins may remove admins but never the last one;
-    /// governance can (force_remove_admin).
+    /// governance can (`force_remove_admin`).
     #[test]
     fn the_last_admin_refuses_removal_through_the_door() {
         let mut onboarding = PoAOnboarding::new();

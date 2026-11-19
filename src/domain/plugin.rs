@@ -92,7 +92,7 @@ pub struct PoWDomainPlugin {
 }
 
 impl PoWDomainPlugin {
-    /// PoW plugin backed by the bounded Budlum header-chain light client.
+    /// `PoW` plugin backed by the bounded Budlum header-chain light client.
     pub fn new(consensus: Arc<dyn ConsensusEngine>) -> Self {
         Self {
             consensus,
@@ -100,8 +100,8 @@ impl PoWDomainPlugin {
         }
     }
 
-    /// PoW plugin backed by the Bitcoin SPV finality adapter: SHA256d headers,
-    /// compact bits, chainwork. This is the plugin a node registers for a PoW
+    /// `PoW` plugin backed by the Bitcoin SPV finality adapter: `SHA256d` headers,
+    /// compact bits, chainwork. This is the plugin a node registers for a `PoW`
     /// domain whose `finality_adapter` is `bitcoin-spv-v1`.
     pub fn new_bitcoin_spv(consensus: Arc<dyn ConsensusEngine>) -> Self {
         Self {

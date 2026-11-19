@@ -124,7 +124,7 @@ pub struct FamilyContext<'a> {
 }
 
 /// One endpoint event, as the home chain's indexer hands it over. Every
-/// family uses the fields it has: EVM `topics` and `data`, CosmWasm the event
+/// family uses the fields it has: EVM `topics` and `data`, `CosmWasm` the event
 /// type in `topics[0]` and `attributes`, SVM and Move `topics[0]` and `data`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawEndpointEvent {

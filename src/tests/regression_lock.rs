@@ -7,15 +7,15 @@
 //!
 //! ## Regresyon #1: ZK finality fail-open
 //!
-//! The generic trait `verify_finality` method of ZkFinalityAdapter used to be able to
-//! finalize without a ProofClaimRegistry lookup (fail-open).
+//! The generic trait `verify_finality` method of `ZkFinalityAdapter` used to be able to
+//! finalize without a `ProofClaimRegistry` lookup (fail-open).
 //! Fixed: the trait method always returns `Rejected`,
 //! and real verification happens only through `verify_finality_with_claim`
-//! together with the ProofClaimRegistry.
+//! together with the `ProofClaimRegistry`.
 //!
 //! ## Regresyon #2: Relayer escrow silent-failure
 //!
-//! When an escrowed AiAgentPayment is released, the payment must be removed from the
+//! When an escrowed `AiAgentPayment` is released, the payment must be removed from the
 //! registry and the recipient credited. If release/reclaim
 //! fails silently (the payment disappears without a balance change),
 //! funds are lost. The test verifies that release/reclaim really removes the
@@ -59,7 +59,7 @@ mod zk_finality_fail_open_regression {
     /// REGRESSION LOCK: `ZkFinalityAdapter::verify_finality`
     /// (the generic trait entry point) must NEVER return `Finalized`.
     ///
-    /// This method used to be able to finalize without a ProofClaimRegistry
+    /// This method used to be able to finalize without a `ProofClaimRegistry`
     /// lookup: a second, registry-independent verification path (fail-open).
     /// If someone accidentally "fixes" this method into returning `Finalized`,
     /// this test breaks.
@@ -90,7 +90,7 @@ mod zk_finality_fail_open_regression {
     }
 
     /// REGRESSION LOCK: `verify_finality_with_claim` must NEVER return `Finalized`
-    /// when accepted_claim_root=None (no claim in the registry).
+    /// when `accepted_claim_root=None` (no claim in the registry).
     ///
     /// This is one manifestation of the "missing binding" defect found in the
     /// audit - with no claim there must be no finalization.
@@ -149,7 +149,7 @@ mod zk_finality_fail_open_regression {
     }
 
     /// REGRESSION LOCK: `verify_finality_with_claim` must NEVER return `Finalized` proof'un
-    /// when the claim root does not match the proof's final_state_root.
+    /// when the claim root does not match the proof's `final_state_root`.
     #[test]
     fn zk_verify_with_claim_rejects_proof_claim_mismatch() {
         let adapter = ZkFinalityAdapter;
@@ -202,7 +202,7 @@ mod zk_finality_fail_open_regression {
     }
 
     /// REGRESSION LOCK: `verify_finality_with_claim` must NEVER return `Finalized`
-    /// on a domain_id or height mismatch.
+    /// on a `domain_id` or height mismatch.
     #[test]
     fn zk_verify_with_claim_rejects_domain_or_height_mismatch() {
         let adapter = ZkFinalityAdapter;
@@ -506,7 +506,7 @@ mod relayer_escrow_silent_failure_regression {
         );
     }
 
-    /// REGRESSION LOCK: a non-escrowed payment (request_id=None) can never be
+    /// REGRESSION LOCK: a non-escrowed payment (`request_id=None`) can never be
     /// released; that path is already resolved in the executor via immediate
     /// credit. Release must not be called, because there is no escrow.
     #[test]
@@ -545,7 +545,7 @@ mod relayer_escrow_silent_failure_regression {
         );
     }
 
-    /// REGRESSION LOCK: reclaim may only be performed by the sender (from_agent).
+    /// REGRESSION LOCK: reclaim may only be performed by the sender (`from_agent`).
     /// Any other address attempting reclaim -> error.
     #[test]
     fn escrowed_payment_reclaim_only_by_original_sender() {

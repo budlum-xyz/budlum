@@ -826,7 +826,7 @@ mod tests {
         );
     }
 
-    /// A proof that claims PoS finality has the claim checked.
+    /// A proof that claims `PoS` finality has the claim checked.
     ///
     /// This is the defect. `sync_committee.rs` implements Altair verification
     /// and is tested six ways; `adapter.rs` said "sync-committee verification

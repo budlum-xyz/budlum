@@ -231,7 +231,7 @@ mod tests {
         assert!(AssetId::from_hex("not-hex").is_err());
     }
 
-    /// The R3 lock: `BTreeMap<AssetId, _>` must round trip as a serde_json
+    /// The R3 lock: `BTreeMap<AssetId, _>` must round trip as a `serde_json`
     /// object key and the keys must be strings (a raw [u8; 32] key is FORBIDDEN).
     #[test]
     fn asset_id_is_json_map_key_safe() {

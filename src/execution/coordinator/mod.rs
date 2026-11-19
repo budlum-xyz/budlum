@@ -1,6 +1,6 @@
 //! The Universal Execution Layer coordinator: account aliases, sparse Merkle
 //! namespaces, BGU gas and EIP-1559 fee accounting, nested call-frame overlays,
-//! stateful BudZero contract execution, and worker supervision.
+//! stateful `BudZero` contract execution, and worker supervision.
 //!
 //! The scheduler executes independent waves in parallel with deterministic
 //! sequential fallback and byte-identical checked state transitions.
@@ -61,7 +61,7 @@ use budlum_uel_abi::{
 };
 use sha2::{Digest, Sha256};
 
-/// Maximum BudZero contract bytecode size accepted at deployment (256 KiB).
+/// Maximum `BudZero` contract bytecode size accepted at deployment (256 KiB).
 pub const MAX_BUDZERO_CODE_BYTES: usize = 256 * 1024;
 
 /// Typed UEL call payload submitted to the coordinator.
@@ -349,15 +349,15 @@ impl CallerRegistration {
     }
 }
 
-/// Stateful BudZero execution adapter closing  (deploy, contract address,
+/// Stateful `BudZero` execution adapter closing  (deploy, contract address,
 /// and persistent key-value storage in `ee/budzero/{program,storage}`).
 #[derive(Debug, Default, Clone)]
 pub struct StatefulBudZeroEe;
 
 impl StatefulBudZeroEe {
-    /// Creates the stateful BudZero execution environment adapter.
+    /// Creates the stateful `BudZero` execution environment adapter.
     ///
-    /// exposed for: `ExecutionCoordinator` default BudZero registration.
+    /// exposed for: `ExecutionCoordinator` default `BudZero` registration.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -650,7 +650,7 @@ impl Default for ExecutionCoordinator {
 }
 
 impl ExecutionCoordinator {
-    /// Creates a coordinator with the built-in stateful BudZero adapter registered.
+    /// Creates a coordinator with the built-in stateful `BudZero` adapter registered.
     ///
     /// exposed for: block execution ( slice 2/2) and EE worker setup.
     #[must_use]

@@ -27,7 +27,7 @@ pub const BITCOIN_SPV_ADAPTER: &str = "bitcoin-spv-v1";
 /// Canonical name of the storage-attestation domain finality adapter.
 ///
 /// Set as the `ConsensusDomain::finality_adapter` value when registering a
-/// `StorageAttestation` domain. Distinct from the PoW header-chain adapter
+/// `StorageAttestation` domain. Distinct from the `PoW` header-chain adapter
 /// (`POW_HEADER_CHAIN_ADAPTER`) because storage finality is **not** the same
 /// Shape as bounded-PoW header finality (will introduce
 /// `StorageFinalityAdapter`, vision +).
@@ -115,12 +115,12 @@ impl ConsensusKind {
         matches!(self, ConsensusKind::Dag)
     }
 
-    /// Convenience: is this a PoH domain?
+    /// Convenience: is this a `PoH` domain?
     pub fn is_poh(&self) -> bool {
         matches!(self, ConsensusKind::Poh)
     }
 
-    /// Convenience: is this a PoSpace domain?
+    /// Convenience: is this a `PoSpace` domain?
     pub fn is_pospace(&self) -> bool {
         matches!(self, ConsensusKind::Pospace)
     }

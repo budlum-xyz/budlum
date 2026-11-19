@@ -115,7 +115,7 @@ pub trait BudlumApi {
     #[method(name = "bud_getConsensusDomains")]
     async fn get_consensus_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Read one state-rooted AppBinding application by its canonical id. Writes
+    /// Read one state-rooted `AppBinding` application by its canonical id. Writes
     /// still travel as signed `SettlementTx::AppBinding` transactions.
     #[method(name = "bud_getAppBindingApplication")]
     async fn get_app_binding_application(
@@ -129,7 +129,7 @@ pub trait BudlumApi {
     #[method(name = "bud_getRestakedValidators")]
     async fn get_restaked_validators(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prove an AppBinding payment against the latest checkpoint header whose
+    /// Prove an `AppBinding` payment against the latest checkpoint header whose
     /// payment window holds it. An application checks the
     /// result with `settlement::app_binding::verify_app_binding_payment` and a finalized
     /// checkpoint it trusts. `null` when no recent header covers the payment.
@@ -485,7 +485,7 @@ pub trait BudlumApi {
     // Validation is economic (stake) / cryptographic (evidence).
 
     /// Register by submitting a signed `Stake` (validator) or
-    /// `AiOperatorBond` (RoleId 8) transaction. Bonding == registration;
+    /// `AiOperatorBond` (`RoleId` 8) transaction. Bonding == registration;
     /// There is no separate approval step. Returns the tx hash.
     #[method(name = "bud_registryRegister")]
     async fn registry_register(
@@ -1153,7 +1153,7 @@ pub trait BudlumApi {
         limit: Option<usize>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List the AppBinding applications (apps on other chains usable with BUD).
+    /// List the `AppBinding` applications (apps on other chains usable with BUD).
     #[method(name = "bud_hubGetAppBindingApps")]
     async fn budlumxyz_get_app_binding_apps(
         &self,
@@ -1283,7 +1283,7 @@ pub trait BudlumApi {
         request_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Query active AI verifiers (RoleId::AI_VERIFIER = RoleId(6)).
+    /// Query active AI verifiers (`RoleId::AI_VERIFIER` = RoleId(6)).
     #[method(name = "bud_aiGetActiveVerifiers")]
     async fn ai_get_active_verifiers(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
@@ -1311,7 +1311,7 @@ pub trait BudlumApi {
 
     /// Prepare a dispute slash transaction for an equivocating verifier.
     /// This creates an `AiDisputeSlash` transaction template that must be signed
-    /// And submitted via bud_sendRawTransaction.
+    /// And submitted via `bud_sendRawTransaction`.
     #[method(name = "bud_aiDisputeSlash")]
     async fn ai_dispute_slash(
         &self,
@@ -1462,7 +1462,7 @@ pub trait BudlumApi {
         commitment: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Resolve a SocialFi u64 NFT id or 32-byte `NftId` hex to its bound B.U.D. 3.0
+    /// Resolve a `SocialFi` u64 NFT id or 32-byte `NftId` hex to its bound B.U.D. 3.0
     /// object metadata and symbol roots, or null when unbound.
     #[method(name = "bud_storageGetNftObject")]
     async fn storage_get_nft_object(

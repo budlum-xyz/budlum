@@ -401,7 +401,7 @@ pub enum MigrationTx {
     ImportEvmStorageChunk(ImportEvmStorageChunk),
     /// Verifies complete `storage_root`, charges migration fee, and installs EVM state.
     FinalizeEvmImport { contract: [u8; 20] },
-    /// Verifies CosmWasm bytecode, Cosmos creator signature, and ICS-23 proofs, and installs WASM state (`8.12.3`).
+    /// Verifies `CosmWasm` bytecode, Cosmos creator signature, and ICS-23 proofs, and installs WASM state (`8.12.3`).
     ImportWasmContract(Box<WasmMigrationRequest>),
     /// Verifies Solana account Merkle proof and Ed25519 authority signature, and installs SVM state (`8.12.3`).
     ImportSvmAccount(Box<SvmMigrationRequest>),

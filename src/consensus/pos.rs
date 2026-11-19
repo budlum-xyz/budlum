@@ -228,7 +228,7 @@ impl PoSEngine {
             .map_err(|_| ConsensusError("Failed to acquire read lock on checkpoints".into()))
     }
 
-    /// Record `block` as a committed PoS checkpoint.
+    /// Record `block` as a committed `PoS` checkpoint.
     ///
     /// # Errors
     ///
@@ -547,9 +547,9 @@ impl PoSEngine {
             .is_some_and(|v| v.active && !v.slashed && v.stake >= self.config.min_stake)
     }
 
-    /// Lock-order fixture: the POS_STATE writer is gone; this
+    /// Lock-order fixture: the `POS_STATE` writer is gone; this
     /// stays only so `consensus_lock_order_loom` can pin the checkpoints ->
-    /// slashing_evidence lock order.
+    /// `slashing_evidence` lock order.
     #[cfg(test)]
     pub fn serialize_state(&self) -> Result<Vec<u8>, String> {
         let epoch_seed = self
@@ -1645,7 +1645,7 @@ impl ConsensusEngine for PoSEngine {
 #[cfg(test)]
 mod tests {
 
-    /// C-12 regression: the PoS engine validates `block.epoch == block.index /
+    /// C-12 regression: the `PoS` engine validates `block.epoch == block.index /
     /// Config.epoch_length`, while the chain layer derives epoch boundaries
     /// From `chain_config::epoch_len_for_chain_id`. If the default drifts away
     /// From every real network, a caller that forgets to override it silently

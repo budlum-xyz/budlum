@@ -872,9 +872,9 @@ mod chaos_tests {
     }
 
     /// Chaos v2: a spam flood has to be evicted entirely by honest fee payers.
-    /// While the pool is full, evict_lowest_fee runs whenever new.fee is above the
+    /// While the pool is full, `evict_lowest_fee` runs whenever new.fee is above the
     /// lowest; once all the spam has been thrown out, a new low-fee transaction is
-    /// refused with PoolFull because it does not beat the lowest honest fee.
+    /// refused with `PoolFull` because it does not beat the lowest honest fee.
     #[test]
     fn test_chaos_v2_mempool_poison_flooder_evicted_by_honest_fees() {
         use crate::mempool::pool::{Mempool, MempoolConfig};
@@ -933,7 +933,7 @@ mod chaos_tests {
     // ─── Chaos: double-lock, state determinism, genesis mismatch ───
 
     /// **Double-spend protection:** the same asset cannot be locked twice.
-    /// `asset_locations` in BridgeState is a single-state map: after the first
+    /// `asset_locations` in `BridgeState` is a single-state map: after the first
     /// lock the asset moves from Active to Locked and a second lock is refused.
     /// This is the fundamental protection against a cross-domain double spend.
     #[test]

@@ -48,7 +48,7 @@ pub struct SettlementRegistries {
     /// Written only by `SettlementTx::RelayerIntent`.
     #[serde(default)]
     pub relayer_policy: crate::relayer::RelayerPolicyRegistry,
-    /// AppBinding applications, mirror payments, externally proven claims, and
+    /// `AppBinding` applications, mirror payments, externally proven claims, and
     /// solver-intent bindings. Every write enters through `SettlementTx::AppBinding`.
     #[serde(default)]
     pub app_binding: crate::settlement::app_binding::AppBindingRegistry,

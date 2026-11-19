@@ -503,7 +503,7 @@ mod tests {
     use super::*;
 
     /// A derived nullifier must be note-shaped or the transaction
-    /// boundary (is_note_hash) would refuse every proof-bound transfer.
+    /// boundary (`is_note_hash`) would refuse every proof-bound transfer.
     #[test]
     fn derived_nullifiers_are_note_shaped() {
         let c = budlum_note_packing::hash_from_field(0x0102_0304_0506_0708);
@@ -624,7 +624,7 @@ mod tests {
         assert!(r.contains_commitment(&spare));
     }
 
-    /// A transfer cannot grow the live set past MAX_LIVE_COMMITMENTS.
+    /// A transfer cannot grow the live set past `MAX_LIVE_COMMITMENTS`.
     #[test]
     fn transfer_outputs_respect_the_live_commitment_cap() {
         let mut r = L1NoteRegistry::new();

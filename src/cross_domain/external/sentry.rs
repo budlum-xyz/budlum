@@ -38,11 +38,11 @@ pub const MAX_SENTRY_EVENTS: usize = 4_096;
 /// Maximum identifier byte length accepted for a domain key.
 pub const MAX_DOMAIN_ID_LEN: usize = 128;
 
-/// Default maximum shared-security restaking share per domain (30.0000% = 300_000 ppm),
+/// Default maximum shared-security restaking share per domain (30.0000% = `300_000` ppm),
 /// preserving a strict safety margin below the 1/3 BFT corruption threshold.
 pub const DEFAULT_MAX_RESTAKE_SHARE_PPM: u32 = 300_000;
 
-/// Hard classical BFT adversarial corruption ceiling (33.3333% = 333_333 ppm).
+/// Hard classical BFT adversarial corruption ceiling (33.3333% = `333_333` ppm).
 pub const BFT_CORRUPTION_CEILING_PPM: u32 = 333_333;
 
 /// One hundred percent in parts per million.
@@ -72,7 +72,7 @@ pub enum DomainQuantumPosture {
     /// Dual enforcement requiring both a classical signature/proof and a
     /// post-quantum lattice or hash signature/proof (for example Ed25519 + ML-DSA-65).
     HybridPostQuantum,
-    /// Pure post-quantum hash or lattice security (SHA-256 PoW, Plonky3 FRI STARK,
+    /// Pure post-quantum hash or lattice security (SHA-256 `PoW`, Plonky3 FRI STARK,
     /// ML-DSA-65/87, SLH-DSA, ML-KEM-768/1024).
     PurePostQuantum,
 }

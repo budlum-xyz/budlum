@@ -30,7 +30,7 @@ use crate::storage::bud3::view::{NetworkSymbolSource, PaidViewReceipt, ViewBud3E
 /// Domain tag deriving deterministic cross-environment account aliases (`bud alias show`).
 pub const DOMAIN_CLI_ALIAS: &[u8] = b"BDLM_BUD3_CLI_ALIAS_V1";
 
-/// Legacy B.U.D. CLI PoW test domain; NOT the testnet faucet's wire algorithm.
+/// Legacy B.U.D. CLI `PoW` test domain; NOT the testnet faucet's wire algorithm.
 /// The testnet service uses SHA-256 over `budlum-faucet-v1`, chain ID,
 /// challenge, recipient and nonce (see `src/bin/budlum-faucet.rs`).
 pub const DOMAIN_CLI_FAUCET_POW: &[u8] = b"BDLM_BUD3_CLI_FAUCET_POW_V1";
@@ -477,7 +477,7 @@ fn leading_zero_bits(digest: &[u8; 32]) -> u32 {
     total
 }
 
-/// Solve the legacy B.U.D. CLI PoW test vector, not a production faucet
+/// Solve the legacy B.U.D. CLI `PoW` test vector, not a production faucet
 /// challenge. No `bud faucet request` command currently calls this function;
 /// using it against the live faucet would generate an incompatible proof.
 ///

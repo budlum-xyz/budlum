@@ -211,7 +211,7 @@ impl FilterPool {
     }
 
     /// Resolve a filter id for one peer, or name the reason it cannot be used.
-    /// PARTIAL: allowed - evicts an expired idle filter entry before returning FilterError::Expired.
+    /// PARTIAL: allowed - evicts an expired idle filter entry before returning `FilterError::Expired`.
     fn resolve(&mut self, peer: &str, id: &str, now: u64) -> Result<u64, FilterError> {
         let key = id
             .strip_prefix("0x")

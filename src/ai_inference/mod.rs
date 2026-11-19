@@ -480,7 +480,7 @@ mod tests {
         assert_eq!(s.nft_id, 42);
         assert_eq!(s.owner, addr(1));
     }
-    /// E2E: model registration + operator bond + ai_inference transaction build -> the tx_type is correct.
+    /// E2E: model registration + operator bond + `ai_inference` transaction build -> the `tx_type` is correct.
     #[test]
     fn ai_e2e_model_bond_tx_integration() {
         use crate::ai::AiRegistry;

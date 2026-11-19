@@ -86,7 +86,7 @@ pub struct VerifiedOpticalObject {
 ///
 /// Groups frames per segment by `(segment_len, symbol_len, source_symbols)` and
 /// prioritizes majority geometry so a single rogue/corrupted frame with spoofed
-/// dimensions cannot hijack or DoS the segment decoder.
+/// dimensions cannot hijack or `DoS` the segment decoder.
 ///
 /// # Errors
 ///
