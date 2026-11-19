@@ -192,12 +192,16 @@ pub fn build_repair_proven_witness(
         .iter()
         .map(|s| (s.esi, symbol_leaf(&s.data)))
         .collect();
+    let mut seen_esis = std::collections::BTreeSet::new();
     let mut proofs = Vec::with_capacity(live_subset.len());
     for sym in live_subset {
-        if sym.segment != seg || sym.esi < first_esi {
+        if sym.segment != seg || sym.esi < first_esi || !seen_esis.insert(sym.esi) {
             return None;
         }
         let pos = usize::try_from(sym.esi - first_esi).ok()?;
+        if pos >= placed_leaves.len() {
+            return None;
+        }
         let root_path = prove_symbol_root_path(&placed_leaves, pos)?;
         proofs.push(RepairSymbolProof {
             root_index,
@@ -436,7 +440,7 @@ pub fn verify_repaired_symbol(
 /// submits a fraudulent repair (`bud3_bad_repair_is_slashed`, Section 6.10.8).
 #[must_use]
 pub const fn bad_repair_slash_amount(repairer_stake: u64) -> u64 {
-    repairer_stake.saturating_mul(BAD_REPAIR_SLASH_BPS) / 10_000
+    ((repairer_stake as u128 * BAD_REPAIR_SLASH_BPS as u128) / 10_000) as u64
 }
 
 /// Blocks an assigned Full validator has to submit `RecordRepair` before
@@ -595,5 +599,13 @@ mod tests {
         forged.data[0] ^= 0xFF;
         assert!(!verify_repaired_symbol(0, &seg_bytes, &SMALL, &forged).unwrap());
         assert_eq!(bad_repair_slash_amount(500_000), 5_000);
+        // Large validator stakes above u64::MAX / 100 still slash exact 1% without saturating.
+        let large_stake = u64::MAX / 10;
+        assert_eq!(bad_repair_slash_amount(large_stake), large_stake / 100);
+
+        // Duplicate ESIs in repair witness subset are rejected.
+        let enc = SegmentEncoder::new(0, &seg_bytes, &SMALL).unwrap();
+        let src = enc.source_symbols();
+        assert!(build_repair_proven_witness(0, &src, &[src[0].clone(), src[0].clone()]).is_none());
     }
 }

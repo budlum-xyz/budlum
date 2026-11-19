@@ -1085,7 +1085,7 @@ fn freeze_domain(
 /// a registry refusal, or nonce writes that break the account invariants.
 pub fn accept_commitment(
     state: &mut AccountState,
-    commitment: DomainCommitment,
+    mut commitment: DomainCommitment,
 ) -> Result<CommitmentOutcome, String> {
     let domain = validate_commitment_metadata(state, &commitment)?.clone();
 
@@ -1103,6 +1103,19 @@ pub fn accept_commitment(
         .commitments
         .find_by_height(commitment.domain_id, commitment.domain_height);
     let attested = CommitmentAttestation::for_domain(&domain);
+    let kind_attested = CommitmentAttestation::for_kind(&domain.kind);
+    // When an adapter narrows its ConsensusKind's attestation surface (such as
+    // `bitcoin-spv-v1` under `ConsensusKind::PoW`, whose 80-byte header binds
+    // `parent` and `tx_root` but never a `state_root` or `event_root`), scrub
+    // the unattested roots before any comparison or persistence so downstream
+    // proof verifiers consulting `for_kind` cannot accept a relayer-supplied
+    // fabricated event tree or state root.
+    if kind_attested.state_root && !attested.state_root {
+        commitment.state_root = [0u8; 32];
+    }
+    if kind_attested.event_root && !attested.event_root {
+        commitment.event_root = [0u8; 32];
+    }
     let agrees_on_attested = |prev: &DomainCommitment, cand: &DomainCommitment| -> bool {
         use subtle::ConstantTimeEq;
         bool::from(prev.domain_block_hash.ct_eq(&cand.domain_block_hash))
@@ -5661,6 +5674,73 @@ mod tests {
             crate::cross_domain::event_tree::MerkleProof,
         )>(&forged, 4 * 1024)
         .is_err());
+    }
+
+    #[test]
+    fn bitcoin_spv_commitment_scrubs_unattested_event_and_state_roots() {
+        use crate::cross_domain::event_tree::{DomainEvent, DomainEventTree};
+        use crate::cross_domain::DomainEventKind;
+        use crate::domain::plugin::default_domain;
+        use crate::domain::types::BITCOIN_SPV_ADAPTER;
+        use crate::settlement::proof_verifier::{ProofVerificationError, SettlementProofVerifier};
+
+        let mut state = AccountState::new();
+        let btc_dom = default_domain(709, ConsensusKind::PoW, 70_900, BITCOIN_SPV_ADAPTER, 6);
+        state
+            .settlement
+            .domains
+            .register(btc_dom)
+            .expect("register bitcoin-spv domain");
+
+        let forged_event = DomainEvent {
+            domain_id: 709,
+            domain_height: 1,
+            event_index: 0,
+            kind: DomainEventKind::Custom(b"forged-lock".to_vec()),
+            emitter: Address::from([0x33; 32]),
+            message: None,
+            payload_hash: [0xEE; 32],
+        };
+        let mut fake_tree = DomainEventTree::new();
+        fake_tree.push(forged_event.clone());
+        let fake_event_root = fake_tree.root();
+        let merkle_proof = fake_tree.proof(0).expect("merkle proof");
+
+        let commitment = DomainCommitment {
+            domain_id: 709,
+            domain_height: 1,
+            domain_block_hash: [0x11; 32],
+            parent_domain_block_hash: [0u8; 32],
+            state_root: [0xAA; 32],
+            tx_root: [0x22; 32],
+            event_root: fake_event_root,
+            finality_proof_hash: [0x44; 32],
+            consensus_kind: ConsensusKind::PoW,
+            validator_set_hash: [0u8; 32],
+            producer: Some(Address::from([0x55; 32])),
+            timestamp_ms: 1_000,
+            sequence: 1,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+        let out = accept_commitment(&mut state, commitment).expect("accept bitcoin-spv commitment");
+        assert!(matches!(out, CommitmentOutcome::Advanced));
+
+        let stored = state
+            .settlement
+            .commitments
+            .find_by_height(709, 1)
+            .expect("stored commitment");
+        assert_eq!(stored.tx_root, [0x22; 32]);
+        assert_eq!(stored.state_root, [0u8; 32]);
+        assert_eq!(stored.event_root, [0u8; 32]);
+
+        let err = SettlementProofVerifier::verify_event_against_commitment(
+            &stored,
+            forged_event,
+            &merkle_proof,
+        )
+        .expect_err("bitcoin-spv commitment must never attest event_root");
+        assert_eq!(err, ProofVerificationError::UnattestedEventRoot);
     }
 
     #[test]

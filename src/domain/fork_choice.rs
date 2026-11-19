@@ -81,9 +81,11 @@ impl ConsensusDomainForkChoice for DomainForkChoice {
     fn fork_choice(&self, candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceError> {
         ensure_single_domain(self.domain_id, candidates)?;
         let mut head = match &self.kind {
-            ConsensusKind::PoW => resolve_pow(candidates)?,
+            ConsensusKind::PoW | ConsensusKind::Pospace => resolve_pow(candidates)?,
             ConsensusKind::PoS => resolve_pos(candidates)?,
-            ConsensusKind::Bft => resolve_bft(candidates)?,
+            ConsensusKind::Bft | ConsensusKind::Dag | ConsensusKind::Poh => {
+                resolve_bft(candidates)?
+            }
             ConsensusKind::PoA => resolve_poa(candidates)?,
             ConsensusKind::Zk => resolve_zk(candidates)?,
             ConsensusKind::StorageAttestation(_)
@@ -93,7 +95,11 @@ impl ConsensusDomainForkChoice for DomainForkChoice {
         if candidates.len() == 1
             && !matches!(
                 self.kind,
-                ConsensusKind::Bft | ConsensusKind::PoA | ConsensusKind::Zk
+                ConsensusKind::Bft
+                    | ConsensusKind::Dag
+                    | ConsensusKind::Poh
+                    | ConsensusKind::PoA
+                    | ConsensusKind::Zk
             )
         {
             head.reason = ForkChoiceReason::SingleCandidate;
