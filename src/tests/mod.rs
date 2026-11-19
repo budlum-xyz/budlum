@@ -274,3 +274,7 @@ pub mod bitcoin_spv;
 // End-to-end success and refusal coverage for the bud_ai* JSON-RPC family.
 #[cfg(test)]
 pub mod rpc_ai_coverage;
+
+// The Solana compatibility door: every row answered and refused on the real wire.
+#[cfg(test)]
+pub mod rpc_door_solana;
