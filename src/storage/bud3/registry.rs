@@ -2939,9 +2939,10 @@ impl Bud3Registry {
                         })
                         .map(|s| u64::from(s.share.symbols))
                         .sum();
-                    let has_open_pending = obj.shares.iter().any(|s| {
-                        s.root == root_idx && s.status != ShareStatus::Confirmed
-                    });
+                    let has_open_pending = obj
+                        .shares
+                        .iter()
+                        .any(|s| s.root == root_idx && s.status != ShareStatus::Confirmed);
                     if confirmed_live == 0 && !has_open_pending {
                         r.settled = true;
                     }

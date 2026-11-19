@@ -134,8 +134,6 @@ impl SymbioticVaultEvidence {
             fields.push(idx);
             fields.push(&sig.signature);
         }
-        }
-        let fields: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
         crate::core::hash::hash_fields_bytes(&fields)
     }
 }

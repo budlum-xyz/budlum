@@ -121,10 +121,15 @@ pub mod ton_catchain;
 pub mod versioning;
 pub mod zkvm_proof;
 
-<<<<<<< HEAD
 pub use algorand_stateproof::{
     advance_algorand_verifier, verify_algorand_equivocation, AlgorandStateProofAdapter,
     AlgorandStateProofMessage, PinnedAlgorandVerifier,
+};
+pub use aptos_jolteon_bft::{
+    encode_jolteon_evidence, jolteon_tc_sign_bytes, jolteon_vote_sign_bytes,
+    verify_jolteon_equivocation, AptosJolteonAdapter, JolteonBlock, JolteonEquivocationProof,
+    JolteonQuorumCert, JolteonTimeoutCert, JolteonTwoChainEvidence, JolteonValidator,
+    JolteonValidatorSig, PinnedJolteonEpochState, APTOS_JOLTEON_ADAPTER_NAME,
 };
 pub use arweave_spora::{ArweaveSpOraAdapter, ArweaveSpOraEvidence};
 pub use auxpow_pop::{
@@ -135,12 +140,6 @@ pub use babylon_eots::{
     EotsEquivocationProof, EotsEvidence, EotsPublicKey, EotsVote, PostQuantumHalf,
     DEFAULT_REQUIRED_BTC_CONFIRMATIONS, EVIDENCE_VERSION as EOTS_EVIDENCE_VERSION,
     SCHNORR_PUBLIC_KEY_LEN, SCHNORR_SIGNATURE_LEN,
-};
-pub use aptos_jolteon_bft::{
-    encode_jolteon_evidence, jolteon_tc_sign_bytes, jolteon_vote_sign_bytes,
-    verify_jolteon_equivocation, AptosJolteonAdapter, JolteonBlock, JolteonEquivocationProof,
-    JolteonQuorumCert, JolteonTimeoutCert, JolteonTwoChainEvidence, JolteonValidator,
-    JolteonValidatorSig, PinnedJolteonEpochState, APTOS_JOLTEON_ADAPTER_NAME,
 };
 pub use based_preconf::{BasedPreconfAdapter, BasedPreconfValidator, PinnedBasedPreconfCommittee};
 pub use bitcoin_spv::{
