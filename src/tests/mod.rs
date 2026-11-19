@@ -278,3 +278,7 @@ pub mod rpc_ai_coverage;
 // The Solana compatibility door: every row answered and refused on the real wire.
 #[cfg(test)]
 pub mod rpc_door_solana;
+
+// Success and refusal RPC coverage for BNS, bridge, encoding/relayer, and role registry.
+#[cfg(test)]
+pub mod rpc_bridge_bns_registry_coverage;

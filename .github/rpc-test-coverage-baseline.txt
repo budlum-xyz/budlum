@@ -99,50 +99,6 @@ bud_submitSlashingReport missing=refusal
 bud_txPrecheck missing=refusal
 bud_validatorProfile missing=refusal
 
-# BNS name service (13 rows)
-
-bud_bnsPrepareRegisterSubdomain missing=refusal
-bud_bnsPrepareRegisterSubdomain missing=success
-bud_bnsPrepareRenew missing=refusal
-bud_bnsPrepareRenew missing=success
-bud_bnsPrepareSetStorage missing=success
-bud_bnsPrepareSetSubdomainContent missing=success
-bud_bnsPrepareTransfer missing=refusal
-bud_bnsPrepareTransfer missing=success
-bud_bnsResolve missing=refusal
-bud_bnsResolveFull missing=refusal
-bud_bnsResolveSubdomain missing=refusal
-bud_bnsResolveSubdomainContent missing=refusal
-bud_bnsResolveSubdomainContent missing=success
-
-# bridge door (5 rows)
-
-bud_burnBridgeTransfer missing=refusal
-bud_burnBridgeTransferWithEvent missing=refusal
-bud_mintBridgeTransfer missing=refusal
-bud_unlockBridgeTransfer missing=refusal
-bud_unlockBridgeTransferVerified missing=refusal
-
-# encoding and relayer planning (9 rows)
-
-bud_encodeCrossVmCall missing=success
-bud_encodeExternalEvidence missing=refusal
-bud_encodeExternalEvidence missing=success
-bud_planEvmVerification missing=refusal
-bud_planEvmVerification missing=success
-bud_relayerPrepareExternalTx missing=refusal
-bud_relayerPrepareExternalTx missing=success
-bud_replayExternalProbes missing=refusal
-bud_replayExternalProbes missing=success
-
-# role registry (5 rows)
-
-bud_registryActiveMembers missing=refusal
-bud_registryBeginRoleBondUnbonding missing=refusal
-bud_registryRegister missing=refusal
-bud_registryRegister missing=success
-bud_registryWithdrawRoleBond missing=refusal
-
 # social layer (8 rows)
 
 bud_socialGetFeed missing=refusal
