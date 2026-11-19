@@ -193,6 +193,51 @@ pub struct PinnedScpTier {
     pub nodes: Vec<ScpValidatorNode>,
 }
 
+impl PinnedScpTier {
+    /// Canonical length-prefixed SHA3-256 commitment over the network
+    /// passphrase, slash-escrow flag, and every pinned node's `NodeID`,
+    /// `QuorumSet` commitment, and ML-DSA-65 co-signing key.
+    ///
+    /// WIRING: checked in constant time by `crate::cross_domain::economic_guard`
+    /// on both backing refreshes and contradiction submissions.
+    #[must_use]
+    pub fn canonical_pin_digest(&self) -> Hash32 {
+        let mut acc = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_SCP_PIN_V1",
+            self.network_passphrase.as_bytes(),
+            &[u8::from(self.has_bonded_slash_escrow)],
+            &(self.nodes.len() as u64).to_le_bytes(),
+        ]);
+        for node in &self.nodes {
+            let qhash = node.quorum_set.hash();
+            acc = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_SCP_PIN_V1",
+                &[1u8],
+                &acc,
+                &node.ed25519_pubkey,
+                &qhash,
+                &node.pq_pubkey,
+            ]);
+        }
+        acc
+    }
+
+    /// Return `(bonded_unit_weight, has_pq_key)` for `node_id` in this tier.
+    ///
+    /// WIRING: used by `crate::cross_domain::economic_guard` for incremental
+    /// per-offender Stellar SCP slashing accounting.
+    #[must_use]
+    pub fn node_member_info(&self, node_id: &[u8; 32]) -> Option<(u128, bool)> {
+        self.nodes
+            .iter()
+            .find(|n| bool::from(n.ed25519_pubkey.ct_eq(node_id)))
+            .map(|n| {
+                let unit = u128::from(self.has_bonded_slash_escrow);
+                (unit, !n.pq_pubkey.is_empty())
+            })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ScpLedgerHeader {
     ledger_seq: u64,
@@ -222,15 +267,62 @@ impl ScpLedgerHeader {
     }
 }
 
+/// Signed `SCPStatementExternalize` envelope emitted by a pinned SCP validator.
+///
+/// WIRING: verified by [`StellarScpAdapter`] and
+/// [`verify_stellar_ballot_equivocation`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ScpExternalizeEnvelope {
-    node_id: [u8; 32],
-    commit_counter: u32,
-    highest_counter: u32,
-    quorum_set_hash: Hash32,
-    ed25519_sig: Vec<u8>,
+pub struct ScpExternalizeEnvelope {
+    /// Validator Ed25519 `NodeID` (32 bytes).
+    pub node_id: [u8; 32],
+    /// Ballot counter at which the node committed the value (`>= 1`).
+    pub commit_counter: u32,
+    /// Highest ballot counter observed when externalizing (`>= commit_counter`).
+    pub highest_counter: u32,
+    /// Declared `QuorumSet` commitment (`ScpQuorumSet::hash()`).
+    pub quorum_set_hash: Hash32,
+    /// Detached Ed25519 signature over [`externalize_sign_bytes`].
+    pub ed25519_sig: Vec<u8>,
+    /// Mandatory ML-DSA-65 co-signature when `pq_pubkey` is configured.
     #[serde(default)]
-    pq_sig: Vec<u8>,
+    pub pq_sig: Vec<u8>,
+}
+
+/// Permissionless SCP ballot equivocation proof demonstrating that one or more
+/// pinned top-tier nodes externalized two distinct ledger header hashes at the
+/// same `slot_index` (an unconditional safety fault in Mazieres SCP).
+///
+/// WIRING: verified in production by [`verify_stellar_ballot_equivocation`] via
+/// `crate::cross_domain::economic_guard::BridgeEconomicGuard::submit_contradiction`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StellarBallotEquivocationProof {
+    /// Ledger slot index at which both conflicting values were externalized (`> 0`).
+    pub slot_index: u64,
+    /// First externalized ledger header hash (non-zero).
+    pub ledger_header_hash_a: Hash32,
+    /// Signed externalize envelopes attesting `ledger_header_hash_a`.
+    pub envelopes_a: Vec<ScpExternalizeEnvelope>,
+    /// Second conflicting externalized ledger header hash (non-zero, `!= a`).
+    pub ledger_header_hash_b: Hash32,
+    /// Signed externalize envelopes attesting `ledger_header_hash_b`.
+    pub envelopes_b: Vec<ScpExternalizeEnvelope>,
+}
+
+/// Verified outcome of [`verify_stellar_ballot_equivocation`].
+///
+/// WIRING: consumed by `crate::cross_domain::economic_guard` when freezing a
+/// faulted FBA/SCP domain and recording proven equivocating top-tier nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedStellarSlash {
+    /// Canonical order-independent digest of the proven SCP equivocation.
+    pub evidence_digest: Hash32,
+    /// Slot index at which the conflicting `EXTERNALIZE` envelopes were signed.
+    pub slot_index: u64,
+    /// Sorted unique Ed25519 `NodeID`s of proven equivocating tier nodes.
+    pub offenders: Vec<[u8; 32]>,
+    /// Bonded slashable node count (`offenders.len()` when
+    /// `pinned.has_bonded_slash_escrow`, otherwise `0`).
+    pub slashed_bonded_nodes: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,8 +331,12 @@ struct ScpFinalityEvidence {
     envelopes: Vec<ScpExternalizeEnvelope>,
 }
 
+/// Compute the canonical SCP network identifier hash for `(network, passphrase)`.
+///
+/// WIRING: shared between [`StellarScpAdapter`] and
+/// [`verify_stellar_ballot_equivocation`].
 #[must_use]
-fn compute_network_id_hash(network: &str, passphrase: &str) -> Hash32 {
+pub fn compute_network_id_hash(network: &str, passphrase: &str) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[
         b"BDLM_SCP_NET_V1",
         network.as_bytes(),
@@ -248,8 +344,13 @@ fn compute_network_id_hash(network: &str, passphrase: &str) -> Hash32 {
     ])
 }
 
+/// Compute the canonical signing digest for an `SCPStatementExternalize`
+/// envelope.
+///
+/// WIRING: shared between [`StellarScpAdapter`] and
+/// [`verify_stellar_ballot_equivocation`].
 #[must_use]
-fn externalize_sign_bytes(
+pub fn externalize_sign_bytes(
     network_id_hash: &Hash32,
     slot_index: u64,
     commit_counter: u32,
@@ -374,6 +475,175 @@ fn decode_scp_evidence(payload: &[u8]) -> Result<ScpFinalityEvidence, AdapterErr
         });
     }
     Ok(decoded)
+}
+
+fn verify_scp_slash_side(
+    pinned: &PinnedScpTier,
+    node_index: &BTreeMap<[u8; 32], usize>,
+    net_hash: &Hash32,
+    slot_index: u64,
+    ledger_hash: &Hash32,
+    envelopes: &[ScpExternalizeEnvelope],
+    what: &str,
+) -> Result<BTreeSet<[u8; 32]>, AdapterError> {
+    if envelopes.is_empty() || envelopes.len() > pinned.nodes.len() {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!("invalid {what} envelope count {}", envelopes.len()),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    for env in envelopes {
+        if !seen.insert(env.node_id) {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!("duplicate node envelope in {what}"),
+            });
+        }
+        if env.commit_counter == 0 || env.highest_counter < env.commit_counter {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!("invalid SCP ballot counters in {what}"),
+            });
+        }
+        let Some(&idx) = node_index.get(&env.node_id) else {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!("unknown SCP tier node in {what}"),
+            });
+        };
+        let Some(node) = pinned.nodes.get(idx) else {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!("unknown SCP tier node in {what}"),
+            });
+        };
+        let expected_qhash = node.quorum_set.hash();
+        if !bool::from(env.quorum_set_hash.ct_eq(&expected_qhash)) {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!("SCP quorum_set_hash mismatch in {what}"),
+            });
+        }
+        let msg = externalize_sign_bytes(
+            net_hash,
+            slot_index,
+            env.commit_counter,
+            env.highest_counter,
+            ledger_hash,
+            &expected_qhash,
+        );
+        crate::crypto::primitives::verify_signature(&msg, &env.ed25519_sig, &node.ed25519_pubkey)
+            .map_err(|_| AdapterError::Crypto {
+            what: format!("invalid Ed25519 signature in {what}"),
+        })?;
+        if !node.pq_pubkey.is_empty() {
+            if env.pq_sig.is_empty() {
+                return Err(AdapterError::Crypto {
+                    what: format!("missing mandatory ML-DSA-65 co-signature in {what}"),
+                });
+            }
+            crate::crypto::primitives::PqKeyPair::verify(
+                &node.pq_pubkey,
+                crate::crypto::ctx::CROSS_DOMAIN_V1,
+                &msg,
+                &env.pq_sig,
+            )
+            .map_err(|_| AdapterError::Crypto {
+                what: format!("invalid ML-DSA-65 co-signature in {what}"),
+            })?;
+        }
+    }
+    Ok(seen)
+}
+
+/// Verify permissionless Stellar/FBA `SCPStatementExternalize` equivocation
+/// evidence against a governance-pinned [`PinnedScpTier`].
+///
+/// WIRING: invoked in production by
+/// `crate::cross_domain::economic_guard::BridgeEconomicGuard::submit_contradiction`.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] when the pinned tier violates Mazieres quorum
+/// intersection, `slot_index == 0`, the externalized ledger hashes are zero or
+/// equal, any ballot counter, `quorum_set_hash`, Ed25519 signature, or
+/// mandatory ML-DSA-65 signature fails verification, or no node signed both.
+pub fn verify_stellar_ballot_equivocation(
+    network: &str,
+    pinned: &PinnedScpTier,
+    proof: &StellarBallotEquivocationProof,
+) -> Result<VerifiedStellarSlash, AdapterError> {
+    if network.trim().is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "SCP equivocation network cannot be empty".into(),
+        });
+    }
+    let (node_index, _min_quorum) = StellarScpAdapter::validate_tier(pinned)?;
+    if proof.slot_index == 0 {
+        return Err(AdapterError::ConsensusRule {
+            rule: "SCP equivocation slot_index must be positive".into(),
+        });
+    }
+    if bool::from(proof.ledger_header_hash_a.ct_eq(&[0u8; 32]))
+        || bool::from(proof.ledger_header_hash_b.ct_eq(&[0u8; 32]))
+        || bool::from(
+            proof
+                .ledger_header_hash_a
+                .ct_eq(&proof.ledger_header_hash_b),
+        )
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "SCP equivocation requires two distinct non-zero ledger hashes".into(),
+        });
+    }
+    let net_hash = compute_network_id_hash(network, &pinned.network_passphrase);
+    let set_a = verify_scp_slash_side(
+        pinned,
+        &node_index,
+        &net_hash,
+        proof.slot_index,
+        &proof.ledger_header_hash_a,
+        &proof.envelopes_a,
+        "scp-slash-a",
+    )?;
+    let set_b = verify_scp_slash_side(
+        pinned,
+        &node_index,
+        &net_hash,
+        proof.slot_index,
+        &proof.ledger_header_hash_b,
+        &proof.envelopes_b,
+        "scp-slash-b",
+    )?;
+    let offenders: Vec<[u8; 32]> = set_a.intersection(&set_b).copied().collect();
+    if offenders.is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "SCP equivocation has no overlapping offending tier node".into(),
+        });
+    }
+    let (lo_hash, hi_hash) = if proof.ledger_header_hash_a <= proof.ledger_header_hash_b {
+        (&proof.ledger_header_hash_a, &proof.ledger_header_hash_b)
+    } else {
+        (&proof.ledger_header_hash_b, &proof.ledger_header_hash_a)
+    };
+    let slot_le = proof.slot_index.to_le_bytes();
+    let count_le = (offenders.len() as u64).to_le_bytes();
+    let mut fields: Vec<&[u8]> = Vec::with_capacity(offenders.len().saturating_add(6));
+    fields.push(b"BDLM_SCP_SLASH_V1");
+    fields.push(&net_hash);
+    fields.push(&slot_le);
+    fields.push(lo_hash);
+    fields.push(hi_hash);
+    fields.push(&count_le);
+    for pk in &offenders {
+        fields.push(pk);
+    }
+    let slashed = if pinned.has_bonded_slash_escrow {
+        offenders.len() as u128
+    } else {
+        0
+    };
+    Ok(VerifiedStellarSlash {
+        evidence_digest: crate::core::hash::hash_fields_bytes(&fields),
+        slot_index: proof.slot_index,
+        offenders,
+        slashed_bonded_nodes: slashed,
+    })
 }
 
 /// External finality adapter for Federated Byzantine Agreement / Stellar

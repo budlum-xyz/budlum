@@ -132,6 +132,85 @@ pub struct PinnedRestakingAvsSet {
     pub eots_providers: Vec<AvsQuorumMember>,
 }
 
+impl PinnedRestakingAvsSet {
+    /// Canonical length-prefixed SHA3-256 commitment over every pinned quorum
+    /// parameter, validator key, operator haircut, and EOTS finality provider.
+    ///
+    /// WIRING: checked in constant time by `crate::cross_domain::economic_guard`
+    /// on both backing refreshes and contradiction submissions.
+    #[must_use]
+    pub fn canonical_pin_digest(&self) -> Hash32 {
+        let mut acc = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_AVS_PIN_V1",
+            &self.epoch.to_le_bytes(),
+            &self.min_withdrawal_delay.to_le_bytes(),
+            &self.max_shared_avs_per_operator.to_le_bytes(),
+            &self.min_effective_restaked_stake.to_le_bytes(),
+            &(self.native_validators.len() as u64).to_le_bytes(),
+            &(self.restaked_operators.len() as u64).to_le_bytes(),
+            &(self.eots_providers.len() as u64).to_le_bytes(),
+        ]);
+        for v in &self.native_validators {
+            acc = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_AVS_PIN_V1",
+                &[1u8],
+                &acc,
+                &v.ed25519_pubkey,
+                &v.stake_weight.to_le_bytes(),
+                &v.pq_pubkey,
+            ]);
+        }
+        for op in &self.restaked_operators {
+            acc = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_AVS_PIN_V1",
+                &[2u8],
+                &acc,
+                &op.ed25519_pubkey,
+                &op.raw_stake.to_le_bytes(),
+                &op.shared_avs_count.to_le_bytes(),
+                &op.pq_pubkey,
+            ]);
+        }
+        for ep in &self.eots_providers {
+            acc = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_AVS_PIN_V1",
+                &[3u8],
+                &acc,
+                &ep.ed25519_pubkey,
+                &ep.stake_weight.to_le_bytes(),
+                &ep.pq_pubkey,
+            ]);
+        }
+        acc
+    }
+
+    /// Return the haircut-adjusted restaked stake and whether an ML-DSA-65
+    /// co-signing key is bound for `pubkey`.
+    ///
+    /// WIRING: used by `crate::cross_domain::economic_guard` for incremental
+    /// per-offender slashing accounting.
+    #[must_use]
+    pub fn restaked_member_info(&self, pubkey: &[u8; 32]) -> Option<(u128, bool)> {
+        self.restaked_operators
+            .iter()
+            .find(|op| bool::from(op.ed25519_pubkey.ct_eq(pubkey)))
+            .map(|op| (u128::from(op.haircut_stake()), !op.pq_pubkey.is_empty()))
+    }
+
+    /// Return the EOTS finality stake and whether an ML-DSA-65 co-signing key
+    /// is bound for `pubkey`.
+    ///
+    /// WIRING: used by `crate::cross_domain::economic_guard` for incremental
+    /// per-offender EOTS slashing accounting.
+    #[must_use]
+    pub fn eots_member_info(&self, pubkey: &[u8; 32]) -> Option<(u128, bool)> {
+        self.eots_providers
+            .iter()
+            .find(|ep| bool::from(ep.ed25519_pubkey.ct_eq(pubkey)))
+            .map(|ep| (u128::from(ep.stake_weight), !ep.pq_pubkey.is_empty()))
+    }
+}
+
 /// Detached hybrid signature attached to an AVS quorum vote or slashing proof.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvsSignature {
@@ -705,6 +784,16 @@ pub fn verify_restaking_slashing(
             let height_le = height.to_le_bytes();
             let ha_le = horizon_a.to_le_bytes();
             let hb_le = horizon_b.to_le_bytes();
+            // Order the conflicting statements canonically so swapping sides A and B
+            // produces the exact same evidence digest and cannot bypass replay checks.
+            let ((lo_h, lo_digest), (hi_h, hi_digest)) =
+                if (batch_digest_a.as_slice(), ha_le.as_slice())
+                    <= (batch_digest_b.as_slice(), hb_le.as_slice())
+                {
+                    ((&ha_le, batch_digest_a), (&hb_le, batch_digest_b))
+                } else {
+                    ((&hb_le, batch_digest_b), (&ha_le, batch_digest_a))
+                };
             let count_le = u64::try_from(offenders.len())
                 .unwrap_or(u64::MAX)
                 .to_le_bytes();
@@ -714,10 +803,10 @@ pub fn verify_restaking_slashing(
             fields.push(network.as_bytes());
             fields.push(&epoch_le);
             fields.push(&height_le);
-            fields.push(&ha_le);
-            fields.push(batch_digest_a);
-            fields.push(&hb_le);
-            fields.push(batch_digest_b);
+            fields.push(lo_h);
+            fields.push(lo_digest);
+            fields.push(hi_h);
+            fields.push(hi_digest);
             fields.push(&count_le);
             for pk in &offenders {
                 fields.push(pk);
@@ -776,6 +865,14 @@ pub fn verify_restaking_slashing(
             }
             let epoch_le = epoch.to_le_bytes();
             let height_le = height.to_le_bytes();
+            let ((lo_rand, lo_digest), (hi_rand, hi_digest)) =
+                if (batch_digest_a.as_slice(), rand_root_a.as_slice())
+                    <= (batch_digest_b.as_slice(), rand_root_b.as_slice())
+                {
+                    ((rand_root_a, batch_digest_a), (rand_root_b, batch_digest_b))
+                } else {
+                    ((rand_root_b, batch_digest_b), (rand_root_a, batch_digest_a))
+                };
             let count_le = u64::try_from(offenders.len())
                 .unwrap_or(u64::MAX)
                 .to_le_bytes();
@@ -785,10 +882,10 @@ pub fn verify_restaking_slashing(
             fields.push(network.as_bytes());
             fields.push(&epoch_le);
             fields.push(&height_le);
-            fields.push(rand_root_a);
-            fields.push(batch_digest_a);
-            fields.push(rand_root_b);
-            fields.push(batch_digest_b);
+            fields.push(lo_rand);
+            fields.push(lo_digest);
+            fields.push(hi_rand);
+            fields.push(hi_digest);
             fields.push(&count_le);
             for pk in &offenders {
                 fields.push(pk);
