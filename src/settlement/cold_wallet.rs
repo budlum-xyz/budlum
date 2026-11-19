@@ -479,9 +479,13 @@ impl ColdWalletState {
             }
         }
         let mut previous = 0u32;
+        let mut previous_height: Option<u64> = None;
         for rotation in &self.rotations {
             if rotation.key_epoch <= previous || rotation.key_epoch > self.key_epoch {
                 return Err("rotation-epochs-not-monotonic");
+            }
+            if previous_height.is_some_and(|h| rotation.at_height < h) {
+                return Err("rotation-heights-not-monotonic");
             }
             if rotation.reason.is_empty() {
                 return Err("empty-rotation-reason");
@@ -490,13 +494,16 @@ impl ColdWalletState {
                 return Err("rotation-reason-too-long");
             }
             previous = rotation.key_epoch;
+            previous_height = Some(rotation.at_height);
         }
-        // An empty rotation history is valid at epoch one. If a history is
-        // present, its newest entry must explain the current epoch.
+        // An empty rotation history is valid only at epoch one. If a history
+        // is present, its newest entry must explain the current epoch.
         if let Some(last) = self.rotations.last() {
             if last.key_epoch != self.key_epoch {
                 return Err("current-key-epoch-not-recorded");
             }
+        } else if self.key_epoch != 1 {
+            return Err("current-key-epoch-not-recorded");
         }
         Ok(())
     }
@@ -1469,6 +1476,32 @@ mod tests {
                 .sign_with_quorum(&req, cold.key_epoch, &sigs)
                 .expect("fresh-epoch signatures pass");
             assert_eq!(out.key_epoch, 2);
+        }
+
+        #[test]
+        fn validate_refuses_epoch_above_one_without_rotation_and_regressing_heights() {
+            let mut tampered = ColdWalletState::new(quorum_policy());
+            tampered.key_epoch = 3;
+            tampered.rotations.clear();
+            let err = tampered
+                .validate()
+                .expect_err("key_epoch > 1 with empty rotation history must be refused");
+            assert_eq!(err, "current-key-epoch-not-recorded");
+
+            let mut regressing = ColdWalletState::new(quorum_policy());
+            regressing.rotate_key(200, "first rotation").unwrap();
+            regressing
+                .rotations
+                .push(crate::settlement::cold_wallet::KeyRotation {
+                    key_epoch: 3,
+                    at_height: 150,
+                    reason: "tampered snapshot regression".into(),
+                });
+            regressing.key_epoch = 3;
+            let herr = regressing
+                .validate()
+                .expect_err("regressing rotation heights must be refused");
+            assert_eq!(herr, "rotation-heights-not-monotonic");
         }
     }
 }

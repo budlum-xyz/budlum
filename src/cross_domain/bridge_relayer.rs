@@ -1,9 +1,9 @@
-//! Bridge ↔ Relayer integration layer.
+//! Bridge <-> Relayer integration layer.
 //!
 //! Orchestrates the full cross-domain transfer lifecycle:
-//! 1. User initiates lock/burn on source domain → bridge creates event
-//! 2. Relayer picks up the event → submits proof on target domain
-//! 3. Bridge processes the verified message → mint/unlock on target
+//! 1. User initiates lock/burn on source domain -> bridge creates event
+//! 2. Relayer picks up the event -> submits proof on target domain
+//! 3. Bridge processes the verified message -> mint/unlock on target
 //!
 //! This module ties `BridgeState`, `UniversalRelayer`, and
 //! `CrossDomainMessageRegistry` into a coherent pipeline.
@@ -148,7 +148,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
         self.event_trees.entry(domain).or_default()
     }
 
-    // ─── Stage 1: Lock (source domain) ────
+    // --- Stage 1: Lock (source domain) ----
 
     /// Initiate a cross-domain lock. Creates the bridge transfer, event, and
     /// Enqueues the relay request.
@@ -223,7 +223,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
         Ok(event)
     }
 
-    // ─── Stage 2: Relay (relayer submits proof on target domain) ───
+    // --- Stage 2: Relay (relayer submits proof on target domain) ---
 
     /// Process a relay submission. The relayer provides a Merkle proof that
     /// The lock/burn event occurred on the source domain.
@@ -260,7 +260,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
         Ok(message)
     }
 
-    // ─── Stage 3: Mint (target domain) ────
+    // --- Stage 3: Mint (target domain) ----
 
     /// After relay verification, mint the asset on the target domain.
     ///
@@ -292,7 +292,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
         Ok(())
     }
 
-    // ─── Stage 4: Burn (target domain) ────
+    // --- Stage 4: Burn (target domain) ----
 
     /// Burn the asset on the target domain to send it back.
     /// Returns the event for relay back to the source domain.
@@ -361,7 +361,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
         Ok(event)
     }
 
-    // ─── Stage 5: Unlock (source domain) ─────
+    // --- Stage 5: Unlock (source domain) -----
 
     /// After relay verification of a burn, unlock the asset on the source domain.
     /// `current_height` is the block the unlock settles in.
@@ -399,7 +399,17 @@ impl<'a> BridgeRelayerPipeline<'a> {
             .correlation_id
             .ok_or(PipelineError::MissingCorrelationId)?;
         self.bridge
+            .verify_burn_message_matches_transfer(&transfer_id, message)?;
+        let bridge_before = self.bridge.clone();
+        self.bridge
             .unlock(transfer_id, source_domain, current_height)?;
+        if let Err(err) = self
+            .bridge
+            .record_burn_message_processed(message, current_height)
+        {
+            *self.bridge = bridge_before;
+            return Err(PipelineError::Bridge(err));
+        }
         Ok(())
     }
 
@@ -448,7 +458,7 @@ mod tests {
         Address::from([0xCC; 32])
     }
 
-    // Full lifecycle: lock → relay → mint
+    // Full lifecycle: lock -> relay -> mint
 
     #[test]
     fn full_lock_relay_mint_lifecycle() {
@@ -482,7 +492,7 @@ mod tests {
         );
     }
 
-    // ─── ─── Full lifecycle: lock → relay → mint → burn → relay → unlock ─
+    // --- --- Full lifecycle: lock -> relay -> mint -> burn -> relay -> unlock -
 
     #[test]
     fn full_round_trip_lock_mint_burn_unlock() {
@@ -532,7 +542,7 @@ mod tests {
         );
     }
 
-    // ─── Error cases ──────────────────────
+    // --- Error cases ----------------------
 
     #[test]
     fn lock_rejects_unknown_asset() {
@@ -580,7 +590,7 @@ mod tests {
         assert!(matches!(err, PipelineError::NoEventTree(99)));
     }
 
-    // ─── Event tree consistency ───────────
+    // --- Event tree consistency -----------
 
     #[test]
     fn event_tree_grows_with_locks() {
@@ -854,5 +864,71 @@ mod tests {
         let burn_msg = burn_event.message.clone().unwrap();
         // Unlocking before `relay` proves the burn event is refused.
         assert!(p.unlock(&burn_msg, 2, 250).is_err());
+    }
+
+    #[test]
+    fn pipeline_unlock_refuses_forged_burn_sender_and_payload() {
+        use crate::cross_domain::event_tree::DomainEventKind;
+        use crate::cross_domain::message::CrossDomainMessageParams;
+
+        let mut rig = pipeline();
+        let mut p = rig.pipeline();
+        let a = asset(9);
+        p.register_asset(a, 1).unwrap();
+
+        let lock_event = p
+            .lock(1, 2, 100, a, owner(), recipient(), 500, 900)
+            .unwrap();
+        let lock_msg = lock_event.message.clone().unwrap();
+        let lock_proof = p.event_proof(1, 0).unwrap();
+        let relayed_lock = p
+            .relay(lock_msg.message_id, relayer_addr(), &lock_proof, 1, 120)
+            .unwrap();
+        p.mint(&relayed_lock, 120).unwrap();
+        p.burn(lock_msg.message_id, 2, 150, 900, [0x77; 20])
+            .unwrap();
+
+        // Forge a correlated BridgeBurn from an unrelated sender with altered payload.
+        let forged_msg = CrossDomainMessage::new_correlated(
+            CrossDomainMessageParams {
+                source_domain: 2,
+                target_domain: 1,
+                source_height: 151,
+                event_index: 1,
+                nonce: 42,
+                sender: Address::from([0xDE; 32]),
+                recipient: owner(),
+                payload_hash: [0xFA; 32],
+                kind: MessageKind::BridgeBurn,
+                expiry_height: 900,
+            },
+            lock_msg.message_id,
+        );
+        let forged_event = DomainEvent {
+            domain_id: 2,
+            domain_height: 151,
+            event_index: 1,
+            kind: DomainEventKind::BridgeBurned,
+            emitter: Address::from([0xDE; 32]),
+            message: Some(forged_msg.clone()),
+            payload_hash: forged_msg.payload_hash,
+        };
+        let tree = p.event_trees.entry(2).or_default();
+        tree.push(forged_event.clone());
+        let forged_proof = p.event_proof(2, 1).unwrap();
+        p.relayer
+            .enqueue_relay(forged_event, &forged_msg, 151)
+            .expect("enqueue forged burn");
+        let relayed_forged = p
+            .relay(forged_msg.message_id, relayer_addr(), &forged_proof, 2, 160)
+            .unwrap();
+
+        let err = p
+            .unlock(&relayed_forged, 2, 165)
+            .expect_err("forged correlated burn must not unlock transfer");
+        assert!(
+            err.to_string().contains("sender") || err.to_string().contains("payload"),
+            "got: {err}"
+        );
     }
 }
