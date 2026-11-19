@@ -53,6 +53,13 @@ pub struct PluginReplacement {
     pub next_adapter: String,
 }
 
+/// Hard upper bound on plugin replacement audit records retained in memory so
+/// repeated administrative churn cannot grow the registry without limit.
+const MAX_PLUGIN_REPLACEMENTS: usize = 4_096;
+
+/// Hard upper bound on concurrently registered consensus plugins.
+const MAX_REGISTERED_PLUGINS: usize = 16_384;
+
 #[derive(Default)]
 pub struct DomainPluginRegistry {
     plugins: BTreeMap<DomainId, Arc<dyn ConsensusDomainPlugin>>,
@@ -86,6 +93,11 @@ impl DomainPluginRegistry {
                  change and goes through `replace`, which records what changed"
             ));
         }
+        if self.plugins.len() >= MAX_REGISTERED_PLUGINS {
+            return Err(format!(
+                "Plugin registry full at {MAX_REGISTERED_PLUGINS} entries"
+            ));
+        }
         self.plugins.insert(domain_id, plugin);
         Ok(())
     }
@@ -107,6 +119,11 @@ impl DomainPluginRegistry {
         domain_id: DomainId,
         plugin: Arc<dyn ConsensusDomainPlugin>,
     ) -> Result<PluginReplacement, String> {
+        if self.replacements.len() >= MAX_PLUGIN_REPLACEMENTS {
+            return Err(format!(
+                "Plugin replacement log full at {MAX_PLUGIN_REPLACEMENTS} entries"
+            ));
+        }
         let previous = self.plugins.get(&domain_id).ok_or_else(|| {
             format!(
                 "No plugin registered for domain {domain_id}; there is nothing to replace, and \
