@@ -16,6 +16,8 @@ use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 ///
 /// Convenience: shared by Starknet RPC policy and activation checks.
 pub const PROPOSED_CAIRO_ACTIVATION_HEIGHT: u64 = 0;
+/// Maximum Starknet RPC request envelope size (1 MiB). Strix B-0063.
+pub const MAX_STARKNET_RPC_REQUEST_BYTES: usize = 1 << 20;
 
 /// Starknet JSON-RPC specification version supported by this gateway.
 ///
@@ -140,6 +142,17 @@ pub fn handle_starknet_rpc(
             "Cairo (Starknet) RPC is closed on testnet before activation height",
         );
     }
+    // Strix B-0063: strict JSON-RPC 2.0 version enforcement.
+    if req.jsonrpc != "2.0" {
+        return StarknetRpcResponse::err(
+            req.id,
+            -32600,
+            &format!(
+                "Starknet RPC requires jsonrpc \"2.0\", got {:?}",
+                req.jsonrpc
+            ),
+        );
+    }
     match req.method.as_str() {
         "starknet_specVersion" => StarknetRpcResponse::ok(req.id, json!(STARKNET_SPEC_VERSION)),
         "starknet_chainId" => {
@@ -148,6 +161,24 @@ pub fn handle_starknet_rpc(
         }
         "starknet_blockNumber" => StarknetRpcResponse::ok(req.id, json!(policy.block_height)),
         "starknet_getNonce" => {
+            // block_id validation (Strix B-0063): must be present and valid.
+            if let Some(block_id) = req.params.first() {
+                let valid = match block_id {
+                    Value::String(s) => {
+                        s == "latest" || s == "pending" || parse_felt_hex(s).is_some()
+                    }
+                    Value::Object(obj) => obj.contains_key("block_number")
+                        || obj.contains_key("block_hash"),
+                    _ => false,
+                };
+                if !valid {
+                    return StarknetRpcResponse::err(
+                        req.id,
+                        -32602,
+                        "invalid block_id",
+                    );
+                }
+            }
             let Some(addr_str) = req.params.get(1).and_then(Value::as_str) else {
                 return StarknetRpcResponse::err(req.id, -32602, "missing contract_address");
             };
@@ -225,5 +256,62 @@ mod tests {
             },
         );
         assert_eq!(spec.result.unwrap().as_str(), Some("0.7.1"));
+    }
+
+    #[test]
+    fn starknet_rpc_rejects_wrong_jsonrpc_version() {
+        let state = AccountState::new();
+        let policy = StarknetActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 100,
+            activation_height: Some(100),
+        };
+        let resp = handle_starknet_rpc(
+            &state,
+            policy,
+            StarknetRpcRequest {
+                jsonrpc: "1.0".into(),
+                id: json!(1),
+                method: "starknet_specVersion".into(),
+                params: vec![],
+            },
+        );
+        assert!(resp.error.is_some());
+        assert!(resp.error.unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains("2.0"));
+    }
+
+    #[test]
+    fn starknet_rpc_rejects_invalid_block_id() {
+        let state = AccountState::new();
+        let policy = StarknetActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 100,
+            activation_height: Some(100),
+        };
+        let resp = handle_starknet_rpc(
+            &state,
+            policy,
+            StarknetRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(1),
+                method: "starknet_getNonce".into(),
+                params: vec![json!(42), json!("0x1234")],
+            },
+        );
+        assert!(resp.error.is_some());
+        assert!(resp
+            .error
+            .unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains("block_id"));
+    }
+
+    #[test]
+    fn max_starknet_rpc_request_bytes_is_bounded() {
+        assert_eq!(MAX_STARKNET_RPC_REQUEST_BYTES, 1 << 20);
     }
 }
