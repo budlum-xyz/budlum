@@ -345,3 +345,470 @@ fn insufficient_spv_depth_is_refused() {
         Err(AdapterError::Malformed { .. })
     ));
 }
+
+fn mine_regtest_header(
+    parent_hash: [u8; 32],
+    merkle_root: [u8; 32],
+    timestamp: u32,
+    bits: u32,
+) -> [u8; HEADER_LEN] {
+    let exp = (bits >> 24) as usize;
+    let mant = bits & 0x007f_ffff;
+    let mut target = [0u8; 32];
+    let start = 32 - (exp - 3) - 3;
+    target[start..start + 3].copy_from_slice(&mant.to_be_bytes()[1..4]);
+
+    let mut raw = [0u8; HEADER_LEN];
+    raw[0..4].copy_from_slice(&0x2000_0000i32.to_le_bytes());
+    raw[4..36].copy_from_slice(&parent_hash);
+    raw[36..68].copy_from_slice(&merkle_root);
+    raw[68..72].copy_from_slice(&timestamp.to_le_bytes());
+    raw[72..76].copy_from_slice(&bits.to_le_bytes());
+    for nonce in 0..=u32::MAX {
+        raw[76..80].copy_from_slice(&nonce.to_le_bytes());
+        let mut h = sha256d(&raw);
+        h.reverse();
+        if h <= target {
+            return raw;
+        }
+    }
+    panic!("unreachable for regtest target {bits:08x}");
+}
+
+#[test]
+fn exact_256_bit_chainwork_matches_bitcoin_core_and_defeats_longer_low_work_fork() {
+    use crate::cross_domain::external::bitcoin_spv::{
+        select_heaviest_bitcoin_chain, ChainWork256, REGTEST_POW_LIMIT_BITS,
+    };
+
+    // Bitcoin Core genesis block `0x1d00ffff`: exact GetBlockProof = 0x1_0001_0001 (4_295_032_833).
+    let genesis_work = ChainWork256::from_bits(0x1d00_ffff).expect("genesis work");
+    assert_eq!(genesis_work.to_le_words(), [0x0000_0001_0001_0001, 0, 0, 0]);
+    assert!(!genesis_work.is_zero());
+    assert_eq!(
+        ChainWork256::from_be_bytes(genesis_work.to_be_bytes()),
+        genesis_work
+    );
+    assert_eq!(genesis_work.log2_floor(), 32);
+
+    // 6 real Satoshi mainnet blocks accumulate exact `6 * 0x1_0001_0001 = 0x6_0006_0006`.
+    let verified_mainnet = adapter()
+        .verify_chain(&golden(), &policy())
+        .expect("mainnet chain verifies");
+    assert_eq!(
+        verified_mainnet.total_chainwork.to_le_words(),
+        [6 * 0x0000_0001_0001_0001, 0, 0, 0]
+    );
+
+    // Fork choice: 6 blocks at 4x harder target (total work 24) beat 10 blocks at 1x target (work 20).
+    let root_hash = sha256d(b"fork-root");
+    let ts_open = 1_710_000_000u32;
+    let base_anchor = PinnedBitcoinAnchor {
+        height: 2_015,
+        block_hash: root_hash,
+        bits: REGTEST_POW_LIMIT_BITS,
+    };
+    let prior: [u32; 11] = std::array::from_fn(|i| ts_open + 300_000 + (i as u32) * 600);
+    let fast_adapter = BitcoinSpvAdapter::new("regtest", Some(base_anchor.clone()))
+        .with_epoch_start_timestamp(ts_open)
+        .with_prior_timestamps(prior)
+        .with_anchor_chainwork(ChainWork256::from_bits(REGTEST_POW_LIMIT_BITS).unwrap());
+    let hard_bits =
+        crate::cross_domain::external::bitcoin_spv::compute_next_work_required_with_limit(
+            ts_open,
+            prior[10],
+            REGTEST_POW_LIMIT_BITS,
+            REGTEST_POW_LIMIT_BITS,
+        )
+        .unwrap();
+
+    // Shorter 6-block chain at 4x difficulty.
+    let mut hard_headers = Vec::new();
+    let mut prev = root_hash;
+    for i in 0..6u32 {
+        let h = mine_regtest_header(
+            prev,
+            sha256d(&[0xA0, i as u8]),
+            prior[10] + 600 * (i + 1),
+            hard_bits,
+        );
+        prev = sha256d(&h);
+        hard_headers.push(h);
+    }
+    let hard_refs: Vec<&[u8; HEADER_LEN]> = hard_headers.iter().collect();
+    let hard_ev = spv_evidence(&fast_adapter, "regtest", &hard_refs, Address::from([5; 32]));
+
+    // Longer 10-block chain at 1x difficulty from the same anchor.
+    let slow_prior: [u32; 11] =
+        std::array::from_fn(|i| ts_open + 1_209_600 - (10 - i as u32) * 600);
+    let slow_adapter = BitcoinSpvAdapter::new("regtest", Some(base_anchor))
+        .with_epoch_start_timestamp(ts_open)
+        .with_prior_timestamps(slow_prior)
+        .with_anchor_chainwork(ChainWork256::from_bits(REGTEST_POW_LIMIT_BITS).unwrap());
+    let mut easy_headers = Vec::new();
+    let mut prev2 = root_hash;
+    for i in 0..10u32 {
+        let h = mine_regtest_header(
+            prev2,
+            sha256d(&[0xB0, i as u8]),
+            slow_prior[10] + 600 * (i + 1),
+            REGTEST_POW_LIMIT_BITS,
+        );
+        prev2 = sha256d(&h);
+        easy_headers.push(h);
+    }
+    let easy_refs: Vec<&[u8; HEADER_LEN]> = easy_headers.iter().collect();
+    let easy_ev = spv_evidence(&slow_adapter, "regtest", &easy_refs, Address::from([6; 32]));
+
+    let pol = VerificationPolicy {
+        min_depth: 6,
+        require_declared_match: true,
+        max_age: 0,
+        now: u64::from(slow_prior[10]) + 20_000,
+        require_slashable: false,
+    };
+    let hard_chain = fast_adapter.verify_chain(&hard_ev, &pol).expect("hard");
+    let easy_chain = slow_adapter.verify_chain(&easy_ev, &pol).expect("easy");
+    assert!(hard_chain.headers.len() < easy_chain.headers.len());
+    assert!(hard_chain.total_chainwork > easy_chain.total_chainwork);
+
+    let candidates = [easy_chain, hard_chain.clone()];
+    let winner = select_heaviest_bitcoin_chain(&candidates).expect("heaviest wins");
+    assert_eq!(
+        winner.attestation.state_root,
+        hard_chain.attestation.state_root
+    );
+    assert_eq!(winner.attestation.height, 2_021);
+}
+
+#[test]
+fn cross_epoch_retarget_and_prior_mtp11_enforce_exact_bitcoin_core_rules() {
+    use crate::cross_domain::external::bitcoin_spv::{
+        compute_next_work_required, compute_next_work_required_with_limit, median_time_past,
+        DIFFICULTY_ADJUSTMENT_INTERVAL, MAINNET_POW_LIMIT_BITS, MAX_HEADERS, MTP_WINDOW_LEN,
+        POW_TARGET_TIMESPAN_SECS, REGTEST_POW_LIMIT_BITS,
+    };
+    use crate::cross_domain::external::spec::AdapterError;
+
+    assert!(MAX_HEADERS as u64 > DIFFICULTY_ADJUSTMENT_INTERVAL);
+    assert_eq!(
+        compute_next_work_required(
+            1_712_000_000,
+            1_712_000_000 + POW_TARGET_TIMESPAN_SECS,
+            REGTEST_POW_LIMIT_BITS
+        )
+        .expect("mainnet clamp"),
+        MAINNET_POW_LIMIT_BITS
+    );
+
+    // Mid-epoch anchor at 839_997 crossing 4th-halving retarget 840_000 at 2x speed.
+    let prev_bits = 0x207f_fff0u32;
+    let epoch_open_ts = 1_712_000_000u32;
+    let block_839999_ts = epoch_open_ts + (POW_TARGET_TIMESPAN_SECS / 2);
+    let expected_next_bits = compute_next_work_required_with_limit(
+        epoch_open_ts,
+        block_839999_ts,
+        prev_bits,
+        REGTEST_POW_LIMIT_BITS,
+    )
+    .expect("retarget");
+    assert_ne!(expected_next_bits, prev_bits);
+
+    let anchor_ts = block_839999_ts - 1_200;
+    let prior: [u32; MTP_WINDOW_LEN] = std::array::from_fn(|i| anchor_ts - ((10 - i) as u32) * 600);
+    let mtp_at_anchor = median_time_past(&prior).expect("mtp");
+    let root_hash = sha256d(b"anchor-840669");
+    let adp = BitcoinSpvAdapter::new(
+        "regtest",
+        Some(PinnedBitcoinAnchor {
+            height: 840_669,
+            block_hash: root_hash,
+            bits: prev_bits,
+        }),
+    )
+    .with_epoch_start_timestamp(epoch_open_ts)
+    .with_prior_timestamps(prior);
+
+    // Non-monotonic timestamp on block 839_998 (< anchor_ts) strictly ABOVE MTP-11 succeeds!
+    let ts_list = [
+        anchor_ts - 100, // < anchor_ts, > mtp_at_anchor (valid BIP-113!)
+        block_839999_ts, // height 839_999 (closes epoch)
+        block_839999_ts + 600,
+        block_839999_ts + 1_200,
+        block_839999_ts + 1_800,
+        block_839999_ts + 2_400,
+    ];
+    assert!(ts_list[0] > mtp_at_anchor && ts_list[0] < anchor_ts);
+
+    let mut chain = Vec::new();
+    let mut prev = root_hash;
+    for (i, &ts) in ts_list.iter().enumerate() {
+        let h_bits = if i < 2 { prev_bits } else { expected_next_bits };
+        let hdr = mine_regtest_header(prev, sha256d(&[0xC1, i as u8]), ts, h_bits);
+        prev = sha256d(&hdr);
+        chain.push(hdr);
+    }
+    let refs: Vec<&[u8; HEADER_LEN]> = chain.iter().collect();
+    let ev = spv_evidence(&adp, "regtest", &refs, Address::from([7; 32]));
+    let pol = VerificationPolicy {
+        min_depth: 6,
+        require_declared_match: true,
+        max_age: 0,
+        now: u64::from(block_839999_ts) + 3_000,
+        require_slashable: false,
+    };
+    let ok = adp
+        .verify_chain(&ev, &pol)
+        .expect("840_672 retarget passes");
+    assert_eq!(ok.attestation.height, 840_675);
+
+    // Timestamp == MTP-11 on block 839_998 must fail closed (BIP-113 requires strict `>`).
+    let mut mtp_fail = Vec::new();
+    let mut p = root_hash;
+    for (i, &ts) in ts_list.iter().enumerate() {
+        let actual_ts = if i == 0 { mtp_at_anchor } else { ts };
+        let h_bits = if i < 2 { prev_bits } else { expected_next_bits };
+        let hdr = mine_regtest_header(p, sha256d(&[0xC2, i as u8]), actual_ts, h_bits);
+        p = sha256d(&hdr);
+        mtp_fail.push(hdr);
+    }
+    let mtp_refs: Vec<&[u8; HEADER_LEN]> = mtp_fail.iter().collect();
+    let mtp_ev = spv_evidence(&adp, "regtest", &mtp_refs, Address::from([7; 32]));
+    assert!(matches!(
+        adp.verify(&mtp_ev, &pol),
+        Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("BIP-113 MTP")
+    ));
+
+    // Wrong retarget bits on block 840_000 must fail closed.
+    let wrong_bits = compute_next_work_required_with_limit(
+        epoch_open_ts + 60_000,
+        block_839999_ts,
+        prev_bits,
+        REGTEST_POW_LIMIT_BITS,
+    )
+    .unwrap();
+    let mut bad_ret = Vec::new();
+    let mut p2 = root_hash;
+    for (i, &ts) in ts_list.iter().enumerate() {
+        let h_bits = if i < 2 { prev_bits } else { wrong_bits };
+        let hdr = mine_regtest_header(p2, sha256d(&[0xC3, i as u8]), ts, h_bits);
+        p2 = sha256d(&hdr);
+        bad_ret.push(hdr);
+    }
+    let bad_refs: Vec<&[u8; HEADER_LEN]> = bad_ret.iter().collect();
+    let bad_ev = spv_evidence(&adp, "regtest", &bad_refs, Address::from([7; 32]));
+    assert!(matches!(
+        adp.verify(&bad_ev, &pol),
+        Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("Bitcoin retarget")
+    ));
+}
+
+#[test]
+fn spv_raw_tx_refuses_cve_2017_12842_inner_node_and_underconfirmed_tip_tx() {
+    use crate::cross_domain::external::bitcoin_spv::{
+        verify_spv_raw_tx_inclusion, FORBIDDEN_INNER_NODE_TX_BYTES, MAX_STRIPPED_TX_BYTES,
+        REGTEST_POW_LIMIT_BITS,
+    };
+    use crate::cross_domain::external::spec::AdapterError;
+
+    assert_eq!(FORBIDDEN_INNER_NODE_TX_BYTES, 64);
+    assert_eq!(MAX_STRIPPED_TX_BYTES, 1_000_000);
+
+    let pair = |l: [u8; 32], r: [u8; 32]| {
+        let mut b = [0u8; 64];
+        b[..32].copy_from_slice(&l);
+        b[32..].copy_from_slice(&r);
+        sha256d(&b)
+    };
+    let coinbase = [0x11u8; 100]; // valid non-64-byte stripped coinbase
+    let payment_tx = [0x22u8; 192]; // valid non-64-byte stripped P2WPKH payment tx
+    let tx2 = [0x33u8; 150];
+    let tx3 = [0x44u8; 180];
+    let id0 = sha256d(&coinbase);
+    let id1 = sha256d(&payment_tx);
+    let id2 = sha256d(&tx2);
+    let id3 = sha256d(&tx3);
+    let h01 = pair(id0, id1);
+    let h23 = pair(id2, id3);
+    let merkle_root = pair(h01, h23);
+
+    // CVE-2017-12842 attack: submit the 64-byte internal concatenation `id2 || id3`
+    // as a fake leaf transaction with 1-step branch `[h01]`. Without the 64-byte
+    // guard its SHA256d equals `h23` and walks straight to `merkle_root`!
+    let mut forged_64_byte_tx = [0u8; 64];
+    forged_64_byte_tx[..32].copy_from_slice(&id2);
+    forged_64_byte_tx[32..].copy_from_slice(&id3);
+    let cve_err = verify_spv_raw_tx_inclusion(&forged_64_byte_tx, &merkle_root, 1, &[h01], false)
+        .expect_err("64-byte CVE-2017-12842 inner-node payload must fail closed");
+    assert!(matches!(
+        cve_err,
+        AdapterError::ConsensusRule { ref rule } if rule.contains("CVE-2017-12842")
+    ));
+
+    // Coinbase flag mismatch refused in both directions.
+    assert!(verify_spv_raw_tx_inclusion(&coinbase, &merkle_root, 0, &[id1, h23], false).is_err());
+    assert!(verify_spv_raw_tx_inclusion(&payment_tx, &merkle_root, 1, &[id0, h23], true).is_err());
+
+    // Build a verified 6-block chain embedding `merkle_root` in block #1 (6 confs)
+    // and another tx in block #6 (1 conf, below required 6 confirmations).
+    let root_hash = sha256d(b"payment-anchor");
+    let adp = BitcoinSpvAdapter::new(
+        "regtest",
+        Some(PinnedBitcoinAnchor {
+            height: 500,
+            block_hash: root_hash,
+            bits: REGTEST_POW_LIMIT_BITS,
+        }),
+    );
+    let tip_tx = [0x55u8; 120];
+    let tip_merkle = sha256d(&tip_tx);
+    let mut chain = Vec::new();
+    let mut prev = root_hash;
+    for i in 0..6u32 {
+        let mr = if i == 0 {
+            merkle_root
+        } else if i == 5 {
+            tip_merkle
+        } else {
+            sha256d(&[0xD0, i as u8])
+        };
+        let hdr = mine_regtest_header(prev, mr, 1_720_000_000 + i * 600, REGTEST_POW_LIMIT_BITS);
+        prev = sha256d(&hdr);
+        chain.push(hdr);
+    }
+    let b1_hash = sha256d(&chain[0]);
+    let b6_hash = sha256d(&chain[5]);
+    let refs: Vec<&[u8; HEADER_LEN]> = chain.iter().collect();
+    let ev = spv_evidence(&adp, "regtest", &refs, Address::from([8; 32]));
+    let pol = VerificationPolicy {
+        min_depth: 6,
+        require_declared_match: true,
+        max_age: 0,
+        now: 1_720_010_000,
+        require_slashable: false,
+    };
+    let verified_chain = adp.verify_chain(&ev, &pol).expect("chain verifies");
+
+    // Honest coinbase + payment at block 501 both verify with 6 confirmations!
+    let cb_ok = verified_chain
+        .verify_confirmed_payment(&b1_hash, &coinbase, 0, &[id1, h23], true, 6)
+        .expect("coinbase 6 confs");
+    assert!(cb_ok.is_coinbase && cb_ok.confirmations == 6 && cb_ok.txid == id0);
+
+    let pay_ok = verified_chain
+        .verify_confirmed_payment(&b1_hash, &payment_tx, 1, &[id0, h23], false, 6)
+        .expect("payment 6 confs");
+    assert!(!pay_ok.is_coinbase && pay_ok.confirmations == 6 && pay_ok.txid == id1);
+
+    // Tip block 506 has only 1 confirmation -> refused when demanding 6!
+    assert!(matches!(
+        verified_chain.verify_confirmed_payment(&b6_hash, &tip_tx, 0, &[], true, 6),
+        Err(AdapterError::InsufficientDepth {
+            observed: 1,
+            required: 6
+        })
+    ));
+}
+
+#[test]
+fn real_mainnet_headers_prove_and_verify_plonky3_stark_prog_claim() {
+    use crate::aggregation::claim::Claim;
+    use crate::cross_domain::external::bitcoin_spv::{
+        bitcoin_stark_input_hash, bitcoin_stark_output_hash, prove_bitcoin_header_chain_stark,
+        verify_bitcoin_header_chain_stark, ChainWork256, MAX_STARK_BATCH_HEADERS,
+    };
+
+    assert!(MAX_STARK_BATCH_HEADERS >= 6);
+    let dom = 7u32;
+    let adp = adapter();
+    let ev = golden();
+    let pol = policy();
+    let pinned = anchor();
+
+    // Generate a REAL 128-bit Plonky3 FRI-STARK BudAir proof over Satoshi's
+    // real Bitcoin mainnet blocks 1..=6 anchored at Genesis block 0!
+    let batch = prove_bitcoin_header_chain_stark(&adp, &ev, &pol, dom).expect("STARK batch proves");
+    assert_eq!(batch.header_count, 6);
+    assert_eq!(batch.tip_height, 6);
+    assert_eq!(batch.tip_hash, ev.declared_root);
+    assert_eq!(
+        batch.total_chainwork.to_le_words(),
+        [6 * 0x0000_0001_0001_0001, 0, 0, 0]
+    );
+
+    let claim =
+        verify_bitcoin_header_chain_stark("mainnet", &pinned, ChainWork256::ZERO, dom, &batch)
+            .expect("128-bit Plonky3 FRI-STARK Claim::Prog verifies");
+    let expected_in = bitcoin_stark_input_hash(
+        "mainnet",
+        &pinned,
+        ChainWork256::ZERO,
+        6,
+        batch.max_allowed_ts,
+    );
+    let expected_out = bitcoin_stark_output_hash(
+        batch.tip_height,
+        &batch.tip_hash,
+        &batch.tip_merkle_root,
+        batch.tip_timestamp,
+        batch.tip_bits,
+        batch.total_chainwork,
+        batch.transcript_commitment,
+    );
+    assert_eq!(
+        claim,
+        Claim::Prog {
+            program_hash: batch.program_hash,
+            input_hash: expected_in,
+            output_hash: expected_out,
+        }
+    );
+
+    // 1. Cross-domain replay must fail closed.
+    assert!(verify_bitcoin_header_chain_stark(
+        "mainnet",
+        &pinned,
+        ChainWork256::ZERO,
+        dom + 1,
+        &batch
+    )
+    .is_err());
+
+    // 2. Inflated cumulative chainwork forgery must fail closed.
+    let mut forged_work = batch.clone();
+    forged_work.total_chainwork = batch
+        .total_chainwork
+        .saturating_add(ChainWork256::from_bits(0x1d00_ffff).unwrap());
+    assert!(verify_bitcoin_header_chain_stark(
+        "mainnet",
+        &pinned,
+        ChainWork256::ZERO,
+        dom,
+        &forged_work
+    )
+    .is_err());
+
+    // 3. Forged tip hash must fail closed.
+    let mut forged_tip = batch.clone();
+    forged_tip.tip_hash[0] ^= 0x01;
+    assert!(verify_bitcoin_header_chain_stark(
+        "mainnet",
+        &pinned,
+        ChainWork256::ZERO,
+        dom,
+        &forged_tip
+    )
+    .is_err());
+
+    // 4. Forged pinned anchor must fail closed.
+    let mut wrong_anchor = pinned;
+    wrong_anchor.block_hash[0] ^= 0xff;
+    assert!(verify_bitcoin_header_chain_stark(
+        "mainnet",
+        &wrong_anchor,
+        ChainWork256::ZERO,
+        dom,
+        &batch
+    )
+    .is_err());
+}
