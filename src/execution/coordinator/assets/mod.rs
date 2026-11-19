@@ -180,11 +180,59 @@ pub fn encode_pointer_bytecode(desc: &PointerDescriptor) -> Result<Vec<u8>, Stri
     Ok(out)
 }
 
+/// Returns `true` when `code` starts with the reserved [`POINTER_BYTECODE_PREFIX`].
+///
+/// Convenience: checked by EE deploy validators and runtime dispatchers to block unprivileged
+/// contracts from spoofing immutable UEL asset pointers.
+#[must_use]
+pub fn is_pointer_bytecode_prefixed(code: &[u8]) -> bool {
+    code.starts_with(POINTER_BYTECODE_PREFIX)
+}
+
 /// Decodes a `PointerDescriptor` if `code` carries [`POINTER_BYTECODE_PREFIX`].
 #[must_use]
 pub fn decode_pointer_bytecode(code: &[u8]) -> Option<PointerDescriptor> {
     let rest = code.strip_prefix(POINTER_BYTECODE_PREFIX)?;
     serde_json::from_slice(rest).ok()
+}
+
+/// Verifies that `code` either does not carry [`POINTER_BYTECODE_PREFIX`] (`Ok(None)`) or encodes
+/// a canonical `PointerDescriptor` bound to `(current_ee, target_addr)` (`Ok(Some(desc))`).
+///
+/// WIRING: called by EVM, WASM, SVM, and Move runtime dispatchers before executing cross-EE
+/// pointer operations so corrupt, forged, or misplaced pointer descriptors revert fail-closed.
+///
+/// # Errors
+///
+/// Returns an error when `code` starts with [`POINTER_BYTECODE_PREFIX`] yet fails JSON decoding,
+/// sets `home_ee == current_ee`, carries a non-canonical `asset_id`, or is invoked at an address
+/// other than `derive_pointer_address(&desc.asset_id, current_ee)`.
+pub fn verify_canonical_pointer_bytecode(
+    code: &[u8],
+    current_ee: EeId,
+    target_addr: &[u8],
+) -> Result<Option<PointerDescriptor>, String> {
+    let Some(rest) = code.strip_prefix(POINTER_BYTECODE_PREFIX) else {
+        return Ok(None);
+    };
+    let desc: PointerDescriptor = serde_json::from_slice(rest)
+        .map_err(|_| String::from("corrupt UEL pointer bytecode descriptor"))?;
+    if desc.home_ee == current_ee.0 {
+        return Err(String::from("pointer home_ee cannot equal target EE"));
+    }
+    let expected_asset_id = derive_uel_asset_id(EeId(desc.home_ee), &desc.home_ref);
+    if desc.asset_id != expected_asset_id {
+        return Err(String::from(
+            "forged pointer asset_id does not match home_ee and home_ref",
+        ));
+    }
+    let canonical_addr = derive_pointer_address(&desc.asset_id, current_ee)?;
+    if target_addr != canonical_addr.as_slice() {
+        return Err(String::from(
+            "pointer bytecode invoked at non-canonical target address",
+        ));
+    }
+    Ok(Some(desc))
 }
 
 /// Derives the deterministic pointer address for `(asset_id, target_ee)` (8.8 item 5).
