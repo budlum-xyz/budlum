@@ -494,6 +494,35 @@ pub fn burn_with_event(
     reserve: u64,
     height: u64,
 ) -> Result<DomainEvent, String> {
+    if request.expiry_height == 0 || request.expiry_height <= height {
+        return Err(format!(
+            "Bridge burn expiry must be above current block height (current {height}, expiry {})",
+            request.expiry_height
+        ));
+    }
+    if request.expiry_height
+        > height.saturating_add(crate::cross_domain::bridge::MAX_BURN_EXPIRY_BLOCKS)
+    {
+        return Err(format!(
+            "Bridge burn expiry exceeds the protocol window (current height {height}, expiry {}, max window {} blocks)",
+            request.expiry_height,
+            crate::cross_domain::bridge::MAX_BURN_EXPIRY_BLOCKS
+        ));
+    }
+    if let Some(domain_cfg) = state.settlement.domains.get(request.domain) {
+        if domain_cfg.status != crate::domain::types::DomainStatus::Active {
+            return Err(format!(
+                "Bridge burn domain {} is not active (status={:?})",
+                request.domain, domain_cfg.status
+            ));
+        }
+        if !domain_cfg.bridge_enabled {
+            return Err(format!(
+                "Bridge burn disabled for domain {}",
+                request.domain
+            ));
+        }
+    }
     let message_id = request.message_id;
     // Burn is the debit half of mint. The recipient
     // holds what the mint credited to it - the amount less the relayer fee -
@@ -618,40 +647,13 @@ pub fn unlock_from_verified_event(
         .ok_or_else(|| "Verified bridge burn message is missing correlation id".to_string())?;
     let transfer = state
         .bridge_state
-        .transfer(&transfer_id)
-        .ok_or_else(|| "Unknown bridge transfer".to_string())?;
+        .verify_burn_message_matches_transfer(&transfer_id, &message)
+        .map_err(|e| e.to_string())?;
     crate::cross_domain::bridge::check_burn_matches_lock_domain(
         transfer.source_domain,
         message.target_domain,
     )
     .map_err(|e| e.to_string())?;
-    if transfer.target_domain != message.source_domain {
-        return Err("Verified bridge burn source domain mismatch".into());
-    }
-    if transfer.source_domain != message.target_domain {
-        return Err("Verified bridge burn target domain mismatch".into());
-    }
-    if transfer.recipient != message.sender {
-        return Err("Verified bridge burn sender mismatch".into());
-    }
-    if transfer.owner != message.recipient {
-        return Err("Verified bridge burn recipient mismatch".into());
-    }
-    // The burn payload commits the Ethereum destination.
-    let expected_payload_hash = match transfer.recipient_eth {
-        Some(recipient_eth) => crate::cross_domain::bridge::bridge_burn_payload_hash(
-            transfer.asset_id,
-            transfer.amount.get(),
-            &recipient_eth,
-        ),
-        None => crate::cross_domain::bridge::bridge_payload_hash(
-            transfer.asset_id,
-            transfer.amount.get(),
-        ),
-    };
-    if message.payload_hash != expected_payload_hash {
-        return Err("Verified bridge burn payload does not match transfer".into());
-    }
     // Credit the exact units the burn debited, never a fresh split from
     // live fee parameters.
     if transfer.burned_amount == 0 {
@@ -664,10 +666,18 @@ pub fn unlock_from_verified_event(
         .checked_add(returned)
         .ok_or_else(|| "Bridge unlock (owner credit) would overflow".to_string())?;
 
+    let bridge_before = state.bridge_state.clone();
     state
         .bridge_state
         .unlock(transfer_id, message.source_domain, height)
         .map_err(|e| e.to_string())?;
+    if let Err(e) = state
+        .bridge_state
+        .record_burn_message_processed(&message, height)
+    {
+        state.bridge_state = bridge_before;
+        return Err(e.to_string());
+    }
     state
         .try_add_balance(&owner, returned)
         .map_err(|e| format!("Bridge unlock (owner credit): {e}"))
@@ -697,6 +707,12 @@ pub fn submit_relay_proof(
             .relayer
             .pending_relay(&message_id)
             .ok_or_else(|| format!("no pending relay for message {}", hex::encode(message_id)))?;
+        if pending.source_event.domain_id != source_domain {
+            return Err(format!(
+                "pending relay originates from domain {}, not caller-supplied domain {source_domain}",
+                pending.source_event.domain_id
+            ));
+        }
         let source_height = pending.source_event.domain_height;
         let domain = state
             .settlement
@@ -723,6 +739,21 @@ pub fn submit_relay_proof(
                     "No committed event root for domain {source_domain} at height {source_height}"
                 )
             })?;
+        let has_conflict = state
+            .settlement
+            .commitments
+            .commitments_for_global_block()
+            .into_iter()
+            .filter(|c| c.domain_id == source_domain && c.domain_height == source_height)
+            .any(|c| {
+                c.domain_block_hash != commitment.domain_block_hash
+                    || c.event_root != commitment.event_root
+            });
+        if has_conflict {
+            return Err(format!(
+                "conflicting commitments recorded for domain {source_domain} at height {source_height}; refusing ambiguous relay"
+            ));
+        }
         if source_height > domain.last_committed_height {
             return Err(format!(
                 "Bridge source commitment at height {source_height} is not on the applied domain chain (tip {})",
@@ -820,8 +851,8 @@ fn apply_relay_effects(
             })?;
             let transfer = state
                 .bridge_state
-                .get_transfer(&transfer_id)
-                .ok_or_else(|| "Unknown bridge transfer".to_string())?
+                .verify_burn_message_matches_transfer(&transfer_id, message)
+                .map_err(|e| e.to_string())?
                 .clone();
             crate::cross_domain::bridge::check_burn_matches_lock_domain(
                 transfer.source_domain,
@@ -833,10 +864,18 @@ fn apply_relay_effects(
             }
             let returned = transfer.burned_amount;
             ensure_relay_credits_fit(state, (transfer.owner, returned), (relayer, 0))?;
+            let bridge_before = state.bridge_state.clone();
             state
                 .bridge_state
                 .unlock(transfer_id, message.source_domain, height)
                 .map_err(|e| e.to_string())?;
+            if let Err(e) = state
+                .bridge_state
+                .record_burn_message_processed(message, height)
+            {
+                state.bridge_state = bridge_before;
+                return Err(e.to_string());
+            }
             state
                 .try_add_balance(&transfer.owner, returned)
                 .map_err(|e| format!("Bridge relay unlock overflow (owner): {e}"))?;
@@ -1571,5 +1610,204 @@ mod tests {
             verify_domain_event_proof(&state, domain_id, 1, 1, [0x42; 32], forged_event, &proof)
                 .expect_err("bitcoin-spv-v1 headers never bind event_root");
         assert_eq!(err, ProofVerificationError::UnattestedEventRoot);
+    }
+
+    #[test]
+    fn burn_with_event_refuses_unbounded_caller_horizon_and_zero_expiry() {
+        let (mut state, _) = bridged();
+        state.current_block_height = 50;
+        let owner = Address::from([0x51; 32]);
+        let recipient = Address::from([0x22; 32]);
+        state.add_balance(&owner, 1_000 + FEE);
+        state.add_balance(&recipient, 2_000 + FEE);
+        let (transfer, lock_ev) = lock(&mut state, owner, &lock_request(1_000), FEE, 10).unwrap();
+        state
+            .bridge_state
+            .mint(&lock_ev.message.unwrap(), 15)
+            .unwrap();
+
+        let root_before = state.bridge_state.root();
+        let immortal = BurnRequest {
+            message_id: transfer.message_id,
+            domain: 2,
+            domain_height: u64::MAX - 20,
+            event_index: 0,
+            expiry_height: u64::MAX - 10,
+            recipient_eth: [0x55; 20],
+        };
+        let err = burn_with_event(&mut state, &immortal, FEE, 50)
+            .expect_err("caller domain_height near u64::MAX must be refused");
+        assert!(err.contains("expiry"), "got: {err}");
+        assert_eq!(state.bridge_state.root(), root_before);
+
+        let zero_exp = BurnRequest {
+            domain_height: 50,
+            expiry_height: 0,
+            ..immortal
+        };
+        let zerr = burn_with_event(&mut state, &zero_exp, FEE, 50)
+            .expect_err("zero expiry_height must be refused");
+        assert!(zerr.contains("expiry"), "got: {zerr}");
+        assert_eq!(state.bridge_state.root(), root_before);
+
+        let same_block = BurnRequest {
+            domain_height: 10,
+            expiry_height: 50,
+            ..immortal
+        };
+        let serr = burn_with_event(&mut state, &same_block, FEE, 50)
+            .expect_err("expiry_height == current block height must be refused");
+        assert!(serr.contains("expiry"), "got: {serr}");
+        assert_eq!(state.bridge_state.root(), root_before);
+    }
+
+    #[test]
+    fn relay_unlock_refuses_claimed_transfer_and_forged_burn_fields() {
+        use crate::cross_domain::message::CrossDomainMessageParams;
+
+        let (mut state, _) = bridged();
+        let owner = Address::from([0x61; 32]);
+        let recipient = Address::from([0x22; 32]);
+        let attacker = Address::from([0xEE; 32]);
+        let relayer = Address::from([0xCA; 32]);
+        state.add_balance(&owner, 1_000 + FEE);
+        state.add_balance(&recipient, 2_000 + FEE);
+        let (transfer, lock_ev) = lock(&mut state, owner, &lock_request(1_000), FEE, 10).unwrap();
+        state
+            .bridge_state
+            .mint(&lock_ev.message.unwrap(), 12)
+            .unwrap();
+        let burn_ev = burn_with_event(
+            &mut state,
+            &BurnRequest {
+                message_id: transfer.message_id,
+                domain: 2,
+                domain_height: 20,
+                event_index: 0,
+                expiry_height: 400,
+                recipient_eth: [0xAB; 20],
+            },
+            FEE,
+            20,
+        )
+        .unwrap();
+        let real_burn = burn_ev.message.unwrap();
+
+        let forged_burn = CrossDomainMessage::new_correlated(
+            CrossDomainMessageParams {
+                source_domain: 2,
+                target_domain: 1,
+                source_height: 20,
+                event_index: 9,
+                nonce: 99,
+                sender: attacker,
+                recipient: owner,
+                payload_hash: [0xFF; 32],
+                kind: MessageKind::BridgeBurn,
+                expiry_height: 400,
+            },
+            transfer.message_id,
+        );
+        let owner_before = state.get_balance(&owner);
+        let ferr = apply_relay_effects(&mut state, &forged_burn, relayer, 25)
+            .expect_err("forged burn sender/payload must never unlock transfer");
+        assert!(
+            ferr.contains("sender") || ferr.contains("payload"),
+            "got: {ferr}"
+        );
+        assert_eq!(state.get_balance(&owner), owner_before);
+
+        state
+            .bridge_state
+            .record_claim_issued(&transfer.message_id, 25)
+            .unwrap();
+        let cerr = apply_relay_effects(&mut state, &real_burn, relayer, 30)
+            .expect_err("externally claimed burn must not unlock through relay");
+        assert!(cerr.contains("claim"), "got: {cerr}");
+        assert_eq!(state.get_balance(&owner), owner_before);
+    }
+
+    #[test]
+    fn submit_relay_proof_refuses_ambiguous_commitments_at_same_height() {
+        use crate::cross_domain::event_tree::DomainEventTree;
+        use crate::domain::types::DomainCommitment;
+
+        let mut state = AccountState::new();
+        let d10 = default_domain(10, ConsensusKind::PoW, 45270, POW_HEADER_CHAIN_ADAPTER, 1);
+        let d11 = default_domain(11, ConsensusKind::PoW, 45271, POW_HEADER_CHAIN_ADAPTER, 1);
+        crate::settlement::domains::register_domain(&mut state, d10).unwrap();
+        crate::settlement::domains::register_domain(&mut state, d11).unwrap();
+        register_asset(&mut state, ASSET, 10).unwrap();
+
+        let owner = Address::from([0x71; 32]);
+        let recipient = Address::from([0x72; 32]);
+        let relayer = Address::from([0x73; 32]);
+        state.add_balance(&owner, 1_000 + FEE);
+        let (_, lock_ev) = lock(
+            &mut state,
+            owner,
+            &LockRequest {
+                source_domain: 10,
+                target_domain: 11,
+                source_height: 1,
+                event_index: 0,
+                asset_id: ASSET,
+                recipient,
+                amount: 1_000,
+                expiry_height: 500,
+            },
+            FEE,
+            1,
+        )
+        .unwrap();
+        let lock_id = lock_ev.message.as_ref().unwrap().message_id;
+
+        let mut tree_a = DomainEventTree::new();
+        tree_a.push(lock_ev);
+        let proof_a = tree_a.proof(0).unwrap();
+
+        let comm_a = DomainCommitment {
+            domain_id: 10,
+            domain_height: 1,
+            domain_block_hash: [0xA1; 32],
+            parent_domain_block_hash: [0u8; 32],
+            state_root: [0x11; 32],
+            tx_root: [0u8; 32],
+            event_root: tree_a.root(),
+            validator_set_hash: [0u8; 32],
+            consensus_kind: ConsensusKind::PoW,
+            finality_proof_hash: [0x21; 32],
+            timestamp_ms: 1_000,
+            sequence: 1,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+        let comm_b = DomainCommitment {
+            domain_block_hash: [0xB2; 32],
+            event_root: [0xEE; 32],
+            finality_proof_hash: [0x22; 32],
+            sequence: 2,
+            ..comm_a.clone()
+        };
+        state
+            .settlement
+            .commitments
+            .insert_at_height(comm_a, 1)
+            .unwrap();
+        state
+            .settlement
+            .commitments
+            .insert_at_height(comm_b, 1)
+            .unwrap();
+        if let Some(d) = state.settlement.domains.get_mut(10) {
+            d.last_committed_height = 1;
+        }
+
+        let err = submit_relay_proof(&mut state, lock_id, relayer, &proof_a, 10, 2)
+            .expect_err("conflicting commitments at same (domain, height) must fail closed");
+        assert!(
+            err.contains("conflicting") || err.contains("ambiguous"),
+            "got: {err}"
+        );
     }
 }

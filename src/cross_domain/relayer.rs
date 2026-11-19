@@ -77,7 +77,7 @@ impl std::error::Error for RelayerError {}
 /// Used for replay protection and slashing evidence.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RelayLedger {
-    /// `Message_id` → (`relayer_address`, `relay_height`, `proof_hash`)
+    /// `Message_id` -> (`relayer_address`, `relay_height`, `proof_hash`)
     #[serde(with = "crate::core::map_keys")]
     relayed: BTreeMap<MessageId, RelayRecord>,
 }
@@ -203,7 +203,7 @@ pub struct RelayerConfig {}
 pub struct UniversalRelayer {
     pub config: RelayerConfig,
     pub ledger: RelayLedger,
-    /// Pending relay requests: `message_id` → (`source_event`, `target_domain`).
+    /// Pending relay requests: `message_id` -> (`source_event`, `target_domain`).
     /// Populated when a bridge lock/burn creates a cross-domain message.
     #[serde(with = "crate::core::map_keys")]
     pending: BTreeMap<MessageId, PendingRelay>,

@@ -46,6 +46,7 @@ pub(crate) fn self_checked_observation<A: ChainAdapter + ?Sized>(
     let proof: MerkleProof = bincode::options()
         .with_fixint_encoding()
         .with_limit(MAX_RECEIPT_PROOF_BYTES)
+        .reject_trailing_bytes()
         .deserialize(&result.receipt_proof)
         .map_err(|e| {
             AdapterError::ProofVerificationFailed(format!(
@@ -197,6 +198,7 @@ pub trait ChainAdapter: Send + Sync {
         let proof: MerkleProof = bincode::options()
             .with_fixint_encoding()
             .with_limit(MAX_RECEIPT_PROOF_BYTES)
+            .reject_trailing_bytes()
             .deserialize(&result.receipt_proof)
             .map_err(|e| {
                 AdapterError::ProofVerificationFailed(format!(
@@ -374,6 +376,7 @@ pub mod test_adapter {
             let proof: MerkleProof = bincode::options()
                 .with_fixint_encoding()
                 .with_limit(MAX_RECEIPT_PROOF_BYTES)
+                .reject_trailing_bytes()
                 .deserialize(&result.receipt_proof)
                 .map_err(|e| {
                     AdapterError::ProofVerificationFailed(format!(
@@ -554,4 +557,22 @@ fn adapter_error_display() {
 
     let err = AdapterError::ConfirmationTimeout;
     assert!(err.to_string().contains("timeout"));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn verify_observation_refuses_trailing_bytes_after_valid_proof() {
+    use self::test_adapter::StubAdapter;
+    let adapter = StubAdapter::new(ExternalChain::Ethereum);
+    let mut result = adapter.wait_for_confirmation("0xabc123", 1).await.unwrap();
+    adapter
+        .verify_observation(&result)
+        .expect("canonical receipt proof verifies");
+    result
+        .receipt_proof
+        .extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    let err = adapter
+        .verify_observation(&result)
+        .expect_err("trailing garbage after canonical receipt proof must be refused");
+    assert!(err.to_string().contains("decode"), "got: {err}");
 }
