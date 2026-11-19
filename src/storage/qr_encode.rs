@@ -49,13 +49,15 @@ const fn gf_tables() -> ([u8; 256], [u8; 256]) {
     // against the indexed form: all 512 table bytes agree and the
     // `exp[log[v]] == v` inverse relation holds.
     while i < 255 {
+        let [x_byte, _] = x.to_le_bytes();
         let (head, _) = exp.split_at_mut(i + 1);
         if let Some(slot) = head.last_mut() {
-            *slot = x as u8;
+            *slot = x_byte;
         }
+        let [i_byte, ..] = i.to_le_bytes();
         let (lhead, _) = log.split_at_mut(x as usize + 1);
         if let Some(slot) = lhead.last_mut() {
-            *slot = i as u8;
+            *slot = i_byte;
         }
         x <<= 1;
         if x & 0x100 != 0 {
@@ -123,11 +125,12 @@ fn rs_encode(data: &[u8], ec_len: usize) -> Vec<u8> {
         if lead != 0 {
             let log_lead = usize::from(GF_LOG.get(usize::from(lead)).copied().unwrap_or(0));
             for k in 0..ec_len {
-                let mut add = 0u8;
-                if let Some(&gene) = gen.get(k + 1) {
+                let add = if let Some(&gene) = gen.get(k + 1) {
                     let lg = usize::from(GF_LOG.get(usize::from(gene)).copied().unwrap_or(0));
-                    add = GF_EXP.get((lg + log_lead) % 255).copied().unwrap_or(0);
-                }
+                    GF_EXP.get((lg + log_lead) % 255).copied().unwrap_or(0)
+                } else {
+                    0u8
+                };
                 if let Some(slot) = res.get_mut(i + 1 + k) {
                     *slot ^= add;
                 }
@@ -306,15 +309,16 @@ fn build_codewords(data: &[u8]) -> Result<(Vec<u8>, u8), QrError> {
     let dcw = data_codewords(version);
     let count_bits = if version < 10 { 8 } else { 16 };
     let mut bits = BitWriter::new();
+    let data_len = u32::try_from(data.len()).map_err(|_| QrError::TooLong(data.len()))?;
     bits.push(0b0100, 4);
-    bits.push(data.len() as u32, count_bits);
+    bits.push(data_len, count_bits);
     for &b in data {
         bits.push(u32::from(b), 8);
     }
-    let term = core::cmp::min(4, dcw * 8 - bits.len);
-    bits.push(0, term as u32);
-    let pad = (8 - bits.len % 8) % 8;
-    bits.push(0, pad as u32);
+    let term = u32::try_from(core::cmp::min(4, dcw * 8 - bits.len)).unwrap_or(0);
+    bits.push(0, term);
+    let pad = u32::try_from((8 - bits.len % 8) % 8).unwrap_or(0);
+    bits.push(0, pad);
     let mut bytes = bits.into_bytes();
     let mut alt = false;
     while bytes.len() < dcw {
@@ -427,19 +431,23 @@ pub struct EncodedMatrix {
 }
 
 impl EncodedMatrix {
+    #[must_use]
     pub const fn version(&self) -> u8 {
         self.version
     }
 
     /// ISO mask pattern carried by this symbol's format word.
+    #[must_use]
     pub const fn mask(&self) -> u8 {
         self.mask
     }
 
+    #[must_use]
     pub const fn side_len(&self) -> usize {
         self.dark.len()
     }
 
+    #[must_use]
     pub fn is_dark(&self, row: usize, col: usize) -> bool {
         // The matrix is square and `side_len` names its edge, so a caller that
         // steps past the edge reads a light cell instead of aborting the node.
@@ -450,33 +458,27 @@ impl EncodedMatrix {
     }
 }
 
-/// Encodes a byte-mode, level-L symbol for `data` with deterministic mask fallback.
-/// # Errors
-///
-/// Propagates `QrError` from the step that failed; its variants name the refused conditions.
-pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
-    let (stream, version) = build_codewords(data)?;
-    let side = side_len(version);
-    let mut dark = vec![vec![false; side]; side];
-    let mut reserved = vec![vec![false; side]; side];
-    let set =
-        |dark: &mut Vec<Vec<bool>>, reserved: &mut Vec<Vec<bool>>, r: usize, c: usize, v: bool| {
-            if let (Some(row), Some(res)) = (dark.get_mut(r), reserved.get_mut(r)) {
-                if let (Some(cell), Some(flag)) = (row.get_mut(c), res.get_mut(c)) {
-                    *cell = v;
-                    *flag = true;
-                }
-            }
-        };
+fn set_reserved(dark: &mut [Vec<bool>], reserved: &mut [Vec<bool>], r: usize, c: usize, v: bool) {
+    if let (Some(row), Some(res)) = (dark.get_mut(r), reserved.get_mut(r)) {
+        if let (Some(cell), Some(flag)) = (row.get_mut(c), res.get_mut(c)) {
+            *cell = v;
+            *flag = true;
+        }
+    }
+}
 
+fn place_function_patterns(
+    dark: &mut [Vec<bool>],
+    reserved: &mut [Vec<bool>],
+    version: u8,
+    side: usize,
+) {
     // finder patterns with their light separators
     for (fr, fc) in [(0usize, 0usize), (0, side - 7), (side - 7, 0)] {
         for r in fr.saturating_sub(1)..=(fr + 7).min(side - 1) {
             for c in fc.saturating_sub(1)..=(fc + 7).min(side - 1) {
-                let dr = r as isize - (fr + 3) as isize;
-                let dc = c as isize - (fc + 3) as isize;
-                let dist = dr.abs().max(dc.abs()) as usize;
-                set(&mut dark, &mut reserved, r, c, dist != 2 && dist < 4);
+                let dist = r.abs_diff(fr + 3).max(c.abs_diff(fc + 3));
+                set_reserved(dark, reserved, r, c, dist != 2 && dist < 4);
             }
         }
     }
@@ -484,8 +486,8 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
     // timing patterns
     for i in 8..side - 8 {
         let bit = i % 2 == 0;
-        set(&mut dark, &mut reserved, 6, i, bit);
-        set(&mut dark, &mut reserved, i, 6, bit);
+        set_reserved(dark, reserved, 6, i, bit);
+        set_reserved(dark, reserved, i, 6, bit);
     }
 
     // alignment patterns, skipping the three that collide with finders
@@ -497,25 +499,24 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
         .iter()
         .copied()
         .filter(|&p| p != 0)
-        .map(|p| p as usize)
+        .map(usize::from)
         .collect();
     for &ar in &centers {
         for &ac in &centers {
             if (ar, ac) == (6, 6) || (ar, ac) == (6, last) || (ar, ac) == (last, 6) {
                 continue;
             }
-            for dr in -2isize..=2 {
-                for dc in -2isize..=2 {
-                    let r = (ar as isize + dr) as usize;
-                    let c = (ac as isize + dc) as usize;
-                    set(&mut dark, &mut reserved, r, c, dr.abs().max(dc.abs()) != 1);
+            for r in ar.saturating_sub(2)..=ar + 2 {
+                for c in ac.saturating_sub(2)..=ac + 2 {
+                    let dist = r.abs_diff(ar).max(c.abs_diff(ac));
+                    set_reserved(dark, reserved, r, c, dist != 1);
                 }
             }
         }
     }
 
     // dark module and format reservations (values written after masking)
-    set(&mut dark, &mut reserved, side - 8, 8, true);
+    set_reserved(dark, reserved, side - 8, 8, true);
     for i in 0..15 {
         let (r, c) = format_cell_main(i);
         if let Some(slot) = reserved.get_mut(r).and_then(|row| row.get_mut(c)) {
@@ -536,24 +537,40 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
         let word = (u32::from(version) << 12) | (rem & 0xfff);
         for i in 0..18 {
             let bit = (word >> i) & 1 != 0;
-            set(&mut dark, &mut reserved, side - 11 + i % 3, i / 3, bit);
-            set(&mut dark, &mut reserved, i / 3, side - 11 + i % 3, bit);
+            set_reserved(dark, reserved, side - 11 + i % 3, i / 3, bit);
+            set_reserved(dark, reserved, i / 3, side - 11 + i % 3, bit);
         }
     }
+}
+
+/// Encodes a byte-mode, level-L symbol for `data` with deterministic mask fallback.
+///
+/// # Errors
+///
+/// Propagates `QrError` from the step that failed; its variants name the refused conditions.
+pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
+    let (stream, version) = build_codewords(data)?;
+    let side = side_len(version);
+    let mut dark = vec![vec![false; side]; side];
+    let mut reserved = vec![vec![false; side]; side];
+    place_function_patterns(&mut dark, &mut reserved, version, side);
 
     // data placement: two-module-wide zigzag, column 6 skipped
     let total_bits = stream.len() * 8;
     let mut bit_at = 0usize;
-    let mut col = side as isize - 1;
+    let mut col_cursor = Some(side - 1);
     let mut upward = true;
-    while col >= 1 {
+    while let Some(mut col) = col_cursor {
+        if col == 0 {
+            break;
+        }
         if col == 6 {
-            col -= 1;
+            col = 5;
         }
         for i in 0..side {
             let row = if upward { side - 1 - i } else { i };
-            for dx in 0..2 {
-                let c = (col - dx as isize) as usize;
+            for dx in 0..2usize {
+                let c = col - dx;
                 if reserved.get(row).and_then(|r| r.get(c)).is_some_and(|v| *v) {
                     continue;
                 }
@@ -569,7 +586,7 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
                 }
             }
         }
-        col -= 2;
+        col_cursor = col.checked_sub(2);
         upward = !upward;
     }
     debug_assert_eq!(bit_at, total_bits);
@@ -591,7 +608,7 @@ pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
     Err(QrError::Undecodable)
 }
 
-fn mask_applies(mask: u8, r: usize, c: usize) -> bool {
+const fn mask_applies(mask: u8, r: usize, c: usize) -> bool {
     match mask {
         0 => (r + c).is_multiple_of(2),
         1 => r.is_multiple_of(2),
@@ -610,7 +627,7 @@ fn mask_applies(mask: u8, r: usize, c: usize) -> bool {
 
 fn apply_data_mask(dark: &mut [Vec<bool>], reserved: &[Vec<bool>], mask: u8) {
     for r in 0..dark.len() {
-        let cols = dark.get(r).map_or(0, |row| row.len());
+        let cols = dark.get(r).map_or(0, Vec::len);
         for c in 0..cols {
             let reserved_cell = reserved
                 .get(r)
@@ -632,7 +649,7 @@ fn apply_data_mask(dark: &mut [Vec<bool>], reserved: &[Vec<bool>], mask: u8) {
 /// exactly why mutation testing's `|` -> `^` swap survived every symbol test.
 /// Keeping the combination in one helper lets the test suite feed it
 /// overlapping inputs and kill that mutant at its source.
-fn level_mask_bits(level: u32, mask: u32) -> u32 {
+const fn level_mask_bits(level: u32, mask: u32) -> u32 {
     level | (mask & 0b111)
 }
 

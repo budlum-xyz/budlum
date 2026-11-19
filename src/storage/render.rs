@@ -188,13 +188,16 @@ impl std::error::Error for RenderError {}
 /// string: `fixed(12345, 1000)` is `"12.345"`.
 fn fixed(value: u64, scale: u64) -> String {
     debug_assert!(scale > 0);
+    let scale = scale.max(1);
     let whole = value / scale;
     let frac = value % scale;
     if frac == 0 {
         whole.to_string()
     } else {
-        // Pad the fraction to the scale's digit count, strip trailing zeros.
-        let mut frac_str = format!("{frac:0width$}", width = digit_count(scale));
+        // Pad the fraction to `scale - 1`'s digit count (so scale=1000 gives 3
+        // decimal digits, making fixed(12345, 1000) == "12.345"), then strip
+        // trailing zeros.
+        let mut frac_str = format!("{frac:0width$}", width = digit_count(scale - 1));
         while frac_str.ends_with('0') {
             frac_str.pop();
         }
@@ -215,8 +218,8 @@ fn digit_count(mut n: u64) -> usize {
 /// byte in a fixed order so every machine produces the same file.
 fn crc32(data: &[u8]) -> u32 {
     let mut table = [0u32; 256];
-    for (i, entry) in table.iter_mut().enumerate() {
-        let mut c = i as u32; // 0..256 loop index; cannot truncate.
+    for (i, entry) in (0u32..256).zip(table.iter_mut()) {
+        let mut c = i;
         for _ in 0..8 {
             c = if c & 1 != 0 {
                 0xEDB8_8320 ^ (c >> 1)
@@ -256,6 +259,10 @@ fn zlib_stored(data: &[u8]) -> Vec<u8> {
     // zlib header: CMF/FLG with a fixed check value for compression level 0.
     out.push(0x78);
     out.push(0x01);
+    if data.is_empty() {
+        // RFC 1951 requires at least one BFINAL=1 block even for an empty stream.
+        out.extend_from_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF]);
+    }
     // DEFLATE stored blocks, 65535 bytes each.
     let mut pos = 0usize;
     while pos < data.len() {
@@ -302,7 +309,7 @@ pub fn render(spec: &GeneratedSpec, format: &RenderFormat) -> Result<Vec<u8>, Re
     match format {
         RenderFormat::Svg => render_svg(spec, &pixels),
         RenderFormat::Png { size } => render_png(spec, &pixels, *size),
-        RenderFormat::VideoFrame { frame } => render_frame(spec, &pixels, *frame),
+        RenderFormat::VideoFrame { frame } => Ok(render_frame(&pixels, *frame)),
         RenderFormat::QrStream { seq, payload_len } => {
             render_qr_stream_frame(spec, &pixels, *seq, *payload_len)
         }
@@ -382,7 +389,7 @@ fn render_svg(spec: &GeneratedSpec, pixels: &[u8]) -> Result<Vec<u8>, RenderErro
 }
 
 fn render_png(spec: &GeneratedSpec, pixels: &[u8], size: u16) -> Result<Vec<u8>, RenderError> {
-    let side = square_side(spec.output_len)?;
+    let grid_edge = square_side(spec.output_len)?;
     if size == 0 {
         return Err(RenderError::MissingParam("png size"));
     }
@@ -400,17 +407,17 @@ fn render_png(spec: &GeneratedSpec, pixels: &[u8], size: u16) -> Result<Vec<u8>,
     }
     // Scale the pixel buffer to the requested size with a deterministic
     // nearest-neighbour sampler: every source pixel maps to a fixed block.
-    let source_side = u64::from(side);
-    let dest_side = u64::from(size);
+    let source_edge = u64::from(grid_edge);
+    let dest_edge = u64::from(size);
     let mut raw =
         Vec::with_capacity((usize::from(size) * usize::from(size)) * 3 + usize::from(size));
-    for y in 0..dest_side {
+    for y in 0..dest_edge {
         raw.push(0u8); // filter type: None
-        for x in 0..dest_side {
-            let sx = usize::try_from(x * source_side / dest_side).unwrap_or(0);
-            let sy = usize::try_from(y * source_side / dest_side).unwrap_or(0);
-            let si = sy * usize::from(side) + sx;
-            let b = pixels.get(si).copied().unwrap_or(0);
+        for x in 0..dest_edge {
+            let src_x = usize::try_from(x * source_edge / dest_edge).unwrap_or(0);
+            let src_y = usize::try_from(y * source_edge / dest_edge).unwrap_or(0);
+            let src_idx = src_y * usize::from(grid_edge) + src_x;
+            let b = pixels.get(src_idx).copied().unwrap_or(0);
             raw.extend_from_slice(&[b, b, b]);
         }
     }
@@ -428,15 +435,15 @@ fn render_png(spec: &GeneratedSpec, pixels: &[u8], size: u16) -> Result<Vec<u8>,
     Ok(out)
 }
 
-fn render_frame(_spec: &GeneratedSpec, pixels: &[u8], frame: u16) -> Result<Vec<u8>, RenderError> {
+fn render_frame(pixels: &[u8], frame: u16) -> Vec<u8> {
     // The frame number is part of the output, so frame 17 of a loop is a
     // different object from frame 18 and the same bytes every time. The
     // actual encoder (MP4/WebM) is a separate versioned step.
-    let mut out = Vec::with_capacity(pixels.len() + 4);
+    let mut out = Vec::with_capacity(pixels.len() + 7);
     out.extend_from_slice(b"BDLMF");
     out.extend_from_slice(&frame.to_be_bytes());
     out.extend_from_slice(pixels);
-    Ok(out)
+    out
 }
 
 /// Length of a transport frame header.
@@ -500,7 +507,8 @@ fn render_qr_stream_frame(
     out.push(1u8);
     out.push(0u8);
     out.extend_from_slice(&seq.to_be_bytes());
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    let payload_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&payload_len.to_be_bytes());
     // The first 4 bytes of the payload digest: enough for frame integrity while the
     // header stays small. This is not the content id - the manifest carries that.
     //
@@ -1151,5 +1159,22 @@ mod tests {
         let h = u32::from_be_bytes(a[20..24].try_into().unwrap());
         assert_eq!(w, 128);
         assert_eq!(h, 128);
+    }
+
+    #[test]
+    fn fixed_decimal_scaling_and_empty_zlib_stored_stream_are_exact() {
+        assert_eq!(fixed(12_345, 1_000), "12.345");
+        assert_eq!(fixed(1_050, 100), "10.5");
+        assert_eq!(fixed(7, 1_000), "0.007");
+        assert_eq!(fixed(42, 1), "42");
+
+        let empty_z = zlib_stored(&[]);
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(
+            &mut flate2::read::ZlibDecoder::new(empty_z.as_slice()),
+            &mut decoded,
+        )
+        .expect("zlib_stored(&[]) must emit a valid RFC 1950/1951 stream");
+        assert!(decoded.is_empty());
     }
 }

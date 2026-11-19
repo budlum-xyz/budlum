@@ -15,6 +15,10 @@ pub const ZK_QC_FAULT_PROOF_CLOSED_ON_TESTNET: bool = true;
 
 /// Verify a ZK QC fault proof. Always refuses until a `BudZero` STARK
 /// verifier is integrated.
+///
+/// # Errors
+///
+/// Always returns `Err` (fail-closed) until the `BudZero` STARK verifier is integrated.
 pub fn verify_zk_qc_fault_proof(_proof_bytes: &[u8], _merkle_root: &str) -> Result<(), String> {
     Err("ZK QC fault proof verifier not implemented - ZK domain attestations cannot be challenged until ZK verifier integration. This is fail-closed: no invalid ZK attestation can be finalized via this path.".into())
 }
