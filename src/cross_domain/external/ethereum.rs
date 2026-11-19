@@ -189,6 +189,371 @@ pub mod layout {
     pub const LEN: usize = 752;
     /// Total payload length for Electra (7-sibling finality branch).
     pub const LEN_ELECTRA: usize = 784;
+    /// Fixed binary length of the v3 execution extension appended after a
+    /// Deneb (`LEN`) or Electra (`LEN_ELECTRA`) beacon finality payload:
+    /// 4 x 32B `execution_branch` (`gindex = 25`, 128B) + 17-field
+    /// `ExecutionPayloadHeader` (`613`B) = `741` bytes.
+    /// Convenience: exposed for v3 Deneb/Electra execution finality payloads.
+    pub const EXECUTION_TRAILER_LEN: usize = 128 + 613;
+    /// Total v3 Deneb payload length (`752 + 741 = 1493` bytes).
+    /// Convenience: exposed for v3 Deneb execution finality framing.
+    pub const LEN_V3_DENEB: usize = LEN + EXECUTION_TRAILER_LEN;
+    /// Total v3 Electra payload length (`784 + 741 = 1525` bytes).
+    /// Convenience: exposed for v3 Electra execution finality framing.
+    pub const LEN_V3_ELECTRA: usize = LEN_ELECTRA + EXECUTION_TRAILER_LEN;
+}
+
+/// Parsed v3 Deneb/Electra finality update carrying both the Beacon finality
+/// proof and the 17-field SSZ `ExecutionPayloadHeader` proven at body gindex `25`.
+///
+/// Convenience: exposed for Ethereum execution finality verification and tooling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionSyncCommitteeUpdate {
+    pub beacon: SyncCommitteeUpdate,
+    pub execution_branch: [[u8; 32]; 4],
+    pub execution_payload: crate::cross_domain::evm::sync_committee::ExecutionPayloadHeader,
+}
+
+/// Encode the fixed-size 721-byte execution trailer (`execution_branch` +
+/// 17-field `ExecutionPayloadHeader`) for evidence format v3.
+///
+/// Convenience: exposed for Ethereum v3 execution evidence builders.
+///
+/// # Errors
+///
+/// Returns [`AdapterError::ConsensusRule`] if `execution_payload` fails
+/// consensus validation (`logs_bloom != 256B`, `extra_data > 32B`,
+/// `gas_used > gas_limit`, or zero root/hash).
+pub fn encode_execution_trailer_v3(
+    execution_branch: &[[u8; 32]; 4],
+    payload: &crate::cross_domain::evm::sync_committee::ExecutionPayloadHeader,
+) -> Result<Vec<u8>, AdapterError> {
+    payload
+        .validate()
+        .map_err(|e| AdapterError::ConsensusRule {
+            rule: e.to_string(),
+        })?;
+    let mut out = Vec::with_capacity(layout::EXECUTION_TRAILER_LEN);
+    for sib in execution_branch {
+        out.extend_from_slice(sib);
+    }
+    out.extend_from_slice(&payload.parent_hash); // 32
+    out.extend_from_slice(&payload.fee_recipient); // 20
+    out.extend_from_slice(&payload.state_root); // 32
+    out.extend_from_slice(&payload.receipts_root); // 32
+    out.extend_from_slice(&payload.logs_bloom); // 256
+    out.extend_from_slice(&payload.prev_randao); // 32
+    out.extend_from_slice(&payload.block_number.to_le_bytes()); // 8
+    out.extend_from_slice(&payload.gas_limit.to_le_bytes()); // 8
+    out.extend_from_slice(&payload.gas_used.to_le_bytes()); // 8
+    out.extend_from_slice(&payload.timestamp.to_le_bytes()); // 8
+    let extra_len =
+        u8::try_from(payload.extra_data.len()).map_err(|_| AdapterError::ConsensusRule {
+            rule: "execution extra_data exceeds 32 bytes".to_string(),
+        })?;
+    out.push(extra_len); // 1
+    let mut extra_buf = [0u8; 32];
+    if let Some(dst) = extra_buf.get_mut(..payload.extra_data.len()) {
+        dst.copy_from_slice(&payload.extra_data);
+    }
+    out.extend_from_slice(&extra_buf); // 32
+    out.extend_from_slice(&payload.base_fee_per_gas); // 32
+    out.extend_from_slice(&payload.block_hash); // 32
+    out.extend_from_slice(&payload.transactions_root); // 32
+    out.extend_from_slice(&payload.withdrawals_root); // 32
+    out.extend_from_slice(&payload.blob_gas_used.to_le_bytes()); // 8
+    out.extend_from_slice(&payload.excess_blob_gas.to_le_bytes()); // 8
+    Ok(out)
+}
+
+/// Parse an evidence-format v3 payload (`LEN_V3_DENEB` or `LEN_V3_ELECTRA`)
+/// into its Beacon finality proof and 17-field `ExecutionPayloadHeader`.
+///
+/// Convenience: exposed for Ethereum v3 execution evidence verification.
+///
+/// # Errors
+///
+/// Returns [`AdapterError::Malformed`] if any length, gindex, or non-zero
+/// `extra_data` padding rule is violated.
+pub fn parse_execution_update_v3(
+    payload: &[u8],
+) -> Result<ExecutionSyncCommitteeUpdate, AdapterError> {
+    let beacon_len = match payload.len() {
+        layout::LEN_V3_DENEB => layout::LEN,
+        layout::LEN_V3_ELECTRA => layout::LEN_ELECTRA,
+        other => {
+            return Err(AdapterError::Malformed {
+                offset: other,
+                reason: format!(
+                    "v3 execution payload is {other} bytes, expected {} (Deneb) or {} (Electra)",
+                    layout::LEN_V3_DENEB,
+                    layout::LEN_V3_ELECTRA
+                ),
+            });
+        }
+    };
+    let beacon_slice = payload.get(..beacon_len).ok_or(AdapterError::Malformed {
+        offset: 0,
+        reason: "beacon prefix missing".to_string(),
+    })?;
+    let beacon = parse_update(beacon_slice)?;
+    let trailer = payload.get(beacon_len..).ok_or(AdapterError::Malformed {
+        offset: beacon_len,
+        reason: "execution trailer missing".to_string(),
+    })?;
+
+    fn take_slice<'a>(
+        buf: &'a [u8],
+        cursor: &mut usize,
+        n: usize,
+        base: usize,
+        name: &str,
+    ) -> Result<&'a [u8], AdapterError> {
+        let end = cursor.checked_add(n).ok_or(AdapterError::Malformed {
+            offset: base.saturating_add(*cursor),
+            reason: format!("{name} offset overflow"),
+        })?;
+        let out = buf.get(*cursor..end).ok_or(AdapterError::Malformed {
+            offset: base.saturating_add(*cursor),
+            reason: format!("{name} truncated"),
+        })?;
+        *cursor = end;
+        Ok(out)
+    }
+    fn take32(
+        buf: &[u8],
+        cursor: &mut usize,
+        base: usize,
+        name: &str,
+    ) -> Result<[u8; 32], AdapterError> {
+        let s = take_slice(buf, cursor, 32, base, name)?;
+        <[u8; 32]>::try_from(s).map_err(|_| AdapterError::Malformed {
+            offset: base,
+            reason: format!("{name} is not 32 bytes"),
+        })
+    }
+    fn take_u64(
+        buf: &[u8],
+        cursor: &mut usize,
+        base: usize,
+        name: &str,
+    ) -> Result<u64, AdapterError> {
+        let s = take_slice(buf, cursor, 8, base, name)?;
+        let a = <[u8; 8]>::try_from(s).map_err(|_| AdapterError::Malformed {
+            offset: base,
+            reason: format!("{name} is not 8 bytes"),
+        })?;
+        Ok(u64::from_le_bytes(a))
+    }
+
+    let mut cursor = 0usize;
+    let execution_branch = [
+        take32(trailer, &mut cursor, beacon_len, "execution_branch[0]")?,
+        take32(trailer, &mut cursor, beacon_len, "execution_branch[1]")?,
+        take32(trailer, &mut cursor, beacon_len, "execution_branch[2]")?,
+        take32(trailer, &mut cursor, beacon_len, "execution_branch[3]")?,
+    ];
+    let parent_hash = take32(trailer, &mut cursor, beacon_len, "parent_hash")?;
+    let fee_bytes = take_slice(trailer, &mut cursor, 20, beacon_len, "fee_recipient")?;
+    let fee_recipient = <[u8; 20]>::try_from(fee_bytes).map_err(|_| AdapterError::Malformed {
+        offset: beacon_len,
+        reason: "fee_recipient is not 20 bytes".to_string(),
+    })?;
+    let state_root = take32(trailer, &mut cursor, beacon_len, "execution.state_root")?;
+    let receipts_root = take32(trailer, &mut cursor, beacon_len, "execution.receipts_root")?;
+    let logs_bloom = take_slice(trailer, &mut cursor, 256, beacon_len, "logs_bloom")?.to_vec();
+    let prev_randao = take32(trailer, &mut cursor, beacon_len, "prev_randao")?;
+    let block_number = take_u64(trailer, &mut cursor, beacon_len, "block_number")?;
+    let gas_limit = take_u64(trailer, &mut cursor, beacon_len, "gas_limit")?;
+    let gas_used = take_u64(trailer, &mut cursor, beacon_len, "gas_used")?;
+    let timestamp = take_u64(trailer, &mut cursor, beacon_len, "timestamp")?;
+    let extra_len_byte = take_slice(trailer, &mut cursor, 1, beacon_len, "extra_data_len")?
+        .first()
+        .copied()
+        .unwrap_or(u8::MAX);
+    let extra_len = usize::from(extra_len_byte);
+    if extra_len > crate::cross_domain::evm::sync_committee::MAX_EXTRA_DATA_BYTES {
+        return Err(AdapterError::Malformed {
+            offset: beacon_len.saturating_add(cursor.saturating_sub(1)),
+            reason: format!("extra_data_len {extra_len} exceeds 32"),
+        });
+    }
+    let extra_padded = take_slice(trailer, &mut cursor, 32, beacon_len, "extra_data")?;
+    // Refuse non-zero trailing pad bytes so v3 encoding is strictly canonical.
+    if extra_padded
+        .get(extra_len..)
+        .is_some_and(|pad| pad.iter().any(|b| *b != 0))
+    {
+        return Err(AdapterError::Malformed {
+            offset: beacon_len.saturating_add(cursor.saturating_sub(32).saturating_add(extra_len)),
+            reason: "extra_data trailing padding must be zero".to_string(),
+        });
+    }
+    let extra_data = extra_padded.get(..extra_len).unwrap_or_default().to_vec();
+    let base_fee_per_gas = take32(trailer, &mut cursor, beacon_len, "base_fee_per_gas")?;
+    let block_hash = take32(trailer, &mut cursor, beacon_len, "block_hash")?;
+    let transactions_root = take32(trailer, &mut cursor, beacon_len, "transactions_root")?;
+    let withdrawals_root = take32(trailer, &mut cursor, beacon_len, "withdrawals_root")?;
+    let blob_gas_used = take_u64(trailer, &mut cursor, beacon_len, "blob_gas_used")?;
+    let excess_blob_gas = take_u64(trailer, &mut cursor, beacon_len, "excess_blob_gas")?;
+
+    let execution_payload = crate::cross_domain::evm::sync_committee::ExecutionPayloadHeader {
+        parent_hash,
+        fee_recipient,
+        state_root,
+        receipts_root,
+        logs_bloom,
+        prev_randao,
+        block_number,
+        gas_limit,
+        gas_used,
+        timestamp,
+        extra_data,
+        base_fee_per_gas,
+        block_hash,
+        transactions_root,
+        withdrawals_root,
+        blob_gas_used,
+        excess_blob_gas,
+    };
+
+    Ok(ExecutionSyncCommitteeUpdate {
+        beacon,
+        execution_branch,
+        execution_payload,
+    })
+}
+
+/// Parameters for [`build_execution_update_payload_v3`].
+///
+/// Convenience: exposed for Ethereum v3 execution finality evidence builders.
+#[derive(Debug, Clone)]
+pub struct ExecutionUpdateV3Params<'a> {
+    pub finalized_slot: u64,
+    pub attested_slot: u64,
+    pub period: u64,
+    pub finalized_root_gindex: u64,
+    pub committee: &'a PinnedCommittee,
+    pub signature: &'a [u8],
+    pub participation_bits: &'a [u8],
+    pub beacon_state_root: [u8; 32],
+    pub execution_branch: [[u8; 32]; 4],
+    pub execution_payload: &'a crate::cross_domain::evm::sync_committee::ExecutionPayloadHeader,
+}
+
+/// Build a canonical v3 Deneb (`1473`B) or Electra (`1505`B) execution-bound
+/// light-client update payload.
+///
+/// Convenience: exposed for Ethereum v3 execution finality evidence builders.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] if the fork gindex or execution payload is invalid.
+pub fn build_execution_update_payload_v3(
+    params: &ExecutionUpdateV3Params<'_>,
+) -> Result<Vec<u8>, AdapterError> {
+    let ExecutionUpdateV3Params {
+        finalized_slot,
+        attested_slot,
+        period,
+        finalized_root_gindex,
+        committee,
+        signature,
+        participation_bits,
+        beacon_state_root,
+        execution_branch,
+        execution_payload,
+    } = params;
+    use crate::cross_domain::evm::sync_committee::{
+        beacon_header_hash_tree_root, walk_branch, EXECUTION_PAYLOAD_GINDEX,
+        FINALIZED_ROOT_GINDEX_DENEB, FINALIZED_ROOT_GINDEX_ELECTRA,
+    };
+    let (beacon_len, finality_depth) = match *finalized_root_gindex {
+        FINALIZED_ROOT_GINDEX_DENEB => (layout::LEN, 6usize),
+        FINALIZED_ROOT_GINDEX_ELECTRA => (layout::LEN_ELECTRA, 7usize),
+        other => {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!("unsupported finalized_root_gindex {other}"),
+            });
+        }
+    };
+    let exec_root =
+        execution_payload
+            .hash_tree_root()
+            .map_err(|e| AdapterError::ConsensusRule {
+                rule: e.to_string(),
+            })?;
+    let finalized_body_root = walk_branch(exec_root, execution_branch, EXECUTION_PAYLOAD_GINDEX)
+        .ok_or_else(|| AdapterError::ConsensusRule {
+            rule: "failed to compute finalized_body_root from execution_branch".into(),
+        })?;
+    let finalized_root = beacon_header_hash_tree_root(
+        *finalized_slot,
+        0,
+        [0u8; 32],
+        *beacon_state_root,
+        finalized_body_root,
+    );
+    let finality_branch: Vec<[u8; 32]> = (0..finality_depth)
+        .map(|i| [0x11u8.wrapping_mul(u8::try_from(i + 1).unwrap_or(1)); 32])
+        .collect();
+    let attested_state_root = walk_branch(finalized_root, &finality_branch, *finalized_root_gindex)
+        .ok_or_else(|| AdapterError::ConsensusRule {
+            rule: "failed to compute attested_state_root from finality_branch".into(),
+        })?;
+
+    let mut payload = vec![0u8; beacon_len];
+    if let Some(s) = payload.get_mut(layout::FINALIZED_ROOT) {
+        s.copy_from_slice(&finalized_root);
+    }
+    if let Some(s) = payload.get_mut(layout::FINALIZED_SLOT) {
+        s.copy_from_slice(&finalized_slot.to_le_bytes());
+    }
+    if let Some(s) = payload.get_mut(layout::ATTESTED_SLOT) {
+        s.copy_from_slice(&attested_slot.to_le_bytes());
+    }
+    if let Some(s) = payload.get_mut(layout::PERIOD) {
+        s.copy_from_slice(&period.to_le_bytes());
+    }
+    if let Some(s) = payload.get_mut(layout::NEXT_COMMITTEE_ROOT) {
+        s.copy_from_slice(&committee.next_committee_root);
+    }
+    if let (Some(dst), true) = (
+        payload.get_mut(layout::AGGREGATE_PUBKEY),
+        committee.aggregate_pubkey.len() == 96,
+    ) {
+        dst.copy_from_slice(&committee.aggregate_pubkey);
+    }
+    if let (Some(dst), true) = (payload.get_mut(layout::SIGNATURE), signature.len() == 96) {
+        dst.copy_from_slice(signature);
+    }
+    if let (Some(dst), true) = (
+        payload.get_mut(layout::PARTICIPATION_BITS),
+        participation_bits.len() == BITVECTOR_BYTES,
+    ) {
+        dst.copy_from_slice(participation_bits);
+    }
+    if let Some(s) = payload.get_mut(layout::STATE_ROOT) {
+        s.copy_from_slice(beacon_state_root);
+    }
+    if let Some(s) = payload.get_mut(layout::FINALIZED_BODY_ROOT) {
+        s.copy_from_slice(&finalized_body_root);
+    }
+    if let Some(s) = payload.get_mut(layout::ATTESTED_STATE_ROOT) {
+        s.copy_from_slice(&attested_state_root);
+    }
+    if let Some(s) = payload.get_mut(layout::FINALIZED_ROOT_GINDEX) {
+        s.copy_from_slice(&finalized_root_gindex.to_le_bytes());
+    }
+    for (i, sib) in finality_branch.iter().enumerate() {
+        let start = layout::FINALITY_BRANCH_OFFSET + i * 32;
+        if let Some(dst) = payload.get_mut(start..start + 32) {
+            dst.copy_from_slice(sib);
+        }
+    }
+    let trailer = encode_execution_trailer_v3(execution_branch, execution_payload)?;
+    payload.extend_from_slice(&trailer);
+    Ok(payload)
 }
 
 /// The parsed update.
@@ -544,6 +909,65 @@ pub fn signing_root_v2(update: &SyncCommitteeUpdate) -> [u8; 32] {
     ])
 }
 
+/// Domain-separated signing root for evidence format v3, binding both the
+/// Beacon finality proof and the SSZ-proven 17-field `ExecutionPayloadHeader`
+/// (`execution_payload_root`, `state_root`, `receipts_root`, `block_hash`,
+/// `transactions_root`, `block_number`, and `timestamp`).
+///
+/// Convenience: exposed for Ethereum v3 execution light-client signing and checks.
+#[must_use]
+pub fn signing_root_v3(
+    update: &ExecutionSyncCommitteeUpdate,
+    execution_payload_root: &[u8; 32],
+) -> [u8; 32] {
+    let b = &update.beacon;
+    let p = &update.execution_payload;
+    let attested_header_root = b.attested_header_root();
+    crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_ETHSYNC_SIGNING_ROOT_V3",
+        &attested_header_root,
+        &b.attested_state_root,
+        &b.finalized_root,
+        &b.finalized_body_root,
+        &b.finalized_slot.to_le_bytes(),
+        &b.attested_slot.to_le_bytes(),
+        &b.period.to_le_bytes(),
+        &b.next_committee_root,
+        &b.participation_bits,
+        &b.state_root,
+        execution_payload_root,
+        &p.state_root,
+        &p.receipts_root,
+        &p.block_hash,
+        &p.transactions_root,
+        &p.block_number.to_le_bytes(),
+        &p.timestamp.to_le_bytes(),
+    ])
+}
+
+/// SSZ-authenticated period rotation bundle for [`EthereumSyncAdapter::rotate_committee_with_ssz_branch`].
+///
+/// Convenience: exposed for multi-period SSZ sync-committee rotation on [`EthereumSyncAdapter`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SszCommitteeRotation {
+    /// Target sequential period (`current.period + 1`).
+    pub next_period: u64,
+    /// Full 512-member BLS12-381 G1 roster entering as the active committee for `next_period`.
+    pub next_member_pubkeys: [[u8; 48]; 512],
+    /// Compressed 48-byte aggregate G1 public key for `next_period`.
+    pub next_aggregate_pubkey: [u8; 48],
+    /// Verified finalized `BeaconBlockHeader.state_root` from `current.period`.
+    pub finalized_state_root: [u8; 32],
+    /// Fork-matched `next_sync_committee` generalized index (`55` Deneb / `87` Electra).
+    pub next_sync_committee_gindex: u64,
+    /// SSZ Merkle branch proving `sync_committee_hash_tree_root` in `finalized_state_root`.
+    pub next_sync_committee_branch: Vec<[u8; 32]>,
+    /// Fork's `finalized_root_gindex` (`105` Deneb / `169` Electra) used to enforce gindex pairing.
+    pub finalized_root_gindex: u64,
+    /// Commitment to period `next_period + 1` (either `committee_root` or SSZ root).
+    pub subsequent_committee_root: [u8; 32],
+}
+
 /// The adapter.
 pub struct EthereumSyncAdapter {
     descriptor: AdapterDescriptor,
@@ -624,7 +1048,7 @@ impl EthereumSyncAdapter {
                 // Evidence format v2 - the signature
                 // covers the update itself, not a stored constant.
                 adapter_version: 2,
-                accepted_evidence_versions: vec![2],
+                accepted_evidence_versions: vec![2, 3],
                 consensus_kind: "gasper-pos".to_string(),
                 finality_kind: FinalityKind::ProtocolFinality,
                 // Two epochs of Casper FFG. Declared rather than derived from
@@ -710,11 +1134,17 @@ impl EthereumSyncAdapter {
                 rule: "no pinned committee to rotate from".to_string(),
             });
         };
-        if next.period <= current.period {
+        let Some(expected_period) = current.period.checked_add(1) else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "sync committee period reached u64::MAX and cannot rotate further"
+                    .to_string(),
+            });
+        };
+        if next.period != expected_period {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
-                    "committee period must move forward: pinned {}, next {}",
-                    current.period, next.period
+                    "committee period must advance by exactly 1: pinned {}, expected {}, next {}",
+                    current.period, expected_period, next.period
                 ),
             });
         }
@@ -726,6 +1156,128 @@ impl EthereumSyncAdapter {
         }
         self.committee = Some(next);
         self.member_pubkeys = None;
+        Ok(())
+    }
+
+    /// Rotate the pinned committee sequentially (`P -> P + 1`) using a full
+    /// Deneb (`gindex = 55`) or Electra (`gindex = 87`) SSZ Merkle branch
+    /// proving `next_sync_committee` against a verified `finalized_state_root`,
+    /// validating every one of the 512 BLS12-381 G1 member keys and installing
+    /// the verified roster atomically for subset-bound pairing in `P + 1`.
+    ///
+    /// Convenience: exposed for multi-period Deneb/Electra SSZ sync-committee rotation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError::ConsensusRule`] or [`AdapterError::Crypto`] when
+    /// no committee is pinned, `next_period != current.period + 1`, the fork
+    /// gindex pair mismatches, the SSZ Merkle branch fails, the committed
+    /// `next_committee_root` disagrees, or any G1 pubkey/aggregate is invalid.
+    pub fn rotate_committee_with_ssz_branch(
+        &mut self,
+        rotation: &SszCommitteeRotation,
+    ) -> Result<(), AdapterError> {
+        use crate::cross_domain::evm::sync_committee::{
+            sync_committee_hash_tree_root, validate_sync_committee_pubkeys, walk_branch,
+            FINALIZED_ROOT_GINDEX_DENEB, FINALIZED_ROOT_GINDEX_ELECTRA,
+            NEXT_SYNC_COMMITTEE_GINDEX_DENEB, NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA,
+        };
+        use subtle::ConstantTimeEq;
+
+        let Some(current) = self.committee.as_ref() else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "no pinned committee to rotate from".to_string(),
+            });
+        };
+        let Some(expected_period) = current.period.checked_add(1) else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "sync committee period overflow at u64::MAX".to_string(),
+            });
+        };
+        if rotation.next_period != expected_period {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "committee period must advance sequentially: pinned {}, expected {}, found {}",
+                    current.period, expected_period, rotation.next_period
+                ),
+            });
+        }
+        let expected_gindex = match rotation.finalized_root_gindex {
+            FINALIZED_ROOT_GINDEX_DENEB => NEXT_SYNC_COMMITTEE_GINDEX_DENEB,
+            FINALIZED_ROOT_GINDEX_ELECTRA => NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA,
+            other => {
+                return Err(AdapterError::ConsensusRule {
+                    rule: format!("unsupported finalized_root_gindex {other} for SSZ rotation"),
+                });
+            }
+        };
+        if rotation.next_sync_committee_gindex != expected_gindex {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "next_sync_committee gindex mismatch: expected {expected_gindex}, found {}",
+                    rotation.next_sync_committee_gindex
+                ),
+            });
+        }
+
+        let ssz_committee_root = sync_committee_hash_tree_root(
+            &rotation.next_member_pubkeys,
+            &rotation.next_aggregate_pubkey,
+        );
+        let proven_state_root = walk_branch(
+            ssz_committee_root,
+            &rotation.next_sync_committee_branch,
+            expected_gindex,
+        )
+        .ok_or_else(|| AdapterError::ConsensusRule {
+            rule: "next_sync_committee SSZ branch has invalid length".to_string(),
+        })?;
+        if !bool::from(
+            proven_state_root
+                .as_slice()
+                .ct_eq(rotation.finalized_state_root.as_slice()),
+        ) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "next_sync_committee SSZ branch does not prove finalized_state_root"
+                    .to_string(),
+            });
+        }
+
+        let mut padded_agg = vec![0u8; 96];
+        if let Some(head) = padded_agg.get_mut(..48) {
+            head.copy_from_slice(&rotation.next_aggregate_pubkey);
+        }
+        let matches_ssz = bool::from(
+            ssz_committee_root
+                .as_slice()
+                .ct_eq(current.next_committee_root.as_slice()),
+        );
+        let matches_pin_hash = bool::from(
+            committee_root(&padded_agg)
+                .as_slice()
+                .ct_eq(current.next_committee_root.as_slice()),
+        );
+        if !matches_ssz && !matches_pin_hash {
+            return Err(AdapterError::ConsensusRule {
+                rule: "incoming sync committee does not open pinned next_committee_root"
+                    .to_string(),
+            });
+        }
+
+        validate_sync_committee_pubkeys(
+            &rotation.next_member_pubkeys,
+            &rotation.next_aggregate_pubkey,
+        )
+        .map_err(|e| AdapterError::Crypto {
+            what: e.to_string(),
+        })?;
+
+        self.committee = Some(PinnedCommittee {
+            period: expected_period,
+            aggregate_pubkey: padded_agg,
+            next_committee_root: rotation.subsequent_committee_root,
+        });
+        self.member_pubkeys = Some(rotation.next_member_pubkeys.to_vec());
         Ok(())
     }
 
@@ -792,16 +1344,33 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             });
         }
 
-        let update = parse_update(&evidence.payload)?;
+        let (update, maybe_exec) = if evidence.evidence_version == 3 {
+            let v3 = parse_execution_update_v3(&evidence.payload)?;
+            let exec_root = v3
+                .execution_payload
+                .verify_in_beacon_body(&v3.beacon.finalized_body_root, &v3.execution_branch)
+                .map_err(|e| AdapterError::ConsensusRule {
+                    rule: format!("execution_payload_header SSZ verification failed: {e}"),
+                })?;
+            let sign_root = signing_root_v3(&v3, &exec_root);
+            let exec = v3.execution_payload;
+            (v3.beacon, Some((exec, sign_root)))
+        } else {
+            (parse_update(&evidence.payload)?, None)
+        };
 
-        // The declared fields must be the derived ones. Without this the
-        // envelope's claim and the payload's content can drift, and the
-        // network would be indexing one while committing the other.
+        let committed_state_root = maybe_exec
+            .as_ref()
+            .map_or(update.state_root, |(exec, _)| exec.state_root);
+
+        // The declared fields must be the derived ones. In v2 `declared_root`
+        // binds the finalized Beacon state root; in v3 it binds the SSZ-proven
+        // Deneb/Electra `ExecutionPayloadHeader.state_root`.
         if policy.require_declared_match {
             if evidence.declared_height != update.finalized_slot {
                 return Err(AdapterError::DeclarationMismatch { field: "height" });
             }
-            if evidence.declared_root != update.state_root {
+            if evidence.declared_root != committed_state_root {
                 return Err(AdapterError::DeclarationMismatch {
                     field: "state_root",
                 });
@@ -943,12 +1512,12 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
                     .to_string(),
             });
         }
-        // The signed root is DERIVED from the update -
-        // the signature binds the claimed state root and cannot be replayed
-        // under another one.
+        let derived_signing_root = maybe_exec
+            .as_ref()
+            .map_or_else(|| signing_root_v2(&update), |(_, root)| *root);
         verifier
             .verify_aggregate(
-                &signing_root_v2(&update),
+                &derived_signing_root,
                 &verified_key,
                 &update.signature,
                 signers,
@@ -978,6 +1547,17 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
         // committee's BLS12-381 aggregate.
         observer.observe(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
 
+        let (attested_block_hash, attested_event_root, attested_tx_root) =
+            if let Some((ref exec, _)) = maybe_exec {
+                (
+                    Some(exec.block_hash),
+                    Some(exec.receipts_root),
+                    Some(exec.transactions_root),
+                )
+            } else {
+                (Some(update.finalized_root), None, None)
+            };
+
         Ok(FinalityAttestation {
             adapter: self.descriptor.id,
             domain: crate::cross_domain::external::spec::DomainKey::from_parts(
@@ -985,12 +1565,10 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
                 &evidence.network,
             ),
             height: update.finalized_slot,
-            state_root: update.state_root,
-            // The signed header root IS the block hash
-            // this attestation covers.
-            attested_block_hash: Some(update.finalized_root),
-            attested_event_root: None,
-            attested_tx_root: None,
+            state_root: committed_state_root,
+            attested_block_hash,
+            attested_event_root,
+            attested_tx_root,
             finalized_at: epoch_of_slot(update.finalized_slot),
             time_unit: TimeUnit::Epoch,
             security: SecurityBacking::SignatureSet {
@@ -1350,7 +1928,7 @@ mod slashable_policy_tests {
         bad_version.evidence_version = 99;
         match adapter.verify(&bad_version, &VerificationPolicy::strict(1_000)) {
             Err(AdapterError::UnsupportedEvidenceVersion { accepted, .. }) => {
-                assert_eq!(accepted, "2");
+                assert_eq!(accepted, "2, 3");
             }
             other => panic!("expected UnsupportedEvidenceVersion, got {other:?}"),
         }
@@ -1475,5 +2053,359 @@ mod slashable_policy_tests {
             ),
             "wrong 350-signer subset must fail BLS pairing against bits[0..350]"
         );
+    }
+
+    #[test]
+    fn rotate_committee_refuses_period_skip_and_ceiling_overflow() {
+        let next_key = vec![0x22u8; 96];
+        let pin = PinnedCommittee {
+            period: 7,
+            aggregate_pubkey: vec![0x11u8; 96],
+            next_committee_root: committee_root(&next_key),
+        };
+        let mut adapter = EthereumSyncAdapter::new("mainnet", Some(pin), None);
+
+        // Skipping from period 7 straight to period 12 with period 8's committed
+        // key must be rejected fail-closed.
+        let skipped = PinnedCommittee {
+            period: 12,
+            aggregate_pubkey: next_key.clone(),
+            next_committee_root: [0x99u8; 32],
+        };
+        assert!(
+            adapter.rotate_committee(skipped).is_err(),
+            "committee rotation must refuse skipping intermediate sync-committee periods"
+        );
+        assert_eq!(adapter.committee.as_ref().unwrap().period, 7);
+
+        // Exact sequential advance 7 -> 8 succeeds.
+        let sequential = PinnedCommittee {
+            period: 8,
+            aggregate_pubkey: next_key.clone(),
+            next_committee_root: [0x99u8; 32],
+        };
+        adapter
+            .rotate_committee(sequential)
+            .expect("sequential P -> P + 1 rotation succeeds");
+        assert_eq!(adapter.committee.as_ref().unwrap().period, 8);
+
+        // Ceiling overflow at u64::MAX must be refused without saturation.
+        let mut ceiling_adapter = EthereumSyncAdapter::new(
+            "mainnet",
+            Some(PinnedCommittee {
+                period: u64::MAX,
+                aggregate_pubkey: vec![0x33u8; 96],
+                next_committee_root: committee_root(&next_key),
+            }),
+            None,
+        );
+        assert!(ceiling_adapter
+            .rotate_committee(PinnedCommittee {
+                period: u64::MAX,
+                aggregate_pubkey: next_key,
+                next_committee_root: [0u8; 32],
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn v3_deneb_and_electra_execution_payload_and_multiperiod_ssz_rotation_verify_and_refuse_forgeries(
+    ) {
+        use crate::cross_domain::evm::sync_committee::{
+            sync_committee_hash_tree_root, walk_branch, ExecutionPayloadHeader,
+            FINALIZED_ROOT_GINDEX_DENEB, FINALIZED_ROOT_GINDEX_ELECTRA, LOGS_BLOOM_BYTES,
+            NEXT_SYNC_COMMITTEE_GINDEX_DENEB, NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA,
+        };
+        use bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
+        use sha2::{Digest, Sha256};
+
+        struct RealBls;
+        impl BlsVerifier for RealBls {
+            fn verify_aggregate(
+                &self,
+                signing_root: &[u8; 32],
+                aggregate_pubkey: &[u8],
+                signature: &[u8],
+                _participants: u64,
+            ) -> Result<(), String> {
+                let pk_arr: [u8; 48] = aggregate_pubkey[..48]
+                    .try_into()
+                    .map_err(|_| "bad pk len".to_string())?;
+                let sig_arr: [u8; 96] = signature
+                    .try_into()
+                    .map_err(|_| "bad sig len".to_string())?;
+                let pk = G1Affine::from_compressed(&pk_arr)
+                    .into_option()
+                    .ok_or_else(|| "invalid G1".to_string())?;
+                let sig = G2Affine::from_compressed(&sig_arr)
+                    .into_option()
+                    .ok_or_else(|| "invalid G2".to_string())?;
+                let h = crate::chain::finality::hash_to_g2(signing_root);
+                let g1_neg = -G1Affine::generator();
+                let res = bls12_381::multi_miller_loop(&[(&pk, &h.into()), (&g1_neg, &sig.into())])
+                    .final_exponentiation();
+                if res == bls12_381::Gt::identity() {
+                    Ok(())
+                } else {
+                    Err("BLS pairing failed".into())
+                }
+            }
+            fn sync_committee_closed(&self) -> bool {
+                false
+            }
+        }
+
+        let make_roster = |tag: u64| -> (Vec<Scalar>, [[u8; 48]; 512], [u8; 48]) {
+            let g1 = G1Projective::generator();
+            let mut sks = Vec::with_capacity(512);
+            let mut pks = [[0u8; 48]; 512];
+            let mut sum = G1Projective::identity();
+            for (i, slot) in pks.iter_mut().enumerate() {
+                let mut wide = [0u8; 64];
+                wide[..32].copy_from_slice(&Sha256::digest(
+                    [
+                        b"v3-a".as_slice(),
+                        &tag.to_le_bytes(),
+                        &(i as u64).to_le_bytes(),
+                    ]
+                    .concat(),
+                ));
+                wide[32..].copy_from_slice(&Sha256::digest(
+                    [
+                        b"v3-b".as_slice(),
+                        &tag.to_le_bytes(),
+                        &(i as u64).to_le_bytes(),
+                    ]
+                    .concat(),
+                ));
+                let sk = Scalar::from_bytes_wide(&wide);
+                let pt = g1 * sk;
+                *slot = G1Affine::from(pt).to_compressed();
+                sum += pt;
+                sks.push(sk);
+            }
+            (sks, pks, G1Affine::from(sum).to_compressed())
+        };
+        let sign_v3 = |sks: &[Scalar], raw: &mut [u8], count: usize| {
+            let parsed = parse_execution_update_v3(raw).expect("valid v3 template");
+            let exec_root = parsed.execution_payload.hash_tree_root().unwrap();
+            let sroot = signing_root_v3(&parsed, &exec_root);
+            let h = G2Projective::from(crate::chain::finality::hash_to_g2(&sroot));
+            let mut acc = G2Projective::identity();
+            for sk in sks.iter().take(count) {
+                acc += h * sk;
+            }
+            raw[layout::SIGNATURE].copy_from_slice(&G2Affine::from(acc).to_compressed());
+        };
+        let mask_for = |count: usize| -> [u8; BITVECTOR_BYTES] {
+            let mut m = [0u8; BITVECTOR_BYTES];
+            for i in 0..count {
+                m[i / 8] |= 1u8 << (i % 8);
+            }
+            m
+        };
+
+        let (sk0, pk0, agg0) = make_roster(10);
+        let (sk1, pk1, agg1) = make_roster(11);
+        let (sk2, pk2, agg2) = make_roster(12);
+
+        let ssz_root_1 = sync_committee_hash_tree_root(&pk1, &agg1);
+        let ssz_root_2 = sync_committee_hash_tree_root(&pk2, &agg2);
+
+        let mut padded_agg0 = vec![0u8; 96];
+        padded_agg0[..48].copy_from_slice(&agg0);
+        let pin0 = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: padded_agg0,
+            next_committee_root: ssz_root_1,
+        };
+        let mut adapter =
+            EthereumSyncAdapter::new("mainnet", Some(pin0.clone()), Some(Box::new(RealBls)))
+                .with_member_pubkeys(pk0.to_vec())
+                .expect("pin period-0 512-member roster");
+
+        // 1. Deneb v3 execution update in period 0 (gindex 105 + execution gindex 25).
+        let exec0 = ExecutionPayloadHeader {
+            parent_hash: [0x10; 32],
+            fee_recipient: [0x20; 20],
+            state_root: [0x30; 32],
+            receipts_root: [0x40; 32],
+            logs_bloom: vec![0u8; LOGS_BLOOM_BYTES],
+            prev_randao: [0x50; 32],
+            block_number: 19_500_000,
+            gas_limit: 30_000_000,
+            gas_used: 15_000_000,
+            timestamp: 1_715_000_000,
+            extra_data: b"deneb-v3".to_vec(),
+            base_fee_per_gas: [0x07; 32],
+            block_hash: [0x60; 32],
+            transactions_root: [0x70; 32],
+            withdrawals_root: [0x80; 32],
+            blob_gas_used: 131_072,
+            excess_blob_gas: 0,
+        };
+        let exec_branch = [[0xA1; 32], [0xA2; 32], [0xA3; 32], [0xA4; 32]];
+        let bits = mask_for(342);
+        let mut raw_deneb = build_execution_update_payload_v3(&ExecutionUpdateV3Params {
+            finalized_slot: 128,
+            attested_slot: 192,
+            period: 0,
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_DENEB,
+            committee: &pin0,
+            signature: &[0u8; 96],
+            participation_bits: &bits,
+            beacon_state_root: [0xB1; 32],
+            execution_branch: exec_branch,
+            execution_payload: &exec0,
+        })
+        .expect("build Deneb v3 payload");
+        assert_eq!(raw_deneb.len(), layout::LEN_V3_DENEB);
+        sign_v3(&sk0, &mut raw_deneb, 342);
+
+        let ev0 = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            network: "mainnet".to_string(),
+            evidence_version: 3,
+            declared_height: 128,
+            declared_root: exec0.state_root,
+            payload: raw_deneb.clone(),
+            submitter: crate::core::address::Address([0x01; 32]),
+        };
+        let att0 = adapter
+            .verify(&ev0, &VerificationPolicy::strict(300))
+            .expect("Deneb v3 execution update verifies");
+        assert_eq!(att0.state_root, exec0.state_root);
+        assert_eq!(att0.attested_block_hash, Some(exec0.block_hash));
+        assert_eq!(att0.attested_event_root, Some(exec0.receipts_root));
+        assert_eq!(att0.attested_tx_root, Some(exec0.transactions_root));
+
+        // Forgery A: mutating execution_branch sibling refuses fail-closed.
+        let mut bad_exec_branch = ev0.clone();
+        bad_exec_branch.payload[layout::LEN] ^= 0xFF;
+        assert!(matches!(
+            adapter.verify(&bad_exec_branch, &VerificationPolicy::strict(300)),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+        // Forgery B: declaring Beacon state_root instead of Execution state_root refuses.
+        let mut wrong_decl = ev0.clone();
+        wrong_decl.declared_root = [0xB1; 32];
+        assert!(matches!(
+            adapter.verify(&wrong_decl, &VerificationPolicy::strict(300)),
+            Err(AdapterError::DeclarationMismatch {
+                field: "state_root"
+            })
+        ));
+        // Forgery C: non-zero padding byte in extra_data refuses as Malformed.
+        let mut bad_pad = ev0.clone();
+        let extra_pad_last = layout::LEN + 128 + 32 + 20 + 32 + 32 + 256 + 32 + 32 + 1 + 31;
+        bad_pad.payload[extra_pad_last] = 0x01;
+        assert!(matches!(
+            adapter.verify(&bad_pad, &VerificationPolicy::strict(300)),
+            Err(AdapterError::Malformed { .. })
+        ));
+
+        // 2. Chain two SSZ rotations: 0 -> 1 (Deneb gindex 55) and 1 -> 2 (Electra gindex 87).
+        let branch_55: Vec<[u8; 32]> = (0u8..5).map(|i| [0xC1 + i; 32]).collect();
+        let fin_state_0 =
+            walk_branch(ssz_root_1, &branch_55, NEXT_SYNC_COMMITTEE_GINDEX_DENEB).unwrap();
+        let rot_to_1 = SszCommitteeRotation {
+            next_period: 1,
+            next_member_pubkeys: pk1,
+            next_aggregate_pubkey: agg1,
+            finalized_state_root: fin_state_0,
+            next_sync_committee_gindex: NEXT_SYNC_COMMITTEE_GINDEX_DENEB,
+            next_sync_committee_branch: branch_55,
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_DENEB,
+            subsequent_committee_root: ssz_root_2,
+        };
+        // Wrong fork gindex or period skip must refuse before mutating the pinned committee.
+        let mut wrong_fork_rot = rot_to_1.clone();
+        wrong_fork_rot.next_sync_committee_gindex = NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA;
+        assert!(adapter
+            .rotate_committee_with_ssz_branch(&wrong_fork_rot)
+            .is_err());
+        let mut skipped_rot = rot_to_1.clone();
+        skipped_rot.next_period = 2;
+        assert!(adapter
+            .rotate_committee_with_ssz_branch(&skipped_rot)
+            .is_err());
+
+        adapter
+            .rotate_committee_with_ssz_branch(&rot_to_1)
+            .expect("Deneb SSZ rotation 0 -> 1 succeeds");
+        assert!(
+            adapter
+                .verify(&ev0, &VerificationPolicy::strict(300))
+                .is_err(),
+            "period-0 update must no longer verify after rotating to period 1"
+        );
+
+        let branch_87: Vec<[u8; 32]> = (0u8..6).map(|i| [0xD1 + i; 32]).collect();
+        let fin_state_1 =
+            walk_branch(ssz_root_2, &branch_87, NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA).unwrap();
+        adapter
+            .rotate_committee_with_ssz_branch(&SszCommitteeRotation {
+                next_period: 2,
+                next_member_pubkeys: pk2,
+                next_aggregate_pubkey: agg2,
+                finalized_state_root: fin_state_1,
+                next_sync_committee_gindex: NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA,
+                next_sync_committee_branch: branch_87,
+                finalized_root_gindex: FINALIZED_ROOT_GINDEX_ELECTRA,
+                subsequent_committee_root: [0xEE; 32],
+            })
+            .expect("Electra SSZ rotation 1 -> 2 succeeds");
+
+        // 3. Electra v3 execution update in period 2 verifies against rotated `pk2` subset!
+        let pin2 = adapter.committee.clone().unwrap();
+        let exec2 = ExecutionPayloadHeader {
+            state_root: [0x32; 32],
+            receipts_root: [0x42; 32],
+            block_hash: [0x62; 32],
+            transactions_root: [0x72; 32],
+            block_number: 22_000_000,
+            ..exec0
+        };
+        let slot_p2 = 2 * EPOCHS_PER_SYNC_COMMITTEE_PERIOD * SLOTS_PER_EPOCH + 128;
+        let mut raw_electra = build_execution_update_payload_v3(&ExecutionUpdateV3Params {
+            finalized_slot: slot_p2,
+            attested_slot: slot_p2 + 64,
+            period: 2,
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_ELECTRA,
+            committee: &pin2,
+            signature: &[0u8; 96],
+            participation_bits: &mask_for(360),
+            beacon_state_root: [0xB2; 32],
+            execution_branch: exec_branch,
+            execution_payload: &exec2,
+        })
+        .expect("build Electra v3 payload");
+        assert_eq!(raw_electra.len(), layout::LEN_V3_ELECTRA);
+        // Signing with retired period-1 committee keys MUST fail pairing!
+        sign_v3(&sk1, &mut raw_electra, 360);
+        let mut ev2 = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            network: "mainnet".to_string(),
+            evidence_version: 3,
+            declared_height: slot_p2,
+            declared_root: exec2.state_root,
+            payload: raw_electra.clone(),
+            submitter: crate::core::address::Address([0x02; 32]),
+        };
+        assert!(matches!(
+            adapter.verify(&ev2, &VerificationPolicy::strict(slot_p2 + 200)),
+            Err(AdapterError::Crypto { .. })
+        ));
+
+        // Signing with period-2 rotated keys verifies and outputs proven execution roots!
+        sign_v3(&sk2, &mut ev2.payload, 360);
+        let att2 = adapter
+            .verify(&ev2, &VerificationPolicy::strict(slot_p2 + 200))
+            .expect("Electra v3 execution update verifies in period 2");
+        assert_eq!(att2.height, slot_p2);
+        assert_eq!(att2.state_root, exec2.state_root);
+        assert_eq!(att2.attested_block_hash, Some(exec2.block_hash));
+        assert_eq!(att2.attested_event_root, Some(exec2.receipts_root));
+        assert_eq!(att2.attested_tx_root, Some(exec2.transactions_root));
     }
 }

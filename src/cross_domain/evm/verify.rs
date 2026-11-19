@@ -286,8 +286,9 @@ pub fn verify_evm_receipt(
     )
     .map_err(|e| VerifyError::Header(e.to_string()))?;
 
-    // 2. MPT verify: receiptsRoot → receipt bytes.
-    let receipt_bytes = mpt::verify(proof.proof_nodes, &target.receipts_root, proof.receipt_key)?;
+    // 2. Strict Yellow Paper MPT verify: receiptsRoot -> receipt bytes.
+    let receipt_bytes =
+        mpt::verify_yellow_paper(proof.proof_nodes, &target.receipts_root, proof.receipt_key)?;
 
     // 3. Receipt RLP decode.
     let receipt: EthReceipt = receipt::decode_receipt(&receipt_bytes)?;
