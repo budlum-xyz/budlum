@@ -15,23 +15,23 @@ permissions:
 jobs:
   storage-shards:
     # User decision 2026-09-24: pay the full storage UB inspection cost rather
-    # than leaving the 3600 s PR window as the only evidence. Twenty-four
-    # scheduled shards keep each hosted job under the 6 h ceiling (measured
-    # full cost: ~26.5 runner-hours/week). This workflow has no pull_request
-    # trigger, so PRs never list a permanent Skipped check for the
-    # scheduled-only sweep.
-    name: Miri storage full shard ${{ matrix.shard_index }}/24 (weekly)
+    # than leaving the 3600 s PR window as the only evidence. Thirty-two
+    # scheduled shards keep each hosted job under the 6 h ceiling even when a
+    # shard draws several PQ-signing `domain::storage_tx` cases. This workflow
+    # has no pull_request trigger, so PRs never list a permanent Skipped check
+    # for the scheduled-only sweep.
+    name: Miri storage full shard ${{ matrix.shard_index }}/32 (weekly)
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      # Twenty-four shards of up to six hours each must not hold every runner.
+      # Thirty-two shards of up to six hours each must not hold every runner.
       max-parallel: 4
       matrix:
         shard_index:
           [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
-            12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
           ]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,11 +64,11 @@ jobs:
             sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
             rm -f /tmp/protoc.zip
           fi
-      - name: Miri storage shard ${{ matrix.shard_index }} of 24
+      - name: Miri storage shard ${{ matrix.shard_index }} of 32
         run: |
           set -euo pipefail
           shard='${{ matrix.shard_index }}'
-          shards=24
+          shards=32
           echo "Enumerating storage tests for shard $shard/$shards..."
           cargo +nightly-2026-07-19 test -p budlum-core --lib -- storage --list \
             2>&1 | tee /tmp/miri-storage-list.txt
@@ -128,22 +128,25 @@ jobs:
             qc_blob_storage_rejects_corruption_and_cross_height_rows
             corrupted_local_bytes_are_refused
             honest_local_bytes_are_returned
+            # RPC server tests construct TLS/rcgen fixtures via C `aws-lc-sys`
+            # (`EVP_PKEY_CTX_new_id`), libp2p node tests invoke OS socket FFI,
+            # and codec vector harnesses call C `zstd-sys` (`ZSTD_createCStream`);
+            # all three abort Miri at the foreign-function boundary before any
+            # pure-Rust storage state machine runs (run 43852689301 shards 0/1).
+            rpc::tests::
+            network::node::
+            garden::storage::
+            test_bns_full_resolve_with_storage
+            bud3_context_codec_vectors
+            bud3_every_format_round_trips_and_two_paths_are_identical
           )
 
-          # Pass the selected tests as exact libtest filters. The previous
-          # form passed every non-selected test as its own `--skip` pattern:
-          # with 898 listed tests that was ~862 substring patterns for a
-          # 36-test shard. Under Miri, libtest spent the whole measured
-          # window (2 h 42 min in run 39489412201) matching those patterns
-          # before it ever printed `running N tests`, so the shard inspected
-          # nothing and only ever ended by cancellation. Exact filters name
-          # the same selected set directly; the FFI-bound tests are excluded
-          # by not being selected, exactly as before.
-          args=(--exact --test-threads=1)
-          selected=0
+          # Filter FFI-bound entries FIRST and shard across the surviving pure-Rust
+          # storage tests so every shard receives a balanced slice and no shard can
+          # end up empty when its modulo stride collides with skipped tests.
+          pure_tests=()
           forced_skipped=0
-          for i in "${!tests[@]}"; do
-            name="${tests[$i]}"
+          for name in "${tests[@]}"; do
             skip=0
             for forced in "${ffi_skip[@]}"; do
               if [[ "$name" == *"$forced"* ]]; then
@@ -152,19 +155,31 @@ jobs:
                 break
               fi
             done
-            if [ "$skip" -eq 0 ] && [ $((i % shards)) -ne "$shard" ]; then
-              skip=1
-            fi
             if [ "$skip" -eq 0 ]; then
+              pure_tests+=("$name")
+            fi
+          done
+          total_pure=${#pure_tests[@]}
+          if [ "$total_pure" -lt 64 ]; then
+            echo "::error::Only $total_pure pure storage tests survived FFI filtering (from $total_listed listed)."
+            exit 1
+          fi
+
+          # Pass the selected tests as exact libtest filters so libtest does not
+          # spend hours evaluating hundreds of `--skip` patterns under Miri.
+          args=(--exact --test-threads=1)
+          selected=0
+          for i in "${!pure_tests[@]}"; do
+            if [ $((i % shards)) -eq "$shard" ]; then
               selected=$((selected + 1))
-              args+=("$name")
+              args+=("${pure_tests[$i]}")
             fi
           done
           if [ "$selected" -lt 1 ]; then
-            echo "::error::Shard $shard selected zero tests from $total_listed listed tests."
+            echo "::error::Shard $shard selected zero tests from $total_pure pure storage tests."
             exit 1
           fi
-          echo "Shard $shard selected $selected of $total_listed listed storage tests; forced Miri-FFI skips encountered: $forced_skipped."
+          echo "Shard $shard selected $selected of $total_pure pure storage tests ($total_listed listed; $forced_skipped FFI skips)."
 
           set +e
           cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- "${args[@]}" \
@@ -193,6 +208,7 @@ jobs:
             echo "| measured | value |"
             echo "| :-- | --: |"
             echo "| tests listed | $total_listed |"
+            echo "| pure storage tests after FFI filter | $total_pure |"
             echo "| tests selected by shard | $selected |"
             echo "| tests passed under Miri | ${passed:-0} |"
             echo "| forced sled/FFI skips seen in list | $forced_skipped |"
@@ -205,6 +221,6 @@ jobs:
           set +o pipefail
           if [ -s /tmp/miri-storage-shard.txt ]; then
             sed -e 's/\x1b\[[0-9;]*m//g' /tmp/miri-storage-shard.txt \
-              | grep -E "error|Undefined Behavior|panicked|test result|FAILED|failures:" \
-              | head -n 12 | sed -e "s@^@::error::/tmp/miri-storage-shard.txt @"
+              | grep -E "^(error(\[|:)|test result:|failures:)|Undefined Behavior|panicked at|FAILED" \
+              | head -n 16 | sed -e "s@^@::error::/tmp/miri-storage-shard.txt @"
           fi
