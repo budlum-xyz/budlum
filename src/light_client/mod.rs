@@ -36,7 +36,7 @@ use crate::consensus::qc::QcBlob;
 use crate::core::block::BlockHeader;
 use crate::network::protocol::is_canonical_hash;
 
-/// Maximum number of verified un-advanced headers cached in [`LightClient::linked`].
+/// Maximum number of verified un-advanced headers cached in `LightClient::linked`.
 ///
 /// Caps light-client memory against unbounded header-segment downloads between
 /// checkpoint advances while keeping full multi-epoch sync segments admissible.

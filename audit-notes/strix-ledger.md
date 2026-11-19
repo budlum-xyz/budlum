@@ -249,13 +249,13 @@ giden kurulumuyu soruyor
 - **Yer:** dört dosya, dört lint.
 - **Ne:** `d8d3f01` (~5300 satır yeni kod: PoSpace+VDF adaptörü, ULP-1,
   ışık istemcisi) clippy kapısını yeniden kırmızı yapmış:
-  1. `src/cross_domain/external/pospace_vdf.rs:1002` — `mine_valid_block`
+  1. `src/cross_domain/external/pospace_vdf.rs:1002` - `mine_valid_block`
      9 argüman (`too_many_arguments`).
-  2. `src/settlement/shared_security.rs:1540` — `.get(&val_a).is_none()`
+  2. `src/settlement/shared_security.rs:1540` - `.get(&val_a).is_none()`
      (`unnecessary_get_then_check`).
-  3. `src/tests/bitcoin_spv.rs:721` — `assert!(MAX_STARK_BATCH_HEADERS >= 6)`
+  3. `src/tests/bitcoin_spv.rs:721` - `assert!(MAX_STARK_BATCH_HEADERS >= 6)`
      (`assertions_on_constants`).
-  4. `src/light_client/mod.rs:2338` — `vec![...]` tek öğeli dizi
+  4. `src/light_client/mod.rs:2338` - `vec![...]` tek öğeli dizi
      (`useless_vec`).
 - **Neden önemli:** Kapı her seferinde yeniden kırmızı oluyor; bu, kapıın
   ucu gerçekten koruyamadığının kanıtı.

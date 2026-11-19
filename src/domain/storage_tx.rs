@@ -32,6 +32,7 @@ use crate::domain::storage_params::{STORAGE_MIN_OPERATOR_BOND, STORAGE_REQUIRE_M
 /// Minimum epochs an operator must have to respond to a retrieval challenge.
 /// Strix B-0066: too-short windows make honest operators miss deadlines
 /// through no fault of their own and lose their bond.
+/// WIRING: enforced in `open_challenge` and exposed for storage SDK callers.
 pub const MIN_AUDIT_RESPONSE_WINDOW_EPOCHS: u64 = 3;
 use crate::domain::Hash32;
 use crate::storage::{
