@@ -1534,7 +1534,9 @@ impl Bud3Registry {
     ///
     /// # Errors
     ///
-    /// Returns [`RegistryError`] if [`Self::validate_view_grant`] fails.
+    /// Returns [`RegistryError`] from the shared validation in [`Self::validate_view_grant`]
+    /// when the NFT is unknown, the signer is not authorized, or the grant row fails its
+    /// shape and epoch checks.
     pub fn issue_grant(
         &mut self,
         nft: &NftId,
@@ -1702,7 +1704,7 @@ impl Bud3Registry {
     ///
     /// # Errors
     ///
-    /// Returns [`RegistryError::BadQuota`] if `quota_bytes` violates `limits`.
+    /// Returns [`RegistryError::BadQuota`] when the declared custody quota violates `limits`.
     pub fn set_mobile_custody_quota(
         &mut self,
         validator: Address,
