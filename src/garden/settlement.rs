@@ -199,11 +199,14 @@ impl GardenBudlumLink {
     /// bridgeless flag and Garden finality adapter), never the 31-bit derived
     /// `domain_id` alone, so a hash collision with another Garden cannot adopt
     /// or quarantine the wrong local record.
+    #[cfg(test)]
     pub async fn view(&self, chain_id: u64) -> Option<GardenDomainView> {
         self.view_matching(chain_id, None).await
     }
 
-    /// Like [`Self::view`], additionally binding `config_hash` to `genesis_hash`.
+    /// Look up this Garden's local record on Budlum, binding `domain_chain_id`,
+    /// `PoA` kind, bridgeless flag, finality adapter, and `config_hash` to
+    /// `genesis_hash`.
     pub async fn view_for_genesis(
         &self,
         chain_id: u64,

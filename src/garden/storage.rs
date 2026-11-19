@@ -198,30 +198,30 @@ impl GardenContentStore {
             ));
         }
         let len = charged_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-        match self.path_of(&content_id) {
-            Some(path) => {
+        if let Some(path) = self.path_of(&content_id) {
+            if self.contains(&content_id) {
+                return Ok(None);
+            }
+            if !self.can_fit(len) {
+                return Err(format!(
+                    "garden local storage limit of {} bytes reached",
+                    self.max_total_bytes
+                ));
+            }
+            self.total_bytes = self.total_bytes.saturating_add(len);
+            Ok(Some((path, len)))
+        } else {
+            if !self.memory.contains_key(&content_id) {
                 if !self.can_fit(len) {
                     return Err(format!(
                         "garden local storage limit of {} bytes reached",
                         self.max_total_bytes
                     ));
                 }
+                self.memory.insert(content_id, bytes.to_vec());
                 self.total_bytes = self.total_bytes.saturating_add(len);
-                Ok(Some((path, len)))
             }
-            None => {
-                if !self.memory.contains_key(&content_id) {
-                    if !self.can_fit(len) {
-                        return Err(format!(
-                            "garden local storage limit of {} bytes reached",
-                            self.max_total_bytes
-                        ));
-                    }
-                    self.memory.insert(content_id, bytes.to_vec());
-                    self.total_bytes = self.total_bytes.saturating_add(len);
-                }
-                Ok(None)
-            }
+            Ok(None)
         }
     }
 
@@ -515,5 +515,28 @@ mod tests {
         assert!(reopened.can_fit(1));
         assert!(reopened.can_fit(floor));
         assert!(!reopened.can_fit(floor + 1));
+    }
+
+    #[test]
+    fn reserve_background_write_is_idempotent_when_object_already_on_disk() {
+        let floor = crate::garden::types::MIN_PUBLICATION_CHARGE;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("garden");
+        // Budget fits one object plus spare headroom, not two full charges.
+        let mut store = GardenContentStore::open_with_limit(Some(&root), 64, floor + 512).unwrap();
+        let payload = [0x42u8; 24];
+        let id = store.put(&payload).unwrap();
+        assert_eq!(store.total_bytes(), floor);
+
+        // Re-reserving the exact already-stored object must succeed without
+        // charging a second slot or pushing total_bytes past the cap.
+        let reservation = store
+            .reserve_background_write(id, &payload)
+            .expect("idempotent background deposit for an existing object must fit");
+        assert!(
+            reservation.is_none(),
+            "existing valid object need not schedule another disk write"
+        );
+        assert_eq!(store.total_bytes(), floor);
     }
 }
