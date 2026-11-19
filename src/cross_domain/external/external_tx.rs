@@ -1145,13 +1145,24 @@ mod tests {
         )
         .is_err());
 
-        // Replenishing bond above required floor restores honest readmission.
+        // Replenishing bond up to required floor restores honest readmission.
+        // Bonding a fresh prover at the required floor restores honest readmission.
+        let backup_prover = Address([11; 32]);
+        state.get_or_create(&backup_prover).balance = 5_000_000;
+        let required_bond = state
+            .settlement
+            .external_intake
+            .registry
+            .domain(&key)
+            .expect("domain stays registered while quarantined")
+            .economics
+            .required_bond_atoms();
         execute_external_domain_tx(
             &mut state,
-            &ctx(poster),
+            &ctx(backup_prover),
             &ExternalDomainTx::BondProver {
                 domain: key,
-                bond_atoms: 1_000,
+                bond_atoms: required_bond,
             },
         )
         .unwrap();

@@ -228,7 +228,7 @@ impl FamilyProfile for EvmFamily {
         _ctx: &FamilyContext<'_>,
         raw: &RawEndpointEvent,
     ) -> Result<EndpointEvent, FamilyError> {
-        if raw.topics.len() != 1 || raw.topics[0].len() != 32 {
+        if raw.topics.len() != 1 || raw.topics[0].len() != 32 || !raw.attributes.is_empty() {
             return Err(FamilyError::UnknownEvent);
         }
         let topic = raw.topics[0].as_slice();
@@ -250,12 +250,17 @@ impl FamilyProfile for EvmFamily {
                 recipient: (recipient != [0u8; 32]).then_some(Address(recipient)),
             })
         } else if topic == keccak256(HOME_CALL_SIGNATURE.as_bytes()) {
+            const MAX_EVM_HOME_CALL_BYTES: usize = 8 * 1024;
             let nonce = u64::try_from(abi_u128(&abi_word(d, 1)?)?)
                 .map_err(|_| FamilyError::Malformed("nonce above u64"))?;
+            let calls = abi_bytes(d, 2)?;
+            if calls.len() > MAX_EVM_HOME_CALL_BYTES {
+                return Err(FamilyError::Malformed("call list too long"));
+            }
             Ok(EndpointEvent::Call {
                 sender: abi_address(&abi_word(d, 0)?)?.to_vec(),
                 nonce,
-                calls: abi_bytes(d, 2)?,
+                calls,
             })
         } else if topic == keccak256(RELEASED_SIGNATURE.as_bytes()) {
             exact_words(d, 1)?;

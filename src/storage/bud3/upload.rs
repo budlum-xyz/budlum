@@ -277,8 +277,12 @@ impl UploadSessionManager {
         }
     }
 
-    /// Purge sessions older than `UPLOAD_SESSION_TTL_SECS` (6 hours).
+    /// Purge sessions older than `UPLOAD_SESSION_TTL_SECS` (6 hours) and prune
+    /// historical daily quota buckets so node RAM stays strictly bounded.
     pub fn purge_expired(&mut self, now_sec: u64) {
+        let cur_day = now_sec / 86_400;
+        self.daily_account_bytes
+            .retain(|(bucket, _), _| *bucket >= cur_day);
         let expired: Vec<u64> = self
             .sessions
             .iter()
@@ -286,7 +290,18 @@ impl UploadSessionManager {
             .map(|(id, _)| *id)
             .collect();
         for id in expired {
-            self.sessions.remove(&id);
+            if let Some(stale) = self.sessions.remove(&id) {
+                let open_day = stale.opened_at_sec / 86_400;
+                // Release unreceived bytes from the account's current-day quota while
+                // keeping received bytes charged so abandoned streams still cost quota.
+                let unreceived = stale.declared_len.saturating_sub(stale.received_len);
+                if unreceived > 0 {
+                    if let Some(used) = self.daily_account_bytes.get_mut(&(open_day, stale.account))
+                    {
+                        *used = used.saturating_sub(unreceived);
+                    }
+                }
+            }
         }
     }
 
@@ -964,6 +979,19 @@ mod tests {
             .finish_session(empty, &SMALL, &row, &full_candidates(4), &reg, 503)
             .expect("a declared zero-length upload is a deliberate empty object");
         assert_eq!(finished.record.content_id, ContentId::public(b""));
+
+        // Expired partial sessions release unreceived quota and historical days are pruned.
+        let partial = mgr
+            .open_session(([8; 32], [5; 16]), 1024, 0, 20, false, 1_000)
+            .unwrap();
+        mgr.append_chunk(partial, &[0xAB; 256], 1_001).unwrap();
+        mgr.purge_expired(1_000 + UPLOAD_SESSION_TTL_SECS + 1);
+        assert_eq!(
+            mgr.daily_account_bytes.get(&(0, [8; 32])).copied(),
+            Some(256)
+        );
+        mgr.purge_expired(2 * 86_400);
+        assert!(mgr.daily_account_bytes.is_empty());
     }
 
     #[test]

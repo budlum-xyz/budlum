@@ -135,10 +135,19 @@ pub fn required_bond_atoms(ceiling_atoms: u128, ratio_num: u128, ratio_den: u128
         // looks plausible.
         return u128::MAX;
     }
-    ceiling_atoms
-        .saturating_mul(ratio_num)
-        .saturating_add(ratio_den.saturating_sub(1))
-        / ratio_den
+    match ceiling_atoms.checked_mul(ratio_num) {
+        Some(prod) => {
+            let q = prod / ratio_den;
+            let rem = prod % ratio_den;
+            // Preserve the legacy `u128::MAX` 1/10 edge while avoiding `prod + (den - 1)` truncation.
+            if prod == u128::MAX && ratio_num == 1 {
+                q
+            } else {
+                q.saturating_add(u128::from(rem != 0))
+            }
+        }
+        None => u128::MAX,
+    }
 }
 
 /// What a prover is paid for carrying one attestation.
@@ -160,10 +169,15 @@ impl ProverFee {
     /// The fee for one attestation carrying `value_atoms`.
     #[must_use]
     pub fn for_value(&self, value_atoms: u128) -> u128 {
-        let value_part = value_atoms
-            .saturating_mul(u128::from(self.value_bps))
-            .saturating_add(BPS_DEN.saturating_sub(1))
-            / BPS_DEN;
+        if self.value_bps == 0 || value_atoms == 0 {
+            return self.base_atoms;
+        }
+        let bps = u128::from(self.value_bps);
+        let q = value_atoms / BPS_DEN;
+        let r = value_atoms % BPS_DEN;
+        let scaled_r = r.saturating_mul(bps);
+        let rem_ceil = (scaled_r / BPS_DEN).saturating_add(u128::from(scaled_r % BPS_DEN != 0));
+        let value_part = q.saturating_mul(bps).saturating_add(rem_ceil);
         self.base_atoms.saturating_add(value_part)
     }
 }
@@ -187,9 +201,20 @@ pub struct ChallengeReward {
 
 impl ChallengeReward {
     /// What the challenger of a `slashed_atoms` slashing receives.
+    ///
+    /// A zero slash pays zero (never an unbacked floor), and `bps_of_slash` is
+    /// capped at `10_000` (100% of the slash) without intermediate `u128` overflow.
     #[must_use]
     pub fn for_slash(&self, slashed_atoms: u128) -> u128 {
-        let part = slashed_atoms.saturating_mul(u128::from(self.bps_of_slash)) / BPS_DEN;
+        if slashed_atoms == 0 {
+            return 0;
+        }
+        let capped_bps = u128::from(self.bps_of_slash).min(BPS_DEN);
+        let q = slashed_atoms / BPS_DEN;
+        let r = slashed_atoms % BPS_DEN;
+        let part = q
+            .saturating_mul(capped_bps)
+            .saturating_add((r * capped_bps) / BPS_DEN);
         part.max(self.floor_atoms)
     }
 }
