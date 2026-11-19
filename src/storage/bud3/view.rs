@@ -483,7 +483,7 @@ pub fn fallback_decode_public<N: NetworkSymbolSource>(
         .map(|(k, _)| k);
     if receipt_resolved != Some(resolved_key)
         || receipt.fee_paid_atoms < MIN_PAID_VIEW_FEE_ATOMS
-        || !registry.verify_paid_view(receipt)
+        || !registry.verify_paid_view_at(receipt, registry.observed_paid_view_epoch())
     {
         return Err(ViewBud3Error::UnpaidFallbackView);
     }
