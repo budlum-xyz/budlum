@@ -2762,7 +2762,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      code-quality: write
     # 45 minutes used to be enough and stopped being enough without the suite
     # getting slower: it got longer. The run on `7535554` was still walking the
     # suite at 44 minutes (2383 of 4355 tests at 17 minutes, plus the instrumented
