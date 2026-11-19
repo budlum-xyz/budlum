@@ -53,7 +53,7 @@ impl Default for PoSpaceConfig {
 
 /// Canonical Merkle inclusion proof for one committed 32-byte plot leaf.
 /// WIRING: Proof envelope supplied to [`PoSpaceEngine::register_verified_plot`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlotMerkleProof {
     /// Zero-based leaf position inside the `2^tree_depth`-leaf plot tree.
     pub leaf_index: u64,
@@ -457,7 +457,7 @@ fn derive_block_challenge(previous_hash: &str, block_index: u64, challenge_epoch
     out
 }
 
-/// PoSpace engine: bounded Merkle-verified plot registry and challenge verifier.
+/// `PoSpace` engine: bounded Merkle-verified plot registry and challenge verifier.
 pub struct PoSpaceEngine {
     pub config: PoSpaceConfig,
     plots: RwLock<BTreeMap<String, PlotRecord>>,
@@ -465,7 +465,7 @@ pub struct PoSpaceEngine {
 }
 
 impl PoSpaceEngine {
-    /// Create a new PoSpace consensus engine.
+    /// Create a new `PoSpace` consensus engine.
     #[must_use]
     pub const fn new(config: PoSpaceConfig) -> Self {
         Self {
@@ -582,7 +582,7 @@ impl PoSpaceEngine {
         Ok(())
     }
 
-    /// Issue the next domain-separated PoSpace challenge.
+    /// Issue the next domain-separated `PoSpace` challenge.
     fn issue_challenge(&self) -> Result<[u8; 32], ConsensusError> {
         let mut counter = self
             .challenge_counter
@@ -821,6 +821,363 @@ impl ConsensusEngine for PoSpaceEngine {
     }
 }
 
+/// Hard upper bound on synchronous sequential delay steps verified per proof.
+const MAX_POSPACE_VDF_ITERATIONS: u64 = 65_536;
+
+/// Maximum plot-filter difficulty prefix in bits (caps filter sparsity to `2^16`).
+const MAX_PLOT_FILTER_BITS: u8 = 16;
+
+/// Maximum number of intermediate checkpoints in a segmented delay proof.
+const MAX_POSPACE_VDF_CHECKPOINTS: usize = 64;
+
+/// Segmented sequential SHA-256 delay proof coupled to a verified `PoSpace`
+/// Merkle leaf opening (eliminates costless history rewriting / grinding).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpaceTimeDelayProof {
+    pub plot_id: [u8; 32],
+    pub size_bytes: u64,
+    pub tree_depth: u8,
+    pub challenge: [u8; 32],
+    pub signage_index: u32,
+    pub filter_bits: u8,
+    pub space_opening: PlotMerkleProof,
+    pub iterations: u64,
+    pub segment_stride: u64,
+    pub checkpoints: Vec<[u8; 32]>,
+    pub output: [u8; 32],
+}
+
+/// Evaluate the Chia-style signage-point plot filter for a sub-slot.
+///
+/// Requires the leading `filter_bits` of
+/// `H("BDLM_POSPACE_FILTER_V1" || plot_id || challenge || signage_index)`
+/// to be zero, preventing farmers from scanning every plot on every sub-slot.
+///
+/// WIRING: Sub-slot eligibility gate for `ConsensusKind::Pospace` and PoSpace+VDF pipelines.
+#[must_use]
+pub fn passes_plot_filter(
+    plot_id: &[u8; 32],
+    challenge: &[u8; 32],
+    signage_index: u32,
+    filter_bits: u8,
+) -> bool {
+    if filter_bits == 0 {
+        return true;
+    }
+    if filter_bits > MAX_PLOT_FILTER_BITS {
+        return false;
+    }
+    let digest = crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_POSPACE_FILTER_V1",
+        plot_id,
+        challenge,
+        &signage_index.to_le_bytes(),
+    ]);
+    let head = u16::from_be_bytes([
+        digest.first().copied().unwrap_or(0xFF),
+        digest.get(1).copied().unwrap_or(0xFF),
+    ]);
+    head.leading_zeros() >= u32::from(filter_bits)
+}
+
+/// Compute the required sequential delay iterations for a `PoSpace` quality hit.
+///
+/// Derives a canonical 32-byte digest over `(plot_id, challenge, signage_index, opened_leaf)`
+/// and maps it into `1..=max_iterations` inversely weighted by verified `size_bytes`.
+///
+/// Pure integer math (zero floats); strictly bounded by `MAX_POSPACE_VDF_ITERATIONS`.
+///
+/// # Errors
+///
+/// Returns [`ConsensusError`] when `size_bytes == 0`, `difficulty == 0`, or
+/// `max_iterations` is outside `1..=MAX_POSPACE_VDF_ITERATIONS`.
+///
+/// WIRING: Deterministic quality-to-delay schedule for [`evaluate_space_time_delay`]
+/// and [`verify_space_time_delay`].
+pub fn required_space_time_iterations(
+    plot_id: &[u8; 32],
+    challenge: &[u8; 32],
+    signage_index: u32,
+    opening: &PlotMerkleProof,
+    size_bytes: u64,
+    difficulty: u64,
+    max_iterations: u64,
+) -> Result<u64, ConsensusError> {
+    if size_bytes == 0 || size_bytes > MAX_PLOT_SIZE_BYTES {
+        return Err(ConsensusError(
+            "PoSpace delay schedule requires non-zero bounded size_bytes".into(),
+        ));
+    }
+    if difficulty == 0 {
+        return Err(ConsensusError(
+            "PoSpace delay schedule requires non-zero difficulty".into(),
+        ));
+    }
+    if max_iterations == 0 || max_iterations > MAX_POSPACE_VDF_ITERATIONS {
+        return Err(ConsensusError(format!(
+            "PoSpace max_iterations {max_iterations} outside 1..={MAX_POSPACE_VDF_ITERATIONS}"
+        )));
+    }
+    let quality = crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_POSPACE_QUALITY_V1",
+        plot_id,
+        challenge,
+        &signage_index.to_le_bytes(),
+        &opening.leaf_index.to_le_bytes(),
+        &opening.leaf_value,
+    ]);
+    let mut q_bytes = [0u8; 8];
+    if let Some(prefix) = quality.get(..8) {
+        q_bytes.copy_from_slice(prefix);
+    }
+    // Scale 64-bit quality ticket by difficulty / size_bytes into [1, max_iterations].
+    let q_norm = u128::from(u64::from_be_bytes(q_bytes)) >> 32;
+    let raw = q_norm
+        .saturating_mul(u128::from(difficulty))
+        .checked_div(u128::from(size_bytes))
+        .unwrap_or(1);
+    let capped = raw.clamp(1, u128::from(max_iterations));
+    u64::try_from(capped).map_err(|_| ConsensusError("PoSpace iteration count overflow".into()))
+}
+
+fn delay_seed(
+    plot_id: &[u8; 32],
+    challenge: &[u8; 32],
+    signage_index: u32,
+    resp: &[u8; 32],
+) -> [u8; 32] {
+    crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_POSPACE_VDF_SEED_V1",
+        plot_id,
+        challenge,
+        &signage_index.to_le_bytes(),
+        resp,
+    ])
+}
+
+fn step_delay_chain(mut state: [u8; 32], start_step: u64, count: u64) -> [u8; 32] {
+    let mut i = 0u64;
+    while i < count {
+        let step = start_step.saturating_add(i);
+        let mut h = Sha256::new();
+        h.update(b"BDLM_POSPACE_VDF_STEP_V1");
+        h.update(step.to_le_bytes());
+        h.update(state);
+        let d = h.finalize();
+        state.copy_from_slice(&d);
+        i += 1;
+    }
+    state
+}
+
+/// Schedule parameters governing a segmented `PoSpace` delay proof.
+///
+/// WIRING: Parameter bundle shared by [`evaluate_space_time_delay`],
+/// [`verify_space_time_delay`], and [`crate::unification::UnificationLedger`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpaceTimeDelayParams {
+    pub signage_index: u32,
+    pub filter_bits: u8,
+    pub difficulty: u64,
+    pub max_iterations: u64,
+    pub segment_stride: u64,
+}
+
+/// Construct a verified [`SpaceTimeDelayProof`] for an eligible `PoSpace` slot.
+///
+/// Links a committed Merkle leaf opening to an iterated sequential SHA-256 delay
+/// chain with intermediate checkpoints every `params.segment_stride` steps.
+///
+/// # Errors
+///
+/// Returns [`ConsensusError`] if the plot fails the signage-point filter, the
+/// Merkle opening is invalid, or iteration/checkpoint bounds are violated.
+///
+/// WIRING: Prover companion to [`verify_space_time_delay`] for PoSpace+VDF slots.
+pub fn evaluate_space_time_delay(
+    plot_id: [u8; 32],
+    size_bytes: u64,
+    tree_depth: u8,
+    leaves: &[[u8; 32]],
+    challenge: [u8; 32],
+    params: SpaceTimeDelayParams,
+) -> Result<SpaceTimeDelayProof, ConsensusError> {
+    let signage_index = params.signage_index;
+    let filter_bits = params.filter_bits;
+    let difficulty = params.difficulty;
+    let max_iterations = params.max_iterations;
+    let segment_stride = params.segment_stride;
+    if !passes_plot_filter(&plot_id, &challenge, signage_index, filter_bits) {
+        return Err(ConsensusError(
+            "PoSpace plot did not pass signage-point filter".into(),
+        ));
+    }
+    let sub_challenge = crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_POSPACE_SUBSLOT_V1",
+        &challenge,
+        &signage_index.to_le_bytes(),
+    ]);
+    let leaf_idx = challenged_leaf_index(&plot_id, &sub_challenge, tree_depth);
+    let space_opening = open_plot_merkle_leaf(leaves, leaf_idx)?;
+    if !verify_plot_merkle_proof(&plot_id, tree_depth, &space_opening) {
+        return Err(ConsensusError(
+            "PoSpace leaves do not match declared plot_id".into(),
+        ));
+    }
+    let iterations = required_space_time_iterations(
+        &plot_id,
+        &challenge,
+        signage_index,
+        &space_opening,
+        size_bytes,
+        difficulty,
+        max_iterations,
+    )?;
+    if segment_stride == 0 {
+        return Err(ConsensusError(
+            "PoSpace VDF segment_stride must be >= 1".into(),
+        ));
+    }
+    let full_checkpoints = (iterations.saturating_sub(1)) / segment_stride;
+    if full_checkpoints > MAX_POSPACE_VDF_CHECKPOINTS as u64 {
+        return Err(ConsensusError(format!(
+            "PoSpace VDF checkpoint count {full_checkpoints} exceeds {MAX_POSPACE_VDF_CHECKPOINTS}"
+        )));
+    }
+    let resp = compute_leaf_bound_response(&plot_id, &sub_challenge, &space_opening);
+    let mut cur = delay_seed(&plot_id, &challenge, signage_index, &resp);
+    let mut done = 0u64;
+    let mut checkpoints = Vec::new();
+    while done < iterations {
+        let step_cnt = segment_stride.min(iterations - done);
+        cur = step_delay_chain(cur, done, step_cnt);
+        done += step_cnt;
+        if done < iterations {
+            checkpoints.push(cur);
+        }
+    }
+    Ok(SpaceTimeDelayProof {
+        plot_id,
+        size_bytes,
+        tree_depth,
+        challenge,
+        signage_index,
+        filter_bits,
+        space_opening,
+        iterations,
+        segment_stride,
+        checkpoints,
+        output: cur,
+    })
+}
+
+/// Deterministically verify a [`SpaceTimeDelayProof`] against `expected_challenge`.
+///
+/// Checks signage-point filter eligibility, challenge-derived Merkle leaf opening,
+/// capacity-normalized iteration count, intermediate checkpoints, and final output.
+///
+/// # Errors
+///
+/// Returns [`ConsensusError`] on any filter, commitment, schedule, checkpoint, or
+/// final output mismatch.
+///
+/// WIRING: Verifier for PoSpace+time sequential finality proofs.
+pub fn verify_space_time_delay(
+    proof: &SpaceTimeDelayProof,
+    expected_challenge: &[u8; 32],
+    min_plot_size_bytes: u64,
+    expected_filter_bits: u8,
+    difficulty: u64,
+    max_iterations: u64,
+) -> Result<(), ConsensusError> {
+    if bool::from(proof.plot_id.ct_eq(&[0u8; 32])) {
+        return Err(ConsensusError(
+            "PoSpace delay proof has zero plot_id".into(),
+        ));
+    }
+    if !bool::from(proof.challenge.ct_eq(expected_challenge)) {
+        return Err(ConsensusError(
+            "PoSpace delay proof challenge mismatch".into(),
+        ));
+    }
+    if proof.filter_bits != expected_filter_bits
+        || !passes_plot_filter(
+            &proof.plot_id,
+            &proof.challenge,
+            proof.signage_index,
+            expected_filter_bits,
+        )
+    {
+        return Err(ConsensusError(
+            "PoSpace delay proof failed signage-point filter".into(),
+        ));
+    }
+    if proof.size_bytes < min_plot_size_bytes || proof.size_bytes > MAX_PLOT_SIZE_BYTES {
+        return Err(ConsensusError(
+            "PoSpace delay proof size_bytes outside permitted bounds".into(),
+        ));
+    }
+    let sub_challenge = crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_POSPACE_SUBSLOT_V1",
+        &proof.challenge,
+        &proof.signage_index.to_le_bytes(),
+    ]);
+    let expected_leaf = challenged_leaf_index(&proof.plot_id, &sub_challenge, proof.tree_depth);
+    if proof.space_opening.leaf_index != expected_leaf
+        || !verify_plot_merkle_proof(&proof.plot_id, proof.tree_depth, &proof.space_opening)
+    {
+        return Err(ConsensusError(
+            "PoSpace delay proof Merkle leaf opening failed verification".into(),
+        ));
+    }
+    let expected_iters = required_space_time_iterations(
+        &proof.plot_id,
+        &proof.challenge,
+        proof.signage_index,
+        &proof.space_opening,
+        proof.size_bytes,
+        difficulty,
+        max_iterations,
+    )?;
+    if proof.iterations != expected_iters || proof.segment_stride == 0 {
+        return Err(ConsensusError(
+            "PoSpace delay proof iteration count or segment_stride mismatch".into(),
+        ));
+    }
+    if proof.checkpoints.len() > MAX_POSPACE_VDF_CHECKPOINTS {
+        return Err(ConsensusError(
+            "PoSpace delay proof exceeds checkpoint limit".into(),
+        ));
+    }
+    let expected_checkpoints = (expected_iters.saturating_sub(1)) / proof.segment_stride;
+    if proof.checkpoints.len() as u64 != expected_checkpoints {
+        return Err(ConsensusError(
+            "PoSpace delay proof checkpoint count does not match segment_stride".into(),
+        ));
+    }
+    let resp = compute_leaf_bound_response(&proof.plot_id, &sub_challenge, &proof.space_opening);
+    let mut state = delay_seed(&proof.plot_id, &proof.challenge, proof.signage_index, &resp);
+    let mut done = 0u64;
+    for cp in &proof.checkpoints {
+        let computed = step_delay_chain(state, done, proof.segment_stride);
+        if !bool::from(computed.ct_eq(cp)) {
+            return Err(ConsensusError(
+                "PoSpace delay proof intermediate VDF checkpoint mismatch".into(),
+            ));
+        }
+        state = *cp;
+        done += proof.segment_stride;
+    }
+    let rem = expected_iters - done;
+    let final_out = step_delay_chain(state, done, rem);
+    if !bool::from(final_out.ct_eq(&proof.output)) {
+        return Err(ConsensusError(
+            "PoSpace delay proof final VDF output mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1026,5 +1383,111 @@ mod tests {
         let mut tampered = chain_small[0].clone();
         tampered.hash = "f".repeat(64);
         assert_eq!(observer.fork_choice_score(&[tampered]), 0);
+    }
+
+    #[test]
+    fn space_time_delay_enforces_plot_filter_merkle_binding_and_vdf_checkpoints() {
+        let leaves = sample_leaves(0x42, 16);
+        let (plot_id, depth) = build_plot_merkle_tree(&leaves).expect("plot tree");
+        let challenge = [0x7A; 32];
+        let size_bytes = 4 * 1024 * 1024;
+        let filter_bits = 2u8;
+
+        // Find the first eligible signage point and also a rejected signage point.
+        let pass_idx = (0..256u32)
+            .find(|&idx| passes_plot_filter(&plot_id, &challenge, idx, filter_bits))
+            .expect("eligible signage point exists");
+        let fail_idx = (0..256u32)
+            .find(|&idx| !passes_plot_filter(&plot_id, &challenge, idx, filter_bits))
+            .expect("filtered signage point exists");
+
+        assert!(evaluate_space_time_delay(
+            plot_id,
+            size_bytes,
+            depth,
+            &leaves,
+            challenge,
+            SpaceTimeDelayParams {
+                signage_index: fail_idx,
+                filter_bits,
+                difficulty: 100,
+                max_iterations: 256,
+                segment_stride: 32,
+            },
+        )
+        .is_err());
+
+        let proof = evaluate_space_time_delay(
+            plot_id,
+            size_bytes,
+            depth,
+            &leaves,
+            challenge,
+            SpaceTimeDelayParams {
+                signage_index: pass_idx,
+                filter_bits,
+                difficulty: 100,
+                max_iterations: 256,
+                segment_stride: 32,
+            },
+        )
+        .expect("evaluate space-time proof");
+        verify_space_time_delay(&proof, &challenge, 1024 * 1024, filter_bits, 100, 256)
+            .expect("verify space-time proof");
+
+        // Larger verified plot capacity requires no more sequential VDF iterations
+        // than a smaller plot with the same quality.
+        let small_iters = required_space_time_iterations(
+            &plot_id,
+            &challenge,
+            pass_idx,
+            &proof.space_opening,
+            1024 * 1024,
+            1_000,
+            4_096,
+        )
+        .expect("small iters");
+        let large_iters = required_space_time_iterations(
+            &plot_id,
+            &challenge,
+            pass_idx,
+            &proof.space_opening,
+            16 * 1024 * 1024,
+            1_000,
+            4_096,
+        )
+        .expect("large iters");
+        assert!(large_iters <= small_iters);
+
+        // Shortcutting iterations, tampering a checkpoint, or tampering output all fail closed.
+        let mut short = proof.clone();
+        short.iterations = short.iterations.saturating_sub(1);
+        assert!(
+            verify_space_time_delay(&short, &challenge, 1024 * 1024, filter_bits, 100, 256)
+                .is_err()
+        );
+        if let Some(first_cp) = proof.checkpoints.first().copied() {
+            let mut bad_cp = proof.clone();
+            bad_cp.checkpoints[0] = {
+                let mut c = first_cp;
+                c[0] ^= 0x55;
+                c
+            };
+            assert!(verify_space_time_delay(
+                &bad_cp,
+                &challenge,
+                1024 * 1024,
+                filter_bits,
+                100,
+                256
+            )
+            .is_err());
+        }
+        let mut bad_out = proof;
+        bad_out.output[31] ^= 0x01;
+        assert!(
+            verify_space_time_delay(&bad_out, &challenge, 1024 * 1024, filter_bits, 100, 256)
+                .is_err()
+        );
     }
 }

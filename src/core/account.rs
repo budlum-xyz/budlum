@@ -231,7 +231,7 @@ pub struct ConsensusAccountProof {
 
 /// The consensus accounts leaf hash: `SHA-256(0x00 || pubkey || balance ||
 /// nonce || frac_attos? || (TAG_ACCOUNT_AUTH_PROGRAM || auth_program_hash)?)`,
-/// shared with [`AccountState::hash_account_leaf`] for both key and program
+/// shared with `AccountState::hash_account_leaf` for both key and program
 /// accounts while keeping pre-existing hashes unchanged when `None`.
 #[must_use]
 pub fn consensus_account_leaf(
