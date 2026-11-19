@@ -56,6 +56,7 @@ impl MobileSelfProfile {
         Ok(())
     }
 
+    #[must_use]
     pub const fn recommendation_for_content(
         &self,
         content_size: u64,
@@ -75,6 +76,7 @@ impl MobileSelfProfile {
         }
     }
 
+    #[must_use]
     pub const fn availability_label(&self) -> &'static str {
         match self.availability {
             MobileAvailabilityClass::Opportunistic => {
@@ -85,6 +87,7 @@ impl MobileSelfProfile {
         }
     }
 
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_MOBILE_SELF_PROFILE_V1");
@@ -119,20 +122,26 @@ impl MobileSelfContentPolicy {
     pub fn validate_against_profile(&self, profile: &MobileSelfProfile) -> Result<(), String> {
         profile.validate()?;
         if self.owner != profile.owner {
-            return Err("MobileSelfContentPolicy owner/profile mismatch".into());
+            return Err("content custody policy owner/profile mismatch".into());
         }
         if self.critical && self.required_paid_replicas == 0 {
             return Err("critical Mobile Self content requires paid replicas".into());
+        }
+        if !self.self_host_allowed && self.required_paid_replicas == 0 {
+            return Err(
+                "content custody policy must allow self-hosting or require at least one paid replica"
+                    .into(),
+            );
         }
         Ok(())
     }
 }
 
-/// B.U.D. 1.0 semantics: in the 1.0 product, a user's device enters the network
-/// *as a server-like node* and the device itself (not the network) carries the
-/// storage responsibility. This measures exactly that, without adding any
-/// network dependency: it is deterministic and unit-testable, and it is the
-/// piece that says "the storage load lives on the user's node, not on us".
+/// B.U.D. 1.0 custody mode for stored content.
+///
+/// In the 1.0 product, a user's device enters the network *as a server-like node*
+/// and carries the storage responsibility itself rather than offloading it to the
+/// network. This type captures that decision deterministically with no network dependency.
 ///
 /// `CustodyMode` answers the question that decides who pays and who holds:
 /// * [`CustodyMode::NetworkHeld`] - the network stores it (never true in 1.0).
@@ -151,10 +160,11 @@ pub struct CustodyDecision {
     pub user_held_bytes: u64,
 }
 
-/// Decide which mode a put uses. This is so the network never silently becomes
-/// the custodian of 1.0 content: critical content always returns
-/// `NetworkHeld` only through a paid replica decision, while non-critical
-/// self-host-capable content stays `UserHeld` so the device is the server.
+/// Decide which custody mode a put uses.
+///
+/// Critical content selects `NetworkHeld` only through a paid replica decision,
+/// while non-critical self-host-capable content stays `UserHeld` on the device.
+#[must_use]
 pub const fn decide_custody(
     profile: &MobileSelfProfile,
     content_size: u64,
@@ -200,12 +210,15 @@ pub enum UploadCustodyRefusal {
     /// storage is a server that will miss the reads it promised, so the put
     /// is refused rather than recorded.
     OverDeviceCapacity { held: u64, capacity: u64 },
+    /// The profile itself failed validation (zero owner, zero device commitment,
+    /// or empty capacity quota), so it cannot anchor a custody decision.
+    InvalidProfile,
 }
 
-/// The B.U.D. 1.0 upload contract. Wraps [`decide_custody`] with the one rule
-/// that makes the 1.0 promise real: **the network is never the default
-/// custodian.** A put either stays on the user's device (which is the server
-/// of its own content), or the network takes it only because it must - the
+/// Enforce the B.U.D. 1.0 upload custody contract around [`decide_custody`].
+///
+/// **The network is never the default custodian:** a put either stays on the user's
+/// device, or the network takes it only because it must - the
 /// content is critical (with the owner's explicit consent) or it exceeds the
 /// device.
 ///
@@ -216,6 +229,7 @@ pub enum UploadCustodyRefusal {
 ///
 /// # Errors
 ///
+/// [`UploadCustodyRefusal::InvalidProfile`] when `profile.validate()` fails;
 /// [`UploadCustodyRefusal::NetworkCustodyNotAllowed`] when the device could
 /// hold the content but the caller tried to default it to the network;
 /// [`UploadCustodyRefusal::CriticalNeedsExplicitNetworkCustody`] when the
@@ -226,6 +240,9 @@ pub fn decide_upload_custody(
     critical: bool,
     network_custody_requested: bool,
 ) -> Result<CustodyDecision, UploadCustodyRefusal> {
+    if profile.validate().is_err() {
+        return Err(UploadCustodyRefusal::InvalidProfile);
+    }
     let d = decide_custody(profile, content_size, critical);
     match d.mode {
         CustodyMode::UserHeld => {
@@ -251,10 +268,10 @@ pub fn decide_upload_custody(
     }
 }
 
-/// A running measure of how much of the storage responsibility the owner's
-/// node has taken on. It is the device-side counter-observation of the 1.0
-/// promise: every upload the device serves grows its own `user_held_bytes`,
-/// and every attempt to hand holdable content to the network is counted in
+/// Running measure of the storage responsibility the owner's node carries.
+///
+/// Every upload the device serves grows its own `user_held_bytes`, and every
+/// refused attempt to hand holdable content to the network increments
 /// `network_default_attempts` (which B.U.D. 1.0 code must keep at zero).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CustodyLedger {
@@ -273,7 +290,8 @@ impl CustodyLedger {
     /// responsibility for that item; duplicates are counted as a single asset
     /// and the bytes are updated.
     pub fn record_user_held(&mut self, content_id: ContentId, bytes: u64) {
-        for entry in self.user_held.iter_mut() {
+        self.network_held.retain(|id| *id != content_id);
+        for entry in &mut self.user_held {
             if entry.0 == content_id {
                 entry.1 = bytes;
                 return;
@@ -283,19 +301,23 @@ impl CustodyLedger {
     }
 
     /// Record an item the network holds for a legitimate mandatory reason.
+    /// Releases any stale user-held footprint for the same asset so one asset
+    /// is never double-counted across both custody sets.
     pub fn record_network_held(&mut self, content_id: ContentId) {
+        self.user_held.retain(|(id, _)| *id != content_id);
         if !self.network_held.contains(&content_id) {
             self.network_held.push(content_id);
         }
     }
 
     /// Count an attempted default network custody that was refused.
-    pub fn record_network_default_attempt(&mut self) {
+    pub const fn record_network_default_attempt(&mut self) {
         self.network_default_attempts = self.network_default_attempts.saturating_add(1);
     }
 
     /// Total bytes the user's node is responsible for across everything it
     /// serves. This is the number a B.U.D. 1.0 node reports as its own load.
+    #[must_use]
     pub fn total_user_held_bytes(&self) -> u64 {
         self.user_held
             .iter()
@@ -303,18 +325,21 @@ impl CustodyLedger {
     }
 
     /// How many distinct assets the user's node serves.
-    pub fn user_held_items(&self) -> usize {
+    #[must_use]
+    pub const fn user_held_items(&self) -> usize {
         self.user_held.len()
     }
 
     /// How many assets the network holds for the owner.
-    pub fn network_held_items(&self) -> usize {
+    #[must_use]
+    pub const fn network_held_items(&self) -> usize {
         self.network_held.len()
     }
 
     /// How many times code tried to default custody of holdable content to
     /// the network. B.U.D. 1.0 requires this to be zero.
-    pub fn network_default_attempts(&self) -> u64 {
+    #[must_use]
+    pub const fn network_default_attempts(&self) -> u64 {
         self.network_default_attempts
     }
 
@@ -697,5 +722,43 @@ mod ledger_behavior_tests {
             .unwrap();
         assert_eq!(ledger.total_user_held_bytes(), 400);
         assert_eq!(ledger.user_held_items(), 1);
+    }
+
+    #[test]
+    fn zero_capacity_profile_and_cross_mode_reput_do_not_bypass_or_double_count_custody() {
+        let mut zero_cap = profile();
+        zero_cap.max_storage_bytes = 0;
+        assert!(
+            decide_upload_custody(&zero_cap, 1, false, false).is_err(),
+            "invalid zero-capacity profile must not route every upload to NetworkHeld"
+        );
+
+        type ContentPolicy = super::MobileSelfContentPolicy;
+        let orphan_policy = ContentPolicy {
+            content_id: ContentId::of(b"orphan"),
+            owner: profile().owner,
+            critical: false,
+            required_paid_replicas: 0,
+            self_host_allowed: false,
+        };
+        assert!(
+            orphan_policy.validate_against_profile(&profile()).is_err(),
+            "policy disallowing both self-host and paid replicas must be refused"
+        );
+
+        // Re-putting an existing user-held asset as critical (network-held) must release
+        // its stale user-held footprint so the device ledger is not double-counted.
+        let mut ledger = CustodyLedger::default();
+        let id = ContentId::of(b"promoted-asset");
+        ledger
+            .put_user_content(id, &profile(), 600, false, false)
+            .unwrap();
+        assert_eq!(ledger.total_user_held_bytes(), 600);
+        ledger
+            .put_user_content(id, &profile(), 600, true, true)
+            .unwrap();
+        assert_eq!(ledger.user_held_items(), 0);
+        assert_eq!(ledger.total_user_held_bytes(), 0);
+        assert_eq!(ledger.network_held_items(), 1);
     }
 }

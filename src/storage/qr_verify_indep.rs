@@ -212,14 +212,14 @@ fn reconstruct(stream_commitment: &[u8; 32], frames: &[Vec<u8>]) -> Result<Found
                     block_len: drop.block_len,
                     total_len: drop.total_len,
                 };
-                basis = Some(Basis::new(&p));
+                basis = Some(Basis::new(p));
                 params = Some(p);
             }
             Some(p) if p != drop.params() => return Err(IndepError::ParamMismatch),
             Some(_) => {}
         }
         let p = params.ok_or(IndepError::NoFrames)?;
-        let cols = row_columns(&drop, &p).map_err(|fault| IndepError::Frame { index, fault })?;
+        let cols = row_columns(&drop, p).map_err(|fault| IndepError::Frame { index, fault })?;
         if let Some(prev) = seen.get(&drop.seq) {
             if *prev == drop.body {
                 continue;
@@ -403,7 +403,7 @@ fn parse_drop(wire: &[u8], frame_seq: u32) -> Result<RawDrop, &'static str> {
 ///
 /// Positions `0..k` of each `2k` cycle are systematic (one block). The rest
 /// are repair rows drawn from a SHA-256 counter stream seeded by the seq.
-fn row_columns(drop: &RawDrop, p: &Params) -> Result<Vec<usize>, &'static str> {
+fn row_columns(drop: &RawDrop, p: Params) -> Result<Vec<usize>, &'static str> {
     let k = u32::from(p.k);
     let pos = drop.seq % (2 * k);
     if pos < k {
@@ -477,7 +477,7 @@ struct Basis {
 }
 
 impl Basis {
-    fn new(p: &Params) -> Self {
+    fn new(p: Params) -> Self {
         Self {
             k: usize::from(p.k),
             block_len: usize::from(p.block_len),
@@ -493,16 +493,13 @@ impl Basis {
         }
         let mut rhs = rhs;
         while let Some(lead) = lowest_bit(&mask) {
-            match self.rows.get(lead).ok_or(IndepError::BadParams)? {
-                Some((row_mask, row_rhs)) => {
-                    xor_words(&mut mask, row_mask);
-                    xor_bytes(&mut rhs, row_rhs);
-                }
-                None => {
-                    *self.rows.get_mut(lead).ok_or(IndepError::BadParams)? = Some((mask, rhs));
-                    self.rank += 1;
-                    return Ok(());
-                }
+            if let Some((row_mask, row_rhs)) = self.rows.get(lead).ok_or(IndepError::BadParams)? {
+                xor_words(&mut mask, row_mask);
+                xor_bytes(&mut rhs, row_rhs);
+            } else {
+                *self.rows.get_mut(lead).ok_or(IndepError::BadParams)? = Some((mask, rhs));
+                self.rank += 1;
+                return Ok(());
             }
         }
         if rhs.iter().any(|b| *b != 0) {
@@ -600,15 +597,21 @@ fn read_container(packed: &[u8]) -> Result<Found, IndepError> {
         return Err(bad("length range"));
     }
     let raw = if zlib {
+        let mut decoder = ZlibDecoder::new(body);
         let mut out = Vec::new();
-        ZlibDecoder::new(body)
-            .take(
-                u64::try_from(MAX_BYTES)
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1),
-            )
+        // Bound read to `orig_len + 1` (never full 64 MiB when orig is tiny)
+        // and refuse unconsumed trailing bytes past the zlib ADLER32 trailer.
+        decoder
+            .by_ref()
+            .take(orig_len.saturating_add(1))
             .read_to_end(&mut out)
             .map_err(|_| bad("inflate"))?;
+        if out.len() != orig {
+            return Err(bad("length differs from body"));
+        }
+        if decoder.total_in() != u64::try_from(body.len()).unwrap_or(u64::MAX) {
+            return Err(bad("trailing zlib bytes"));
+        }
         out
     } else {
         body.to_vec()
@@ -935,5 +938,25 @@ mod tests {
             confirm(&sc, &other, &claim),
             Err(IndepError::Frame { index: 0, .. })
         ));
+    }
+
+    #[test]
+    fn independent_verifier_refuses_trailing_zlib_bytes_and_caps_bomb_to_declared_len() {
+        let raw = b"repeated-compressible-frame-body-".repeat(24);
+        let mut packed = pl::pack_payload(pl::PayloadKind::ContentBytes, &raw).unwrap();
+        assert!(pl::packed_is_zlib(&packed));
+        packed.extend_from_slice(b"EXTRA_UNCONSUMED_TAIL");
+        let enc = car::CarouselEncoder::new(&packed, 64).unwrap();
+        let p = enc.params();
+        let sc = p.stream_commitment(&pl::payload_commitment(&packed));
+        let frames = frames_under(&packed, &sc, 64, u32::from(p.k));
+        let claim = PrimaryClaim {
+            kind_tag: pl::PayloadKind::ContentBytes.tag(),
+            content_sha256: calculate_hash_bytes(&raw),
+        };
+        assert!(
+            confirm(&sc, &frames, &claim).is_err(),
+            "independent verifier must refuse unconsumed trailing bytes after zlib stream"
+        );
     }
 }
