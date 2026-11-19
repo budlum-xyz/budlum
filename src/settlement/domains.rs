@@ -1261,6 +1261,13 @@ pub fn submit_zk_proof(
             submission.public_inputs.chain_id
         ));
     }
+    if submission.program.len() > crate::prover::MAX_ZK_PROGRAM_WORDS {
+        return Err(format!(
+            "zk program length {} exceeds limit {}",
+            submission.program.len(),
+            crate::prover::MAX_ZK_PROGRAM_WORDS
+        ));
+    }
     if crate::prover::is_empty_or_halt_only_program(&submission.program) {
         return Err("empty or bare Halt program cannot attest a ZK domain state root".into());
     }
@@ -1272,6 +1279,18 @@ pub fn submit_zk_proof(
         .domains
         .get(claimed_domain)
         .ok_or_else(|| format!("unknown domain {claimed_domain}"))?;
+    if domain.kind != ConsensusKind::Zk {
+        return Err(format!(
+            "domain {claimed_domain} has consensus kind {:?}, not Zk",
+            domain.kind
+        ));
+    }
+    if domain.status == DomainStatus::Frozen {
+        return Err(format!("domain {claimed_domain} is frozen"));
+    }
+    if !domain.is_active() {
+        return Err(format!("domain {claimed_domain} is not active"));
+    }
     let program_hash = crate::prover::zk_program_hash(&submission.program);
     if !domain.zk_program_allowlist.contains(&program_hash) {
         return Err(format!(
@@ -1378,18 +1397,26 @@ pub fn submit_zk_proof(
     };
 
     let fee = state.registry.params().proof_submission_fee;
+    let needed = fee
+        .checked_add(reserve)
+        .ok_or_else(|| "proof fee plus transaction fee reserve overflows u64".to_string())?;
     let submitter = submission.submitter();
-    let balance = state.get_balance(&submitter);
-    if balance < fee.saturating_add(reserve) {
+    // Enforce spendable_balance (not raw balance) so cliff-locked vesting
+    // allocations and the burn-reserve account cannot spend locked tokens
+    // as proof fees.
+    let balance = state.spendable_balance(&submitter);
+    if balance < needed {
         return Err(format!(
-            "insufficient balance for proof fee: have {balance}, need {}",
-            fee.saturating_add(reserve)
+            "insufficient balance for proof fee: have {balance}, need {needed}"
         ));
     }
     // The proof fee leaves the submitter whatever the verdict, and no pool
     // receives it: it is burned, and recorded as burned.
     let account = state.get_or_create(&submitter);
-    account.balance -= fee;
+    account.balance = account
+        .balance
+        .checked_sub(fee)
+        .ok_or_else(|| "proof fee sender balance underflow".to_string())?;
     state.mark_dirty(&submitter);
     state.burned_total = state.burned_total.saturating_add(fee);
 
@@ -2358,6 +2385,17 @@ fn execute_proof_market_tx(
             if verification_hash == [0u8; 32] {
                 return Err(SettlementTxError::Refused(
                     "proof-market ZK verification hash cannot be zero".into(),
+                ));
+            }
+            // Pre-check potential refund overflow before `submit_zk_proof`
+            // burns the submitter's proof fee, keeping refusal atomic.
+            if state
+                .get_balance(&task.creator)
+                .checked_add(task.reward)
+                .is_none()
+            {
+                return Err(SettlementTxError::Refused(
+                    "proof-market task refund would overflow creator balance".into(),
                 ));
             }
             let chain_height = state.current_block_height;
@@ -5356,5 +5394,129 @@ mod tests {
             format!("{err:?}").contains("object_layer_class_requires_domain_operator"),
             "got: {err:?}"
         );
+    }
+
+    #[test]
+    fn submit_zk_proof_refuses_vesting_locked_fee_and_frozen_or_non_zk_domain() {
+        use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams};
+        use crate::cross_domain::MessageKind;
+        use crate::domain::plugin::default_domain;
+        use crate::execution::zkvm::{prove_bytecode, DEFAULT_CONTRACT_GAS_LIMIT};
+        use crate::prover::{zk_program_hash, ZkProofSubmission};
+        use crate::tokenomics::VestingSchedule;
+        use bud_isa::{Instruction, Opcode};
+
+        let bytecode: Vec<u8> = [
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 7,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        ]
+        .into_iter()
+        .flat_map(u64::to_le_bytes)
+        .collect();
+        let (proof, pi, program) =
+            prove_bytecode(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).expect("prove");
+        let allow_hash = zk_program_hash(&program);
+
+        let mk_sub = |sender: Address, domain_id: u32, h: u64| -> ZkProofSubmission {
+            let payload_hash =
+                ZkProofSubmission::payload_binding_hash(&proof, &pi, &program, domain_id, h);
+            ZkProofSubmission {
+                message: CrossDomainMessage::new(CrossDomainMessageParams {
+                    source_domain: domain_id,
+                    target_domain: domain_id,
+                    source_height: h,
+                    event_index: 0,
+                    nonce: h,
+                    sender,
+                    recipient: Address::zero(),
+                    payload_hash,
+                    kind: MessageKind::Custom(b"zk-proof".to_vec()),
+                    expiry_height: 1_000,
+                }),
+                proof: proof.clone(),
+                public_inputs: pi.clone(),
+                program: program.clone(),
+            }
+        };
+
+        let mut state = AccountState::new();
+        state.current_block_height = 10;
+        let fee = state.registry.params().proof_submission_fee;
+
+        // 1. Active ZK domain, but submitter's full balance is cliff-locked in team_vesting.
+        let mut zk_dom = default_domain(701, ConsensusKind::Zk, 70_100, "budzero-stark-v1", 1);
+        zk_dom.zk_program_allowlist = vec![allow_hash];
+        state
+            .settlement
+            .domains
+            .register(zk_dom)
+            .expect("register zk");
+
+        let vested = Address::from([0x71; 32]);
+        let locked = fee.saturating_mul(4);
+        state.add_balance(&vested, locked);
+        state.team_vesting = Some((
+            vested,
+            VestingSchedule {
+                total: locked,
+                start_epoch: 0,
+                cliff_epochs: 500,
+                duration_epochs: 1_000,
+            },
+        ));
+        assert_eq!(state.spendable_balance(&vested), 0);
+        let sub_v = mk_sub(vested, 701, 1);
+        let err = submit_zk_proof(&mut state, &sub_v, 45_262, 10, 0)
+            .expect_err("cliff-locked vesting balance must never pay proof fee");
+        assert!(
+            err.contains("insufficient balance"),
+            "unexpected err: {err}"
+        );
+        assert_eq!(state.get_balance(&vested), locked);
+        assert_eq!(state.burned_total, 0);
+
+        // 2. Funded submitter, but target domain is non-ZK (Bft) -> refused.
+        let funded = Address::from([0x72; 32]);
+        state.add_balance(&funded, locked);
+        let mut bft_dom = default_domain(702, ConsensusKind::Bft, 70_200, "bft-v1", 1);
+        bft_dom.zk_program_allowlist = vec![allow_hash];
+        state
+            .settlement
+            .domains
+            .register(bft_dom)
+            .expect("register bft");
+        let sub_bft = mk_sub(funded, 702, 1);
+        let err = submit_zk_proof(&mut state, &sub_bft, 45_262, 10, 0)
+            .expect_err("non-ZK domain must refuse submit_zk_proof");
+        assert!(err.contains("not Zk"), "unexpected err: {err}");
+
+        // 3. Frozen ZK domain -> refused before burning fee.
+        state
+            .settlement
+            .domains
+            .set_status(701, DomainStatus::Frozen)
+            .expect("freeze");
+        let sub_frz = mk_sub(funded, 701, 1);
+        let err = submit_zk_proof(&mut state, &sub_frz, 45_262, 10, 0)
+            .expect_err("frozen ZK domain must refuse submit_zk_proof");
+        assert!(
+            err.contains("not active") || err.contains("frozen"),
+            "unexpected err: {err}"
+        );
+        assert_eq!(state.get_balance(&funded), locked);
     }
 }

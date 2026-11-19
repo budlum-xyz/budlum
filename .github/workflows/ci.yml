@@ -2416,7 +2416,7 @@ jobs:
           done
 
   fuzz-quick:
-    #  + : mevcut target'lar + 3 yeni (consensus/relayer/zk).
+    # Covers all active fuzz targets including consensus, relayer, and zk.
     # Long runs are handled by fuzz-nightly.yml (schedule, 4h/target, corpus cache).
     # Quick: 60s/target (10 targets x 60s ~ 10min + build; timeout-minutes 60).
     name: Fuzz Quick (60s x 12 targets)
@@ -2619,8 +2619,8 @@ jobs:
         run: gitleaks detect --source . --config .gitleaks.toml --redact --verbose
 
   timing-safe:
-    # static scan for raw equality in RPC/crypto + dudect-style
-    # Istatistiksel zamanlama regresyon testi (cargo bench).
+    # Static scan for raw equality in RPC/crypto + dudect-style
+    # statistical timing regression benchmark (cargo bench).
     name: Timing-Safe Regression
     runs-on: ubuntu-latest
     timeout-minutes: 40
