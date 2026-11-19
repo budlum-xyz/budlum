@@ -431,17 +431,34 @@ impl TendermintCommitEvidence {
     /// and the caller must then skip the probe rather than guess.
     #[must_use]
     fn field_offsets(&self) -> FieldOffsets {
-        // Fixed-width header: chain_id (u64 len + bytes), height (u64),
-        // round (i64), block_hash (32), parts_total (u32), parts_hash (32),
-        // app_hash (32), commit_time (u64), then Vec<T> length prefixes.
-        let mut at = 8usize.saturating_add(self.chain_id.len());
+        // The bincode layout, in declaration order. It is arithmetic rather than
+        // a scheme because the probes it serves corrupt exactly one field each:
+        // an offset that drifts by a byte still applies and still produces a
+        // refusal - of something else - so `field_offsets_point_at_the_fields_they_name`
+        // reads every offset back out of a real encoding. Adding a field to the
+        // evidence means adding its width here *before* the fields below it stop
+        // being where this says they are, and that test is what says so.
+        let mut at = 8usize.saturating_add(self.chain_id.len()); // chain_id
         at += 8; // height
         at += 8; // round
         at += 32; // block_hash
         at += 4; // parts_total
         at += 32; // parts_hash
+        at += 8; // version_block
+        at += 32; // last_block_hash
+        at += 4; // last_parts_total
+        at += 32; // last_parts_hash
+        at += 32; // last_commit_hash
+        at += 32; // data_hash
+        at += 32; // validators_hash
+        at += 32; // next_validators_hash
+        at += 32; // consensus_hash
         at += 32; // app_hash
+        at += 32; // last_results_hash
+        at += 32; // evidence_hash
+        at += ADDRESS_LEN; // proposer_address
         at += 8; // commit_time
+        at += 4; // commit_time_nanos
         let validators_len_at = at;
         at += 8; // validators length prefix
         let first_validator_at = at;
@@ -3193,6 +3210,7 @@ mod tests {
 
         let parts_hash = [0x55; 32];
         let vote_ts = 1_750_010_000i64;
+        let target_validators_hash = validator_set_hash(&target_vals);
         let sign_commit = |signer_indices: &[usize]| -> TendermintCommitEvidence {
             let signatures = signer_indices
                 .iter()
@@ -3222,8 +3240,21 @@ mod tests {
                 block_hash,
                 parts_total: 1,
                 parts_hash,
+                version_block: 1,
+                last_block_hash: [0x11; 32],
+                last_parts_total: 1,
+                last_parts_hash: [0x22; 32],
+                last_commit_hash: [0x33; 32],
+                data_hash: [0x44; 32],
+                validators_hash: target_validators_hash,
+                next_validators_hash: next_vals_hash,
+                consensus_hash: [0x66; 32],
                 app_hash,
+                last_results_hash: [0x88; 32],
+                evidence_hash: [0xaa; 32],
+                proposer_address: validator_address_of(&keys[0].public_key_bytes()),
                 commit_time: vote_ts as u64,
+                commit_time_nanos: 0,
                 validators: target_vals.clone(),
                 signatures,
             }
