@@ -19,7 +19,7 @@
 //! required check, and nothing in this repository publishes a status on
 //! its behalf.
 //!
-//! # The three review steps
+//! # The four review steps
 //!
 //!   1. **Attack surface.** The security-relevant surface is enumerated
 //!      from the tree itself - workflow files, binaries under `src/bin`,
@@ -32,7 +32,7 @@
 //!   2. **Hardening of that surface.** Every workflow file keeps an
 //!      explicit deny-by-default `permissions:` block, and the grants
 //!      and triggers `write-all` and `pull_request_target` fail the gate
-//!      outright. Measured when this gate landed: all 38 workflows
+//!      outright. Measured when this gate landed: all 39 workflows
 //!      already comply, so the ratchet starts at zero.
 //!   3. **Proven claims.** The review workflow must invoke each pinned
 //!      security gate twice - its `--self-test` canary first, then the
@@ -40,6 +40,10 @@
 //!      statically from the workflow text. Deleting, reordering or
 //!      softening a step turns the required check red without needing a
 //!      human eye.
+//!   4. **Provenance.** `gate-source-provenance` binds the gate binary to
+//!      the gate sources it scans. It runs with its canary in the same
+//!      workflow, so a binary compiled from another tree fails before it
+//!      can publish verdicts that belong to neither tree.
 //!
 //! # Determinism
 //!
@@ -75,10 +79,11 @@ const PINNED_EVIDENCE_GATES: &[&str] = &[
     "no-constant-security-verdicts",
     "classical-crypto-is-paired",
     "suppressions-are-justified",
+    "gate-source-provenance",
 ];
 
 /// Floors under which the scan is considered vacuous (step 1). Measured
-/// on the landing tree: 38 workflows, 12 binaries, 52 manifests. The
+/// on the landing tree: 39 workflows, 12 binaries, 52 manifests. The
 /// floors sit well below the measurements so only a pruned or empty
 /// scan trips them; surface movement itself is handled by the baseline.
 const MIN_WORKFLOWS: usize = 30;
@@ -88,7 +93,8 @@ const MIN_MANIFESTS: usize = 40;
 /// Directories the surface walk never descends into.
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules"];
 
-/// The review itself: enumerate the surface, pin it, harden it, prove it.
+/// The review itself: enumerate the surface, pin it, harden it, prove the
+/// claims and bind the binary to the sources it scans.
 pub fn run(root: &Path) -> Result<String, String> {
     review(root)
 }
@@ -172,7 +178,7 @@ pub fn self_test() -> Result<String, String> {
     evidence_suite()?;
     tree_suite()?;
     Ok(String::from(
-        "native-security-review self-test: 3 steps exercised, every failure mode reproduced",
+        "native-security-review self-test: 4 steps exercised, every failure mode reproduced",
     ))
 }
 

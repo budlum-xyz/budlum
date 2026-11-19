@@ -108,6 +108,7 @@ mod gates {
     pub mod garden_scenario;
     pub mod gas_calibration;
     pub mod gate_references_are_real;
+    pub mod gate_source_provenance;
     pub mod gates_are_wired;
     pub mod gates_do_not_panic;
     pub mod gateway_gate;
@@ -1690,6 +1691,14 @@ const GATES: &[Gate] = &[
         self_test: gates::native_security_review::self_test,
     },
     Gate {
+        name: "gate-source-provenance",
+        replaces: None,
+        run: gates::gate_source_provenance::run,
+        run_log: None,
+        run_args: Some(gates::gate_source_provenance::run_args),
+        self_test: gates::gate_source_provenance::self_test,
+    },
+    Gate {
         name: "launch-evidence",
         replaces: None,
         run: gates::launch_evidence::run,
@@ -1766,7 +1775,7 @@ const GATES: &[Gate] = &[
 /// Gates that take extra arguments but whose plain run (no arguments) is a
 /// complete verification. `--all` runs them: leaving `tree-pin` out meant the
 /// aggregate run, the one CI relies on, never checked the budzero tree pins.
-const RUNS_WITHOUT_ARGUMENTS: &[&str] = &["tree-pin", "launch-evidence"];
+const RUNS_WITHOUT_ARGUMENTS: &[&str] = &["tree-pin", "launch-evidence", "gate-source-provenance"];
 
 /// The gates `--all` runs.
 ///
@@ -1907,6 +1916,10 @@ mod all_selection_tests {
     fn all_runs_tree_pin() {
         let names: Vec<&str> = all_selection(false).iter().map(|g| g.name).collect();
         assert!(names.contains(&"tree-pin"), "`--all` skips tree-pin");
+        assert!(
+            names.contains(&"gate-source-provenance"),
+            "`--all` skips gate-source-provenance"
+        );
         let canaries: Vec<&str> = all_selection(true).iter().map(|g| g.name).collect();
         assert!(canaries.contains(&"tree-pin"));
         assert_eq!(canaries.len(), GATES.len(), "every canary runs");

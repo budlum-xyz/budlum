@@ -15,7 +15,10 @@
 #      block; `write-all` and `pull_request_target` fail outright;
 #   3. proven claims: each pinned security gate runs its self-test canary
 #      first and then the plain gate (red before green), verified
-#      statically by the `native-security-review` gate itself.
+#      statically by the `native-security-review` gate itself;
+#   4. provenance: the gate binary is compiled from the same gate sources
+#      it scans, so a cross-tree binary cannot publish verdicts that belong
+#      to neither tree.
 #
 # The external review application may return as an additional layer when
 # its quota allows; it must never again be the single required check, and
@@ -81,3 +84,9 @@ jobs:
       - name: suppressions-are-justified
         if: always() && steps.rust.outcome == 'success'
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- suppressions-are-justified
+      - name: Canary for gate-source-provenance
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --self-test
+      - name: gate-source-provenance
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance
