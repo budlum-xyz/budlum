@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: 5bc51521183d5965ea6391fac13b63e2268fc978865371fda855a81c6cba1829
+digest: 829afd3a492a687b699708b7c89a2aafbec510cb759a0f19f59686842073ce1f
 files: 188
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -27,7 +27,7 @@ src/gates/bud3_custody_proofs.rs	6b54ccf3d69924b33cacaab07942b0b04fcf0f67b1f90bc
 src/gates/bud3_custody_rewards.rs	8e870cbf154094c2884df759a88b360f13688eb4d0fe4bf427ffa2f8cf276681
 src/gates/bud3_dependent_modules.rs	64ed6d16c55a7aefd814419b6e61102689bdc94b2ea205bf9b38cac98e0f5467
 src/gates/bud3_fee_uses_physical_bytes.rs	bc3a6548e3a8a4ddf74f328fb0146155a021f2bcb70229c4a123e02a136aa0d5
-src/gates/bud3_forbidden_phrases.rs	09b627345484481212cef9969d0fa6aec78aa5ff7f49f89e72de378e0d693949
+src/gates/bud3_forbidden_phrases.rs	b1b6a39a3d828653fe0d2edd5220dca9eb707c71585884b9e55f9d6df672b30d
 src/gates/bud3_module_claims.rs	8bcdaba54760760bb7635c2398128e9d0a1dc7d54a04cfe35f5f25c822c8de17
 src/gates/bud3_object_is_universal.rs	1da451ae16968d6bc0577c7298fd5f1ab632eb4ef1a07478c4a06399730d4837
 src/gates/bud3_paid_view.rs	4adab8df97f202a270c3f0ba2b3f8d116143f4a0050e0279d5d58b1597a02ac6
@@ -191,5 +191,5 @@ src/gates/zizmor.rs	ce74e736b69d80d711a9c8a61b79f357a0a278a56201af8a19f7dc6f3b5c
 src/gates/zkvm_refuses_untrusted_proofs.rs	dfca412c7a6bbc72aba195ebaffcd9f759406bfca4531ab535ae60748af88520
 src/main.rs	c1c7f0b32c465bdfd3e5d49c18f21eec0c861ef240c67b8466d2ccc9f7878816
 src/sha256.rs	b43ece6c2d4936308d742266930a3d598dfd3175722856b7e4924f5439d35eb5
-tests/repository_locks.rs	21c52b4cf7dd40fe1af7ddb67fd3aa7b8a8fe50fcda266cb14c66b228ca12ebf
+tests/repository_locks.rs	2516db485e59c27bbafed8444d5464ac480f71ed7773639d3cac8170e1cc3ded
 

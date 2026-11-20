@@ -183,6 +183,9 @@ fn account_commitment(account: &QuantumAccount) -> [u8; 32] {
 /// an ordered chain gets from a sequence number that cannot go backwards.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct QuantumAccountRegistry {
+    // A JSON object keys by string, so the map goes through the shared key
+    // codec rather than handing serde a byte array it cannot write.
+    #[serde(default, with = "crate::core::map_keys")]
     accounts: BTreeMap<[u8; 32], QuantumAccount>,
     /// The chain epoch this registry state belongs to. Persisted and folded
     /// into `root()`: an older copy applied at a later epoch must not read the
