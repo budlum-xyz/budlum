@@ -2978,21 +2978,46 @@ mod tests {
     }
 
     #[test]
-    fn open_challenge_refuses_too_short_response_window() {
+    fn the_registry_window_floor_already_covers_the_audit_response_floor() {
+        // A challenge has two floors: the registry refuses a deadline closer
+        // than `MIN_CHALLENGE_WINDOW_EPOCHS`, and the transaction door refuses
+        // one closer than `MIN_AUDIT_RESPONSE_WINDOW_EPOCHS`. Because the
+        // registry floor is the larger of the two, every window that reaches
+        // the door has already cleared the audit floor, so no window can
+        // satisfy one floor and fail the other. The ordering is pinned here
+        // rather than left implicit: inverted, the door's guard would be the
+        // only thing between an opener and a deadline too short to answer.
+        assert!(
+            StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS >= MIN_AUDIT_RESPONSE_WINDOW_EPOCHS,
+            "the registry floor {} is below the audit response floor {}; the door \
+             would then refuse windows the registry allowed",
+            StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS,
+            MIN_AUDIT_RESPONSE_WINDOW_EPOCHS
+        );
         let mut state = AccountState::new();
         let (_operator, opener, deal_id) = challengeable(&mut state);
-        // deadline_epoch = current_epoch + 1 (below minimum response window)
-        let tx = StorageTx::OpenChallenge {
-            deal_id,
-            range_len: 16,
-            deadline_epoch: state.epoch_index + 1,
-            opener_bond: 100,
-        };
-        let err = execute_storage_tx(&mut state, &ctx(opener), &tx).unwrap_err();
-        assert!(
-            matches!(err, StorageTxError::ChallengeRefused(_)),
-            "unexpected: {err}"
-        );
+        let epoch = state.epoch_index;
+        for window in [
+            1,
+            MIN_AUDIT_RESPONSE_WINDOW_EPOCHS - 1,
+            StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS - 1,
+        ] {
+            let err = execute_storage_tx(
+                &mut state,
+                &ctx(opener),
+                &StorageTx::OpenChallenge {
+                    deal_id,
+                    range_len: 16,
+                    deadline_epoch: epoch + window,
+                    opener_bond: StorageRegistry::required_opener_bond(16),
+                },
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, StorageTxError::ChallengeRefused(_)),
+                "a window of {window} epochs must be refused: {err}"
+            );
+        }
     }
 
     #[test]

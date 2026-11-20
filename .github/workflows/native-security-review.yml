@@ -28,7 +28,14 @@ name: Native Security Review
 
 on:
   push:
-    branches: [main, testnet, garden, budlum-stack]
+    # `testnet` is the head of the open PR #126. A push to it used to fire BOTH
+    # this `push` event and that PR's `pull_request` (synchronize) event, so a
+    # single commit published two required "Native Security Review" check runs
+    # (measured 2026-11-20 on e5a4a7aca2: runs 44650731362 and 44650745680,
+    # both queued). The PR event already covers testnet, so drop only that
+    # branch here. `garden` and `budlum-stack` keep their push triggers: their
+    # pull requests are closed, so no PR event reports for a push to them.
+    branches: [main, garden, budlum-stack]
   pull_request:
 
 permissions:
