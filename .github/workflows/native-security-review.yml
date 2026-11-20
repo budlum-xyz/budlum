@@ -29,8 +29,11 @@ name: Native Security Review
 on:
   push:
     # Only branches that are not event heads belong here.
-    # Other branches remain because no paired event reports for them.
-    branches: [main, garden, budlum-stack]
+    # `garden` and `budlum-stack` are retired staging heads (closed per the
+    # repository constitution); their pull_request events already cover the
+    # open testnet -> main flow, so they are removed from the push trigger
+    # to stop double-running on every forward-merge.
+    branches: [main]
   pull_request:
 
 permissions:
