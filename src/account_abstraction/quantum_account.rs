@@ -61,13 +61,71 @@ impl std::fmt::Display for SeedError {
 impl std::error::Error for SeedError {}
 pub const BUD_MAGIC: [u8; 8] = *b"BUDLUM\x01\x00";
 
-#[derive(Debug, Clone)]
+/// Serde for byte arrays longer than 32: array impls stop there, so the
+/// fields travel as length-prefixed byte strings instead.
+///
+/// The encoding is stable and self-describing: a `Vec<u8>` on the wire, with
+/// the length checked against the array type on the way back. A short or long
+/// payload is refused rather than silently truncated or zero-filled.
+pub(crate) mod big_array {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer, const N: usize>(
+        value: &[u8; N],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(value)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+        deserializer: D,
+    ) -> Result<[u8; N], D::Error> {
+        let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
+        bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("byte array has the wrong length"))
+    }
+}
+
+/// Serde for `Vec<[u8; N]>` with the same wire shape as [`big_array`]: a
+/// sequence of byte strings, each length-checked on restore.
+pub(crate) mod big_array_vec {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer, const N: usize>(
+        value: &[[u8; N]],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(value.len()))?;
+        for item in value {
+            seq.serialize_element(item.as_slice())?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+        deserializer: D,
+    ) -> Result<Vec<[u8; N]>, D::Error> {
+        let rows: Vec<Vec<u8>> = Vec::deserialize(deserializer)?;
+        rows.into_iter()
+            .map(|row| {
+                row.try_into()
+                    .map_err(|_| serde::de::Error::custom("guardian key has the wrong length"))
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuantumAccount {
     pub address: [u8; 32],
+    #[serde(with = "big_array")]
     pub pq_public_key: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
     pub storage_root: [u8; 32],
     pub pact_root: [u8; 32],
     pub guardian_root: [u8; 32],
+    #[serde(with = "big_array_vec")]
     pub guardians: Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]>,
     pub multisig_threshold: usize,
     pub recovery_threshold: usize,

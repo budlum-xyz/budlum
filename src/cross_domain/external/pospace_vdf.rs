@@ -859,6 +859,10 @@ impl PoSpaceVdfAdapter {
             false
         };
 
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
+        }
+
         let weight_bits = 128u32.saturating_sub(tip.cumulative_weight.leading_zeros());
         let security = if pq_verified {
             SecurityBacking::SignatureSet {
@@ -866,7 +870,9 @@ impl PoSpaceVdfAdapter {
                 signers: 1,
                 required: 1,
                 total_weight: tip.cumulative_weight,
-                slashable: true,
+                // External PoSpace farmer/timelord signatures have no local Budlum
+                // confiscation bond or BridgeEconomicGuard arm yet.
+                slashable: false,
             }
         } else {
             SecurityBacking::Work {
@@ -1313,5 +1319,30 @@ mod tests {
             ..s2
         };
         assert!(verify_double_signage_equivocation(net, &s1, &s_other).is_err());
+
+        let (slash_adapter, _, _, slash_raw, _) = build_fixture("chia-pq-mainnet", 5, 1, true);
+        let unbonded_policy = VerificationPolicy::strict(110);
+        let att = slash_adapter
+            .verify(&slash_raw, &unbonded_policy)
+            .expect("valid PoSpace+VDF evidence verifies when slashability is not required");
+        assert!(
+            matches!(
+                att.security,
+                SecurityBacking::SignatureSet {
+                    slashable: false,
+                    ..
+                }
+            ),
+            "timelord/farmer PQ attestation without a local Budlum confiscation arm must report slashable=false"
+        );
+        let mut slash_policy = unbonded_policy;
+        slash_policy.require_slashable = true;
+        assert!(
+            matches!(
+                slash_adapter.verify(&slash_raw, &slash_policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "require_slashable=true must fail closed with UnslashableBacking"
+        );
     }
 }
