@@ -219,6 +219,9 @@ fn the_two_runtime_indexes_are_panic_free() {
         "the IPv6 bucket must use get_mut, not a runtime slice index"
     );
     let filter = read("src/storage/bud3/dedup_index.rs");
+    // Either constant-size chunking API is acceptable: `as_chunks` yields
+    // arrays and `chunks_exact` yields slices. What the lock is really about is
+    // that the lanes are filled by `zip`, never by a runtime index.
     assert!(
         filter.contains("lanes.iter_mut().zip(digest.as_chunks::<8>().0)"),
         "the digest lanes must be filled by zip, not a runtime index"
