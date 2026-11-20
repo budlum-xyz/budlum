@@ -444,6 +444,21 @@ jobs:
       - name: Clippy
         if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --all-targets -- -D warnings
+      # `--all-targets` compiles the test target too, so a function that only
+      # a `#[cfg(test)]` caller reaches counts as used and the step above stays
+      # green. That is the exact shape of production code that ships to nobody:
+      # it reads like a live helper in review, it has a passing test, and no
+      # build that leaves the repository contains a single call to it. The vote
+      # history writer had one - a four-argument wrapper that filled
+      # `prevote_hash` and `precommit_hash` with `None`. Had any production
+      # path ever picked it over the real writer it would have erased the two
+      # marks that stop a restarted validator from signing a second hash at a
+      # height it already voted on, and the test next to it would still have
+      # passed. Dropping `--all-targets` asks rustc the one question the line
+      # above cannot: is this item reachable in the library we actually ship.
+      - name: Clippy (lib only - no test target to prop dead code up)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --lib -- -D warnings
       - name: Clippy pedantic/nursery ratchet (izleme modu)
         if: always() && steps.rust.outcome == 'success'
         # Warning visibility + ratchet against count growth (baseline 191,
