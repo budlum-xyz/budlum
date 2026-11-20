@@ -324,6 +324,16 @@ pub fn view_public<I>(record: &ObjectRecord, symbols: I) -> Result<Vec<u8>, Pipe
 where
     I: IntoIterator<Item = Symbol>,
 {
+    // The record is submitter-chosen data and both budgets below scale with
+    // `symbols_per_segment`. Refuse an overstated record at the entry, before
+    // any allocation, so a caller can never read the outcome as a missing
+    // segment.
+    if record.symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+        return Err(PipelineError::TooManySymbols {
+            want: record.symbols_per_segment,
+            max: MAX_SYMBOLS_PER_SEGMENT,
+        });
+    }
     let seg = Segmentation::new(record.object_len, &record.profile)
         .ok_or(PipelineError::Fountain(FountainError::InvalidProfile))?;
     let seg_count = seg.count();

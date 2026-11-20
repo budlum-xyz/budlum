@@ -1264,3 +1264,40 @@ mod tests {
         .is_none());
     }
 }
+
+#[cfg(test)]
+mod view_entry_ceiling_tests {
+    use super::super::limits::{Bud3Limits, Profile};
+    use super::super::pipeline::{prepare_public_upload, view_public, MAX_SYMBOLS_PER_SEGMENT};
+    use super::*;
+
+    const SMALL: Profile = Profile {
+        id: 0,
+        qr_version: 40,
+        symbol_size: 128,
+        fps: 10,
+        k_max: 16,
+    };
+
+    /// `view_public` derives its step and byte budgets from
+    /// `record.symbols_per_segment`, which the submitter chose. A record above
+    /// the protocol ceiling must be refused at the entry with a named error,
+    /// not silently filtered deeper in, so no caller can mistake the refusal
+    /// for a missing segment.
+    #[test]
+    fn view_public_refuses_a_record_above_the_ceiling_at_the_entry() {
+        let data = b"a viewer payload whose record overstates its placement";
+        let up = prepare_public_upload(data, &SMALL, &Bud3Limits::default(), 20).unwrap();
+        let mut record = up.record.clone();
+        record.symbols_per_segment = MAX_SYMBOLS_PER_SEGMENT + 1;
+        match view_public(&record, up.segments.concat()) {
+            Err(PipelineError::TooManySymbols { want, max }) => {
+                assert_eq!(
+                    (want, max),
+                    (MAX_SYMBOLS_PER_SEGMENT + 1, MAX_SYMBOLS_PER_SEGMENT)
+                );
+            }
+            other => panic!("an overstated record must be refused at the entry, got {other:?}"),
+        }
+    }
+}
