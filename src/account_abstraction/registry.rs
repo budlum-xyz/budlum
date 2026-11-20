@@ -588,6 +588,50 @@ mod tests {
     }
 
     #[test]
+    fn registry_root_commits_account_identity_fields() {
+        let first = account_with(2, 3);
+        let mut second = account_with(2, 3);
+        second.pq_public_key = [4u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        second.address = QuantumAccount::address_from_public_key(&second.pq_public_key);
+
+        let mut first_registry = QuantumAccountRegistry::new();
+        first_registry.register(first).expect("first account");
+        let mut second_registry = QuantumAccountRegistry::new();
+        second_registry.register(second).expect("second account");
+
+        assert_ne!(first_registry.root(), second_registry.root());
+    }
+
+    #[test]
+    fn registry_root_commits_every_mutable_account_field() {
+        let account = account_with(2, 3);
+        let address = account.address;
+        let mut registry = QuantumAccountRegistry::new();
+        registry.register(account).expect("base account");
+        let root = registry.root();
+
+        let changes: [fn(&mut QuantumAccount); 8] = [
+            |account| account.storage_root = [1u8; 32],
+            |account| {
+                account.guardians[0][0] = 99;
+                account.guardian_root = QuantumAccount::guardian_root(&account.guardians);
+            },
+            |account| account.multisig_threshold = 1,
+            |account| account.recovery_threshold = 1,
+            |account| account.timelock_blocks += 1,
+            |account| account.nonce += 1,
+            |account| account.balance += 1,
+            |account| account.storage_bytes += 1,
+        ];
+
+        for change in changes {
+            let mut changed = registry.clone();
+            changed.update(&address, change).expect("valid update");
+            assert_ne!(root, changed.root());
+        }
+    }
+
+    #[test]
     fn registry_root_is_independent_of_registration_order() {
         let first = account_with(2, 3);
         let mut second = account_with(2, 3);
