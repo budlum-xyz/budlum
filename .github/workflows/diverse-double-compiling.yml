@@ -112,7 +112,9 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          cargo build --release 2>&1 | tail -5
+          # Keep every rustc line in the job log and still fail on the compiler's
+          # exit status: truncation here hides the real cause of a red stage.
+          cargo build --release 2>&1 | tee /tmp/build-stage1.log; exit "${PIPESTATUS[0]}"
 
       - name: Canonical digests
         id: digests
