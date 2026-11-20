@@ -811,4 +811,652 @@ fn real_mainnet_headers_prove_and_verify_plonky3_stark_prog_claim() {
         &batch
     )
     .is_err());
+
+    spv_merkle_proof_verifies_every_leaf_of_odd_width_trees();
+    spv_merkle_proof_index_is_canonical_even_with_duplicated_tail_nodes();
+    spv_merkle_proof_refuses_a_duplicate_at_a_leftmost_or_right_child_position();
+    spv_merkle_proof_verifies_every_transaction_of_real_odd_mainnet_blocks();
+    spv_confirmed_payment_proves_the_tail_transaction_of_an_odd_block();
+    spv_chain_with_a_backward_timestamp_step_verifies_when_median_time_past_holds();
+    spv_chain_below_the_implied_median_time_past_floor_is_refused();
+    an_equal_work_sibling_cannot_slash_the_carrier_of_a_bitcoin_attestation();
+    a_sibling_pair_cannot_slash_the_carrier_of_a_bitcoin_attestation_by_ancestry();
+    a_work_bucket_boundary_does_not_let_a_sibling_pair_slash_by_ancestry();
+    unix_seconds_live_policy_clock_advances_from_accepted_attestation_timestamps();
+}
+
+/// Bitcoin's transaction Merkle tree: a level of odd width pairs its last node
+/// with a copy of itself (the rule `ComputeMerkleRoot` applies in Bitcoin Core).
+fn merkle_levels(leaves: &[[u8; 32]]) -> Vec<Vec<[u8; 32]>> {
+    let mut levels = vec![leaves.to_vec()];
+    while levels.last().map_or(0, Vec::len) > 1 {
+        let level = levels.last().expect("at least one level");
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pair in level.chunks(2) {
+            let mut buf = [0u8; 64];
+            buf[..32].copy_from_slice(&pair[0]);
+            buf[32..].copy_from_slice(pair.get(1).unwrap_or(&pair[0]));
+            next.push(sha256d(&buf));
+        }
+        levels.push(next);
+    }
+    levels
+}
+
+fn merkle_branch(levels: &[Vec<[u8; 32]>], leaf_index: usize) -> Vec<[u8; 32]> {
+    let mut idx = leaf_index;
+    let mut branch = Vec::with_capacity(levels.len().saturating_sub(1));
+    for level in &levels[..levels.len() - 1] {
+        branch.push(*level.get(idx ^ 1).unwrap_or(&level[idx]));
+        idx >>= 1;
+    }
+    branch
+}
+
+fn synthetic_leaves(n: usize) -> Vec<[u8; 32]> {
+    (0..n)
+        .map(|i| sha256d(format!("leaf-{n}-{i}").as_bytes()))
+        .collect()
+}
+
+fn spv_merkle_proof_verifies_every_leaf_of_odd_width_trees() {
+    use crate::cross_domain::external::bitcoin_spv::verify_spv_tx_inclusion;
+
+    for n in 1..=40usize {
+        let leaves = synthetic_leaves(n);
+        let levels = merkle_levels(&leaves);
+        let root = levels.last().expect("levels")[0];
+        for (i, leaf) in leaves.iter().enumerate() {
+            let branch = merkle_branch(&levels, i);
+            let index = u32::try_from(i).expect("small index");
+            assert!(
+                verify_spv_tx_inclusion(leaf, &root, index, &branch),
+                "honest proof for leaf {i} of {n} was refused"
+            );
+        }
+    }
+}
+
+fn spv_merkle_proof_index_is_canonical_even_with_duplicated_tail_nodes() {
+    use crate::cross_domain::external::bitcoin_spv::verify_spv_tx_inclusion;
+
+    for n in 1..=40usize {
+        let leaves = synthetic_leaves(n);
+        let levels = merkle_levels(&leaves);
+        let root = levels.last().expect("levels")[0];
+        let depth = levels.len() - 1;
+        for (i, leaf) in leaves.iter().enumerate() {
+            let branch = merkle_branch(&levels, i);
+            for alias in 0..(1u32 << depth) {
+                if usize::try_from(alias).expect("small index") == i {
+                    continue;
+                }
+                assert!(
+                    !verify_spv_tx_inclusion(leaf, &root, alias, &branch),
+                    "leaf {i} of {n} also verified at index {alias}"
+                );
+            }
+            let high_bit_alias = u32::try_from(i).expect("small index") | (1u32 << depth);
+            assert!(
+                !verify_spv_tx_inclusion(leaf, &root, high_bit_alias, &branch),
+                "leaf {i} of {n} verified with a stray high index bit"
+            );
+        }
+    }
+}
+
+fn spv_merkle_proof_refuses_a_duplicate_at_a_leftmost_or_right_child_position() {
+    use crate::cross_domain::external::bitcoin_spv::verify_spv_tx_inclusion;
+
+    let leaf = sha256d(b"duplicated");
+    let mut buf = [0u8; 64];
+    buf[..32].copy_from_slice(&leaf);
+    buf[32..].copy_from_slice(&leaf);
+    let doubled_root = sha256d(&buf);
+
+    // `[x, x]` is the mutated form of a one-transaction block: a genuine
+    // duplicate is only ever the last node of a wider odd level, never node 0
+    // and never a right child.
+    assert!(!verify_spv_tx_inclusion(&leaf, &doubled_root, 0, &[leaf]));
+    assert!(!verify_spv_tx_inclusion(&leaf, &doubled_root, 1, &[leaf]));
+}
+
+/// Real mainnet blocks 100027 (3 transactions) and 100014 (7 transactions).
+/// Each header's double-SHA256 equals the block hash and carries the Merkle
+/// root below, so the transaction ids are pinned to proof-of-work.
+const MAINNET_ODD_BLOCKS: [(&str, &[&str]); 2] = [
+    (
+        "7099d100635a0e5f62ef12a8420c99426a408951078f191a0f63ddedc4dcd198",
+        &[
+            "1a02db5db5a24c5edc5b653051d8aaaddec3f9abc30354f7df358c49fe40f735",
+            "d3f3eb471e368a27f5320ff7a961bed748519139435cf8348e84ebd6225d7150",
+            "7cbcf6b5378e3e43b39734baa578efa501d02abf90289547f0e6621ee959f0e3",
+        ],
+    ),
+    (
+        "8772d9d0fdf8c1303c7b1167e3c73b095fd970e33c799c6563d98b2e96c5167f",
+        &[
+            "147caa76786596590baa4e98f5d9f48b86c7765e489f7a6ff3360fe5c674360b",
+            "0bcb16af267dee77ed8761662d31ee9d9a1bf1e4d268a9e7127407ebb3f9acfd",
+            "48738657818e2628f216375a9d48d681e2b1b1390be1b7a028c7b810eaa3928a",
+            "02981fa052f0481dbc5868f4fc2166035a10f27a03cfd2de67326471df5bc041",
+            "652b0aa4cf4f17bdb31f7a1d308331bba91f3b3cbf8f39c9cb5e19d4015b9f01",
+            "68d0685759c3d4f3f90a4f0e48d1b77641f06bb1f0b83a8841e8d71d5570ed41",
+            "0a2a92f0bda4727d0a13eaddf4dd9ac6b5c61a1429e6b2b818f19b15df0ac154",
+        ],
+    ),
+];
+
+fn internal_order(display_hex: &str) -> [u8; 32] {
+    let mut raw: [u8; 32] = hex::decode(display_hex)
+        .expect("pinned hex")
+        .try_into()
+        .expect("32 bytes");
+    raw.reverse();
+    raw
+}
+
+fn spv_merkle_proof_verifies_every_transaction_of_real_odd_mainnet_blocks() {
+    use crate::cross_domain::external::bitcoin_spv::verify_spv_tx_inclusion;
+
+    for (root_hex, txids) in MAINNET_ODD_BLOCKS {
+        let leaves: Vec<[u8; 32]> = txids.iter().map(|t| internal_order(t)).collect();
+        let levels = merkle_levels(&leaves);
+        let header_root = internal_order(root_hex);
+        assert_eq!(levels.last().expect("levels")[0], header_root);
+        for (i, leaf) in leaves.iter().enumerate() {
+            let branch = merkle_branch(&levels, i);
+            let index = u32::try_from(i).expect("small index");
+            assert!(
+                verify_spv_tx_inclusion(leaf, &header_root, index, &branch),
+                "transaction {i} of {} in block {root_hex} was refused",
+                leaves.len()
+            );
+            let mut forged = branch.clone();
+            forged[0][0] ^= 1;
+            assert!(!verify_spv_tx_inclusion(leaf, &header_root, index, &forged));
+        }
+    }
+}
+
+fn spv_confirmed_payment_proves_the_tail_transaction_of_an_odd_block() {
+    use crate::cross_domain::external::bitcoin_spv::{
+        verify_spv_raw_tx_inclusion, REGTEST_POW_LIMIT_BITS,
+    };
+    use crate::cross_domain::external::spec::AdapterError;
+
+    let raw_txs: Vec<Vec<u8>> = (0u8..5)
+        .map(|i| vec![0x70 + i; 120 + usize::from(i)])
+        .collect();
+    let leaves: Vec<[u8; 32]> = raw_txs.iter().map(|t| sha256d(t)).collect();
+    let levels = merkle_levels(&leaves);
+    let merkle_root = levels.last().expect("levels")[0];
+
+    let anchor_hash = sha256d(b"odd-block-anchor");
+    let adp = BitcoinSpvAdapter::new(
+        "regtest",
+        Some(PinnedBitcoinAnchor {
+            height: 700,
+            block_hash: anchor_hash,
+            bits: REGTEST_POW_LIMIT_BITS,
+        }),
+    );
+    let mut chain = Vec::new();
+    let mut prev = anchor_hash;
+    for i in 0..6u32 {
+        let root = if i == 0 {
+            merkle_root
+        } else {
+            sha256d(&[0xE0, u8::try_from(i).expect("small")])
+        };
+        let hdr = mine_regtest_header(prev, root, 1_730_000_000 + i * 600, REGTEST_POW_LIMIT_BITS);
+        prev = sha256d(&hdr);
+        chain.push(hdr);
+    }
+    let block_hash = sha256d(&chain[0]);
+    let refs: Vec<&[u8; HEADER_LEN]> = chain.iter().collect();
+    let ev = spv_evidence(&adp, "regtest", &refs, Address::from([9; 32]));
+    let pol = VerificationPolicy {
+        min_depth: 6,
+        require_declared_match: true,
+        max_age: 0,
+        now: 1_730_010_000,
+        require_slashable: false,
+    };
+    let verified_chain = adp.verify_chain(&ev, &pol).expect("chain verifies");
+
+    for (i, raw_tx) in raw_txs.iter().enumerate() {
+        let branch = merkle_branch(&levels, i);
+        let index = u32::try_from(i).expect("small index");
+        let proven = verified_chain
+            .verify_confirmed_payment(&block_hash, raw_tx, index, &branch, i == 0, 6)
+            .unwrap_or_else(|e| panic!("transaction {i} of 5 was refused: {e:?}"));
+        assert_eq!(proven.txid, leaves[i]);
+        assert_eq!(proven.tx_index, index);
+        assert_eq!(proven.confirmations, 6);
+
+        let standalone = verify_spv_raw_tx_inclusion(raw_tx, &merkle_root, index, &branch, i == 0)
+            .expect("standalone proof");
+        assert_eq!(standalone.txid, leaves[i]);
+    }
+
+    // The tail transaction cannot be claimed at the neighbouring index.
+    let tail_branch = merkle_branch(&levels, 4);
+    assert!(matches!(
+        verified_chain.verify_confirmed_payment(&block_hash, &raw_txs[4], 5, &tail_branch, false, 6),
+        Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("Merkle branch")
+    ));
+}
+
+fn regtest_chain_with_timestamps(timestamps: &[u32]) -> (BitcoinSpvAdapter, RawConsensusEvidence) {
+    use crate::cross_domain::external::bitcoin_spv::REGTEST_POW_LIMIT_BITS;
+
+    let anchor_hash = sha256d(b"timestamp-rule-anchor");
+    let adp = BitcoinSpvAdapter::new(
+        "regtest",
+        Some(PinnedBitcoinAnchor {
+            height: 900,
+            block_hash: anchor_hash,
+            bits: REGTEST_POW_LIMIT_BITS,
+        }),
+    );
+    let mut prev = anchor_hash;
+    let mut chain = Vec::with_capacity(timestamps.len());
+    for (i, ts) in timestamps.iter().enumerate() {
+        let root = sha256d(&u32::try_from(i).expect("small index").to_le_bytes());
+        let header = mine_regtest_header(prev, root, *ts, REGTEST_POW_LIMIT_BITS);
+        prev = sha256d(&header);
+        chain.push(header);
+    }
+    let refs: Vec<&[u8; HEADER_LEN]> = chain.iter().collect();
+    let evidence = spv_evidence(&adp, "regtest", &refs, Address::from([10; 32]));
+    (adp, evidence)
+}
+
+fn timestamp_policy(latest: u32) -> VerificationPolicy {
+    VerificationPolicy {
+        min_depth: 6,
+        require_declared_match: true,
+        max_age: 0,
+        now: u64::from(latest) + 1_000,
+        require_slashable: false,
+    }
+}
+
+fn spv_chain_with_a_backward_timestamp_step_verifies_when_median_time_past_holds() {
+    // Bitcoin consensus only requires `timestamp > MTP-11`, so a header may
+    // carry an earlier timestamp than its parent (3.4% of recent mainnet
+    // parent links do). Without pinned prior timestamps the verifier cannot
+    // evaluate the exact median, and must not invent a stricter rule.
+    let base = 1_730_000_000u32;
+    let mut timestamps: Vec<u32> = (1..=12u32).map(|i| base + i * 600).collect();
+    timestamps[3] = timestamps[2] - 100;
+    timestamps[8] = timestamps[7] - 100;
+    let (adp, evidence) = regtest_chain_with_timestamps(&timestamps);
+    let latest = *timestamps.iter().max().expect("non-empty");
+    let attestation = adp
+        .verify(&evidence, &timestamp_policy(latest))
+        .expect("a consensus-valid chain with backward timestamp steps verifies");
+    assert_eq!(attestation.height, 912);
+}
+
+fn spv_chain_below_the_implied_median_time_past_floor_is_refused() {
+    use crate::cross_domain::external::spec::AdapterError;
+
+    // With `k >= 6` known predecessors the true median is at least the
+    // `(k - 5)`-th smallest of them whatever the unknown older blocks were, so
+    // a header at or below that floor is invalid on every possible history.
+    let base = 1_730_000_000u32;
+    let rising: Vec<u32> = (1..=7u32).map(|i| base + i * 100).collect();
+
+    // k = 6: the floor is the smallest known timestamp.
+    let mut at_floor = rising[..6].to_vec();
+    at_floor.push(rising[0]);
+    let (adp, evidence) = regtest_chain_with_timestamps(&at_floor);
+    assert!(matches!(
+        adp.verify(&evidence, &timestamp_policy(base + 1_000)),
+        Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("BIP-113")
+    ));
+
+    // k = 7: the floor is the second smallest. At the floor is refused, one
+    // second above it is accepted even though it is below the parent.
+    let mut seven = rising.clone();
+    seven.push(rising[1]);
+    let (adp, evidence) = regtest_chain_with_timestamps(&seven);
+    assert!(matches!(
+        adp.verify(&evidence, &timestamp_policy(base + 1_000)),
+        Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("BIP-113")
+    ));
+
+    let mut above = rising;
+    above.push(above[1] + 1);
+    let (adp, evidence) = regtest_chain_with_timestamps(&above);
+    adp.verify(&evidence, &timestamp_policy(base + 1_000))
+        .expect("one second above the implied floor is consensus-valid");
+}
+
+const POW_DOOR_BASE_TS: u32 = 1_730_000_000;
+const POW_DOOR_CARRIER: [u8; 32] = [9; 32];
+const POW_DOOR_CHALLENGER: [u8; 32] = [77; 32];
+
+fn pow_door_anchor() -> PinnedBitcoinAnchor {
+    use crate::cross_domain::external::bitcoin_spv::REGTEST_POW_LIMIT_BITS;
+
+    PinnedBitcoinAnchor {
+        height: 900,
+        block_hash: sha256d(b"pow-door-anchor"),
+        bits: REGTEST_POW_LIMIT_BITS,
+    }
+}
+
+fn pow_door_policy() -> VerificationPolicy {
+    VerificationPolicy {
+        min_depth: 6,
+        require_declared_match: true,
+        max_age: 0,
+        now: u64::from(POW_DOOR_BASE_TS) + 10_000,
+        require_slashable: false,
+    }
+}
+
+/// Mines `len` regtest headers on top of `parent`, numbered from `first`. The
+/// merkle roots come from `tag`, so two tags give two distinct valid branches
+/// with the same heights, timestamps and work.
+fn pow_door_branch(
+    parent: [u8; 32],
+    first: usize,
+    len: usize,
+    tag: &[u8],
+) -> Vec<[u8; HEADER_LEN]> {
+    use crate::cross_domain::external::bitcoin_spv::REGTEST_POW_LIMIT_BITS;
+
+    let mut prev = parent;
+    let mut branch = Vec::with_capacity(len);
+    for index in first..first + len {
+        let index = u32::try_from(index).expect("small index");
+        let mut seed = tag.to_vec();
+        seed.extend_from_slice(&index.to_le_bytes());
+        let header = mine_regtest_header(
+            prev,
+            sha256d(&seed),
+            POW_DOOR_BASE_TS + (index + 1) * 600,
+            REGTEST_POW_LIMIT_BITS,
+        );
+        prev = sha256d(header.as_slice());
+        branch.push(header);
+    }
+    branch
+}
+
+/// `common` headers every fork shares, then `tail` headers private to `tag`:
+/// two tags with the same `common` are two forks off one block.
+fn pow_door_fork(common: usize, tail: usize, tag: &[u8]) -> Vec<[u8; HEADER_LEN]> {
+    let anchor_hash = pow_door_anchor().block_hash;
+    let mut chain = pow_door_branch(anchor_hash, 0, common, b"shared");
+    let parent = chain
+        .last()
+        .map_or(anchor_hash, |header| sha256d(header.as_slice()));
+    chain.extend(pow_door_branch(parent, common, tail, tag));
+    chain
+}
+
+fn pow_door_evidence(chain: &[[u8; HEADER_LEN]], submitter: [u8; 32]) -> RawConsensusEvidence {
+    let adapter = BitcoinSpvAdapter::new("regtest", Some(pow_door_anchor()));
+    let refs: Vec<&[u8; HEADER_LEN]> = chain.iter().collect();
+    spv_evidence(&adapter, "regtest", &refs, Address::from(submitter))
+}
+
+fn pow_door_backing(chain: &[[u8; HEADER_LEN]]) -> SecurityBacking {
+    BitcoinSpvAdapter::new("regtest", Some(pow_door_anchor()))
+        .verify(
+            &pow_door_evidence(chain, POW_DOOR_CHALLENGER),
+            &pow_door_policy(),
+        )
+        .expect("the mined chain verifies")
+        .security
+}
+
+/// A registered, bonded regtest Bitcoin domain whose carrier already has the
+/// attestation for `accepted` in the book.
+fn pow_door_book(
+    accepted: &[[u8; HEADER_LEN]],
+) -> (IntakeState, crate::cross_domain::external::spec::DomainKey) {
+    let spec = Spec::BitcoinSpv {
+        network: "regtest".to_string(),
+        anchor: Some(pow_door_anchor()),
+    };
+    let economics = IntakeState::conservative_economics(1_000_000);
+    let descriptor_id = spec.build(None, None).descriptor().id;
+    let mut state = IntakeState::new();
+    state.pin_bitcoin_anchor("regtest", pow_door_anchor());
+    let key = state
+        .register_domain(
+            RegistrationRequest {
+                spec,
+                policy: pow_door_policy(),
+                economics,
+                versions: VersionPolicy::single(descriptor_id, 1, 0),
+                bond_atoms: economics.required_bond_atoms(),
+                poster: Address::from(POW_DOOR_CARRIER),
+                golden: pow_door_evidence(&pow_door_fork(6, 0, b"golden"), POW_DOOR_CARRIER),
+            },
+            None,
+        )
+        .expect("a pinned regtest Bitcoin domain registers");
+    state
+        .submit_evidence(&pow_door_evidence(accepted, POW_DOOR_CARRIER), None)
+        .expect("the carrier's attestation is accepted");
+    (state, key)
+}
+
+fn assert_pow_door_book_untouched(
+    state: &IntakeState,
+    key: &crate::cross_domain::external::spec::DomainKey,
+    digest_before: [u8; 32],
+) {
+    use crate::cross_domain::external::profile::DomainState;
+
+    assert_eq!(
+        state.state_digest().expect("digest"),
+        digest_before,
+        "a refused challenge must not move any state"
+    );
+    let registration = state.registry.domain(key).expect("domain stays registered");
+    assert_eq!(registration.record.state, DomainState::Active);
+    assert_eq!(
+        registration.attestations.len(),
+        1,
+        "the carrier's attestation stays in the book"
+    );
+    let bond = registration
+        .provers
+        .get(&Address::from(POW_DOOR_CARRIER))
+        .expect("the carrier's bond");
+    assert_eq!(bond.slashed_atoms, 0);
+    assert!(bond.slashings.is_empty());
+}
+
+fn an_equal_work_sibling_cannot_slash_the_carrier_of_a_bitcoin_attestation() {
+    // Two forks off the fifth block reach the same height with the same work:
+    // the external chain's own tie. Neither carrier is provably the liar, so
+    // the contradiction door must refuse and leave every record where it was.
+    let accepted = pow_door_fork(5, 1, b"carrier-tip");
+    let rival = pow_door_fork(5, 1, b"rival-tip");
+    assert_eq!(
+        pow_door_backing(&accepted),
+        pow_door_backing(&rival),
+        "the forks carry exactly the same work"
+    );
+    let (mut state, key) = pow_door_book(&accepted);
+    let digest_before = state.state_digest().expect("digest");
+
+    let refusal = state
+        .slash_on_contradiction(
+            &pow_door_evidence(&rival, POW_DOOR_CHALLENGER),
+            Address::from(POW_DOOR_CHALLENGER),
+            None,
+        )
+        .expect_err("a tie slashes nobody");
+    assert!(
+        matches!(&refusal, IntakeError::InvalidContradiction { reason } if reason.contains("more than")),
+        "unexpected refusal: {refusal:?}"
+    );
+    assert_pow_door_book_untouched(&state, &key, digest_before);
+}
+
+fn a_sibling_pair_cannot_slash_the_carrier_of_a_bitcoin_attestation_by_ancestry() {
+    // The carrier attested a six-header chain. A rival fork off the fifth
+    // block reaches height 7, so its header at height 6 is a sibling of the
+    // carrier's tip. That is an ordinary one-block race, and it must not be
+    // read as proof that the carrier lied.
+    let accepted = pow_door_fork(5, 1, b"carrier-tip");
+    let witness = pow_door_fork(5, 2, b"rival-tip");
+    let (mut state, key) = pow_door_book(&accepted);
+    let digest_before = state.state_digest().expect("digest");
+
+    let refusal = state
+        .adjudicate_ancestry(
+            &pow_door_evidence(&witness, POW_DOOR_CHALLENGER),
+            Address::from(POW_DOOR_CHALLENGER),
+            None,
+        )
+        .expect_err("a one-block race refutes nothing");
+    assert!(
+        matches!(&refusal, IntakeError::InvalidContradiction { reason } if reason.contains("proof-of-work")),
+        "unexpected refusal: {refusal:?}"
+    );
+    assert_pow_door_book_untouched(&state, &key, digest_before);
+}
+
+fn a_work_bucket_boundary_does_not_let_a_sibling_pair_slash_by_ancestry() {
+    // The attested work is a power-of-two bucket. The witness is one block
+    // longer by adjacency, so at a bucket edge its bucket is strictly higher
+    // than the attested one even though it proves no reorg: a comparison of
+    // the two buckets would let this pair slash an honest carrier.
+    let accepted = pow_door_fork(6, 1, b"carrier-tip");
+    let witness = pow_door_fork(6, 2, b"rival-tip");
+    let (
+        SecurityBacking::Work {
+            difficulty_bits: attested_bits,
+        },
+        SecurityBacking::Work {
+            difficulty_bits: witness_bits,
+        },
+    ) = (pow_door_backing(&accepted), pow_door_backing(&witness))
+    else {
+        panic!("a Bitcoin window is work backed");
+    };
+    assert!(
+        witness_bits > attested_bits,
+        "the fixture must sit on a bucket edge ({attested_bits} -> {witness_bits})"
+    );
+    let (mut state, key) = pow_door_book(&accepted);
+    let digest_before = state.state_digest().expect("digest");
+
+    let refusal = state
+        .adjudicate_ancestry(
+            &pow_door_evidence(&witness, POW_DOOR_CHALLENGER),
+            Address::from(POW_DOOR_CHALLENGER),
+            None,
+        )
+        .expect_err("a bucket edge is not a reorg");
+    assert!(
+        matches!(&refusal, IntakeError::InvalidContradiction { reason } if reason.contains("proof-of-work")),
+        "unexpected refusal: {refusal:?}"
+    );
+    assert_pow_door_book_untouched(&state, &key, digest_before);
+}
+
+fn unix_seconds_live_policy_clock_advances_from_accepted_attestation_timestamps() {
+    use crate::cross_domain::external::bitcoin_spv::REGTEST_POW_LIMIT_BITS;
+
+    let anchor = PinnedBitcoinAnchor {
+        height: 900,
+        block_hash: sha256d(b"clock-unit-anchor"),
+        bits: REGTEST_POW_LIMIT_BITS,
+    };
+    let anchor_hash = anchor.block_hash;
+    let adapter = BitcoinSpvAdapter::new("regtest", Some(anchor.clone()));
+    let mut prev = anchor_hash;
+    let mut chain1 = Vec::new();
+    for i in 0..6u32 {
+        let hdr = mine_regtest_header(
+            prev,
+            sha256d(&i.to_le_bytes()),
+            1_730_000_000 + (i + 1) * 1_000,
+            REGTEST_POW_LIMIT_BITS,
+        );
+        prev = sha256d(&hdr);
+        chain1.push(hdr);
+    }
+    let mut chain2 = chain1.clone();
+    let hdr7 = mine_regtest_header(
+        prev,
+        sha256d(&7u32.to_le_bytes()),
+        1_730_011_000,
+        REGTEST_POW_LIMIT_BITS,
+    );
+    chain2.push(hdr7);
+
+    let chain1_refs: Vec<&[u8; HEADER_LEN]> = chain1.iter().collect();
+    let chain2_refs: Vec<&[u8; HEADER_LEN]> = chain2.iter().collect();
+    let policy = VerificationPolicy {
+        min_depth: 6,
+        require_declared_match: true,
+        max_age: 3_600,
+        now: 1_730_003_000,
+        require_slashable: false,
+    };
+    let spec = Spec::BitcoinSpv {
+        network: "regtest".to_string(),
+        anchor: Some(anchor.clone()),
+    };
+    let economics = IntakeState::conservative_economics(1_000_000);
+    let mut state = IntakeState::new();
+    state.pin_bitcoin_anchor("regtest", anchor);
+    state
+        .register_domain(
+            RegistrationRequest {
+                spec,
+                policy,
+                economics,
+                versions: VersionPolicy::single(adapter.descriptor().id, 1, 0),
+                bond_atoms: economics.required_bond_atoms(),
+                poster: Address::from(POW_DOOR_CARRIER),
+                golden: spv_evidence(
+                    &adapter,
+                    "regtest",
+                    &chain1_refs,
+                    Address::from(POW_DOOR_CARRIER),
+                ),
+            },
+            None,
+        )
+        .expect("domain registers");
+    state
+        .submit_evidence(
+            &spv_evidence(
+                &adapter,
+                "regtest",
+                &chain1_refs,
+                Address::from(POW_DOOR_CARRIER),
+            ),
+            None,
+        )
+        .expect("first attestation accepted at UnixSeconds finalized_at 1_730_006_000");
+    let second = state
+        .submit_evidence(
+            &spv_evidence(
+                &adapter,
+                "regtest",
+                &chain2_refs,
+                Address::from(POW_DOOR_CARRIER),
+            ),
+            None,
+        )
+        .expect(
+            "UnixSeconds live_policy_clock advances to 1_730_006_000 and accepts 1_730_011_000",
+        );
+    assert_eq!(second.height, 907);
+    assert_eq!(second.finalized_at, 1_730_011_000);
 }

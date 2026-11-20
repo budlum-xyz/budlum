@@ -82,15 +82,21 @@
 //! challenge that carries the refuting proof, so no operator key can slash
 //! anyone and no slash can be manufactured without evidence.
 //!
-//! The limit that remains is *cross-slot*: refutation is defined only for the
-//! slot the challenged attestation occupies. A false attestation whose slot
-//! can no longer be re-proved - an abandoned branch left behind by a deeper
-//! chain, the Bitcoin reorg case - cannot be refuted from the record today,
-//! because `FinalityAttestation` carries no attested parent hash while
-//! `FinalityProofShape` already declares a `BINDS_PARENT_HASH` class. Closing
-//! that gap means carrying the ancestry commitment into the attestation and
-//! walking the accepted book backwards with it; until then the honest claim
-//! is "refutable at its own slot", not "refutable".
+//! The limit that remains is *cross-slot*, and it differs by backing. A
+//! successor that descends from a different parent refutes its predecessor
+//! (`IntakeState::adjudicate_ancestry`, `ExternalDomainTx::ChallengeAncestry`)
+//! only where the adapter binds a parent hash (`attested_parent`, which Bitcoin
+//! SPV alone does) and the predecessor is not work backed. A proof-of-work
+//! predecessor is refused on purpose: the successor is one block longer than
+//! the attested chain by construction, so every honest one-block fork descends
+//! from a different parent, and no comparison of the two windows' difficulty
+//! tells a reorg from a race. The same-slot door treats an equal-work sibling
+//! as a tie and slashes nobody; only a proof carrying strictly more difficulty
+//! slashes. The Bitcoin reorg case is therefore still open: refuting work needs
+//! a witness that out-works the attested branch by a margin, which today's
+//! one-successor transaction cannot carry, and until it lands the honest claim
+//! for a proof-of-work domain is "refutable by strictly more work at its own
+//! slot", not "refutable".
 //!
 //! # The rule underneath all six
 //!

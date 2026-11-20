@@ -226,21 +226,21 @@ impl ClientSealedDedupIndex {
         self.entries.insert(self.content_tag(content), object);
     }
 
-    /// Convenience: export an encrypted BOF-1 sealed backup object of this client index.
+    /// Convenience: export an encrypted BOF-1 sealed backup object of this client index
+    /// using a fresh 24-byte salt drawn from the OS CSPRNG.
     ///
     /// # Errors
     ///
     /// Returns [`KeyPkgBud3Error`] if sealing fails.
-    pub fn export_sealed_backup(
-        &self,
-        backup_salt: [u8; SEAL_SALT_LEN],
-    ) -> Result<Object, KeyPkgBud3Error> {
+    pub fn export_sealed_backup(&self) -> Result<Object, KeyPkgBud3Error> {
         let mut raw = Vec::with_capacity(self.entries.len().saturating_mul(64).saturating_add(8));
         raw.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
         for (tag, obj) in &self.entries {
             raw.extend_from_slice(tag);
             raw.extend_from_slice(obj);
         }
+        let mut backup_salt = [0u8; SEAL_SALT_LEN];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut backup_salt);
         let backup_key = ContentKey(self.dedup_key);
         let sealed = seal_object(&raw, &backup_key, backup_salt);
         raw.zeroize();
@@ -324,12 +324,29 @@ mod tests {
         assert_eq!(idx.lookup(b"photo-1"), Some([0xa1u8; 32]));
         assert_eq!(idx.lookup(b"photo-2"), None);
 
-        let backup = idx.export_sealed_backup([0x77u8; SEAL_SALT_LEN]).unwrap();
+        let backup = idx.export_sealed_backup().unwrap();
         assert_eq!(backup.header.content_len, 0);
         let mut m = Meter::for_object(1 << 20);
         let restored =
             ClientSealedDedupIndex::import_sealed_backup(&seed, &backup, &mut m).unwrap();
         assert_eq!(restored.lookup(b"photo-1"), Some([0xa1u8; 32]));
+
+        // Consecutive exports under the same wallet seed must draw distinct
+        // 24-byte OS CSPRNG salts so XChaCha20-Poly1305 never reuses a
+        // (backup_key, nonce) pair across index snapshots.
+        idx.record(b"photo-2", [0xb2u8; 32]);
+        let second_backup = idx.export_sealed_backup().unwrap();
+        assert_ne!(
+            &backup.payload[..SEAL_SALT_LEN],
+            &second_backup.payload[..SEAL_SALT_LEN],
+            "consecutive backup exports must draw fresh CSPRNG salts"
+        );
+        assert_ne!(backup.payload, second_backup.payload);
+        let mut m2 = Meter::for_object(1 << 20);
+        let restored_second =
+            ClientSealedDedupIndex::import_sealed_backup(&seed, &second_backup, &mut m2).unwrap();
+        assert_eq!(restored_second.lookup(b"photo-1"), Some([0xa1u8; 32]));
+        assert_eq!(restored_second.lookup(b"photo-2"), Some([0xb2u8; 32]));
     }
 
     /// A backup whose declared count disagrees with its body must be refused,
@@ -344,7 +361,7 @@ mod tests {
         let seed = [0x44u8; 32];
         let mut idx = ClientSealedDedupIndex::from_wallet_seed(&seed);
         idx.record(b"photo-1", [0xb1u8; 32]);
-        let backup = idx.export_sealed_backup([0x78u8; SEAL_SALT_LEN]).unwrap();
+        let backup = idx.export_sealed_backup().unwrap();
         let mut m = Meter::for_object(1 << 20);
         assert!(ClientSealedDedupIndex::import_sealed_backup(&seed, &backup, &mut m).is_ok());
 

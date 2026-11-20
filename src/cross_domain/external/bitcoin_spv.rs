@@ -24,7 +24,7 @@
 //! Evidence is a contiguous run of real 80-byte Bitcoin block headers. The
 //! adapter derives, never trusts: the double-SHA256 hash of every header, the
 //! parent link back to a *pinned* anchor, the compact `nBits` target, the
-//! proof-of-work inequality, monotonically non-decreasing timestamps, the
+//! proof-of-work inequality, the BIP-113 median-time-past timestamp bound, the
 //! declared height and the declared root. It refuses an unknown evidence
 //! version, a mismatched adapter or network, an unpinned anchor, a truncated
 //! payload and a depth below policy.
@@ -32,7 +32,8 @@
 //! It is a full Nakamoto SPV header-chain and payment verifier: exact 256-bit
 //! cumulative chainwork (`floor(2^256 / (target + 1))`), canonical heaviest-chain
 //! fork selection, fail-closed 2016-block `[1/4, 4x]` difficulty retargeting,
-//! strict BIP-113 Median-Time-Past (`MTP-11`), per-header `+2h` future-time
+//! BIP-113 Median-Time-Past (`MTP-11`, exact with 11 known predecessors and a
+//! provable lower bound before that), per-header `+2h` future-time
 //! enforcement, CVE-2012-2459 and CVE-2017-12842-hardened coinbase/transaction
 //! Merkle inclusion with `k`-confirmation depth checks, and 128-bit Plonky3
 //! FRI-STARK `BudVM` (`Claim::Prog`) batch header-chain proving and verification.
@@ -140,8 +141,11 @@ const MAX_SPV_MERKLE_DEPTH: usize = 32;
 /// header's `merkle_root` (`SHA256d` in internal byte order).
 ///
 /// Rejects zero `txid`/`merkle_root`, oversized branches (`> 32`), leftover
-/// high index bits above the branch depth, and any `left == right` internal
-/// compression (blocking CVE-2012-2459 odd-leaf duplication malleability).
+/// high index bits above the branch depth, and every `left == right` step an
+/// honest tree cannot contain (blocking CVE-2012-2459 odd-leaf duplication
+/// malleability). Bitcoin pairs the last node of an odd-width level with
+/// itself, so an equal sibling is honest only for a left child that is not the
+/// leftmost node of its level.
 ///
 /// Convenience: exposed for external Bitcoin SPV settlement and bridge callers
 /// verifying payment inclusion against `FinalityAttestation::attested_tx_root`.
@@ -162,9 +166,9 @@ pub fn verify_spv_tx_inclusion(
     let mut idx = tx_index;
     let mut pair = Vec::with_capacity(64);
     for sibling in branch {
-        if acc == *sibling {
-            // CVE-2012-2459: refuse duplicate-child Merkle steps so a forged
-            // trailing-pair duplicate tree can never alias a distinct tx index.
+        // A right child or the leftmost node paired with an equal sibling is
+        // the duplicated-tail alias of another index (CVE-2012-2459).
+        if acc == *sibling && (idx & 1 == 1 || idx == 0) {
             return false;
         }
         let (left, right) = if idx & 1 == 0 {
@@ -595,6 +599,23 @@ pub fn median_time_past(prior_timestamps: &[u32]) -> Option<u32> {
     let mut window: Vec<u32> = prior_timestamps.get(start..)?.to_vec();
     window.sort_unstable();
     window.get(window.len() / 2).copied()
+}
+
+/// Lower bound on the median-time-past of the 11 blocks before the next
+/// header, from the trailing timestamps known so far. Each of the `11 - k` unknown
+/// predecessors can pull the median down by at most one rank, so with `k`
+/// known values the median is at least the `(k - 5)`-th smallest of them;
+/// with fewer than six nothing can be inferred. For `k >= 11` this is the
+/// exact median.
+#[must_use]
+fn median_time_past_floor(known_timestamps: &[u32]) -> Option<u32> {
+    if known_timestamps.len() >= MTP_WINDOW_LEN {
+        return median_time_past(known_timestamps);
+    }
+    let rank = known_timestamps.len().checked_sub(MTP_WINDOW_LEN / 2 + 1)?;
+    let mut sorted = known_timestamps.to_vec();
+    sorted.sort_unstable();
+    sorted.get(rank).copied()
 }
 
 /// Encode a big-endian 256-bit positive target back into canonical Bitcoin
@@ -1051,24 +1072,17 @@ impl BitcoinSpvAdapter {
                     rule: "Bitcoin header does not link to its parent".to_string(),
                 });
             }
-            // Enforce strict BIP-113 Median-Time-Past (`timestamp > MTP-11`)
-            // whenever 11 prior timestamps are available, and monotonic order
-            // on shorter unseeded checkpoint windows.
-            if seen_timestamps.len() >= MTP_WINDOW_LEN {
-                if let Some(mtp) = median_time_past(&seen_timestamps) {
-                    if header.timestamp <= mtp {
-                        return Err(AdapterError::ConsensusRule {
-                            rule: format!(
-                                "Bitcoin header timestamp {} does not exceed BIP-113 MTP {mtp}",
-                                header.timestamp
-                            ),
-                        });
-                    }
-                }
-            } else if let Some(&prev_ts) = seen_timestamps.last() {
-                if header.timestamp < prev_ts {
+            // Bitcoin only requires a timestamp above the median of the
+            // previous 11 headers, so a header may carry a smaller timestamp
+            // than its parent. The bound is exact once 11 predecessors are
+            // known and a provable lower bound before that.
+            if let Some(floor) = median_time_past_floor(&seen_timestamps) {
+                if header.timestamp <= floor {
                     return Err(AdapterError::ConsensusRule {
-                        rule: "Bitcoin header timestamp moves backwards".to_string(),
+                        rule: format!(
+                            "Bitcoin header timestamp {} does not exceed BIP-113 MTP floor {floor}",
+                            header.timestamp
+                        ),
                     });
                 }
             }
