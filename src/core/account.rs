@@ -780,7 +780,7 @@ pub struct AccountState {
     /// pattern, so a chain that never opened account abstraction keeps the
     /// roots it always had. Persisted through the snapshot's schema-16 field
     /// and digested under the same gate.
-    pub quantum_accounts: crate::account_abstraction::registry::QuantumAccountRegistry,
+    pub quantum_accounts: crate::account_abstraction::QuantumAccountRegistry,
     /// The scheme and suite statuses of this chain.
     ///
     /// Consensus state: every signature check that decides a block or a
@@ -1038,7 +1038,7 @@ impl AccountState {
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
             vault: crate::socialfi::VaultRegistry::new(),
-            quantum_accounts: crate::account_abstraction::registry::QuantumAccountRegistry::new(),
+            quantum_accounts: crate::account_abstraction::QuantumAccountRegistry::new(),
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
@@ -1113,7 +1113,7 @@ impl AccountState {
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
             vault: crate::socialfi::VaultRegistry::new(),
-            quantum_accounts: crate::account_abstraction::registry::QuantumAccountRegistry::new(),
+            quantum_accounts: crate::account_abstraction::QuantumAccountRegistry::new(),
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
@@ -1191,7 +1191,7 @@ impl AccountState {
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
             vault: crate::socialfi::VaultRegistry::new(),
-            quantum_accounts: crate::account_abstraction::registry::QuantumAccountRegistry::new(),
+            quantum_accounts: crate::account_abstraction::QuantumAccountRegistry::new(),
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
@@ -8910,8 +8910,8 @@ impl AccountState {
     pub fn register_quantum_account_at_root(
         &mut self,
         based_on_root: [u8; 32],
-        account: crate::account_abstraction::registry::QuantumAccount,
-    ) -> Result<(), crate::account_abstraction::registry::QuantumAccountRegistryError> {
+        account: crate::account_abstraction::QuantumAccount,
+    ) -> Result<(), crate::account_abstraction::QuantumAccountRegistryError> {
         self.quantum_accounts
             .register_at_root(based_on_root, account)
     }
@@ -8928,9 +8928,9 @@ impl AccountState {
         address: &[u8; 32],
         based_on_root: [u8; 32],
         change: F,
-    ) -> Result<(), crate::account_abstraction::registry::QuantumAccountRegistryError>
+    ) -> Result<(), crate::account_abstraction::QuantumAccountRegistryError>
     where
-        F: FnOnce(&mut crate::account_abstraction::registry::QuantumAccount),
+        F: FnOnce(&mut crate::account_abstraction::QuantumAccount),
     {
         self.quantum_accounts
             .update_at_root(address, based_on_root, change)

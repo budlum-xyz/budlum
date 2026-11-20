@@ -2180,6 +2180,31 @@ mod rpc_tests {
             .record_paid_view(payer.0, pub_key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 0)
             .unwrap();
 
+        // A Pollen-bound commitment: the paid view door must refuse it
+        // before touching storage, receipts, or symbols.
+        let pollen_owner = alice;
+        let pollen_asset = crate::pollen::DataAsset::new(
+            pollen_owner,
+            crate::storage::ContentId([0x77u8; 32]),
+            [0x66; 32],
+            false,
+        );
+        let pollen_asset_id = pollen_asset.asset_id;
+        bc.state
+            .marketplace
+            .register_data_asset(pollen_asset)
+            .unwrap();
+        bc.state
+            .marketplace
+            .protected_content
+            .bind(
+                crate::storage::ContentId([0x77u8; 32]),
+                pollen_asset_id,
+                pollen_owner,
+                pollen_owner,
+            )
+            .unwrap();
+
         let (op_server, chain) = setup_with_blockchain(bc).await;
         let pub_node = Node::new(chain.clone()).unwrap();
         let pub_server = RpcServer::with_security_and_mode(
@@ -2364,7 +2389,7 @@ mod rpc_tests {
         assert_eq!(
             pub_server
                 .storage_get_content(
-                    payer_hex,
+                    payer_hex.clone(),
                     sealed_hex,
                     format!("0x{}", hex::encode([0x88u8; 32])),
                     MIN_PAID_VIEW_FEE_ATOMS
@@ -2373,6 +2398,22 @@ mod rpc_tests {
                 .unwrap_err()
                 .code(),
             -32602
+        );
+
+        // Pollen-listed bytes never leave through the paid storage view: the
+        // commitment-bound refusal fires before any decode or receipt burn.
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex,
+                    format!("0x{}", hex::encode([0x77u8; 32])),
+                    format!("0x{}", hex::encode([0x99u8; 32])),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32004
         );
 
         // Live BNS content resolves through BlockchainSymbolSource.
