@@ -195,6 +195,12 @@ pub struct BudlumClient {
 impl BudlumClient {
     #[must_use]
     pub fn new(url: String) -> Self {
+        // reqwest is built with the provider-less rustls feature, so it uses the
+        // process-wide provider. `main` installs Budlum's TLS 1.3 hybrid-only
+        // provider before anything runs; doing it here too keeps a client built
+        // anywhere else - a test, a future subcommand - from panicking with "No
+        // provider set". The install is idempotent and the first caller wins.
+        budlum_core::crypto::tls::install_default_provider();
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
@@ -294,6 +300,12 @@ pub struct EthClient {
 impl EthClient {
     #[must_use]
     pub fn new(url: String, bridge_address: String) -> Self {
+        // reqwest is built with the provider-less rustls feature, so it uses the
+        // process-wide provider. `main` installs Budlum's TLS 1.3 hybrid-only
+        // provider before anything runs; doing it here too keeps a client built
+        // anywhere else - a test, a future subcommand - from panicking with "No
+        // provider set". The install is idempotent and the first caller wins.
+        budlum_core::crypto::tls::install_default_provider();
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))

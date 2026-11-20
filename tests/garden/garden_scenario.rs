@@ -40,12 +40,24 @@ impl Drop for Node {
     }
 }
 
-fn free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    listener
-        .local_addr()
-        .map(|addr| addr.port())
-        .map_err(|e| e.to_string())
+/// Four distinct free ports.
+///
+/// The listeners are held until all four are known. Asking for them one at a
+/// time hands the same port out twice: the kernel is free to reuse a port the
+/// previous `TcpListener` released, and when it did, the node started with two
+/// of its four listeners on one port - the public RPC lost the race to the
+/// operator listener and the test failed with "timed out waiting for the
+/// operator listener" after two minutes. It failed roughly once in three runs.
+fn free_ports() -> Result<[u16; 4], String> {
+    let listeners = (0..4)
+        .map(|_| TcpListener::bind("127.0.0.1:0"))
+        .collect::<Result<Vec<TcpListener>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut ports = [0u16; 4];
+    for (port, listener) in ports.iter_mut().zip(&listeners) {
+        *port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    }
+    Ok(ports)
 }
 
 /// The operator listener serves 120 requests a minute to one address. The
@@ -160,10 +172,7 @@ impl Node {
     /// answers.
     fn start(name: &str) -> Result<Self, String> {
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let operator_port = free_port()?;
-        let public_port = free_port()?;
-        let p2p_port = free_port()?;
-        let metrics_port = free_port()?;
+        let [operator_port, public_port, p2p_port, metrics_port] = free_ports()?;
         let db = dir.path().join("db");
         let log = std::fs::File::create(dir.path().join("node.log")).map_err(|e| e.to_string())?;
         let errors = log.try_clone().map_err(|e| e.to_string())?;
