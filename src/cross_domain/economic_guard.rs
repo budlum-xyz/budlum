@@ -40,6 +40,10 @@ use crate::cross_domain::external::algorand_stateproof::{
     algorand_pubkey_commitment, verify_algorand_equivocation, AlgorandEquivocationProof,
     AlgorandStateProofAdapter, PinnedAlgorandVerifier,
 };
+use crate::cross_domain::external::aptos_jolteon_bft::{
+    verify_jolteon_equivocation, AptosJolteonAdapter, JolteonEquivocationProof,
+    PinnedJolteonEpochState,
+};
 use crate::cross_domain::external::auxpow_pop::{
     verify_pop_equivocation, AuxPowPopAdapter, PinnedAuxPowAnchor, PopEquivocationProof,
 };
@@ -47,8 +51,30 @@ use crate::cross_domain::external::based_preconf::{
     verify_based_preconf_equivocation, BasedPreconfAdapter, BasedPreconfEquivocationProof,
     PinnedBasedPreconfCommittee,
 };
+use crate::cross_domain::external::da_sampling::{
+    verify_da_fraud_proof, DaFraudProof, DataAvailabilityAdapter, PinnedDaCommittee,
+};
+use crate::cross_domain::external::dag_bft::{
+    verify_dag_equivocation_proof, BullsharkDagAdapter, DagEquivocationProof, PinnedDagCommittee,
+};
+use crate::cross_domain::external::honeybadger_bft::{
+    verify_rbc_equivocation, HoneyBadgerBftAdapter, PinnedHoneyBadgerCommittee,
+    RbcEquivocationProof,
+};
+use crate::cross_domain::external::hotstuff::{
+    verify_hotstuff_equivocation, HotStuffEquivocationProof, HotStuffThreeChainAdapter,
+    PinnedHotStuffCommittee,
+};
 use crate::cross_domain::external::mina_recursive::{
     PinnedSuccinctGenesis, SuccinctRecursiveAdapter,
+};
+use crate::cross_domain::external::near_doomslug::{
+    compute_near_bp_hash, near_approval_sign_bytes, verify_near_approval_slash,
+    NearApprovalSlashProof, NearDoomslugAdapter, NearSlashKind, PinnedNearEpoch,
+};
+use crate::cross_domain::external::pospace_vdf::{
+    verify_double_signage_equivocation, PinnedPoSpaceAnchor, PoSpaceVdfAdapter,
+    SignedPoSpaceSignage,
 };
 use crate::cross_domain::external::prover::{ProverBond, Slashing, BPS_DEN};
 use crate::cross_domain::external::restaking_avs::{
@@ -64,6 +90,11 @@ use crate::cross_domain::external::spec::{
 use crate::cross_domain::external::stellar_fba::{
     verify_stellar_ballot_equivocation, PinnedScpTier, StellarBallotEquivocationProof,
     StellarScpAdapter,
+};
+use crate::cross_domain::external::tendermint::{
+    validator_set_hash, verify_tendermint_misbehaviour, TendermintEraAnchor,
+    TendermintFinalityAdapter, TendermintLightParams, TendermintMisbehaviour,
+    TrustedTendermintState,
 };
 use crate::cross_domain::external::ton_catchain::{
     verify_ton_catchain_equivocation, PinnedTonMasterchainAnchor, TonCatchainAdapter,
@@ -156,8 +187,11 @@ pub struct DomainCeilingPolicy {
     pub stake_haircut_bps: u64,
     /// Haircut in basis points (`0..=10_000`) applied to slashable prover bond.
     pub bond_haircut_bps: u64,
-    /// Challenger reward in basis points (`0..=10_000`) of slashed prover bond.
+    /// Challenger reward in basis points (`0..=MAX_FINDER_REWARD_BPS`) of slashed prover bond.
     pub finder_reward_bps: u64,
+    /// Optional absolute ceiling in atoms on any single challenger reward payout.
+    #[serde(default)]
+    pub max_finder_reward_atoms: Option<u128>,
     /// Optional explicit window cap for verified Proof-of-Work domains.
     pub work_window_cap_atoms: u128,
     /// Minimum `PoW` `difficulty_bits` required before `work_window_cap_atoms` applies.
@@ -186,6 +220,7 @@ impl Default for DomainCeilingPolicy {
             stake_haircut_bps: DEFAULT_STAKE_HAIRCUT_BPS,
             bond_haircut_bps: DEFAULT_BOND_HAIRCUT_BPS,
             finder_reward_bps: DEFAULT_FINDER_REWARD_BPS,
+            max_finder_reward_atoms: None,
             work_window_cap_atoms: 0,
             min_work_difficulty_bits: 1,
             zk_window_cap_atoms: 0,
@@ -276,6 +311,185 @@ pub enum GuardedExternalAdapter {
         /// Governance-pinned succinct genesis and ML-DSA-65 aggregator anchor.
         pinned: Box<PinnedSuccinctGenesis>,
     },
+    /// `CometBFT` / `Tendermint` ICS-07 light-client anchor and unbonding window.
+    TendermintIbc {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned trusted `CometBFT` checkpoint state.
+        trusted: Box<TrustedTendermintState>,
+        /// Validated ICS-07 trusting and unbonding parameters.
+        params: TendermintLightParams,
+    },
+    /// Linear 3-chain `HotStuff` epoch validator committee.
+    HotStuffThreeChain {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned `HotStuff` epoch validator set.
+        pinned: PinnedHotStuffCommittee,
+    },
+    /// 2-chain pipelined `AptosBFT` / `Jolteon` epoch validator set.
+    AptosJolteon {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned `Jolteon` `EpochState`.
+        pinned: PinnedJolteonEpochState,
+    },
+    /// `NEAR` `Nightshade` + `Doomslug` finality epoch block-producer set.
+    NearDoomslug {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned `NEAR` epoch block-producer table.
+        pinned: PinnedNearEpoch,
+    },
+    /// Leaderless asynchronous `HoneyBadgerBFT` ACS + Bracha RBC committee.
+    HoneyBadgerBft {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned post-quantum ML-DSA-65 `HoneyBadgerBFT` committee.
+        pinned: PinnedHoneyBadgerCommittee,
+    },
+    /// Causal `Narwhal` / `Bullshark` DAG-BFT wave committee.
+    BullsharkDag {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned DAG-BFT epoch validator set.
+        pinned: PinnedDagCommittee,
+    },
+    /// 2D Reed-Solomon + Namespaced Merkle Tree data-availability sampling committee.
+    DataAvailability2d {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned DA namespace and committee configuration.
+        pinned: PinnedDaCommittee,
+    },
+    /// Physical Proof-of-Space + sequential hash-VDF chain anchor.
+    PoSpaceVdf {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned `PoSpace+VDF` genesis challenge and ML-DSA-65 attestor anchor.
+        pinned: Box<PinnedPoSpaceAnchor>,
+    },
+}
+
+fn hash_tendermint_pin(trusted: &TrustedTendermintState, params: &TendermintLightParams) -> Hash32 {
+    let vset_hash = validator_set_hash(&trusted.validators);
+    hash_fields_bytes(&[
+        b"BDLM_ECON_GUARD_PIN_V1",
+        &[9u8],
+        trusted.chain_id.as_bytes(),
+        &trusted.height.to_le_bytes(),
+        &trusted.time_secs.to_le_bytes(),
+        &trusted.trusting_period_secs.to_le_bytes(),
+        &vset_hash,
+        &trusted.next_validators_hash,
+        &params.trusting_period_secs.to_le_bytes(),
+        &params.unbonding_period_secs.to_le_bytes(),
+        &params.max_clock_drift_secs.to_le_bytes(),
+        &params.max_height_drift.to_le_bytes(),
+    ])
+}
+
+fn hash_hotstuff_pin(pinned: &PinnedHotStuffCommittee) -> Hash32 {
+    let count_le = u64::try_from(pinned.members.len())
+        .unwrap_or(u64::MAX)
+        .to_le_bytes();
+    let mut acc = hash_fields_bytes(&[
+        b"BDLM_ECON_GUARD_PIN_V1",
+        &[10u8],
+        &pinned.epoch.to_le_bytes(),
+        &count_le,
+    ]);
+    for m in &pinned.members {
+        acc = hash_fields_bytes(&[
+            b"BDLM_ECON_GUARD_PIN_V1",
+            &[10u8],
+            &acc,
+            &m.ed25519_pubkey,
+            &m.voting_weight.to_le_bytes(),
+            &m.pq_pubkey,
+        ]);
+    }
+    acc
+}
+
+fn hash_near_pin(pinned: &PinnedNearEpoch) -> Hash32 {
+    let bp_hash = compute_near_bp_hash(&pinned.block_producers);
+    hash_fields_bytes(&[
+        b"BDLM_ECON_GUARD_PIN_V1",
+        &[12u8],
+        &pinned.epoch_id,
+        &pinned.next_epoch_id,
+        &pinned.next_bp_hash,
+        &bp_hash,
+    ])
+}
+
+fn hash_dag_pin(pinned: &PinnedDagCommittee) -> Hash32 {
+    let count_le = u64::try_from(pinned.members.len())
+        .unwrap_or(u64::MAX)
+        .to_le_bytes();
+    let mut acc = hash_fields_bytes(&[
+        b"BDLM_ECON_GUARD_PIN_V1",
+        &[14u8],
+        &pinned.epoch.to_le_bytes(),
+        &count_le,
+    ]);
+    for m in &pinned.members {
+        acc = hash_fields_bytes(&[
+            b"BDLM_ECON_GUARD_PIN_V1",
+            &[14u8],
+            &acc,
+            &m.ed25519_pubkey,
+            &m.voting_weight.to_le_bytes(),
+            &m.pq_pubkey,
+        ]);
+    }
+    acc
+}
+
+fn hash_da_pin(pinned: &PinnedDaCommittee) -> Hash32 {
+    let count_le = u64::try_from(pinned.members.len())
+        .unwrap_or(u64::MAX)
+        .to_le_bytes();
+    let mut acc = hash_fields_bytes(&[
+        b"BDLM_ECON_GUARD_PIN_V1",
+        &[15u8],
+        &pinned.namespace_id,
+        &pinned.min_samples.to_le_bytes(),
+        &pinned.min_square_size.to_le_bytes(),
+        &count_le,
+    ]);
+    for m in &pinned.members {
+        acc = hash_fields_bytes(&[
+            b"BDLM_ECON_GUARD_PIN_V1",
+            &[15u8],
+            &acc,
+            &m.ed25519_pubkey,
+            &m.voting_weight.to_le_bytes(),
+            &m.pq_pubkey,
+        ]);
+    }
+    acc
+}
+
+fn hash_pospace_pin(pinned: &PinnedPoSpaceAnchor) -> Hash32 {
+    let (has_pq, pq_bytes): (u8, &[u8]) = pinned
+        .pq_attestor_pubkey
+        .as_deref()
+        .map_or((0u8, &[][..]), |pk| (1u8, pk));
+    hash_fields_bytes(&[
+        b"BDLM_ECON_GUARD_PIN_V1",
+        &[16u8],
+        &pinned.genesis_challenge,
+        &[pinned.min_plot_k],
+        &pinned.min_iterations_per_block.to_le_bytes(),
+        &pinned.max_iterations_per_block.to_le_bytes(),
+        &pinned.required_depth.to_le_bytes(),
+        &pinned.min_cumulative_weight.to_le_bytes(),
+        &[u8::from(pinned.require_pq_attestation)],
+        &[has_pq],
+        pq_bytes,
+    ])
 }
 
 impl GuardedExternalAdapter {
@@ -291,10 +505,20 @@ impl GuardedExternalAdapter {
             Self::TonCatchain { .. } => 6,
             Self::StellarScp { .. } => 7,
             Self::MinaRecursive { .. } => 8,
+            Self::TendermintIbc { .. } => 9,
+            Self::HotStuffThreeChain { .. } => 10,
+            Self::AptosJolteon { .. } => 11,
+            Self::NearDoomslug { .. } => 12,
+            Self::HoneyBadgerBft { .. } => 13,
+            Self::BullsharkDag { .. } => 14,
+            Self::DataAvailability2d { .. } => 15,
+            Self::PoSpaceVdf { .. } => 16,
         }
     }
 
     /// Configured external network identifier.
+    ///
+    /// WIRING: validated by [`DomainCeilingPolicy`] and [`Self::canonical_pin_digest`].
     #[must_use]
     pub fn network(&self) -> &str {
         match self {
@@ -305,8 +529,28 @@ impl GuardedExternalAdapter {
             | Self::BasedPreconf { network, .. }
             | Self::TonCatchain { network, .. }
             | Self::StellarScp { network, .. }
-            | Self::MinaRecursive { network, .. } => network,
+            | Self::MinaRecursive { network, .. }
+            | Self::TendermintIbc { network, .. }
+            | Self::HotStuffThreeChain { network, .. }
+            | Self::AptosJolteon { network, .. }
+            | Self::NearDoomslug { network, .. }
+            | Self::HoneyBadgerBft { network, .. }
+            | Self::BullsharkDag { network, .. }
+            | Self::DataAvailability2d { network, .. }
+            | Self::PoSpaceVdf { network, .. } => network,
         }
+    }
+
+    /// Returns `true` only when the external committee's collateral is held in
+    /// a locally confiscatable restaking/slashing vault rather than solely on a
+    /// foreign chain.
+    ///
+    /// WIRING: enforced by [`effective_ceiling_atoms`] and
+    /// [`BridgeEconomicGuard::refresh_backing_from_adapter`] so non-custodial
+    /// foreign validator stake never unlocks unbonded bridge minting headroom.
+    #[must_use]
+    pub const fn has_local_stake_confiscation(&self) -> bool {
+        matches!(self, Self::RestakingAvs { .. })
     }
 
     /// Canonical domain-separated SHA3-256 commitment binding the adapter kind,
@@ -325,6 +569,16 @@ impl GuardedExternalAdapter {
             Self::TonCatchain { pinned, .. } => pinned.canonical_pin_digest(),
             Self::StellarScp { pinned, .. } => pinned.canonical_pin_digest(),
             Self::MinaRecursive { pinned, .. } => pinned.canonical_pin_digest(),
+            Self::TendermintIbc {
+                trusted, params, ..
+            } => hash_tendermint_pin(trusted, params),
+            Self::HotStuffThreeChain { pinned, .. } => hash_hotstuff_pin(pinned),
+            Self::AptosJolteon { pinned, .. } => pinned.epoch_state_digest(),
+            Self::NearDoomslug { pinned, .. } => hash_near_pin(pinned),
+            Self::HoneyBadgerBft { pinned, .. } => pinned.canonical_pin_digest(),
+            Self::BullsharkDag { pinned, .. } => hash_dag_pin(pinned),
+            Self::DataAvailability2d { pinned, .. } => hash_da_pin(pinned),
+            Self::PoSpaceVdf { pinned, .. } => hash_pospace_pin(pinned),
         };
         hash_fields_bytes(&[
             b"BDLM_ECON_GUARD_PIN_V1",
@@ -421,6 +675,84 @@ pub enum ContradictionEvidence {
         pinned: PinnedScpTier,
         /// Cryptographic SCP ballot equivocation proof.
         proof: Box<StellarBallotEquivocationProof>,
+    },
+    /// Verified `CometBFT` / `Tendermint` ICS-07 misbehaviour (double-sign, BFT time violation, or lunatic header).
+    TendermintFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned trusted `CometBFT` state.
+        trusted: Box<TrustedTendermintState>,
+        /// Validated ICS-07 light-client parameters.
+        params: TendermintLightParams,
+        /// Cryptographic ICS-07 misbehaviour evidence.
+        misbehaviour: Box<TendermintMisbehaviour>,
+        /// Deterministic reference timestamp in seconds within the trusting window.
+        reference_time_secs: u64,
+    },
+    /// Verified linear 3-chain `HotStuff` validator view double-vote equivocation.
+    HotStuffFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned `HotStuff` epoch validator set.
+        pinned: PinnedHotStuffCommittee,
+        /// Cryptographic `HotStuff` double-vote proof.
+        proof: Box<HotStuffEquivocationProof>,
+    },
+    /// Verified 2-chain pipelined `AptosBFT` / `Jolteon` round double-vote equivocation.
+    AptosJolteonFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned `Jolteon` `EpochState`.
+        pinned: PinnedJolteonEpochState,
+        /// Cryptographic `Jolteon` double-vote proof.
+        proof: Box<JolteonEquivocationProof>,
+    },
+    /// Verified `NEAR` `Doomslug` double-approval or surround-approval violation.
+    NearDoomslugFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned `NEAR` epoch block-producer set.
+        pinned: PinnedNearEpoch,
+        /// Cryptographic `Doomslug` approval slash proof.
+        proof: Box<NearApprovalSlashProof>,
+    },
+    /// Verified post-quantum `HoneyBadgerBFT` Bracha RBC double-root equivocation.
+    HoneyBadgerFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned `HoneyBadgerBFT` committee.
+        pinned: PinnedHoneyBadgerCommittee,
+        /// Cryptographic ML-DSA-65 Bracha RBC double-root proof.
+        proof: Box<RbcEquivocationProof>,
+    },
+    /// Verified `Bullshark` DAG-BFT anchor-certificate, causal-parent, or voter-vertex equivocation.
+    BullsharkDagFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned DAG-BFT committee.
+        pinned: PinnedDagCommittee,
+        /// Cryptographic DAG-BFT equivocation proof.
+        proof: Box<DagEquivocationProof>,
+    },
+    /// Verified 2D Reed-Solomon bad-encoding, axis-mismatch, or DA header equivocation fraud proof.
+    DataAvailabilityFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned DA committee and namespace configuration.
+        pinned: PinnedDaCommittee,
+        /// Cryptographic 2D DA fraud proof.
+        proof: Box<DaFraudProof>,
+    },
+    /// Verified `PoSpace+VDF` ML-DSA-65 double-signage equivocation by the pinned attestor.
+    PoSpaceDoubleSignage {
+        /// External network name.
+        network: String,
+        /// Governance-pinned `PoSpace+VDF` chain anchor.
+        pinned: Box<PinnedPoSpaceAnchor>,
+        /// First signed signage-point statement.
+        first: Box<SignedPoSpaceSignage>,
+        /// Conflicting second signed signage-point statement at the same `(sub_slot, signage_index)`.
+        second: Box<SignedPoSpaceSignage>,
     },
 }
 
@@ -573,7 +905,6 @@ fn validate_policy(policy: &DomainCeilingPolicy) -> Result<(), EconomicGuardErro
     }
     if u128::from(policy.stake_haircut_bps) > BPS_DEN
         || u128::from(policy.bond_haircut_bps) > BPS_DEN
-        || u128::from(policy.finder_reward_bps) > BPS_DEN
     {
         return Err(EconomicGuardError::InvalidPolicy(
             "basis-point parameters cannot exceed 10_000".into(),
@@ -609,6 +940,32 @@ fn validate_policy(policy: &DomainCeilingPolicy) -> Result<(), EconomicGuardErro
             return Err(EconomicGuardError::InvalidPolicy(
                 "pinned_adapter network cannot be empty".into(),
             ));
+        }
+        match pin {
+            GuardedExternalAdapter::TendermintIbc {
+                trusted, params, ..
+            } => {
+                if trusted.chain_id.trim().is_empty() || trusted.validators.is_empty() {
+                    return Err(EconomicGuardError::InvalidPolicy(
+                        "TendermintIbc trusted state must carry non-empty chain_id and validators"
+                            .into(),
+                    ));
+                }
+                params
+                    .validate()
+                    .map_err(|e| EconomicGuardError::InvalidPolicy(e.to_string()))?;
+            }
+            GuardedExternalAdapter::HoneyBadgerBft { network, pinned } => {
+                if network != &pinned.network_id {
+                    return Err(EconomicGuardError::InvalidPolicy(
+                        "HoneyBadgerBft network mismatches pinned.network_id".into(),
+                    ));
+                }
+                pinned
+                    .validate()
+                    .map_err(|e| EconomicGuardError::InvalidPolicy(e.to_string()))?;
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -823,10 +1180,18 @@ pub fn effective_ceiling_atoms(record: &DomainEconomicRecord) -> u128 {
             slashable: true,
             ..
         } => {
-            let consumers = u128::from(policy.shared_consumer_count.max(1));
-            let dedicated_stake = total_weight / consumers;
-            let stake_cap = mul_bps_floor(dedicated_stake, policy.stake_haircut_bps);
-            bond_cap.map_or(stake_cap, |bc| stake_cap.min(bc))
+            if policy
+                .pinned_adapter
+                .as_ref()
+                .is_some_and(|pin| !pin.has_local_stake_confiscation())
+            {
+                bond_cap.unwrap_or(0)
+            } else {
+                let consumers = u128::from(policy.shared_consumer_count.max(1));
+                let dedicated_stake = total_weight / consumers;
+                let stake_cap = mul_bps_floor(dedicated_stake, policy.stake_haircut_bps);
+                bond_cap.map_or(stake_cap, |bc| stake_cap.min(bc))
+            }
         }
         SecurityBacking::Work { difficulty_bits } => {
             let work_cap = if *difficulty_bits >= policy.min_work_difficulty_bits {
@@ -856,6 +1221,93 @@ pub struct BridgeEconomicGuard {
     slashed_offenders: BTreeSet<Hash32>,
     #[serde(default)]
     require_configured_domains: bool,
+}
+
+fn verify_adapter_finality(
+    adapter_cfg: &GuardedExternalAdapter,
+    evidence: &RawConsensusEvidence,
+    verification_policy: &VerificationPolicy,
+) -> Result<FinalityAttestation, EconomicGuardError> {
+    match adapter_cfg {
+        GuardedExternalAdapter::RestakingAvs { network, pinned } => {
+            RestakingAvsAdapter::new(network.clone(), Some(pinned.clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::AuxPowPop { network, pinned } => {
+            AuxPowPopAdapter::new(network.clone(), Some((**pinned).clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::SimplexBft { network, pinned } => {
+            SimplexBftAdapter::new(network.clone(), Some(pinned.clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::AlgorandStateProof { network, pinned } => {
+            AlgorandStateProofAdapter::new(network.clone(), Some((**pinned).clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::BasedPreconf { network, pinned } => {
+            BasedPreconfAdapter::new(network.clone(), Some(pinned.clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::TonCatchain { network, pinned } => {
+            TonCatchainAdapter::new(network.clone(), Some(pinned.clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::StellarScp { network, pinned } => {
+            StellarScpAdapter::new(network.clone(), Some(pinned.clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::MinaRecursive { network, pinned } => {
+            SuccinctRecursiveAdapter::new(network.clone(), Some((**pinned).clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::TendermintIbc {
+            network,
+            trusted,
+            params,
+        } => {
+            params
+                .validate()
+                .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+            let vhash = validator_set_hash(&trusted.validators);
+            TendermintFinalityAdapter::new_pinned(network, &trusted.chain_id, Some(vhash))
+                .with_trusted_era(TendermintEraAnchor {
+                    pinned_height: trusted.height,
+                    pinned_time_secs: trusted.time_secs,
+                    params: *params,
+                })
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::HotStuffThreeChain { network, pinned } => {
+            HotStuffThreeChainAdapter::new(network.clone(), Some(pinned.clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::AptosJolteon { network, pinned } => {
+            AptosJolteonAdapter::new(network.clone(), Some(pinned.clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::NearDoomslug { network, pinned } => {
+            NearDoomslugAdapter::new(network.clone(), Some(pinned.clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::HoneyBadgerBft { network, pinned } => {
+            HoneyBadgerBftAdapter::new(network, Some(pinned.clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::BullsharkDag { network, pinned } => {
+            BullsharkDagAdapter::new(network.clone(), Some(pinned.clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::DataAvailability2d { network, pinned } => {
+            DataAvailabilityAdapter::new(network.clone(), Some(pinned.clone()))
+                .verify(evidence, verification_policy)
+        }
+        GuardedExternalAdapter::PoSpaceVdf { network, pinned } => {
+            PoSpaceVdfAdapter::new(network.clone(), Some((**pinned).clone()))
+                .verify(evidence, verification_policy)
+        }
+    }
+    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))
 }
 
 impl BridgeEconomicGuard {
@@ -1004,44 +1456,16 @@ impl BridgeEconomicGuard {
             existing.policy.pinned_adapter.as_ref(),
             adapter_cfg,
         )?;
-        let attestation = match adapter_cfg {
-            GuardedExternalAdapter::RestakingAvs { network, pinned } => {
-                RestakingAvsAdapter::new(network.clone(), Some(pinned.clone()))
-                    .verify(evidence, verification_policy)
-            }
-            GuardedExternalAdapter::AuxPowPop { network, pinned } => {
-                AuxPowPopAdapter::new(network.clone(), Some((**pinned).clone()))
-                    .verify(evidence, verification_policy)
-            }
-            GuardedExternalAdapter::SimplexBft { network, pinned } => {
-                SimplexBftAdapter::new(network.clone(), Some(pinned.clone()))
-                    .verify(evidence, verification_policy)
-            }
-            GuardedExternalAdapter::AlgorandStateProof { network, pinned } => {
-                AlgorandStateProofAdapter::new(network.clone(), Some((**pinned).clone()))
-                    .verify(evidence, verification_policy)
-            }
-            GuardedExternalAdapter::BasedPreconf { network, pinned } => {
-                BasedPreconfAdapter::new(network.clone(), Some(pinned.clone()))
-                    .verify(evidence, verification_policy)
-            }
-            GuardedExternalAdapter::TonCatchain { network, pinned } => {
-                TonCatchainAdapter::new(network.clone(), Some(pinned.clone()))
-                    .verify(evidence, verification_policy)
-            }
-            GuardedExternalAdapter::StellarScp { network, pinned } => {
-                StellarScpAdapter::new(network.clone(), Some(pinned.clone()))
-                    .verify(evidence, verification_policy)
-            }
-            GuardedExternalAdapter::MinaRecursive { network, pinned } => {
-                SuccinctRecursiveAdapter::new(network.clone(), Some((**pinned).clone()))
-                    .verify(evidence, verification_policy)
+        let attestation = verify_adapter_finality(adapter_cfg, evidence, verification_policy)?;
+
+        let mut normalized_backing = attestation.security;
+        if !adapter_cfg.has_local_stake_confiscation() {
+            if let SecurityBacking::SignatureSet { slashable, .. } = &mut normalized_backing {
+                *slashable = false;
             }
         }
-        .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
-
         if let Some(rec) = self.domains.get_mut(&domain_id) {
-            rec.policy.backing = attestation.security;
+            rec.policy.backing = normalized_backing;
         }
         Ok(attestation)
     }
@@ -1153,6 +1577,11 @@ impl BridgeEconomicGuard {
         let Some(rec) = self.domains.get(&domain_id) else {
             return Err(EconomicGuardError::UnknownDomain(domain_id));
         };
+        if bool::from(challenger.as_bytes().as_slice().ct_eq(&[0u8; 32])) {
+            return Err(EconomicGuardError::InvalidEvidence(
+                "challenger address cannot be all-zero".into(),
+            ));
+        }
         let (evidence_digest, external_slashed_weight, new_offender_keys) = match evidence {
             ContradictionEvidence::SignedProverDoubleRoot {
                 domain_height,
@@ -1565,6 +1994,504 @@ impl BridgeEconomicGuard {
                 )?;
                 (digest, incremental, keys)
             }
+            ContradictionEvidence::TendermintFault {
+                network,
+                trusted,
+                params,
+                misbehaviour,
+                reference_time_secs,
+            } => {
+                let supplied = GuardedExternalAdapter::TendermintIbc {
+                    network: network.clone(),
+                    trusted: trusted.clone(),
+                    params: *params,
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let res = verify_tendermint_misbehaviour(
+                    trusted,
+                    params,
+                    misbehaviour,
+                    *reference_time_secs,
+                )
+                .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[9u8],
+                    &domain_id.to_le_bytes(),
+                    &res.evidence_id,
+                ]);
+                let low_h = res.header_1_height.min(res.header_2_height);
+                let high_h = res.header_1_height.max(res.header_2_height);
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &[9u8],
+                    &low_h.to_le_bytes(),
+                    &high_h.to_le_bytes(),
+                ]);
+                let offenders: Vec<[u8; 32]> = res.culprits.iter().map(|v| v.public_key).collect();
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    9,
+                    &locus,
+                    &offenders,
+                    digest,
+                    |pk| {
+                        let trusted_w = trusted
+                            .validators
+                            .iter()
+                            .find(|v| bool::from(v.public_key.ct_eq(pk)))
+                            .map_or(0u128, |v| u128::from(v.voting_power));
+                        Some((trusted_w, false))
+                    },
+                )?;
+                (digest, incremental, keys)
+            }
+            ContradictionEvidence::HotStuffFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::HotStuffThreeChain {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let (offender, _weight) = verify_hotstuff_equivocation(network, pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let (low_blk, high_blk) = if proof.block_hash_a <= proof.block_hash_b {
+                    (proof.block_hash_a, proof.block_hash_b)
+                } else {
+                    (proof.block_hash_b, proof.block_hash_a)
+                };
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[10u8],
+                    &domain_id.to_le_bytes(),
+                    &proof.epoch.to_le_bytes(),
+                    &proof.view.to_le_bytes(),
+                    &offender,
+                    &low_blk,
+                    &high_blk,
+                ]);
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &[10u8],
+                    &proof.epoch.to_le_bytes(),
+                    &proof.view.to_le_bytes(),
+                ]);
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    10,
+                    &locus,
+                    &[offender],
+                    digest,
+                    |pk| {
+                        pinned
+                            .members
+                            .iter()
+                            .find(|m| bool::from(m.ed25519_pubkey.ct_eq(pk)))
+                            .map(|m| (u128::from(m.voting_weight), !m.pq_pubkey.is_empty()))
+                    },
+                )?;
+                (digest, incremental, keys)
+            }
+            ContradictionEvidence::AptosJolteonFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::AptosJolteon {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let (offender, _power) = verify_jolteon_equivocation(network, pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let (low_t, high_t) = if proof.first_target <= proof.second_target {
+                    (&proof.first_target, &proof.second_target)
+                } else {
+                    (&proof.second_target, &proof.first_target)
+                };
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[11u8],
+                    &domain_id.to_le_bytes(),
+                    &proof.epoch.to_le_bytes(),
+                    &proof.round.to_le_bytes(),
+                    &offender,
+                    &low_t.0,
+                    &low_t.1,
+                    &high_t.0,
+                    &high_t.1,
+                ]);
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &[11u8],
+                    &proof.epoch.to_le_bytes(),
+                    &proof.round.to_le_bytes(),
+                ]);
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    11,
+                    &locus,
+                    &[offender],
+                    digest,
+                    |pk| {
+                        pinned
+                            .validators
+                            .iter()
+                            .find(|v| bool::from(v.ed25519_pubkey.ct_eq(pk)))
+                            .map(|v| (u128::from(v.voting_power), !v.pq_pubkey.is_empty()))
+                    },
+                )?;
+                (digest, incremental, keys)
+            }
+            ContradictionEvidence::NearDoomslugFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::NearDoomslug {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let (account_id, stake, kind) = verify_near_approval_slash(network, pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let Some(bp) = pinned
+                    .block_producers
+                    .iter()
+                    .find(|b| b.account_id == account_id)
+                else {
+                    return Err(EconomicGuardError::InvalidEvidence(
+                        "verified NEAR offender absent from pinned block_producers".into(),
+                    ));
+                };
+                let stmt_a = near_approval_sign_bytes(
+                    network,
+                    &pinned.epoch_id,
+                    &proof.inner_a,
+                    proof.target_a,
+                );
+                let stmt_b = near_approval_sign_bytes(
+                    network,
+                    &pinned.epoch_id,
+                    &proof.inner_b,
+                    proof.target_b,
+                );
+                let (low_s, high_s) = if stmt_a <= stmt_b {
+                    (stmt_a, stmt_b)
+                } else {
+                    (stmt_b, stmt_a)
+                };
+                let kind_byte = match kind {
+                    NearSlashKind::DoubleApproval => 1u8,
+                    NearSlashKind::SurroundApproval => 2u8,
+                };
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[12u8],
+                    &domain_id.to_le_bytes(),
+                    &pinned.epoch_id,
+                    &[kind_byte],
+                    &bp.ed25519_pubkey,
+                    &low_s,
+                    &high_s,
+                ]);
+                let low_t = proof.target_a.min(proof.target_b);
+                let high_t = proof.target_a.max(proof.target_b);
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &[12u8],
+                    &pinned.epoch_id,
+                    &low_t.to_le_bytes(),
+                    &high_t.to_le_bytes(),
+                ]);
+                let offender_key = offender_replay_key(
+                    domain_id,
+                    12,
+                    &locus,
+                    hybrid_or_ed25519_scheme(!bp.pq_pubkey.is_empty()),
+                    &bp.ed25519_pubkey,
+                );
+                if self.slashed_offenders.contains(&offender_key) {
+                    return Err(EconomicGuardError::DuplicateEvidence(digest));
+                }
+                (digest, stake, vec![offender_key])
+            }
+            ContradictionEvidence::HoneyBadgerFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::HoneyBadgerBft {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                if network != &pinned.network_id {
+                    return Err(EconomicGuardError::InvalidEvidence(
+                        "HoneyBadgerBFT network mismatches pinned.network_id".into(),
+                    ));
+                }
+                let (validator_id, weight) = verify_rbc_equivocation(pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let (low_r, high_r) = if proof.first_root <= proof.second_root {
+                    (proof.first_root, proof.second_root)
+                } else {
+                    (proof.second_root, proof.first_root)
+                };
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[13u8],
+                    &domain_id.to_le_bytes(),
+                    &proof.committee_epoch.to_le_bytes(),
+                    &proof.acs_epoch.to_le_bytes(),
+                    &validator_id,
+                    &low_r,
+                    &high_r,
+                ]);
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &[13u8],
+                    &proof.committee_epoch.to_le_bytes(),
+                    &proof.acs_epoch.to_le_bytes(),
+                ]);
+                let offender_key =
+                    offender_replay_key(domain_id, 13, &locus, SchemeId::ML_DSA_65, &validator_id);
+                if self.slashed_offenders.contains(&offender_key) {
+                    return Err(EconomicGuardError::DuplicateEvidence(digest));
+                }
+                (digest, u128::from(weight), vec![offender_key])
+            }
+            ContradictionEvidence::BullsharkDagFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::BullsharkDag {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let verdict = verify_dag_equivocation_proof(network, pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let (kind_tag, low_d, high_d) = match proof.as_ref() {
+                    DagEquivocationProof::AnchorCertificate {
+                        first_anchor_digest,
+                        second_anchor_digest,
+                        ..
+                    } => {
+                        let (l, h) = if first_anchor_digest <= second_anchor_digest {
+                            (*first_anchor_digest, *second_anchor_digest)
+                        } else {
+                            (*second_anchor_digest, *first_anchor_digest)
+                        };
+                        (1u8, l, h)
+                    }
+                    DagEquivocationProof::CausalParent { first, second } => {
+                        let (l, h) = if first.digest <= second.digest {
+                            (first.digest, second.digest)
+                        } else {
+                            (second.digest, first.digest)
+                        };
+                        (2u8, l, h)
+                    }
+                    DagEquivocationProof::VoterVertex { first, second } => {
+                        let (l, h) = if first.digest <= second.digest {
+                            (first.digest, second.digest)
+                        } else {
+                            (second.digest, first.digest)
+                        };
+                        (3u8, l, h)
+                    }
+                };
+                let mut sorted_offenders = verdict.slashable_validators.clone();
+                sorted_offenders.sort_unstable();
+                let mut offender_acc = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[14u8, kind_tag],
+                    &domain_id.to_le_bytes(),
+                    &verdict.epoch.to_le_bytes(),
+                    &verdict.round.to_le_bytes(),
+                    &low_d,
+                    &high_d,
+                ]);
+                for pk in &sorted_offenders {
+                    offender_acc =
+                        hash_fields_bytes(&[b"BDLM_ECON_GUARD_EVIDENCE_V1", &offender_acc, pk]);
+                }
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &[14u8, kind_tag],
+                    &verdict.epoch.to_le_bytes(),
+                    &verdict.round.to_le_bytes(),
+                ]);
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    14,
+                    &locus,
+                    &sorted_offenders,
+                    offender_acc,
+                    |pk| {
+                        pinned
+                            .members
+                            .iter()
+                            .find(|m| bool::from(m.ed25519_pubkey.ct_eq(pk)))
+                            .map(|m| (u128::from(m.voting_weight), !m.pq_pubkey.is_empty()))
+                    },
+                )?;
+                (offender_acc, incremental, keys)
+            }
+            ContradictionEvidence::DataAvailabilityFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::DataAvailability2d {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let verdict = verify_da_fraud_proof(network, pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let mut sorted_signers = verdict.slashable_signers.clone();
+                sorted_signers.sort_unstable();
+                let mut digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[15u8],
+                    &domain_id.to_le_bytes(),
+                    &pinned.namespace_id,
+                    &verdict.height.to_le_bytes(),
+                    &verdict.invalid_data_root,
+                ]);
+                for pk in &sorted_signers {
+                    digest = hash_fields_bytes(&[b"BDLM_ECON_GUARD_EVIDENCE_V1", &digest, pk]);
+                }
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &[15u8],
+                    &pinned.namespace_id,
+                    &verdict.height.to_le_bytes(),
+                ]);
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    15,
+                    &locus,
+                    &sorted_signers,
+                    digest,
+                    |pk| {
+                        pinned
+                            .members
+                            .iter()
+                            .find(|m| bool::from(m.ed25519_pubkey.ct_eq(pk)))
+                            .map(|m| (u128::from(m.voting_weight), !m.pq_pubkey.is_empty()))
+                    },
+                )?;
+                (digest, incremental, keys)
+            }
+            ContradictionEvidence::PoSpaceDoubleSignage {
+                network,
+                pinned,
+                first,
+                second,
+            } => {
+                let supplied = GuardedExternalAdapter::PoSpaceVdf {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let Some(expected_pq) = &pinned.pq_attestor_pubkey else {
+                    return Err(EconomicGuardError::InvalidEvidence(
+                        "PoSpaceVdf domain has no pinned pq_attestor_pubkey for double-signage slashing"
+                            .into(),
+                    ));
+                };
+                if first.signer_pq_pubkey.len() != expected_pq.len()
+                    || !bool::from(
+                        first
+                            .signer_pq_pubkey
+                            .as_slice()
+                            .ct_eq(expected_pq.as_slice()),
+                    )
+                {
+                    return Err(EconomicGuardError::InvalidEvidence(
+                        "PoSpace double-signage key does not match governance-pinned pq_attestor_pubkey"
+                            .into(),
+                    ));
+                }
+                let res = verify_double_signage_equivocation(network, first, second)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let (low_b, high_b) = if res.first_block_hash <= res.second_block_hash {
+                    (res.first_block_hash, res.second_block_hash)
+                } else {
+                    (res.second_block_hash, res.first_block_hash)
+                };
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[16u8],
+                    &domain_id.to_le_bytes(),
+                    &res.sub_slot.to_le_bytes(),
+                    &[res.signage_index],
+                    &res.offender_key_digest,
+                    &low_b,
+                    &high_b,
+                ]);
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &[16u8],
+                    &res.sub_slot.to_le_bytes(),
+                    &[res.signage_index],
+                ]);
+                let offender_key = offender_replay_key(
+                    domain_id,
+                    16,
+                    &locus,
+                    SchemeId::ML_DSA_65,
+                    &res.offender_key_digest,
+                );
+                if self.slashed_offenders.contains(&offender_key) {
+                    return Err(EconomicGuardError::DuplicateEvidence(digest));
+                }
+                (digest, 1u128, vec![offender_key])
+            }
         };
 
         if self.consumed_evidence.contains(&evidence_digest) {
@@ -1596,6 +2523,7 @@ impl BridgeEconomicGuard {
             };
         }
         let finder_bps = rec_mut.policy.finder_reward_bps;
+        let finder_cap = rec_mut.policy.max_finder_reward_atoms;
         let (slashed_prover, slashed_bond_atoms, challenger_reward_atoms, burned_bond_atoms) =
             match rec_mut.prover_bond.as_mut() {
                 None => (None, 0u128, 0u128, 0u128),
@@ -1609,7 +2537,8 @@ impl BridgeEconomicGuard {
                         // freezes the domain and loses the bond, but it can
                         // never route the finder reward back to itself.
                         let reward_bps = if challenger == prover { 0 } else { finder_bps };
-                        let paid = mul_bps_floor(live, reward_bps).min(live);
+                        let raw_paid = mul_bps_floor(live, reward_bps).min(live);
+                        let paid = finder_cap.map_or(raw_paid, |cap| raw_paid.min(cap));
                         bond.bond_atoms = bond.bond_atoms.saturating_sub(live);
                         bond.slashed_atoms = bond.slashed_atoms.saturating_add(live);
                         bond.slashings.push(Slashing {
@@ -1663,6 +2592,10 @@ impl BridgeEconomicGuard {
                 .pinned_adapter
                 .as_ref()
                 .map_or((0u8, [0u8; 32]), |pin| (1u8, pin.canonical_pin_digest()));
+            let (has_reward_cap, reward_cap_le) = rec
+                .policy
+                .max_finder_reward_atoms
+                .map_or((0u8, [0u8; 16]), |cap| (1u8, cap.to_le_bytes()));
             domain_leaves.push(hash_fields_bytes(&[
                 b"BDLM_ECON_GUARD_DOMAIN_V1",
                 &domain_id.to_le_bytes(),
@@ -1671,6 +2604,8 @@ impl BridgeEconomicGuard {
                 &rec.policy.stake_haircut_bps.to_le_bytes(),
                 &rec.policy.bond_haircut_bps.to_le_bytes(),
                 &rec.policy.finder_reward_bps.to_le_bytes(),
+                &[has_reward_cap],
+                &reward_cap_le,
                 &rec.policy.work_window_cap_atoms.to_le_bytes(),
                 &rec.policy.min_work_difficulty_bits.to_le_bytes(),
                 &rec.policy.zk_window_cap_atoms.to_le_bytes(),
@@ -3210,5 +4145,877 @@ mod tests {
                 sx_out.evidence_digest
             ))
         );
+    }
+
+    #[test]
+    fn finder_reward_atom_cap_and_zero_challenger_refusal() {
+        let prover_ed = KeyPair::from_seed(&[0x94; 32]).unwrap();
+        let prover_pq = PqKeyPair::generate();
+        let prover_addr = Address::from([0x94; 32]);
+        let mut guard = BridgeEconomicGuard::production();
+
+        // An absolute per-challenge atoms ceiling caps the payout even when the
+        // basis-point share sits at the protocol ceiling; a zero-address
+        // challenger is refused before any state mutation.
+        let valid_policy = DomainCeilingPolicy {
+            finder_reward_bps: MAX_FINDER_REWARD_BPS,
+            max_finder_reward_atoms: Some(8_000),
+            prover_ed25519_pubkey: Some(prover_ed.public_key_bytes()),
+            prover_pq_pubkey: prover_pq.public_key_bytes().to_vec(),
+            ..DomainCeilingPolicy::default()
+        };
+        guard
+            .configure_domain(92, valid_policy, Some(make_bond(prover_addr, 50_000)))
+            .unwrap();
+        let stmt_a = contradiction_statement_bytes(92, 500, &[0xA1; 32]);
+        let stmt_b = contradiction_statement_bytes(92, 500, &[0xB2; 32]);
+        let double_root = ContradictionEvidence::SignedProverDoubleRoot {
+            domain_height: 500,
+            state_root_a: [0xA1; 32],
+            ed25519_sig_a: prover_ed.sign(&stmt_a).to_vec(),
+            pq_sig_a: prover_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_a)
+                .unwrap(),
+            state_root_b: [0xB2; 32],
+            ed25519_sig_b: prover_ed.sign(&stmt_b).to_vec(),
+            pq_sig_b: prover_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_b)
+                .unwrap(),
+        };
+        let root_before = guard.root();
+        assert!(matches!(
+            guard.submit_contradiction(92, &double_root, Address::from([0u8; 32]), 510),
+            Err(EconomicGuardError::InvalidEvidence(_))
+        ));
+        assert_eq!(guard.root(), root_before);
+
+        let out = guard
+            .submit_contradiction(92, &double_root, Address::from([0xCC; 32]), 511)
+            .unwrap();
+        assert_eq!(out.slashed_bond_atoms, 50_000);
+        assert_eq!(out.challenger_reward_atoms, 8_000);
+        assert_eq!(out.burned_bond_atoms, 42_000);
+    }
+
+    #[test]
+    fn foreign_adapter_stake_without_local_confiscation_clamps_unbonded_ceiling_to_zero() {
+        use crate::cross_domain::external::simplex_bft::SimplexValidator;
+
+        let k_ed = KeyPair::from_seed(&[0x95; 32]).unwrap();
+        let k_pq = PqKeyPair::generate();
+        let sx_pin = PinnedSimplexCommittee {
+            epoch: 1,
+            validators: vec![SimplexValidator {
+                ed25519_pubkey: k_ed.public_key_bytes(),
+                stake_weight: 900_000,
+                pq_pubkey: k_pq.public_key_bytes().to_vec(),
+            }],
+        };
+
+        let mut guard = BridgeEconomicGuard::production();
+        let unconfiscatable_foreign_policy = DomainCeilingPolicy {
+            backing: SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+                signers: 4,
+                required: 3,
+                total_weight: 900_000,
+                slashable: true,
+            },
+            pinned_adapter: Some(GuardedExternalAdapter::SimplexBft {
+                network: "foreign-unbonded-net".into(),
+                pinned: sx_pin,
+            }),
+            ..DomainCeilingPolicy::default()
+        };
+        guard
+            .configure_domain(93, unconfiscatable_foreign_policy.clone(), None)
+            .unwrap();
+        assert_eq!(
+            effective_ceiling_atoms(guard.record(93).unwrap()),
+            0,
+            "foreign committee stake without local confiscation vault or ProverBond must grant 0 bridge ceiling"
+        );
+        guard
+            .configure_domain(
+                93,
+                unconfiscatable_foreign_policy,
+                Some(make_bond(Address::from([0x96; 32]), 10_000)),
+            )
+            .unwrap();
+        assert_eq!(effective_ceiling_atoms(guard.record(93).unwrap()), 9_000);
+    }
+
+    fn build_tm_test_commit(
+        chain_id: &str,
+        height: u64,
+        time_secs: u64,
+        app_hash: [u8; 32],
+        keys: &[KeyPair],
+        signer_idxs: &[usize],
+    ) -> crate::cross_domain::external::tendermint::TendermintCommitEvidence {
+        use crate::cross_domain::external::tendermint::{
+            validator_address_of, TendermintCommitEvidence, TendermintSignature,
+            TendermintValidator,
+        };
+        let vals: Vec<TendermintValidator> = keys
+            .iter()
+            .map(|k| {
+                let pk = k.public_key_bytes();
+                TendermintValidator {
+                    address: validator_address_of(&pk),
+                    public_key: pk,
+                    voting_power: 100,
+                }
+            })
+            .collect();
+        let vhash = validator_set_hash(&vals);
+        let mut c = TendermintCommitEvidence {
+            chain_id: chain_id.to_string(),
+            height,
+            round: 0,
+            block_hash: [0u8; 32],
+            parts_total: 1,
+            parts_hash: [0x11; 32],
+            version_block: 11,
+            last_block_hash: [0x22; 32],
+            last_parts_total: 1,
+            last_parts_hash: [0x33; 32],
+            last_commit_hash: [0x44; 32],
+            data_hash: [0x55; 32],
+            validators_hash: vhash,
+            next_validators_hash: vhash,
+            consensus_hash: [0x66; 32],
+            app_hash,
+            last_results_hash: [0x77; 32],
+            evidence_hash: [0x88; 32],
+            proposer_address: vals[0].address,
+            commit_time: time_secs,
+            commit_time_nanos: 0,
+            validators: vals.clone(),
+            signatures: Vec::new(),
+        };
+        c.block_hash = c.header_hash();
+        for &idx in signer_idxs {
+            let mut sig = TendermintSignature {
+                address: vals[idx].address,
+                timestamp_seconds: i64::try_from(time_secs).unwrap(),
+                timestamp_nanos: 0,
+                signature: Vec::new(),
+            };
+            let sb = c.canonical_vote_bytes(&sig);
+            sig.signature = keys[idx].sign(&sb).to_vec();
+            c.signatures.push(sig);
+        }
+        c
+    }
+
+    fn tendermint_fault_evidence(
+        trusted: &TrustedTendermintState,
+        params: TendermintLightParams,
+        header_1: crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+        header_2: Option<crate::cross_domain::external::tendermint::TendermintCommitEvidence>,
+    ) -> ContradictionEvidence {
+        ContradictionEvidence::TendermintFault {
+            network: "cosmos-net".into(),
+            trusted: Box::new(trusted.clone()),
+            params,
+            misbehaviour: Box::new(TendermintMisbehaviour { header_1, header_2 }),
+            reference_time_secs: 1_780_000_200,
+        }
+    }
+
+    fn da_test_header(tag: u8) -> crate::cross_domain::external::da_sampling::DaHeader {
+        use crate::cross_domain::external::da_sampling::DaHeader;
+        let nmt = [tag; 32];
+        let row = [tag.wrapping_add(1); 32];
+        let col = [tag.wrapping_add(2); 32];
+        let data_root = hash_fields_bytes(&[
+            b"BDLM_DA_DATA_ROOT_V1",
+            &2u16.to_le_bytes(),
+            &nmt,
+            &row,
+            &col,
+        ]);
+        DaHeader {
+            height: 77,
+            time_secs: 1_700_000_000,
+            square_size: 2,
+            nmt_roots_root: nmt,
+            row_roots_root: row,
+            col_roots_root: col,
+            data_root,
+        }
+    }
+
+    fn da_test_signatures(
+        k_ed: &KeyPair,
+        k_pq: &PqKeyPair,
+        namespace_id: &[u8; 32],
+        hdr: &crate::cross_domain::external::da_sampling::DaHeader,
+    ) -> Vec<crate::cross_domain::external::da_sampling::DaAttestationSig> {
+        use crate::cross_domain::external::da_sampling::DaAttestationSig;
+        use crate::crypto::ctx::CROSS_DOMAIN_V1;
+        let vote = hash_fields_bytes(&[
+            b"BDLM_DA_HEADER_VOTE_V1",
+            b"da-net",
+            namespace_id,
+            &hdr.height.to_le_bytes(),
+            &hdr.time_secs.to_le_bytes(),
+            &hdr.square_size.to_le_bytes(),
+            &hdr.nmt_roots_root,
+            &hdr.row_roots_root,
+            &hdr.col_roots_root,
+            &hdr.data_root,
+        ]);
+        vec![DaAttestationSig {
+            signer_pubkey: k_ed.public_key_bytes(),
+            ed25519_sig: k_ed.sign(&vote).to_vec(),
+            pq_sig: k_pq.sign(CROSS_DOMAIN_V1, &vote).unwrap(),
+        }]
+    }
+
+    #[test]
+    fn contradictions_tendermint_freeze_and_reject_replays() {
+        use crate::cross_domain::external::tendermint::{
+            validator_address_of, TendermintValidator,
+        };
+
+        let challenger = Address::from([0xCF; 32]);
+        let mut guard = BridgeEconomicGuard::production();
+
+        // 1. CometBFT / Tendermint ICS-07 double-sign equivocation (tag 9).
+        let tm_keys: Vec<KeyPair> = (0..4u8)
+            .map(|i| KeyPair::from_seed(&[0x10 + i; 32]).unwrap())
+            .collect();
+        let tm_vals: Vec<TendermintValidator> = tm_keys
+            .iter()
+            .map(|k| {
+                let pk = k.public_key_bytes();
+                TendermintValidator {
+                    address: validator_address_of(&pk),
+                    public_key: pk,
+                    voting_power: 100,
+                }
+            })
+            .collect();
+        let tm_vhash = validator_set_hash(&tm_vals);
+        let tm_trusted = TrustedTendermintState {
+            chain_id: "cosmoshub-guard-1".into(),
+            height: 500,
+            time_secs: 1_780_000_000,
+            trusting_period_secs: 86_400,
+            validators: tm_vals,
+            next_validators_hash: tm_vhash,
+        };
+        let tm_params = TendermintLightParams::standard_for_unbonding(259_200).unwrap();
+        guard
+            .configure_domain(
+                101,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::TendermintIbc {
+                        network: "cosmos-net".into(),
+                        trusted: Box::new(tm_trusted.clone()),
+                        params: tm_params,
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0xA1; 32]), 20_000)),
+            )
+            .unwrap();
+        let h1 = build_tm_test_commit(
+            "cosmoshub-guard-1",
+            510,
+            1_780_000_100,
+            [0xA1; 32],
+            &tm_keys,
+            &[0, 1, 2],
+        );
+        let h2 = build_tm_test_commit(
+            "cosmoshub-guard-1",
+            510,
+            1_780_000_100,
+            [0xB2; 32],
+            &tm_keys,
+            &[1, 2, 3],
+        );
+        let tm_out = guard
+            .submit_contradiction(
+                101,
+                &tendermint_fault_evidence(&tm_trusted, tm_params, h1.clone(), Some(h2.clone())),
+                challenger,
+                600,
+            )
+            .unwrap();
+        assert_eq!(tm_out.external_slashed_weight, 200);
+        assert_eq!(tm_out.slashed_bond_atoms, 20_000);
+        assert_eq!(
+            guard.submit_contradiction(
+                101,
+                &tendermint_fault_evidence(&tm_trusted, tm_params, h2, Some(h1)),
+                challenger,
+                601,
+            ),
+            Err(EconomicGuardError::DuplicateEvidence(
+                tm_out.evidence_digest
+            ))
+        );
+
+        assert!(matches!(
+            guard.record(101).unwrap().status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ));
+        assert!(guard.check_and_record_flow(101, 1, 700).is_err());
+    }
+
+    #[test]
+    fn contradictions_hotstuff_freeze_and_reject_replays() {
+        use crate::cross_domain::external::hotstuff::{HotStuffValidator, HotStuffVoteSig};
+        use crate::crypto::ctx::CROSS_DOMAIN_V1;
+
+        let challenger = Address::from([0xCF; 32]);
+        let mut guard = BridgeEconomicGuard::production();
+
+        // 2. HotStuff 3-chain view double-vote (tag 10).
+        let k_ed = KeyPair::from_seed(&[0x21; 32]).unwrap();
+        let k_pq = PqKeyPair::generate();
+        let hs_pin = PinnedHotStuffCommittee {
+            epoch: 7,
+            members: vec![HotStuffValidator {
+                ed25519_pubkey: k_ed.public_key_bytes(),
+                voting_weight: 350,
+                pq_pubkey: k_pq.public_key_bytes().to_vec(),
+            }],
+        };
+        guard
+            .configure_domain(
+                102,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::HotStuffThreeChain {
+                        network: "hs-net".into(),
+                        pinned: hs_pin.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0xA2; 32]), 10_000)),
+            )
+            .unwrap();
+        let hs_ma = hash_fields_bytes(&[
+            b"BDLM_HOTSTUFF_VOTE_V1",
+            b"hs-net",
+            &7u64.to_le_bytes(),
+            &51u64.to_le_bytes(),
+            &[0x11; 32],
+        ]);
+        let hs_mb = hash_fields_bytes(&[
+            b"BDLM_HOTSTUFF_VOTE_V1",
+            b"hs-net",
+            &7u64.to_le_bytes(),
+            &51u64.to_le_bytes(),
+            &[0x22; 32],
+        ]);
+        let hs_va = HotStuffVoteSig {
+            signer_pubkey: k_ed.public_key_bytes(),
+            ed25519_sig: k_ed.sign(&hs_ma).to_vec(),
+            pq_sig: k_pq.sign(CROSS_DOMAIN_V1, &hs_ma).unwrap(),
+        };
+        let hs_vb = HotStuffVoteSig {
+            signer_pubkey: k_ed.public_key_bytes(),
+            ed25519_sig: k_ed.sign(&hs_mb).to_vec(),
+            pq_sig: k_pq.sign(CROSS_DOMAIN_V1, &hs_mb).unwrap(),
+        };
+        let hs_out = guard
+            .submit_contradiction(
+                102,
+                &ContradictionEvidence::HotStuffFault {
+                    network: "hs-net".into(),
+                    pinned: hs_pin,
+                    proof: Box::new(HotStuffEquivocationProof {
+                        epoch: 7,
+                        view: 51,
+                        block_hash_a: [0x11; 32],
+                        block_hash_b: [0x22; 32],
+                        vote_a: hs_va,
+                        vote_b: hs_vb,
+                    }),
+                },
+                challenger,
+                602,
+            )
+            .unwrap();
+        assert_eq!(hs_out.external_slashed_weight, 350);
+        assert_eq!(hs_out.slashed_bond_atoms, 10_000);
+        assert!(matches!(
+            guard.record(102).unwrap().status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ));
+        assert!(guard.check_and_record_flow(102, 1, 700).is_err());
+    }
+
+    #[test]
+    fn contradictions_jolteon_round_double_vote_slash_and_freeze() {
+        use crate::cross_domain::external::aptos_jolteon_bft::{
+            jolteon_vote_sign_bytes, JolteonValidator, JolteonValidatorSig,
+        };
+        use crate::crypto::ctx::CROSS_DOMAIN_V1;
+
+        let challenger = Address::from([0xCF; 32]);
+        let k_ed = KeyPair::from_seed(&[0x22; 32]).unwrap();
+        let k_pq = PqKeyPair::generate();
+        let mut guard = BridgeEconomicGuard::production();
+
+        // 3. AptosBFT / Jolteon round double-vote (tag 11).
+        let jolt_pin = PinnedJolteonEpochState {
+            epoch: 4,
+            validators: vec![JolteonValidator {
+                ed25519_pubkey: k_ed.public_key_bytes(),
+                voting_power: 450,
+                pq_pubkey: k_pq.public_key_bytes().to_vec(),
+            }],
+        };
+        guard
+            .configure_domain(
+                103,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::AptosJolteon {
+                        network: "aptos-net".into(),
+                        pinned: jolt_pin.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .unwrap();
+        let jt1 = ([0xA1; 32], [0xB1; 32]);
+        let jt2 = ([0xA2; 32], [0xB2; 32]);
+        let jm1 = jolteon_vote_sign_bytes("aptos-net", 4, 12, &jt1.0, &jt1.1);
+        let jm2 = jolteon_vote_sign_bytes("aptos-net", 4, 12, &jt2.0, &jt2.1);
+        let jolt_out = guard
+            .submit_contradiction(
+                103,
+                &ContradictionEvidence::AptosJolteonFault {
+                    network: "aptos-net".into(),
+                    pinned: jolt_pin,
+                    proof: Box::new(JolteonEquivocationProof {
+                        epoch: 4,
+                        round: 12,
+                        first_target: jt1,
+                        second_target: jt2,
+                        first_sig: JolteonValidatorSig {
+                            signer_pubkey: k_ed.public_key_bytes(),
+                            ed25519_sig: k_ed.sign(&jm1).to_vec(),
+                            pq_sig: k_pq.sign(CROSS_DOMAIN_V1, &jm1).unwrap(),
+                        },
+                        second_sig: JolteonValidatorSig {
+                            signer_pubkey: k_ed.public_key_bytes(),
+                            ed25519_sig: k_ed.sign(&jm2).to_vec(),
+                            pq_sig: k_pq.sign(CROSS_DOMAIN_V1, &jm2).unwrap(),
+                        },
+                    }),
+                },
+                challenger,
+                604,
+            )
+            .unwrap();
+        assert_eq!(jolt_out.external_slashed_weight, 450);
+        assert!(matches!(
+            guard.record(103).unwrap().status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ));
+        assert!(guard.check_and_record_flow(103, 1, 700).is_err());
+    }
+
+    #[test]
+    fn contradictions_near_doomslug_surround_approval_slash_and_freeze() {
+        use crate::cross_domain::external::near_doomslug::{
+            NearApprovalInner, NearApprovalSig, NearBlockProducer,
+        };
+        use crate::crypto::ctx::CROSS_DOMAIN_V1;
+
+        let challenger = Address::from([0xCF; 32]);
+        let k_ed = KeyPair::from_seed(&[0x22; 32]).unwrap();
+        let k_pq = PqKeyPair::generate();
+        let mut guard = BridgeEconomicGuard::production();
+
+        // 4. NEAR Doomslug surround-approval slash (tag 12).
+        let near_bps = vec![NearBlockProducer {
+            account_id: "bp0.near".into(),
+            ed25519_pubkey: k_ed.public_key_bytes(),
+            stake: 550,
+            pq_pubkey: k_pq.public_key_bytes().to_vec(),
+        }];
+        let near_pin = PinnedNearEpoch {
+            epoch_id: [0xE1; 32],
+            next_epoch_id: [0xE2; 32],
+            next_bp_hash: compute_near_bp_hash(&near_bps),
+            block_producers: near_bps,
+        };
+        guard
+            .configure_domain(
+                104,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::NearDoomslug {
+                        network: "near-net".into(),
+                        pinned: near_pin.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .unwrap();
+        let outer = NearApprovalInner::Skip { source_height: 100 };
+        let inner = NearApprovalInner::Endorsement {
+            parent_hash: [0xCC; 32],
+            parent_height: 103,
+        };
+        let nm1 = near_approval_sign_bytes("near-net", &near_pin.epoch_id, &outer, 110);
+        let nm2 = near_approval_sign_bytes("near-net", &near_pin.epoch_id, &inner, 104);
+        let near_out = guard
+            .submit_contradiction(
+                104,
+                &ContradictionEvidence::NearDoomslugFault {
+                    network: "near-net".into(),
+                    pinned: near_pin,
+                    proof: Box::new(NearApprovalSlashProof {
+                        inner_a: outer,
+                        target_a: 110,
+                        sig_a: NearApprovalSig {
+                            signer_pubkey: k_ed.public_key_bytes(),
+                            ed25519_sig: k_ed.sign(&nm1).to_vec(),
+                            pq_sig: k_pq.sign(CROSS_DOMAIN_V1, &nm1).unwrap(),
+                        },
+                        inner_b: inner,
+                        target_b: 104,
+                        sig_b: NearApprovalSig {
+                            signer_pubkey: k_ed.public_key_bytes(),
+                            ed25519_sig: k_ed.sign(&nm2).to_vec(),
+                            pq_sig: k_pq.sign(CROSS_DOMAIN_V1, &nm2).unwrap(),
+                        },
+                    }),
+                },
+                challenger,
+                605,
+            )
+            .unwrap();
+        assert_eq!(near_out.external_slashed_weight, 550);
+        assert!(matches!(
+            guard.record(104).unwrap().status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ));
+        assert!(guard.check_and_record_flow(104, 1, 700).is_err());
+    }
+
+    #[test]
+    fn contradictions_honeybadger_bracha_rbc_double_root_slash_and_freeze() {
+        use crate::cross_domain::external::honeybadger_bft::{
+            rbc_root_announcement_digest, HoneyBadgerValidator,
+        };
+        use crate::crypto::ctx::CROSS_DOMAIN_V1;
+
+        let challenger = Address::from([0xCF; 32]);
+        let mut guard = BridgeEconomicGuard::production();
+
+        // 5. HoneyBadgerBFT ML-DSA-65 Bracha RBC double-root (tag 13).
+        let hb_pq_keys: Vec<PqKeyPair> = (0..4).map(|_| PqKeyPair::generate()).collect();
+        let hb_pin = PinnedHoneyBadgerCommittee {
+            network_id: "hbbft-net".into(),
+            genesis_hash: [0x42; 32],
+            committee_epoch: 3,
+            min_acs_epoch: 1,
+            validators: hb_pq_keys
+                .iter()
+                .zip(1u8..=4)
+                .map(|(kp, id_byte)| HoneyBadgerValidator {
+                    validator_id: [id_byte; 32],
+                    mldsa65_pubkey: kp.public_key_bytes().to_vec(),
+                    weight: 125,
+                })
+                .collect(),
+        };
+        guard
+            .configure_domain(
+                105,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::HoneyBadgerBft {
+                        network: "hbbft-net".into(),
+                        pinned: hb_pin.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .unwrap();
+        let hbm_a = rbc_root_announcement_digest("hbbft-net", &[0x42; 32], 3, 9, 1, &[0xAA; 32]);
+        let hbm_b = rbc_root_announcement_digest("hbbft-net", &[0x42; 32], 3, 9, 1, &[0xBB; 32]);
+        let hb_out = guard
+            .submit_contradiction(
+                105,
+                &ContradictionEvidence::HoneyBadgerFault {
+                    network: "hbbft-net".into(),
+                    pinned: hb_pin,
+                    proof: Box::new(RbcEquivocationProof {
+                        genesis_hash: [0x42; 32],
+                        committee_epoch: 3,
+                        acs_epoch: 9,
+                        proposer_index: 1,
+                        first_root: [0xAA; 32],
+                        first_sig: hb_pq_keys[1].sign(CROSS_DOMAIN_V1, &hbm_a).unwrap(),
+                        second_root: [0xBB; 32],
+                        second_sig: hb_pq_keys[1].sign(CROSS_DOMAIN_V1, &hbm_b).unwrap(),
+                    }),
+                },
+                challenger,
+                606,
+            )
+            .unwrap();
+        assert_eq!(hb_out.external_slashed_weight, 125);
+        assert!(matches!(
+            guard.record(105).unwrap().status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ));
+        assert!(guard.check_and_record_flow(105, 1, 700).is_err());
+    }
+
+    #[test]
+    fn contradictions_bullshark_dag_anchor_equivocation_slash_and_freeze() {
+        use crate::cross_domain::external::dag_bft::{DagBftSig, DagBftValidator};
+        use crate::crypto::ctx::CROSS_DOMAIN_V1;
+
+        let challenger = Address::from([0xCF; 32]);
+        let k_ed = KeyPair::from_seed(&[0x23; 32]).unwrap();
+        let k_pq = PqKeyPair::generate();
+        let mut guard = BridgeEconomicGuard::production();
+
+        // 6. Bullshark DAG-BFT anchor certificate equivocation (tag 14).
+        let dag_pin = PinnedDagCommittee {
+            epoch: 2,
+            members: vec![DagBftValidator {
+                ed25519_pubkey: k_ed.public_key_bytes(),
+                voting_weight: 650,
+                pq_pubkey: k_pq.public_key_bytes().to_vec(),
+            }],
+        };
+        guard
+            .configure_domain(
+                106,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::BullsharkDag {
+                        network: "dag-net".into(),
+                        pinned: dag_pin.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .unwrap();
+        let dm_a = hash_fields_bytes(&[
+            b"BDLM_DAGBFT_CERT_V1",
+            b"dag-net",
+            &2u64.to_le_bytes(),
+            &10u64.to_le_bytes(),
+            &[0x31; 32],
+        ]);
+        let dm_b = hash_fields_bytes(&[
+            b"BDLM_DAGBFT_CERT_V1",
+            b"dag-net",
+            &2u64.to_le_bytes(),
+            &10u64.to_le_bytes(),
+            &[0x32; 32],
+        ]);
+        let dag_out = guard
+            .submit_contradiction(
+                106,
+                &ContradictionEvidence::BullsharkDagFault {
+                    network: "dag-net".into(),
+                    pinned: dag_pin,
+                    proof: Box::new(DagEquivocationProof::AnchorCertificate {
+                        round: 10,
+                        first_anchor_digest: [0x31; 32],
+                        first_sigs: vec![DagBftSig {
+                            signer_pubkey: k_ed.public_key_bytes(),
+                            ed25519_sig: k_ed.sign(&dm_a).to_vec(),
+                            pq_sig: k_pq.sign(CROSS_DOMAIN_V1, &dm_a).unwrap(),
+                        }],
+                        second_anchor_digest: [0x32; 32],
+                        second_sigs: vec![DagBftSig {
+                            signer_pubkey: k_ed.public_key_bytes(),
+                            ed25519_sig: k_ed.sign(&dm_b).to_vec(),
+                            pq_sig: k_pq.sign(CROSS_DOMAIN_V1, &dm_b).unwrap(),
+                        }],
+                    }),
+                },
+                challenger,
+                607,
+            )
+            .unwrap();
+        assert_eq!(dag_out.external_slashed_weight, 650);
+        assert!(matches!(
+            guard.record(106).unwrap().status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ));
+        assert!(guard.check_and_record_flow(106, 1, 700).is_err());
+    }
+
+    #[test]
+    fn contradictions_da_2d_header_equivocation_slash_and_freeze() {
+        use crate::cross_domain::external::da_sampling::{DaCommitteeMember, DaFraudKind};
+
+        let challenger = Address::from([0xCF; 32]);
+        let k_ed = KeyPair::from_seed(&[0x24; 32]).unwrap();
+        let k_pq = PqKeyPair::generate();
+        let mut guard = BridgeEconomicGuard::production();
+
+        // 7. 2D Data Availability HeaderEquivocation fraud proof (tag 15).
+        let da_ns = [0xD4; 32];
+        let da_pin = PinnedDaCommittee {
+            namespace_id: da_ns,
+            min_samples: 2,
+            min_square_size: 2,
+            members: vec![DaCommitteeMember {
+                ed25519_pubkey: k_ed.public_key_bytes(),
+                voting_weight: 750,
+                pq_pubkey: k_pq.public_key_bytes().to_vec(),
+            }],
+        };
+        guard
+            .configure_domain(
+                107,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::DataAvailability2d {
+                        network: "da-net".into(),
+                        pinned: da_pin.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .unwrap();
+        let dh1 = da_test_header(0x10);
+        let dh2 = da_test_header(0x20);
+        let da_out = guard
+            .submit_contradiction(
+                107,
+                &ContradictionEvidence::DataAvailabilityFault {
+                    network: "da-net".into(),
+                    pinned: da_pin,
+                    proof: Box::new(DaFraudProof {
+                        header: dh1.clone(),
+                        signatures: da_test_signatures(&k_ed, &k_pq, &da_ns, &dh1),
+                        kind: DaFraudKind::HeaderEquivocation {
+                            conflicting_header: dh2.clone(),
+                            conflicting_signatures: da_test_signatures(&k_ed, &k_pq, &da_ns, &dh2),
+                        },
+                    }),
+                },
+                challenger,
+                608,
+            )
+            .unwrap();
+        assert_eq!(da_out.external_slashed_weight, 750);
+        assert!(matches!(
+            guard.record(107).unwrap().status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ));
+        assert!(guard.check_and_record_flow(107, 1, 700).is_err());
+    }
+
+    #[test]
+    fn contradictions_pospace_vdf_double_signage_slash_and_reject_outsider() {
+        use crate::cross_domain::external::pospace_vdf::pospace_signage_sign_bytes;
+        use crate::crypto::ctx::CROSS_DOMAIN_V1;
+
+        let challenger = Address::from([0xCF; 32]);
+        let k_pq = PqKeyPair::generate();
+        let mut guard = BridgeEconomicGuard::production();
+
+        // 8. PoSpace+VDF ML-DSA-65 double-signage + outsider key refusal (tag 16).
+        let pos_pin = PinnedPoSpaceAnchor {
+            genesis_challenge: [0x77; 32],
+            min_plot_k: 16,
+            min_iterations_per_block: 4,
+            max_iterations_per_block: 1_024,
+            required_depth: 2,
+            min_cumulative_weight: 100,
+            require_pq_attestation: true,
+            pq_attestor_pubkey: Some(k_pq.public_key_bytes().to_vec()),
+        };
+        guard
+            .configure_domain(
+                108,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::PoSpaceVdf {
+                        network: "chia-net".into(),
+                        pinned: Box::new(pos_pin.clone()),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0xA8; 32]), 16_000)),
+            )
+            .unwrap();
+        let outsider = PqKeyPair::generate();
+        let pm_a = pospace_signage_sign_bytes("chia-net", 42, 7, &[0x81; 32]);
+        let pm_b = pospace_signage_sign_bytes("chia-net", 42, 7, &[0x82; 32]);
+        assert!(guard
+            .submit_contradiction(
+                108,
+                &ContradictionEvidence::PoSpaceDoubleSignage {
+                    network: "chia-net".into(),
+                    pinned: Box::new(pos_pin.clone()),
+                    first: Box::new(SignedPoSpaceSignage {
+                        network: "chia-net".into(),
+                        sub_slot: 42,
+                        signage_index: 7,
+                        infusion_block_hash: [0x81; 32],
+                        signer_pq_pubkey: outsider.public_key_bytes().to_vec(),
+                        signature: outsider.sign(CROSS_DOMAIN_V1, &pm_a).unwrap(),
+                    }),
+                    second: Box::new(SignedPoSpaceSignage {
+                        network: "chia-net".into(),
+                        sub_slot: 42,
+                        signage_index: 7,
+                        infusion_block_hash: [0x82; 32],
+                        signer_pq_pubkey: outsider.public_key_bytes().to_vec(),
+                        signature: outsider.sign(CROSS_DOMAIN_V1, &pm_b).unwrap(),
+                    }),
+                },
+                challenger,
+                609,
+            )
+            .is_err());
+        let pos_out = guard
+            .submit_contradiction(
+                108,
+                &ContradictionEvidence::PoSpaceDoubleSignage {
+                    network: "chia-net".into(),
+                    pinned: Box::new(pos_pin),
+                    first: Box::new(SignedPoSpaceSignage {
+                        network: "chia-net".into(),
+                        sub_slot: 42,
+                        signage_index: 7,
+                        infusion_block_hash: [0x81; 32],
+                        signer_pq_pubkey: k_pq.public_key_bytes().to_vec(),
+                        signature: k_pq.sign(CROSS_DOMAIN_V1, &pm_a).unwrap(),
+                    }),
+                    second: Box::new(SignedPoSpaceSignage {
+                        network: "chia-net".into(),
+                        sub_slot: 42,
+                        signage_index: 7,
+                        infusion_block_hash: [0x82; 32],
+                        signer_pq_pubkey: k_pq.public_key_bytes().to_vec(),
+                        signature: k_pq.sign(CROSS_DOMAIN_V1, &pm_b).unwrap(),
+                    }),
+                },
+                challenger,
+                610,
+            )
+            .unwrap();
+        assert_eq!(pos_out.external_slashed_weight, 1);
+        assert_eq!(pos_out.slashed_bond_atoms, 16_000);
+        assert_eq!(pos_out.challenger_reward_atoms, 1_600);
+        assert_eq!(pos_out.burned_bond_atoms, 14_400);
+        assert!(matches!(
+            guard.record(108).unwrap().status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ));
+        assert!(guard.check_and_record_flow(108, 1, 700).is_err());
     }
 }

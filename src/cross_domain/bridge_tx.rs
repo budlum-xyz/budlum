@@ -1020,19 +1020,28 @@ fn ensure_domain_class_intake(
     }
 }
 
-/// Configure or update the adaptive escrow ceiling and optional prover bond
-/// guarding bridge flows for `domain_id`.
+/// Configure or update the per-domain economic guard policy and synchronize
+/// any `prover_bond` escrow against `AccountState::external_bonds`.
 ///
-/// WIRING: production bridge economic-guard configuration entry point paired
-/// with [`crate::cross_domain::bridge::BridgeState::mint`],
+/// Requires an authenticated non-zero `caller`:
+/// - When `domain_id` is registered in `state.settlement.domains`, `caller`
+///   MUST be the domain's registered `operator`.
+/// - When a new bond is attached, it may pledge only `caller`'s own balance.
+/// - Whenever a recorded live bond would be displaced or released, `caller`
+///   MUST be that bond's recorded `prover`.
+///
+/// Refusals never mutate state. An unchanged escrow (same prover, same atoms)
+/// is left untouched: no release/lock round-trip is performed.
+///
+/// WIRING: Bridge domain ceiling / bond escrow lifecycle paired with
 /// [`crate::cross_domain::bridge::BridgeState::unlock`], and
 /// [`report_bridge_contradiction`].
 ///
 /// # Errors
 ///
-/// Returns an error string when `policy` violates protocol bounds, when the
-/// new bond names an address other than `caller`, or when a recorded bond
-/// held by someone else would be displaced or released.
+/// Returns an error string when `caller` is unauthorized for the registered
+/// domain, when the new bond names an address other than `caller`, or when a
+/// recorded bond held by someone else would be displaced or released.
 pub fn configure_domain_economic_guard(
     state: &mut AccountState,
     caller: &Address,
@@ -1040,11 +1049,27 @@ pub fn configure_domain_economic_guard(
     policy: crate::cross_domain::economic_guard::DomainCeilingPolicy,
     prover_bond: Option<crate::cross_domain::external::prover::ProverBond>,
 ) -> Result<(), String> {
+    if *caller == Address::from([0u8; 32]) {
+        return Err("Zero address cannot configure domain economic guard".into());
+    }
+    if let Some(domain_reg) = state.settlement.domains.get(domain_id) {
+        let Some(operator) = domain_reg.operator else {
+            return Err(format!("Domain {domain_id} has no registered operator"));
+        };
+        if *caller != operator {
+            return Err(format!(
+                "Caller is not the registered operator of domain {domain_id}"
+            ));
+        }
+    }
     // The bond is spendable balance moved into slashable escrow: only its
     // owner may pledge it, and only the recorded owner may displace or
     // release what is already locked. Without these two checks any caller
     // could escrow a stranger's balance or evict a domain's live backing.
     if let Some(bond) = &prover_bond {
+        if bond.prover == Address::from([0u8; 32]) {
+            return Err("Prover bond address cannot be zero".into());
+        }
         if bond.prover != *caller {
             return Err("Bridge economic guard bond must pledge the caller's own balance".into());
         }
@@ -1068,12 +1093,27 @@ pub fn configure_domain_economic_guard(
             Some((b.prover, live))
         }
     };
+    // Unchanged escrow (same prover, same u64 amount): the escrow is already
+    // locked for exactly this account and amount, so skip the release/lock
+    // round-trip; only the policy changes.
+    let unchanged_escrow = match (prior_bond, new_bond_spec) {
+        (Some((old_p, old_atoms)), Some((new_p, new_u64))) => {
+            old_p == new_p && u64::try_from(old_atoms).ok() == Some(new_u64)
+        }
+        (None, None) => true,
+        _ => false,
+    };
+
     let guard_before = state.bridge_state.economic_guard.clone();
     state
         .bridge_state
         .economic_guard
         .configure_domain(domain_id, policy, prover_bond)
         .map_err(|e| e.to_string())?;
+
+    if unchanged_escrow {
+        return Ok(());
+    }
 
     if let Some((old_prover, old_atoms)) = prior_bond {
         if old_atoms > 0 {
@@ -2022,5 +2062,91 @@ mod tests {
             err.contains("conflicting") || err.contains("ambiguous"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn configure_domain_economic_guard_rejects_unauthorized_caller_and_victim_bond_debit() {
+        use crate::cross_domain::economic_guard::DomainCeilingPolicy;
+        use crate::cross_domain::external::prover::ProverBond;
+
+        let (mut state, operator) = bridged();
+        let victim = Address::from([0x77; 32]);
+        let attacker = Address::from([0x88; 32]);
+        state.add_balance(&operator, 50_000);
+        state.add_balance(&victim, 50_000);
+        state.add_balance(&attacker, 50_000);
+
+        let mk_bond = |prover: Address, atoms: u128| ProverBond {
+            prover,
+            bond_atoms: atoms,
+            ceiling_atoms: atoms.saturating_mul(10),
+            slashed_atoms: 0,
+            slashings: Vec::new(),
+            accepted: 0,
+            refused: 0,
+        };
+        let def = DomainCeilingPolicy::default;
+
+        // 1. Zero caller is rejected.
+        assert!(configure_domain_economic_guard(
+            &mut state,
+            &Address::from([0u8; 32]),
+            1,
+            def(),
+            None
+        )
+        .is_err());
+
+        // 2. Non-operator cannot configure registered domain 1 even with its own bond.
+        assert!(configure_domain_economic_guard(
+            &mut state,
+            &attacker,
+            1,
+            def(),
+            Some(mk_bond(attacker, 10_000))
+        )
+        .is_err());
+        assert_eq!(state.get_balance(&attacker), 50_000);
+
+        // 3. Even the registered domain operator cannot lock a third-party victim's balance!
+        assert!(configure_domain_economic_guard(
+            &mut state,
+            &operator,
+            1,
+            def(),
+            Some(mk_bond(victim, 15_000))
+        )
+        .is_err());
+        assert_eq!(state.get_balance(&victim), 50_000);
+
+        // 4. Operator locking its own bond succeeds; unchanged re-post moves no funds.
+        configure_domain_economic_guard(
+            &mut state,
+            &operator,
+            1,
+            def(),
+            Some(mk_bond(operator, 15_000)),
+        )
+        .unwrap();
+        assert_eq!(state.get_balance(&operator), 35_000);
+        let updated = DomainCeilingPolicy {
+            window_blocks: 3_600,
+            ..def()
+        };
+        configure_domain_economic_guard(
+            &mut state,
+            &operator,
+            1,
+            updated,
+            Some(mk_bond(operator, 15_000)),
+        )
+        .unwrap();
+        assert_eq!(state.get_balance(&operator), 35_000);
+
+        // 5. Non-operator cannot release the recorded bond; operator can.
+        assert!(configure_domain_economic_guard(&mut state, &attacker, 1, def(), None).is_err());
+        assert_eq!(state.get_balance(&operator), 35_000);
+        configure_domain_economic_guard(&mut state, &operator, 1, def(), None).unwrap();
+        assert_eq!(state.get_balance(&operator), 50_000);
     }
 }
