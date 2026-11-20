@@ -2504,12 +2504,6 @@ impl Plonky3Adapter {
             }
         }
 
-        let config = build_config();
-        let air = BudAir {
-            num_steps: expected_inputs.trace_len as usize,
-            program: program.to_vec(),
-        };
-
         let degree_bits = log2_strict_usize(
             (3 * expected_inputs.trace_len as usize + 1)
                 .next_power_of_two()
@@ -2521,11 +2515,10 @@ impl Plonky3Adapter {
                 envelope.degree_bits, degree_bits
             )));
         }
-        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
-        let preprocessed_vk_ref = preprocessed.as_ref().map(|(_, vk)| vk);
 
-        let public_values = to_public_values(expected_inputs);
-
+        // Decode and reject malformed or trailing-byte proofs BEFORE running
+        // setup_preprocessed: building a 2^17 preprocessed commitment for a
+        // garbage proof would let cheap rejected calls stall validators.
         let bounded_bytes = &envelope.proof_bytes[..envelope
             .proof_bytes
             .len()
@@ -2542,6 +2535,16 @@ impl Plonky3Adapter {
                 trailing.len()
             )));
         }
+
+        let config = build_config();
+        let air = BudAir {
+            num_steps: expected_inputs.trace_len as usize,
+            program: program.to_vec(),
+        };
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_vk_ref = preprocessed.as_ref().map(|(_, vk)| vk);
+
+        let public_values = to_public_values(expected_inputs);
 
         stark_verify_with_preprocessed(
             &config,
@@ -11072,6 +11075,56 @@ mod tests {
             matches!(verify_err, VerifyError::InvalidEnvelope(_)),
             "an oversized claimed trace must be refused before the preprocessed \
              trace is built, got {verify_err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_malformed_proof_before_large_preprocessed_setup() {
+        // A valid-sized trace_len (43_690 -> degree_bits = 17) paired with
+        // malformed proof_bytes must fail deserialization immediately without
+        // paying the multi-second 2^17 preprocessed STARK setup.
+        let halt = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let pi = ExecutionPublicInputs {
+            chain_id: 0,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            program_hash: crate::canonical_set::program_hash_of(&[halt]),
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 1_000_000,
+            gas_used: 1,
+            exit_code: 0,
+            trace_len: 43_690,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        let env = ProofEnvelope {
+            proof_format_version: PROOF_FORMAT_VERSION,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes: vec![0xFFu8; 8],
+            degree_bits: 17,
+        };
+        let start = std::time::Instant::now();
+        let verify_err = Plonky3Adapter::verify(&env, &pi, &[halt]).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(verify_err, VerifyError::DeserializationError(_)),
+            "expected DeserializationError, got {verify_err:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "malformed proof took {elapsed:?} -- setup_preprocessed ran before proof decoding"
         );
     }
 }

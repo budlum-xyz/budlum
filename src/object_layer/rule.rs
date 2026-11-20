@@ -210,6 +210,7 @@ fn verify_program_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
             .map_err(|_| RuleRefusal::WrongShape)?;
         if inputs.exit_code != 0
             || inputs.gas_used != receipt.gas_used
+            || inputs.trace_len != receipt.trace_len
             || inputs.trace_len == 0
             || inputs.gas_used > inputs.gas_limit
         {
@@ -625,6 +626,40 @@ mod tests {
         fail_slice.insert(String::from("program_bytecode"), fail_prog);
         assert_eq!(
             apply_rule(&ClassRule::Program, &fail_slice, &before, &verb),
+            Err(RuleRefusal::Paused)
+        );
+
+        // A program_proof claiming a different trace_len than the VM receipt must
+        // be refused before entering the STARK verifier (prevents setup-sizing DoS).
+        let bogus_inputs = ExecutionPublicInputs {
+            chain_id: 0,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            program_hash: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 100_000,
+            gas_used: 1,
+            exit_code: 0,
+            trace_len: 43_690,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        let bogus_env = ProofEnvelope {
+            proof_format_version: bud_proof::adapter::PROOF_FORMAT_VERSION,
+            backend: String::from("Plonky3-Keccak-Goldilocks"),
+            p3_version: String::from("0.5.2"),
+            fri_params_id: String::from("test_fri_params"),
+            public_inputs_hash: bogus_inputs.hash(),
+            proof_bytes: vec![0xFFu8; 8],
+            degree_bits: 17,
+        };
+        let raw_proof = postcard::to_allocvec(&(bogus_env, bogus_inputs)).expect("encode proof");
+        let mut mismatched_trace_slice = ok_slice.clone();
+        mismatched_trace_slice.insert(String::from("program_proof"), raw_proof);
+        assert_eq!(
+            apply_rule(&ClassRule::Program, &mismatched_trace_slice, &before, &verb),
             Err(RuleRefusal::Paused)
         );
     }

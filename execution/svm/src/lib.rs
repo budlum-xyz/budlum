@@ -129,15 +129,32 @@ fn parse_pubkey32(raw: &[u8]) -> Option<[u8; 32]> {
     raw.try_into().ok()
 }
 
+#[cfg(test)]
 fn read_svm_account(host: &dyn HostRead, pubkey: &[u8; 32]) -> SvmAccountRecord {
-    let Ok(ns) = Namespace::new(NS_SVM_ACCOUNT) else {
-        return SvmAccountRecord::default();
-    };
-    host.read(&ns, pubkey)
+    read_svm_account_checked(host, pubkey)
         .ok()
         .flatten()
-        .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
+}
+
+fn read_svm_account_checked(
+    host: &dyn HostRead,
+    pubkey: &[u8; 32],
+) -> Result<Option<SvmAccountRecord>, HostError> {
+    let ns = Namespace::new(NS_SVM_ACCOUNT).map_err(|e| HostError::Invalid(e.to_string()))?;
+    match host.read(&ns, pubkey)? {
+        None => Ok(None),
+        Some(raw) => serde_json::from_slice(&raw)
+            .map(Some)
+            .map_err(|e| HostError::Invalid(format!("corrupt SVM account record: {e}"))),
+    }
+}
+
+fn map_svm_read_err(err: HostError) -> (OutcomeStatus, String) {
+    match err {
+        HostError::OutOfGas => (OutcomeStatus::OutOfGas, String::new()),
+        other => (OutcomeStatus::Revert, other.to_string()),
+    }
 }
 
 fn svm_account_exists(host: &dyn HostRead, pubkey: &[u8; 32]) -> Result<bool, HostError> {
@@ -437,7 +454,9 @@ fn handle_spl_token(
                     String::from("token account already initialized"),
                 ));
             }
-            let mint_rec = read_svm_account(host, &mint_pk);
+            let mint_rec = read_svm_account_checked(host, &mint_pk)
+                .map_err(map_svm_read_err)?
+                .unwrap_or_default();
             if mint_rec.owner != *program_id
                 || !serde_json::from_slice::<SplMintState>(&mint_rec.data)
                     .is_ok_and(|mint| mint.is_initialized)
@@ -475,7 +494,9 @@ fn handle_spl_token(
             );
             let mint_pk = ix.accounts.first().map(|m| m.pubkey).unwrap_or([0; 32]);
             let dst_pk = ix.accounts.get(1).map(|m| m.pubkey).unwrap_or([0; 32]);
-            let mut mint_rec = read_svm_account(host, &mint_pk);
+            let mut mint_rec = read_svm_account_checked(host, &mint_pk)
+                .map_err(map_svm_read_err)?
+                .unwrap_or_default();
             let mut mint: SplMintState = serde_json::from_slice(&mint_rec.data)
                 .map_err(|_| (OutcomeStatus::Revert, String::from("uninitialized mint")))?;
             if mint_rec.owner != *program_id
@@ -487,7 +508,9 @@ fn handle_spl_token(
                     String::from("mint authority mismatch"),
                 ));
             }
-            let mut dst_rec = read_svm_account(host, &dst_pk);
+            let mut dst_rec = read_svm_account_checked(host, &dst_pk)
+                .map_err(map_svm_read_err)?
+                .unwrap_or_default();
             let mut dst: SplTokenAccountState =
                 serde_json::from_slice(&dst_rec.data).map_err(|_| {
                     (
@@ -530,8 +553,12 @@ fn handle_spl_token(
             );
             let src_pk = ix.accounts.first().map(|m| m.pubkey).unwrap_or([0; 32]);
             let dst_pk = ix.accounts.get(1).map(|m| m.pubkey).unwrap_or([0; 32]);
-            let mut src_rec = read_svm_account(host, &src_pk);
-            let mut dst_rec = read_svm_account(host, &dst_pk);
+            let mut src_rec = read_svm_account_checked(host, &src_pk)
+                .map_err(map_svm_read_err)?
+                .unwrap_or_default();
+            let mut dst_rec = read_svm_account_checked(host, &dst_pk)
+                .map_err(map_svm_read_err)?
+                .unwrap_or_default();
             let mut src: SplTokenAccountState = serde_json::from_slice(&src_rec.data)
                 .map_err(|_| (OutcomeStatus::Revert, String::from("bad src token acc")))?;
             let mut dst: SplTokenAccountState = serde_json::from_slice(&dst_rec.data)
@@ -624,6 +651,17 @@ impl SvmWorker {
         }
 
         if call.kind == EeCallKind::Deploy {
+            if call.input.len() > MAX_SBPF_CODE_BYTES {
+                return EeOutcome {
+                    status: OutcomeStatus::InvalidCode,
+                    output: format!(
+                        "sBPF size {} exceeds {MAX_SBPF_CODE_BYTES}",
+                        call.input.len()
+                    )
+                    .into_bytes(),
+                    gas_used: 0,
+                };
+            }
             let loader = Arc::new(BuiltinProgram::new_loader(deterministic_sbpf_config()));
             if let Err(msg) = load_and_verify_sbpf(&call.input, loader) {
                 return EeOutcome {
@@ -850,7 +888,23 @@ impl SvmWorker {
                     gas_used: 0,
                 };
             }
-            let mint_rec = read_svm_account(host, &mint);
+            let mint_rec = match read_svm_account_checked(host, &mint) {
+                Ok(rec) => rec.unwrap_or_default(),
+                Err(HostError::OutOfGas) => {
+                    return EeOutcome {
+                        status: OutcomeStatus::OutOfGas,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    };
+                }
+                Err(e) => {
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: e.to_string().into_bytes(),
+                        gas_used: 0,
+                    };
+                }
+            };
             if mint_rec.owner != tok_prog
                 || !serde_json::from_slice::<SplMintState>(&mint_rec.data)
                     .is_ok_and(|mint| mint.is_initialized)
@@ -915,7 +969,23 @@ impl SvmWorker {
         }
 
         // Deployed sBPF program execution
-        let prog_rec = read_svm_account(host, &target_pk);
+        let prog_rec = match read_svm_account_checked(host, &target_pk) {
+            Ok(rec) => rec.unwrap_or_default(),
+            Err(HostError::OutOfGas) => {
+                return EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                };
+            }
+            Err(e) => {
+                return EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: e.to_string().into_bytes(),
+                    gas_used: 0,
+                };
+            }
+        };
         if !prog_rec.executable || prog_rec.data.is_empty() {
             return EeOutcome {
                 status: OutcomeStatus::Revert,
@@ -1027,7 +1097,12 @@ impl ExecutionEnvironment for SvmWorker {
                 message: String::from("SVM query target must be 32 bytes"),
             });
         };
-        let rec = read_svm_account(host, &pk);
+        let rec = read_svm_account_checked(host, &pk)
+            .map_err(|e| EeRefusal {
+                code: RefusalCode::Denied,
+                message: e.to_string(),
+            })?
+            .unwrap_or_default();
         if rec.executable && !q.input.is_empty() {
             let (_, _, out) = execute_sbpf_bytecode(&rec.data, &q.input, QUERY_CU_LIMIT).map_err(
                 |(_, message, _)| EeRefusal {
@@ -1904,5 +1979,108 @@ mod tests {
         drop(client);
         let _ = srv.join();
         let _ = std::fs::remove_file(&sock_path);
+    }
+
+    struct FailingReadHost {
+        inner: MemoryHost,
+        fail_with_oog: bool,
+    }
+
+    impl HostRead for FailingReadHost {
+        fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+            if ns.as_str() == NS_SVM_ACCOUNT {
+                return Err(if self.fail_with_oog {
+                    HostError::OutOfGas
+                } else {
+                    HostError::Invalid(String::from("injected SVM storage read fault"))
+                });
+            }
+            self.inner.read(ns, key)
+        }
+        fn bud_balance(&self, id: &EeIdentity) -> Result<BudAmount, HostError> {
+            self.inner.bud_balance(id)
+        }
+    }
+
+    impl HostApi for FailingReadHost {
+        fn write(
+            &mut self,
+            ns: &Namespace,
+            key: &[u8],
+            value: Option<&[u8]>,
+        ) -> Result<(), HostError> {
+            self.inner.write(ns, key, value)
+        }
+        fn charge(&mut self, gas: u64) -> Result<(), budlum_uel_abi::OutOfGas> {
+            self.inner.charge(gas)
+        }
+        fn emit_log(&mut self, log: budlum_uel_abi::EeLog) -> Result<(), HostError> {
+            self.inner.emit_log(log)
+        }
+        fn bud_transfer(
+            &mut self,
+            from: &EeIdentity,
+            to: &EeIdentity,
+            amount: u128,
+        ) -> Result<(), HostError> {
+            self.inner.bud_transfer(from, to, amount)
+        }
+        fn universal_call(
+            &mut self,
+            call: budlum_uel_abi::UniversalCall,
+        ) -> Result<budlum_uel_abi::UniversalResult, HostError> {
+            self.inner.universal_call(call)
+        }
+        fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+            self.inner.checkpoint_begin()
+        }
+        fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+            self.inner.checkpoint_commit(id)
+        }
+        fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+            self.inner.checkpoint_rollback(id)
+        }
+    }
+
+    #[test]
+    fn query_and_execute_fail_closed_on_host_read_error_instead_of_default_account() {
+        let mut worker = SvmWorker;
+        let ctx = test_ctx();
+        let target = [0x44u8; 32];
+
+        // 1. Query MUST refuse a host read error instead of fabricating a default empty account.
+        let bad_host = FailingReadHost {
+            inner: MemoryHost::new(100_000),
+            fail_with_oog: false,
+        };
+        let q = budlum_uel_abi::EeQuery {
+            target: EeIdentity {
+                ee: EeId::SVM,
+                id: target.to_vec(),
+            },
+            input: Vec::new(),
+        };
+        assert!(
+            worker.query(&ctx, &q, &bad_host).is_err(),
+            "SVM query must fail closed on host.read error rather than returning a default account"
+        );
+
+        // 2. Execute MUST propagate HostError::OutOfGas as OutcomeStatus::OutOfGas (not Revert).
+        let mut oog_host = FailingReadHost {
+            inner: MemoryHost::new(100_000),
+            fail_with_oog: true,
+        };
+        let out = worker
+            .execute(
+                &ctx,
+                &test_call(target, EeCallKind::Call, vec![1, 2, 3], 100_000),
+                &mut oog_host,
+            )
+            .expect("worker must not fault");
+        assert_eq!(
+            out.status,
+            OutcomeStatus::OutOfGas,
+            "HostError::OutOfGas while reading SVM program account must return OutOfGas"
+        );
     }
 }
