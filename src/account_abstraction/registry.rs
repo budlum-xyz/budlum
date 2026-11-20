@@ -556,6 +556,55 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn registry_root_commits_the_pact_root() {
+        use crate::storage::pact_binding::Pact;
+
+        let mut plain_account = account_with(2, 3);
+        plain_account.storage_root = [9u8; 32];
+        let mut plain = QuantumAccountRegistry::new();
+        plain.register(plain_account).expect("plain account");
+
+        let mut pacts = PactRegistry::new();
+        pacts
+            .add_pact(
+                Pact::new([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [0u8; 32], 8, 0)
+                    .expect("valid pact"),
+            )
+            .expect("pact accepted");
+        let mut bound_account = account_with(2, 3);
+        bound_account.storage_root = [9u8; 32];
+        bound_account.pact_root = pacts.root;
+        let mut bound = QuantumAccountRegistry::new();
+        bound
+            .register_with_pacts(bound_account, &pacts)
+            .expect("evidence-backed account");
+
+        assert_ne!(
+            plain.root(),
+            bound.root(),
+            "the registry root must commit the account pact root"
+        );
+    }
+
+    #[test]
+    fn registry_root_is_independent_of_registration_order() {
+        let first = account_with(2, 3);
+        let mut second = account_with(2, 3);
+        second.pq_public_key = [4u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        second.address = QuantumAccount::address_from_public_key(&second.pq_public_key);
+
+        let mut forward = QuantumAccountRegistry::new();
+        forward.register(first.clone()).expect("first account");
+        forward.register(second.clone()).expect("second account");
+
+        let mut reverse = QuantumAccountRegistry::new();
+        reverse.register(second).expect("second account");
+        reverse.register(first).expect("first account");
+
+        assert_eq!(forward.root(), reverse.root());
+    }
+
     /// An unknown address cannot be updated.
     #[test]
     fn updating_an_unknown_address_is_refused() {
