@@ -1076,11 +1076,20 @@ impl LightClient {
             ));
         };
         let hub_root = global_header.calculate_hash_bytes();
+        // The settlement epoch the bundle must have witnessed is re-derived
+        // from the trusted anchor, never taken from the packet: the same
+        // canonical rule the consensus layer applies to checkpoint certificates.
+        let expected_settlement_epoch =
+            crate::aggregation::universal_light_proof::ulp_expected_settlement_epoch(
+                global_header.chain_id,
+                global_header.checkpoint_height,
+            );
         let ulp_header = open_universal_light_proof(
             &packet.ulp_bundle,
             &canonical.program_hash,
             verified_hub_chain_id,
             &hub_root,
+            expected_settlement_epoch,
             registry,
         )
         .map_err(|e| LightClientError::VerificationFailed(e.to_string()))?;
@@ -2481,12 +2490,27 @@ mod tests {
         ];
 
         // Benchmark real ULP-1 proving & verification across D = 1, 3, 6 domains.
+        // The settlement epoch must be the canonical one derived from the hub
+        // anchor (checkpoint_height / epoch_len_for_chain_id(chain_id)); devnet
+        // 45262 has epoch length 10 and checkpoint height 25 -> epoch 2.
+        let expected_settlement_epoch =
+            crate::aggregation::universal_light_proof::ulp_expected_settlement_epoch(
+                u64::from(hub_chain_id),
+                global_header.checkpoint_height,
+            );
+        assert_eq!(expected_settlement_epoch, 2);
         let mut six_bundle_opt = None;
         for d in [1usize, 3, 6] {
             let subset = all_six.get(..d).unwrap();
             let compiled = compile_ulp_program(hub_chain_id, d).unwrap();
             let (bundle, sorted, metrics) = prove_universal_light_proof(
-                &compiled, 5, hub_root, subset, &agg_seed, d as u64, &registry,
+                &compiled,
+                expected_settlement_epoch,
+                hub_root,
+                subset,
+                &agg_seed,
+                d as u64,
+                &registry,
             )
             .expect("ULP-1 prove succeeds");
             let inc = prove_ulp_domain_inclusion(&sorted, 1).unwrap();
@@ -2496,6 +2520,7 @@ mod tests {
                 &compiled.program_hash,
                 hub_chain_id,
                 &hub_root,
+                expected_settlement_epoch,
                 &registry,
             )
             .expect("ULP-1 verify succeeds");
@@ -2533,6 +2558,7 @@ mod tests {
                 &prog_hash,
                 hub_chain_id,
                 &hub_root,
+                expected_settlement_epoch,
                 &sorted6,
                 &registry,
             )
@@ -2545,6 +2571,7 @@ mod tests {
                     &prog_hash,
                     hub_chain_id,
                     &hub_root,
+                    expected_settlement_epoch,
                     &sorted6,
                     &registry,
                 )
@@ -2559,6 +2586,7 @@ mod tests {
                     &prog_hash,
                     hub_chain_id,
                     &hub_root,
+                    expected_settlement_epoch,
                     &sorted6,
                     &registry,
                 )
@@ -2573,6 +2601,7 @@ mod tests {
                     &prog_hash,
                     hub_chain_id,
                     &hub_root,
+                    expected_settlement_epoch,
                     &sorted6,
                     &registry,
                 )

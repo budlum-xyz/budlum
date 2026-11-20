@@ -56,6 +56,7 @@ use super::programs::prog_claim::{
     DIGEST_LIMBS_U32,
 };
 use super::stark::{StarkBackend, STARK_PARAMETER_SET};
+use crate::core::chain_config::epoch_len_for_chain_id;
 use crate::crypto::scheme::{SchemeId, SchemeStatusRegistry};
 use crate::domain::types::{DomainId, Hash32};
 use zeroize::Zeroizing;
@@ -559,6 +560,20 @@ pub fn ulp_output_hash(
         limbs.extend_from_slice(&digest_limbs(&snap.state_root));
     }
     poseidon_sponge_256(TAG_ULP_OUTPUT, &limbs)
+}
+
+/// Derives the canonical settlement epoch of a hub checkpoint from the chain's
+/// own epoch length: `checkpoint_height / epoch_len_for_chain_id(chain_id)`.
+///
+/// This is the same derivation the consensus layer uses for checkpoint
+/// certificates (`Blockchain::epoch_for_checkpoint_height`), so a ULP-1 bundle's
+/// declared `settlement_epoch` can be re-derived from the trusted anchor's
+/// `checkpoint_height` instead of being accepted as a prover-declared value.
+/// `epoch_len_for_chain_id` is at least 1 for every `chain_id`, so the division
+/// is total and deterministic.
+#[must_use]
+pub fn ulp_expected_settlement_epoch(chain_id: u64, checkpoint_height: u64) -> u64 {
+    checkpoint_height / epoch_len_for_chain_id(chain_id).max(1)
 }
 
 #[derive(Clone, Copy)]
@@ -1242,12 +1257,21 @@ pub fn open_universal_light_proof_with_snapshots(
     expected_program_hash: &Hash32,
     expected_hub_chain_id: DomainId,
     expected_hub_checkpoint_root: &Hash32,
+    expected_settlement_epoch: u64,
     snapshots: &[UlpDomainSnapshot],
     registry: &SchemeStatusRegistry,
 ) -> Result<VerifiedUlpHeader, UlpError> {
     if snapshots.len() != usize::try_from(bundle.domain_count).unwrap_or(usize::MAX) {
         return Err(UlpError::BindingMismatch(
             "snapshot count does not match bundle domain_count",
+        ));
+    }
+    // The declared settlement epoch must be the one the caller derived from
+    // the trusted anchor; a prover cannot move the statement to a different
+    // epoch by re-declaring it.
+    if bundle.settlement_epoch != expected_settlement_epoch {
+        return Err(UlpError::BindingMismatch(
+            "declared settlement_epoch is not the anchor-derived epoch",
         ));
     }
     // The leaves must fold to the declared root: without this the witness
@@ -1286,6 +1310,7 @@ pub fn open_universal_light_proof_with_snapshots(
         expected_program_hash,
         expected_hub_chain_id,
         expected_hub_checkpoint_root,
+        expected_settlement_epoch,
         registry,
     )
 }
@@ -1295,8 +1320,17 @@ pub fn open_universal_light_proof(
     expected_program_hash: &Hash32,
     expected_hub_chain_id: DomainId,
     expected_hub_checkpoint_root: &Hash32,
+    expected_settlement_epoch: u64,
     registry: &SchemeStatusRegistry,
 ) -> Result<VerifiedUlpHeader, UlpError> {
+    // Fail closed: the declared settlement_epoch must be the epoch the caller
+    // derived from the trusted hub anchor. Without this the prover could
+    // re-declare the epoch and move the statement off the anchored checkpoint.
+    if bundle.settlement_epoch != expected_settlement_epoch {
+        return Err(UlpError::BindingMismatch(
+            "declared settlement_epoch is not the anchor-derived epoch",
+        ));
+    }
     if bundle.domain_count == 0
         || usize::try_from(bundle.domain_count).unwrap_or(usize::MAX) > MAX_ULP_DOMAINS
     {
@@ -1462,6 +1496,107 @@ mod modern_domain_kind_tests {
     use super::*;
 
     #[test]
+    fn ulp_expected_settlement_epoch_matches_consensus_derivation() {
+        // Devnet (45262) epoch length is 10: checkpoint height 25 -> epoch 2.
+        assert_eq!(ulp_expected_settlement_epoch(45_262, 25), 2);
+        assert_eq!(ulp_expected_settlement_epoch(45_262, 30), 3);
+        // Testnet (45261) epoch length is 50: checkpoint height 100 -> epoch 2.
+        assert_eq!(ulp_expected_settlement_epoch(45_261, 100), 2);
+        // Mainnet (45260) epoch length is 100.
+        assert_eq!(ulp_expected_settlement_epoch(45_260, 250), 2);
+        // An unknown chain id falls back to the default epoch length.
+        assert_eq!(ulp_expected_settlement_epoch(999_999, 100), 1);
+        // Deterministic: same inputs always produce the same epoch.
+        assert_eq!(
+            ulp_expected_settlement_epoch(45_262, 25),
+            ulp_expected_settlement_epoch(45_262, 25)
+        );
+    }
+
+    #[test]
+    fn ulp_verifier_refuses_declared_epoch_not_derived_from_anchor() {
+        // Regression: a prover that declares a settlement_epoch different from
+        // the epoch derived from the trusted hub checkpoint height must be
+        // refused. The verifier re-derives the epoch from the anchor, so the
+        // declared value cannot drift the statement.
+        let families = [
+            (71u32, UlpDomainKind::BasedPreconf, 7_100u64),
+            (72u32, UlpDomainKind::TonCatchain, 8_200u64),
+        ];
+        let snapshots: Vec<UlpDomainSnapshot> = families
+            .iter()
+            .enumerate()
+            .map(|(i, &(domain_id, kind, weight))| {
+                let tag = u8::try_from(i + 0x41).expect("fits u8");
+                UlpDomainSnapshot {
+                    domain_id,
+                    external_chain_id: u64::from(domain_id) * 100,
+                    kind,
+                    prev_height: 1_000 + i as u64,
+                    finalized_height: 1_010 + i as u64,
+                    state_root: [tag; 32],
+                    event_root: [tag.wrapping_add(0x10); 32],
+                    anchor_hash: [tag.wrapping_add(0x20); 32],
+                    security_weight: weight,
+                    pq_attested: true,
+                    outflow_bps: 400,
+                }
+            })
+            .collect();
+
+        let compiled = compile_ulp_program(45_262, snapshots.len()).expect("compile ULP-1");
+        let hub_root = [0xAB; 32];
+        let seed = [0xCD; 32];
+        let registry = SchemeStatusRegistry::genesis();
+
+        // Hub checkpoint height 25 on devnet (epoch length 10) -> canonical epoch 2.
+        const CHECKPOINT_HEIGHT: u64 = 25;
+        let expected_epoch = ulp_expected_settlement_epoch(45_262, CHECKPOINT_HEIGHT);
+        assert_eq!(expected_epoch, 2);
+
+        // Prove with the canonical epoch.
+        let (bundle, _sorted, _metrics) =
+            prove_universal_light_proof(&compiled, expected_epoch, hub_root, &snapshots, &seed, 12, &registry)
+                .expect("prove ULP-1");
+
+        // Honest epoch verifies.
+        open_universal_light_proof(
+            &bundle,
+            &compiled.program_hash,
+            45_262,
+            &hub_root,
+            expected_epoch,
+            &registry,
+        )
+        .expect("canonical epoch verifies");
+
+        // A prover that declares a different epoch is refused.
+        let mut lied = bundle.clone();
+        lied.settlement_epoch = expected_epoch + 1;
+        let result = open_universal_light_proof(
+            &lied,
+            &compiled.program_hash,
+            45_262,
+            &hub_root,
+            expected_epoch,
+            &registry,
+        );
+        assert!(
+            result.is_err(),
+            "a declared settlement_epoch that is not the anchor-derived epoch must be refused"
+        );
+        assert!(
+            matches!(result, Err(UlpError::BindingMismatch(_))),
+            "epoch drift must surface as BindingMismatch"
+        );
+
+        // And the verifier itself derives the epoch from the anchor, so the
+        // declared epoch cannot be used to move the statement.
+        let derived = ulp_expected_settlement_epoch(45_262, CHECKPOINT_HEIGHT);
+        assert_eq!(derived, expected_epoch);
+    }
+
+    #[test]
     fn ulp_proves_and_verifies_extended_2026_consensus_families_and_binds_kind_code() {
         // 1. All 14 discriminators round-trip uniquely and enforce strict Frost Alarm PQ gating.
         assert_eq!(UlpDomainKind::from_code(0), None);
@@ -1536,9 +1671,27 @@ mod modern_domain_kind_tests {
             &compiled.program_hash,
             45_261,
             &hub_root,
+            77,
             &registry,
         )
         .expect("verify split-STARK bundle over extended families");
+        // The epoch binding rejects a declared epoch off the anchor-derived one.
+        let mut drifted = bundle.clone();
+        drifted.settlement_epoch = 78;
+        assert!(
+            matches!(
+                open_universal_light_proof(
+                    &drifted,
+                    &compiled.program_hash,
+                    45_261,
+                    &hub_root,
+                    77,
+                    &registry,
+                ),
+                Err(UlpError::BindingMismatch(_))
+            ),
+            "a settlement_epoch off the anchor-derived value must be refused"
+        );
         assert_eq!(verified.domain_count, 6);
         assert!(verified.all_pq_attested);
         assert_eq!(
