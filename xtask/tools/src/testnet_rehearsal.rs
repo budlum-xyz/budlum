@@ -1266,7 +1266,8 @@ fn scenario_bns(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, Stri
     const DURATION: &str = "1000";
     // The offer has to outlive the whole scenario; the epoch ladder here is
     // linear in blocks, so a four-digit epoch is a few minutes of chain time.
-    const EXPIRES_AT_EPOCH: &str = "1000000";
+    // The value stays inside the listing TTL ceiling the market enforces.
+    const EXPIRES_AT_EPOCH: &str = "100000";
     // There is no direct registration door: the BNS directive removed
     // `BnsRegister`, so a name exists only after a `Primary` offer from an
     // authorized seller is settled by a buyer. The ceremony names alice as the

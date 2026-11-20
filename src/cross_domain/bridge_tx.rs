@@ -1030,19 +1030,36 @@ fn ensure_domain_class_intake(
 ///
 /// # Errors
 ///
-/// Returns an error string when `policy` violates protocol bounds.
+/// Returns an error string when `policy` violates protocol bounds, when the
+/// new bond names an address other than `caller`, or when a recorded bond
+/// held by someone else would be displaced or released.
 pub fn configure_domain_economic_guard(
     state: &mut AccountState,
+    caller: &Address,
     domain_id: DomainId,
     policy: crate::cross_domain::economic_guard::DomainCeilingPolicy,
     prover_bond: Option<crate::cross_domain::external::prover::ProverBond>,
 ) -> Result<(), String> {
+    // The bond is spendable balance moved into slashable escrow: only its
+    // owner may pledge it, and only the recorded owner may displace or
+    // release what is already locked. Without these two checks any caller
+    // could escrow a stranger's balance or evict a domain's live backing.
+    if let Some(bond) = &prover_bond {
+        if bond.prover != *caller {
+            return Err("Bridge economic guard bond must pledge the caller's own balance".into());
+        }
+    }
     let prior_bond = state
         .bridge_state
         .economic_guard
         .record(domain_id)
         .and_then(|r| r.prover_bond.as_ref())
         .map(|b| (b.prover, b.live_atoms()));
+    if let Some((old_prover, old_atoms)) = prior_bond {
+        if old_atoms > 0 && old_prover != *caller {
+            return Err("Only the recorded bond owner may displace or release its bond".into());
+        }
+    }
     let new_bond_spec = match &prover_bond {
         None => None,
         Some(b) => {

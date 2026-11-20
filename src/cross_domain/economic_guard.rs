@@ -1917,7 +1917,7 @@ mod tests {
         // policy is refused before it ever guards a domain.
         let mut guard = BridgeEconomicGuard::new();
         let oversized = DomainCeilingPolicy {
-            backing: backing.clone(),
+            backing,
             finder_reward_bps: MAX_FINDER_REWARD_BPS + 1,
             prover_ed25519_pubkey: Some(prover_ed.public_key_bytes()),
             prover_pq_pubkey: prover_pq.public_key_bytes().to_vec(),
@@ -2184,9 +2184,41 @@ mod tests {
         // contradiction slash, challenger reward, and strict supply conservation.
         let mut state = AccountState::new();
         state.add_balance(&owner, 20_000);
-        configure_domain_economic_guard(&mut state, 7, policy, Some(make_bond(owner, 12_000)))
-            .unwrap();
+        // A caller cannot pledge someone else's balance into the escrow.
+        let stranger = Address::from([0xEE; 32]);
+        let foreign = configure_domain_economic_guard(
+            &mut state,
+            &stranger,
+            7,
+            policy.clone(),
+            Some(make_bond(owner, 12_000)),
+        )
+        .expect_err("a bond naming another address must be refused");
+        assert!(foreign.contains("own balance"), "got: {foreign}");
+        assert_eq!(
+            state.get_balance(&owner),
+            20_000,
+            "refusal must not move funds"
+        );
+        configure_domain_economic_guard(
+            &mut state,
+            &owner,
+            7,
+            policy.clone(),
+            Some(make_bond(owner, 12_000)),
+        )
+        .unwrap();
         assert_eq!(state.get_balance(&owner), 8_000);
+        // Only the recorded owner may displace or release the live bond.
+        let evict = configure_domain_economic_guard(
+            &mut state,
+            &stranger,
+            7,
+            policy,
+            Some(make_bond(stranger, 1)),
+        )
+        .expect_err("a stranger must not evict the recorded bond");
+        assert!(evict.contains("recorded bond owner"), "got: {evict}");
         let sa = contradiction_statement_bytes(7, 42, &[0xA1; 32]);
         let sb = contradiction_statement_bytes(7, 42, &[0xB2; 32]);
         let ev = ContradictionEvidence::SignedProverDoubleRoot {
