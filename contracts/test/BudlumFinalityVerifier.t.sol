@@ -5,6 +5,7 @@ import {Harness} from "./Harness.sol";
 import {
     Attestation,
     BudlumFinalityVerifier,
+    FinalityMode,
     IExternalFraudProofVerifier
 } from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumHash} from "../lib/BudlumHash.sol";
@@ -51,6 +52,10 @@ contract BooleanOnlyFinality is IBudlumObjectLayerFinality {
     function headerAt(uint64) external pure returns (bytes32) {
         return bytes32(0);
     }
+
+    function finalityModeAt(uint64) external pure returns (FinalityMode) {
+        return FinalityMode.Hybrid;
+    }
 }
 
 /// Only the test fixture may install a finalized root without BLS/ML-DSA.
@@ -62,6 +67,13 @@ contract SeededFinalityVerifier is BudlumFinalityVerifier {
     function seedFinalized(uint64 height, bytes32 stateRoot) external {
         heightFinal[height] = true;
         rootAtHeight[height] = stateRoot;
+        finalityModeAtHeight[height] = FinalityMode.Hybrid;
+    }
+
+    function seedWithMode(uint64 height, bytes32 stateRoot, FinalityMode mode) external {
+        heightFinal[height] = mode != FinalityMode.None;
+        rootAtHeight[height] = stateRoot;
+        finalityModeAtHeight[height] = mode;
     }
 }
 
@@ -112,7 +124,7 @@ contract InspectingFraudVerifier is IExternalFraudProofVerifier {
         if (shouldRevert) {
             revert("boom");
         }
-        (, address challenger, uint64 openedAt, bool resolved, uint64 h, bytes32 root) = target.challenges(digest);
+        (, address challenger, uint64 openedAt, bool resolved, uint64 h, bytes32 root,) = target.challenges(digest);
         require(openedAt != 0, "challenge missing");
         require(challenger == address(0), "challenger mutated before verifyFraud");
         require(!resolved, "resolved mutated before verifyFraud");
@@ -528,5 +540,71 @@ contract BudlumFinalityVerifierTest is Harness {
         vm.roll(block.number + WINDOW);
         vm.expectPartialRevert(BudlumFinalityVerifier.AlreadyFraudulent.selector);
         bls.settle(siblingDigest);
+    }
+
+    function test_F06_classical_only_settlement_records_classical_mode_not_hybrid() public {
+        BudlumFinalityVerifier bls = verifier;
+        bytes32 body = bytes32(uint256(11));
+        bytes32 header = bytes32(uint256(22));
+        bytes[] memory fields = new bytes[](3);
+        fields[0] = "BDLM_STATE_ROOT_GLOBAL_HEADER_V1";
+        fields[1] = abi.encodePacked(body);
+        fields[2] = abi.encodePacked(header);
+        bytes32 stateRoot = BudlumHash.hashFields(fields);
+
+        // Under prague only BLS verifies; ML-DSA is absent so settlement must
+        // record ClassicalOnly rather than impersonating full hybrid finality.
+        Attestation memory a = _attestation(42, bytes32(uint256(7)));
+        bytes32 digest = bls.verify(a);
+        assertTrue(bls.finalityModeAtHeight(42) == FinalityMode.None, "pending has no finality mode");
+        vm.roll(block.number + WINDOW);
+        bls.settle(digest);
+        assertTrue(bls.heightFinal(42), "height final after window");
+        assertTrue(bls.finalityModeAtHeight(42) == FinalityMode.ClassicalOnly, "BLS-only settle records ClassicalOnly");
+        assertTrue(bls.finalityModeAtHeight(42) != FinalityMode.Hybrid, "BLS-only settle is never Hybrid");
+
+        // A classical-only root opening records ClassicalOnly on the object-layer
+        // view and is refused by the settlement endpoint, which requires Hybrid.
+        SeededFinalityVerifier seeded = new SeededFinalityVerifier(address(fraud));
+        seeded.seedWithMode(45, stateRoot, FinalityMode.ClassicalOnly);
+        BudlumObjectLayerFinality objectLayer = new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(seeded)));
+        BudlumSettlementEndpoint endpoint =
+            new BudlumSettlementEndpoint(IBudlumObjectLayerFinality(address(objectLayer)), 100);
+        objectLayer.record(45, header, body);
+        assertTrue(objectLayer.finalityModeAt(45) == FinalityMode.ClassicalOnly, "object layer preserves ClassicalOnly");
+        vm.expectPartialRevert(BudlumSettlementEndpoint.HybridFinalityRequired.selector);
+        endpoint.acceptHeader(45);
+        assertEq(endpoint.lastAcceptedHeight(), 0, "classical-only checkpoint cannot advance endpoint");
+    }
+
+    function test_object_layer_endpoint_distinguishes_classical_only_from_hybrid() public {
+        SeededFinalityVerifier seeded = new SeededFinalityVerifier(address(fraud));
+        BudlumObjectLayerFinality objectLayer = new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(seeded)));
+        BudlumSettlementEndpoint endpoint =
+            new BudlumSettlementEndpoint(IBudlumObjectLayerFinality(address(objectLayer)), 100);
+        bytes32 body = bytes32(uint256(11));
+        bytes32 headerA = bytes32(uint256(22));
+        bytes32 headerB = bytes32(uint256(23));
+        bytes[] memory fields = new bytes[](3);
+        fields[0] = "BDLM_STATE_ROOT_GLOBAL_HEADER_V1";
+        fields[1] = abi.encodePacked(body);
+        fields[2] = abi.encodePacked(headerA);
+        bytes32 rootA = BudlumHash.hashFields(fields);
+        fields[2] = abi.encodePacked(headerB);
+        bytes32 rootB = BudlumHash.hashFields(fields);
+
+        seeded.seedWithMode(45, rootA, FinalityMode.ClassicalOnly);
+        objectLayer.record(45, headerA, body);
+        assertTrue(objectLayer.finalityModeAt(45) == FinalityMode.ClassicalOnly, "recorded as ClassicalOnly");
+        vm.expectPartialRevert(BudlumSettlementEndpoint.HybridFinalityRequired.selector);
+        endpoint.acceptHeader(45);
+        assertEq(endpoint.lastAcceptedHeight(), 0, "ClassicalOnly refused by settlement endpoint");
+
+        seeded.seedWithMode(46, rootB, FinalityMode.Hybrid);
+        objectLayer.record(46, headerB, body);
+        assertTrue(objectLayer.finalityModeAt(46) == FinalityMode.Hybrid, "recorded as Hybrid");
+        endpoint.acceptHeader(46);
+        assertEq(endpoint.lastAcceptedHeight(), 46, "Hybrid accepted by settlement endpoint");
+        assertTrue(endpoint.lastAcceptedFinalityMode() == FinalityMode.Hybrid, "endpoint records Hybrid mode");
     }
 }

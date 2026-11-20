@@ -3,11 +3,20 @@
 // aderyn-fp-next-line(push-zero-opcode)
 pragma solidity 0.8.26;
 
+/// @notice Verification mode recorded when a Budlum height becomes final.
+enum FinalityMode {
+    None,
+    ClassicalOnly,
+    PostQuantumOnly,
+    Hybrid
+}
+
 /// @notice Minimal finality read surface consumed by downstream AppBinding receivers.
 interface IBudlumFinality {
     function rootAtHeight(uint64 height) external view returns (bytes32);
     function heightFinal(uint64 height) external view returns (bool);
     function latestFinalHeight() external view returns (uint64);
+    function finalityModeAtHeight(uint64 height) external view returns (FinalityMode);
 }
 
 import {BudlumHash} from "../lib/BudlumHash.sol";
@@ -35,6 +44,7 @@ struct Challenge {
     bool resolved;
     uint64 height;
     bytes32 stateRoot;
+    FinalityMode mode;
 }
 
 interface IExternalFraudProofVerifier {
@@ -98,6 +108,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     mapping(uint64 => bytes32) public pendingRootAtHeight;
     mapping(uint64 => bytes32) public pendingAttestationAtHeight;
     mapping(uint64 => bool) public override heightFinal;
+    mapping(uint64 => FinalityMode) public override finalityModeAtHeight;
     uint64 public override latestFinalHeight;
     mapping(bytes32 => Challenge) public challenges;
     mapping(bytes32 => bool) public fraudulent;
@@ -295,6 +306,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             accepted[identity] = true;
             rootAtHeight[a.height] = a.stateRoot;
             heightFinal[a.height] = true;
+            finalityModeAtHeight[a.height] = FinalityMode.Hybrid;
             if (a.height > latestFinalHeight) {
                 latestFinalHeight = a.height;
             }
@@ -319,6 +331,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (pendingEnvelopeCount[identity] >= MAX_PENDING_ENVELOPES) {
             revert PendingEnvelopeLimitReached(identity);
         }
+        FinalityMode pendingMode = blsOk ? FinalityMode.ClassicalOnly : FinalityMode.PostQuantumOnly;
         string memory reason = blsOk ? "post-quantum half unverified" : "classical half unverified";
         challenges[digest] = Challenge({
             attestationDigest: digest,
@@ -326,7 +339,8 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             openedAt: uint64(block.number),
             resolved: false,
             height: a.height,
-            stateRoot: a.stateRoot
+            stateRoot: a.stateRoot,
+            mode: pendingMode
         });
         pendingRootAtHeight[a.height] = a.stateRoot;
         pendingAttestationAtHeight[a.height] = identity;
@@ -431,6 +445,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             pendingRootAtHeight[c.height] = bytes32(0);
             rootAtHeight[c.height] = c.stateRoot;
             heightFinal[c.height] = true;
+            finalityModeAtHeight[c.height] = c.mode;
             if (c.height > latestFinalHeight) {
                 latestFinalHeight = c.height;
             }
@@ -455,14 +470,28 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         view
         returns (bool finalized)
     {
-        if (!heightFinal[height] || headerHash == bytes32(0)) {
-            return false;
+        return finalizedHeaderMode(height, headerHash, stateRootBody) != FinalityMode.None;
+    }
+
+    /// @notice Authenticate a global header and report the verification mode
+    ///         recorded when `height` became final.
+    function finalizedHeaderMode(uint64 height, bytes32 headerHash, bytes32 stateRootBody)
+        public
+        view
+        returns (FinalityMode mode)
+    {
+        mode = finalityModeAtHeight[height];
+        if (!heightFinal[height] || mode == FinalityMode.None || headerHash == bytes32(0)) {
+            return FinalityMode.None;
         }
         bytes[] memory fields = new bytes[](HEADER_OPENING_FIELDS);
         fields[0] = "BDLM_STATE_ROOT_GLOBAL_HEADER_V1";
         fields[1] = bytes.concat(stateRootBody);
         fields[2] = bytes.concat(headerHash);
-        return rootAtHeight[height] == BudlumHash.hashFields(fields);
+        if (rootAtHeight[height] != BudlumHash.hashFields(fields)) {
+            return FinalityMode.None;
+        }
+        return mode;
     }
 
     // ---------------------------------------------------------------------
