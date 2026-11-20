@@ -100,6 +100,402 @@ pub struct FinalityProofShape {
     pub depth: DepthClass,
 }
 
+/// Canonical identifier for each built-in external consensus family in
+/// `crate::cross_domain::external`.
+///
+/// Paired one-to-one with `AdapterDescriptor::consensus_kind` so the bridge
+/// seam can refuse a built-in family name whose descriptor was downgraded to
+/// `TrustModel::TrustedParty`, a mismatched finality class, or a foreign time
+/// unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub(crate) enum ExternalVerifierFamily {
+    AlgorandStateProof = 0,
+    AptosJolteonBft = 1,
+    ArweaveSpOra = 2,
+    AuxPowPop = 3,
+    BabylonEots = 4,
+    BasedPreconf = 5,
+    BitcoinNakamotoPow = 6,
+    BitVmCovenant = 7,
+    CasperFfg = 8,
+    ChainKeyNiDkg = 9,
+    CelestiaDas = 10,
+    BullsharkDagBft = 11,
+    EthereumGasperSync = 12,
+    GhostdagPow = 13,
+    HeterogeneousMultiProver = 14,
+    HoneyBadgerBft = 15,
+    HotStuffChainedBft = 16,
+    MinaSuccinctRecursive = 17,
+    MysticetiDag = 18,
+    NearDoomslugBft = 19,
+    NipopowSuperblock = 20,
+    OuroborosMithril = 21,
+    PoSpaceVdf = 22,
+    RestakingAvs = 23,
+    SimplexBft = 24,
+    SolanaTowerBft = 25,
+    StarkValidityRollup = 26,
+    StellarScp = 27,
+    SymbioticVault = 28,
+    TendermintBft = 29,
+    TonCatchainBft = 30,
+    BudZkVmExecution = 31,
+}
+
+/// Refusal reasons when translating an external finality attestation into
+/// [`FinalityProofShape`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExternalShapeError {
+    /// The attestation carries `SecurityBacking::None`.
+    EmptySecurityBacking,
+    /// A signature backing carries zero threshold, zero weight, or fewer
+    /// signers than its own threshold.
+    DegenerateSignatureQuorum {
+        signers: u64,
+        required: u64,
+        total_weight: u128,
+    },
+    /// A work-backed attestation reports zero accumulated difficulty bits.
+    ZeroWorkBacking,
+    /// An authority-backed attestation reports zero authorities.
+    EmptyAuthoritySet,
+    /// The attestation's `time_unit` disagrees with its adapter descriptor.
+    TimeUnitMismatch {
+        expected: crate::cross_domain::external::spec::TimeUnit,
+        observed: crate::cross_domain::external::spec::TimeUnit,
+    },
+    /// A built-in consensus family was presented without a pinned trust anchor.
+    MissingTrustAnchor { family: ExternalVerifierFamily },
+    /// A built-in consensus family's descriptor drifted from its canonical
+    /// finality kind, trust model, or time unit.
+    FamilyProfileMismatch {
+        family: ExternalVerifierFamily,
+        reason: &'static str,
+    },
+}
+
+impl std::fmt::Display for ExternalShapeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptySecurityBacking => {
+                f.write_str("external attestation carries no cryptographic security backing")
+            }
+            Self::DegenerateSignatureQuorum {
+                signers,
+                required,
+                total_weight,
+            } => write!(
+                f,
+                "degenerate signature quorum (signers={signers}, required={required}, total_weight={total_weight})"
+            ),
+            Self::ZeroWorkBacking => {
+                f.write_str("work-backed external attestation carries zero difficulty bits")
+            }
+            Self::EmptyAuthoritySet => {
+                f.write_str("authority-backed external attestation carries zero authorities")
+            }
+            Self::TimeUnitMismatch { expected, observed } => write!(
+                f,
+                "attestation time unit {} does not match descriptor time unit {}",
+                observed.as_str(),
+                expected.as_str()
+            ),
+            Self::MissingTrustAnchor { family } => write!(
+                f,
+                "external consensus family {} requires a pinned trust anchor",
+                family.consensus_kind()
+            ),
+            Self::FamilyProfileMismatch { family, reason } => write!(
+                f,
+                "external family profile mismatch for {}: {reason}",
+                family.consensus_kind()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExternalShapeError {}
+
+impl ExternalVerifierFamily {
+    /// Resolve a canonical `AdapterDescriptor::consensus_kind` string to its
+    /// built-in verifier family.
+    #[must_use]
+    pub(crate) fn from_consensus_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "algorand-pure-pos-stateproof-pq" => Some(Self::AlgorandStateProof),
+            "aptos-jolteon-2chain-bft" => Some(Self::AptosJolteonBft),
+            "arweave-spora-recall" => Some(Self::ArweaveSpOra),
+            "auxpow-pop-merged-mining" => Some(Self::AuxPowPop),
+            "babylon-btc-restaking-eots" => Some(Self::BabylonEots),
+            "based-preconf-focil" => Some(Self::BasedPreconf),
+            "nakamoto-pow" => Some(Self::BitcoinNakamotoPow),
+            "bitvm2-pow-covenant" => Some(Self::BitVmCovenant),
+            "casper-ffg-checkpoint" => Some(Self::CasperFfg),
+            "chain-key-nidkg-threshold-bls" => Some(Self::ChainKeyNiDkg),
+            "modular-das-nmt-2d" => Some(Self::CelestiaDas),
+            "bullshark-round-dag-bft" => Some(Self::BullsharkDagBft),
+            "gasper-pos" => Some(Self::EthereumGasperSync),
+            "ghostdag-k-cluster-pow" => Some(Self::GhostdagPow),
+            "heterogeneous-multiprover-2of3" => Some(Self::HeterogeneousMultiProver),
+            "asynchronous-common-subset-bft" => Some(Self::HoneyBadgerBft),
+            "hotstuff-chained-bft" => Some(Self::HotStuffChainedBft),
+            "succinct-recursive-samasika-stark" => Some(Self::MinaSuccinctRecursive),
+            "mysticeti-uncertified-dag" => Some(Self::MysticetiDag),
+            "near-nightshade-doomslug-bft" => Some(Self::NearDoomslugBft),
+            "nipopow-superblock" => Some(Self::NipopowSuperblock),
+            "ouroboros-praos-with-mithril-stm" => Some(Self::OuroborosMithril),
+            "pospace-hash-vdf" => Some(Self::PoSpaceVdf),
+            "restaking-avs-eots" => Some(Self::RestakingAvs),
+            "simplex-monadbft-2round" => Some(Self::SimplexBft),
+            "solana-tower-bft" => Some(Self::SolanaTowerBft),
+            "stark-state-diff-validity-rollup" => Some(Self::StarkValidityRollup),
+            "federated-bft-scp" => Some(Self::StellarScp),
+            "symbiotic-curated-vault" => Some(Self::SymbioticVault),
+            "tendermint-bft" => Some(Self::TendermintBft),
+            "ton-masterchain-catchain-bft" => Some(Self::TonCatchainBft),
+            "zkvm-execution" => Some(Self::BudZkVmExecution),
+            _ => None,
+        }
+    }
+
+    /// Canonical `consensus_kind` string declared by this family's adapter.
+    #[must_use]
+    pub(crate) const fn consensus_kind(self) -> &'static str {
+        match self {
+            Self::AlgorandStateProof => "algorand-pure-pos-stateproof-pq",
+            Self::AptosJolteonBft => "aptos-jolteon-2chain-bft",
+            Self::ArweaveSpOra => "arweave-spora-recall",
+            Self::AuxPowPop => "auxpow-pop-merged-mining",
+            Self::BabylonEots => "babylon-btc-restaking-eots",
+            Self::BasedPreconf => "based-preconf-focil",
+            Self::BitcoinNakamotoPow => "nakamoto-pow",
+            Self::BitVmCovenant => "bitvm2-pow-covenant",
+            Self::CasperFfg => "casper-ffg-checkpoint",
+            Self::ChainKeyNiDkg => "chain-key-nidkg-threshold-bls",
+            Self::CelestiaDas => "modular-das-nmt-2d",
+            Self::BullsharkDagBft => "bullshark-round-dag-bft",
+            Self::EthereumGasperSync => "gasper-pos",
+            Self::GhostdagPow => "ghostdag-k-cluster-pow",
+            Self::HeterogeneousMultiProver => "heterogeneous-multiprover-2of3",
+            Self::HoneyBadgerBft => "asynchronous-common-subset-bft",
+            Self::HotStuffChainedBft => "hotstuff-chained-bft",
+            Self::MinaSuccinctRecursive => "succinct-recursive-samasika-stark",
+            Self::MysticetiDag => "mysticeti-uncertified-dag",
+            Self::NearDoomslugBft => "near-nightshade-doomslug-bft",
+            Self::NipopowSuperblock => "nipopow-superblock",
+            Self::OuroborosMithril => "ouroboros-praos-with-mithril-stm",
+            Self::PoSpaceVdf => "pospace-hash-vdf",
+            Self::RestakingAvs => "restaking-avs-eots",
+            Self::SimplexBft => "simplex-monadbft-2round",
+            Self::SolanaTowerBft => "solana-tower-bft",
+            Self::StarkValidityRollup => "stark-state-diff-validity-rollup",
+            Self::StellarScp => "federated-bft-scp",
+            Self::SymbioticVault => "symbiotic-curated-vault",
+            Self::TendermintBft => "tendermint-bft",
+            Self::TonCatchainBft => "ton-masterchain-catchain-bft",
+            Self::BudZkVmExecution => "zkvm-execution",
+        }
+    }
+
+    /// Enforce that `descriptor` preserves this family's canonical finality
+    /// kind, trust model, and time unit, and that a trust anchor is present.
+    pub(crate) fn verify_descriptor(
+        self,
+        descriptor: &crate::cross_domain::external::spec::AdapterDescriptor,
+        anchor_pinned: bool,
+    ) -> Result<(), ExternalShapeError> {
+        use crate::cross_domain::external::spec::{FinalityKind, TimeUnit, TrustModel};
+
+        if !anchor_pinned {
+            return Err(ExternalShapeError::MissingTrustAnchor { family: self });
+        }
+        if descriptor.consensus_kind != self.consensus_kind() {
+            return Err(ExternalShapeError::FamilyProfileMismatch {
+                family: self,
+                reason: "descriptor consensus_kind does not match verifier family",
+            });
+        }
+        if matches!(descriptor.trust_model, TrustModel::TrustedParty) {
+            return Err(ExternalShapeError::FamilyProfileMismatch {
+                family: self,
+                reason: "built-in consensus family may never downgrade to TrustedParty",
+            });
+        }
+
+        let valid_profile = match self {
+            Self::BitcoinNakamotoPow | Self::BitVmCovenant | Self::GhostdagPow => {
+                descriptor.finality_kind == FinalityKind::Probabilistic
+                    && matches!(descriptor.trust_model, TrustModel::Trustless)
+                    && descriptor.time_unit == TimeUnit::UnixSeconds
+            }
+            Self::NipopowSuperblock | Self::PoSpaceVdf => {
+                descriptor.finality_kind == FinalityKind::Probabilistic
+                    && matches!(descriptor.trust_model, TrustModel::Trustless)
+                    && descriptor.time_unit == TimeUnit::Height
+            }
+            Self::AuxPowPop => {
+                descriptor.time_unit == TimeUnit::Height
+                    && ((descriptor.finality_kind == FinalityKind::Probabilistic
+                        && matches!(descriptor.trust_model, TrustModel::Trustless))
+                        || (descriptor.finality_kind == FinalityKind::EconomicFinality
+                            && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })))
+            }
+            Self::BudZkVmExecution | Self::StarkValidityRollup | Self::MinaSuccinctRecursive => {
+                descriptor.finality_kind == FinalityKind::Proven
+                    && matches!(descriptor.trust_model, TrustModel::Trustless)
+                    && descriptor.time_unit == TimeUnit::Height
+            }
+            Self::HeterogeneousMultiProver => {
+                descriptor.finality_kind == FinalityKind::Proven
+                    && matches!(descriptor.trust_model, TrustModel::Trustless)
+                    && descriptor.time_unit == TimeUnit::UnixSeconds
+            }
+            Self::EthereumGasperSync => {
+                descriptor.finality_kind == FinalityKind::ProtocolFinality
+                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
+                    && matches!(descriptor.time_unit, TimeUnit::Slot | TimeUnit::Epoch)
+            }
+            Self::AlgorandStateProof | Self::MysticetiDag => {
+                descriptor.finality_kind == FinalityKind::ProtocolFinality
+                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
+                    && descriptor.time_unit == TimeUnit::Round
+            }
+            Self::HoneyBadgerBft => {
+                descriptor.finality_kind == FinalityKind::ProtocolFinality
+                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
+                    && descriptor.time_unit == TimeUnit::Epoch
+            }
+            Self::TendermintBft => {
+                descriptor.finality_kind == FinalityKind::ProtocolFinality
+                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
+                    && descriptor.time_unit == TimeUnit::UnixSeconds
+            }
+            Self::AptosJolteonBft
+            | Self::ChainKeyNiDkg
+            | Self::BullsharkDagBft
+            | Self::HotStuffChainedBft
+            | Self::NearDoomslugBft
+            | Self::SimplexBft
+            | Self::TonCatchainBft => {
+                descriptor.finality_kind == FinalityKind::ProtocolFinality
+                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
+                    && descriptor.time_unit == TimeUnit::Height
+            }
+            Self::SolanaTowerBft | Self::StellarScp => {
+                matches!(
+                    descriptor.finality_kind,
+                    FinalityKind::ProtocolFinality | FinalityKind::EconomicFinality
+                ) && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
+                    && descriptor.time_unit == TimeUnit::Height
+            }
+            Self::ArweaveSpOra | Self::BasedPreconf | Self::CelestiaDas | Self::RestakingAvs => {
+                descriptor.finality_kind == FinalityKind::EconomicFinality
+                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
+                    && descriptor.time_unit == TimeUnit::Height
+            }
+            Self::BabylonEots | Self::CasperFfg | Self::OuroborosMithril | Self::SymbioticVault => {
+                descriptor.finality_kind == FinalityKind::EconomicFinality
+                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
+                    && descriptor.time_unit == TimeUnit::Epoch
+            }
+        };
+
+        if !valid_profile {
+            return Err(ExternalShapeError::FamilyProfileMismatch {
+                family: self,
+                reason: "descriptor finality_kind, trust_model, or time_unit violates canonical family profile",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl FinalityProofShape {
+    /// Derive the unified [`FinalityProofShape`] of a verified external
+    /// attestation, failing closed on missing or degenerate security backing
+    /// and descriptor/attestation time-unit drift.
+    pub(crate) fn from_external_attestation(
+        descriptor: &crate::cross_domain::external::spec::AdapterDescriptor,
+        attestation: &crate::cross_domain::external::spec::FinalityAttestation,
+    ) -> Result<Self, ExternalShapeError> {
+        use crate::cross_domain::external::spec::{FinalityKind, SecurityBacking, TrustModel};
+
+        if attestation.time_unit != descriptor.time_unit {
+            return Err(ExternalShapeError::TimeUnitMismatch {
+                expected: descriptor.time_unit,
+                observed: attestation.time_unit,
+            });
+        }
+
+        let (quorum, trust_anchor) = match (&descriptor.trust_model, &attestation.security) {
+            (_, SecurityBacking::None) => return Err(ExternalShapeError::EmptySecurityBacking),
+            (
+                _,
+                SecurityBacking::SignatureSet {
+                    signers,
+                    required,
+                    total_weight,
+                    ..
+                },
+            ) => {
+                if *required == 0 || *signers < *required || *total_weight == 0 {
+                    return Err(ExternalShapeError::DegenerateSignatureQuorum {
+                        signers: *signers,
+                        required: *required,
+                        total_weight: *total_weight,
+                    });
+                }
+                (QuorumClass::StakeWeighted, TrustAnchor::RegisteredSet)
+            }
+            (_, SecurityBacking::Work { difficulty_bits }) => {
+                if *difficulty_bits == 0 {
+                    return Err(ExternalShapeError::ZeroWorkBacking);
+                }
+                (QuorumClass::WorkWeighted, TrustAnchor::TrustedCheckpoint)
+            }
+            (_, SecurityBacking::Zk { .. }) => {
+                (QuorumClass::ProofCarrying, TrustAnchor::ProofCarrying)
+            }
+            (TrustModel::Trustless, SecurityBacking::Authority { count })
+            | (TrustModel::HonestMajority { .. }, SecurityBacking::Authority { count })
+            | (TrustModel::TrustedParty, SecurityBacking::Authority { count }) => {
+                if *count == 0 {
+                    return Err(ExternalShapeError::EmptyAuthoritySet);
+                }
+                (QuorumClass::AuthorityWeighted, TrustAnchor::RegisteredSet)
+            }
+        };
+
+        let depth = match descriptor.finality_kind {
+            FinalityKind::Probabilistic => DepthClass::Confirmations,
+            FinalityKind::Proven => DepthClass::ProofDelay,
+            FinalityKind::ProtocolFinality | FinalityKind::EconomicFinality => {
+                DepthClass::SingleBlock
+            }
+        };
+
+        let mut binds = BINDS_HEIGHT | BINDS_STATE_ROOT | BINDS_TIMESTAMP;
+        if attestation.attested_block_hash.is_some() {
+            binds |= BINDS_BLOCK_HASH;
+        }
+        if attestation.attested_tx_root.is_some() {
+            binds |= BINDS_TX_ROOT;
+        }
+        if attestation.attested_event_root.is_some() {
+            binds |= BINDS_EVENT_ROOT;
+        }
+
+        Ok(Self {
+            binds,
+            quorum,
+            trust_anchor,
+            depth,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +681,319 @@ mod tests {
         for (proof, expected) in cases {
             assert_eq!(proof.shape().binds, expected, "{proof:?}");
         }
+        assert_external_verifier_families_and_attestation_shapes();
+    }
+
+    fn assert_external_verifier_families_and_attestation_shapes() {
+        use crate::cross_domain::external::spec::{
+            AdapterDescriptor, AdapterId, DomainKey, FinalityAttestation, FinalityKind,
+            SecurityBacking, TimeUnit, TrustModel,
+        };
+        use crate::crypto::facts::ObservedScheme;
+        use crate::crypto::scheme::SchemeId;
+        use std::collections::BTreeSet;
+
+        let majority = TrustModel::HonestMajority { set_size: 4 };
+        let canonical_profiles = [
+            (
+                ExternalVerifierFamily::AlgorandStateProof,
+                "algorand-pure-pos-stateproof-pq",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Round,
+            ),
+            (
+                ExternalVerifierFamily::AptosJolteonBft,
+                "aptos-jolteon-2chain-bft",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::ArweaveSpOra,
+                "arweave-spora-recall",
+                FinalityKind::EconomicFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::AuxPowPop,
+                "auxpow-pop-merged-mining",
+                FinalityKind::Probabilistic,
+                TrustModel::Trustless,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::BabylonEots,
+                "babylon-btc-restaking-eots",
+                FinalityKind::EconomicFinality,
+                majority,
+                TimeUnit::Epoch,
+            ),
+            (
+                ExternalVerifierFamily::BasedPreconf,
+                "based-preconf-focil",
+                FinalityKind::EconomicFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::BitcoinNakamotoPow,
+                "nakamoto-pow",
+                FinalityKind::Probabilistic,
+                TrustModel::Trustless,
+                TimeUnit::UnixSeconds,
+            ),
+            (
+                ExternalVerifierFamily::BitVmCovenant,
+                "bitvm2-pow-covenant",
+                FinalityKind::Probabilistic,
+                TrustModel::Trustless,
+                TimeUnit::UnixSeconds,
+            ),
+            (
+                ExternalVerifierFamily::CasperFfg,
+                "casper-ffg-checkpoint",
+                FinalityKind::EconomicFinality,
+                majority,
+                TimeUnit::Epoch,
+            ),
+            (
+                ExternalVerifierFamily::ChainKeyNiDkg,
+                "chain-key-nidkg-threshold-bls",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::CelestiaDas,
+                "modular-das-nmt-2d",
+                FinalityKind::EconomicFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::BullsharkDagBft,
+                "bullshark-round-dag-bft",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::EthereumGasperSync,
+                "gasper-pos",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Slot,
+            ),
+            (
+                ExternalVerifierFamily::GhostdagPow,
+                "ghostdag-k-cluster-pow",
+                FinalityKind::Probabilistic,
+                TrustModel::Trustless,
+                TimeUnit::UnixSeconds,
+            ),
+            (
+                ExternalVerifierFamily::HeterogeneousMultiProver,
+                "heterogeneous-multiprover-2of3",
+                FinalityKind::Proven,
+                TrustModel::Trustless,
+                TimeUnit::UnixSeconds,
+            ),
+            (
+                ExternalVerifierFamily::HoneyBadgerBft,
+                "asynchronous-common-subset-bft",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Epoch,
+            ),
+            (
+                ExternalVerifierFamily::HotStuffChainedBft,
+                "hotstuff-chained-bft",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::MinaSuccinctRecursive,
+                "succinct-recursive-samasika-stark",
+                FinalityKind::Proven,
+                TrustModel::Trustless,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::MysticetiDag,
+                "mysticeti-uncertified-dag",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Round,
+            ),
+            (
+                ExternalVerifierFamily::NearDoomslugBft,
+                "near-nightshade-doomslug-bft",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::NipopowSuperblock,
+                "nipopow-superblock",
+                FinalityKind::Probabilistic,
+                TrustModel::Trustless,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::OuroborosMithril,
+                "ouroboros-praos-with-mithril-stm",
+                FinalityKind::EconomicFinality,
+                TrustModel::HonestMajority { set_size: 0 },
+                TimeUnit::Epoch,
+            ),
+            (
+                ExternalVerifierFamily::PoSpaceVdf,
+                "pospace-hash-vdf",
+                FinalityKind::Probabilistic,
+                TrustModel::Trustless,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::RestakingAvs,
+                "restaking-avs-eots",
+                FinalityKind::EconomicFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::SimplexBft,
+                "simplex-monadbft-2round",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::SolanaTowerBft,
+                "solana-tower-bft",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::StarkValidityRollup,
+                "stark-state-diff-validity-rollup",
+                FinalityKind::Proven,
+                TrustModel::Trustless,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::StellarScp,
+                "federated-bft-scp",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::SymbioticVault,
+                "symbiotic-curated-vault",
+                FinalityKind::EconomicFinality,
+                majority,
+                TimeUnit::Epoch,
+            ),
+            (
+                ExternalVerifierFamily::TendermintBft,
+                "tendermint-bft",
+                FinalityKind::ProtocolFinality,
+                TrustModel::HonestMajority { set_size: 0 },
+                TimeUnit::UnixSeconds,
+            ),
+            (
+                ExternalVerifierFamily::TonCatchainBft,
+                "ton-masterchain-catchain-bft",
+                FinalityKind::ProtocolFinality,
+                majority,
+                TimeUnit::Height,
+            ),
+            (
+                ExternalVerifierFamily::BudZkVmExecution,
+                "zkvm-execution",
+                FinalityKind::Proven,
+                TrustModel::Trustless,
+                TimeUnit::Height,
+            ),
+        ];
+
+        assert_eq!(canonical_profiles.len(), 32);
+        let mut tags = BTreeSet::new();
+        for (family, kind, finality_kind, trust_model, time_unit) in canonical_profiles {
+            assert!(tags.insert(family as u8), "duplicate tag for {kind}");
+            assert_eq!(family.consensus_kind(), kind);
+            assert_eq!(
+                ExternalVerifierFamily::from_consensus_kind(kind),
+                Some(family)
+            );
+
+            let adapter_id = AdapterId::from_name(kind);
+            let descriptor = AdapterDescriptor {
+                id: adapter_id,
+                name: kind.to_string(),
+                adapter_version: 1,
+                accepted_evidence_versions: vec![1],
+                consensus_kind: kind.to_string(),
+                finality_kind,
+                required_depth: 1,
+                time_unit,
+                trust_model,
+            };
+            assert_eq!(family.verify_descriptor(&descriptor, true), Ok(()));
+            assert_eq!(
+                family.verify_descriptor(&descriptor, false),
+                Err(ExternalShapeError::MissingTrustAnchor { family })
+            );
+
+            let mut downgraded = descriptor.clone();
+            downgraded.trust_model = TrustModel::TrustedParty;
+            assert!(matches!(
+                family.verify_descriptor(&downgraded, true),
+                Err(ExternalShapeError::FamilyProfileMismatch { .. })
+            ));
+
+            let attestation = FinalityAttestation {
+                adapter: adapter_id,
+                domain: DomainKey::from_parts(&adapter_id, "mainnet"),
+                height: 42,
+                state_root: [0x11; 32],
+                attested_block_hash: Some([0x22; 32]),
+                attested_event_root: None,
+                attested_tx_root: Some([0x33; 32]),
+                finalized_at: 100,
+                time_unit,
+                security: SecurityBacking::SignatureSet {
+                    scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
+                    signers: 4,
+                    required: 3,
+                    total_weight: 100,
+                    slashable: true,
+                },
+                evidence_digest: [0x44; 32],
+                adapter_version: 1,
+                evidence_version: 1,
+            };
+            let shape =
+                FinalityProofShape::from_external_attestation(&descriptor, &attestation).unwrap();
+            assert_eq!(
+                shape.binds,
+                BINDS_HEIGHT
+                    | BINDS_STATE_ROOT
+                    | BINDS_TIMESTAMP
+                    | BINDS_BLOCK_HASH
+                    | BINDS_TX_ROOT
+            );
+            assert_eq!(shape.quorum, QuorumClass::StakeWeighted);
+            assert_eq!(shape.trust_anchor, TrustAnchor::RegisteredSet);
+        }
+        assert_eq!(
+            ExternalVerifierFamily::from_consensus_kind("fixture-consensus"),
+            None
+        );
     }
 
     /// The two work-weighted families are the only ones that need a checkpoint
