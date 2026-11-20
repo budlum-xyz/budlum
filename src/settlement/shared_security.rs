@@ -808,16 +808,38 @@ pub fn execute_tendermint_misbehaviour_slash(
         return Err(refused("shared-security slash quarantine table is full"));
     }
 
+    // Capture the named targets' forfeited units BEFORE the correlation pass
+    // zeroes them: the receipt must report what was taken, not what is left.
+    let target_units: Vec<(Address, [u8; 20], u64)> = targets
+        .iter()
+        .filter_map(|addr| {
+            state
+                .settlement
+                .shared_security
+                .validators
+                .get(addr)
+                .map(|row| (*addr, row.eth_operator, row.allocated_units))
+        })
+        .collect();
+
+    // A verified slashing event on one source must also quarantine every source
+    // that settles on the SAME external chain: EigenLayer and Symbiotic both
+    // take the operator's own ETH, so slashing one and leaving the other live
+    // would let the BFT restaking cap count the same free collateral twice.
+    // This runs before the per-target copy and is what zeroes correlated rows
+    // the evidence never named.
+    let culprits: Vec<[u8; 20]> = culprit_addrs.iter().copied().collect();
+    let _correlated_keys =
+        quarantine_correlated_sources(state, source, &culprits, RestakeStatus::Slashed);
+
     let mut records = Vec::with_capacity(targets.len());
-    for val_addr in targets {
+    for (val_addr, op, slashed_units) in target_units {
         if let Some(row) = state
             .settlement
             .shared_security
             .validators
             .get_mut(&val_addr)
         {
-            let slashed_units = row.allocated_units;
-            let op = row.eth_operator;
             row.allocated_units = 0;
             row.status = RestakeStatus::Slashed;
             let rec = ExternalSlashRecord {
@@ -843,6 +865,98 @@ pub fn execute_tendermint_misbehaviour_slash(
     }
     Ok(records)
 }
+
+/// Record `sources` as permanently slashed for each operator in `operators`.
+///
+/// # Why this is not a loop over `sources`
+///
+/// The BFT-safety cap (`SHARED_SECURITY_MAX_SAFE_BFT_RESTAKED_SHARE_PPM`) bounds
+/// restaked weight at `< 1/3` of the committee by capping the **sum over
+/// sources**. That arithmetic only buys safety if the sources are *independent
+/// fault domains*. They are not: `RestakeSource::external_chain` maps
+/// `EigenLayer` and `Symbiotic` to the same `ExternalChain::Ethereum`, because
+/// both take the operator's own ETH as the free downside. One verified slashing
+/// event on Ethereum therefore removes every same-chain source at once.
+///
+/// Quarantining only the source named in the evidence would leave the sibling
+/// source live and its weight counted, i.e. the cap would count the same free
+/// collateral twice. So an operator slashed on a chain is quarantined on
+/// **every source that settles on that chain**; a different chain (Bitcoin,
+/// another ICS domain) is a different downside and is left untouched.
+///
+/// Returns the number of `(source, operator)` quarantine keys newly written.
+pub fn quarantine_correlated_sources(
+    state: &mut AccountState,
+    slashed_source: RestakeSource,
+    operators: &[[u8; 20]],
+    status: RestakeStatus,
+) -> usize {
+    let chain = slashed_source.external_chain();
+    let correlated: Vec<RestakeSource> = ALL_RESTAKE_SOURCES
+        .iter()
+        .copied()
+        .filter(|source| source.external_chain() == chain)
+        .collect();
+    let mut written = 0usize;
+    for source in correlated {
+        for operator in operators {
+            let key = source.operator_map_key(operator);
+            if state
+                .settlement
+                .shared_security
+                .slashed_operators
+                .contains_key(&key)
+            {
+                continue;
+            }
+            state.settlement.shared_security.slashed_operators.insert(
+                key,
+                ExternalSlashRecord {
+                    source,
+                    operator: *operator,
+                    budlum_validator: Address::from([0u8; 32]),
+                    slashed_units: 0,
+                    // The evidence proved equivocation; the correlated source
+                    // inherits the same class because the same key, on the same
+                    // chain, took the same free downside.
+                    kind: crate::cross_domain::external::tendermint::TendermintMisbehaviourKind::DoubleSignEquivocation,
+                    infraction_height: 0,
+                    slashed_at_epoch: state.epoch_index,
+                    // Deterministic, chain-scoped domain tag: the same
+                    // evidence is what quarantines the correlated source.
+                    evidence_id: crate::core::hash::hash_fields_bytes(&[
+                        b"BDLM_MIKORIZA_CORRELATED_SLASH_V1",
+                        &[slashed_source.tag()],
+                        operator,
+                    ]),
+                },
+            );
+            written += 1;
+        }
+    }
+    // Every active row of a correlated source for these operators loses its
+    // weight at the next boundary, including rows the evidence never named.
+    for (address, row) in state.settlement.shared_security.validators.iter_mut() {
+        if row.status == RestakeStatus::Active
+            && row.source.external_chain() == chain
+            && operators.contains(&row.eth_operator)
+        {
+            row.allocated_units = 0;
+            row.status = status;
+            if let Some(validator) = state.validators.get_mut(address) {
+                validator.restaked_weight = 0;
+            }
+        }
+    }
+    written
+}
+
+/// Every restaking source Budlum reads, for chain-correlation reasoning.
+pub const ALL_RESTAKE_SOURCES: [RestakeSource; 3] = [
+    RestakeSource::EigenLayer,
+    RestakeSource::Symbiotic,
+    RestakeSource::Babylon,
+];
 
 /// Recompute every validator's restaked weight from the live allocations
 /// (run at the epoch boundary, so weight changes take effect there).
@@ -1552,6 +1666,98 @@ mod tests {
             .expect_err("cold zero-unit allocation must not squat registry slot");
         assert!(matches!(err, SettlementTxError::Refused(_)));
         assert!(state.settlement.shared_security.validators.is_empty());
+    }
+
+    /// A single real-world operator must not multiply a *free* downside across
+    /// sources that settle on the **same external chain**.
+    ///
+    /// The BFT-safety cap guarantees `restaked weight < 1/3` of the committee by
+    /// capping the sum over sources. That arithmetic assumes the sources are
+    /// independent. `EigenLayer` and `Symbiotic` are not: both settle on
+    /// Ethereum, and one operator key can take the same free ETH downside behind
+    /// both. A single Ethereum slashing event removes *every* source at once, so
+    /// the real independence behind the weight is one chain, not `k` protocols.
+    ///
+    /// `RestakeSource::external_chain` already models this correlation; this test
+    /// requires the quarantine table to honour it too.
+    #[test]
+    fn one_operator_cannot_multiply_free_downside_across_same_chain_sources() {
+        let op = [0x0A; 20];
+        let val_eigen = Address::from([0x61; 32]);
+        let val_symbiotic = Address::from([0x62; 32]);
+        let val_babylon = Address::from([0x63; 32]);
+        let mut state = AccountState::new();
+        // Committee members exist; the attack is about *whose* weight counts.
+        for tag in [0x61u8, 0x62u8, 0x63u8] {
+            let address = Address::from([tag; 32]);
+            let mut v = Validator::new(address, 1_000_000);
+            v.active = true;
+            v.bls_public_key = vec![0xB1; BLS_PUBLIC_KEY_BYTES];
+            state.validators.insert(address, v);
+        }
+        for (source, validator) in [
+            (RestakeSource::EigenLayer, val_eigen),
+            (RestakeSource::Symbiotic, val_symbiotic),
+            (RestakeSource::Babylon, val_babylon),
+        ] {
+            state.settlement.shared_security.validators.insert(
+                validator,
+                RestakedValidator {
+                    budlum_validator: validator,
+                    eth_operator: op,
+                    allocated_units: 10_000,
+                    source,
+                    observed_epoch: 5,
+                    status: RestakeStatus::Active,
+                    bls_public_key: vec![0xB1; BLS_PUBLIC_KEY_BYTES],
+                },
+            );
+        }
+
+        // One verified Ethereum-side slashing event for `op` on the EigenLayer
+        // registrar. It names the EigenLayer source only.
+        let records = quarantine_correlated_sources(
+            &mut state,
+            RestakeSource::EigenLayer,
+            &[op],
+            RestakeStatus::Slashed,
+        );
+
+        assert!(
+            state
+                .settlement
+                .shared_security
+                .is_operator_slashed(RestakeSource::EigenLayer, &op),
+            "the slashed source is quarantined"
+        );
+        assert!(
+            state
+                .settlement
+                .shared_security
+                .is_operator_slashed(RestakeSource::Symbiotic, &op),
+            "the same key on the same chain was quarantined too, records={records}"
+        );
+        assert!(
+            !state
+                .settlement
+                .shared_security
+                .is_operator_slashed(RestakeSource::Babylon, &op),
+            "a different chain (Bitcoin) is a different downside and must survive"
+        );
+        let params = SharedSecurityParams {
+            enabled: true,
+            max_restaked_share_ppm: MAX_SAFE_BFT_RESTAKED_SHARE_PPM,
+            units_to_weight_ppm: 1_000_000,
+        };
+        apply_restaked_weights(&mut state, &params);
+        assert_eq!(
+            state.validators[&val_eigen].restaked_weight, 0,
+            "the slashed source carries no weight"
+        );
+        assert_eq!(
+            state.validators[&val_symbiotic].restaked_weight, 0,
+            "the correlated source must carry no weight either: same ETH"
+        );
     }
 
     #[test]
