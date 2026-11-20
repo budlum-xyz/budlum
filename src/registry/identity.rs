@@ -631,6 +631,17 @@ impl IdentityRegistry {
                 did: did_of(&record.subject),
             });
         }
+        // The two counters live outside the hand-built signing preimage, so
+        // a relay could rewrite them on a signed registration. A fresh
+        // record has spent nothing: anything else is a tampered payload and
+        // would brick the DID (u64::MAX counters refuse every later issue
+        // and never spend a recovery quorum).
+        if record.issued_credentials != 0 || record.recovery_nonce != 0 {
+            return Err(IdentityError::BadApproval(format!(
+                "register: a fresh record carries no spent counters ({}, {})",
+                record.issued_credentials, record.recovery_nonce
+            )));
+        }
         let subject = record.subject;
         if self.records.contains_key(&subject) {
             return Err(IdentityError::AlreadyExists {
@@ -2938,6 +2949,26 @@ mod tests {
             ),
             Err(IdentityError::BadApproval(_))
         ));
+    }
+
+    #[test]
+    fn a_relay_tampered_counter_cannot_enter_through_register() {
+        // The counters ride the transaction payload outside the signing
+        // preimage; the door refuses anything a fresh record cannot have.
+        let mut registry = IdentityRegistry::new();
+        let mut record = subject_record();
+        record.issued_credentials = u64::MAX;
+        assert!(matches!(
+            registry.apply(&ConsensusKind::PoA, IdentityOp::Register { record }, 0),
+            Err(IdentityError::BadApproval(_))
+        ));
+        let mut record = subject_record();
+        record.recovery_nonce = 1;
+        assert!(matches!(
+            registry.apply(&ConsensusKind::PoA, IdentityOp::Register { record }, 0),
+            Err(IdentityError::BadApproval(_))
+        ));
+        assert!(registry.record(&addr(1)).is_none());
     }
 
     #[test]
