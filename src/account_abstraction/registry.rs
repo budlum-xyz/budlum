@@ -3,9 +3,8 @@
 //! # Why this module exists
 //!
 //! `QuantumAccount` and its `validate_all` guard had been written, were bound to real
-//! ML-DSA-87 and passed their tests; but no production path called them,
-//! because the account was **stored nowhere**. An account type is only a type
-//! without a registry that holds it.
+//! ML-DSA-87 and passed their tests; but no registry API held them. An account
+//! type is only a type without a registry that holds it.
 //!
 //! The registry was written as a gate: an account gets in only if it passes
 //! `validate_all`. That way rules such as "the multisig threshold must be within 1..=16"
@@ -18,7 +17,8 @@
 //! This layer validates the **shape** of the account. Spending a transaction with multisig
 //! authority is a separate decision: the transaction schema carries a single signature today, and
 //! multisig authorization needs a new signature version. That work belongs to the transaction
-//! schema, not here.
+//! schema, not here. This registry is not part of `AccountState` and no block transaction writes
+//! it yet; callers must not describe its root as chain-committed state.
 
 use super::quantum_account::QuantumAccount;
 use crate::storage::pact_binding::PactRegistry;
@@ -52,6 +52,8 @@ pub enum QuantumAccountRegistryError {
     /// The presented pact registry has a stale root: the root recomputed from the pacts inside it
     /// is not the root the registry carries.
     PactRegistryRootIsStale { reason: &'static str },
+    /// A non-zero pact root was submitted without the pact set that proves it.
+    PactRegistryRequired { declared: [u8; 32] },
 }
 
 impl std::fmt::Display for QuantumAccountRegistryError {
@@ -96,6 +98,11 @@ impl std::fmt::Display for QuantumAccountRegistryError {
             Self::PactRegistryRootIsStale { reason } => {
                 write!(f, "presented pact registry is inconsistent: {reason}")
             }
+            Self::PactRegistryRequired { declared } => write!(
+                f,
+                "non-zero pact root {} requires its pact registry",
+                hex::encode(declared)
+            ),
         }
     }
 }
@@ -126,9 +133,21 @@ impl QuantumAccountRegistry {
     ///
     /// # Errors
     ///
-    /// Errors if the account is invalid, the address does not match the key, or the address is
-    /// already registered.
+    /// Errors if the account has a non-zero pact root without its pact registry,
+    /// is invalid, has an address that does not match the key, or is already registered.
     pub fn register(&mut self, account: QuantumAccount) -> Result<(), QuantumAccountRegistryError> {
+        if account.pact_root != [0u8; 32] {
+            return Err(QuantumAccountRegistryError::PactRegistryRequired {
+                declared: account.pact_root,
+            });
+        }
+        self.insert_account(account)
+    }
+
+    fn insert_account(
+        &mut self,
+        account: QuantumAccount,
+    ) -> Result<(), QuantumAccountRegistryError> {
         let derived = QuantumAccount::address_from_public_key(&account.pq_public_key);
         if derived != account.address {
             return Err(QuantumAccountRegistryError::AddressDoesNotMatchKey {
@@ -189,7 +208,7 @@ impl QuantumAccountRegistry {
                 computed: pacts.root,
             });
         }
-        self.register(account)
+        self.insert_account(account)
     }
 
     #[must_use]
