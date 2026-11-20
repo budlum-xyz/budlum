@@ -980,7 +980,7 @@ mod tests {
             let consensus = Arc::new(PoWEngine::new(0));
             let blockchain = Blockchain::new(consensus, None, 45265, None);
             let (actor, client) = ChainActor::new(blockchain);
-            tokio::spawn(async move { actor.run().await });
+            tokio::spawn(async move { Box::pin(actor.run()).await });
             client
         }
 
@@ -1045,10 +1045,10 @@ mod tests {
         // Attacker tries to dial the shielded validator directly.
         attacker.dial(&validator_addr).expect("attacker dials");
 
-        let h_sa = tokio::spawn(async move { sentry_a.run().await });
-        let h_sb = tokio::spawn(async move { sentry_b.run().await });
-        let h_att = tokio::spawn(async move { attacker.run().await });
-        let h_val = tokio::spawn(async move { validator.run().await });
+        let h_sa = tokio::spawn(async move { Box::pin(sentry_a.run()).await });
+        let h_sb = tokio::spawn(async move { Box::pin(sentry_b.run()).await });
+        let h_att = tokio::spawn(async move { Box::pin(attacker.run()).await });
+        let h_val = tokio::spawn(async move { Box::pin(validator.run()).await });
 
         // Wait for Validator <-> Sentry A connection to come up. See
         // `SENTRY_FAILOVER_WAIT_STEPS` for why the budget is generous.

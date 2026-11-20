@@ -1,10 +1,10 @@
+//! Shared security from restaked Ethereum collateral.
+//!
 //! WIRING: wired - allocations enter through `SettlementTx::SharedSecurity`,
 //! the weights are recomputed at every epoch boundary
 //! (`AccountState::advance_epoch`) and read by leader election and the
 //! finality snapshot through `Validator::voting_weight`; the Ethereum-side
 //! `BudlumRegistrar` and `BudlumSlasher` contracts are.
-//!
-//! Shared security from restaked Ethereum collateral.
 //!
 //! The implementation is active only on devnet. Public testnet and mainnet
 //! fail closed until their activation gates and external evidence rehearsals
@@ -936,7 +936,7 @@ pub fn quarantine_correlated_sources(
     }
     // Every active row of a correlated source for these operators loses its
     // weight at the next boundary, including rows the evidence never named.
-    for (address, row) in state.settlement.shared_security.validators.iter_mut() {
+    for (address, row) in &mut state.settlement.shared_security.validators {
         if row.status == RestakeStatus::Active
             && row.source.external_chain() == chain
             && operators.contains(&row.eth_operator)
@@ -1343,11 +1343,11 @@ mod tests {
         let validator = Address::from([2u8; 32]);
         let allocation = claim(validator, 1_000, 5);
         let honest = anchored(&mut state, &allocation, 0);
-        let mut foreign = honest.clone();
+        let mut foreign = honest;
         foreign.chain = crate::core::transaction::ExternalChain::Custom(DOMAIN);
         // Re-anchor the forged evidence so only the chain binding can refuse it.
         let leaf = foreign.result_leaf();
-        let mut proof = foreign.clone();
+        let mut proof = foreign;
         proof.external_state_root = leaf;
         proof.receipt_proof = bincode::serialize(&crate::cross_domain::event_tree::MerkleProof {
             leaf,
@@ -2027,11 +2027,18 @@ mod tests {
             c.signatures = signers
                 .iter()
                 .map(|&i| {
-                    let msg =
-                        vote_sign_bytes(chain_id, 900, 0, &c.block_hash, 1, &parts, (ts as i64, 0));
+                    let msg = vote_sign_bytes(
+                        chain_id,
+                        900,
+                        0,
+                        &c.block_hash,
+                        1,
+                        &parts,
+                        (i64::try_from(ts).expect("timestamp fits i64"), 0),
+                    );
                     TendermintSignature {
                         address: tm_vals[i].address,
-                        timestamp_seconds: ts as i64,
+                        timestamp_seconds: i64::try_from(ts).expect("timestamp fits i64"),
                         timestamp_nanos: 0,
                         signature: keys[i].sign(&msg).to_vec(),
                     }
