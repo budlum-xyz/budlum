@@ -747,6 +747,7 @@ impl ExternalDomainRegistry {
                 refused: 0,
             },
         );
+        reg.sync_record_bond_facts();
         Ok(())
     }
 
@@ -1011,6 +1012,7 @@ impl ExternalDomainRegistry {
         }
         reg.attestations
             .retain(|_, a| a.evidence_digest != evidence_digest);
+        reg.sync_record_bond_facts();
         Ok((taken, reward))
     }
 
@@ -1129,11 +1131,21 @@ impl ExternalDomainRegistry {
                     root_hi.as_slice(),
                 ))))
         });
+        reg.sync_record_bond_facts();
         Ok((taken, reward))
     }
 }
 
 impl DomainRegistration {
+    fn sync_record_bond_facts(&mut self) {
+        self.record.bond_atoms = self
+            .provers
+            .values()
+            .fold(0u128, |acc, b| acc.saturating_add(b.live_atoms()));
+        self.record.bond_posters =
+            self.provers.values().filter(|b| b.live_atoms() > 0).count() as u64;
+    }
+
     /// Returns `true` iff `(height, version, state_root)` is currently in the
     /// attestation book AND was committed by a quorum round (`commit_attestation`).
     #[must_use]
@@ -1321,6 +1333,7 @@ mod tests {
     #[test]
     fn slash_charges_the_carrier_and_withdraws_the_attestation() {
         let (mut registry, key, att) = registered();
+        let initial_bond = registry.domain(&key).expect("domain").record.bond_atoms;
         let (taken, reward) = registry
             .slash(
                 &key,
@@ -1339,6 +1352,43 @@ mod tests {
             reg.latest_attestation().is_none(),
             "a slashed attestation must not be served"
         );
+        let live_after_slash = initial_bond.saturating_sub(taken);
+        assert_eq!(
+            reg.record.bond_atoms, live_after_slash,
+            "DomainRecord.bond_atoms must reflect live unslashed bond after slash"
+        );
+        assert_eq!(
+            crate::cross_domain::external::profile::profile_of(&reg.record).bond_atoms,
+            live_after_slash
+        );
+
+        // Bonding a second prover updates both live bond total and poster count.
+        registry
+            .bond_prover(&key, Address::from([8u8; 32]), initial_bond)
+            .expect("second prover bonds");
+        let reg = registry.domain(&key).expect("domain");
+        assert_eq!(
+            reg.record.bond_atoms,
+            live_after_slash.saturating_add(initial_bond)
+        );
+        assert_eq!(reg.record.bond_posters, 2);
+
+        // Slashing the second prover's full bond via Symbiotic equivocation drops
+        // its live contribution and active poster count back to 1.
+        let (sym_taken, _) = registry
+            .slash_symbiotic_equivocation(
+                &key,
+                Address::from([8u8; 32]),
+                1,
+                ([0xAA; 32], [0xBB; 32]),
+                u128::MAX,
+                Address::from([9u8; 32]),
+            )
+            .expect("symbiotic equivocation slashes second prover");
+        assert_eq!(sym_taken, initial_bond);
+        let reg = registry.domain(&key).expect("domain");
+        assert_eq!(reg.record.bond_atoms, live_after_slash);
+        assert_eq!(reg.record.bond_posters, 1);
     }
 
     #[test]
