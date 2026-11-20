@@ -143,12 +143,26 @@ jobs:
           yes | sdkmanager --licenses > /dev/null
           set -o pipefail
           sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+      # Maven Central parent-POM fetches flake on fresh runners; three
+      # bounded attempts separate a network blip from a real build failure.
       - name: Build debug APK
         working-directory: mobile/android
-        run: gradle assembleDebug --no-daemon
+        run: |
+          for attempt in 1 2 3; do
+            if gradle assembleDebug --no-daemon; then exit 0; fi
+            echo "gradle assembleDebug attempt ${attempt} failed; retrying" >&2
+            sleep $((attempt * 20))
+          done
+          exit 1
       - name: Run Android unit tests
         working-directory: mobile/android
-        run: gradle testDebugUnitTest --no-daemon
+        run: |
+          for attempt in 1 2 3; do
+            if gradle testDebugUnitTest --no-daemon; then exit 0; fi
+            echo "gradle testDebugUnitTest attempt ${attempt} failed; retrying" >&2
+            sleep $((attempt * 20))
+          done
+          exit 1
 
   android-instrumentation:
     name: Android Keystore and boot instrumentation (manual)
