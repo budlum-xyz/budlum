@@ -327,6 +327,13 @@ pub fn pay_epoch(
                 && state
                     .registry
                     .is_active(address, crate::registry::role::roles::VALIDATOR)
+                // The consensus share pays the seats that served the closing
+                // epoch. Liveness records that epoch before this payout runs,
+                // so an open miss streak means the seat produced nothing for
+                // the epoch being paid: it earns nothing until it serves
+                // again, instead of drawing up to the suspension threshold
+                // for zero work.
+                && state.liveness.missed_count(address) == 0
         })
         .map(|(address, v)| (*address, v.stake))
         .collect();
@@ -766,5 +773,52 @@ mod tests {
         assert_eq!(state.get_balance(&validator), 20);
         assert_eq!(state.registry.claimable_reward(delegator, validator), 180);
         assert_eq!(state.get_balance(&pool), 800);
+    }
+
+    #[test]
+    fn a_seat_that_missed_the_closing_epoch_earns_no_consensus_share() {
+        let producer = addr(3);
+        let idler = addr(4);
+        let pool = reward_pool_account();
+        let mut state = crate::core::account::AccountState::new();
+        state.add_validator(producer, 1_000);
+        state.add_validator(idler, 1_000);
+        state.add_balance(&pool, 1_000);
+        // Liveness records the closing epoch before the payout runs: the
+        // idler missed it, the producer served it.
+        let expected = [producer, idler];
+        let params = crate::registry::params::RegistryParams::default();
+        state
+            .liveness
+            .record_epoch(1, &expected, |a| *a == producer, &params);
+
+        let schedule = RewardPoolSchedule {
+            validation_reward_pool: 1_000,
+            validation_pool_epochs: 4,
+            treasury_pool: 0,
+            reward_pool_start_epoch: 0,
+        };
+        let producer_before = state.get_balance(&producer);
+        let idler_before = state.get_balance(&idler);
+        let paid = pay_epoch(&mut state, &schedule, 1);
+        assert!(paid > 0, "the serving seat is paid");
+        assert!(
+            state.get_balance(&producer) > producer_before,
+            "the producer collects the consensus share"
+        );
+        assert_eq!(
+            state.get_balance(&idler),
+            idler_before,
+            "a seat with an open miss streak earns nothing for the epoch it missed"
+        );
+
+        // Serving the next epoch clears the streak and restores the share.
+        state.liveness.record_epoch(2, &expected, |_| true, &params);
+        let idler_mid = state.get_balance(&idler);
+        pay_epoch(&mut state, &schedule, 2);
+        assert!(
+            state.get_balance(&idler) > idler_mid,
+            "participation resumes the payout"
+        );
     }
 }
