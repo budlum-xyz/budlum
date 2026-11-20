@@ -51,7 +51,7 @@ use crate::cross_domain::external::registry::{ExternalDomainRegistry, RegistryEr
 use crate::cross_domain::external::selftest::{admit, AdmissionReport};
 use crate::cross_domain::external::spec::{
     AdapterDescriptor, DomainKey, ExternalFinalityAdapter, FinalityAttestation,
-    RawConsensusEvidence, VerificationPolicy,
+    RawConsensusEvidence, SecurityBacking, TimeUnit, VerificationPolicy,
 };
 use crate::cross_domain::external::tendermint::TendermintFinalityAdapter;
 use crate::cross_domain::external::versioning::VersionPolicy;
@@ -644,15 +644,35 @@ impl PinnedExternalAnchor {
 }
 
 /// The clock `max_age` measures against at submission: the domain's most
-/// recent accepted height, never lower than the stored registration value
-/// (the same high-water-mark rule as the EVM relay's
+/// recent accepted tip in the adapter's [`TimeUnit`], never lower than the
+/// stored registration value (the same high-water-mark rule as the EVM relay's
 /// policy clock).
 #[must_use]
 ///
 /// Convenience: crate-visible so the intake policy reads one clock
 /// definition; the policy refresh in this file is its caller today.
-pub(crate) fn live_policy_clock(stored_now: u64, last_accepted_height: Option<u64>) -> u64 {
-    last_accepted_height.map_or(stored_now, |tip| tip.max(stored_now))
+pub(crate) fn live_policy_clock(stored_now: u64, last_accepted_tip: Option<u64>) -> u64 {
+    last_accepted_tip.map_or(stored_now, |tip| tip.max(stored_now))
+}
+
+/// The domain's accepted clock tip in `time_unit`: for `TimeUnit::UnixSeconds`
+/// domains (`BitcoinSpv`, `Tendermint`), `VerificationPolicy::now` and
+/// `FinalityAttestation::finalized_at` are Unix-epoch seconds while
+/// `record.last_accepted_height` is a block height, so the accepted clock is
+/// the maximum `finalized_at` across accepted `UnixSeconds` attestations.
+fn accepted_policy_clock_tip(
+    reg: &crate::cross_domain::external::registry::DomainRegistration,
+    time_unit: TimeUnit,
+) -> Option<u64> {
+    if time_unit == TimeUnit::UnixSeconds {
+        reg.attestations
+            .values()
+            .filter(|a| a.time_unit == TimeUnit::UnixSeconds)
+            .map(|a| a.finalized_at)
+            .max()
+    } else {
+        reg.record.last_accepted_height
+    }
 }
 
 /// What went wrong at the intake boundary, as distinct from inside the
@@ -735,6 +755,16 @@ fn first_carrier(
 /// are digested on every call, so the seat count must have a bound the
 /// operator cannot lift.
 const MAX_QUORUM_PARTICIPANTS: usize = 256;
+
+/// Whether `challenge` proves strictly more accumulated work than the
+/// `accepted_bits` an attestation was admitted with. A tie is the external
+/// chain's own fork, and a fork alone proves no carrier false.
+fn out_works(accepted_bits: u32, challenge: &SecurityBacking) -> bool {
+    matches!(
+        challenge,
+        SecurityBacking::Work { difficulty_bits } if *difficulty_bits > accepted_bits
+    )
+}
 
 impl IntakeState {
     #[must_use]
@@ -1226,11 +1256,12 @@ impl IntakeState {
         // accepted attestation the stored value stays (registration-time
         // admission used it deliberately).
         let mut policy = entry.policy.clone();
+        let time_unit = adapter.descriptor().time_unit;
         policy.now = live_policy_clock(
             policy.now,
             self.registry
                 .domain(&key)
-                .and_then(|reg| reg.record.last_accepted_height),
+                .and_then(|reg| accepted_policy_clock_tip(reg, time_unit)),
         );
         if self.quorum.policy_of(&key).is_some() {
             return match self.submit_to_round(key, evidence, adapter.as_ref(), &policy)? {
@@ -1274,8 +1305,10 @@ impl IntakeState {
     /// 3. Self-challenge (`challenger == carrier`) is unconditionally forbidden
     ///    so a dishonest prover cannot reclaim the challenger reward share.
     /// 4. State-root divergence is evaluated via [`subtle::ConstantTimeEq`].
-    /// 5. For `PoW` domains, the contradicting proof must carry at least the
-    ///    accumulated difficulty bits of the accepted attestation.
+    /// 5. For `PoW` domains, the contradicting proof must carry strictly more
+    ///    accumulated difficulty bits than the accepted attestation. Equal
+    ///    work is the external chain's own tie, which proves no carrier
+    ///    false, so a sibling at the same height cannot slash.
     /// 6. The penalty is always computed at `economics.routing_ceiling_atoms`
     ///    so a colluding front-runner cannot dust-slash for 1 atom.
     ///
@@ -1288,8 +1321,6 @@ impl IntakeState {
         challenger: Address,
         bls: Option<Box<dyn BlsVerifier>>,
     ) -> Result<ContradictionSlashOutcome, IntakeError> {
-        use crate::cross_domain::external::spec::SecurityBacking;
-
         if contradicting.submitter != challenger {
             return Err(IntakeError::InvalidContradiction {
                 reason: "contradiction evidence submitter must match challenger".to_string(),
@@ -1371,17 +1402,12 @@ impl IntakeState {
             difficulty_bits: accepted_bits,
         } = existing.security
         {
-            match verified.security {
-                SecurityBacking::Work {
-                    difficulty_bits: challenge_bits,
-                } if challenge_bits >= accepted_bits => {}
-                _ => {
-                    return Err(IntakeError::InvalidContradiction {
-                        reason: format!(
-                            "PoW contradiction must carry at least {accepted_bits} difficulty bits"
-                        ),
-                    });
-                }
+            if !out_works(accepted_bits, &verified.security) {
+                return Err(IntakeError::InvalidContradiction {
+                    reason: format!(
+                        "PoW contradiction must carry more than {accepted_bits} difficulty bits"
+                    ),
+                });
             }
         }
 
@@ -1446,6 +1472,14 @@ impl IntakeState {
     /// at that slot; and every ruling is tombstoned in
     /// [`IntakeGuard::record_contradiction`] under the challenged claim digest.
     ///
+    /// A proof-of-work predecessor is refused outright. Adjacency makes the
+    /// witness exactly one block longer than the attested chain, so every
+    /// honest one-block fork descends from "a different parent", and a
+    /// difficulty comparison between the two windows measures that extra block
+    /// and not a reorg. Work is refuted only by a witness that out-works the
+    /// attested branch by a margin, which a one-successor challenge cannot
+    /// carry.
+    ///
     /// # Errors
     ///
     /// [`IntakeError::UnknownDomain`], [`IntakeError::MissingCarrier`],
@@ -1507,6 +1541,15 @@ impl IntakeState {
                 ),
             });
         };
+        if matches!(predecessor.security, SecurityBacking::Work { .. }) {
+            return Err(IntakeError::InvalidContradiction {
+                reason: "a proof-of-work attestation cannot be refuted by its adjacent \
+                         successor: the successor is one block longer by construction, so \
+                         only a witness that out-works the attested branch by a margin \
+                         could decide"
+                    .to_string(),
+            });
+        }
         let Some(slashed_prover) = reg
             .attestation_provers
             .get(&predecessor.evidence_digest)
@@ -3744,5 +3787,18 @@ mod tests {
             intake.registry.domain(&bv_key).expect("dom").record.state,
             DomainState::Faulted
         );
+        a_work_challenge_must_carry_strictly_more_difficulty_than_the_accepted_attestation();
+    }
+
+    fn a_work_challenge_must_carry_strictly_more_difficulty_than_the_accepted_attestation() {
+        let work = |difficulty_bits| SecurityBacking::Work { difficulty_bits };
+        assert!(out_works(10, &work(11)));
+        assert!(!out_works(10, &work(10)), "a tie slashes nobody");
+        assert!(!out_works(10, &work(9)));
+        assert!(
+            !out_works(10, &SecurityBacking::Authority { count: 7 }),
+            "a proof with no work behind it cannot out-work work"
+        );
+        assert!(!out_works(10, &SecurityBacking::None));
     }
 }

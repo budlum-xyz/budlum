@@ -929,6 +929,23 @@ impl DomainFinalityAdapter for PoWHeaderChainFinalityAdapter {
     }
 }
 
+/// Bitcoin's median-time-past window: the 11 blocks before a header.
+const BITCOIN_MTP_WINDOW: usize = 11;
+
+/// Lower bound on the median of the 11 blocks before the next header, from the
+/// trailing timestamps a window knows. Each of the `11 - k` unknown
+/// predecessors can pull the median down by at most one rank, so the median is
+/// at least the `(k - 5)`-th smallest known value; below six known values
+/// nothing can be inferred.
+fn bitcoin_median_time_past_floor(known_timestamps: &[u32]) -> Option<u32> {
+    let start = known_timestamps.len().saturating_sub(BITCOIN_MTP_WINDOW);
+    let window = known_timestamps.get(start..)?;
+    let rank = window.len().checked_sub(BITCOIN_MTP_WINDOW / 2 + 1)?;
+    let mut sorted = window.to_vec();
+    sorted.sort_unstable();
+    sorted.get(rank).copied()
+}
+
 /// Bounded Bitcoin SPV light client for `bitcoin-spv-v1` domains.
 ///
 /// The trust model mirrors [`PoWHeaderChainFinalityAdapter`]: a window of
@@ -1003,7 +1020,7 @@ impl DomainFinalityAdapter for BitcoinSpvFinalityAdapter {
 
         let mut previous_hash: Option<Hash32> = None;
         let mut previous_height = 0u64;
-        let mut previous_timestamp = 0u32;
+        let mut seen_timestamps: Vec<u32> = Vec::with_capacity(headers.len());
         let mut cumulative_work = 0u128;
 
         for (index, header) in headers.iter().enumerate() {
@@ -1037,9 +1054,14 @@ impl DomainFinalityAdapter for BitcoinSpvFinalityAdapter {
                         "Bitcoin header parent link mismatch".into(),
                     ));
                 }
-                if header.timestamp < previous_timestamp {
+                // Bitcoin lets a header carry a smaller timestamp than its
+                // parent; only the median bound is a consensus rule.
+                if bitcoin_median_time_past_floor(&seen_timestamps)
+                    .is_some_and(|floor| header.timestamp <= floor)
+                {
                     return Ok(FinalityStatus::Rejected(
-                        "Bitcoin header timestamps move backwards".into(),
+                        "Bitcoin header timestamp does not exceed the median-time-past floor"
+                            .into(),
                     ));
                 }
             }
@@ -1064,7 +1086,7 @@ impl DomainFinalityAdapter for BitcoinSpvFinalityAdapter {
             // Wire order, which is what the next header's `prev_hash` carries.
             previous_hash = Some(header.block_hash());
             previous_height = header.height;
-            previous_timestamp = header.timestamp;
+            seen_timestamps.push(header.timestamp);
         }
 
         let observed_depth = headers.len() as u64;
@@ -3703,6 +3725,60 @@ mod tests {
         );
     }
 
+    fn window_with_timestamps(timestamps: &[u32]) -> Vec<BitcoinHeader> {
+        let mut headers = Vec::with_capacity(timestamps.len());
+        let mut prev = [1u8; 32];
+        for (offset, timestamp) in timestamps.iter().enumerate() {
+            let header = mine_bitcoin_header(prev, 10 + offset as u64, *timestamp);
+            prev = header.block_hash();
+            headers.push(header);
+        }
+        headers
+    }
+
+    fn judge_window(headers: Vec<BitcoinHeader>) -> FinalityStatus {
+        let domain = bitcoin_domain(6);
+        let commitment = bitcoin_commitment(&headers);
+        BitcoinSpvFinalityAdapter
+            .verify_finality(&domain, &commitment, &FinalityProof::BitcoinSpv { headers })
+            .expect("a window is judged, not errored")
+    }
+
+    fn bitcoin_spv_finalizes_a_window_whose_timestamps_step_back_above_the_median() {
+        // Bitcoin only requires `timestamp > median(previous 11)`, so a header
+        // may carry a smaller timestamp than its parent (3.4% of recent mainnet
+        // parent links do) and still be consensus-valid.
+        let base = 1_700_000_000u32;
+        let mut timestamps: Vec<u32> = (0..8u32).map(|i| base + i * 600).collect();
+        timestamps[3] = timestamps[2] - 120;
+        timestamps[7] = timestamps[6] - 120;
+        let status = judge_window(window_with_timestamps(&timestamps));
+        assert!(
+            matches!(status, FinalityStatus::Finalized),
+            "expected Finalized, got {status:?}"
+        );
+    }
+
+    fn bitcoin_spv_rejects_a_timestamp_at_or_below_the_implied_median_floor() {
+        // Six known predecessors force the median of the eleven before the
+        // next header to be at least the smallest of them, so that value is
+        // refused and one second above it is not.
+        let base = 1_700_000_000u32;
+        let mut timestamps: Vec<u32> = (0..7u32).map(|i| base + i * 600).collect();
+        timestamps[6] = base;
+        let status = judge_window(window_with_timestamps(&timestamps));
+        assert!(
+            matches!(&status, FinalityStatus::Rejected(reason) if reason.contains("median-time-past")),
+            "expected a median-time-past rejection, got {status:?}"
+        );
+        timestamps[6] = base + 1;
+        let status = judge_window(window_with_timestamps(&timestamps));
+        assert!(
+            matches!(status, FinalityStatus::Finalized),
+            "expected Finalized, got {status:?}"
+        );
+    }
+
     #[test]
     fn bitcoin_spv_rejects_a_header_below_its_target() {
         let domain = bitcoin_domain(2);
@@ -3722,6 +3798,8 @@ mod tests {
             matches!(status, FinalityStatus::Rejected(_)),
             "expected Rejected, got {status:?}"
         );
+        bitcoin_spv_finalizes_a_window_whose_timestamps_step_back_above_the_median();
+        bitcoin_spv_rejects_a_timestamp_at_or_below_the_implied_median_floor();
     }
 
     #[test]
