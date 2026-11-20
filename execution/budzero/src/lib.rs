@@ -1352,4 +1352,58 @@ mod tests {
         );
         assert!(q_res.is_err(), "query omitting required slot must fail");
     }
+
+    #[test]
+    fn budzero_deploy_charges_per_byte_and_reports_nonzero_gas_used() {
+        let halt = bud_isa::Instruction {
+            opcode: bud_isa::Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let code: Vec<u8> = std::iter::repeat_n(halt, 64)
+            .flat_map(u64::to_le_bytes)
+            .collect();
+        let expected_gas = 5_000 + (code.len() as u64) * 25;
+        let mut fx = Fixture::new();
+
+        let Ok(low) = fx.worker.execute(
+            &fx.ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: fx.caller.clone(),
+                target: fx.target.clone(),
+                value: BudAmount(0),
+                input: code.clone(),
+                gas_limit: expected_gas - 1,
+                depth: 0,
+                tx_hash: [0x91; 32],
+            },
+            &mut fx.host,
+        ) else {
+            panic!("low deploy");
+        };
+        assert_eq!(low.status, OutcomeStatus::OutOfGas);
+
+        let Ok(ok) = fx.worker.execute(
+            &fx.ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: fx.caller.clone(),
+                target: fx.target.clone(),
+                value: BudAmount(0),
+                input: code,
+                gas_limit: expected_gas,
+                depth: 0,
+                tx_hash: [0x92; 32],
+            },
+            &mut fx.host,
+        ) else {
+            panic!("ok deploy");
+        };
+        assert_eq!(ok.status, OutcomeStatus::Success);
+        assert_eq!(ok.gas_used, expected_gas);
+    }
 }

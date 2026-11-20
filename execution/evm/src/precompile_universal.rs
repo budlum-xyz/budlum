@@ -1124,4 +1124,105 @@ mod tests {
         assert_eq!(s_raw, 100u128.to_le_bytes().to_vec());
         assert_eq!(r_raw, 500u128.to_le_bytes().to_vec());
     }
+
+    #[test]
+    fn uol_offer_rejects_oversized_taker_and_charges_state_growth_gas() {
+        use crate::abi::{uol_selector, NS_UEL_ASSETS, UOL_PRECOMPILE};
+        use crate::{EvmWorker, BUDLUM_EVM_CHAIN_ID};
+        use budlum_uel_abi::mock::MemoryHost;
+        use budlum_uel_abi::{
+            BlockContext, BudAmount, EeCall, EeCallKind, EeId, EeIdentity, ExecutionEnvironment,
+            HostApi, Namespace, OutcomeStatus,
+        };
+
+        let mut host = MemoryHost::new(10_000_000);
+        let Ok(ns_assets) = Namespace::new(NS_UEL_ASSETS) else {
+            panic!("ns");
+        };
+        let class_id = [0x33u8; 32];
+        let asset_id = [0x44u8; 32];
+        let maker = [0x11u8; 20];
+        let hk = super::uol_holder_key(&asset_id);
+        host.write(&ns_assets, &hk, Some(&maker)).expect("holder");
+
+        let build_offer_cd = |taker: &[u8]| -> Vec<u8> {
+            let mut cd = Vec::from(uol_selector(
+                "offer(bytes32,bytes32,bytes,bytes,uint128,uint64)",
+            ));
+            cd.extend_from_slice(&class_id);
+            cd.extend_from_slice(&asset_id);
+            let mut w_off1 = [0u8; 32];
+            w_off1[24..32].copy_from_slice(&192u64.to_be_bytes());
+            cd.extend_from_slice(&w_off1);
+            let taker_padded = taker.len().div_ceil(32) * 32;
+            let pay_off = 192u64 + 32 + (taker_padded as u64);
+            let mut w_off2 = [0u8; 32];
+            w_off2[24..32].copy_from_slice(&pay_off.to_be_bytes());
+            cd.extend_from_slice(&w_off2);
+            cd.extend_from_slice(&[0u8; 32]);
+            let mut w_exp = [0u8; 32];
+            w_exp[24..32].copy_from_slice(&100u64.to_be_bytes());
+            cd.extend_from_slice(&w_exp);
+            let mut tlen = [0u8; 32];
+            tlen[24..32].copy_from_slice(&(taker.len() as u64).to_be_bytes());
+            cd.extend_from_slice(&tlen);
+            let mut tbuf = vec![0u8; taker_padded];
+            tbuf[..taker.len()].copy_from_slice(taker);
+            cd.extend_from_slice(&tbuf);
+            cd.extend_from_slice(&[0u8; 32]);
+            cd
+        };
+
+        let mut worker = EvmWorker;
+        let sender_id = EeIdentity::new(EeId::EVM, maker.to_vec()).expect("maker");
+        let uol_id = EeIdentity::new(EeId::EVM, UOL_PRECOMPILE.as_slice().to_vec()).expect("uol");
+        let ctx = BlockContext {
+            chain_id: BUDLUM_EVM_CHAIN_ID,
+            height: 10,
+            timestamp_ms: 1_793_923_200_000,
+        };
+
+        let bad_cd = build_offer_cd(&vec![0xAA; 512]);
+        let bad_out = worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: sender_id.clone(),
+                    target: uol_id.clone(),
+                    value: BudAmount(0),
+                    input: bad_cd,
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0xE1; 32],
+                },
+                &mut host,
+            )
+            .expect("bad_out");
+        assert_eq!(bad_out.status, OutcomeStatus::Revert);
+
+        let valid_cd = build_offer_cd(&[0x22u8; 20]);
+        let ok_out = worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: sender_id,
+                    target: uol_id,
+                    value: BudAmount(0),
+                    input: valid_cd,
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0xE2; 32],
+                },
+                &mut host,
+            )
+            .expect("ok_out");
+        assert_eq!(ok_out.status, OutcomeStatus::Success);
+        assert!(
+            ok_out.gas_used >= 27_000,
+            "UOL offer must charge per-byte state growth gas, got {}",
+            ok_out.gas_used
+        );
+    }
 }

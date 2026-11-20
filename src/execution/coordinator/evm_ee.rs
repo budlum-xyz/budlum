@@ -1334,6 +1334,12 @@ fn invoke_uol_precompile(
             if expiry > 0 && block_height > expiry {
                 return Ok((OutcomeStatus::Revert, b"UOL offer already expired".to_vec()));
             }
+            if !taker.is_empty() && taker.len() != 20 {
+                return Ok((
+                    OutcomeStatus::Revert,
+                    b"unsupported UOL offer taker encoding".to_vec(),
+                ));
+            }
             if !payment.is_empty() && payment.len() != 16 && payment.len() != 48 {
                 return Ok((
                     OutcomeStatus::Revert,
@@ -1388,6 +1394,11 @@ fn invoke_uol_precompile(
                 expiry,
             };
             let enc = encode_uol_offer_bytes(&rec);
+            let growth_gas = u64::try_from(enc.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(16);
+            host.charge(growth_gas)
+                .map_err(|_| String::from("out of gas storing UOL offer"))?;
             host.write(&ns, &offer_key, Some(&enc))
                 .map_err(|e| e.to_string())?;
             Ok((OutcomeStatus::Success, offer_id.to_vec()))
@@ -3638,6 +3649,15 @@ mod tests {
         let (st_bad_asset, _) =
             invoke_uol_precompile(10, &maker, &bad_xfer, false, &mut host).unwrap();
         assert_eq!(st_bad_asset, OutcomeStatus::Revert);
+
+        // Non-20-byte non-empty taker in UOL offer must revert cleanly.
+        let mut bad_offer = offer_calldata.clone();
+        // taker length word starts at 4 + 6*32 = 196; set taker length to 21 inside the 32B padded slot.
+        bad_offer[196 + 31] = 21;
+        let (st_bad_taker, out_bad_taker) =
+            invoke_uol_precompile(10, &maker, &bad_offer, false, &mut host).unwrap();
+        assert_eq!(st_bad_taker, OutcomeStatus::Revert);
+        assert_eq!(out_bad_taker, b"unsupported UOL offer taker encoding");
     }
 
     #[test]

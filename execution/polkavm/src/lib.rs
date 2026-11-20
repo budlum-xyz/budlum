@@ -1048,4 +1048,57 @@ mod tests {
             "PolkaVM Deploy must fail closed on code: host.read error"
         );
     }
+
+    #[test]
+    fn polkavm_deploy_charges_per_byte_of_published_blob() {
+        let mut worker = PolkaVmWorker::with_activation_height(Some(0));
+        let prog = PolkaVmProgram {
+            constructor: vec![PolkaVmInsn::LoadImm { rd: 0, imm: 1 }; 40],
+            dispatches: Vec::new(),
+        };
+        let Ok(blob) = encode_polkavm_blob(&prog) else {
+            panic!("blob");
+        };
+        let expected_base = 1_000 + (blob.len() as u64) * 25;
+        let Ok(alice) = EeIdentity::new(EeId::POLKAVM, vec![0x77; 32]) else {
+            panic!("alice");
+        };
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(low) = worker.execute(
+            &ctx_open(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice.clone(),
+                value: BudAmount(0),
+                input: blob.clone(),
+                gas_limit: expected_base - 1,
+                depth: 0,
+                tx_hash: [0xC1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low");
+        };
+        assert_eq!(low.status, OutcomeStatus::OutOfGas);
+
+        let Ok(ok) = worker.execute(
+            &ctx_open(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice,
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: expected_base + 50_000,
+                depth: 0,
+                tx_hash: [0xC2; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("ok");
+        };
+        assert_eq!(ok.status, OutcomeStatus::Success);
+        assert!(ok.gas_used >= expected_base);
+    }
 }
