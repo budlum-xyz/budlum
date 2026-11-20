@@ -406,6 +406,7 @@ pub fn check_burn_matches_lock_domain(
 }
 
 impl BridgeState {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             asset_locations: BTreeMap::new(),
@@ -658,6 +659,7 @@ impl BridgeState {
         Ok(())
     }
 
+    #[must_use]
     pub fn get_transfer(&self, message_id: &MessageId) -> Option<&BridgeTransfer> {
         self.transfers.get(message_id)
     }
@@ -890,6 +892,7 @@ impl BridgeState {
         Ok(())
     }
 
+    #[must_use]
     pub fn root(&self) -> Hash32 {
         // The root used to hash only asset_locations, leaving the transfers
         // (owner, recipient, amount, status) out of scope. The transfer
@@ -973,16 +976,19 @@ impl BridgeState {
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 
+    #[must_use]
     pub fn replay_root(&self) -> Hash32 {
         self.replay.root()
     }
 
+    #[must_use]
     pub fn source_event_hash(&self, message_id: &MessageId) -> Option<Hash32> {
         self.transfers
             .get(message_id)
             .map(|transfer| transfer.source_event_hash)
     }
 
+    #[must_use]
     pub fn transfer(&self, message_id: &MessageId) -> Option<&BridgeTransfer> {
         self.transfers.get(message_id)
     }
@@ -1308,6 +1314,7 @@ impl BridgeState {
 /// Canonical payload commitment for a bridge lock message.
 ///
 /// WIRING: computed by [`BridgeState::lock`] and verified by [`BridgeState::mint`].
+#[must_use]
 pub fn bridge_payload_hash(asset_id: AssetId, amount: u64) -> Hash32 {
     hash_fields_bytes(&[
         b"BDLM_BRIDGE_PAYLOAD_V1",

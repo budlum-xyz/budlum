@@ -576,10 +576,11 @@ pub struct Validator {
 }
 
 impl Validator {
+    #[must_use]
     pub fn new(address: Address, stake: u64) -> Self {
         let mut roles = BTreeSet::new();
         roles.insert(roles::VALIDATOR); // Default: consensus validator role
-        Validator {
+        Self {
             address,
             stake,
             active: true,
@@ -612,21 +613,25 @@ impl Validator {
     }
 
     /// Check if this validator has a specific role.
+    #[must_use]
     pub fn has_role(&self, role: &RoleId) -> bool {
         self.roles.contains(role)
     }
 
     /// Check if this validator is a consensus validator (has VALIDATOR role).
+    #[must_use]
     pub fn is_consensus_validator(&self) -> bool {
         self.has_role(&roles::VALIDATOR)
     }
 
     /// Check if this validator is a B.U.D. storage operator.
+    #[must_use]
     pub fn is_storage_operator(&self) -> bool {
         self.has_role(&roles::STORAGE_OPERATOR)
     }
 
     /// Check if this validator is an AI inference layer compute provider.
+    #[must_use]
     pub fn is_ai_operator(&self) -> bool {
         self.has_role(&roles::AI_OPERATOR)
     }
@@ -666,6 +671,7 @@ impl Validator {
     /// Check if this validator has the minimum
     /// Consensus keys required for mainnet block production and hybrid finality.
     /// VRF, BLS, and PQ keys must all belong to the same validator stake set.
+    #[must_use]
     pub fn has_consensus_keys(&self) -> bool {
         !self.vrf_public_key.is_empty()
             && !self.bls_public_key.is_empty()
@@ -676,6 +682,7 @@ impl Validator {
     ///
     /// This is stricter than `has_consensus_keys`: a validator must have
     /// VRF + BLS + Proof-of-Possession before it can count toward quorum.
+    #[must_use]
     pub fn is_consensus_ready(&self) -> bool {
         self.has_consensus_keys() && !self.pop_signature.is_empty()
     }
@@ -686,6 +693,7 @@ impl Validator {
     /// The `PoP` must be bound to this chain id (R11: a `PoP` over only the key
     /// replays across chains, so an operator slashed on one chain could
     /// re-register the same key elsewhere without a fresh possession proof).
+    #[must_use]
     pub fn verify_pop_is_valid(&self, chain_id: u64) -> bool {
         if self.pop_signature.is_empty() || self.bls_public_key.is_empty() {
             return false;
@@ -702,6 +710,7 @@ impl Validator {
     /// Full readiness check - VRF + BLS + `PoP` signature.
     /// Mainnet validators MUST pass this check before participating in
     /// Consensus. Returns list of missing key types.
+    #[must_use]
     pub fn missing_consensus_keys(&self) -> Vec<&'static str> {
         let mut missing = Vec::new();
         if self.vrf_public_key.is_empty() {
@@ -727,6 +736,7 @@ impl Validator {
         self.stake.saturating_add(self.restaked_weight)
     }
 
+    #[must_use]
     pub fn effective_stake(&self) -> u64 {
         if self.slashed || self.jailed {
             0
@@ -734,6 +744,7 @@ impl Validator {
             self.stake
         }
     }
+    #[must_use]
     pub fn is_eligible(&self, current_epoch: u64) -> bool {
         self.active && !self.slashed && (!self.jailed || current_epoch >= self.jail_until)
     }
@@ -996,8 +1007,9 @@ pub enum TxAuthority {
 }
 
 impl AccountState {
+    #[must_use]
     pub fn new() -> Self {
-        AccountState {
+        Self {
             accounts: BTreeMap::new(),
             validators: BTreeMap::new(),
             tokenomics: crate::tokenomics::TokenomicsParams::default(),
@@ -1064,7 +1076,7 @@ impl AccountState {
     /// Returns the load error when stored accounts cannot be read. The caller
     /// must not continue with an empty state in that case.
     pub fn with_storage(storage: Storage) -> Result<Self, String> {
-        let mut state = AccountState {
+        let mut state = Self {
             accounts: BTreeMap::new(),
             validators: BTreeMap::new(),
             tokenomics: crate::tokenomics::TokenomicsParams::default(),
@@ -1128,6 +1140,7 @@ impl AccountState {
         state.load_from_storage()?;
         Ok(state)
     }
+    #[must_use]
     pub fn from_snapshot(snapshot: &crate::chain::snapshot::StateSnapshot) -> Self {
         let mut accounts = BTreeMap::new();
         for (addr, balance) in &snapshot.balances {
@@ -1140,7 +1153,7 @@ impl AccountState {
         for (addr, v) in &snapshot.validators {
             validators.insert(*addr, v.clone());
         }
-        AccountState {
+        Self {
             accounts,
             validators,
             tokenomics: crate::tokenomics::TokenomicsParams::default(),
@@ -1256,7 +1269,7 @@ impl AccountState {
             message_registry.root()
         };
 
-        AccountState {
+        Self {
             accounts,
             validators,
             tokenomics,
@@ -1690,32 +1703,29 @@ impl AccountState {
                 provided: balance,
             });
         }
-        let total = match self.registry.get(address, role) {
-            Some(existing) => {
-                if !matches!(existing.status, crate::registry::MemberStatus::Active) {
-                    return Err(RegistryError::NotActive {
-                        account: *address,
-                        role,
-                    });
-                }
-                existing
-                    .stake
-                    .checked_add(amount)
-                    .ok_or(RegistryError::InsufficientStake {
-                        required: amount,
-                        provided: existing.stake,
-                    })?
+        let total = if let Some(existing) = self.registry.get(address, role) {
+            if !matches!(existing.status, crate::registry::MemberStatus::Active) {
+                return Err(RegistryError::NotActive {
+                    account: *address,
+                    role,
+                });
             }
-            None => {
-                let min_stake = self.registry.params().min_stake;
-                if amount < min_stake {
-                    return Err(RegistryError::InsufficientStake {
-                        required: min_stake,
-                        provided: amount,
-                    });
-                }
-                amount
+            existing
+                .stake
+                .checked_add(amount)
+                .ok_or(RegistryError::InsufficientStake {
+                    required: amount,
+                    provided: existing.stake,
+                })?
+        } else {
+            let min_stake = self.registry.params().min_stake;
+            if amount < min_stake {
+                return Err(RegistryError::InsufficientStake {
+                    required: min_stake,
+                    provided: amount,
+                });
             }
+            amount
         };
         let account = self.get_or_create(address);
         account.balance -= amount;
@@ -3508,7 +3518,7 @@ impl AccountState {
         // clearing a threshold that names a third. The reduction saturates and
         // keeps the address in `voters`, exactly as the unbonding, report and
         // governance-slash paths do, so it cannot vote a second time.
-        for proposal in self.governance.proposals.iter_mut() {
+        for proposal in &mut self.governance.proposals {
             if proposal.status == crate::core::governance::ProposalStatus::Active {
                 proposal.reduce_vote_weight(address, u64::MAX);
             }
@@ -3633,7 +3643,7 @@ impl AccountState {
                     .map_or(0, |validator| validator.stake);
                 let bond_penalty = outcome.as_ref().map_or(0, |slash| slash.penalty);
                 if let Some(validator) = self.validators.get_mut(&report.offender) {
-                    let penalty = outcome.as_ref().map(|o| o.penalty).unwrap_or(0);
+                    let penalty = outcome.as_ref().map_or(0, |o| o.penalty);
                     validator.stake = validator.stake.saturating_sub(penalty);
                     if report.condition() == crate::registry::SlashingCondition::LivenessFault {
                         // (decision A+B): a liveness fault is
@@ -3688,7 +3698,7 @@ impl AccountState {
                 // lets roughly a quarter of the stake reach a threshold that
                 // names a third. This is the reduction the `Unstake` path
                 // performs when stake moves, applied to the same rows.
-                for proposal in self.governance.proposals.iter_mut() {
+                for proposal in &mut self.governance.proposals {
                     if proposal.status == crate::core::governance::ProposalStatus::Active {
                         proposal.reduce_vote_weight(&report.offender, u64::MAX);
                     }
@@ -4108,7 +4118,7 @@ impl AccountState {
         let current_epoch = self.epoch_index;
         let mut to_execute = Vec::new();
 
-        for proposal in self.governance.proposals.iter_mut() {
+        for proposal in &mut self.governance.proposals {
             if proposal.status == crate::core::governance::ProposalStatus::Active
                 && current_epoch >= proposal.end_epoch
             {
@@ -4238,7 +4248,7 @@ impl AccountState {
         // Validator yield. Validator income is exclusively the transaction fee
         // Credited by Executor::apply_block_checked.
 
-        for (addr, validator) in self.validators.iter_mut() {
+        for (addr, validator) in &mut self.validators {
             if validator.jailed && validator.jail_until <= self.epoch_index {
                 tracing::info!("Validator {addr} released from jail");
                 validator.jailed = false;
@@ -4398,7 +4408,7 @@ impl AccountState {
                     // Measure exact drop across validator stake, unbonding queue,
                     // and delegation records so burned supply is booked once.
                     self.record_destroyed_since(committed_before);
-                    for proposal in self.governance.proposals.iter_mut() {
+                    for proposal in &mut self.governance.proposals {
                         if proposal.status == crate::core::governance::ProposalStatus::Active {
                             proposal.reduce_vote_weight(address, u64::MAX);
                         }

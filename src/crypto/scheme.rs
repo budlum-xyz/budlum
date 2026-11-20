@@ -208,6 +208,7 @@ pub struct SchemeInfo {
 }
 
 /// The scheme table of section 6.5. Sorted by identifier.
+///
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const SCHEMES: &[SchemeInfo] = &[
     SchemeInfo {
@@ -415,6 +416,7 @@ pub struct SuiteInfo {
 }
 
 /// The suite table of section 6.5. Sorted by identifier.
+///
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const SUITES: &[SuiteInfo] = &[
     SuiteInfo {

@@ -1762,6 +1762,7 @@ fn validate_operator_bind_address(
 /// callers. If it changes, the timing-safe CI gate (static scan plus a
 /// dudect-style statistical test) has to stay green.
 #[doc(hidden)]
+#[must_use]
 pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
     // Walk the expected value `b` in full on every call, fold the length
@@ -5685,18 +5686,17 @@ impl BudlumApiServer for RpcServer {
                 return Ok(());
             }
         };
-        let slot = match feed_slot() {
-            Some(slot) => slot,
-            None => {
-                pending
-                    .reject(ErrorObjectOwned::owned(
-                        -32005,
-                        "subscription limit reached; retry later",
-                        None::<()>,
-                    ))
-                    .await;
-                return Ok(());
-            }
+        let slot = if let Some(slot) = feed_slot() {
+            slot
+        } else {
+            pending
+                .reject(ErrorObjectOwned::owned(
+                    -32005,
+                    "subscription limit reached; retry later",
+                    None::<()>,
+                ))
+                .await;
+            return Ok(());
         };
         let sink = pending.accept().await?;
         let chain = self.chain.clone();

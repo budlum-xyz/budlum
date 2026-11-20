@@ -256,12 +256,11 @@ impl PlacementTable {
         }
         let baseline_bytes = self
             .lookup(chosen.n_full, 0)
-            .map(|full_only| {
+            .map_or(total_bytes, |full_only| {
                 full_only
                     .total_symbols()
                     .saturating_mul(u64::from(symbol_size))
-            })
-            .unwrap_or(total_bytes);
+            });
         if total_bytes > baseline_bytes {
             Some((baseline_bytes, total_bytes - baseline_bytes))
         } else {

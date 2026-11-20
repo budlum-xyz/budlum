@@ -596,6 +596,7 @@ pub struct PoAAuthoritySignature {
 /// signature made under `_V1`-`_V4` (each of which lacked some of these
 /// fields) does not verify here, so no pre-fix attestation can be replayed
 /// against the chain- and commitment-metadata-bound verifier.
+#[must_use]
 pub fn poa_commit_signing_message(
     chain_id: u64,
     domain_id: DomainId,
@@ -782,6 +783,7 @@ fn certificate_schemes(
 
 /// Count leading zero bits in a 32-byte block hash (big-endian byte order).
 /// Used as a minimal `PoW` difficulty check for declared domain heads.
+#[must_use]
 pub fn leading_zero_bits(hash: &crate::domain::Hash32) -> u32 {
     let mut bits = 0u32;
     for b in hash {
@@ -1280,6 +1282,7 @@ impl PoAFinalityAdapter {
     /// fails closed by requiring every authority, and the multiplication
     /// saturates instead of wrapping, so a numerator wide enough to overflow
     /// cannot lower the bar either.
+    #[must_use]
     pub fn required_signatures(&self, authority_count: usize) -> usize {
         if self.quorum_denominator == 0 {
             return authority_count;
@@ -2435,10 +2438,12 @@ pub fn hash_finality_proof(proof: &FinalityProof) -> Result<[u8; 32], FinalityEr
     ]))
 }
 
+#[must_use]
 pub fn empty_event_root() -> [u8; 32] {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_EMPTY_DOMAIN_EVENT_ROOT_V1"])
 }
 
+#[must_use]
 pub fn block_finality_proof_hash(_block: &Block) -> [u8; 32] {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_NO_FINALITY_PROOF_YET_V1"])
 }

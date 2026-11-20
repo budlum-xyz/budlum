@@ -19,14 +19,17 @@ use serde::{Deserialize, Serialize};
 pub struct RoleId(pub u32);
 
 impl RoleId {
+    #[must_use]
     pub const fn new(id: u32) -> Self {
-        RoleId(id)
+        Self(id)
     }
 
+    #[must_use]
     pub const fn value(&self) -> u32 {
         self.0
     }
 
+    #[must_use]
     pub fn as_bytes(&self) -> [u8; 4] {
         self.0.to_le_bytes()
     }
@@ -46,7 +49,7 @@ impl std::fmt::Display for RoleId {
             roles::ATTESTER => write!(f, "attester"),
             roles::AI_OPERATOR => write!(f, "ai_operator"),
             roles::CONTENT_VALIDATOR => write!(f, "content_validator"),
-            RoleId(id) => write!(f, "role#{id}"),
+            Self(id) => write!(f, "role#{id}"),
         }
     }
 }

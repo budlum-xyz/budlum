@@ -1060,12 +1060,11 @@ pub fn configure_domain_economic_guard(
 
     if let Some((old_prover, old_atoms)) = prior_bond {
         if old_atoms > 0 {
-            let old_u64 = match u64::try_from(old_atoms) {
-                Ok(v) => v,
-                Err(_) => {
-                    state.bridge_state.economic_guard = guard_before;
-                    return Err("Existing prover bond exceeds u64 escrow representation".into());
-                }
+            let old_u64 = if let Ok(v) = u64::try_from(old_atoms) {
+                v
+            } else {
+                state.bridge_state.economic_guard = guard_before;
+                return Err("Existing prover bond exceeds u64 escrow representation".into());
             };
             if let Err(err) = state.release_external_bond(&old_prover, old_u64) {
                 state.bridge_state.economic_guard = guard_before;
@@ -1146,19 +1145,17 @@ pub fn report_bridge_contradiction(
             state.bridge_state.economic_guard = guard_before;
             return Err("Slashed bond outcome missing prover address".into());
         };
-        let slashed_u64 = match u64::try_from(outcome.slashed_bond_atoms) {
-            Ok(v) => v,
-            Err(_) => {
-                state.bridge_state.economic_guard = guard_before;
-                return Err("Slashed bond exceeds u64 escrow representation".into());
-            }
+        let slashed_u64 = if let Ok(v) = u64::try_from(outcome.slashed_bond_atoms) {
+            v
+        } else {
+            state.bridge_state.economic_guard = guard_before;
+            return Err("Slashed bond exceeds u64 escrow representation".into());
         };
-        let reward_u64 = match u64::try_from(outcome.challenger_reward_atoms) {
-            Ok(v) => v,
-            Err(_) => {
-                state.bridge_state.economic_guard = guard_before;
-                return Err("Challenger reward exceeds u64 escrow representation".into());
-            }
+        let reward_u64 = if let Ok(v) = u64::try_from(outcome.challenger_reward_atoms) {
+            v
+        } else {
+            state.bridge_state.economic_guard = guard_before;
+            return Err("Challenger reward exceeds u64 escrow representation".into());
         };
         if let Err(err) = state.slash_external_bond(&prover, slashed_u64, reward_u64, &challenger) {
             state.bridge_state.economic_guard = guard_before;

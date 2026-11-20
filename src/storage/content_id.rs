@@ -40,6 +40,7 @@ pub struct ContentId(pub Hash32);
 
 impl ContentId {
     /// Compute the `ContentId` of a chunk.
+    #[must_use]
     pub fn of(chunk: &[u8]) -> Self {
         Self(hash_fields_bytes(&[b"BDLM_CONTENT_V1", chunk]))
     }
@@ -55,6 +56,7 @@ impl ContentId {
     /// "interim retrieval challenge" limitation, see
     /// `crate::domain::storage_deal::RetrievalChallenge` for the long
     /// Warning comment and the README cross-link.
+    #[must_use]
     pub fn of_subrange(chunk: &[u8], start: u64, end: u64) -> Self {
         if start > end || end > chunk.len() as u64 {
             // Out-of-range requests still get a deterministic hash (so the
@@ -100,6 +102,7 @@ impl ContentId {
     /// and it removes the free version of the attack: colluding operators now
     /// have to relay each other's live challenges rather than precompute one
     /// answer set. See `docs/STORAGE.md` (in construction).
+    #[must_use]
     pub fn of_subrange_for_deal(
         chunk: &[u8],
         start: u64,
@@ -118,6 +121,7 @@ impl ContentId {
         ]))
     }
 
+    #[must_use]
     pub const fn as_bytes(&self) -> &Hash32 {
         &self.0
     }

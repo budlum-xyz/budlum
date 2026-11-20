@@ -510,7 +510,7 @@ mod nft_registry_tests {
         );
     }
 
-    /// A with_body record reports exactly the body length it holds, so the
+    /// A `with_body` record reports exactly the body length it holds, so the
     /// rent meter can run over the `WithBody.body` field and over
     /// nothing else.
     #[test]

@@ -260,6 +260,7 @@ fn take_preview(rest: &str) -> String {
 }
 
 /// The slots a template will fill, in document order, duplicates refused.
+///
 /// This is the list a consent screen shows, and the reason it is extracted
 /// before any value is looked at is that the answer must not depend on the
 /// secrets.

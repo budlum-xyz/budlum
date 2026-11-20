@@ -434,6 +434,7 @@ pub fn disclosure_proof(leaves: &[[u8; 32]], leaf_index: usize) -> Option<Disclo
 }
 
 /// Recomputes the leaf from the disclosure material and walks it to a root.
+///
 /// True only if that root is the expected one; every failure mode (wrong
 /// salt, wrong value digest, wrong name, tampered path) lands in `false`,
 /// never in a panic or a "looks close enough".

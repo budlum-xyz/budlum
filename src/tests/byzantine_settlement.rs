@@ -119,14 +119,14 @@ mod byzantine_settlement_tests {
         all_commitments.extend(pos_commitments.clone());
         all_commitments.extend(poa_commitments.clone());
 
-        for (com, _proof) in all_commitments.iter() {
+        for (com, _proof) in &all_commitments {
             node_a.submit_domain_commitment(com.clone()).unwrap();
         }
         let root_a = node_a.build_global_header(None).domain_commitment_root;
 
         let mut all_commitments_shuffled = all_commitments.clone();
         all_commitments_shuffled.reverse();
-        for (com, _proof) in all_commitments_shuffled.iter() {
+        for (com, _proof) in &all_commitments_shuffled {
             node_b.submit_domain_commitment(com.clone()).unwrap();
         }
         let root_b = node_b.build_global_header(None).domain_commitment_root;
@@ -724,7 +724,7 @@ mod byzantine_settlement_tests {
     async fn test_async_gossip_message_delay_reordering_convergence() {
         let mut nodes = [make_node(), make_node(), make_node()];
         let accounts: Vec<Address> = (0..10).map(|i| Address::from([i as u8; 32])).collect();
-        for node in nodes.iter_mut() {
+        for node in &mut nodes {
             for acc in &accounts {
                 node.state.add_balance(acc, 1000);
             }
@@ -757,7 +757,7 @@ mod byzantine_settlement_tests {
     async fn test_async_gossip_packet_drop_later_recovery() {
         let mut nodes = [make_node(), make_node(), make_node()];
         let accounts: Vec<Address> = (0..10).map(|i| Address::from([i as u8; 32])).collect();
-        for node in nodes.iter_mut() {
+        for node in &mut nodes {
             for acc in &accounts {
                 node.state.add_balance(acc, 1000);
             }
@@ -782,7 +782,7 @@ mod byzantine_settlement_tests {
 
         assert_ne!(h0_hash, h1_hash);
 
-        for node in nodes.iter_mut() {
+        for node in &mut nodes {
             for com in commitments.iter().cloned() {
                 let _ = node.submit_domain_commitment(com);
             }
@@ -803,7 +803,7 @@ mod byzantine_settlement_tests {
     async fn test_partial_commit_propagation_conflict_deterministic_tiebreak() {
         let mut nodes = vec![make_node(), make_node(), make_node()];
         let alice = Address::from([0xA1u8; 32]);
-        for node in nodes.iter_mut() {
+        for node in &mut nodes {
             node.state.add_balance(&alice, 1000);
         }
         let com_pow = make_commitment_for_account(&nodes[0], 1, alice, 1, 1);
@@ -816,7 +816,7 @@ mod byzantine_settlement_tests {
         assert_eq!(nodes[1].state.get_nonce(&alice), 1);
         assert_eq!(nodes[2].state.get_nonce(&alice), 0);
 
-        for node in nodes.iter_mut() {
+        for node in &mut nodes {
             let _ = node.submit_domain_commitment(com_pow.clone());
             let _ = node.submit_domain_commitment(com_pos.clone());
         }
@@ -836,13 +836,13 @@ mod byzantine_settlement_tests {
         let node_count = 5;
         let mut nodes: Vec<Blockchain> = (0..node_count).map(|_| make_node()).collect();
         let accounts: Vec<Address> = (0..50).map(|i| Address::from([i as u8; 32])).collect();
-        for node in nodes.iter_mut() {
+        for node in &mut nodes {
             for acc in &accounts {
                 node.state.add_balance(acc, 1000);
             }
         }
         let commitments = make_non_conflicting_commitments(&nodes[0], &accounts, 500);
-        for com in commitments.iter() {
+        for com in &commitments {
             for node in nodes.iter_mut().take(node_count) {
                 if rng.random::<f64>() < 0.20 {
                     continue;
@@ -856,7 +856,7 @@ mod byzantine_settlement_tests {
         for _round in 0..5 {
             let mut shuffled = commitments.clone();
             shuffled.shuffle(&mut rng);
-            for node in nodes.iter_mut() {
+            for node in &mut nodes {
                 for com in shuffled.iter().cloned() {
                     let _ = node.submit_domain_commitment(com);
                 }
@@ -891,16 +891,16 @@ mod byzantine_settlement_tests {
         let c2 = make_domain_commitment_at_height(&nodes[0], domain_id, 10, "state_b", 11);
         let _ = nodes[0].submit_domain_commitment(c1.clone());
         let _ = nodes[1].submit_domain_commitment(c2.clone());
-        for node in nodes.iter_mut() {
+        for node in &mut nodes {
             let _ = node.submit_domain_commitment(c1.clone());
             let _ = node.submit_domain_commitment(c2.clone());
         }
-        for node in nodes.iter() {
+        for node in &nodes {
             let domain = node.state.settlement.domains.get(domain_id).unwrap();
             assert_eq!(domain.status, DomainStatus::Frozen);
         }
         let c3 = make_domain_commitment_at_height(&nodes[0], domain_id, 11, "state_c", 12);
-        for node in nodes.iter_mut() {
+        for node in &mut nodes {
             assert!(node.submit_domain_commitment(c3.clone()).is_err());
         }
     }

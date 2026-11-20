@@ -17,23 +17,25 @@ pub enum MessageKind {
 
 impl MessageKind {
     /// The variant's name, for error text that reports what arrived.
+    #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
-            MessageKind::BridgeLock => "BridgeLock",
-            MessageKind::BridgeMint => "BridgeMint",
-            MessageKind::BridgeBurn => "BridgeBurn",
-            MessageKind::BridgeUnlock => "BridgeUnlock",
-            MessageKind::Custom(_) => "Custom",
+            Self::BridgeLock => "BridgeLock",
+            Self::BridgeMint => "BridgeMint",
+            Self::BridgeBurn => "BridgeBurn",
+            Self::BridgeUnlock => "BridgeUnlock",
+            Self::Custom(_) => "Custom",
         }
     }
 
+    #[must_use]
     pub fn as_bytes(&self) -> Vec<u8> {
         match self {
-            MessageKind::BridgeLock => b"bridge-lock".to_vec(),
-            MessageKind::BridgeMint => b"bridge-mint".to_vec(),
-            MessageKind::BridgeBurn => b"bridge-burn".to_vec(),
-            MessageKind::BridgeUnlock => b"bridge-unlock".to_vec(),
-            MessageKind::Custom(bytes) => {
+            Self::BridgeLock => b"bridge-lock".to_vec(),
+            Self::BridgeMint => b"bridge-mint".to_vec(),
+            Self::BridgeBurn => b"bridge-burn".to_vec(),
+            Self::BridgeUnlock => b"bridge-unlock".to_vec(),
+            Self::Custom(bytes) => {
                 let mut out = b"custom:".to_vec();
                 out.extend_from_slice(bytes);
                 out
@@ -121,8 +123,9 @@ pub const fn quantum_class_from_code(code: u8) -> Option<Option<QuantumClass>> {
 }
 
 impl CrossDomainMessage {
+    #[must_use]
     pub fn new(params: CrossDomainMessageParams) -> Self {
-        let mut message = CrossDomainMessage {
+        let mut message = Self {
             message_id: [0u8; 32],
             correlation_id: None,
             source_domain: params.source_domain,
@@ -153,6 +156,7 @@ impl CrossDomainMessage {
         self
     }
 
+    #[must_use]
     pub fn new_correlated(params: CrossDomainMessageParams, correlation_id: MessageId) -> Self {
         let mut message = Self::new(params);
         message.correlation_id = Some(correlation_id);
@@ -241,6 +245,7 @@ impl CrossDomainMessage {
         .map_err(|e| format!("message sender signature does not verify: {e}"))
     }
 
+    #[must_use]
     pub fn calculate_message_id(&self) -> MessageId {
         let kind = self.kind.as_bytes();
         // Presence is folded in through the shared
@@ -265,6 +270,7 @@ impl CrossDomainMessage {
         ])
     }
 
+    #[must_use]
     pub fn verify_id(&self) -> bool {
         self.message_id == self.calculate_message_id()
     }

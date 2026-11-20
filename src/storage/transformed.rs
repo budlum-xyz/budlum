@@ -578,7 +578,7 @@ mod tests {
         assert!(ContentClass::RecipeWire.may_try_zlib());
     }
 
-    /// Task 3 step 6: PRE_SHRUNK is never lifted on the entropy classes.
+    /// Task 3 step 6: `PRE_SHRUNK` is never lifted on the entropy classes.
     #[test]
     fn matrix_zlib_never_grows_entropy() {
         let entropy_inputs: Vec<Vec<u8>> = vec![

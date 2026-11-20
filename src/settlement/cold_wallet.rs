@@ -572,28 +572,26 @@ impl ColdWalletState {
                 let next_spent = if self.signed_count == 0 {
                     request.value_atoms
                 } else {
-                    match self.epoch_spent_atoms.checked_add(request.value_atoms) {
-                        Some(total) => total,
-                        None => {
-                            let err = ColdRefusal::EpochBudgetExceeded {
-                                spent: self.epoch_spent_atoms,
-                                requested: request.value_atoms,
-                                budget: self.policy.max_value_per_epoch_atoms,
-                            };
-                            self.record_refusal(request, &err);
-                            return Err(err);
-                        }
-                    }
-                };
-                let next_count = match self.signed_count.checked_add(1) {
-                    Some(count) => count,
-                    None => {
-                        let err = ColdRefusal::InvalidState {
-                            rule: "signed-count-exhausted".to_string(),
+                    if let Some(total) = self.epoch_spent_atoms.checked_add(request.value_atoms) {
+                        total
+                    } else {
+                        let err = ColdRefusal::EpochBudgetExceeded {
+                            spent: self.epoch_spent_atoms,
+                            requested: request.value_atoms,
+                            budget: self.policy.max_value_per_epoch_atoms,
                         };
                         self.record_refusal(request, &err);
                         return Err(err);
                     }
+                };
+                let next_count = if let Some(count) = self.signed_count.checked_add(1) {
+                    count
+                } else {
+                    let err = ColdRefusal::InvalidState {
+                        rule: "signed-count-exhausted".to_string(),
+                    };
+                    self.record_refusal(request, &err);
+                    return Err(err);
                 };
                 self.last_signed_height = request.height;
                 self.last_signed_nonce = request.nonce;

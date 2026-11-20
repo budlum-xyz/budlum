@@ -53,6 +53,7 @@ pub struct PoaMember {
 }
 
 impl PoaMember {
+    #[must_use]
     pub fn is_authorized(&self) -> bool {
         matches!(self.status, MembershipStatus::Approved)
     }
@@ -87,32 +88,32 @@ pub enum PoaMembershipError {
 impl std::fmt::Display for PoaMembershipError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PoaMembershipError::NotAnAdmin { caller, domain } => {
+            Self::NotAnAdmin { caller, domain } => {
                 write!(f, "{caller} is not an admin of PoA domain {domain}")
             }
-            PoaMembershipError::NotFound { account, domain } => {
+            Self::NotFound { account, domain } => {
                 write!(f, "no PoA membership for {account} in domain {domain}")
             }
-            PoaMembershipError::AlreadyApplied { account, domain } => {
+            Self::AlreadyApplied { account, domain } => {
                 write!(f, "{account} already applied to PoA domain {domain}")
             }
-            PoaMembershipError::InvalidTransition { from } => {
+            Self::InvalidTransition { from } => {
                 write!(f, "invalid membership transition from {from:?}")
             }
-            PoaMembershipError::MissingKyc => write!(f, "missing KYC commitment"),
-            PoaMembershipError::LastAdmin => {
+            Self::MissingKyc => write!(f, "missing KYC commitment"),
+            Self::LastAdmin => {
                 write!(
                     f,
                     "the last admin of a PoA domain cannot be removed by admins"
                 )
             }
-            PoaMembershipError::InvalidValidityHorizon { requested, max } => {
+            Self::InvalidValidityHorizon { requested, max } => {
                 write!(
                     f,
                     "KYC validity horizon {requested} exceeds the bound {max}"
                 )
             }
-            PoaMembershipError::NotPermissioned { domain } => {
+            Self::NotPermissioned { domain } => {
                 write!(
                     f,
                     "PoA domain {domain} runs no admission control, so there is no one to decide an application"
@@ -137,6 +138,7 @@ pub struct PoaMembershipRegistry {
 }
 
 impl PoaMembershipRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             admins: BTreeMap::new(),
@@ -245,6 +247,7 @@ impl PoaMembershipRegistry {
             .is_some_and(|((d, _), ())| *d == domain)
     }
 
+    #[must_use]
     pub fn is_admin(&self, domain: DomainId, account: &Address) -> bool {
         self.admins.contains_key(&(domain, *account))
     }
@@ -253,6 +256,7 @@ impl PoaMembershipRegistry {
     /// with the onboarding layer's KYC expiry map - one digest over the
     /// whole admission state, computed by
     /// [`crate::registry::poa_onboarding::PoAOnboarding::root`].
+    #[must_use]
     pub fn root_with_expiry(&self, kyc_expiry: &BTreeMap<(DomainId, Address), u64>) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
@@ -422,10 +426,12 @@ impl PoaMembershipRegistry {
             .is_some_and(PoaMember::is_authorized)
     }
 
+    #[must_use]
     pub fn get(&self, domain: DomainId, account: &Address) -> Option<&PoaMember> {
         self.members.get(&(domain, *account))
     }
 
+    #[must_use]
     pub fn authorized_members(&self, domain: DomainId) -> Vec<&PoaMember> {
         self.members
             .values()

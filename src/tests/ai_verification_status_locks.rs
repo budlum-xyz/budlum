@@ -202,7 +202,7 @@ fn prove_mlp_inference_proves_the_matmul_guest() {
     );
 }
 
-/// The ReLU sign test must stay signed. `Lt` is unsigned in the VM, so
+/// The `ReLU` sign test must stay signed. `Lt` is unsigned in the VM, so
 /// `Lt(acc, zero)` is vacuous and lets negative activations through.
 #[test]
 fn guest_relu_uses_the_signed_field_threshold() {

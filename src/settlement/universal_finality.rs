@@ -24,11 +24,11 @@ use serde::{Deserialize, Serialize};
 const BPS_SCALE: u16 = 10_000;
 /// Optimal asynchronous/partially-synchronous BFT safety bound (`floor(10_000 / 3) - 1 = 3333 bps`).
 const BFT_FAULT_TOLERANCE_BPS: u16 = 3_333;
-/// Honest-majority Nakamoto PoW safety bound (`< 50%` hashpower = `4999 bps`).
+/// Honest-majority Nakamoto `PoW` safety bound (`< 50%` hashpower = `4999 bps`).
 const POW_FAULT_TOLERANCE_BPS: u16 = 4_999;
 /// Cryptographic STARK soundness (`1-of-N` honest prover; bounded only by hash collision resistance).
 const VALIDITY_PROOF_FAULT_TOLERANCE_BPS: u16 = 9_999;
-/// Minimum confirmation depth required before probabilistic PoW finality is
+/// Minimum confirmation depth required before probabilistic `PoW` finality is
 /// eligible for cross-domain value routing without slashable stake.
 const MIN_VALUE_SAFE_POW_CONFIRMATIONS: u64 = 6;
 
@@ -434,7 +434,7 @@ impl FinalityGuarantee {
 
     /// Whether this source guarantee alone satisfies the protocol bar for
     /// cross-domain value transfer: authenticated events plus either slashable
-    /// economic security, STARK validity, or deep cumulative PoW (`>= 6` blocks).
+    /// economic security, STARK validity, or deep cumulative `PoW` (`>= 6` blocks).
     #[must_use]
     pub const fn admits_cross_domain_value(&self) -> bool {
         if !self.attestation.event_root

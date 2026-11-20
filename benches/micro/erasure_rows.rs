@@ -89,12 +89,11 @@ fn run_rows(rs: &ReedSolomon, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
         .map(|i| {
             let mut out = vec![0u8; data[0].len()];
             for (j, shard) in data.iter().enumerate() {
-                let coeff = match rs.parity_coefficient(i, j) {
-                    Some(c) => c,
-                    None => {
-                        eprintln!("erasure_rows: the scheme has no coefficient ({i}, {j})");
-                        exit(2);
-                    }
+                let coeff = if let Some(c) = rs.parity_coefficient(i, j) {
+                    c
+                } else {
+                    eprintln!("erasure_rows: the scheme has no coefficient ({i}, {j})");
+                    exit(2);
                 };
                 if coeff == 0 {
                     continue;
@@ -138,12 +137,11 @@ where
             best = Some((spent, out));
         }
     }
-    match best {
-        Some(pair) => pair,
-        None => {
-            eprintln!("erasure_rows: no repetition ran, refusing to report");
-            exit(2);
-        }
+    if let Some(pair) = best {
+        pair
+    } else {
+        eprintln!("erasure_rows: no repetition ran, refusing to report");
+        exit(2);
     }
 }
 

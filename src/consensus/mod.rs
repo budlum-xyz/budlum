@@ -66,6 +66,7 @@ const PRODUCER_ROUND_CUSHION_MS: u128 = 500;
 /// One definition for the round pricing below: the producer and the verifier
 /// must ask the same question the same way, or the round stops being priced at
 /// all (CWE-807).
+#[must_use]
 pub fn now_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

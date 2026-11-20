@@ -90,7 +90,7 @@ pub struct MempoolConfig {
 
 impl Default for MempoolConfig {
     fn default() -> Self {
-        MempoolConfig {
+        Self {
             max_size: 20000,
             max_per_sender: 100,
             min_fee: 1,
@@ -236,6 +236,7 @@ pub struct Mempool {
 /// Reuses the protobuf `encoded_len` that `validate_tx_size` refuses on, so a
 /// transaction charged here is charged the number it was admitted against.
 /// The serialization is discarded; only the length is wanted.
+#[must_use]
 pub fn charged_bytes(tx: &Transaction) -> usize {
     use prost::Message;
     let proto = crate::network::proto_conversions::pb::ProtoTransaction::from(tx);
@@ -305,8 +306,9 @@ fn is_uol_home_stipend_tx(tx: &Transaction) -> bool {
 }
 
 impl Mempool {
+    #[must_use]
     pub fn new(config: MempoolConfig) -> Self {
-        Mempool {
+        Self {
             config,
             transactions: HashMap::new(),
             by_sender: HashMap::new(),
@@ -830,6 +832,7 @@ impl Mempool {
     /// The measure is [`duty_lane::block_bytes`], the one the block validator
     /// uses, so the share is a fraction of the quantity that is actually
     /// bounded.
+    #[must_use]
     pub fn get_sorted_transactions(&self, limit: usize) -> Vec<Transaction> {
         let mut result = Vec::with_capacity(limit);
         let duty_cap = self.config.duty_block_bytes;
@@ -865,6 +868,7 @@ impl Mempool {
     /// snapshot through [`Self::get_sorted_transactions`] would apply the duty
     /// lane's share to a copy of the pool, and every duty batch past the share
     /// would be dropped from the rebuilt pool instead of waiting for a block.
+    #[must_use]
     pub fn all_pending_transactions(&self, limit: usize) -> Vec<Transaction> {
         let mut result = Vec::with_capacity(limit);
 
@@ -902,6 +906,7 @@ impl Mempool {
         count
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.transactions.len()
     }
@@ -917,14 +922,17 @@ impl Mempool {
         self.by_sender.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.transactions.is_empty()
     }
 
+    #[must_use]
     pub fn get(&self, hash: &str) -> Option<&Transaction> {
         self.transactions.get(hash).map(|p| &p.tx)
     }
 
+    #[must_use]
     pub fn sender_transactions(&self, sender: &Address) -> Vec<Transaction> {
         self.by_sender
             .get(sender)
@@ -2399,7 +2407,7 @@ mod tests {
         let mut hit_cap = false;
         let window_ms: u128 = 10 * 60 * 1000;
         for window in 0u64..16 {
-            let now = (window as u128) * window_ms + 1;
+            let now = u128::from(window) * window_ms + 1;
             let tx = make_ack(&spammer, window, [window as u8; 32]);
             match pool.admit_at(tx, now) {
                 Ok(()) => admitted += 1,

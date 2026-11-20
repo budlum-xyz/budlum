@@ -1098,25 +1098,22 @@ impl BnsRegistry {
         if *caller == Address::zero() {
             return Err(BnsError::InvalidName);
         }
-        match name {
-            Some(name) => {
-                if !Self::is_valid_name(&name) {
-                    return Err(BnsError::InvalidName);
-                }
-                let record = self.names.get(&name).ok_or(BnsError::InvalidName)?;
-                if record.expires_at <= current_epoch {
-                    return Err(BnsError::Expired);
-                }
-                if &record.owner != caller && record.address.as_ref() != Some(caller) {
-                    return Err(BnsError::NotOwner);
-                }
-                self.primary_names.insert(*caller, name);
-                Ok(())
+        if let Some(name) = name {
+            if !Self::is_valid_name(&name) {
+                return Err(BnsError::InvalidName);
             }
-            None => {
-                self.primary_names.remove(caller);
-                Ok(())
+            let record = self.names.get(&name).ok_or(BnsError::InvalidName)?;
+            if record.expires_at <= current_epoch {
+                return Err(BnsError::Expired);
             }
+            if &record.owner != caller && record.address.as_ref() != Some(caller) {
+                return Err(BnsError::NotOwner);
+            }
+            self.primary_names.insert(*caller, name);
+            Ok(())
+        } else {
+            self.primary_names.remove(caller);
+            Ok(())
         }
     }
 

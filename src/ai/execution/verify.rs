@@ -30,6 +30,7 @@ pub struct ExecutionVerifyReport {
 }
 
 impl ExecutionVerifyReport {
+    #[must_use]
     pub fn is_structurally_valid(&self) -> bool {
         self.commitments_ok
             && self.model_bound
@@ -40,12 +41,14 @@ impl ExecutionVerifyReport {
     }
 
     /// Structural + STARK: requires `stark_ok == Some(true)`.
+    #[must_use]
     pub fn is_fully_valid(&self) -> bool {
         self.is_structurally_valid() && self.stark_ok == Some(true)
     }
 }
 
 /// Structural checks (no STARK). Used when guest bytecode is not available.
+#[must_use]
 pub fn verify_execution_proof_structural(
     proof: &AiExecutionProof,
     request: &AiInferenceRequest,
@@ -54,6 +57,7 @@ pub fn verify_execution_proof_structural(
     verify_execution_proof_structural_with_model(proof, request, result, None)
 }
 
+#[must_use]
 pub fn verify_execution_proof_structural_with_model(
     proof: &AiExecutionProof,
     request: &AiInferenceRequest,
@@ -182,6 +186,7 @@ pub fn expected_mlp_output_event_digest(
 /// structural function alone accepts a proof it never cryptographically
 /// checked, and one that reaches for the STARK alone accepts a proof whose
 /// commitments do not match the request it is attached to.
+#[must_use]
 pub fn verify_execution_proof_full(
     proof: &AiExecutionProof,
     request: &AiInferenceRequest,

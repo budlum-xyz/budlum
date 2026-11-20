@@ -265,6 +265,7 @@ impl PoAEngine {
     /// Is produced, since its hash is unknown beforehand.
     /// Test-only convenience wrapper.
     #[cfg(test)]
+    #[must_use]
     pub fn leader_slot(block_index: u64, active_validators: &[&Validator]) -> Option<usize> {
         Self::leader_slot_with_entropy(block_index, active_validators, &[0u8; 32], 0)
     }
@@ -1092,7 +1093,7 @@ mod tests {
         assert!(block.composite_pq_key().is_some());
         assert!(block.verify_signature());
 
-        let pq_bytes = block.composite_pq_key().unwrap().to_vec();
+        let pq_bytes = block.composite_pq_key().unwrap().clone();
         let unregistered_err = engine.validate_block(&block, &[], &state).unwrap_err();
         assert!(
             unregistered_err
@@ -1111,7 +1112,7 @@ mod tests {
             )
             .unwrap();
         state.validators.get_mut(&pubkey).unwrap().pq_public_key =
-            wrong_block.composite_pq_key().unwrap().to_vec();
+            wrong_block.composite_pq_key().unwrap().clone();
         let mismatch_err = engine.validate_block(&block, &[], &state).unwrap_err();
         assert!(
             mismatch_err

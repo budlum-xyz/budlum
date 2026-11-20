@@ -45,7 +45,7 @@ mod settlement_prod_tests {
             ConsensusKind::PoA => "poa-authority-quorum",
             _ => "custom",
         };
-        default_domain(id, kind, 45262 + id as u64, adapter, 0)
+        default_domain(id, kind, 45262 + u64::from(id), adapter, 0)
     }
 
     fn commitment_for(
@@ -109,7 +109,7 @@ mod settlement_prod_tests {
         let mut validators = Vec::new();
         let mut sks = Vec::new();
         for i in 0..3u8 {
-            let sk = Scalar::from(1000 + i as u64);
+            let sk = Scalar::from(1000 + u64::from(i));
             let pk = G2Affine::from(G2Affine::generator() * sk)
                 .to_compressed()
                 .to_vec();
@@ -857,7 +857,7 @@ mod settlement_prod_tests {
                 target_domain: 2,
                 source_height: 44,
                 event_index: index,
-                nonce: index as u64,
+                nonce: u64::from(index),
                 sender: test_addr_from_byte(1u8),
                 recipient: test_addr_from_byte(2u8),
                 payload_hash,
@@ -1192,7 +1192,7 @@ mod settlement_prod_tests {
         let mut d = default_domain(
             id,
             ConsensusKind::Bft,
-            45262 + id as u64,
+            45262 + u64::from(id),
             "bft-quorum-commit",
             0,
         );
@@ -1204,7 +1204,7 @@ mod settlement_prod_tests {
         default_domain(
             id,
             ConsensusKind::Zk,
-            45262 + id as u64,
+            45262 + u64::from(id),
             "zk-proof-verification",
             0,
         )
@@ -1655,7 +1655,7 @@ mod settlement_prod_tests {
                 target_domain: 2,
                 source_height: 10,
                 event_index: i,
-                nonce: i as u64,
+                nonce: u64::from(i),
                 sender: test_addr_from_byte(1u8),
                 recipient: test_addr_from_byte(2u8),
                 payload_hash: ph,
@@ -2143,7 +2143,7 @@ mod zk_finality_real_proof {
         default_domain(
             DOMAIN_ID,
             ConsensusKind::Zk,
-            45262 + DOMAIN_ID as u64,
+            45262 + u64::from(DOMAIN_ID),
             "zk-proof-verification",
             0,
         )
