@@ -1962,4 +1962,100 @@ mod all_selection_tests {
         assert!(canaries.contains(&"tree-pin"));
         assert_eq!(canaries.len(), GATES.len(), "every canary runs");
     }
+
+    /// Names the gates that neither `--all` runs nor any workflow step calls.
+    ///
+    /// Kept apart from the assertions so the judgement can be canaried with a
+    /// synthetic roster: the real tree has no orphan today, and a test that
+    /// only ever sees the passing shape proves nothing about the check.
+    fn orphans<'a>(gates: &[&'a str], all: &[&str], workflow_text: &str) -> Vec<&'a str> {
+        gates
+            .iter()
+            .copied()
+            .filter(|g| {
+                if all.contains(g) {
+                    return false;
+                }
+                // A workflow step calls a gate as `-- <name>`; require the
+                // name to end there, so `bns-names` does not satisfy a step
+                // that only mentions `bns-names-are-safe-in-an-address-bar`.
+                let mut hit = false;
+                for m in workflow_text.match_indices(&format!("-- {g}")) {
+                    let end = m.0 + 3 + g.len();
+                    match workflow_text[end..].chars().next() {
+                        None => hit = true,
+                        Some(c) if !c.is_ascii_alphanumeric() && c != '-' && c != '_' => hit = true,
+                        Some(_) => {}
+                    }
+                }
+                !hit
+            })
+            .collect()
+    }
+
+    #[test]
+    fn orphan_check_canary() {
+        // A gate outside `--all` that no step names is an orphan.
+        let found = orphans(
+            &["runs-in-all", "named-by-a-step", "abandoned"],
+            &["runs-in-all"],
+            "run: cargo run --release -- gates -- named-by-a-step --self-test",
+        );
+        assert_eq!(found, vec!["abandoned"]);
+        // A prefix of a longer gate name does not count as a step.
+        let prefix = orphans(
+            &["bns-names"],
+            &[],
+            "gates -- bns-names-are-safe-in-an-address-bar",
+        );
+        assert_eq!(prefix, vec!["bns-names"]);
+        // Every gate selected by `--all` is covered whatever the text says.
+        assert!(orphans(&["x"], &["x"], "").is_empty());
+    }
+
+    /// Every registered gate is reached: `--all` selects it, or a workflow
+    /// step calls it by name.
+    ///
+    /// This is the check that a hand count got wrong once: reading the gate
+    /// registry and concluding that a gate marked `run_args: Some` never runs
+    /// in CI, when an allow-list above `all_selection` already carried it.
+    /// Measured on the tree at the time of writing the answer is 158 gates in
+    /// `--all` and 24 named by a step, no orphan. The number is not asserted;
+    /// the absence of an orphan is.
+    #[test]
+    fn every_gate_is_reached() {
+        let root = repo_root();
+        let dir = root.join(".github/workflows");
+        let mut text = String::new();
+        let mut files = 0_usize;
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                let is_yml = p.extension().is_some_and(|x| x == "yml" || x == "yaml");
+                if !is_yml {
+                    continue;
+                }
+                if let Ok(t) = std::fs::read_to_string(&p) {
+                    files += 1;
+                    text.push_str(&t);
+                    text.push('\n');
+                }
+            }
+        }
+        assert!(
+            files > 0,
+            "no workflow file read under {}; the check would pass over nothing",
+            dir.display()
+        );
+        let all: Vec<&str> = all_selection(false).iter().map(|g| g.name).collect();
+        let names: Vec<&str> = GATES.iter().map(|g| g.name).collect();
+        let found = orphans(&names, &all, &text);
+        assert!(
+            found.is_empty(),
+            "{} gate(s) are never reached: neither `--all` nor a workflow step runs {:?} of {} registered across {files} workflow file(s)",
+            found.len(),
+            found,
+            names.len()
+        );
+    }
 }

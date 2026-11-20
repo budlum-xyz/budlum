@@ -350,22 +350,24 @@ fn evaluate(root: &Path) -> Result<String, String> {
     }
 
     if !findings.is_empty() {
+        use std::fmt::Write as _;
         let mut msg = format!(
             "re-pin commits are not inert: {} of {} commit(s) in the window mix a pin or baseline update with other files\n",
             findings.len(),
             inspected
         );
         for f in findings.iter().take(20) {
-            msg.push_str(&format!(
-                "  {} {} | pin(s): {} | other file(s): {}\n",
+            let _ = writeln!(
+                msg,
+                "  {} {} | pin(s): {} | other file(s): {}",
                 f.sha,
                 f.subject,
                 f.pins.join(", "),
                 f.others.join(", ")
-            ));
+            );
         }
         if findings.len() > 20 {
-            msg.push_str(&format!("  ... {} more\n", findings.len() - 20));
+            let _ = writeln!(msg, "  ... {} more", findings.len() - 20);
         }
         msg.push_str(
             "Split it: one commit carries the change, the next carries only the re-measured pins and baselines.",
@@ -392,205 +394,181 @@ pub fn run(root: &Path) -> Result<String, String> {
     evaluate(root)
 }
 
-/// Canary: a mixed commit fails, an inert re-pin passes, a plain commit passes.
-pub fn self_test() -> Result<String, String> {
-    let base = std::env::temp_dir().join(format!(
-        "re-pin-canary-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(base.join(PINS_DIR)).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(base.join(BASELINE_DIR)).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(base.join("src")).map_err(|e| e.to_string())?;
+/// Scratch directory for the canary, unique per process and instant.
+fn scratch_dir() -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    std::env::temp_dir().join(format!("re-pin-canary-{}-{nanos}", std::process::id()))
+}
 
-    let cleanup = |p: &Path| {
-        let _ = std::fs::remove_dir_all(p);
-    };
-
-    let init = Command::new("git")
+/// Run git inside the canary tree, ignoring output but not failure.
+fn git_in(base: &Path, args: &[&str]) -> Result<(), String> {
+    let out = Command::new("git")
         .arg("-C")
-        .arg(&base)
-        .arg("init")
-        .output();
-    if !init.is_ok_and(|o| o.status.success()) {
-        cleanup(&base);
-        return Ok(String::from(
-            "re-pin-commits-are-inert canary skipped: git unavailable",
-        ));
+        .arg(base)
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
     }
+    Ok(())
+}
 
-    let commit = |msg: &str| -> Result<(), String> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&base)
-            .args([
-                "-c",
-                "user.name=canary",
-                "-c",
-                "user.email=canary@budlum.local",
-                "commit",
-                "-q",
-                "-m",
-                msg,
-            ])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
-        }
-        Ok(())
-    };
+/// Commit the canary tree under a fixed identity.
+fn commit_in(base: &Path, msg: &str) -> Result<(), String> {
+    git_in(
+        base,
+        &[
+            "-c",
+            "user.name=canary",
+            "-c",
+            "user.email=canary@budlum.local",
+            "commit",
+            "-q",
+            "-m",
+            msg,
+        ],
+    )
+}
 
-    let write = |rel: &str, body: &str| -> Result<(), String> {
-        std::fs::write(base.join(rel), body).map_err(|e| e.to_string())
-    };
+/// Write a file inside the canary tree.
+fn write_in(base: &Path, rel: &str, body: &str) -> Result<(), String> {
+    std::fs::write(base.join(rel), body).map_err(|e| e.to_string())
+}
 
-    let add_all = || -> Result<(), String> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&base)
-            .args(["add", "-A"])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
-        }
-        Ok(())
-    };
+/// Stage everything in the canary tree.
+fn add_all_in(base: &Path) -> Result<(), String> {
+    git_in(base, &["add", "-A"])
+}
 
-    // Seed the tree in two commits, the way this gate asks for it: the source
-    // first, then the pins that seal it. One combined seed commit would be a
-    // re-pin carrying a source file and would fail its own canary.
-    write("src/lib.rs", "pub fn f() -> u8 { 1 }\n")?;
-    add_all()?;
-    commit("seed: source")?;
-    write("xtask/gates/pins/tree.pins", "src/lib.rs aaa\n")?;
-    write(
+/// Seed the canary tree in two commits, the way this gate asks for it: the
+/// source first, then the pins that seal it.
+///
+/// One combined seed commit would be a re-pin carrying a source file and would
+/// fail its own canary, so every later measurement would be measuring the seed.
+fn seed(base: &Path) -> Result<(), String> {
+    write_in(base, "src/lib.rs", "pub fn f() -> u8 { 1 }\n")?;
+    add_all_in(base)?;
+    commit_in(base, "seed: source")?;
+    write_in(base, "xtask/gates/pins/tree.pins", "src/lib.rs aaa\n")?;
+    write_in(
+        base,
         &format!("{BASELINE_DIR}/sample{BASELINE_SUFFIX}"),
         "src/lib.rs\n",
     )?;
-    add_all()?;
-    commit("seed: pins")?;
-    // The seed already obeys the rule, so the tree starts green. If it did
-    // not, every later canary would be measuring the seed's failure.
-    evaluate(&base).map_err(|e| {
-        cleanup(&base);
-        format!("canary `split-seed` failed when it must pass: {e}")
-    })?;
+    add_all_in(base)?;
+    commit_in(base, "seed: pins")?;
+    evaluate(base)
+        .map(|_| ())
+        .map_err(|e| format!("canary `split-seed` failed when it must pass: {e}"))
+}
 
-    // Canary 1: a pin update carrying a logic change must fail.
-    write("xtask/gates/pins/tree.pins", "src/lib.rs bbb\n")?;
-    write("src/lib.rs", "pub fn f() -> u8 { 2 }\n")?;
-    add_all()?;
-    commit("mixed pin and logic")?;
-    if evaluate(&base).is_ok() {
-        cleanup(&base);
+/// Canaries that must fail: a pin update carried beside other work.
+fn canary_refuses_mixtures(base: &Path) -> Result<(), String> {
+    // A pin update carrying a logic change must fail.
+    write_in(base, "xtask/gates/pins/tree.pins", "src/lib.rs bbb\n")?;
+    write_in(base, "src/lib.rs", "pub fn f() -> u8 { 2 }\n")?;
+    add_all_in(base)?;
+    commit_in(base, "mixed pin and logic")?;
+    if evaluate(base).is_ok() {
         return Err(String::from(
             "canary `pin-plus-logic` passed when it must fail",
         ));
     }
 
-    // Canary 2: the same work split in two. The inert half must pass.
+    // The same work split in two. The inert half must pass.
     //
     // `--hard`, not `--soft`. A soft reset keeps the pin file staged, so the
     // "logic only" commit silently carries it - which is exactly the mixture
     // this gate refuses. The canary found that while it was being written.
-    Command::new("git")
-        .arg("-C")
-        .arg(&base)
-        .args(["reset", "-q", "--hard", "HEAD~1"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    write("src/lib.rs", "pub fn f() -> u8 { 3 }\n")?;
-    add_all()?;
-    commit("logic only")?;
-    write("xtask/gates/pins/tree.pins", "src/lib.rs ccc\n")?;
-    Command::new("git")
-        .arg("-C")
-        .arg(&base)
-        .args(["add", "xtask/gates/pins/tree.pins"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    commit("pins only")?;
-    evaluate(&base).map_err(|e| {
-        cleanup(&base);
-        format!("canary `split-in-two` failed when it must pass: {e}")
-    })?;
+    git_in(base, &["reset", "-q", "--hard", "HEAD~1"])?;
+    write_in(base, "src/lib.rs", "pub fn f() -> u8 { 3 }\n")?;
+    add_all_in(base)?;
+    commit_in(base, "logic only")?;
+    write_in(base, "xtask/gates/pins/tree.pins", "src/lib.rs ccc\n")?;
+    git_in(base, &["add", "xtask/gates/pins/tree.pins"])?;
+    commit_in(base, "pins only")?;
+    evaluate(base).map_err(|e| format!("canary `split-in-two` failed when it must pass: {e}"))?;
 
-    // Canary 3: a baseline ratchet line removed beside its code change must
-    // fail, for the same reason as a pin.
-    write(&format!("{BASELINE_DIR}/sample{BASELINE_SUFFIX}"), "")?;
-    write("src/lib.rs", "pub fn f() -> u8 { 4 }\n")?;
-    add_all()?;
-    commit("ratchet plus logic")?;
-    if evaluate(&base).is_ok() {
-        cleanup(&base);
+    // A baseline ratchet line removed beside its code change must fail, for
+    // the same reason as a pin.
+    write_in(base, &format!("{BASELINE_DIR}/sample{BASELINE_SUFFIX}"), "")?;
+    write_in(base, "src/lib.rs", "pub fn f() -> u8 { 4 }\n")?;
+    add_all_in(base)?;
+    commit_in(base, "ratchet plus logic")?;
+    if evaluate(base).is_ok() {
         return Err(String::from(
             "canary `baseline-plus-logic` passed when it must fail",
         ));
     }
 
-    // Canary 4: a deleted pin file carried beside logic is still a pin touch.
-    Command::new("git")
-        .arg("-C")
-        .arg(&base)
-        .args(["reset", "-q", "--hard", "HEAD~1"])
-        .output()
-        .map_err(|e| e.to_string())?;
+    // A deleted pin file carried beside logic is still a pin touch.
+    git_in(base, &["reset", "-q", "--hard", "HEAD~1"])?;
     std::fs::remove_file(base.join("xtask/gates/pins/tree.pins")).map_err(|e| e.to_string())?;
-    write("src/lib.rs", "pub fn f() -> u8 { 5 }\n")?;
-    add_all()?;
-    commit("pin deletion plus logic")?;
-    if evaluate(&base).is_ok() {
-        cleanup(&base);
+    write_in(base, "src/lib.rs", "pub fn f() -> u8 { 5 }\n")?;
+    add_all_in(base)?;
+    commit_in(base, "pin deletion plus logic")?;
+    if evaluate(base).is_ok() {
         return Err(String::from(
             "canary `pin-deletion-plus-logic` passed when it must fail",
         ));
     }
+    Ok(())
+}
 
-    // Canary 5: a cutoff dated after the mixed commits grandfathers them, so
-    // the same tree that just failed now passes. This is the ratchet working,
-    // not the gate going quiet: the count of grandfathered commits is in the
-    // report.
-    write(CUTOFF_FILE, "2999-01-01T00:00:00Z\n")?;
-    add_all()?;
-    commit("cutoff: grandfather the history")?;
-    let exempted = evaluate(&base);
-    if exempted.is_err() {
-        cleanup(&base);
-        return Err(format!(
-            "canary `cutoff-grandfathers` failed when it must pass: {}",
-            exempted.err().unwrap_or_default()
-        ));
-    }
+/// Canaries around the cutoff and the window: both fail closed.
+fn canary_cutoffs(base: &Path) -> Result<(), String> {
+    // A cutoff dated after the mixed commits grandfathers them, so the same
+    // tree that just failed now passes. This is the ratchet working, not the
+    // gate going quiet: the grandfathered count is in the report.
+    write_in(base, CUTOFF_FILE, "2999-01-01T00:00:00Z\n")?;
+    add_all_in(base)?;
+    commit_in(base, "cutoff: grandfather the history")?;
+    evaluate(base)
+        .map_err(|e| format!("canary `cutoff-grandfathers` failed when it must pass: {e}"))?;
 
-    // Canary 6: a cutoff that cannot be parsed fails closed. A misread cutoff
-    // would exempt commits nobody meant to exempt, and quietly.
-    write(CUTOFF_FILE, "next quarter\n")?;
-    if evaluate(&base).is_ok() {
-        cleanup(&base);
+    // A cutoff that cannot be parsed fails closed. A misread cutoff would
+    // exempt commits nobody meant to exempt, and quietly.
+    write_in(base, CUTOFF_FILE, "next quarter\n")?;
+    if evaluate(base).is_ok() {
         return Err(String::from(
             "canary `unparseable-cutoff` passed when it must fail closed",
         ));
     }
 
-    // Canary 7: a window that names an unresolvable base ref must fail closed
-    // rather than inspect nothing.
-    write(CUTOFF_FILE, "1970-01-02T00:00:00Z\n")?;
+    // A window that names an unresolvable base ref fails closed rather than
+    // inspecting nothing.
+    write_in(base, CUTOFF_FILE, "1970-01-02T00:00:00Z\n")?;
     std::env::set_var("GITHUB_BASE_REF", "no-such-base-ref");
-    let closed = evaluate(&base);
+    let closed = evaluate(base);
     std::env::remove_var("GITHUB_BASE_REF");
     if closed.is_ok() {
-        cleanup(&base);
         return Err(String::from(
             "canary `unresolvable-base-ref` passed when it must fail closed",
         ));
     }
+    Ok(())
+}
 
-    cleanup(&base);
+/// Canary: a mixed commit fails, an inert re-pin passes, a plain commit passes.
+pub fn self_test() -> Result<String, String> {
+    let base = scratch_dir();
+    for d in [PINS_DIR, BASELINE_DIR, "src"] {
+        std::fs::create_dir_all(base.join(d)).map_err(|e| e.to_string())?;
+    }
+    if git_in(&base, &["init"]).is_err() {
+        let _ = std::fs::remove_dir_all(&base);
+        return Ok(String::from(
+            "re-pin-commits-are-inert canary skipped: git unavailable",
+        ));
+    }
+    let outcome = seed(&base)
+        .and_then(|()| canary_refuses_mixtures(&base))
+        .and_then(|()| canary_cutoffs(&base));
+    let _ = std::fs::remove_dir_all(&base);
+    outcome?;
     Ok(String::from(
         "re-pin-commits-are-inert canary OK: pin-plus-logic, baseline-plus-logic and pin-deletion-plus-logic refused; split-seed and split-in-two accepted; a future cutoff grandfathers; unparseable cutoff and unresolvable base ref fail closed",
     ))
