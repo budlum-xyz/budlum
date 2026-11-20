@@ -188,6 +188,8 @@ fn the_write_gate_answers_before_the_payload_is_read() {
         credential_roots: Default::default(),
         guardians: vec![],
         recovery_threshold: 0,
+        issued_credentials: 0,
+        recovery_nonce: 0,
     };
     let err = registry
         .apply(

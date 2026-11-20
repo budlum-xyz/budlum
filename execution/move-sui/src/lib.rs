@@ -70,7 +70,13 @@ type Blake2b256 = Blake2b<U32>;
 pub enum SuiOwner {
     AddressOwner([u8; 32]),
     ObjectOwner([u8; 32]),
-    Shared { initial_shared_version: u64 },
+    Shared {
+        initial_shared_version: u64,
+        /// Creator who shared this object. Until Move package bytecode executes
+        /// access-control checks in this worker, only `shared_by` may append to it.
+        #[serde(default)]
+        shared_by: Option<[u8; 32]>,
+    },
     Immutable,
 }
 
@@ -710,6 +716,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         obj.version = next_ver;
                         obj.owner = SuiOwner::Shared {
                             initial_shared_version: next_ver,
+                            shared_by: Some(sender32),
                         };
                         if write_sui_object(host, obj).is_err() {
                             return Err(ee_reverted(b"share err".to_vec(), gas_used));
@@ -758,7 +765,9 @@ impl ExecutionEnvironment for MoveSuiWorker {
                                 ));
                             };
                             let owner_may_write = match &sh.owner {
-                                SuiOwner::Shared { .. } => true,
+                                // Until package Move bytecode runs access control here, a shared
+                                // object may only be written by the account that shared it.
+                                SuiOwner::Shared { shared_by, .. } => *shared_by == Some(sender32),
                                 SuiOwner::AddressOwner(owner) => *owner == sender32,
                                 SuiOwner::ObjectOwner(_) | SuiOwner::Immutable => false,
                             };
@@ -791,6 +800,15 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         }
                         let out_ord = next_ordinal(&mut ordinal, gas_used)?;
                         let out_id = derive_sui_object_id(&call.tx_hash, out_ord);
+                        // Price both the fresh permanent object bytes and the receipt log copy.
+                        let write_and_log_cost = (arg_bytes.len() as u64)
+                            .saturating_mul(2)
+                            .saturating_mul(SUI_OBJECT_WRITE_PER_BYTE_BGU);
+                        if charge_gas(&mut gas_used, call.gas_limit, write_and_log_cost, host)
+                            .is_err()
+                        {
+                            return Err(ee_out_of_gas(call.gas_limit));
+                        }
                         ensure_fresh_object_id(
                             host,
                             &out_id,
@@ -813,7 +831,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                             .emit_log(EeLog {
                                 emitter: EeIdentity {
                                     ee: EeId::MOVE_SUI,
-                                    id: package_id.to_vec(),
+                                    id: sender32.to_vec(),
                                 },
                                 topics: vec![format!("{module}::{function}").into_bytes()],
                                 data: arg_bytes.clone(),
@@ -1636,5 +1654,86 @@ mod tests {
             panic!("original coin missing");
         };
         assert_eq!(still_500.contents, 500u64.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn move_call_meters_produced_object_bytes_binds_shared_writer_and_attributes_log_to_caller() {
+        let mut worker = MoveSuiWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(200_000_000);
+        let owner = publisher();
+        let mallory = EeIdentity {
+            ee: EeId::MOVE_SUI,
+            id: vec![0xBB; 32],
+        };
+        let (pkg, _) = publish(&mut worker, &mut host, &owner, "counter", 0xB0);
+        let shared_id = create_shared(&mut worker, &mut host, &owner, pkg, vec![1, 2, 3], 0xB1);
+
+        // 1. MoveCall producing a 4 KiB object + log under a gas limit that only
+        // covers the flat command step must return OutOfGas.
+        let Ok(large_ptb) = serde_json::to_vec(&SuiPtb {
+            commands: vec![call(pkg, "counter", Vec::new(), vec![0xAB; 4_096])],
+        }) else {
+            panic!("encode large ptb");
+        };
+        let Ok(oog_out) = worker.execute(
+            &BlockContext {
+                chain_id: BUDLUM_TESTNET_CHAIN_ID,
+                height: 10,
+                timestamp_ms: 1_793_923_200_000,
+            },
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: owner.clone(),
+                target: owner.clone(),
+                value: BudAmount(0),
+                input: large_ptb,
+                gas_limit: SUI_PTB_BASE_BGU + SUI_CMD_STEP_BGU * 2,
+                depth: 0,
+                tx_hash: [0xB3; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("large MoveCall");
+        };
+        assert_eq!(
+            oog_out.status,
+            OutcomeStatus::OutOfGas,
+            "MoveCall must meter per-byte gas for produced object and emitted log"
+        );
+
+        // 2. A different caller (mallory) must NOT be able to append bytes to
+        // owner's shared object without module execution.
+        let attack = run(
+            &mut worker,
+            &mut host,
+            &mallory,
+            vec![call(pkg, "counter", vec![shared_id], vec![0xDE, 0xAD])],
+            0xB4,
+        );
+        assert_eq!(
+            attack.status,
+            OutcomeStatus::Revert,
+            "unrelated caller must not rewrite another account's shared object"
+        );
+        assert_eq!(contents(&host, &shared_id), vec![1, 2, 3]);
+
+        // 3. Log attribution: MoveCall log emitter must be sender32, not package_id.
+        let logs_before = host.logs.len();
+        let ok_call = run(
+            &mut worker,
+            &mut host,
+            &owner,
+            vec![call(pkg, "counter", vec![shared_id], vec![0x09])],
+            0xB5,
+        );
+        assert_eq!(ok_call.status, OutcomeStatus::Success);
+        assert_eq!(host.logs.len(), logs_before + 1);
+        let Some(last_log) = host.logs.last() else {
+            panic!("missing MoveCall log");
+        };
+        assert_eq!(
+            last_log.emitter.id, owner.id,
+            "MoveCall log emitter must be the calling sender, not the caller-named package"
+        );
     }
 }
