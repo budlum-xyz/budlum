@@ -87,6 +87,9 @@ impl UniversalRoutePolicy {
     /// The strict policy with a caller-pinned domain-set root. Without a
     /// pinned root every route verification fails closed, so this is the only
     /// constructor that can produce an accepting policy.
+    /// Convenience: the accepting counterpart of [`Self::strict_value`], for
+    /// the same multi-hop route callers; a caller that pins a domain-set root
+    /// has nothing else to construct it with.
     #[must_use]
     pub const fn strict_value_pinned(
         trusted_domains_root: crate::domain::types::Hash32,

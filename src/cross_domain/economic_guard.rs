@@ -117,6 +117,10 @@ pub const DEFAULT_FINDER_REWARD_BPS: u64 = 1_000;
 /// share lets a slashed prover reclaim its own bond through a second
 /// address. Capped at 20%, at least 80% of every slashed bond burns no
 /// matter who reports the contradiction.
+///
+/// WIRING: enforced by the policy check that runs before a guard is built,
+/// so a policy above the ceiling is refused at construction rather than
+/// when the reward is paid out.
 pub const MAX_FINDER_REWARD_BPS: u64 = 2_000;
 /// Default rolling flow-accounting window length in blocks.
 ///
