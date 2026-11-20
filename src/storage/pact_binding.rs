@@ -14,7 +14,9 @@
 //! A pact's commitment must be the hash of its own payload
 //! (`verify_commitment`), and the registry root must be recomputable from the
 //! pacts it contains (`verify_root`). Without the second one a root could also
-//! match a set that contains no pacts at all.
+//! match a set that contains no pacts at all. The root commits to the set, not
+//! to the delivery order: pacts are stored in canonical id order, and a
+//! registry that is not in that order is refused (V3 label).
 
 use sha3::{Digest, Sha3_256};
 
@@ -170,7 +172,12 @@ impl PactRegistry {
         if self.pacts.iter().any(|existing| existing.id == pact.id) {
             return Err("storage pact: duplicate pact id");
         }
-        self.pacts.push(pact);
+        // The root must describe the set, not the delivery order: insert in
+        // id order so `[A, B]` and `[B, A]` cannot commit to different roots.
+        let at = self
+            .pacts
+            .partition_point(|existing| existing.id <= pact.id);
+        self.pacts.insert(at, pact);
         self.recompute_root();
         Ok(())
     }
@@ -201,8 +208,13 @@ impl PactRegistry {
         // same id and commitment were one root. The count in front of the
         // pacts and the fixed width of every field keep the encoding
         // injective.
+        //
+        // V3 hashes the pacts in canonical id order and refuses an unsorted
+        // registry (`verify_root`): under V2 the preimage followed the `Vec`,
+        // so one set delivered two ways committed to two roots. The label
+        // moves with the rule so a V2 root can never be read as a V3 root.
         let mut h = Sha3_256::new();
-        h.update(b"BUDLUM_PACT_REGISTRY_V2");
+        h.update(b"BUDLUM_PACT_REGISTRY_V3");
         h.update((self.pacts.len() as u64).to_le_bytes());
         for p in &self.pacts {
             h.update(p.id);
@@ -219,7 +231,8 @@ impl PactRegistry {
     /// # Errors
     ///
     /// Returns an error when any pact violates structural invariants, ids collide,
-    /// capacity is exceeded, or the recomputed root differs from the stored root.
+    /// the pacts are not in canonical id order, capacity is exceeded, or the
+    /// recomputed root differs from the stored root.
     pub fn verify_root(&self) -> Result<(), &'static str> {
         if self.pacts.len() > MAX_PACTS {
             return Err("storage pact: registry is full");
@@ -230,6 +243,11 @@ impl PactRegistry {
             if !seen_ids.insert(pact.id) {
                 return Err("storage pact: duplicate pact id");
             }
+        }
+        // A deserialized or directly constructed registry skips `add_pact`;
+        // the root is only order-independent if storage is canonical.
+        if !self.pacts.windows(2).all(|w| w[0].id < w[1].id) {
+            return Err("storage pact: pacts are not in canonical id order");
         }
         if self.computed_root() != self.root {
             return Err("storage pact: root mismatch");
@@ -353,6 +371,77 @@ mod tests {
                 "an edited pact field passed under the old root"
             );
         }
+    }
+
+    /// The same pact set in either arrival order must commit to one root.
+    ///
+    /// `add_pact` used to append, and the root hashed the `Vec` in insertion
+    /// order: `[A, B]` and `[B, A]` were two different roots for one set, so
+    /// an account's `pact_root` depended on delivery order, not on the pacts.
+    /// The registry now keeps the pacts in id order, so arrival order cannot
+    /// reach the root.
+    #[test]
+    fn pact_roots_are_order_independent() {
+        let make = |id: u8| {
+            Pact::new(
+                [id; 32],
+                [0u8; 32],
+                [0u8; 32],
+                [id.wrapping_add(10); 32],
+                [0u8; 32],
+                10,
+                0,
+            )
+            .expect("valid pact")
+        };
+        let mut forward = PactRegistry::new();
+        forward.add_pact(make(1)).expect("first");
+        forward.add_pact(make(2)).expect("second");
+        let mut backward = PactRegistry::new();
+        backward.add_pact(make(2)).expect("first");
+        backward.add_pact(make(1)).expect("second");
+        assert_eq!(
+            forward.computed_root(),
+            backward.computed_root(),
+            "one pact set must commit to one root regardless of arrival order"
+        );
+        assert!(forward.verify_root().is_ok());
+        assert!(backward.verify_root().is_ok());
+        assert_eq!(
+            forward.pacts.iter().map(|p| p.id).collect::<Vec<_>>(),
+            backward.pacts.iter().map(|p| p.id).collect::<Vec<_>>(),
+            "the stored order must be canonical (id order)"
+        );
+    }
+
+    /// A hand-ordered registry (direct construction) must be refused.
+    ///
+    /// Canonical storage is what makes the root order-independent; a
+    /// deserialized or directly built registry that skips the ordering must
+    /// not pass verification.
+    #[test]
+    fn a_non_canonical_pact_order_is_refused() {
+        let make = |id: u8| {
+            Pact::new(
+                [id; 32],
+                [0u8; 32],
+                [0u8; 32],
+                [id.wrapping_add(10); 32],
+                [0u8; 32],
+                10,
+                0,
+            )
+            .expect("valid pact")
+        };
+        let mut unsorted = PactRegistry {
+            pacts: vec![make(2), make(1)],
+            root: [0u8; 32],
+        };
+        unsorted.recompute_root();
+        assert!(
+            unsorted.verify_root().is_err(),
+            "a registry whose pacts are not in canonical id order must be refused"
+        );
     }
 
     #[test]
