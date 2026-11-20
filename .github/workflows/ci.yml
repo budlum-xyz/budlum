@@ -271,6 +271,22 @@ jobs:
               exit 1
             }
           done
+      - name: CLI (bud) tests
+        if: always() && steps.rust.outcome == 'success'
+        # The CLI carries the publish path's own end-to-end tests - the site
+        # bundle, the B.U.D. 3.0 registration and the proof JSON a user is shown.
+        # Nothing tested them: `bud` was built in the rehearsal workflow and
+        # never run, so a payload fixture that the executor had started refusing
+        # stayed red without a single job saying so.
+        run: |
+          set -euo pipefail
+          cargo test --bin bud 2>&1 | tee /tmp/bud-tests.log
+          for name in site_bundle_and_publish_site_payloads_execute_cleanly_in_consensus_and_verify_proof_json; do
+            grep -Eq "${name} \.\.\. ok" /tmp/bud-tests.log || {
+              echo "::error::CLI regression $name did not pass"
+              exit 1
+            }
+          done
       - name: Public service admission tests
         if: always() && steps.rust.outcome == 'success'
         run: |
