@@ -4117,24 +4117,6 @@ impl Node {
         )
     }
 
-    fn write_vote_history_file(
-        path: &std::path::Path,
-        last_prevote_height: u64,
-        last_precommit_height: u64,
-        node: &str,
-    ) -> Result<(), String> {
-        Self::write_vote_history_file_with_hashes(
-            path,
-            &VoteHistory {
-                last_prevote_height,
-                last_precommit_height,
-                prevote_hash: None,
-                precommit_hash: None,
-                node: Some(node.to_string()),
-            },
-        )
-    }
-
     /// Persists the high-water marks as the one on-disk shape both sides share.
     ///
     /// The writer takes [`VoteHistory`] rather than a widening list of loose
@@ -9840,7 +9822,17 @@ mod finality_publish_tests {
         // so the caller withholds the vote instead of gossiping unrecorded bytes.
         let dir_as_file = dir.path().join("occupied_dir");
         std::fs::create_dir_all(&dir_as_file).unwrap();
-        assert!(super::Node::write_vote_history_file(&dir_as_file, 16, 14, "node-a").is_err());
+        assert!(super::Node::write_vote_history_file_with_hashes(
+            &dir_as_file,
+            &super::VoteHistory {
+                last_prevote_height: 16,
+                last_precommit_height: 14,
+                prevote_hash: None,
+                precommit_hash: None,
+                node: Some("node-a".to_string()),
+            },
+        )
+        .is_err());
     }
 
     #[test]
