@@ -166,6 +166,20 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
             )));
         }
         let evidence = decode_external_evidence(proof)?;
+        let descriptor = self.adapter.descriptor();
+        if let Some(family) =
+            crate::domain::finality_proof_model::ExternalVerifierFamily::from_consensus_kind(
+                &descriptor.consensus_kind,
+            )
+        {
+            let checked: Result<(), crate::domain::finality_proof_model::ExternalShapeError> =
+                family.verify_descriptor(&descriptor, true);
+            if let Err(err) = checked {
+                return Ok(FinalityStatus::Rejected(format!(
+                    "external family profile refused: {err}"
+                )));
+            }
+        }
         let mut seen = CryptoFacts::new();
         let attestation = self
             .adapter
@@ -173,6 +187,22 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
             .map_err(|error| {
                 FinalityError(format!("external adapter refused evidence: {error}"))
             })?;
+
+        let shape_checked: Result<
+            crate::domain::finality_proof_model::FinalityProofShape,
+            crate::domain::finality_proof_model::ExternalShapeError,
+        > = crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &descriptor,
+            &attestation,
+        );
+        let shape = match shape_checked {
+            Ok(shape) => shape,
+            Err(err) => {
+                return Ok(FinalityStatus::Rejected(format!(
+                    "external finality proof shape refused: {err}"
+                )));
+            }
+        };
 
         // The policy's `require_slashable` is enforced at
         // the BRIDGE, for every adapter - not only the one adapter that
@@ -226,30 +256,39 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
             ));
         }
         // Every binding-critical field is ATTESTED or
-        // EMPTY. Before this, one valid evidence for (height, state_root)
-        // could carry any block hash, event root and transaction root - the
-        // later checks that rely on those fields rested on unattested data.
-        for (name, committed, attested) in [
+        // EMPTY, and its bit in `shape.binds` agrees with the presence of the
+        // attested sub-root. Before this, one valid evidence for
+        // (height, state_root) could carry any block hash, event root and
+        // transaction root - the later checks that rely on those fields rested
+        // on unattested data.
+        for (name, flag, committed, attested) in [
             (
                 "domain_block_hash",
+                crate::domain::finality_proof_model::BINDS_BLOCK_HASH,
                 commitment.domain_block_hash,
                 attestation.attested_block_hash,
             ),
             (
                 "event_root",
+                crate::domain::finality_proof_model::BINDS_EVENT_ROOT,
                 commitment.event_root,
                 attestation.attested_event_root,
             ),
-            ("tx_root", commitment.tx_root, attestation.attested_tx_root),
+            (
+                "tx_root",
+                crate::domain::finality_proof_model::BINDS_TX_ROOT,
+                commitment.tx_root,
+                attestation.attested_tx_root,
+            ),
         ] {
             match attested {
-                Some(value) if value == committed => {}
+                Some(value) if value == committed && (shape.binds & flag) != 0 => {}
                 Some(_) => {
                     return Ok(FinalityStatus::Rejected(format!(
                         "external attestation does not bind the commitment's {name}"
                     )));
                 }
-                None if committed == [0u8; 32] => {}
+                None if committed == [0u8; 32] && (shape.binds & flag) == 0 => {}
                 None => {
                     return Ok(FinalityStatus::Rejected(format!(
                         "the adapter attests no {name}; the commitment must not claim one"
@@ -527,6 +566,10 @@ mod tests {
             matches!(status, FinalityStatus::Rejected(_)),
             "an unslashable set passed a slashable-only policy"
         );
+        empty_security_backing_is_rejected_even_without_slashable_policy();
+        degenerate_signature_work_or_authority_backing_is_rejected();
+        attestation_time_unit_drift_from_descriptor_is_rejected();
+        builtin_consensus_family_descriptor_downgrade_is_rejected();
     }
 
     #[test]
@@ -571,5 +614,183 @@ mod tests {
         assert!(encode_external_evidence(&adapter.evidence).is_err());
         let oversized_wire = FinalityProof::Raw(vec![0u8; MAX_EXTERNAL_EVIDENCE_BYTES + 1]);
         assert!(decode_external_evidence(&oversized_wire).is_err());
+    }
+
+    struct CustomBackingAdapter {
+        descriptor: AdapterDescriptor,
+        evidence: RawConsensusEvidence,
+        security: SecurityBacking,
+        attestation_time_unit: TimeUnit,
+    }
+
+    impl ExternalFinalityAdapter for CustomBackingAdapter {
+        fn descriptor(&self) -> AdapterDescriptor {
+            self.descriptor.clone()
+        }
+
+        fn verify(
+            &self,
+            evidence: &RawConsensusEvidence,
+            _policy: &VerificationPolicy,
+        ) -> Result<FinalityAttestation, crate::cross_domain::external::spec::AdapterError>
+        {
+            if evidence != &self.evidence {
+                return Err(
+                    crate::cross_domain::external::spec::AdapterError::Malformed {
+                        offset: 0,
+                        reason: "custom fixture mismatch".to_string(),
+                    },
+                );
+            }
+            Ok(FinalityAttestation {
+                adapter: self.descriptor.id,
+                domain: crate::cross_domain::external::spec::DomainKey::from_parts(
+                    &self.descriptor.id,
+                    &evidence.network,
+                ),
+                height: evidence.declared_height,
+                state_root: evidence.declared_root,
+                attested_block_hash: Some([5; 32]),
+                attested_event_root: Some([1; 32]),
+                attested_tx_root: Some([2; 32]),
+                finalized_at: evidence.declared_height,
+                time_unit: self.attestation_time_unit,
+                security: self.security,
+                evidence_digest: evidence.digest(),
+                adapter_version: self.descriptor.adapter_version,
+                evidence_version: evidence.evidence_version,
+            })
+        }
+
+        fn fault_probes(&self) -> Vec<crate::cross_domain::external::selftest::FaultProbe> {
+            Vec::new()
+        }
+    }
+
+    fn empty_security_backing_is_rejected_even_without_slashable_policy() {
+        let (base, domain, mut commitment) = fixture();
+        let proof = encode_external_evidence(&base.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let adapter = CustomBackingAdapter {
+            descriptor: base.descriptor,
+            evidence: base.evidence,
+            security: SecurityBacking::None,
+            attestation_time_unit: TimeUnit::Height,
+        };
+        let mut policy = VerificationPolicy::proven(100);
+        policy.require_slashable = false;
+        let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter), policy);
+        let status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(
+            matches!(
+                status,
+                FinalityStatus::Rejected(ref message) if message.contains("security backing")
+            ),
+            "SecurityBacking::None must never finalize a domain commitment: {status:?}"
+        );
+    }
+
+    fn degenerate_signature_work_or_authority_backing_is_rejected() {
+        let scheme = crate::crypto::facts::ObservedScheme::Scheme(
+            crate::crypto::scheme::SchemeId::BLS12381_MINSIG,
+        );
+        let bad_backings = [
+            SecurityBacking::SignatureSet {
+                scheme,
+                signers: 0,
+                required: 0,
+                total_weight: 0,
+                slashable: false,
+            },
+            SecurityBacking::SignatureSet {
+                scheme,
+                signers: 1,
+                required: 2,
+                total_weight: 10,
+                slashable: true,
+            },
+            SecurityBacking::Work { difficulty_bits: 0 },
+            SecurityBacking::Authority { count: 0 },
+        ];
+        for bad in bad_backings {
+            let (base, domain, mut commitment) = fixture();
+            let proof = encode_external_evidence(&base.evidence).expect("encode");
+            commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+            let adapter = CustomBackingAdapter {
+                descriptor: base.descriptor,
+                evidence: base.evidence,
+                security: bad,
+                attestation_time_unit: TimeUnit::Height,
+            };
+            let mut policy = VerificationPolicy::proven(100);
+            policy.require_slashable = false;
+            let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter), policy);
+            let status = bridge
+                .verify_finality(&domain, &commitment, &proof)
+                .unwrap();
+            assert!(
+                matches!(
+                    status,
+                    FinalityStatus::Rejected(ref message) if message.contains("finality proof shape")
+                ),
+                "degenerate backing {bad:?} must be rejected: {status:?}"
+            );
+        }
+    }
+
+    fn attestation_time_unit_drift_from_descriptor_is_rejected() {
+        let (mut base, domain, mut commitment) = fixture();
+        base.descriptor.time_unit = TimeUnit::Slot;
+        let proof = encode_external_evidence(&base.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let adapter = CustomBackingAdapter {
+            descriptor: base.descriptor,
+            evidence: base.evidence,
+            security: SecurityBacking::Authority { count: 3 },
+            attestation_time_unit: TimeUnit::UnixSeconds,
+        };
+        let mut policy = VerificationPolicy::proven(100);
+        policy.require_slashable = false;
+        let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter), policy);
+        let status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(
+            matches!(
+                status,
+                FinalityStatus::Rejected(ref message) if message.contains("time unit")
+            ),
+            "mismatched attestation time unit must be rejected: {status:?}"
+        );
+    }
+
+    fn builtin_consensus_family_descriptor_downgrade_is_rejected() {
+        let (mut base, domain, mut commitment) = fixture();
+        base.descriptor.consensus_kind = "stark-state-diff-validity-rollup".to_string();
+        base.descriptor.finality_kind = FinalityKind::Probabilistic;
+        base.descriptor.trust_model = TrustModel::TrustedParty;
+        let proof = encode_external_evidence(&base.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let adapter = CustomBackingAdapter {
+            descriptor: base.descriptor,
+            evidence: base.evidence,
+            security: SecurityBacking::Authority { count: 1 },
+            attestation_time_unit: TimeUnit::Height,
+        };
+        let mut policy = VerificationPolicy::proven(100);
+        policy.require_slashable = false;
+        let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter), policy);
+        let status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(
+            matches!(
+                status,
+                FinalityStatus::Rejected(ref message) if message.contains("family profile")
+            ),
+            "downgraded built-in family descriptor must be rejected: {status:?}"
+        );
     }
 }
