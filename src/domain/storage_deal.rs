@@ -2912,25 +2912,26 @@ impl StorageRegistry {
         // "not applied", and this function required the envelope anyway, so a
         // client that followed the profile was refused.
         //
-        // Closed gate: the envelope is optional. A deal that carries none opens
-        // and records `merkle_proof: None`, which says "no proof claimed".
-        // Open gate: the envelope and the root are both mandatory, and the
-        // envelope is still only format-checked until the 64-depth verifier
-        // exists. Requiring a blob we cannot verify protects nothing, which is
-        // the second thing the old shape got wrong.
-        match (
-            domain_params.require_merkle_proof,
-            merkle_proof.clone(),
-            storage_root,
-        ) {
-            (true, None, _) | (true, _, None) => {
+        // Closed gate: the proof ENVELOPE is optional - a deal that carries
+        // none records `merkle_proof: None`, "no proof claimed". The
+        // 32-byte storage ROOT is mandatory under either gate: carrying a
+        // commitment costs nothing, and without one every later challenge
+        // on the deal is unanswerable and unfaultable, which pays an
+        // operator for storing nothing. The gate only decides whether the
+        // envelope must come along; the envelope is still format-checked
+        // until the 64-depth verifier exists.
+        let Some(root) = storage_root else {
+            return Err(StorageError::MerkleProofRequired);
+        };
+        match (domain_params.require_merkle_proof, merkle_proof.clone()) {
+            (true, None) => {
                 return Err(StorageError::MerkleProofRequired);
             }
-            (_, Some(proof_bytes), Some(root)) => {
+            (_, Some(proof_bytes)) => {
                 Self::validate_merkle_proof_format(&proof_bytes, &root)?;
             }
             // Closed gate and no envelope: nothing claimed, nothing to check.
-            (false, None, _) | (false, _, None) => {}
+            (false, None) => {}
         }
         if start_epoch >= end_epoch {
             return Err(StorageError::InvalidEpochRange {
@@ -4161,8 +4162,14 @@ impl StorageRegistry {
                         "ZK proof (ProofEnvelope) is mandatory for storage challenge verification"
                             .into(),
                     )),
-                    // Missing commitment is not evidence of operator fault.
-                    (None, _) => Ok(()),
+                    // A deal with no commitment cannot prove possession, and
+                    // since every open now records a root, a missing one is a
+                    // legacy row, not an honest answer: the challenge cannot
+                    // resolve Answered, so the deadline path faults it and
+                    // the payer's refund runs.
+                    (None, _) => Err(StorageError::InvalidMerkleProof(
+                        "deal carries no storage commitment; possession cannot be proven".into(),
+                    )),
                 }
             };
 
@@ -6731,6 +6738,23 @@ mod tests {
         let mut reg = StorageRegistry::new();
         let m = good_manifest();
         let shard = &m.shards[0];
+        // The envelope stays optional under the closed gate, but the
+        // 32-byte commitment is mandatory under either: a deal without one
+        // makes every later challenge unanswerable and unfaultable.
+        let refused = reg.open_deal(
+            42,
+            &m,
+            shard.shard_id,
+            operator(),
+            0,
+            10,
+            20,
+            good_econ(),
+            &params(),
+            None,
+            None,
+        );
+        assert!(matches!(refused, Err(StorageError::MerkleProofRequired)));
         let id = reg
             .open_deal(
                 42,
@@ -6743,13 +6767,13 @@ mod tests {
                 good_econ(),
                 &params(),
                 None,
-                None,
+                Some([0x42; 32]),
             )
-            .expect("a closed gate must not demand a proof it cannot check");
+            .expect("a closed gate must not demand a proof envelope it cannot check");
         let deal = reg.get_deal(id).expect("deal exists");
         assert!(
-            deal.merkle_proof.is_none() && deal.storage_root.is_none(),
-            "a deal opened with no envelope must record that it claims no proof"
+            deal.merkle_proof.is_none() && deal.storage_root.is_some(),
+            "no envelope claimed, but the commitment is always recorded"
         );
     }
 
