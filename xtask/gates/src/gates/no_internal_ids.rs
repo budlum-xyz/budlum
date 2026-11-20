@@ -18,8 +18,9 @@
 //!
 //! * machine-generated lockfiles and license text (`SKIP_FILES`),
 //! * build/dependency directories (`SKIP_DIRS`),
-//! * `docs/audit/` and `xtask/gates/src/gates/launch_evidence.rs`, which form
-//!   the structured launch-gate evidence schema checked by `launch-evidence`,
+//! * `xtask/gates/src/gates/app_binding_guard.rs` and
+//!   `xtask/gates/src/gates/no_internal_ids.rs`, which form
+//!   the structured settlement-door guard checked by `app-binding-guard`,
 //! * this gate's own source file (`xtask/gates/src/gates/no_internal_ids.rs`).
 //!
 //! Any top-level scratch audit directory of the historical name is refused
@@ -46,7 +47,7 @@ const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".cargo"];
 const SKIP_FILES: &[&str] = &["Cargo.lock", "flake.lock", "imports.lock", "LICENSE.md"];
 
 /// Scratch directories that must never exist inside the product repository.
-const FORBIDDEN_DIRS: &[&str] = &["audit-notes"];
+const FORBIDDEN_DIRS: &[&str] = &["audit-notes", "docs/audit", "denetim"];
 
 /// Minimum number of scanned text files required for a non-vacuous run.
 const VACUITY_FLOOR: usize = 50;
@@ -161,8 +162,7 @@ fn is_exempt_finding(rel: &str, label: &str) -> bool {
 }
 
 fn is_exempt_rel_path(rel: &str) -> bool {
-    rel.starts_with("docs/audit/")
-        || rel == "xtask/gates/src/gates/launch_evidence.rs"
+    rel == "xtask/gates/src/gates/app_binding_guard.rs"
         || rel == "xtask/gates/src/gates/no_internal_ids.rs"
 }
 
@@ -430,7 +430,6 @@ pub fn self_test() -> Result<String, String> {
     let base = tmp.path();
 
     fs::create_dir_all(base.join("src")).map_err(|e| e.to_string())?;
-    fs::create_dir_all(base.join("docs/audit")).map_err(|e| e.to_string())?;
 
     // Clean baseline with legitimate protocol standards must pass.
     fs::write(
@@ -438,14 +437,24 @@ pub fn self_test() -> Result<String, String> {
         "//! Clean protocol code using EIP-1559, BIP-340, RFC 6962, FIPS 204, F64, P256 and ML-DSA-65.\npub fn ok() -> u32 { 1 }\n",
     )
     .map_err(|e| e.to_string())?;
-    // Exempt structured launch ledger must not trip the prose check.
+
+    evaluate(base, 1).map_err(|e| format!("clean canary failed: {e}"))?;
+
+    // The launch ledger lives in the workspace repository; a product-tree
+    // audit directory is refused even when every identifier inside is
+    // neutral, so a stray checkout can never resurrect it here.
+    fs::create_dir_all(base.join("docs/audit")).map_err(|e| e.to_string())?;
     fs::write(
         base.join("docs/audit/LIVE_STATUS.md"),
         format!("| {}001 | closed |\n| {}01 | verified |\n", "BLG-", "TLG-"),
     )
     .map_err(|e| e.to_string())?;
-
-    evaluate(base, 1).map_err(|e| format!("clean canary failed: {e}"))?;
+    if evaluate(base, 1).is_ok() {
+        return Err(String::from(
+            "canary `product-tree audit ledger` passed when it must fail",
+        ));
+    }
+    fs::remove_dir_all(base.join("docs/audit")).map_err(|e| e.to_string())?;
 
     // Every forbidden token class must fail closed.
     let bad_samples: [(&str, String); 11] = [
@@ -483,7 +492,7 @@ pub fn self_test() -> Result<String, String> {
     verify_git_canaries(base)?;
 
     Ok(String::from(
-        "no-internal-ids canary OK: 11 token classes, the scratch-directory class, alien author and co-author trailer refused",
+        "no-internal-ids canary OK: 11 token classes, the scratch-directory class, the product-tree audit-ledger class, alien author and co-author trailer refused",
     ))
 }
 

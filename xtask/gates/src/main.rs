@@ -49,6 +49,7 @@ mod gates {
     pub mod ai_inference_reads;
     pub mod ai_inference_zk;
     pub mod air_selectors;
+    pub mod app_binding_guard;
     pub mod ast_security_gates;
     pub mod badges_current;
     pub mod binding_claims;
@@ -124,7 +125,6 @@ mod gates {
     pub mod hash_inputs_are_length_prefixed;
     pub mod indexing_is_not_new;
     pub mod kani;
-    pub mod launch_evidence;
     pub mod launch_matrix_tests_exist;
     pub mod license_consistency;
     pub mod lock_failures;
@@ -237,8 +237,9 @@ type RunArgs = fn(&Path, &[&str]) -> Result<String, String>;
 struct Gate {
     /// Name used on the command line and in CI job names.
     name: &'static str,
-    /// The shell script this replaced, so the two can be compared during the
-    /// migration and the old one deleted with evidence rather than hope.
+    /// The shell script or gate entry this replaced, so the two can be
+    /// compared during a migration and the old one deleted with evidence
+    /// rather than hope.
     replaces: Option<&'static str>,
     run: Run,
     /// Gates that read a cargo test log take the log path as a second
@@ -1699,12 +1700,12 @@ const GATES: &[Gate] = &[
         self_test: gates::gate_source_provenance::self_test,
     },
     Gate {
-        name: "launch-evidence",
-        replaces: None,
-        run: gates::launch_evidence::run,
+        name: "app-binding-guard",
+        replaces: Some("launch-evidence"),
+        run: gates::app_binding_guard::run,
         run_log: None,
-        run_args: Some(gates::launch_evidence::run_args),
-        self_test: gates::launch_evidence::self_test,
+        run_args: Some(gates::app_binding_guard::run_args),
+        self_test: gates::app_binding_guard::self_test,
     },
     Gate {
         name: "no-float-in-consensus-paths",
@@ -1775,7 +1776,8 @@ const GATES: &[Gate] = &[
 /// Gates that take extra arguments but whose plain run (no arguments) is a
 /// complete verification. `--all` runs them: leaving `tree-pin` out meant the
 /// aggregate run, the one CI relies on, never checked the budzero tree pins.
-const RUNS_WITHOUT_ARGUMENTS: &[&str] = &["tree-pin", "launch-evidence", "gate-source-provenance"];
+const RUNS_WITHOUT_ARGUMENTS: &[&str] =
+    &["tree-pin", "app-binding-guard", "gate-source-provenance"];
 
 /// The gates `--all` runs.
 ///
