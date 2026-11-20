@@ -607,6 +607,9 @@ impl UploadSessionManager {
             if symbols_per_segment < k.saturating_add(2) {
                 return Err(UploadError::Placement(PlacementError::RowTooSmall));
             }
+            if symbols_per_segment > super::pipeline::MAX_SYMBOLS_PER_SEGMENT {
+                return Err(UploadError::TooLarge);
+            }
             let mut syms = enc.source_symbols();
             syms.extend(enc.repair_symbols(0, symbols_per_segment - k)?);
             let working = slice

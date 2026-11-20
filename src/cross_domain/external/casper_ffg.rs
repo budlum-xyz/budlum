@@ -4,12 +4,12 @@
 //! A Casper FFG chain calls a checkpoint *justified* when more than two thirds
 //! of the active stake voted for the checkpoint pair `(source, target)` with
 //! `target.epoch == source.epoch + 1`, and *final* when two adjacent
-//! checkpoints are justified. The safety argument is not "the voters are
-//! honest"; it is "two conflicting finalized checkpoints imply at least a third
-//! of the stake provably broke a slashing condition and can be destroyed". That
-//! difference is the whole reason this adapter reports
-//! [`SecurityBacking::SignatureSet`] with `slashable: true` and never reports a
-//! bare authority set.
+//! checkpoints are justified. The safety argument does not rest on "the voters
+//! are honest": a validator that signs two conflicting checkpoint pairs breaks
+//! a Casper slashing condition and can be destroyed on the Casper chain. That
+//! external accountability is why this adapter reports
+//! [`SecurityBacking::SignatureSet`]; it does not verify an equivocation proof
+//! itself, so until a contradiction route exists the backing is unslashable.
 //!
 //! Three rules are checked here, in this order, and each one refuses rather
 //! than approximates:
@@ -91,6 +91,8 @@ pub struct FfgValidator {
 /// submitter can choose is a committee that can be chosen to match the vote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinnedFfgCommittee {
+    /// Consensus epoch served by this validator set.
+    pub epoch: u64,
     /// Members, in any order; [`Self::new`] sorts them by key.
     pub validators: Vec<FfgValidator>,
 }
@@ -103,7 +105,7 @@ impl PinnedFfgCommittee {
     /// [`AdapterError::ConsensusRule`] for an empty or oversized set, a zero
     /// key, zero stake, or a duplicated key - a duplicated member would let one
     /// vote count twice.
-    pub fn new(mut validators: Vec<FfgValidator>) -> Result<Self, AdapterError> {
+    pub fn new(epoch: u64, mut validators: Vec<FfgValidator>) -> Result<Self, AdapterError> {
         if validators.is_empty() || validators.len() > MAX_COMMITTEE {
             return Err(AdapterError::ConsensusRule {
                 rule: "the pinned committee size is out of range".to_string(),
@@ -124,7 +126,7 @@ impl PinnedFfgCommittee {
                 });
             }
         }
-        Ok(Self { validators })
+        Ok(Self { epoch, validators })
     }
 
     /// The committee's total active stake.
@@ -163,11 +165,12 @@ struct FfgVote {
 
 impl FfgVote {
     /// The digest the vote is signed over.
-    fn digest(&self) -> [u8; 32] {
+    fn digest(&self, network: &str) -> [u8; 32] {
         let source = self.source_epoch.to_le_bytes();
         let target = self.target_epoch.to_le_bytes();
         crate::core::hash::hash_fields_bytes(&[
             CASPER_FFG_VOTE_TAG,
+            network.as_bytes(),
             &self.signer,
             &source,
             &self.source_root,
@@ -409,7 +412,7 @@ impl CasperFfgAdapter {
                 });
             }
             seen.push(vote.signer);
-            let digest = vote.digest();
+            let digest = vote.digest(&self.network);
             crate::crypto::primitives::verify_signature(&digest, &vote.signature, &vote.signer)
                 .map_err(|_| AdapterError::Crypto {
                     what: format!("invalid Ed25519 signature in a {label} vote"),
@@ -475,6 +478,11 @@ impl CasperFfgAdapter {
                 ),
             });
         }
+        if policy.require_slashable {
+            return Err(AdapterError::ConsensusRule {
+                rule: "caller policy requires slashable backing; Casper FFG committee stake has no local slash route".to_string(),
+            });
+        }
         let parsed = parse_payload(&evidence.payload)?;
         if parsed.target_epoch <= parsed.source_epoch {
             return Err(AdapterError::ConsensusRule {
@@ -486,6 +494,14 @@ impl CasperFfgAdapter {
                 rule: format!(
                     "checkpoints {} and {} are not adjacent, so finality does not follow",
                     parsed.source_epoch, parsed.target_epoch
+                ),
+            });
+        }
+        if parsed.target_epoch != self.committee.epoch {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "target checkpoint epoch {} is not epoch {}, the only epoch this committee was pinned for",
+                    parsed.target_epoch, self.committee.epoch
                 ),
             });
         }
@@ -570,7 +586,7 @@ impl CasperFfgAdapter {
                 )
                 .unwrap_or(u64::MAX),
                 total_weight: total,
-                slashable: true,
+                slashable: false,
             },
             evidence_digest: evidence.digest(),
             adapter_version: self.descriptor.adapter_version,
@@ -682,7 +698,7 @@ mod tests {
         }
         (
             signers,
-            PinnedFfgCommittee::new(members).expect("committee"),
+            PinnedFfgCommittee::new(TARGET_EPOCH, members).expect("committee"),
         )
     }
 
@@ -702,7 +718,7 @@ mod tests {
             signature: Vec::new(),
             pq_signature: Vec::new(),
         };
-        vote.signature = signer.key.sign(&vote.digest()).to_vec();
+        vote.signature = signer.key.sign(&vote.digest("budlum-ffg")).to_vec();
         vote
     }
 
@@ -810,17 +826,27 @@ mod tests {
                 ..
             } => {
                 assert!(
-                    slashable,
-                    "Casper FFG backing is economic, so it must be slashable"
+                    !slashable,
+                    "Casper FFG backing has no local confiscation route, so slashable must be false"
                 );
                 assert_eq!(total_weight, committee.total_stake());
             }
             other => panic!("unexpected backing: {other:?}"),
         }
+        let mut slash_policy = policy();
+        slash_policy.require_slashable = true;
+        assert!(
+            matches!(
+                adapter.verify(&evidence, &slash_policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "Casper FFG without local slash route must refuse require_slashable"
+        );
         assert_eq!(
             attestation.adapter,
             AdapterId::from_name(CASPER_FFG_ADAPTER_NAME)
         );
+        votes_from_another_epoch_or_network_are_refused();
     }
 
     #[test]
@@ -838,7 +864,8 @@ mod tests {
         for member in &mut committee.validators {
             member.stake = 99;
         }
-        committee = PinnedFfgCommittee::new(committee.validators.clone()).expect("committee");
+        committee =
+            PinnedFfgCommittee::new(TARGET_EPOCH, committee.validators.clone()).expect("committee");
         for s in &mut signers {
             // Keep the same keys; only the stake changed.
             assert!(!s.pubkey.is_empty());
@@ -1086,5 +1113,49 @@ mod tests {
             );
         }
         assert!(report.admitted, "admission failed: {report:?}");
+    }
+
+    fn votes_from_another_epoch_or_network_are_refused() {
+        let (signers, committee) = signers();
+        let adapter = adapter_with(&signers, committee.clone());
+
+        // 1. An adjacent pair at a different epoch (e.g. 20 -> 21) than the pinned epoch (11) must be refused.
+        let wrong_epoch_source: Vec<FfgVote> = signers
+            .iter()
+            .take(3)
+            .map(|s| vote(s, 19, PARENT_ROOT, 20, SOURCE_ROOT))
+            .collect();
+        let wrong_epoch_target: Vec<FfgVote> = signers
+            .iter()
+            .take(3)
+            .map(|s| vote(s, 20, SOURCE_ROOT, 21, TARGET_ROOT))
+            .collect();
+        let mut wrong_epoch_ev = evidence_with(&signers, 3, 3);
+        wrong_epoch_ev.payload = encode(
+            20,
+            SOURCE_ROOT,
+            PARENT_ROOT,
+            21,
+            TARGET_ROOT,
+            &wrong_epoch_source,
+            &wrong_epoch_target,
+        );
+        wrong_epoch_ev.declared_height = 21;
+        let epoch_err = adapter.verify(&wrong_epoch_ev, &policy()).unwrap_err();
+        assert!(
+            matches!(epoch_err, AdapterError::ConsensusRule { ref rule } if rule.contains("only epoch this committee was pinned for")),
+            "unexpected epoch error: {epoch_err:?}"
+        );
+
+        // 2. Votes signed for "budlum-ffg" replayed against an adapter pinned to "other-ffg" must be refused.
+        let other_adapter =
+            CasperFfgAdapter::new("other-ffg", committee, None).expect("other adapter");
+        let mut replayed_ev = evidence_with(&signers, 3, 3);
+        replayed_ev.network = "other-ffg".to_string();
+        let replay_err = other_adapter.verify(&replayed_ev, &policy()).unwrap_err();
+        assert!(
+            matches!(replay_err, AdapterError::Crypto { .. }),
+            "cross-network vote replay must fail signature verification: {replay_err:?}"
+        );
     }
 }

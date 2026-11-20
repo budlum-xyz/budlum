@@ -276,7 +276,52 @@ impl ExecutionEnvironment for BudZeroWorker {
                 set_caller_256(&mut vm, &call.caller.id);
                 vm.context.block_height = ctx.height;
 
+                // Every storage slot the bytecode reads or writes must be covered
+                // so a caller cannot hide committed state behind an omitted
+                // `declared` entry and force a zero read.
+                for raw in &program {
+                    let Ok(inst) =
+                        Instruction::decode_for_mainnet(*raw, MainnetActivation::default())
+                    else {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::InvalidCode,
+                            output: Vec::new(),
+                            gas_used: call.gas_limit,
+                        });
+                    };
+                    if matches!(inst.opcode, Opcode::SRead | Opcode::SWrite) {
+                        if inst.imm == -1 {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::InvalidCode,
+                                output: b"dynamic BudZero storage slot operand".to_vec(),
+                                gas_used: call.gas_limit,
+                            });
+                        }
+                        let slot = bud_vm::constant_storage_slot(inst.imm);
+                        let covered = if inst.opcode == Opcode::SWrite {
+                            declared.contains(&slot)
+                        } else {
+                            declared.contains(&slot) || pairs.iter().any(|(s, _)| *s == slot)
+                        };
+                        if !covered {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: format!("BudZero storage slot {slot} not declared")
+                                    .into_bytes(),
+                                gas_used: 0,
+                            });
+                        }
+                    }
+                }
+
                 for &slot in &declared {
+                    if slot >= bud_vm::GOLDILOCKS_P {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"non-canonical storage slot in declared list".to_vec(),
+                            gas_used: 0,
+                        });
+                    }
                     let key = slot_key(&call.target.id, slot);
                     match host.read(&store_ns, &key) {
                         Ok(Some(raw)) => {
@@ -315,7 +360,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                     }
                 }
                 for (slot, val) in pairs {
-                    if val >= bud_vm::GOLDILOCKS_P {
+                    if slot >= bud_vm::GOLDILOCKS_P || val >= bud_vm::GOLDILOCKS_P {
                         return Ok(EeOutcome {
                             status: OutcomeStatus::Revert,
                             output: b"non-canonical field element in call input".to_vec(),
@@ -531,7 +576,40 @@ impl ExecutionEnvironment for BudZeroWorker {
         let mut vm = Vm::with_mainnet_mode(WORKER_VM_MEMORY_BYTES, 1_000_000, true)
             .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
         vm.context.block_height = ctx.height;
+        for raw in &program {
+            let inst = Instruction::decode_for_mainnet(*raw, MainnetActivation::default())
+                .map_err(|e| EeRefusal {
+                    code: RefusalCode::InvalidCode,
+                    message: format!("invalid BudZero instruction: {e:?}"),
+                })?;
+            if matches!(inst.opcode, Opcode::SRead | Opcode::SWrite) {
+                if inst.imm == -1 {
+                    return Err(EeRefusal {
+                        code: RefusalCode::InvalidCode,
+                        message: "dynamic BudZero storage slot operand".into(),
+                    });
+                }
+                let slot = bud_vm::constant_storage_slot(inst.imm);
+                let covered = if inst.opcode == Opcode::SWrite {
+                    declared.contains(&slot)
+                } else {
+                    declared.contains(&slot) || pairs.iter().any(|(s, _)| *s == slot)
+                };
+                if !covered {
+                    return Err(EeRefusal {
+                        code: RefusalCode::Denied,
+                        message: format!("BudZero storage slot {slot} not declared"),
+                    });
+                }
+            }
+        }
         for &slot in &declared {
+            if slot >= bud_vm::GOLDILOCKS_P {
+                return Err(EeRefusal {
+                    code: RefusalCode::InvalidCode,
+                    message: "non-canonical storage slot in declared list".into(),
+                });
+            }
             let key = slot_key(&q.target.id, slot);
             let raw_opt = host.read(&store_ns, &key).map_err(|e| EeRefusal {
                 code: RefusalCode::Denied,
@@ -553,7 +631,7 @@ impl ExecutionEnvironment for BudZeroWorker {
             }
         }
         for (slot, val) in pairs {
-            if val >= bud_vm::GOLDILOCKS_P {
+            if slot >= bud_vm::GOLDILOCKS_P || val >= bud_vm::GOLDILOCKS_P {
                 return Err(EeRefusal {
                     code: RefusalCode::InvalidCode,
                     message: "non-canonical field element in call input".into(),
@@ -1161,5 +1239,103 @@ mod tests {
                 "query must fail closed on corrupt/non-canonical committed slot {bad_slot}: {query_res:?}"
             );
         }
+    }
+
+    #[test]
+    fn omitted_declared_slot_cannot_hide_committed_storage_or_force_zero_read() {
+        let mut fx = Fixture::new();
+        let steps = [
+            Instruction {
+                opcode: Opcode::SRead,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 7,
+            },
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 2,
+                rs1: 0,
+                rs2: 0,
+                imm: 1,
+            },
+            Instruction {
+                opcode: Opcode::Add,
+                rd: 3,
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::SWrite,
+                rd: 0,
+                rs1: 3,
+                rs2: 0,
+                imm: 7,
+            },
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 3,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+        ];
+        fx.deploy(
+            steps
+                .iter()
+                .flat_map(|ins| ins.encode().to_le_bytes())
+                .collect(),
+        );
+
+        let Ok(store_ns) = Namespace::new(NS_BUDZERO_STORAGE) else {
+            panic!("storage namespace");
+        };
+        let key = slot_key(&fx.target.id, 7);
+        assert!(fx
+            .host
+            .write(&store_ns, &key, Some(&40u64.to_le_bytes()))
+            .is_ok());
+
+        // Invoking with an empty `declared` list must be refused rather than reading 0 and writing 1.
+        let Ok(call_res) = fx.worker.execute(
+            &fx.ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: fx.caller.clone(),
+                target: fx.target.clone(),
+                value: BudAmount(0),
+                input: encode_call_payload(&[], &[]),
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [6u8; 32],
+            },
+            &mut fx.host,
+        ) else {
+            panic!("call faulted unexpectedly");
+        };
+        assert_eq!(call_res.status, OutcomeStatus::Revert);
+        assert_eq!(
+            fx.host.read(&store_ns, &key).ok().flatten(),
+            Some(40u64.to_le_bytes().to_vec()),
+            "committed slot must remain unchanged when caller omits it from declared list"
+        );
+
+        let q_res = fx.worker.query(
+            &fx.ctx,
+            &EeQuery {
+                target: fx.target.clone(),
+                input: encode_call_payload(&[], &[]),
+            },
+            &fx.host,
+        );
+        assert!(q_res.is_err(), "query omitting required slot must fail");
     }
 }

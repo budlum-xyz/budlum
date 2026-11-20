@@ -481,6 +481,11 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
         if u64::from(record.symbols_per_segment) < k + 2 {
             return Err(RegistryError::BadPlacement("fewer than k + 2 symbols"));
         }
+        if record.symbols_per_segment > super::pipeline::MAX_SYMBOLS_PER_SEGMENT {
+            return Err(RegistryError::BadPlacement(
+                "symbols_per_segment above the protocol ceiling",
+            ));
+        }
         let mut ranges: Vec<(u32, u32)> = Vec::new();
         let mut distinct_validators = BTreeSet::new();
         for (s, sh) in shares {
@@ -3601,6 +3606,18 @@ mod tests {
 
     /// Upload content and spread each segment's 20 symbols over four
     /// holders of five symbols.
+    #[test]
+    fn a_record_above_the_symbol_ceiling_is_refused_at_registration() {
+        let mut r = Bud3Registry::default();
+        let content: Vec<u8> = (0u16..1500).map(|i| (i.wrapping_mul(29)) as u8).collect();
+        let (mut up, shares) = upload(&content);
+        up.record.symbols_per_segment = super::super::pipeline::MAX_SYMBOLS_PER_SEGMENT + 1;
+        let err = r
+            .register_object(addr(1), up.record, shares, 0, 100)
+            .expect_err("a placement row above the ceiling must be refused");
+        assert!(matches!(err, RegistryError::BadPlacement(_)));
+    }
+
     fn upload(content: &[u8]) -> (PreparedUpload, Vec<(u64, Share)>) {
         let up = prepare_public_upload(content, &P, &Bud3Limits::default(), 20).unwrap();
         let mut shares = Vec::new();
