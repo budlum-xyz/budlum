@@ -217,8 +217,10 @@ pub const MAX_NAME_OFFERS_PER_SELLER: usize = 64;
 
 /// How far ahead a name listing may expire. The full-table sweep reclaims
 /// only expired rows, so the expiry a seller picks is also the lifetime of
-/// the table space it occupies.
-pub const MAX_NAME_OFFER_TTL_EPOCHS: u64 = 10_000;
+/// the table space it occupies. The bound is the longest registration a
+/// settled offer could grant: a listing has no reason to outlive the
+/// longest life its own product can have.
+pub const MAX_NAME_OFFER_TTL_EPOCHS: u64 = crate::registry::params::MAX_DURATION;
 /// Most data assets the registry holds.
 ///
 /// Convenience: pub so marketplace callers can refuse past the
@@ -355,13 +357,15 @@ impl MarketplaceRegistry {
         // Listing is a claim on the payment stream for these bytes: when the
         // content is already a registered asset or is bound to one, only
         // that asset's owner may list it. Anyone can still list content
-        // nobody has registered, exactly as before.
+        // nobody has registered.
         let owner_of = |asset_id: &AssetId| self.data_assets.get(asset_id).map(|asset| asset.owner);
         if let Some(bound) = self.protected_content.asset_for(&cid) {
             match owner_of(&bound) {
                 Some(owner) if owner == seller => {}
                 Some(_) | None => {
-                    return Err("Content is bound to a Pollen asset another account owns".into());
+                    return Err(
+                        "Content is bound to a data-market asset another account owns".into(),
+                    );
                 }
             }
         }
@@ -2057,7 +2061,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_anothers_registered_content_is_refused() {
+    fn listing_content_registered_by_another_is_refused() {
         let mut reg = MarketplaceRegistry::default();
         let owner = addr(1);
         let stranger = addr(2);
@@ -2074,7 +2078,7 @@ mod tests {
         // The owner still lists it.
         reg.create_offer(owner, cid, 100).unwrap();
 
-        // Pollen-bound content follows its asset's owner the same way.
+        // Bound content follows its asset's owner the same way.
         reg.protected_content
             .bind(cid, asset_id, owner, owner)
             .unwrap();

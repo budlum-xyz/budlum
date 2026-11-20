@@ -885,6 +885,50 @@ pub fn committee_root(aggregate_pubkey: &[u8]) -> [u8; 32] {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_ETHSYNC_COMMITTEE_ROOT_V1", aggregate_pubkey])
 }
 
+/// The pin for real wire-format evidence (v4): a canonical SSZ
+/// `LightClientFinalityUpdate` signed by the committee whose full 512-member
+/// encoding hashes to `committee_ssz_root`.
+///
+/// Where [`PinnedCommittee`] holds an aggregate key for the Budlum-native
+/// evidence formats, this pin holds the *root* of the real committee: the
+/// roster travels inside the payload, and the payload's copy is trusted only
+/// because its `hash_tree_root` opens this pin. The genesis validators root
+/// and the fork schedule are what make the signature's domain unambiguous -
+/// without them a signature made under one fork's domain could be replayed
+/// under another.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SszCommitteePin {
+    /// The sync-committee period this pin serves: `signature_slot / 8192`.
+    pub period: u64,
+    /// `hash_tree_root(SyncCommittee)` of the full canonical SSZ encoding
+    /// (512 member pubkeys plus the aggregate, 24624 bytes).
+    pub committee_ssz_root: [u8; 32],
+    /// The chain's `genesis_validators_root`: the second field of the fork
+    /// data root, and the reason a signature from another network can never
+    /// verify here.
+    pub genesis_validators_root: [u8; 32],
+    /// The fork schedule the signing domain resolves against.
+    pub fork_schedule: crate::cross_domain::external::ethereum_ssz::ForkSchedule,
+}
+
+impl SszCommitteePin {
+    /// The Ethereum mainnet pin: mainnet `genesis_validators_root` and the
+    /// Deneb / Electra / Fulu fork schedule.
+    #[must_use]
+    pub fn mainnet(period: u64, committee_ssz_root: [u8; 32]) -> Self {
+        Self {
+            period,
+            committee_ssz_root,
+            genesis_validators_root: [
+                0x4b, 0x36, 0x3d, 0xb9, 0x4e, 0x28, 0x61, 0x20, 0xd7, 0x6e, 0xb9, 0x05, 0x34, 0x0f,
+                0xdd, 0x4e, 0x54, 0xbf, 0xe9, 0xf0, 0x6b, 0xf3, 0x3f, 0xf6, 0xcf, 0x5a, 0xd2, 0x7f,
+                0x51, 0x1b, 0xfe, 0x95,
+            ],
+            fork_schedule: crate::cross_domain::external::ethereum_ssz::ForkSchedule::mainnet(),
+        }
+    }
+}
+
 /// The signing root, derived (evidence format v2).
 ///
 /// The v1 adapter signed a constant held in `AdapterSpec` - the signature
@@ -986,6 +1030,11 @@ pub struct EthereumSyncAdapter {
     /// `update.participation_bits`, enabling authentic `< 512` partial-quorum
     /// updates and refusing any bitvector mask that disagrees with the signers.
     member_pubkeys: Option<Vec<[u8; 48]>>,
+    /// The pin for real wire-format evidence (v4). `None` keeps the v4 door
+    /// closed even though the version is listed as accepted: an accepted
+    /// version is not an admitted one until the adapter holds the committee
+    /// root the payload's roster must open.
+    ssz_pin: Option<SszCommitteePin>,
     golden: Option<RawConsensusEvidence>,
 }
 
@@ -1048,7 +1097,11 @@ impl EthereumSyncAdapter {
                 // Evidence format v2 - the signature
                 // covers the update itself, not a stored constant.
                 adapter_version: 2,
-                accepted_evidence_versions: vec![2, 3],
+                // v4 is the real wire format: a canonical SSZ
+                // `LightClientFinalityUpdate` carried next to the full
+                // committee encoding. Accepted here; admitted only when an
+                // `SszCommitteePin` is installed.
+                accepted_evidence_versions: vec![2, 3, 4],
                 consensus_kind: "gasper-pos".to_string(),
                 finality_kind: FinalityKind::ProtocolFinality,
                 // Two epochs of Casper FFG. Declared rather than derived from
@@ -1063,6 +1116,7 @@ impl EthereumSyncAdapter {
             verifier,
             committee,
             member_pubkeys: None,
+            ssz_pin: None,
             golden: None,
         }
     }
@@ -1289,6 +1343,256 @@ impl EthereumSyncAdapter {
         self.golden = Some(golden);
         self
     }
+
+    /// Installs the pin that opens the v4 door: real SSZ
+    /// `LightClientFinalityUpdate` evidence whose payload roster must hash to
+    /// the pinned committee root.
+    ///
+    /// The pin is operator-supplied state, like [`PinnedCommittee`]: the
+    /// adapter cannot learn the committee from the evidence itself, because
+    /// the evidence is exactly what is not yet trusted.
+    #[must_use]
+    pub fn with_ssz_committee_pin(mut self, pin: SszCommitteePin) -> Self {
+        self.ssz_pin = Some(pin);
+        self
+    }
+
+    /// Verify real wire-format evidence (v4): a canonical SSZ
+    /// `LightClientFinalityUpdate` carried beside the full encoding of the
+    /// committee that signed it.
+    ///
+    /// Payload layout: `u32 LE committee_len || committee_ssz || update_ssz`.
+    /// The roster is authenticated by its `hash_tree_root` against the
+    /// installed [`SszCommitteePin`] before a single field of the update is
+    /// believed, and the signature is checked against the exact
+    /// participating subset of that roster, under the domain the pinned fork
+    /// schedule and genesis validators root derive.
+    ///
+    /// # Errors
+    ///
+    /// Every step fails closed: malformed SSZ, a roster that does not open
+    /// the pin, a signature slot outside the pinned period, a fork the
+    /// schedule does not reach, a Merkle branch that does not prove its
+    /// leaf, participation below the supermajority, and a signature that
+    /// does not verify are all refusals.
+    fn verify_ssz_update_v4(
+        &self,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+        observer: &mut dyn CryptoObserver,
+    ) -> Result<FinalityAttestation, AdapterError> {
+        use crate::cross_domain::external::ethereum_ssz as ssz;
+        use subtle::ConstantTimeEq;
+
+        // The backing of this adapter is never slashable, whichever format
+        // the evidence arrives in.
+        if policy.require_slashable {
+            return Err(AdapterError::ConsensusRule {
+                rule:
+                    "the policy requires slashable backing; a sync committee set is not slashable"
+                        .to_string(),
+            });
+        }
+        let Some(pin) = self.ssz_pin.as_ref() else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "no SSZ committee pin installed; real-update admission is closed".to_string(),
+            });
+        };
+
+        let payload = evidence.payload.as_slice();
+        let committee_len = payload
+            .get(..4)
+            .and_then(|raw| raw.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| AdapterError::Malformed {
+                offset: 0,
+                reason: "payload shorter than the committee length word".to_string(),
+            })? as usize;
+        if committee_len != ssz::SYNC_COMMITTEE_SSZ_LEN {
+            return Err(AdapterError::Malformed {
+                offset: 0,
+                reason: format!(
+                    "committee length {committee_len} is not the canonical {}",
+                    ssz::SYNC_COMMITTEE_SSZ_LEN
+                ),
+            });
+        }
+        let committee =
+            payload
+                .get(4..4 + committee_len)
+                .ok_or_else(|| AdapterError::Malformed {
+                    offset: 4,
+                    reason: "payload ends inside the committee encoding".to_string(),
+                })?;
+        let update_bytes = payload
+            .get(4 + committee_len..)
+            .filter(|rest| !rest.is_empty())
+            .ok_or_else(|| AdapterError::Malformed {
+                offset: 4 + committee_len,
+                reason: "no finality update follows the committee encoding".to_string(),
+            })?;
+
+        // Roster authenticity, before anything in the update is believed:
+        // the committee travels with the evidence, and the evidence is
+        // exactly what is not yet trusted.
+        let roster_root = ssz::sync_committee_root(committee)?;
+        if !bool::from(roster_root.ct_eq(&pin.committee_ssz_root)) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "the payload's committee does not open the pinned SSZ root".to_string(),
+            });
+        }
+        let roster = ssz::sync_committee_pubkeys(committee)?;
+        let aggregate = ssz::sync_committee_aggregate(committee)?;
+        crate::cross_domain::evm::sync_committee::validate_sync_committee_pubkeys(
+            &roster, &aggregate,
+        )
+        .map_err(|what| AdapterError::Crypto {
+            what: what.to_string(),
+        })?;
+
+        let update = ssz::parse_finality_update(update_bytes, &pin.fork_schedule)?;
+
+        // The committee in force is the one at the SIGNATURE slot (the
+        // block after the signed header), and it must be the pinned period.
+        let signature_period = update.signature_slot / ssz::SLOTS_PER_SYNC_COMMITTEE_PERIOD;
+        if signature_period != pin.period {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "signature slot's period {signature_period} is not the pinned period {}",
+                    pin.period
+                ),
+            });
+        }
+
+        // The signing domain: the fork version at the epoch the signature
+        // belongs to (the spec computes it at `signature_slot - 1`), mixed
+        // with the pinned genesis validators root.
+        let fork_epoch = update.signature_slot.saturating_sub(1) / ssz::SLOTS_PER_EPOCH;
+        let Some(fork_version) = pin.fork_schedule.version_at(fork_epoch) else {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!("the pinned fork schedule names no version at epoch {fork_epoch}"),
+            });
+        };
+        let signing_root = ssz::sync_committee_signing_root(
+            &update.attested.beacon,
+            fork_version,
+            &pin.genesis_validators_root,
+        );
+
+        // The Merkle chain: the finalized header under the attested state
+        // root, then the execution payload under the finalized body root.
+        let execution = ssz::verify_finality_and_execution(&update, &pin.fork_schedule)?;
+
+        // The declared fields must be the proven ones: in v4 the declared
+        // root binds the SSZ-proven `ExecutionPayloadHeader.state_root`.
+        if policy.require_declared_match {
+            if evidence.declared_height != update.finalized.beacon.slot {
+                return Err(AdapterError::DeclarationMismatch { field: "height" });
+            }
+            if evidence.declared_root != execution.state_root {
+                return Err(AdapterError::DeclarationMismatch {
+                    field: "state_root",
+                });
+            }
+        }
+
+        // Participation, before the expensive checks.
+        let signers = update
+            .participation_bits
+            .iter()
+            .map(|byte| u64::from(byte.count_ones()))
+            .sum::<u64>();
+        if !has_supermajority(signers) {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "{signers} of {SYNC_COMMITTEE_SIZE} signed; the threshold is {}",
+                    minimum_signers()
+                ),
+            });
+        }
+
+        // The key the signature is checked against is the exact
+        // participating subset of the authenticated roster.
+        let (subset_key, subset_count) =
+            aggregate_sync_committee_subset(&roster, &update.participation_bits)?;
+        if subset_count != signers {
+            return Err(AdapterError::ConsensusRule {
+                rule: "sync committee subset count diverged from participation bitvector"
+                    .to_string(),
+            });
+        }
+
+        // The pairing check. Refused when no verifier is installed - there
+        // is no mode in which this adapter accepts an unchecked signature.
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Err(AdapterError::Unavailable {
+                reason: "no BLS verifier installed; refusing rather than skipping the check"
+                    .to_string(),
+            });
+        };
+        if verifier.sync_committee_closed() {
+            return Err(AdapterError::Unavailable {
+                reason: "Ethereum sync-committee verification is closed on this verifier"
+                    .to_string(),
+            });
+        }
+        verifier
+            .verify_aggregate(&signing_root, &subset_key, &update.signature, signers)
+            .map_err(|what| AdapterError::Crypto { what })?;
+
+        // Depth and age, against the caller's policy.
+        let depth = update
+            .attested
+            .beacon
+            .slot
+            .saturating_sub(update.finalized.beacon.slot);
+        if depth < policy.min_depth {
+            return Err(AdapterError::InsufficientDepth {
+                observed: depth,
+                required: policy.min_depth,
+            });
+        }
+        if policy.max_age > 0 {
+            let age = policy.now.saturating_sub(update.finalized.beacon.slot);
+            if age > policy.max_age {
+                return Err(AdapterError::Stale {
+                    age,
+                    max_age: policy.max_age,
+                });
+            }
+        }
+
+        // Every check passed. The one scheme this adapter verified is the
+        // committee's BLS12-381 aggregate.
+        observer.observe(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
+
+        Ok(FinalityAttestation {
+            adapter: self.descriptor.id,
+            domain: crate::cross_domain::external::spec::DomainKey::from_parts(
+                &self.descriptor.id,
+                &evidence.network,
+            ),
+            height: update.finalized.beacon.slot,
+            state_root: execution.state_root,
+            attested_block_hash: Some(execution.block_hash),
+            attested_event_root: Some(execution.receipts_root),
+            attested_tx_root: Some(execution.transactions_root),
+            finalized_at: epoch_of_slot(update.finalized.beacon.slot),
+            time_unit: TimeUnit::Epoch,
+            security: SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
+                signers,
+                required: minimum_signers(),
+                total_weight: u128::from(SYNC_COMMITTEE_SIZE),
+                // Altair defines no slashing condition for sync committee
+                // messages; the format of the evidence does not change that.
+                slashable: false,
+            },
+            evidence_digest: evidence.digest(),
+            adapter_version: self.descriptor.adapter_version,
+            evidence_version: evidence.evidence_version,
+        })
+    }
 }
 
 impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSyncAdapter {
@@ -1342,6 +1646,14 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
                 version: evidence.evidence_version,
                 accepted,
             });
+        }
+
+        // The real wire format runs its own pipeline: nothing in a v4
+        // payload is a Budlum-native field, so parsing, proving, and signing
+        // all follow the consensus specification end to end before the
+        // results converge into the same attestation the v2/v3 path emits.
+        if evidence.evidence_version == 4 {
+            return self.verify_ssz_update_v4(evidence, policy, observer);
         }
 
         let (update, maybe_exec) = if evidence.evidence_version == 3 {
@@ -1928,7 +2240,7 @@ mod slashable_policy_tests {
         bad_version.evidence_version = 99;
         match adapter.verify(&bad_version, &VerificationPolicy::strict(1_000)) {
             Err(AdapterError::UnsupportedEvidenceVersion { accepted, .. }) => {
-                assert_eq!(accepted, "2, 3");
+                assert_eq!(accepted, "2, 3, 4");
             }
             other => panic!("expected UnsupportedEvidenceVersion, got {other:?}"),
         }

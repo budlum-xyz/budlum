@@ -66,6 +66,8 @@ pub mod domain_edge_cases;
 #[cfg(test)]
 pub mod encryption_dao;
 #[cfg(test)]
+pub mod ethereum_real_finality;
+#[cfg(test)]
 pub mod evm_finality_contract;
 #[cfg(test)]
 pub mod finality_adversarial;

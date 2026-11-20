@@ -2874,6 +2874,8 @@ mod tests {
     /// Only the keys of the schema-13 change.
     const SCHEMA13_KEYS: &[&str] = &["validator_directory"];
     const SCHEMA14_KEYS: &[&str] = &["bud3_registry"];
+    /// Quantum-account registry: the schema-16 change.
+    const SCHEMA16_KEYS: &[&str] = &["quantum_accounts"];
 
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
@@ -3036,6 +3038,8 @@ mod tests {
             "validator_directory",
             // B.U.D. 3.0 registry (schema-14 digest; carried unbound in 13)
             "bud3_registry",
+            // quantum-account registry (schema-16 bump: default-filled AND digested)
+            "quantum_accounts",
             // identity registry (schema-5 bump: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 bump: same discipline)
@@ -3080,6 +3084,7 @@ mod tests {
                 SCHEMA12_KEYS,
                 SCHEMA13_KEYS,
                 SCHEMA14_KEYS,
+                SCHEMA16_KEYS,
             ]
             .concat(),
             2,
@@ -3099,6 +3104,7 @@ mod tests {
             SCHEMA12_KEYS,
             SCHEMA13_KEYS,
             SCHEMA14_KEYS,
+            SCHEMA16_KEYS,
         ]
         .concat()
         {
@@ -3216,6 +3222,7 @@ mod tests {
                 SCHEMA12_KEYS,
                 SCHEMA13_KEYS,
                 SCHEMA14_KEYS,
+                SCHEMA16_KEYS,
             ]
             .concat(),
             3,
@@ -3233,6 +3240,7 @@ mod tests {
             SCHEMA12_KEYS,
             SCHEMA13_KEYS,
             SCHEMA14_KEYS,
+            SCHEMA16_KEYS,
         ]
         .concat()
         {
@@ -3326,6 +3334,7 @@ mod tests {
                 SCHEMA12_KEYS,
                 SCHEMA13_KEYS,
                 SCHEMA14_KEYS,
+                SCHEMA16_KEYS,
             ]
             .concat(),
             4,
@@ -3342,6 +3351,7 @@ mod tests {
             SCHEMA12_KEYS,
             SCHEMA13_KEYS,
             SCHEMA14_KEYS,
+            SCHEMA16_KEYS,
         ]
         .concat()
         {
