@@ -2057,7 +2057,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_anothers_registered_content_is_refused() {
+    fn listing_content_registered_by_another_is_refused() {
         let mut reg = MarketplaceRegistry::default();
         let owner = addr(1);
         let stranger = addr(2);
