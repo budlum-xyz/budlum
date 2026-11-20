@@ -114,6 +114,7 @@ pub mod da_sampling;
 pub mod dag_bft;
 pub mod domain_bridge;
 pub mod ethereum;
+pub mod ethereum_ssz;
 pub mod evm_hybrid;
 pub mod external_tx;
 pub mod falsity;
@@ -199,8 +200,8 @@ pub use domain_bridge::{
 };
 pub use ethereum::{
     bits_for, epoch_of_slot, has_supermajority, minimum_signers, parse_update, participation,
-    period_of_slot, BlsVerifier, EthereumSyncAdapter, SyncCommitteeUpdate, BITVECTOR_BYTES,
-    EPOCHS_PER_SYNC_COMMITTEE_PERIOD, SLOTS_PER_EPOCH, SYNC_COMMITTEE_SIZE,
+    period_of_slot, BlsVerifier, EthereumSyncAdapter, SszCommitteePin, SyncCommitteeUpdate,
+    BITVECTOR_BYTES, EPOCHS_PER_SYNC_COMMITTEE_PERIOD, SLOTS_PER_EPOCH, SYNC_COMMITTEE_SIZE,
 };
 pub use evm_hybrid::{
     plan_from_observations, plan_verification, EvmGasSchedule, EvmHybridProof, EvmPlanError,
