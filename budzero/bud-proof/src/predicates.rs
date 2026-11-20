@@ -113,7 +113,10 @@ impl PredicateStatement {
     pub fn holds(&self) -> bool {
         match self.kind {
             PredicateKind::Yk1Ownership => self.lhs == self.rhs && self.aux != 0,
-            PredicateKind::Yk2BalanceConservation => self.lhs == self.rhs,
+            // YK2 only carries the caller's two public numbers and cannot bind
+            // hidden note commitments, so it must never report value
+            // conservation until a commitment-bound circuit exists.
+            PredicateKind::Yk2BalanceConservation => false,
             PredicateKind::Yk3MerkleMembership => self.lhs == self.rhs && self.lhs != 0,
             PredicateKind::Yk4NullifierFreshness => {
                 poseidon4_hash4(self.lhs, bud_vm::DOMAIN_NULLIFIER, 0, 0) == self.rhs
@@ -227,14 +230,14 @@ fn hash_program(program: &[u64]) -> [u8; 32] {
 /// Fails closed if `statement.holds()` is false, VM execution fails, or
 /// STARK proving fails.
 pub fn prove_predicate(statement: &PredicateStatement) -> Result<PredicateProof, PredicateError> {
-    if !statement.holds() {
-        return Err(PredicateError::ConditionUnsatisfied(statement.kind));
-    }
     // A VM accepting VerifyInference would still only prove an equality of
     // caller-supplied public numbers, not ownership, Merkle membership, or an
     // actual inference. Opening the opcode must not implicitly open YK1..YK11.
     if statement.kind != PredicateKind::Yk6ThresholdQuorum {
         return Err(PredicateError::ActivationClosed(statement.kind));
+    }
+    if !statement.holds() {
+        return Err(PredicateError::ConditionUnsatisfied(statement.kind));
     }
     let program = statement.to_program();
     let mut vm = Vm::with_mainnet_mode(1024, 1_000_000, true);
@@ -277,14 +280,14 @@ pub fn prove_predicate(statement: &PredicateStatement) -> Result<PredicateProof,
 ///
 /// Fails closed on unsatisfied statement, forged digest/program, or invalid STARK proof.
 pub fn verify_predicate(proof: &PredicateProof) -> Result<(), PredicateError> {
-    if !proof.statement.holds() {
-        return Err(PredicateError::ConditionUnsatisfied(proof.statement.kind));
-    }
     // Independently refuse externally produced STARKs for the unbound kinds:
     // an isolated prover can run the opcode even while production decoding is
     // closed. A valid execution trace is not a proof of a missing relation.
     if proof.statement.kind != PredicateKind::Yk6ThresholdQuorum {
         return Err(PredicateError::ActivationClosed(proof.statement.kind));
+    }
+    if !proof.statement.holds() {
+        return Err(PredicateError::ConditionUnsatisfied(proof.statement.kind));
     }
     if proof.statement_digest != proof.statement.digest() {
         return Err(PredicateError::ProgramMismatch);
@@ -323,7 +326,40 @@ mod tests {
 
     #[test]
     fn yk2_balance_conservation_stays_closed_until_private_witness_is_bound() {
-        let st = PredicateStatement {
+        for (lhs, rhs) in [(500, 500), (0, 0), (1_000, 999)] {
+            let st = PredicateStatement {
+                kind: PredicateKind::Yk2BalanceConservation,
+                lhs,
+                rhs,
+                aux: 7,
+                chain_id: 45261,
+            };
+            assert!(
+                !st.holds(),
+                "prover-chosen public sums must never report value conservation"
+            );
+            let mut isolated_vm = Vm::with_mainnet_mode(1024, 1_000_000, false);
+            assert!(
+                !isolated_vm.run_receipt(&st.to_program()).success,
+                "even an isolated VM must reject a YK2 statement lacking hidden note commitments"
+            );
+            assert_eq!(
+                prove_predicate(&st).unwrap_err(),
+                PredicateError::ActivationClosed(PredicateKind::Yk2BalanceConservation)
+            );
+        }
+
+        // Verifier must refuse YK2 with ActivationClosed before evaluating holds(),
+        // even when handed an externally built proof shell.
+        let quorum = PredicateStatement {
+            kind: PredicateKind::Yk6ThresholdQuorum,
+            lhs: 4,
+            rhs: 4,
+            aux: 7,
+            chain_id: 45261,
+        };
+        let mut forged_yk2 = prove_predicate(&quorum).expect("quorum proof builds");
+        forged_yk2.statement = PredicateStatement {
             kind: PredicateKind::Yk2BalanceConservation,
             lhs: 500,
             rhs: 500,
@@ -331,7 +367,7 @@ mod tests {
             chain_id: 45261,
         };
         assert_eq!(
-            prove_predicate(&st).unwrap_err(),
+            verify_predicate(&forged_yk2).unwrap_err(),
             PredicateError::ActivationClosed(PredicateKind::Yk2BalanceConservation)
         );
     }

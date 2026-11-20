@@ -10,7 +10,8 @@ import {
     IBudlumFinality,
     PaymentProof
 } from "../app_binding/BudlumPaymentReceiver.sol";
-import {BudlumRemoteAccountFactory} from "../app_binding/BudlumRemoteAccountFactory.sol";
+import {FinalityMode} from "../external-domain/BudlumFinalityVerifier.sol";
+import {BudlumRemoteAccount, BudlumRemoteAccountFactory} from "../app_binding/BudlumRemoteAccountFactory.sol";
 
 contract Counter {
     uint256 public count;
@@ -32,11 +33,17 @@ contract ClaimingApp is BudlumAppBindingClaimer {
 
 contract FinalityStub is IBudlumFinality {
     mapping(uint64 => bytes32) public roots;
+    mapping(uint64 => FinalityMode) public modes;
     uint64 public latestFinalHeight;
 
     function set(uint64 height, bytes32 root) external {
+        setWithMode(height, root, root == bytes32(0) ? FinalityMode.None : FinalityMode.Hybrid);
+    }
+
+    function setWithMode(uint64 height, bytes32 root, FinalityMode mode) public {
         roots[height] = root;
-        if (root != bytes32(0) && height > latestFinalHeight) {
+        modes[height] = mode;
+        if (root != bytes32(0) && mode != FinalityMode.None && height > latestFinalHeight) {
             latestFinalHeight = height;
         }
     }
@@ -46,12 +53,29 @@ contract FinalityStub is IBudlumFinality {
     }
 
     function heightFinal(uint64 height) external view returns (bool) {
-        return roots[height] != bytes32(0);
+        return roots[height] != bytes32(0) && modes[height] != FinalityMode.None;
+    }
+
+    function finalityModeAtHeight(uint64 height) external view returns (FinalityMode) {
+        return modes[height];
     }
 }
 
 contract Receiver is BudlumPaymentReceiver {
     constructor(IBudlumFinality finality_, bytes32 appId_) BudlumPaymentReceiver(finality_, appId_) {}
+
+    function consume(PaymentProof calldata proof) external returns (uint64) {
+        return _consumePayment(proof).amount;
+    }
+}
+
+/// Opt-in consumer that explicitly accepts single-half optimistic finality.
+contract OptimisticOptInReceiver is BudlumPaymentReceiver {
+    constructor(IBudlumFinality finality_, bytes32 appId_) BudlumPaymentReceiver(finality_, appId_) {}
+
+    function _requiresHybridFinality() internal pure override returns (bool) {
+        return false;
+    }
 
     function consume(PaymentProof calldata proof) external returns (uint64) {
         return _consumePayment(proof).amount;
@@ -435,5 +459,87 @@ contract AppBindingTest is Harness {
 
         vm.expectPartialRevert(AppBindingExecutor.InvalidAuthorization.selector);
         _authorize(keccak256("self"), address(this), SOLVER, address(executor), hex"", hex"01", 0);
+    }
+
+    function test_classical_only_finality_is_refused_by_receiver_and_remote_account() public {
+        FinalityStub finality = new FinalityStub();
+        bytes32 appId = keccak256("app-mode");
+        bytes32 owner = bytes32(uint256(9));
+
+        // 1. Default BudlumPaymentReceiver refuses ClassicalOnly and PostQuantumOnly.
+        Receiver receiver = new Receiver(finality, appId);
+        PaymentProof memory proof = _proof(receiver, finality, appId);
+        bytes32 root = finality.rootAtHeight(20);
+
+        finality.setWithMode(20, root, FinalityMode.ClassicalOnly);
+        assertEq(
+            keccak256(bytes(receiver.checkPayment(proof))),
+            keccak256("hybrid finality required"),
+            "default receiver refuses ClassicalOnly"
+        );
+        vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
+        receiver.consume(proof);
+
+        finality.setWithMode(20, root, FinalityMode.PostQuantumOnly);
+        assertEq(
+            keccak256(bytes(receiver.checkPayment(proof))),
+            keccak256("hybrid finality required"),
+            "default receiver refuses PostQuantumOnly"
+        );
+        vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
+        receiver.consume(proof);
+
+        // 2. An explicit opt-in receiver can accept ClassicalOnly while seeing its mode.
+        OptimisticOptInReceiver optIn = new OptimisticOptInReceiver(finality, appId);
+        PaymentProof memory optInProof = _proof(Receiver(address(optIn)), finality, appId);
+        bytes32 optInRoot = finality.rootAtHeight(20);
+        finality.setWithMode(20, optInRoot, FinalityMode.ClassicalOnly);
+        assertTrue(finality.finalityModeAtHeight(20) == FinalityMode.ClassicalOnly, "mode visible as ClassicalOnly");
+        assertEq(optIn.consume(optInProof), 500, "explicit opt-in consumer accepts ClassicalOnly");
+
+        // 3. BudlumRemoteAccount refuses arbitrary value execution on ClassicalOnly.
+        BudlumRemoteAccountFactory factory = new BudlumRemoteAccountFactory(finality);
+        BudlumRemoteAccount account = BudlumRemoteAccount(payable(factory.deploy(appId, owner)));
+        bytes memory callData = abi.encodeCall(Counter.bump, ());
+        bytes32 auth = account.callAuthorization(address(counter), 0, callData, 0);
+
+        PaymentProof memory remoteProof;
+        remoteProof.payment = AppBindingPayment(
+            keccak256("remote-call-payment"),
+            appId,
+            owner,
+            bytes32(uint256(10)),
+            500,
+            hex"aa",
+            auth,
+            3,
+            uint64(block.chainid),
+            abi.encodePacked(address(account))
+        );
+        remoteProof.index = 0;
+        remoteProof.path = new bytes32[](0);
+        remoteProof.paymentsRoot = account.paymentLeaf(remoteProof.payment);
+        remoteProof.restHash = keccak256("rest");
+        remoteProof.header.version = 8;
+        remoteProof.header.timestampMs = uint128(block.timestamp) * 1000;
+        remoteProof.header.checkpointHeight = 25;
+        remoteProof.header.hasAppBindingRoot = true;
+        remoteProof.header.appBindingRoot =
+            account.appBindingRegistryRoot(remoteProof.paymentsRoot, remoteProof.restHash);
+        remoteProof.stateRootBody = keccak256("body");
+        bytes32 remoteRoot =
+            account.stateRootFromOpening(remoteProof.stateRootBody, account.headerHash(remoteProof.header));
+
+        finality.setWithMode(25, remoteRoot, FinalityMode.ClassicalOnly);
+        vm.expectPartialRevert(BudlumRemoteAccount.HybridFinalityRequired.selector);
+        account.execute(remoteProof, address(counter), 0, callData);
+        assertEq(counter.count(), 0, "ClassicalOnly must not execute remote call");
+        assertEq(account.nonce(), 0, "ClassicalOnly must not advance remote nonce");
+
+        // Upgrading the fixture height to Hybrid allows execution.
+        finality.setWithMode(25, remoteRoot, FinalityMode.Hybrid);
+        account.execute(remoteProof, address(counter), 0, callData);
+        assertEq(counter.count(), 1, "Hybrid finality executes remote call");
+        assertEq(account.nonce(), 1, "Hybrid finality advances remote nonce");
     }
 }

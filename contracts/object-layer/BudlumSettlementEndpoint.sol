@@ -4,6 +4,7 @@
 pragma solidity 0.8.26;
 
 import {BudlumHash} from "../lib/BudlumHash.sol";
+import {FinalityMode} from "../external-domain/BudlumFinalityVerifier.sol";
 import {IBudlumObjectLayerFinality} from "./BudlumFinalityVerifier.sol";
 
 /// @title Budlum settlement endpoint (EVM family).
@@ -31,6 +32,7 @@ contract BudlumSettlementEndpoint {
     /// its object-layer state against this exact checkpoint, not a caller's
     /// unbound choice of header at the same height.
     bytes32 public lastAcceptedHeaderHash;
+    FinalityMode public lastAcceptedFinalityMode;
     uint256 public lastAcceptedAt;
     mapping(address => uint64) public homeNonce;
 
@@ -50,6 +52,7 @@ contract BudlumSettlementEndpoint {
     error NotOpen(string step);
     error InvalidAssetClass();
     error InvalidEndpointConfig();
+    error HybridFinalityRequired(FinalityMode got);
 
     constructor(IBudlumObjectLayerFinality verifier_, uint256 silenceWindow_) {
         if (
@@ -88,9 +91,11 @@ contract BudlumSettlementEndpoint {
     /// departure/escape opening; it does not activate custody or exit.
     function acceptHeader(uint64 height) external {
         if (height <= lastAcceptedHeight) revert NotNewer();
-        bytes32 headerHash = _readFinalHeader(height);
+        (bytes32 headerHash, FinalityMode mode) = _readFinalHeader(height);
+        if (mode != FinalityMode.Hybrid) revert HybridFinalityRequired(mode);
         lastAcceptedHeight = height;
         lastAcceptedHeaderHash = headerHash;
+        lastAcceptedFinalityMode = mode;
         lastAcceptedAt = block.timestamp;
         emit HeaderAccepted(height, headerHash);
     }
@@ -145,10 +150,11 @@ contract BudlumSettlementEndpoint {
         revert NotOpen("escape proof");
     }
 
-    function _readFinalHeader(uint64 height) internal view returns (bytes32) {
+    function _readFinalHeader(uint64 height) internal view returns (bytes32 headerHash, FinalityMode mode) {
         if (!verifier.heightFinal(height)) revert NotFinal();
-        bytes32 headerHash = verifier.headerAt(height);
+        headerHash = verifier.headerAt(height);
         if (headerHash == bytes32(0)) revert NotFinal();
-        return headerHash;
+        mode = verifier.finalityModeAt(height);
+        if (mode == FinalityMode.None) revert NotFinal();
     }
 }
