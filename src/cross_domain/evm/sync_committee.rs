@@ -977,7 +977,7 @@ fn logs_bloom_hash_tree_root(logs_bloom: &[u8]) -> Result<[u8; 32], SyncCommitte
         ));
     }
     let mut chunks = [[0u8; 32]; 8];
-    for (dst, src) in chunks.iter_mut().zip(logs_bloom.chunks_exact(32)) {
+    for (dst, src) in chunks.iter_mut().zip(logs_bloom.as_chunks::<32>().0) {
         dst.copy_from_slice(src);
     }
     Ok(merkleize_chunks(&chunks))
@@ -1130,8 +1130,10 @@ impl ExecutionPayloadHeader {
                     "sibling index out of bounds",
                 ))?;
             layer = layer
-                .chunks_exact(2)
-                .filter_map(|pair| Some(sha256_pair(pair.first()?, pair.get(1)?)))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| sha256_pair(&pair[0], &pair[1]))
                 .collect();
             idx >>= 1;
         }

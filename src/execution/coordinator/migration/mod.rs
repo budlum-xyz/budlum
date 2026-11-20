@@ -741,10 +741,10 @@ pub fn is_evm_address_occupied(
         return Ok(true);
     }
     let bud_addr = derive_contract_account(EeId::EVM, addr20);
-    if is_native_contract_account_occupied(account_state, &bud_addr) {
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(is_native_contract_account_occupied(
+        account_state,
+        &bud_addr,
+    ))
 }
 
 fn evm_storage_key(addr: &[u8; 20], slot: &[u8; 32]) -> [u8; 52] {

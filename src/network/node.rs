@@ -5231,13 +5231,7 @@ impl Node {
                                 );
                                 let _ = self.swarm.disconnect_peer_id(peer_id);
                                 if newly_connected {
-                                    self.peer_count
-                                        .fetch_update(
-                                            Ordering::SeqCst,
-                                            Ordering::SeqCst,
-                                            |v| Some(v.saturating_sub(1)),
-                                        )
-                                        .ok();
+                                    saturating_atomic_sub(&self.peer_count);
                                     {
                                         let mut pm = self.peer_manager_lock();
                                         pm.note_disconnected(&peer_id);
@@ -5377,13 +5371,7 @@ impl Node {
                                 d
                             };
                             if was_connected {
-                                self.peer_count
-                                    .fetch_update(
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
-                                        |v| Some(v.saturating_sub(1)),
-                                    )
-                                    .ok();
+                                saturating_atomic_sub(&self.peer_count);
                             }
                             // Mark the gossip score record evictable.
                             // It is NOT deleted: a peer one message
@@ -8269,6 +8257,61 @@ const _: fn(&mut Node) = |node| {
     fn assert_send<T: Send>(_: T) {}
     assert_send(node.run());
 };
+
+/// Decrements `counter` by one with saturation at zero.
+///
+/// The drift compiler deprecates `Atomic::fetch_update` in favor of a rename
+/// that does not exist on the merge-barrier toolchain, so the same one-sided
+/// update is written as an explicit compare-and-swap loop: the closure it
+/// replaced always returned the next value, so retrying the swap on the
+/// observed value is an exact equivalent.
+fn saturating_atomic_sub(counter: &AtomicUsize) {
+    let mut cur = counter.load(Ordering::SeqCst);
+    while let Err(actual) = counter.compare_exchange_weak(
+        cur,
+        cur.saturating_sub(1),
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ) {
+        cur = actual;
+    }
+}
+
+#[cfg(test)]
+mod peer_count_saturation_tests {
+    use super::saturating_atomic_sub;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn decrement_saturates_at_zero() {
+        let counter = AtomicUsize::new(2);
+        saturating_atomic_sub(&counter);
+        saturating_atomic_sub(&counter);
+        saturating_atomic_sub(&counter);
+        saturating_atomic_sub(&counter);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn concurrent_decrements_never_underflow() {
+        let counter = Arc::new(AtomicUsize::new(2000));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                std::thread::spawn(move || {
+                    for _ in 0..250 {
+                        saturating_atomic_sub(&counter);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("worker thread must not panic");
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+}
 
 #[cfg(test)]
 mod vote_history_wiring_tests {

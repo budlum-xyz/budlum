@@ -69,10 +69,7 @@ impl WitnessRequest {
         if count > MAX_WITNESS_REQUEST_IDS || bytes.len() != 12 + count * 32 {
             return None;
         }
-        let tx_ids = bytes[12..]
-            .chunks_exact(32)
-            .map(|chunk| <[u8; 32]>::try_from(chunk).ok())
-            .collect::<Option<Vec<_>>>()?;
+        let tx_ids = bytes[12..].as_chunks::<32>().0.to_vec();
         Some(Self {
             block_height,
             tx_ids,

@@ -273,11 +273,13 @@ impl ClientSealedDedupIndex {
             if body.len() != expected_body_len {
                 return Err(KeyPkgBud3Error::MalformedBackup);
             }
-            for pair in body.chunks_exact(64) {
-                let mut tag = [0u8; 32];
-                tag.copy_from_slice(pair.get(..32).ok_or(KeyPkgBud3Error::MalformedBackup)?);
-                let mut obj = [0u8; 32];
-                obj.copy_from_slice(pair.get(32..64).ok_or(KeyPkgBud3Error::MalformedBackup)?);
+            for pair in body.as_chunks::<64>().0 {
+                let tag: [u8; 32] = pair[..32]
+                    .try_into()
+                    .map_err(|_| KeyPkgBud3Error::MalformedBackup)?;
+                let obj: [u8; 32] = pair[32..64]
+                    .try_into()
+                    .map_err(|_| KeyPkgBud3Error::MalformedBackup)?;
                 idx.entries.insert(tag, obj);
             }
             Ok(())

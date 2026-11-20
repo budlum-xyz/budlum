@@ -4,9 +4,10 @@
 //!
 //! `QuantumAccountRegistry::register_with_pacts` compares an account's
 //! `pact_root` field against the root of the registry defined here
-//! (`src/account_abstraction/registry.rs`). For a long time it did not: an
-//! account carried a `pact_root`, but nothing checked that the root named a
-//! real set of pacts, so the field was a claim rather than a binding.
+//! (`src/account_abstraction/registry.rs`). The plain `register` entry point
+//! rejects non-zero pact roots, so callers cannot bypass that evidence check.
+//! This is an in-memory registry API boundary: no block transaction writes the
+//! quantum-account registry and its root is not part of `AccountState` yet.
 //!
 //! # What is verified
 //!

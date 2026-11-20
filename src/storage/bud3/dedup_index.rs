@@ -52,7 +52,7 @@ fn two_hashes(digest: &[u8; 32]) -> [u64; 2] {
     // The four lanes are filled by zipping with the array, not by indexing it:
     // a 32-byte digest has exactly four 8-byte chunks, and the shape that
     // cannot panic is the one the release profile needs.
-    for (slot, chunk) in lanes.iter_mut().zip(digest.chunks_exact(8)) {
+    for (slot, chunk) in lanes.iter_mut().zip(digest.as_chunks::<8>().0) {
         let mut v = 0u64;
         for (j, b) in chunk.iter().enumerate() {
             v |= u64::from(*b) << (8 * j);

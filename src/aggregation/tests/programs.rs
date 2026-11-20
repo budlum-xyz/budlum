@@ -82,7 +82,7 @@ fn run_from(program: &Program, dirty: bool, init: impl FnOnce(&mut [u8])) -> Run
         for (i, register) in (0u64..).zip(vm.registers.iter_mut()).skip(1) {
             *register = 0x0123_4567_89AB_CDEF ^ (i << 40);
         }
-        for (i, cell) in (0u64..).zip(vm.memory.chunks_exact_mut(8)) {
+        for (i, cell) in (0u64..).zip(vm.memory.as_chunks_mut::<8>().0) {
             cell.copy_from_slice(&(0x00C0_FFEE_0000_0000u64 + i).to_le_bytes());
         }
     }

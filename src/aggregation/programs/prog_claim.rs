@@ -226,10 +226,8 @@ impl StarkProofObject {
 /// Writes a 32-byte digest into `vm.memory` at `base_cell` as 8 little-endian
 /// `u32` values (one per 64-bit VM cell).
 pub(crate) fn write_digest_cells(vm: &mut Vm, base_cell: u64, digest: &Hash32) {
-    for (i, chunk) in digest.chunks_exact(4).enumerate() {
-        let [b0, b1, b2, b3] = *chunk else {
-            continue;
-        };
+    for (i, chunk) in digest.as_chunks::<4>().0.iter().enumerate() {
+        let [b0, b1, b2, b3] = *chunk;
         let limb = u64::from(u32::from_le_bytes([b0, b1, b2, b3]));
         write_cell(vm, base_cell + i as u64, limb);
     }
@@ -255,10 +253,8 @@ pub(crate) fn emit_swrite_digest_cells(a: &mut Asm, base_cell: u64, start_slot: 
 /// Emits 8 `SWrite` instructions publishing a constant 32-byte digest into
 /// consecutive storage slots starting at `start_slot`.
 pub(crate) fn emit_swrite_const_digest(a: &mut Asm, digest: &Hash32, start_slot: u32) {
-    for (i, chunk) in (0u32..).zip(digest.chunks_exact(4)) {
-        let [b0, b1, b2, b3] = *chunk else {
-            continue;
-        };
+    for (i, chunk) in (0u32..).zip(digest.as_chunks::<4>().0) {
+        let [b0, b1, b2, b3] = *chunk;
         let limb = u64::from(u32::from_le_bytes([b0, b1, b2, b3]));
         a.li(R[1], limb);
         a.swrite(start_slot + i, R[1]);
