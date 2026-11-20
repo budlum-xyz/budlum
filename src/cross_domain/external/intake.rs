@@ -214,6 +214,28 @@ pub enum AdapterSpec {
         #[serde(default)]
         committee: Option<crate::cross_domain::external::dag_bft::PinnedDagCommittee>,
     },
+    /// Dual-quorum `Casper-FFG` two-epoch checkpoint finality bound to a
+    /// governance-pinned epoch validator set. APPENDED LAST (tag `7`).
+    CasperFfg {
+        network: String,
+        #[serde(default)]
+        committee: Option<crate::cross_domain::external::casper_ffg::PinnedFfgCommittee>,
+    },
+    /// Uncertified three-round `Mysticeti` `DAG-BFT` direct-commit finality bound
+    /// to a governance-pinned epoch committee. APPENDED LAST (tag `8`).
+    MysticetiDag {
+        network: String,
+        #[serde(default)]
+        committee: Option<crate::cross_domain::external::mysticeti_dag::PinnedMysticetiCommittee>,
+    },
+    /// `BitVM2` / `DisproveScript` optimistic-ZK `PoW` covenant finality bound to
+    /// a governance-pinned `PoW` checkpoint, guest program, and operator key.
+    /// APPENDED LAST (tag `9`).
+    BitVmCovenant {
+        network: String,
+        #[serde(default)]
+        anchor: Option<crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor>,
+    },
 }
 
 impl AdapterSpec {
@@ -228,7 +250,10 @@ impl AdapterSpec {
             | Self::TendermintCommit { network, .. }
             | Self::DataAvailability { network, .. }
             | Self::HotStuffQc { network, .. }
-            | Self::DagCertificate { network, .. } => network,
+            | Self::DagCertificate { network, .. }
+            | Self::CasperFfg { network, .. }
+            | Self::MysticetiDag { network, .. }
+            | Self::BitVmCovenant { network, .. } => network,
         }
     }
 
@@ -247,11 +272,11 @@ impl AdapterSpec {
         match self {
             Self::EthereumSync { network, committee } => {
                 let adapter = EthereumSyncAdapter::new(network, committee.clone(), bls);
-                let adapter = match golden {
-                    Some(g) => adapter.with_golden(g),
-                    None => adapter,
-                };
-                Box::new(adapter)
+                Box::new(if let Some(g) = golden {
+                    adapter.with_golden(g)
+                } else {
+                    adapter
+                })
             }
             Self::ZkVm {
                 network,
@@ -259,19 +284,19 @@ impl AdapterSpec {
                 chain_id,
             } => {
                 let adapter = ZkVmFinalityAdapter::new(network, *program_hash, *chain_id);
-                let adapter = match golden {
-                    Some(g) => adapter.with_golden(g),
-                    None => adapter,
-                };
-                Box::new(adapter)
+                Box::new(if let Some(g) = golden {
+                    adapter.with_golden(g)
+                } else {
+                    adapter
+                })
             }
             Self::BitcoinSpv { network, anchor } => {
                 let adapter = BitcoinSpvAdapter::new(network, anchor.clone());
-                let adapter = match golden {
-                    Some(g) => adapter.with_golden(g),
-                    None => adapter,
-                };
-                Box::new(adapter)
+                Box::new(if let Some(g) = golden {
+                    adapter.with_golden(g)
+                } else {
+                    adapter
+                })
             }
             Self::TendermintCommit {
                 network,
@@ -280,11 +305,11 @@ impl AdapterSpec {
             } => {
                 let adapter =
                     TendermintFinalityAdapter::new_pinned(network, chain_id, *validator_set_hash);
-                let adapter = match golden {
-                    Some(g) => adapter.with_golden(g),
-                    None => adapter,
-                };
-                Box::new(adapter)
+                Box::new(if let Some(g) = golden {
+                    adapter.with_golden(g)
+                } else {
+                    adapter
+                })
             }
             Self::DataAvailability { network, committee } => {
                 let adapter =
@@ -292,11 +317,11 @@ impl AdapterSpec {
                         network,
                         committee.clone(),
                     );
-                let adapter = match golden {
-                    Some(g) => adapter.with_golden(g),
-                    None => adapter,
-                };
-                Box::new(adapter)
+                Box::new(if let Some(g) = golden {
+                    adapter.with_golden(g)
+                } else {
+                    adapter
+                })
             }
             Self::HotStuffQc { network, committee } => {
                 let adapter =
@@ -304,22 +329,58 @@ impl AdapterSpec {
                         network,
                         committee.clone(),
                     );
-                let adapter = match golden {
-                    Some(g) => adapter.with_golden(g),
-                    None => adapter,
-                };
-                Box::new(adapter)
+                Box::new(if let Some(g) = golden {
+                    adapter.with_golden(g)
+                } else {
+                    adapter
+                })
             }
             Self::DagCertificate { network, committee } => {
                 let adapter = crate::cross_domain::external::dag_bft::BullsharkDagAdapter::new(
                     network,
                     committee.clone(),
                 );
-                let adapter = match golden {
-                    Some(g) => adapter.with_golden(g),
-                    None => adapter,
-                };
-                Box::new(adapter)
+                Box::new(if let Some(g) = golden {
+                    adapter.with_golden(g)
+                } else {
+                    adapter
+                })
+            }
+            Self::CasperFfg { network, committee } => {
+                let adapter =
+                    crate::cross_domain::external::casper_ffg::CasperFfgAdapter::new_optional(
+                        network,
+                        committee.clone(),
+                    );
+                Box::new(if let Some(g) = golden {
+                    adapter.with_golden(g)
+                } else {
+                    adapter
+                })
+            }
+            Self::MysticetiDag { network, committee } => {
+                let adapter =
+                    crate::cross_domain::external::mysticeti_dag::MysticetiDagAdapter::new(
+                        network,
+                        committee.clone(),
+                    );
+                Box::new(if let Some(g) = golden {
+                    adapter.with_golden(g)
+                } else {
+                    adapter
+                })
+            }
+            Self::BitVmCovenant { network, anchor } => {
+                let adapter =
+                    crate::cross_domain::external::bitvm_covenant::BitVmCovenantAdapter::new(
+                        network,
+                        anchor.clone(),
+                    );
+                Box::new(if let Some(g) = golden {
+                    adapter.with_golden(g)
+                } else {
+                    adapter
+                })
             }
         }
     }
@@ -424,6 +485,24 @@ pub struct IntakeState {
     pub pinned_dag_committees: std::collections::BTreeMap<
         String,
         crate::cross_domain::external::dag_bft::PinnedDagCommittee,
+    >,
+    /// Governance-pinned `Casper-FFG` epoch validator committees keyed by external network.
+    #[serde(default)]
+    pub pinned_casper_ffg_committees: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::casper_ffg::PinnedFfgCommittee,
+    >,
+    /// Governance-pinned `Mysticeti` uncertified `DAG` committees keyed by external network.
+    #[serde(default)]
+    pub pinned_mysticeti_committees: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::mysticeti_dag::PinnedMysticetiCommittee,
+    >,
+    /// Governance-pinned `BitVM2` `PoW` covenant anchors keyed by external network.
+    #[serde(default)]
+    pub pinned_bitvm_anchors: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor,
     >,
     /// Deterministic, admin-keyless intake circuit breaker and contradiction
     /// tombstone ledger, folded into [`Self::state_digest`].
@@ -786,6 +865,38 @@ impl IntakeState {
         self.pinned_dag_committees.insert(network.into(), committee);
     }
 
+    /// Installs or updates the consensus-pinned `Casper-FFG` epoch committee for `network`.
+    /// WIRING: governance/genesis `Casper-FFG` validator-set surface paired with `register_domain`.
+    pub fn pin_casper_ffg_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::casper_ffg::PinnedFfgCommittee,
+    ) {
+        self.pinned_casper_ffg_committees
+            .insert(network.into(), committee);
+    }
+
+    /// Installs or updates the consensus-pinned `Mysticeti` `DAG` committee for `network`.
+    /// WIRING: governance/genesis `Mysticeti` validator-set surface paired with `register_domain`.
+    pub fn pin_mysticeti_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::mysticeti_dag::PinnedMysticetiCommittee,
+    ) {
+        self.pinned_mysticeti_committees
+            .insert(network.into(), committee);
+    }
+
+    /// Installs or updates the consensus-pinned `BitVM2` `PoW` covenant anchor for `network`.
+    /// WIRING: governance/genesis `BitVM2` checkpoint & program surface paired with `register_domain`.
+    pub fn pin_bitvm_anchor(
+        &mut self,
+        network: impl Into<String>,
+        anchor: crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor,
+    ) {
+        self.pinned_bitvm_anchors.insert(network.into(), anchor);
+    }
+
     /// Installs or replaces a family's trust anchor for `network`.
     ///
     /// The consensus door: `GovernanceAction::PinExternalAnchor` in block
@@ -997,6 +1108,33 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             };
             if committee.as_ref() != Some(pinned) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // CasperFfg admission requires a governance-pinned epoch committee.
+        if let AdapterSpec::CasperFfg { network, committee } = &spec {
+            let Some(pinned) = self.pinned_casper_ffg_committees.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if committee.as_ref() != Some(pinned) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // MysticetiDag admission requires a governance-pinned epoch committee.
+        if let AdapterSpec::MysticetiDag { network, committee } = &spec {
+            let Some(pinned) = self.pinned_mysticeti_committees.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if committee.as_ref() != Some(pinned) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // BitVmCovenant admission requires a governance-pinned PoW + program anchor.
+        if let AdapterSpec::BitVmCovenant { network, anchor } = &spec {
+            let Some(pinned) = self.pinned_bitvm_anchors.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if anchor.as_ref() != Some(pinned) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -1779,7 +1917,7 @@ impl IntakeState {
     /// documented starting point instead of five magic numbers.
     /// Convenience: the starting economics a registrant's client builds an `ExternalDomainTx::Register` from; the RPC that used it is a transaction now.
     #[must_use]
-    pub fn conservative_economics(routing_ceiling_atoms: u128) -> DomainEconomics {
+    pub const fn conservative_economics(routing_ceiling_atoms: u128) -> DomainEconomics {
         DomainEconomics {
             routing_ceiling_atoms,
             fee: ProverFee {
@@ -1792,6 +1930,138 @@ impl IntakeState {
             },
             unbonding_heights: 1000,
         }
+    }
+
+    /// Verify objective `Casper-FFG` double-vote or surround-vote slashing
+    /// evidence against the domain's pinned committee and freeze the domain.
+    ///
+    /// WIRING: objective `Casper-FFG` equivocation door freezing `AdapterSpec::CasperFfg` domains (`ExternalDomainTx` follow-up).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if `key` is unknown, not a `CasperFfg` domain,
+    /// unpinned, or `evidence` fails cryptographic slashing verification.
+    pub fn adjudicate_casper_ffg_equivocation(
+        &mut self,
+        key: &DomainKey,
+        evidence: &crate::cross_domain::external::casper_ffg::FfgEquivocationProof,
+    ) -> Result<
+        (
+            crate::cross_domain::external::casper_ffg::FfgSlashingKind,
+            u64,
+        ),
+        IntakeError,
+    > {
+        let Some(entry) = self.entries.get(key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        let AdapterSpec::CasperFfg {
+            network,
+            committee: Some(pinned),
+        } = &entry.spec
+        else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        let (kind, weight) =
+            crate::cross_domain::external::casper_ffg::verify_ffg_slashing_evidence(
+                network, pinned, evidence,
+            )
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let local_height = self.registry.height();
+        let _ = self.guard.record_adverse_round(*key, local_height);
+        self.registry
+            .mark_faulted(
+                key,
+                &format!(
+                    "Casper-FFG validator {} equivocated ({kind:?}, stake={weight})",
+                    hex::encode(evidence.vote_a.signer)
+                ),
+            )
+            .map_err(IntakeError::Registry)?;
+        Ok((kind, weight))
+    }
+
+    /// Verify objective `Mysticeti` same-round `DAG` equivocation against the
+    /// domain's pinned committee and freeze the domain.
+    ///
+    /// WIRING: objective `Mysticeti` equivocation door freezing `AdapterSpec::MysticetiDag` domains (`ExternalDomainTx` follow-up).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if `key` is unknown, not a `MysticetiDag` domain,
+    /// unpinned, or `proof` fails cryptographic equivocation verification.
+    pub fn adjudicate_mysticeti_equivocation(
+        &mut self,
+        key: &DomainKey,
+        proof: &crate::cross_domain::external::mysticeti_dag::MysticetiEquivocationProof,
+    ) -> Result<([u8; 32], u64, u64), IntakeError> {
+        let Some(entry) = self.entries.get(key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        let AdapterSpec::MysticetiDag {
+            network,
+            committee: Some(pinned),
+        } = &entry.spec
+        else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        let (offender, round, weight) =
+            crate::cross_domain::external::mysticeti_dag::verify_mysticeti_equivocation(
+                network, pinned, proof,
+            )
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let local_height = self.registry.height();
+        let _ = self.guard.record_adverse_round(*key, local_height);
+        self.registry
+            .mark_faulted(
+                key,
+                &format!(
+                    "Mysticeti validator {} equivocated at round {round} (stake={weight})",
+                    hex::encode(offender)
+                ),
+            )
+            .map_err(IntakeError::Registry)?;
+        Ok((offender, round, weight))
+    }
+
+    /// Verify a `BitVM2` `1-of-N` single-step `DisproveScript` fraud proof against
+    /// the domain's pinned anchor and freeze the domain.
+    ///
+    /// WIRING: objective `BitVM2` single-step fraud door freezing `AdapterSpec::BitVmCovenant` domains (`ExternalDomainTx` follow-up).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if `key` is unknown, not a `BitVmCovenant` domain,
+    /// unpinned, or `proof` fails single-step fraud verification.
+    pub fn adjudicate_bitvm_disprove(
+        &mut self,
+        key: &DomainKey,
+        proof: &crate::cross_domain::external::bitvm_covenant::DisproveScriptProof,
+    ) -> Result<(u32, [u8; 32], [u8; 32]), IntakeError> {
+        let Some(entry) = self.entries.get(key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        let AdapterSpec::BitVmCovenant {
+            network,
+            anchor: Some(pinned),
+        } = &entry.spec
+        else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        let (chunk_idx, expected_post, claimed_post) =
+            crate::cross_domain::external::bitvm_covenant::verify_disprove_script(
+                network, pinned, proof,
+            )
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let local_height = self.registry.height();
+        let _ = self.guard.record_adverse_round(*key, local_height);
+        self.registry
+            .mark_faulted(
+                key,
+                &format!("BitVM2 DisproveScript refuted operator claim at chunk {chunk_idx}"),
+            )
+            .map_err(IntakeError::Registry)?;
+        Ok((chunk_idx, expected_post, claimed_post))
     }
 }
 
@@ -1882,7 +2152,13 @@ mod tests {
 
     fn versions_for(spec: &AdapterSpec) -> VersionPolicy {
         let adapter = spec.build(Some(Box::new(StrictTestBls)), None);
-        VersionPolicy::single(adapter.descriptor().id, 2, 0)
+        let desc = adapter.descriptor();
+        let ev_ver = desc
+            .accepted_evidence_versions
+            .first()
+            .copied()
+            .unwrap_or(2);
+        VersionPolicy::single(desc.id, ev_ver, 0)
     }
 
     fn register(state: &mut IntakeState) -> DomainKey {
@@ -3111,5 +3387,362 @@ mod tests {
         state
             .submit_evidence(&truthful, Some(Box::new(StrictTestBls)))
             .expect("honest replacement root settles once cooldown expires");
+    }
+
+    #[test]
+    fn casper_and_mysticeti_register_settle_and_freeze_on_objective_faults() {
+        use crate::cross_domain::external::casper_ffg::{
+            encode_ffg_payload, FfgEquivocationProof, FfgValidator, FfgVote, PinnedFfgCommittee,
+            CASPER_FFG_ADAPTER_NAME, FFG_EVIDENCE_VERSION,
+        };
+        use crate::cross_domain::external::mysticeti_dag::{
+            encode_mysticeti_evidence, MysticetiAnchorCommitment, MysticetiEquivocationProof,
+            MysticetiMember, MysticetiVertex, MysticetiWaveEvidence, PinnedMysticetiCommittee,
+            MYSTICETI_DAG_ADAPTER_NAME, MYSTICETI_EVIDENCE_VERSION,
+        };
+        use crate::cross_domain::external::profile::DomainState;
+        use crate::crypto::ctx;
+        use crate::crypto::primitives::{KeyPair, PqKeyPair};
+
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let ed = KeyPair::from_seed(&[0x31; 32]).expect("ed");
+        let pq = PqKeyPair::generate();
+        let pub_ed = ed.public_key_bytes();
+        let pub_pq = pq.public_key_bytes().to_vec();
+        let mut non_slash_policy = VerificationPolicy::strict(0);
+        non_slash_policy.require_slashable = false;
+
+        let ffg_net = "eth-ffg-intake";
+        let ffg_committee = PinnedFfgCommittee::new(
+            10,
+            vec![FfgValidator {
+                pubkey: pub_ed,
+                stake: 1_000,
+                pq_pubkey: pub_pq.clone(),
+            }],
+        )
+        .expect("ffg committee");
+        intake.pin_casper_ffg_committee(ffg_net, ffg_committee.clone());
+        let sign_ffg =
+            |src_epoch: u64, src_root: [u8; 32], tgt_epoch: u64, tgt_root: [u8; 32]| -> FfgVote {
+                let mut vote = FfgVote {
+                    signer: pub_ed,
+                    source_epoch: src_epoch,
+                    source_root: src_root,
+                    target_epoch: tgt_epoch,
+                    target_root: tgt_root,
+                    signature: Vec::new(),
+                    pq_signature: Vec::new(),
+                };
+                let digest = vote.digest(ffg_net);
+                vote.signature = ed.sign(&digest).to_vec();
+                vote.pq_signature = pq.sign(ctx::CROSS_DOMAIN_V1, &digest).expect("pq");
+                vote
+            };
+        let v1 = sign_ffg(8, [0x11; 32], 9, [0x21; 32]);
+        let v2 = sign_ffg(9, [0x21; 32], 10, [0x31; 32]);
+        let ffg_raw = RawConsensusEvidence {
+            adapter: AdapterId::from_name(CASPER_FFG_ADAPTER_NAME),
+            evidence_version: FFG_EVIDENCE_VERSION,
+            network: ffg_net.to_string(),
+            payload: encode_ffg_payload(
+                9,
+                [0x21; 32],
+                [0x11; 32],
+                10,
+                [0x31; 32],
+                std::slice::from_ref(&v1),
+                &[v2],
+            ),
+            declared_height: 10,
+            declared_root: [0x31; 32],
+            submitter: addr(1),
+        };
+        let ffg_spec = AdapterSpec::CasperFfg {
+            network: ffg_net.to_string(),
+            committee: Some(ffg_committee),
+        };
+        let ffg_key = intake
+            .register_domain(
+                RegistrationRequest {
+                    spec: ffg_spec.clone(),
+                    policy: non_slash_policy.clone(),
+                    economics: IntakeState::conservative_economics(1_000),
+                    versions: versions_for(&ffg_spec),
+                    golden: ffg_raw.clone(),
+                    bond_atoms: economics_bond(),
+                    poster: addr(1),
+                },
+                None,
+            )
+            .expect("register casper");
+        assert_eq!(
+            intake
+                .submit_evidence(&ffg_raw, None)
+                .expect("submit")
+                .height,
+            10
+        );
+        let outer_v = sign_ffg(7, [0x17; 32], 10, [0x98; 32]);
+        intake
+            .adjudicate_casper_ffg_equivocation(
+                &ffg_key,
+                &FfgEquivocationProof {
+                    vote_a: outer_v,
+                    vote_b: v1,
+                },
+            )
+            .expect("casper surround slash");
+        assert_eq!(
+            intake.registry.domain(&ffg_key).expect("dom").record.state,
+            DomainState::Faulted
+        );
+
+        let my_net = "sui-mysticeti-intake";
+        let my_comm = PinnedMysticetiCommittee::new(
+            3,
+            vec![MysticetiMember {
+                ed25519_pubkey: pub_ed,
+                voting_weight: 500,
+                pq_pubkey: pub_pq,
+            }],
+        )
+        .expect("mysticeti committee");
+        intake.pin_mysticeti_committee(my_net, my_comm.clone());
+        let sign_my = |round: u64, payload_digest: [u8; 32], parents: Vec<[u8; 32]>| {
+            let mut vtx = MysticetiVertex {
+                author: pub_ed,
+                epoch: 3,
+                round,
+                payload_digest,
+                parents,
+                ed25519_sig: Vec::new(),
+                pq_sig: Vec::new(),
+            };
+            let digest = vtx.digest(my_net);
+            vtx.ed25519_sig = ed.sign(&digest).to_vec();
+            vtx.pq_sig = pq.sign(ctx::CROSS_DOMAIN_V1, &digest).expect("pq");
+            vtx
+        };
+        let commit = MysticetiAnchorCommitment {
+            state_root: [0x41; 32],
+            tx_root: [0x42; 32],
+            event_root: [0x43; 32],
+            block_hash: [0x44; 32],
+            parent_anchor_digest: [0x40; 32],
+        };
+        let anchor_v = sign_my(10, commit.digest(), vec![commit.parent_anchor_digest]);
+        let vote_v = sign_my(11, [0x51; 32], vec![anchor_v.digest(my_net)]);
+        let dec_v = sign_my(12, [0x61; 32], vec![vote_v.digest(my_net)]);
+        let my_raw = RawConsensusEvidence {
+            adapter: AdapterId::from_name(MYSTICETI_DAG_ADAPTER_NAME),
+            evidence_version: MYSTICETI_EVIDENCE_VERSION,
+            network: my_net.to_string(),
+            payload: encode_mysticeti_evidence(&MysticetiWaveEvidence {
+                commitment: commit.clone(),
+                anchor: anchor_v.clone(),
+                voting_vertices: vec![vote_v],
+                decision_vertices: vec![dec_v],
+            }),
+            declared_height: 10,
+            declared_root: commit.state_root,
+            submitter: addr(2),
+        };
+        let my_spec = AdapterSpec::MysticetiDag {
+            network: my_net.to_string(),
+            committee: Some(my_comm),
+        };
+        let my_key = intake
+            .register_domain(
+                RegistrationRequest {
+                    spec: my_spec.clone(),
+                    policy: non_slash_policy,
+                    economics: IntakeState::conservative_economics(1_000),
+                    versions: versions_for(&my_spec),
+                    golden: my_raw,
+                    bond_atoms: economics_bond(),
+                    poster: addr(2),
+                },
+                None,
+            )
+            .expect("register mysticeti");
+        let fork_v = sign_my(10, [0xEE; 32], vec![commit.parent_anchor_digest]);
+        intake
+            .adjudicate_mysticeti_equivocation(
+                &my_key,
+                &MysticetiEquivocationProof {
+                    vertex_a: anchor_v,
+                    vertex_b: fork_v,
+                },
+            )
+            .expect("mysticeti equivocation");
+        assert_eq!(
+            intake.registry.domain(&my_key).expect("dom").record.state,
+            DomainState::Faulted
+        );
+    }
+
+    #[test]
+    fn bitvm_covenant_registers_and_freezes_on_disprove_script_fraud() {
+        use crate::cross_domain::external::bitvm_covenant::{
+            encode_bitvm_evidence, evaluate_chunk_transition, expand_compact_bits,
+            hash_trace_merkle_node, BitVmCovenantEvidence, BitVmPegClaim, DisproveScriptProof,
+            MerkleStep, PinnedBitVmAnchor, TraceChunkStep, BITVM_COVENANT_ADAPTER_NAME,
+            BITVM_EVIDENCE_VERSION, POW_HEADER_LEN,
+        };
+        use crate::cross_domain::external::profile::DomainState;
+        use crate::crypto::ctx;
+        use crate::crypto::primitives::{KeyPair, PqKeyPair};
+
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let op_ed = KeyPair::from_seed(&[0x32; 32]).expect("ed");
+        let op_pq = PqKeyPair::generate();
+        let pub_ed = op_ed.public_key_bytes();
+        let pub_pq = op_pq.public_key_bytes().to_vec();
+        let mut non_slash_policy = VerificationPolicy::strict(0);
+        non_slash_policy.require_slashable = false;
+
+        let bv_net = "btc-bitvm2-intake";
+        let bits = 0x207f_ffffu32;
+        let prog = [0x77; 32];
+        let bv_anchor = PinnedBitVmAnchor {
+            height: 50,
+            block_hash: [0x12; 32],
+            bits,
+            program_hash: prog,
+            min_pow_confirmations: 6,
+            challenge_blocks: 4,
+            operator_ed25519_pubkey: pub_ed,
+            operator_pq_pubkey: pub_pq,
+        };
+        intake.pin_bitvm_anchor(bv_net, bv_anchor.clone());
+        let pre = [0x81; 32];
+        let wit = [0x82; 32];
+        let post = evaluate_chunk_transition(&prog, 0, &pre, 3, &wit);
+        let chunk = TraceChunkStep {
+            chunk_index: 0,
+            pre_state: pre,
+            claimed_post_state: post,
+            step_opcode: 3,
+            step_witness: wit,
+        };
+        let sib = [0x83; 32];
+        let trace_root = hash_trace_merkle_node(&chunk.leaf_digest(), &sib);
+        let mut claim = BitVmPegClaim {
+            state_root: post,
+            tx_root: [0x84; 32],
+            event_root: [0x85; 32],
+            program_hash: prog,
+            trace_merkle_root: trace_root,
+            trace_chunk_count: 2,
+            claim_pow_height: 51,
+            operator_ed25519_sig: Vec::new(),
+            operator_pq_sig: Vec::new(),
+        };
+        let claim_digest = claim.signing_digest(bv_net);
+        claim.operator_ed25519_sig = op_ed.sign(&claim_digest).to_vec();
+        claim.operator_pq_sig = op_pq.sign(ctx::CROSS_DOMAIN_V1, &claim_digest).expect("pq");
+        let txid =
+            crate::cross_domain::external::bitcoin_spv::sha256d(&claim.covenant_tx_bytes(bv_net));
+        let target = expand_compact_bits(bits).expect("target");
+        let mine = |prev: [u8; 32], mr: [u8; 32], ts: u32| -> [u8; POW_HEADER_LEN] {
+            for nonce in 0u32..50_000 {
+                let mut hdr = [0u8; POW_HEADER_LEN];
+                let (ver_slot, rem1) = hdr.split_at_mut(4);
+                ver_slot.copy_from_slice(&0x2000_0000u32.to_le_bytes());
+                let (prev_slot, rem2) = rem1.split_at_mut(32);
+                prev_slot.copy_from_slice(&prev);
+                let (mr_slot, rem3) = rem2.split_at_mut(32);
+                mr_slot.copy_from_slice(&mr);
+                let (time_slot, rem4) = rem3.split_at_mut(4);
+                time_slot.copy_from_slice(&ts.to_le_bytes());
+                let (bits_slot, nonce_slot) = rem4.split_at_mut(4);
+                bits_slot.copy_from_slice(&bits.to_le_bytes());
+                nonce_slot.copy_from_slice(&nonce.to_le_bytes());
+                let mut be = crate::cross_domain::external::bitcoin_spv::sha256d(&hdr);
+                be.reverse();
+                if be <= target {
+                    return hdr;
+                }
+            }
+            panic!("mine failed");
+        };
+        let mut headers = Vec::new();
+        let mut prev = bv_anchor.block_hash;
+        for idx in 0u32..6 {
+            let offset = u8::try_from(idx).unwrap_or(0);
+            let mr = if idx == 0 {
+                txid
+            } else {
+                [0x90u8.saturating_add(offset); 32]
+            };
+            let hdr = mine(prev, mr, 1_700_000_000 + idx * 600);
+            prev = crate::cross_domain::external::bitcoin_spv::sha256d(&hdr);
+            headers.push(hdr);
+        }
+        let bv_raw = RawConsensusEvidence {
+            adapter: AdapterId::from_name(BITVM_COVENANT_ADAPTER_NAME),
+            evidence_version: BITVM_EVIDENCE_VERSION,
+            network: bv_net.to_string(),
+            payload: encode_bitvm_evidence(&BitVmCovenantEvidence {
+                headers,
+                claim_header_index: 0,
+                spv_merkle_proof: Vec::new(),
+                claim: claim.clone(),
+            }),
+            declared_height: 51,
+            declared_root: post,
+            submitter: addr(3),
+        };
+        let bv_spec = AdapterSpec::BitVmCovenant {
+            network: bv_net.to_string(),
+            anchor: Some(bv_anchor),
+        };
+        let bv_key = intake
+            .register_domain(
+                RegistrationRequest {
+                    spec: bv_spec.clone(),
+                    policy: non_slash_policy,
+                    economics: IntakeState::conservative_economics(1_000),
+                    versions: versions_for(&bv_spec),
+                    golden: bv_raw,
+                    bond_atoms: economics_bond(),
+                    poster: addr(3),
+                },
+                None,
+            )
+            .expect("register bitvm");
+        let bad_chunk = TraceChunkStep {
+            claimed_post_state: [0xFE; 32],
+            ..chunk
+        };
+        let bad_root = hash_trace_merkle_node(&bad_chunk.leaf_digest(), &sib);
+        let mut bad_claim = BitVmPegClaim {
+            state_root: [0xFE; 32],
+            trace_merkle_root: bad_root,
+            ..claim
+        };
+        let bad_digest = bad_claim.signing_digest(bv_net);
+        bad_claim.operator_ed25519_sig = op_ed.sign(&bad_digest).to_vec();
+        bad_claim.operator_pq_sig = op_pq.sign(ctx::CROSS_DOMAIN_V1, &bad_digest).expect("pq");
+        intake
+            .adjudicate_bitvm_disprove(
+                &bv_key,
+                &DisproveScriptProof {
+                    claim: bad_claim,
+                    disputed_chunk: bad_chunk,
+                    trace_merkle_proof: vec![MerkleStep {
+                        sibling: sib,
+                        sibling_is_left: false,
+                    }],
+                },
+            )
+            .expect("bitvm disprove");
+        assert_eq!(
+            intake.registry.domain(&bv_key).expect("dom").record.state,
+            DomainState::Faulted
+        );
     }
 }

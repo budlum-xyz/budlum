@@ -117,7 +117,10 @@ impl SettlementRegistries {
             && intake.pinned_tendermint_anchors.is_empty()
             && intake.pinned_da_committees.is_empty()
             && intake.pinned_hotstuff_committees.is_empty()
-            && intake.pinned_dag_committees.is_empty())
+            && intake.pinned_dag_committees.is_empty()
+            && intake.pinned_casper_ffg_committees.is_empty()
+            && intake.pinned_mysticeti_committees.is_empty()
+            && intake.pinned_bitvm_anchors.is_empty())
     }
 
     /// Advance the registries' block clocks. Called once per block, at block
