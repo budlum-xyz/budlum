@@ -181,6 +181,11 @@ fn verify_segment_candidate(
     if u64::try_from(bytes.len()) != Ok(seg_len) {
         return None;
     }
+    // An unbounded record would materialize symbols_per_segment symbols
+    // right here, before any root check: refuse above the protocol ceiling.
+    if record.symbols_per_segment > super::pipeline::MAX_SYMBOLS_PER_SEGMENT {
+        return None;
+    }
     let enc = SegmentEncoder::new(seg, &bytes, &record.profile).ok()?;
     let k = enc.k();
     let initial_count = record.symbols_per_segment.max(k);

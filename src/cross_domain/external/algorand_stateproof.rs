@@ -1070,6 +1070,11 @@ impl AlgorandStateProofAdapter {
             }
         }
 
+        if policy.require_slashable {
+            return Err(AdapterError::ConsensusRule {
+                rule: "caller policy requires slashable backing; foreign Algorand online stake has no local confiscation escrow".into(),
+            });
+        }
         let (signers, required) = verify_stateproof_bundle(&self.network, pinned, &bundle)?;
 
         Ok(FinalityAttestation {
@@ -1084,7 +1089,7 @@ impl AlgorandStateProofAdapter {
                 signers,
                 required,
                 total_weight: pinned.total_weight,
-                slashable: true,
+                slashable: false,
             },
             evidence_digest: evidence.digest(),
             adapter_version: self.descriptor.adapter_version,
@@ -1360,6 +1365,22 @@ mod tests {
         assert_eq!(
             att.security.observed_scheme(),
             Some(ObservedScheme::Scheme(SchemeId::ML_DSA_65))
+        );
+        assert!(matches!(
+            att.security,
+            SecurityBacking::SignatureSet {
+                slashable: false,
+                ..
+            }
+        ));
+        let mut slash_policy = policy.clone();
+        slash_policy.require_slashable = true;
+        assert!(
+            matches!(
+                adapter.verify(&fx.golden, &slash_policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "foreign Algorand online stake without local confiscation escrow must refuse require_slashable"
         );
 
         // Verified zero-trust interval rotation to interval 41!

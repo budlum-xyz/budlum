@@ -1095,6 +1095,11 @@ impl SimplexBftAdapter {
         };
         let attested_event_root =
             (!bool::from(block.event_root.ct_eq(&[0u8; 32]))).then_some(block.event_root);
+        if policy.require_slashable {
+            return Err(AdapterError::ConsensusRule {
+                rule: "caller policy requires slashable backing; foreign Simplex committee stake has no local confiscation escrow".into(),
+            });
+        }
         let attestation = FinalityAttestation {
             adapter: self.descriptor.id,
             domain: DomainKey::from_parts(&self.descriptor.id, &evidence.network),
@@ -1108,7 +1113,7 @@ impl SimplexBftAdapter {
                 required: u64::try_from(min_simplex_supermajority(active_total))
                     .unwrap_or(u64::MAX),
                 total_weight: active_total,
-                slashable: true,
+                slashable: false,
             },
             evidence_digest: evidence.digest(),
             adapter_version: self.descriptor.adapter_version,
@@ -1354,8 +1359,17 @@ mod tests {
             max_age: 500,
             now: 1_600,
             require_declared_match: true,
-            require_slashable: true,
+            require_slashable: false,
         };
+        let mut slash_policy = policy.clone();
+        slash_policy.require_slashable = true;
+        assert!(
+            matches!(
+                adapter.verify(&raw, &slash_policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "foreign Simplex stake without local confiscation escrow must refuse require_slashable"
+        );
         let mut facts = CryptoFacts::new();
         let att = adapter
             .verify_observed(&raw, &policy, &mut facts)
@@ -1368,7 +1382,7 @@ mod tests {
             SecurityBacking::SignatureSet {
                 scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
                 total_weight: 1_000,
-                slashable: true,
+                slashable: false,
                 ..
             }
         ));

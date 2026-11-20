@@ -101,6 +101,12 @@ pub struct PreparedUpload {
     pub segments: Vec<Vec<Symbol>>,
 }
 
+/// One ceiling for `symbols_per_segment` across registration, the
+/// constructors, and every read path. The read side materializes
+/// `symbols_per_segment` symbols before any root check, so an unbounded
+/// record is an allocation bomb, not a storage choice.
+pub const MAX_SYMBOLS_PER_SEGMENT: u32 = 16_384;
+
 /// Why an upload or a view failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineError {
@@ -112,6 +118,8 @@ pub enum PipelineError {
     Object(Bof1Error),
     /// The placement asks for fewer symbols than a segment needs.
     TooFewSymbols { want: u32, k: u32 },
+    /// The placement asks for more symbols than the protocol ceiling.
+    TooManySymbols { want: u32, max: u32 },
     /// Some segment did not decode from the symbols given.
     SegmentMissing(u64),
     /// The decoded object does not match the commitment.
@@ -201,6 +209,12 @@ pub fn prepare_public_upload(
                 k,
             });
         }
+        if symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+            return Err(PipelineError::TooManySymbols {
+                want: symbols_per_segment,
+                max: MAX_SYMBOLS_PER_SEGMENT,
+            });
+        }
         let mut symbols = enc.source_symbols();
         symbols.extend(enc.repair_symbols(0, symbols_per_segment - k)?);
         let leaves: Vec<(u32, [u8; 32])> = symbols
@@ -268,6 +282,12 @@ pub fn prepare_volume_upload(
         return Err(PipelineError::TooFewSymbols {
             want: symbols_per_segment,
             k,
+        });
+    }
+    if symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+        return Err(PipelineError::TooManySymbols {
+            want: symbols_per_segment,
+            max: MAX_SYMBOLS_PER_SEGMENT,
         });
     }
     let mut symbols = encoder.source_symbols();
@@ -431,6 +451,12 @@ where
         return Err(PipelineError::Volume(VolumeError::RootMismatch));
     }
     if record.symbol_root != [0u8; 32] {
+        if record.symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+            return Err(PipelineError::TooManySymbols {
+                want: record.symbols_per_segment,
+                max: MAX_SYMBOLS_PER_SEGMENT,
+            });
+        }
         let enc = SegmentEncoder::new(0, &bytes, &record.profile)?;
         let repair_count = record.symbols_per_segment.checked_sub(enc.k()).ok_or(
             PipelineError::TooFewSymbols {
@@ -631,6 +657,12 @@ pub fn prepare_sealed_upload(
                 k,
             });
         }
+        if symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+            return Err(PipelineError::TooManySymbols {
+                want: symbols_per_segment,
+                max: MAX_SYMBOLS_PER_SEGMENT,
+            });
+        }
         let mut symbols = enc.source_symbols();
         symbols.extend(enc.repair_symbols(0, symbols_per_segment - k)?);
         let leaves: Vec<(u32, [u8; 32])> = symbols
@@ -814,6 +846,18 @@ mod tests {
         assert!(matches!(
             prepare_public_upload(&content(3000), &SMALL, &Bud3Limits::default(), 17),
             Err(PipelineError::TooFewSymbols { .. })
+        ));
+        // One ceiling for every path: a placement row above the protocol
+        // maximum is an allocation bomb on the read side and is refused at
+        // the constructor already.
+        assert!(matches!(
+            prepare_public_upload(
+                &content(3000),
+                &SMALL,
+                &Bud3Limits::default(),
+                MAX_SYMBOLS_PER_SEGMENT + 1
+            ),
+            Err(PipelineError::TooManySymbols { .. })
         ));
     }
 
