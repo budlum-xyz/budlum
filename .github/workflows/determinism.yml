@@ -71,7 +71,9 @@ jobs:
       - name: Build (run 1)
         run: |
           set -euo pipefail
-          cargo build --release 2>&1 | tail -5
+          # The whole rustc output reaches the job log: a red build whose reason
+          # lives only in a truncated tail is a red build nobody can diagnose.
+          cargo build --release 2>&1 | tee /tmp/build-run1.log; exit "${PIPESTATUS[0]}"
       - name: Genesis hash (run 1)
         run: |
           set -euo pipefail
@@ -85,7 +87,7 @@ jobs:
       - name: Build (run 2)
         run: |
           set -euo pipefail
-          cargo build --release 2>&1 | tail -5
+          cargo build --release 2>&1 | tee /tmp/build-run2.log; exit "${PIPESTATUS[0]}"
       - name: Genesis hash (run 2)
         run: |
           set -euo pipefail
