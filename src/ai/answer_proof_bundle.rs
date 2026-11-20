@@ -745,7 +745,7 @@ mod tests {
         assert!(!tampered.is_authentic());
     }
 
-    /// calculator result is verified via deterministic BudZero VM
+    /// calculator result is verified via deterministic `BudZero` VM
     /// execution.
     #[test]
     fn calculator_result_verified_by_budzero_vm() {

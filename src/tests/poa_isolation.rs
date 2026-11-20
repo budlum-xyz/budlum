@@ -1,12 +1,12 @@
 //! PoA/permissionless isolation test suite - CI expansion item 9.
 //!
-//! This file verifies that the PoA domain does not leak into the permissionless side.
+//! This file verifies that the `PoA` domain does not leak into the permissionless side.
 //! Five distinct leak scenarios are tested:
-//! 1. RPC leak - PoA data must not appear in the permissionless RPC
-//! 2. Event leak - PoA membership events must not leak into the permissionless domain
-//! 3. Cross-domain message leak - PoA KYC metadata must not travel in a cross-domain message
-//! 4. Log leak - PoA information must not be leaked in chain data
-//! 5. Error message leak - error messages must not disclose PoA details
+//! 1. RPC leak - `PoA` data must not appear in the permissionless RPC
+//! 2. Event leak - `PoA` membership events must not leak into the permissionless domain
+//! 3. Cross-domain message leak - `PoA` KYC metadata must not travel in a cross-domain message
+//! 4. Log leak - `PoA` information must not be leaked in chain data
+//! 5. Error message leak - error messages must not disclose `PoA` details
 
 #[cfg(test)]
 mod poa_isolation_tests {
@@ -18,9 +18,9 @@ mod poa_isolation_tests {
 
     const POA_DOMAIN: u32 = 3;
 
-    /// Scenario 1: RPC leak - PoA membership data must not appear in the permissionless registry.
+    /// Scenario 1: RPC leak - `PoA` membership data must not appear in the permissionless registry.
     ///
-    /// A PoA member must not enter the permissionless registry without staking.
+    /// A `PoA` member must not enter the permissionless registry without staking.
     #[test]
     fn poa_member_cannot_register_in_permissionless_registry_without_stake() {
         let perm_state = AccountState::new();
@@ -54,9 +54,9 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Scenario 2: event leak - PoA membership events must not appear in the permissionless domain.
+    /// Scenario 2: event leak - `PoA` membership events must not appear in the permissionless domain.
     ///
-    /// PoA membership must not be reflected in the permissionless validator set.
+    /// `PoA` membership must not be reflected in the permissionless validator set.
     #[test]
     fn poa_membership_does_not_affect_permissionless_validator_set() {
         let mut perm_state = AccountState::new();
@@ -92,9 +92,9 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Scenario 3: cross-domain message leak - PoA KYC metadata must not travel in a cross-domain message.
+    /// Scenario 3: cross-domain message leak - `PoA` KYC metadata must not travel in a cross-domain message.
     ///
-    /// A CrossDomainMessage contains no KYC commitment; it carries only payload_hash.
+    /// A `CrossDomainMessage` contains no KYC commitment; it carries only `payload_hash`.
     #[test]
     fn cross_domain_message_does_not_carry_kyc_metadata() {
         use crate::cross_domain::message::{
@@ -131,9 +131,9 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Scenario 4: log leak - PoA information must not be leaked in chain data.
+    /// Scenario 4: log leak - `PoA` information must not be leaked in chain data.
     ///
-    /// The PoA registry is entirely separate from the permissionless registry.
+    /// The `PoA` registry is entirely separate from the permissionless registry.
     #[test]
     fn poa_membership_isolated_from_permissionless_registry() {
         let perm_state = AccountState::new();
@@ -161,9 +161,9 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Scenario 5: error message leak - error messages must not disclose PoA details.
+    /// Scenario 5: error message leak - error messages must not disclose `PoA` details.
     ///
-    /// The PoA and permissionless registries are entirely separate data structures.
+    /// The `PoA` and permissionless registries are entirely separate data structures.
     #[test]
     fn poa_and_permissionless_registries_share_no_state() {
         let mut perm_state = AccountState::new();
@@ -201,7 +201,7 @@ mod poa_isolation_tests {
         assert!(perm_params.min_stake > 0);
     }
 
-    /// Extra: the PoA domain id must differ from the permissionless domain id.
+    /// Extra: the `PoA` domain id must differ from the permissionless domain id.
     #[test]
     fn poa_domain_id_isolated_from_permissionless() {
         use crate::domain::types::DomainId;
@@ -215,7 +215,7 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Extra: PoA admin authority must not affect the permissionless side.
+    /// Extra: `PoA` admin authority must not affect the permissionless side.
     #[test]
     fn poa_admin_authority_does_not_grant_permissionless_power() {
         let perm_state = AccountState::new();
@@ -234,10 +234,10 @@ mod poa_isolation_tests {
         );
     }
 
-    /// An additional isolation seal: the PoA whitelist is entirely independent of
+    /// An additional isolation seal: the `PoA` whitelist is entirely independent of
     /// permissionless stake. An account that became a permissionless validator through stake is
-    /// NOT in the PoA whitelist; PoA whitelist membership does NOT grant permissionless active
-    /// status. This test is part of the PoA isolation CI gate (7 or more).
+    /// NOT in the `PoA` whitelist; `PoA` whitelist membership does NOT grant permissionless active
+    /// status. This test is part of the `PoA` isolation CI gate (7 or more).
     #[test]
     fn poa_whitelist_independent_of_permissionless_stake() {
         let mut perm_state = AccountState::new();
@@ -295,7 +295,7 @@ mod poa_isolation_tests {
     }
 }
 
-/// The PoA compliance ledger is now a GATE: a freeze record has consequences.
+/// The `PoA` compliance ledger is now a GATE: a freeze record has consequences.
 ///
 /// For a long time the module only kept records - freezing could be called but
 /// being frozen had no effect. These tests lock the binding.
@@ -317,7 +317,7 @@ mod poa_compliance_gate {
         Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None)
     }
 
-    /// A PoA domain whose registered operator is `addr(id)` - the operator
+    /// A `PoA` domain whose registered operator is `addr(id)` - the operator
     /// holds compliance authority while the domain has no admins yet.
     fn poa_domain(id: u32) -> ConsensusDomain {
         let mut d = default_domain(
@@ -336,7 +336,7 @@ mod poa_compliance_gate {
     /// On a network that claims sovereignty, a central administrator must not be
     /// able to freeze the account of a permissionless domain. The kind of the
     /// domain is read **from its record**;
-    /// a caller cannot declare their own domain to be PoA and manufacture this authority.
+    /// a caller cannot declare their own domain to be `PoA` and manufacture this authority.
     #[test]
     fn a_permissionless_domain_account_cannot_be_frozen() {
         let mut bc = chain();

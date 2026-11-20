@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_execution_block_finality is reached in this tree only through the adapter modules that declare themselves unwired; the relayer path wires it.
+//! WIRING: unwired - `verify_execution_block_finality` is reached in this tree only through the adapter modules that declare themselves unwired; the relayer path wires it.
 //! Ethereum `PoS` sync committee light client, Altair-and-later finality.
 //!
 //! **BLS variant.** This module follows the Altair *structure* - 512 keys,
@@ -370,11 +370,11 @@ pub const CURRENT_SYNC_COMMITTEE_GINDEX_DENEB: u64 = 54;
 /// Convenience: exposed for Ethereum Electra checkpoint bootstrap.
 pub const CURRENT_SYNC_COMMITTEE_GINDEX_ELECTRA: u64 = 86;
 
-/// `NEXT_SYNC_COMMITTEE_GINDEX_DENEB`: `next_sync_committee` is BeaconState
+/// `NEXT_SYNC_COMMITTEE_GINDEX_DENEB`: `next_sync_committee` is `BeaconState`
 /// field index 23 in a 32-leaf container (`32 + 23 = 55`).
 pub const NEXT_SYNC_COMMITTEE_GINDEX_DENEB: u64 = 55;
 
-/// `NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA`: Electra BeaconState container depth
+/// `NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA`: Electra `BeaconState` container depth
 /// is 6 (`64 + 23 = 87`).
 pub const NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA: u64 = 87;
 
@@ -830,9 +830,9 @@ pub fn rotate_period(state: &mut SyncCommitteeState) -> Result<(), SyncCommittee
 }
 
 /// WIRING: exposed for external EVM light-client integrations that supply the
-/// finalized BeaconState branch and next committee.
+/// finalized `BeaconState` branch and next committee.
 ///
-/// Rotate the sync committee using a finalized BeaconState SSZ branch proving
+/// Rotate the sync committee using a finalized `BeaconState` SSZ branch proving
 /// the incoming `next_sync_committee` against `finalized_state_root`.
 ///
 /// Enforces non-saturating sequential period advance (`current_period + 1`),
@@ -2350,7 +2350,7 @@ mod tests {
 
     /// The header, domain and signing-root construction against values
     /// computed independently (Python `hashlib`, SSZ by hand): mainnet
-    /// Deneb fork version and genesis validators root, slot 8_800_000
+    /// Deneb fork version and genesis validators root, slot `8_800_000`
     /// (period 1074), proposer 12345, parent `0x33..`, state `0x44..`, and
     /// a body root produced by walking a nine-node branch from leaf
     /// `0x11..` at gindex 812 with siblings `0x01..` to `0x09..`.
@@ -3312,8 +3312,8 @@ mod tests {
     }
 
     /// Build a synthetic 64-leaf state Merkle tree containing specified `(leaf_index, value)`
-    /// entries so multiple disjoint gindices (e.g. current_sync_committee 54/86 and
-    /// next_sync_committee 55/87) prove against the exact same `BeaconState` root.
+    /// entries so multiple disjoint gindices (e.g. `current_sync_committee` 54/86 and
+    /// `next_sync_committee` 55/87) prove against the exact same `BeaconState` root.
     fn build_state_tree_and_branches(
         depth: usize,
         entries: &[(usize, [u8; 32])],

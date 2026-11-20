@@ -11,11 +11,11 @@
 //!   [`crate::registry::permissionless::PermissionlessRegistry`]. They share no
 //!   Storage, no keys and no code path.
 //! - There is **no `stake`-based entry** here at all - the only way in is
-//!   `submit_application` → `approve` by an authorized PoA admin.
+//!   `submit_application` → `approve` by an authorized `PoA` admin.
 //! - The permissionless registry has **no approval gate**; this one has **no
 //!   Stake gate**. Neither type can be used where the other is expected, so the
 //!   Two models cannot leak into each other.
-//! - Cross-domain messaging (via `CrossDomainMessage`) between PoA and other
+//! - Cross-domain messaging (via `CrossDomainMessage`) between `PoA` and other
 //!   Domains is still possible, but `PoA`'s admission rules never travel with the
 //!   Message - messaging is orthogonal to membership.
 
@@ -127,7 +127,7 @@ impl std::error::Error for PoaMembershipError {}
 /// The isolated permissioned registry for a set of `PoA` domains.
 ///
 /// Admins are the compliance-authorized approvers; members are KYC'd parties.
-/// Both are keyed by `(domain, account)` so PoA domains are independent.
+/// Both are keyed by `(domain, account)` so `PoA` domains are independent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PoaMembershipRegistry {
     #[serde(with = "crate::core::map_keys")]
@@ -167,7 +167,7 @@ impl PoaMembershipRegistry {
     /// still take the last seat away through its own action, where the
     /// decision is recorded as such.
     ///
-    /// WIRING: the admin-seat half of PoA membership governance; the
+    /// WIRING: the admin-seat half of `PoA` membership governance; the
     /// membership door that calls it lands with the admin-action
     /// transaction path, and the refusal rules are pinned by tests.
     pub fn remove_admin(

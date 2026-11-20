@@ -1,6 +1,6 @@
-//! Proof of Space (PoSpace) consensus engine.
+//! Proof of Space (`PoSpace`) consensus engine.
 //!
-//! PoSpace requires miners to commit balanced Merkle storage plots and answer
+//! `PoSpace` requires miners to commit balanced Merkle storage plots and answer
 //! deterministic slot challenges by opening the challenged leaf against the
 //! registered `plot_id` (Merkle root). Every produced block carries a
 //! hash-covered Merkle opening witness in `vrf_proof` and a challenge-bound
@@ -28,12 +28,12 @@ const MAX_LOCAL_MINER_LEAVES: usize = 1 << 16;
 /// `u64::MAX` witnesses cannot dominate fork choice.
 const MAX_PLOT_SIZE_BYTES: u64 = 1_u64 << 50;
 const POSPACE_WITNESS_MAGIC: &[u8; 8] = b"BDLMSPC2";
-/// Fixed witness header (121 bytes): magic(8), plot_id(32), challenge(32),
-/// size_bytes(8), tree_depth(1), leaf_index(8), and leaf_value(32), followed
+/// Fixed witness header (121 bytes): magic(8), `plot_id(32)`, challenge(32),
+/// `size_bytes(8)`, `tree_depth(1)`, `leaf_index(8)`, and `leaf_value(32)`, followed
 /// by `tree_depth * 32` sibling hashes.
 const POSPACE_WITNESS_HEADER_LEN: usize = 8 + 32 + 32 + 8 + 1 + 8 + 32;
 
-/// PoSpace configuration.
+/// `PoSpace` configuration.
 #[derive(Debug, Clone)]
 pub struct PoSpaceConfig {
     /// Minimum plot size in bytes required to participate.
@@ -75,7 +75,7 @@ struct PlotRecord {
     local_leaves: Option<Vec<[u8; 32]>>,
 }
 
-/// Domain-separated PoSpace Merkle leaf digest (`BDLM_POSPACE_LEAF_V1`).
+/// Domain-separated `PoSpace` Merkle leaf digest (`BDLM_POSPACE_LEAF_V1`).
 #[must_use]
 fn pospace_leaf_hash(leaf_index: u64, leaf_value: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -88,7 +88,7 @@ fn pospace_leaf_hash(leaf_index: u64, leaf_value: &[u8; 32]) -> [u8; 32] {
     out
 }
 
-/// Domain-separated PoSpace Merkle internal node digest (`BDLM_POSPACE_NODE_V1`).
+/// Domain-separated `PoSpace` Merkle internal node digest (`BDLM_POSPACE_NODE_V1`).
 #[must_use]
 fn pospace_node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -103,7 +103,7 @@ fn pospace_node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 
 /// Verify a [`PlotMerkleProof`] against `plot_root` and `tree_depth` in constant time.
 ///
-/// WIRING: PoSpace plot registration and per-block witness verifier (`PoSpaceEngine`).
+/// WIRING: `PoSpace` plot registration and per-block witness verifier (`PoSpaceEngine`).
 #[must_use]
 pub fn verify_plot_merkle_proof(
     plot_root: &[u8; 32],
@@ -304,7 +304,7 @@ fn compute_leaf_bound_response(
     out
 }
 
-/// Verify a PoSpace challenge response against `(plot_id, challenge)`.
+/// Verify a `PoSpace` challenge response against `(plot_id, challenge)`.
 #[must_use]
 pub fn verify_plot_response(plot_id: &[u8; 32], challenge: &[u8; 32], response: &[u8; 32]) -> bool {
     let zero = [0u8; 32];

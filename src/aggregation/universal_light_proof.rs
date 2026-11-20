@@ -78,7 +78,7 @@ const ULP_VM_GAS_LIMIT: u64 = 200_000;
 /// Consensus family attested by one external domain leaf inside `ULP-1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UlpDomainKind {
-    /// Tendermint / CometBFT instant finality.
+    /// Tendermint / `CometBFT` instant finality.
     TendermintBft = 1,
     /// Nakamoto proof-of-work cumulative work (`SHA-256d`, hash-only).
     BitcoinSpv = 2,

@@ -11,7 +11,7 @@
 //!
 //! [`IdentityRecord`] is the DID side: `did:bud:<address>` maps to the
 //! address itself, and the record carries the verification methods (key
-//! handles, [MethodKind::MlDsa87] today, because `ml-dsa-87` is the node's
+//! handles, [`MethodKind::MlDsa87`] today, because `ml-dsa-87` is the node's
 //! own signature primitive), the current credential root, and the guardian
 //! set with its recovery threshold. [`CredentialCommitment`] is the
 //! Verifiable-Credentials side: a closed field list where every field is a
@@ -21,7 +21,7 @@
 //!
 //! # Domain placement
 //!
-//! Write authority lives on the PoA domain; the gate is [`ConsensusKind::PoA`]
+//! Write authority lives on the `PoA` domain; the gate is [`ConsensusKind::PoA`]
 //! and it is enforced by the registry itself, not left to callers, because a
 //! rule a caller can forget is a rule that will be forgotten. Other domains
 //! verify against an anchored root - that part is the cross-domain anchor
@@ -1211,7 +1211,7 @@ pub fn authorize_issue_consent_in(
 /// naming somebody else in the payload and hoping for a check is the shape
 /// `BudlumxyzAttestApp` refused for the same reason, in this same tree.
 ///
-/// The domain this runs on is passed in, not assumed: the registry's PoA
+/// The domain this runs on is passed in, not assumed: the registry's `PoA`
 /// gate still decides, so an executor wired to the wrong domain fails at
 /// the door the rules live behind, not in a comment claiming the wiring.
 ///
@@ -1346,7 +1346,7 @@ pub fn execute_identity_tx_in(
     }
 }
 
-/// The mutations the PoA gate wraps.
+/// The mutations the `PoA` gate wraps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityOp {
     Register {
@@ -1368,7 +1368,7 @@ pub enum IdentityOp {
 /// Why an identity write or a validity query was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
-    /// Only the PoA domain writes the identity registry.
+    /// Only the `PoA` domain writes the identity registry.
     NotPoaDomain { domain: String },
     /// A DID was already registered; rotation goes through recovery, not a
     /// second registration.

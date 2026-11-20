@@ -825,7 +825,7 @@ mod tests {
         assert!(receipt_mainnet.steps > 0);
     }
 
-    /// Log + prove/verify against BudZero main (event_digest AIR fixed).
+    /// Log + prove/verify against `BudZero` main (`event_digest` AIR fixed).
     #[test]
     fn log_program_proves_against_budzero_main() {
         let program = vec![
@@ -865,17 +865,17 @@ mod tests {
         assert!(receipt.proof_bytes > 0);
     }
 
-    /// VerifyInference opcode wired into ZkVmExecutor.
+    /// `VerifyInference` opcode wired into `ZkVmExecutor`.
     ///
-    /// This test verifies that a ZKVM program containing VerifyInference
-    /// Can be executed through the ZkVmExecutor pipeline (execute_bytecode).
-    /// The opcode is mainnet-gated (requires MainnetActivation), so:
-    /// - Non-mainnet mode: VerifyInference is allowed
-    /// - Mainnet mode without activation: VerifyInference is rejected
-    /// - Mainnet mode with full activation: VerifyInference is allowed
+    /// This test verifies that a ZKVM program containing `VerifyInference`
+    /// Can be executed through the `ZkVmExecutor` pipeline (`execute_bytecode`).
+    /// The opcode is mainnet-gated (requires `MainnetActivation`), so:
+    /// - Non-mainnet mode: `VerifyInference` is allowed
+    /// - Mainnet mode without activation: `VerifyInference` is rejected
+    /// - Mainnet mode with full activation: `VerifyInference` is allowed
     ///
     /// The program loads model/input/output commitments and runs
-    /// VerifyInference (0x1F), which performs the 3-task verification
+    /// `VerifyInference` (0x1F), which performs the 3-task verification
     /// (structure → binding → AIR) inside bud-vm.
     #[test]
     fn verify_inference_opcode_wired_in_zkvm_executor() {
@@ -947,7 +947,7 @@ mod tests {
         );
     }
 
-    /// Default production decoding refuses VerifyInference. Isolated VM
+    /// Default production decoding refuses `VerifyInference`. Isolated VM
     /// execution still computes the constrained Poseidon digest, but a digest
     /// is not proof that an AI model ran on the registered weights and input.
     #[test]
@@ -1029,7 +1029,7 @@ mod tests {
         }
     }
 
-    /// VerifyInference remains rejected in mainnet mode under the default schedule.
+    /// `VerifyInference` remains rejected in mainnet mode under the default schedule.
     #[test]
     fn verify_inference_gated_in_mainnet_mode() {
         let program = [

@@ -1235,7 +1235,7 @@ impl Mempool {
     /// (accepted with the bound written down): this sweep
     /// is O(pool entries) in the worst case - it walks `by_fee` until the
     /// byte budget is met. The bound that makes that acceptable is the entry
-    /// cap (20_000), and the sweep only runs when an admission is about to
+    /// cap (`20_000`), and the sweep only runs when an admission is about to
     /// be refused for bytes, so the cost is paid on the path that was about
     /// to reject anyway. An index on charged-bytes-per-fee would replace one
     /// linear scan with maintained bookkeeping on EVERY admission - trading
@@ -1767,7 +1767,7 @@ mod tests {
     }
 
     /// The same-fee tie-break is canonical (tx.hash ASC). A different
-    /// insertion order MUST NOT change the result - the old HashSet path, with
+    /// insertion order MUST NOT change the result - the old `HashSet` path, with
     /// its process-random iteration, would differ between the two pools in
     /// this test (flaky, and a nondeterministic block body order in
     /// production).

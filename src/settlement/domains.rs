@@ -92,8 +92,8 @@ pub enum SettlementTx {
     ProofMarket(Box<ProofMarketTx>),
     /// Open, bid on, fulfill, or expire a state-rooted relayer intent.
     RelayerIntent(Box<RelayerIntentTx>),
-    /// Register an AppBinding application, move value into its mirror, prove a
-    /// claim, or use the AppBinding relayer-intent adapter.
+    /// Register an `AppBinding` application, move value into its mirror, prove a
+    /// claim, or use the `AppBinding` relayer-intent adapter.
     AppBinding(Box<crate::settlement::app_binding::AppBindingTx>),
     /// Name a Mikoriza registrar or record a proven restaking allocation.
     SharedSecurity(Box<crate::settlement::shared_security::SharedSecurityTx>),
@@ -124,7 +124,7 @@ impl Eq for SettlementTx {}
 
 /// Mainnet refuses a quorum proof that carries only classical signatures
 /// a `PoS` or BFT proof needs the ML-DSA QC of the same
-/// signers (`FinalityProof::PoSPq`, `FinalityProof::BftPq`), and a PoA proof
+/// signers (`FinalityProof::PoSPq`, `FinalityProof::BftPq`), and a `PoA` proof
 /// needs composite authority signatures (`FinalityProof::PoAPq`).
 fn refuse_classical_only_quorum_on_mainnet(
     chain_id: u64,
@@ -278,7 +278,7 @@ pub struct SettlementTxContext {
 
 /// Why a settlement transaction was refused. A refused transaction changes
 /// nothing.
-/// exposed for execute_settlement_tx: the executor's Settlement arm reports it by its message, not by name.
+/// exposed for `execute_settlement_tx`: the executor's Settlement arm reports it by its message, not by name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettlementTxError {
     #[error("the domain must name the transaction sender as its operator")]
@@ -3194,7 +3194,7 @@ mod tests {
         }
     }
 
-    /// A PoS certificate is an aggregate of precommits over the checkpoint
+    /// A `PoS` certificate is an aggregate of precommits over the checkpoint
     /// hash; it signs no root. The commitment may therefore advance the
     /// domain's height and hash, but no external-root anchor may be written
     /// from a root the certificate never bound: that map is the value the
@@ -3228,7 +3228,7 @@ mod tests {
         );
     }
 
-    /// The parent link a PoS certificate does not sign cannot be used to freeze
+    /// The parent link a `PoS` certificate does not sign cannot be used to freeze
     /// the domain: a relayer that submits a genuine certificate for the next
     /// height with a parent of its choosing is refused, and the honest
     /// commitment for that height still advances.
@@ -3290,7 +3290,7 @@ mod tests {
         );
     }
 
-    /// The other half of the rule: a parent the proof *does* bind (the PoW
+    /// The other half of the rule: a parent the proof *does* bind (the `PoW`
     /// header chain carries it) stays equivocation evidence, and a mismatch
     /// freezes the domain exactly as before.
     #[test]
@@ -3776,7 +3776,7 @@ mod tests {
     /// An earlier liveness fault does not release a bidder from a *different*
     /// accepted job: a liveness slash keeps the role Active, so expiry charges
     /// the unhonoured award again while still refunding the owner's escrow.
-    /// The distinct `SlashedUnbonding` case below checks the AlreadySlashed
+    /// The distinct `SlashedUnbonding` case below checks the `AlreadySlashed`
     /// refusal and verifies that its refund succeeds without a second charge.
     #[test]
     fn relayer_intent_expiry_refunds_owner_and_charges_a_second_liveness_fault() {

@@ -1,7 +1,7 @@
 //! B.U.D. storage deals and retrieval challenges (
 //! Vision).
 //!
-//! **Production boundary:** the BudZKVM `VerifyMerkle` 64-depth soundness gate
+//! **Production boundary:** the `BudZKVM` `VerifyMerkle` 64-depth soundness gate
 //! Is still treated as incomplete for mainnet claims. Every `open_deal` requires
 //! A structurally valid `ProofEnvelope` plus `storage_root`, and challenge answers
 //! Bind that envelope to chain/deal/challenge context, but this module must not
@@ -1487,7 +1487,7 @@ pub fn prove_storage_challenge_proof(
 }
 
 /// Build an isolated AIR witness for negative tests without activating
-/// VerifyMerkle on a production chain. The default verifier still rejects
+/// `VerifyMerkle` on a production chain. The default verifier still rejects
 /// this bundle and it can never earn storage credit.
 #[cfg(test)]
 pub(crate) fn prove_storage_challenge_proof_for_isolated_air_tests(
@@ -2636,7 +2636,7 @@ impl StorageRegistry {
     }
 
     /// Record a Classic confidential body commit. Refuses plaintext encryption
-    /// (see ConfidentialBodyCommit::new) and refuses a Three edition manifest
+    /// (see `ConfidentialBodyCommit::new`) and refuses a Three edition manifest
     /// when one is already registered for this id (body vs recipe category).
     /// The `owner` is the address the commit is recorded for: an unattributed
     /// body commit would leave later view grants with nobody whose word counts.
@@ -3155,13 +3155,13 @@ impl StorageRegistry {
     #[allow(clippy::too_many_arguments)]
     /// Maximum concurrent open challenges per deal.
     /// Prevents spam attacks where a single deal gets unlimited challenges,
-    /// Growing the `StorageRegistry`'s challenge BTreeMap without bound.
+    /// Growing the `StorageRegistry`'s challenge `BTreeMap` without bound.
     const MAX_OPEN_CHALLENGES_PER_DEAL: usize = 10;
 
     /// Opener bond charged per KiB of the challenged byte range.
     ///
     /// A challenge costs the operator a read plus a hash over the range. On
-    /// commodity NVMe that is roughly 20 ms for the 16 `MiB` maximum chunk and
+    /// commodity `NVMe` that is roughly 20 ms for the 16 `MiB` maximum chunk and
     /// 0.3 ms for the 256 KiB default - small individually, but the rate limit
     /// is keyed on `(operator, manifest)`, so an operator serving 1000
     /// manifests can be made to spend seconds of I/O per epoch by an attacker
@@ -3183,7 +3183,7 @@ impl StorageRegistry {
     pub const MAX_OPEN_CHALLENGES_PER_OPERATOR: usize = 16;
 
     /// Mainnet floor above the uncalibrated 1-unit-per-`KiB` rate.
-    /// `required_opener_bond` for 16 `MiB` is 16_384; this floor dominates it.
+    /// `required_opener_bond` for 16 `MiB` is `16_384`; this floor dominates it.
     /// Storage economics stay disabled on mainnet today; the constant is
     /// the policy the actor will apply the day that gate opens.
     pub const MAINNET_MIN_OPENER_BOND: u64 = 1_000_000;
@@ -3742,7 +3742,7 @@ impl StorageRegistry {
 
     /// The stored coding audit with this id, while the registry holds it.
     ///
-    /// WIRING: read by `StorageTx::AnswerCodingAudit` (storage_tx.rs) to bound
+    /// WIRING: read by `StorageTx::AnswerCodingAudit` (`storage_tx.rs`) to bound
     /// the answer by the audited manifest before the registry checks it.
     #[must_use]
     pub fn coding_audit(&self, audit_id: u64) -> Option<&StoredCodingAudit> {
@@ -4030,7 +4030,7 @@ impl StorageRegistry {
     /// Hash and trusts off-chain verifiers to confirm it. This is
     /// The documented interim-challenge limitation.
     ///
-    /// Range_hash must be non-zero (empty hash = invalid response).
+    /// `Range_hash` must be non-zero (empty hash = invalid response).
     /// Full hash verification deferred to ZK proof integration.
     ///
     /// # Errors
@@ -5156,7 +5156,7 @@ impl StorageRegistry {
 
     /// B.U.D.: validate merkle proof format.
     /// Checks that `proof_bytes` deserializes to a valid `ProofEnvelope`.
-    /// Full STARK verification (Plonky3Adapter::verify) is deferred to
+    /// Full STARK verification (`Plonky3Adapter::verify`) is deferred to
     /// Nodes with the bud-proof crate and prover capability.
     ///
     /// # Errors
@@ -7269,7 +7269,7 @@ mod tests {
     }
 
     /// A format-valid test envelope (an honest marker - NOT a REAL STARK
-    /// proof; a minimal ProofEnvelope that can be bincode-deserialized).
+    /// proof; a minimal `ProofEnvelope` that can be bincode-deserialized).
     /// NOTE: the inline 78-byte arrays in a0671c4 gave a type error (E0308)
     /// and hid the intent; the helper was restored.
     fn valid_merkle_proof() -> Vec<u8> {
@@ -9957,12 +9957,12 @@ mod tests {
         /// Roots taken at 3dcbe16^ (before coding audits existed) for the
         /// same registry. A registry that never opened an audit must keep
         /// them byte for byte, or a chain that has no audit yet forks.
-        /// GOLDEN_CODED_ROOT re-frozen at 1101: manifest/deal serialization
+        /// `GOLDEN_CODED_ROOT` re-frozen at 1101: manifest/deal serialization
         /// grew fields after 3dcbe16 (provenance commitments), so the coded
         /// fixture's root moved while the empty root - the side that must
         /// never move - did not.
         ///
-        /// GOLDEN_CODED_ROOT re-frozen again at 1105: the manifest now carries
+        /// `GOLDEN_CODED_ROOT` re-frozen again at 1105: the manifest now carries
         /// the column commitments of its parity shards, which enter the
         /// manifest id, and the registry root commits that id. The empty root
         /// is unchanged again - a chain that has no audit yet still forks for

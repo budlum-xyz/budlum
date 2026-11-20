@@ -119,8 +119,8 @@ mod tests {
         }
     }
 
-    /// Test helper: when the verifier stake is below MIN_VERIFIER_STAKE
-    /// stakes, then calls submit_result (the auth check
+    /// Test helper: when the verifier stake is below `MIN_VERIFIER_STAKE`
+    /// stakes, then calls `submit_result` (the auth check
     /// afterwards: an unauthorised verifier cannot count a result).
     fn submit_result_staked(
         registry: &mut AiRegistry,

@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 /// finality certificate of the checkpoint covers the block that commits the
 /// state root. V6 adds the checkpoint height and the external intake root.
 ///
-/// V7: the AppBinding registry root
+/// V7: the `AppBinding` registry root
 /// and the delegation root join the header, each presence-tagged. The
 /// testnet starts from a new genesis, so the bump is the activation; the
 /// mainnet activation-height scheme is 's.
@@ -105,7 +105,7 @@ pub struct GlobalBlockHeader {
     #[serde(default)]
     pub external_intake_root: Option<Hash32>,
 
-    /// The AppBinding registry root (V7), when the registry holds any row:
+    /// The `AppBinding` registry root (V7), when the registry holds any row:
     /// applications, the payment window, open intents. A payment proof opens
     /// it ([`crate::settlement::app_binding::AppBindingRootOpening`]).
     #[serde(default)]

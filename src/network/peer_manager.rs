@@ -1301,7 +1301,7 @@ mod tests {
         assert_eq!(manager.get_score(&peer), MAX_SCORE);
     }
 
-    /// Reload uses absolute expiry, not a fresh full BAN_DURATION.
+    /// Reload uses absolute expiry, not a fresh full `BAN_DURATION`.
     #[test]
     fn ban_reload_preserves_remaining() {
         let mut manager = PeerManager::new();
@@ -1341,7 +1341,7 @@ mod tests {
         assert!(manager.get_persisted_banned_peers().is_empty());
     }
 
-    /// SecurityConfig.peer_rate_limit_per_minute wires into refill rate.
+    /// `SecurityConfig.peer_rate_limit_per_minute` wires into refill rate.
     #[test]
     fn peer_rate_limit_security_profile() {
         use crate::core::chain_config::Network;
@@ -1364,7 +1364,7 @@ mod tests {
         assert_eq!(dev.max_peers_per_subnet(), 8);
     }
 
-    /// Tracked peer map has a hard ceiling (memory DoS guard).
+    /// Tracked peer map has a hard ceiling (memory `DoS` guard).
     ///
     /// The ceiling is on the map size, not on admissions: a new peer is
     /// admitted by reclaiming a spent record, and refused when every record
@@ -1640,7 +1640,7 @@ mod tests {
 
     /// Chaos: network partition isolates peer groups by subnet.
     /// Two groups on different /24 subnets cannot communicate through the
-    /// PeerManager's subnet-bound admission.
+    /// `PeerManager`'s subnet-bound admission.
     #[test]
     fn chaos_network_partition_isolates_groups() {
         let mut pm = PeerManager::new();

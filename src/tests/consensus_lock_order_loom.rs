@@ -21,8 +21,8 @@
 //! it, and it fails silently the first time somebody adds a fourth call site
 //! in the other direction.
 //!
-//! ThreadSanitizer does not close that gap either. It reports a race it
-//! observed, on the schedule the machine happened to pick, so a green TSan run
+//! `ThreadSanitizer` does not close that gap either. It reports a race it
+//! observed, on the schedule the machine happened to pick, so a green `TSan` run
 //! says the schedules it tried were clean. A lock inversion needs two threads
 //! to arrive in the wrong order at the wrong moment, which is exactly the
 //! schedule a loaded CI runner is least likely to produce.

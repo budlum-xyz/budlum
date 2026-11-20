@@ -154,7 +154,7 @@ mod tests {
         Address([b; 32])
     }
 
-    /// The end-to-end AI inference layer inference flow over the real AiRegistry.
+    /// The end-to-end AI inference layer inference flow over the real `AiRegistry`.
     #[test]
     fn ai_full_inference_flow_on_real_registry() {
         let mut registry = AiRegistry::new();

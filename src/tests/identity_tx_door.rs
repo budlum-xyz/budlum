@@ -1,7 +1,7 @@
 //! The executor's identity arm - the transaction door onto the master
 //! registry.
 //!
-//! Everything BEHIND the arm (sender-binding rules, the registry's own PoA
+//! Everything BEHIND the arm (sender-binding rules, the registry's own `PoA`
 //! gate, the recovery quorum arithmetic, the crypto door for approvals) is
 //! tested at full depth in `src/registry/identity.rs`. What is tested here
 //! is the door: the domain fed to the body comes from state and never from a
@@ -36,9 +36,9 @@ fn subject_record(subject: Address) -> IdentityRecord {
     .expect("a one-method record with no guardians is well-formed")
 }
 
-/// A state running as the PoA authority's chain - the way `Blockchain`
-/// builds one for a node whose engine declared itself PoA. A bare
-/// `AccountState::new()` never volunteers this: the default stays PoS and
+/// A state running as the `PoA` authority's chain - the way `Blockchain`
+/// builds one for a node whose engine declared itself `PoA`. A bare
+/// `AccountState::new()` never volunteers this: the default stays `PoS` and
 /// the door stays closed.
 fn poa_state(subject: &Address) -> AccountState {
     let mut state = AccountState::new();

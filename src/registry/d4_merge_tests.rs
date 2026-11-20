@@ -4,12 +4,12 @@
 //! All four v1 application domains from one primitive, as required by
 //! Decision (2026-07-22):
 //!
-//! 1. DeEd master verifier → `MASTER_VERIFIER` (RoleId 2, alias of `VERIFIER`)
-//! 2. SocialFi content validator → `CONTENT_VALIDATOR` (RoleId 9)
-//! 3. Permissionless relayer → `RELAYER` (RoleId 3)
-//! 4. Supply-chain attester → `ATTESTER` (RoleId 7)
+//! 1. `DeEd` master verifier → `MASTER_VERIFIER` (`RoleId` 2, alias of `VERIFIER`)
+//! 2. `SocialFi` content validator → `CONTENT_VALIDATOR` (`RoleId` 9)
+//! 3. Permissionless relayer → `RELAYER` (`RoleId` 3)
+//! 4. Supply-chain attester → `ATTESTER` (`RoleId` 7)
 //!
-//! And that `AI_OPERATOR` (RoleId 8) is preserved (never removed).
+//! And that `AI_OPERATOR` (`RoleId` 8) is preserved (never removed).
 //!
 //! There is exactly ONE registry type and ONE stake/slashing model - no
 //! Per-domain allow-lists, no separate registries. The consumer gates
@@ -78,7 +78,7 @@ fn d4_same_account_holds_all_four_domains() {
     assert_eq!(reg.len(), 4);
 }
 
-/// `MASTER_VERIFIER` (RoleId 2) is a true alias of `VERIFIER` - DeEd master
+/// `MASTER_VERIFIER` (`RoleId` 2) is a true alias of `VERIFIER` - `DeEd` master
 /// Verifiers ARE generic verifiers in the unified registry.
 #[test]
 fn d4_master_verifier_is_verifier_alias() {

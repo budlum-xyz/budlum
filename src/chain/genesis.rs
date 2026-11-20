@@ -1784,7 +1784,7 @@ mod tests {
         );
     }
 
-    /// A genesis that lists PoA authorities declares the
+    /// A genesis that lists `PoA` authorities declares the
     /// admission gate; an outsider with stake is not in the admitted set.
     #[test]
     fn genesis_poa_authorities_open_the_admission_gate() {
@@ -1915,7 +1915,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
     }
 
-    /// The mainnet bridge-enabled PoW domain must not keep the
+    /// The mainnet bridge-enabled `PoW` domain must not keep the
     /// 8-bit default floor.
     #[test]
     fn mainnet_bridge_pow_domain_has_a_non_trivial_difficulty_floor() {

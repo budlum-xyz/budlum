@@ -258,9 +258,9 @@ impl PoAEngine {
     }
 
     /// VRF-like leader slot selection in `[0, n)`.
-    /// Added previous_block_hash as an
+    /// Added `previous_block_hash` as an
     /// Entropy source. Previously the leader was fully deterministic from
-    /// Public inputs (block_index + validator set), allowing DoS/bribery
+    /// Public inputs (`block_index` + validator set), allowing DoS/bribery
     /// Attacks. Now the leader is unpredictable until the previous block
     /// Is produced, since its hash is unknown beforehand.
     /// Test-only convenience wrapper.
@@ -877,7 +877,7 @@ mod tests {
     }
 
     /// A state where every listed address is an active validator *and* holds a
-    /// live PoA admission record in domain 0.
+    /// live `PoA` admission record in domain 0.
     fn admitted_state(addrs: &[Address]) -> AccountState {
         let mut state = AccountState::new();
         for a in addrs {

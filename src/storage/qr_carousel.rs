@@ -1085,7 +1085,7 @@ mod tests {
             .collect()
     }
 
-    /// Golden vectors: 24-byte body, k=3, block_len=8. `drop_at(0)`
+    /// Golden vectors: 24-byte body, k=3, `block_len=8`. `drop_at(0)`
     /// is the systematic drop, `drop_at(3)` the first repair drop (degree 3).
     /// Vectors were produced by the encoder at commit time; changing the PRNG seed, header
     /// layout or the FNV digest breaks this test.

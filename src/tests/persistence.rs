@@ -31,7 +31,7 @@ fn snapshot_params() -> StateSnapshotV2Params {
     }
 }
 
-/// Round-trip a state through V2 bytes and back into an AccountState.
+/// Round-trip a state through V2 bytes and back into an `AccountState`.
 fn round_trip(state: &AccountState) -> AccountState {
     let v2 = StateSnapshotV2::from_state(state, snapshot_params());
     let bytes = v2.to_bytes();
@@ -317,7 +317,7 @@ fn try_to_bytes_ok_and_roundtrips_with_populated_registry() {
     assert!(acct.registry.is_active(&addr(2), roles::RELAYER));
 }
 
-/// Documents the failure class the old `unwrap_or_default` swallowed: serde_json
+/// Documents the failure class the old `unwrap_or_default` swallowed: `serde_json`
 /// Genuinely fails on a non-string map key. such a failure became
 /// Silent empty bytes; the hardened paths now either surface it (`try_to_bytes`
 /// -> Err / Result), fail-fast (`.expect` on hash paths), or log + degrade

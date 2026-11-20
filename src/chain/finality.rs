@@ -2044,12 +2044,12 @@ mod tests {
         );
     }
 
-    /// (security audit) `verify_pop` must reject PoP
+    /// (security audit) `verify_pop` must reject `PoP`
     /// Entries whose public key is not in the prime-order
     /// Subgroup. The same subgroup check that protects
     /// `verify_bls_sig` must protect `verify_pop`, otherwise a
     /// Malicious validator could register a small-subgroup public
-    /// Key, get it through the PoP gate, and then use it to make
+    /// Key, get it through the `PoP` gate, and then use it to make
     /// Votes aggregate against a forged finality certificate.
     #[test]
     fn verify_pop_rejects_subgroup_attack_on_public_key() {

@@ -411,7 +411,7 @@ mod tests {
         assert!(decode_receipt(&build_typed_receipt(0x04, true, Vec::new())).is_ok());
     }
 
-    /// Find_log_indexed binds (tx, log index) - two
+    /// `Find_log_indexed` binds (tx, log index) - two
     /// same-shaped logs are told apart by position.
     #[test]
     fn find_log_indexed_binds_the_position() {

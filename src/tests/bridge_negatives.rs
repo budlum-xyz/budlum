@@ -46,7 +46,7 @@ struct Fixture {
     _dir: TempDir,
     bc: Blockchain,
     domains: Vec<ConsensusDomain>,
-    /// (message_id, relayer, honest proof, source_domain)
+    /// (`message_id`, relayer, honest proof, `source_domain`)
     message_id: crate::cross_domain::MessageId,
     relayer: Address,
     tree: DomainEventTree,

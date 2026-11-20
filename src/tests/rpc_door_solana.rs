@@ -257,6 +257,9 @@ async fn solana_refused_rows_answer_minus_32004_and_name_the_native_door() {
 async fn solana_slot_rows_refuse_a_commitment_they_cannot_honor() {
     let module = solana_methods().await;
     let bogus = r#"[{"commitment":"bogus"}]"#;
+    let slot_err = wire_refusal(&module, "getSlot", bogus).await;
+    assert_eq!(slot_err.code(), crate::rpc::compat::JSONRPC_INVALID_PARAMS);
+    assert!(!slot_err.message().is_empty());
     let slot = wire_refusal(&module, "getSlot", bogus).await.code();
     assert_eq!(slot, crate::rpc::compat::JSONRPC_INVALID_PARAMS);
     let height = wire_refusal(&module, "getBlockHeight", bogus).await.code();
@@ -269,6 +272,9 @@ async fn solana_slot_rows_refuse_a_commitment_they_cannot_honor() {
 #[tokio::test]
 async fn solana_svm_subscriptions_are_refused_by_name() {
     let module = solana_methods().await;
+    let account_err = wire_refusal(&module, "accountSubscribe", r#"["x"]"#).await;
+    assert_eq!(account_err.code(), solana::SOLANA_UNAVAILABLE);
+    assert!(!account_err.message().is_empty());
     let account = wire_refusal(&module, "accountSubscribe", r#"["x"]"#)
         .await
         .code();
@@ -353,6 +359,8 @@ async fn native_subscription_doors_are_accepted_refused_and_unsubscribed() {
         heads["result"].is_number(),
         "an accepted feed answers its subscription id: {heads}"
     );
+    let bogus_err = wire_refusal(&module, "bud_subscribe", r#"["bogus"]"#).await;
+    assert!(!bogus_err.message().is_empty());
     let bogus = wire_refusal(&module, "bud_subscribe", r#"["bogus"]"#)
         .await
         .code();

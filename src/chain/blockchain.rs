@@ -126,7 +126,7 @@ pub struct Blockchain {
     pub max_qc_blobs: usize,
     pub validator_snapshots: BTreeMap<u64, ValidatorSetSnapshot>,
     /// Cached current-epoch validator snapshot keyed by exact active-validator
-    /// state tuple, so off-round votes do not repeat O(N) BLS PoP pairings when
+    /// state tuple, so off-round votes do not repeat O(N) BLS `PoP` pairings when
     /// `state.validators` has not changed.
     current_epoch_snapshot_cache: Option<(CurrentEpochValidatorKey, ValidatorSetSnapshot)>,
     /// Maximum number of validator snapshots to keep in memory.
@@ -141,7 +141,7 @@ pub struct Blockchain {
     /// header, by global height: node-local proof material for
     /// `bud_getGlobalHeaderProof`.
     pub global_header_openings: BTreeMap<u64, crate::domain::Hash32>,
-    /// The AppBinding payment window and the rest of the registry opening as
+    /// The `AppBinding` payment window and the rest of the registry opening as
     /// they stood at each recent checkpoint, by global height:
     /// node-local proof material for `bud_appBindingPaymentProof`, so a payment
     /// can be proven against a header after later payments moved the window.
@@ -154,7 +154,7 @@ pub struct Blockchain {
         ),
     >,
     pub plugin_registry: DomainPluginRegistry,
-    /// Node-local registry for sovereign, bridgeless PoA Garden domains.
+    /// Node-local registry for sovereign, bridgeless `PoA` Garden domains.
     /// Kept outside `self.state` and outside the state root so a private
     /// Garden observed by one node never diverges Budlum's consensus state
     /// from peers (G-1).
@@ -205,7 +205,7 @@ pub struct Blockchain {
     early_finality_votes: EarlyFinalityVotes,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
     /// The anchor emission trace, run on every
-    /// checkpoint header a committed block carries; the default is GatedOff
+    /// checkpoint header a committed block carries; the default is `GatedOff`
     /// (skip).
     pub anchor_emission: AnchorEmission,
     /// The seals state recovery may trust: Root Seals and verified
@@ -218,7 +218,7 @@ pub struct Blockchain {
     anchor_classes: BTreeMap<u64, crate::crypto::facts::QuantumClass>,
     /// The cold-wallet committee state, when the node
     /// runs with a cold committee. `None` today; the rotation entry on this
-    /// chain exercises cold_wallet + cold_quorum through pq_anchor.
+    /// chain exercises `cold_wallet` + `cold_quorum` through `pq_anchor`.
     pub cold_wallet: Option<ColdWalletState>,
     /// The scheme and suite statuses of this chain. A fresh
     /// chain holds the genesis statuses of the scheme table; the only sources
@@ -1421,7 +1421,7 @@ impl Blockchain {
     }
 
     /// Entropy a signer cannot know at signing time. The VRF output is empty
-    /// for PoA and BFT blocks, and while a block is still being assembled.
+    /// for `PoA` and BFT blocks, and while a block is still being assembled.
     fn block_context_entropy(previous_hash: &str, vrf_output: &[u8]) -> [u8; 32] {
         crate::core::hash::hash_fields_bytes(&[
             b"BDLM_BLOCK_CONTEXT_ENTROPY_V1",
@@ -1456,7 +1456,7 @@ impl Blockchain {
     /// A template is not evaluated on its own. `register_template_for_domain`
     /// first verifies that the domain is registered, then that the consensus kind
     /// and operator the template declares are the same as the domain's real
-    /// values. Without this gate a template could present a domain running as PoS
+    /// values. Without this gate a template could present a domain running as `PoS`
     /// to an auditor as "permissioned and KYC'd": both records are individually
     /// valid, together they are wrong.
     ///
@@ -1532,7 +1532,7 @@ impl Blockchain {
         out
     }
 
-    /// Register a sovereign, bridgeless PoA Garden domain in this node's
+    /// Register a sovereign, bridgeless `PoA` Garden domain in this node's
     /// local Garden registry. Writes nothing to `self.state`.
     ///
     /// # Errors
@@ -2046,9 +2046,9 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Freeze an address in a PoA domain.
+    /// Freeze an address in a `PoA` domain.
     ///
-    /// Freezing may only be done in permissioned (PoA) domains and only on a
+    /// Freezing may only be done in permissioned (`PoA`) domains and only on a
     /// NAMED admin's authority - the bare `bool` that anybody could pass is
     /// gone. The admin must be an admin of the domain in the admission
     /// registry, or the domain's registered operator when the domain has no
@@ -2057,7 +2057,7 @@ impl Blockchain {
     ///
     /// # Errors
     ///
-    /// Returns an error if the domain is not registered, is not PoA, if the
+    /// Returns an error if the domain is not registered, is not `PoA`, if the
     /// named admin holds no authority on it, or if the reason digest is zero.
     pub fn freeze_poa_account(
         &mut self,
@@ -2072,7 +2072,7 @@ impl Blockchain {
     /// The reverse of [`Self::freeze_poa_account`],
     /// with the same authority rules.
     ///
-    /// WIRING: the direct-API half of the PoA compliance door, twin of
+    /// WIRING: the direct-API half of the `PoA` compliance door, twin of
     /// `freeze_poa_account`; the governance queue reaches the same code
     /// through `apply_pending_poa_compliance`, and a direct actor
     /// caller for this form is still to land.
@@ -2148,7 +2148,7 @@ impl Blockchain {
         result.map_err(|e| format!("{e:?}"))
     }
 
-    /// Apply the governance-queued PoA compliance requests,
+    /// Apply the governance-queued `PoA` compliance requests,
     /// mirroring the governance domain unfreezes: the queue is drained at
     /// block close and each request runs the same verification path as the
     /// direct API.
@@ -2558,7 +2558,7 @@ impl Blockchain {
         })
     }
 
-    /// An AppBinding payment proven against the most recent checkpoint header whose
+    /// An `AppBinding` payment proven against the most recent checkpoint header whose
     /// payment window still holds it: the payment, its Merkle
     /// path to the window root, the rest of the registry opening, and the
     /// header with its own proof material.
@@ -2590,8 +2590,8 @@ impl Blockchain {
 
     /// Node-local follow-up of a committed block: archive the checkpoint
     /// headers it committed, count them, and hand each to the PQ anchor
-    /// emission, whose mode rules are unchanged (GatedOff skips, Devnet
-    /// writes the line, ProductionApproved fails closed).
+    /// emission, whose mode rules are unchanged (`GatedOff` skips, Devnet
+    /// writes the line, `ProductionApproved` fails closed).
     fn observe_committed_global_headers(&mut self, block: &Block) {
         let added = Self::reconcile_global_header_archive(&mut self.global_headers, &self.state);
         for header in &added {
@@ -2646,7 +2646,7 @@ impl Blockchain {
     /// The weakest quantum class among the active domains the header settles.
     /// The class of a domain follows its consensus kind until its profile
     /// reports observed schemes: composite ML-DSA-65 plus Ed25519 blocks
-    /// (PoS, BFT, PoA) are lattice based, proof of work and zk domains are
+    /// (`PoS`, BFT, `PoA`) are lattice based, proof of work and zk domains are
     /// hash based, anything else is not assessed and counts as classical.
     fn anchor_quantum_class(&self) -> crate::crypto::facts::QuantumClass {
         crate::settlement::pq_anchor::weakest_domain_class(
@@ -3075,8 +3075,8 @@ impl Blockchain {
     }
 
     /// Rotate the anchor signing key with the cold-wallet committee
-    /// (production entry): pq_anchor's cold channel drives
-    /// cold_wallet's quorum signature and cold_quorum's verification. The
+    /// (production entry): `pq_anchor`'s cold channel drives
+    /// `cold_wallet`'s quorum signature and `cold_quorum`'s verification. The
     /// wallet must be configured on this chain; the committee is read from
     /// its pinned trusted-device set (S2).
     ///
@@ -5724,7 +5724,7 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Pre-scan a block for NftBurn transactions and collect the associated
+    /// Pre-scan a block for `NftBurn` transactions and collect the associated
     /// Content CIDs from the NFT registry (before the burn removes them).
     /// Returns a list of `(ContentId, owner_address)` pairs for content that
     /// should be pruned from the storage registry after block commit.
@@ -10220,7 +10220,7 @@ impl Blockchain {
     ///
     /// The registry's `accept_reallocation_ticket` keeps the one-shot
     /// guarantee (a filled ticket refuses a second acceptance) and, with the
-    /// domain's VerifyMerkle gate open, the merkle envelope is mandatory, so
+    /// domain's `VerifyMerkle` gate open, the merkle envelope is mandatory, so
     /// a replacement cannot claim a shard it cannot prove. Until this path
     /// existed, a repair ticket
     /// opened by the maintenance sweep could never be filled on-chain:

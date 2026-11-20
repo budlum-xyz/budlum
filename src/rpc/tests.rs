@@ -426,7 +426,7 @@ mod rpc_tests {
 
     /// The actor must see sender and payload, not only type and amount:
     /// subsequent governance proposals in one epoch require a higher fee.
-    /// Quoting base_fee alone would leave a wallet signing a rejected vote.
+    /// Quoting `base_fee` alone would leave a wallet signing a rejected vote.
     #[tokio::test]
     async fn estimate_gas_includes_escalating_governance_proposal_fee() {
         use crate::core::governance::ProposalType;

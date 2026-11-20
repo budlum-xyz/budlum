@@ -2,7 +2,7 @@
 //! external finality adapter (`da-sampling-v1`).
 //!
 //! Verifies data-availability commitments from modular DA networks (Celestia,
-//! Avail, EigenDA, and sovereign rollup DA layers) against a governance-pinned
+//! Avail, `EigenDA`, and sovereign rollup DA layers) against a governance-pinned
 //! namespace and slashable DA attestation committee:
 //!
 //! 1. **2D Erasure-Coded Data Root Binding**: binds `data_root` to a power-of-two
