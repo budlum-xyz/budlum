@@ -544,6 +544,8 @@ pub struct IdentityRegistry {
     /// `Address` newtype's manual `Serialize`.
     credentials: BTreeMap<String, CredentialCommitment>,
     revoked: BTreeSet<String>,
+    #[serde(default)]
+    retired: BTreeSet<Address>,
 }
 
 /// Enforces the domain boundary shared by registry operations and the
@@ -613,7 +615,7 @@ impl IdentityRegistry {
     ) -> Result<(), IdentityError> {
         require_poa_domain(domain)?;
         match op {
-            IdentityOp::Register { record } => self.register(record),
+            IdentityOp::Register { record } => self.register(record, now),
             IdentityOp::Issue { credential } => self.issue(credential, now),
             IdentityOp::Revoke { credential } => self.revoke(credential, now),
             IdentityOp::Recover {
@@ -624,7 +626,7 @@ impl IdentityRegistry {
         }
     }
 
-    fn register(&mut self, record: IdentityRecord) -> Result<(), IdentityError> {
+    fn register(&mut self, record: IdentityRecord, now: u64) -> Result<(), IdentityError> {
         record.validate()?;
         if record.credential_root.is_some() || !record.credential_roots.is_empty() {
             return Err(IdentityError::RootMismatch {
@@ -643,16 +645,37 @@ impl IdentityRegistry {
             )));
         }
         let subject = record.subject;
-        if self.records.contains_key(&subject) {
+        if self.records.contains_key(&subject) || self.retired.contains(&subject) {
             return Err(IdentityError::AlreadyExists {
                 did: did_of(&subject),
             });
         }
         const MAX_IDENTITY_RECORDS: usize = 65_536;
-        if self.records.len() >= MAX_IDENTITY_RECORDS {
+        let reclaimable: Vec<Address> = if self.records.len() >= MAX_IDENTITY_RECORDS {
+            self.records
+                .iter()
+                .filter(|(addr, rec)| {
+                    rec.guardians.is_empty()
+                        && rec.methods.iter().all(|m| !m.is_live_at(now))
+                        && !self.credentials.iter().any(|(cid, cred)| {
+                            !self.revoked.contains(cid)
+                                && cred.is_live_at(now)
+                                && (cred.subject == **addr || cred.issuer == **addr)
+                        })
+                })
+                .map(|(addr, _)| *addr)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if self.records.len().saturating_sub(reclaimable.len()) >= MAX_IDENTITY_RECORDS {
             return Err(IdentityError::BadApproval(format!(
                 "identity registry reached {MAX_IDENTITY_RECORDS} records"
             )));
+        }
+        for dead in reclaimable {
+            self.records.remove(&dead);
+            self.retired.insert(dead);
         }
         self.records.insert(subject, record);
         Ok(())
@@ -677,6 +700,7 @@ impl IdentityRegistry {
         let subject = credential.subject;
         let issuer = credential.issuer;
         let id = credential_id(&credential);
+        let id_hex = hex32(&id);
         let root = credential.root();
         {
             if !self.records.contains_key(&subject) {
@@ -694,16 +718,39 @@ impl IdentityRegistry {
                     did: did_of(&issuer),
                 });
             }
-            if self.credentials.contains_key(hex32(&id).as_str()) {
+            if self.credentials.contains_key(id_hex.as_str())
+                || self.revoked.contains(id_hex.as_str())
+            {
                 return Err(IdentityError::AlreadyIssued {
                     did: did_of(&subject),
                 });
             }
             const MAX_IDENTITY_CREDENTIALS: usize = 262_144;
             const MAX_CREDENTIALS_PER_SUBJECT: usize = 256;
-            if self.credentials.len() >= MAX_IDENTITY_CREDENTIALS {
+            let live_credentials = self
+                .credentials
+                .iter()
+                .filter(|(cid, cred)| {
+                    !self.revoked.contains(*cid) && !cred.expires_at.is_some_and(|exp| exp <= now)
+                })
+                .count();
+            if live_credentials >= MAX_IDENTITY_CREDENTIALS {
                 return Err(IdentityError::BadApproval(format!(
                     "identity registry reached {MAX_IDENTITY_CREDENTIALS} credentials"
+                )));
+            }
+            let issuer_live = self
+                .credentials
+                .iter()
+                .filter(|(cid, cred)| {
+                    cred.issuer == issuer
+                        && !self.revoked.contains(*cid)
+                        && !cred.expires_at.is_some_and(|exp| exp <= now)
+                })
+                .count();
+            if issuer_live >= MAX_CREDENTIALS_PER_SUBJECT {
+                return Err(IdentityError::BadApproval(format!(
+                    "issuer reached {MAX_CREDENTIALS_PER_SUBJECT} live credentials"
                 )));
             }
             if let Some(record) = self.records.get(&subject) {
@@ -724,7 +771,11 @@ impl IdentityRegistry {
                 }
             }
         }
-        self.credentials.insert(hex32(&id), credential);
+        let revoked = &self.revoked;
+        self.credentials.retain(|cid, cred| {
+            !revoked.contains(cid) && !cred.expires_at.is_some_and(|exp| exp <= now)
+        });
+        self.credentials.insert(id_hex, credential);
         if let Some(record) = self.records.get_mut(&subject) {
             record.issued_credentials = record.issued_credentials.saturating_add(1);
             record.credential_root = Some(root);
@@ -738,12 +789,13 @@ impl IdentityRegistry {
 
     fn revoke(&mut self, credential: CredentialCommitment, _now: u64) -> Result<(), IdentityError> {
         let id = hex32(&credential_id(&credential));
+        if self.revoked.contains(&id) {
+            return Err(IdentityError::AlreadyRevoked);
+        }
         if !self.credentials.contains_key(&id) {
             return Err(IdentityError::UnknownCredential);
         }
-        if !self.revoked.insert(id) {
-            return Err(IdentityError::AlreadyRevoked);
-        }
+        let _ = self.revoked.insert(id);
         Ok(())
     }
 
@@ -925,6 +977,16 @@ impl IdentityRegistry {
         for id in &self.revoked {
             acc = hash_fields_bytes(&[&acc, b"revoked", id.as_bytes()]);
         }
+        if !self.retired.is_empty() {
+            acc = hash_fields_bytes(&[
+                &acc,
+                b"retired-count",
+                &(self.retired.len() as u64).to_le_bytes(),
+            ]);
+            for subject in &self.retired {
+                acc = hash_fields_bytes(&[&acc, b"retired", subject.as_bytes()]);
+            }
+        }
         acc
     }
 
@@ -937,12 +999,12 @@ impl IdentityRegistry {
     /// not yet issued at `now`, subject unregistered, root mismatch against
     /// the credential's own fields.
     pub fn is_credential_valid(&self, id: &[u8; 32], now: u64) -> Result<(), IdentityError> {
-        let credential = self
-            .credential(id)
-            .ok_or(IdentityError::UnknownCredential)?;
         if self.is_revoked(id) {
             return Err(IdentityError::AlreadyRevoked);
         }
+        let credential = self
+            .credential(id)
+            .ok_or(IdentityError::UnknownCredential)?;
         if !credential.is_live_at(now) {
             return Err(IdentityError::NotLive {
                 issued_at: credential.issued_at,
@@ -3075,5 +3137,86 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, IdentityError::BadApproval(_)));
+
+        // Expired and revoked credentials release their global map slots on later issuances
+        // while keeping revoked IDs recorded in `revoked`.
+        let mut bounded = IdentityRegistry::new();
+        let s1 = addr(41);
+        let s2 = addr(42);
+        for (s, k) in [(s1, 41u8), (s2, 42u8)] {
+            bounded
+                .apply(
+                    &ConsensusKind::PoA,
+                    IdentityOp::Register {
+                        record: IdentityRecord::new(
+                            s,
+                            vec![VerificationMethod::new([k; 32], MethodKind::MlDsa87)],
+                            vec![],
+                            0,
+                        )
+                        .unwrap(),
+                    },
+                    0,
+                )
+                .unwrap();
+        }
+        let exp_cred = CredentialCommitment {
+            issuer: s1,
+            subject: s1,
+            schema: "ephemeral".to_string(),
+            fields: vec![FieldCommitment {
+                name: "f".to_string(),
+                commitment: [0x77; 32],
+            }],
+            issued_at: 1,
+            expires_at: Some(5),
+        };
+        let exp_id = credential_id(&exp_cred);
+        bounded
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Issue {
+                    credential: exp_cred.clone(),
+                },
+                1,
+            )
+            .unwrap();
+        bounded
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Revoke {
+                    credential: exp_cred,
+                },
+                2,
+            )
+            .unwrap();
+        let next_cred = CredentialCommitment {
+            issuer: s2,
+            subject: s2,
+            schema: "live".to_string(),
+            fields: vec![FieldCommitment {
+                name: "f".to_string(),
+                commitment: [0x88; 32],
+            }],
+            issued_at: 10,
+            expires_at: Some(100),
+        };
+        bounded
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Issue {
+                    credential: next_cred,
+                },
+                10,
+            )
+            .unwrap();
+        assert!(
+            bounded.is_revoked(&exp_id),
+            "revocation marker must persist after reclaiming the expired/revoked credential slot"
+        );
+        assert!(
+            bounded.credential(&exp_id).is_none(),
+            "revoked/expired credential entry must be reclaimed from the active credentials pool"
+        );
     }
 }

@@ -1863,10 +1863,7 @@ fn pcs_opening_refuses_inflated_quotient_chunk_declaration_and_inconsistent_carr
     );
 
     let mut under_carried = honest.clone();
-    assert_eq!(
-        under_carried.opened_values.quotient_chunks.pop().is_some(),
-        true
-    );
+    assert!(under_carried.opened_values.quotient_chunks.pop().is_some());
     assert_eq!(
         PcsOpeningObject::decode(&under_carried.encode().expect("encode under-carried")),
         Err(ObjectError::Invalid),

@@ -23,7 +23,11 @@ pub const MAX_LIVE_COMMITMENTS: usize = 65_536;
 /// Maximum live commitments owned by any single account so one funded
 /// depositor cannot saturate `MAX_LIVE_COMMITMENTS` and refuse all other
 /// accounts' deposits.
-pub const MAX_LIVE_COMMITMENTS_PER_OWNER: usize = 1_024;
+pub const MAX_LIVE_COMMITMENTS_PER_OWNER: usize = 64;
+
+/// Slots reserved exclusively for first-time depositors (`owner_live == 0`)
+/// so repeat accounts cannot lock newcomers out of the shielded pool.
+const NEWCOMER_RESERVED_COMMITMENTS: usize = 4_096;
 
 /// Maximum spent nullifiers before fail-closed rejection.
 /// At 262144 entries × 32 bytes = 8MB - bounded memory for consensus replay protection.
@@ -178,6 +182,16 @@ impl L1NoteRegistry {
         if owner_live >= MAX_LIVE_COMMITMENTS_PER_OWNER {
             return Err(format!(
                 "owner live commitment limit reached ({owner_live}/{MAX_LIVE_COMMITMENTS_PER_OWNER})"
+            ));
+        }
+        if owner_live > 0
+            && self.live_commitments.len()
+                >= MAX_LIVE_COMMITMENTS.saturating_sub(NEWCOMER_RESERVED_COMMITMENTS)
+        {
+            return Err(format!(
+                "non-newcomer live commitment pool reached ({}/{}) - newcomer reserve active",
+                self.live_commitments.len(),
+                MAX_LIVE_COMMITMENTS.saturating_sub(NEWCOMER_RESERVED_COMMITMENTS)
             ));
         }
         self.insert_note(commitment)?;
@@ -1036,5 +1050,9 @@ mod h3_tests {
         assert!(!r.contains_commitment(&new_out));
         let owner_count = r.note_owners.values().filter(|o| **o == owner).count();
         assert_eq!(owner_count, MAX_LIVE_COMMITMENTS_PER_OWNER);
+        assert!(
+            owner_count <= 64,
+            "64 addresses must not be able to saturate all 65,536 global live-note slots"
+        );
     }
 }

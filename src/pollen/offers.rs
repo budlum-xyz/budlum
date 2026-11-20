@@ -215,6 +215,14 @@ pub const MAX_OFFERS: usize = 100_000;
 /// and without a per-seller ceiling one funded account fills it for good.
 pub const MAX_NAME_OFFERS_PER_SELLER: usize = 64;
 
+/// Live data-offer listings one seller may hold at once so one funded
+/// account cannot exhaust [`MAX_OFFERS`] across the shared marketplace.
+const MAX_DATA_OFFERS_PER_SELLER: usize = 256;
+
+/// Highest price a data listing may ask, bounded by total token supply so
+/// settlement arithmetic cannot overflow `u64` and pin an unbuyable slot.
+const MAX_DATA_OFFER_PRICE: u64 = crate::tokenomics::BUD_TOTAL_SUPPLY;
+
 /// How far ahead a name listing may expire. The full-table sweep reclaims
 /// only expired rows, so the expiry a seller picks is also the lifetime of
 /// the table space it occupies. The bound is the longest registration a
@@ -353,6 +361,21 @@ impl MarketplaceRegistry {
     ) -> Result<u64, String> {
         if price == 0 {
             return Err("Price must be greater than zero".into());
+        }
+        if price > MAX_DATA_OFFER_PRICE {
+            return Err(format!(
+                "Price {price} exceeds maximum supply ceiling ({MAX_DATA_OFFER_PRICE})"
+            ));
+        }
+        let seller_live = self
+            .offers
+            .values()
+            .filter(|o| o.active && o.seller == seller)
+            .count();
+        if seller_live >= MAX_DATA_OFFERS_PER_SELLER {
+            return Err(format!(
+                "seller reached maximum active data offers ({MAX_DATA_OFFERS_PER_SELLER})"
+            ));
         }
         // Listing is a claim on the payment stream for these bytes: when the
         // content is already a registered asset or is bound to one, only
@@ -2120,5 +2143,23 @@ mod tests {
         // Another seller is untouched by the first one's ceiling.
         let other = addr(9);
         reg.create_name_offer(other, request(900, 500), 1).unwrap();
+
+        // Data-offer table bounds per-seller live occupancy and refuses overflow prices.
+        assert!(
+            reg.create_offer(seller, ContentId::of(b"unbuyable"), u64::MAX)
+                .is_err(),
+            "u64::MAX price makes purchase arithmetic overflow and permanently pins the slot"
+        );
+        for n in 0..256u32 {
+            reg.create_offer(seller, ContentId::of(&n.to_le_bytes()), 100)
+                .expect("seller within 256 live data offers");
+        }
+        assert!(
+            reg.create_offer(seller, ContentId::of(b"257th-offer"), 100)
+                .is_err(),
+            "seller exceeding 256 live data offers must be refused"
+        );
+        reg.create_offer(other, ContentId::of(b"other-seller-offer"), 100)
+            .expect("independent seller remains able to list");
     }
 }
