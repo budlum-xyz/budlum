@@ -1555,9 +1555,16 @@ mod modern_domain_kind_tests {
         assert_eq!(expected_epoch, 2);
 
         // Prove with the canonical epoch.
-        let (bundle, _sorted, _metrics) =
-            prove_universal_light_proof(&compiled, expected_epoch, hub_root, &snapshots, &seed, 12, &registry)
-                .expect("prove ULP-1");
+        let (bundle, _sorted, _metrics) = prove_universal_light_proof(
+            &compiled,
+            expected_epoch,
+            hub_root,
+            &snapshots,
+            &seed,
+            12,
+            &registry,
+        )
+        .expect("prove ULP-1");
 
         // Honest epoch verifies.
         open_universal_light_proof(
