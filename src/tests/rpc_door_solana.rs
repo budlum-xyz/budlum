@@ -240,10 +240,7 @@ async fn solana_refused_rows_answer_minus_32004_and_name_the_native_door() {
         assert_eq!(error.code(), solana::SOLANA_UNAVAILABLE, "{name}");
         let door = solana::native_door(name).unwrap_or("bud_getStatus");
         // `requestAirdrop` carries its door in `data`, not in the message.
-        let in_data = error
-            .data()
-            .map(|data| data.get().contains(door))
-            .unwrap_or(false);
+        let in_data = error.data().is_some_and(|data| data.get().contains(door));
         assert!(
             error.message().contains(door) || in_data,
             "{name} must name {door}, said {} / {in_data}",

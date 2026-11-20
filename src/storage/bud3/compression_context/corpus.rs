@@ -284,6 +284,7 @@ fn xor_with_dictionary(bytes: &[u8], dictionary: &[u8]) -> Vec<u8> {
 /// The content is XOR-conditioned against `ctx.dictionary` so shared prefixes
 /// and recurring structure collapse to zero runs, then compressed with the
 /// verified `bud_codec::select` pipeline.
+#[must_use]
 pub fn encode_with_context(content: &[u8], ctx: &ContextManifest) -> ContextEncodedPayload {
     let residual = xor_with_dictionary(content, &ctx.dictionary);
     let selected = bud_codec::select(&residual);

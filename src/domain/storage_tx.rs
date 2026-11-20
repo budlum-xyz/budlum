@@ -146,7 +146,7 @@ pub enum StorageTx {
 /// envelope follows the deal-open convention: an empty `merkle_proof` means
 /// none and an all-zero `storage_root` means none, and the registry refuses
 /// an acceptance without both.
-/// exposed for StorageTx::AcceptReallocation: the executor and the signing bytes in core/transaction.rs reach it through the variant, not by name.
+/// exposed for `StorageTx::AcceptReallocation`: the executor and the signing bytes in core/transaction.rs reach it through the variant, not by name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageReallocationAccept {
     pub ticket_id: u64,
@@ -179,7 +179,7 @@ pub struct StorageReallocationAccept {
 /// encoding: an empty `merkle_proof` means none and an all-zero
 /// `storage_root` means none. The registry refuses a deal without both, so in
 /// block today an open that leaves either empty is refused.
-/// exposed for StorageTx::OpenDeal: the executor and the signing bytes in core/transaction.rs reach it through the variant, not by name.
+/// exposed for `StorageTx::OpenDeal`: the executor and the signing bytes in core/transaction.rs reach it through the variant, not by name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageDealOpen {
     pub domain_id: u32,
@@ -484,7 +484,7 @@ fn is_mainnet(chain_id: u64) -> bool {
 /// It binds the chain, the payer, the payer's account nonce and every body
 /// field except the consent itself, under its own tag, so a deal-open consent
 /// cannot be presented as a repair consent or the reverse.
-/// WIRING: the in-block check is accept_reallocation below; the outside caller is the operator-side consent signer, which does not exist yet.
+/// WIRING: the in-block check is `accept_reallocation` below; the outside caller is the operator-side consent signer, which does not exist yet.
 #[must_use]
 pub fn accept_reallocation_consent_digest(
     chain_id: u64,
@@ -853,12 +853,11 @@ fn answer_coding_audit(
             max: MAX_CODING_AUDIT_DATA_COLUMN_BYTES,
         });
     }
-    let manifest_id = match state.storage_registry.coding_audit(audit_id) {
-        Some(stored) => stored.audit.manifest_id,
-        None => {
-            let unknown = StorageError::UnknownCodingAudit(audit_id);
-            return Err(StorageTxError::CodingAuditRefused(unknown.to_string()));
-        }
+    let manifest_id = if let Some(stored) = state.storage_registry.coding_audit(audit_id) {
+        stored.audit.manifest_id
+    } else {
+        let unknown = StorageError::UnknownCodingAudit(audit_id);
+        return Err(StorageTxError::CodingAuditRefused(unknown.to_string()));
     };
     // A pruned manifest is the registry's case: it voids the audit.
     if let Some(manifest) = state.storage_registry.get_manifest(&manifest_id) {
@@ -893,7 +892,7 @@ fn answer_coding_audit(
 /// field except the consent itself, so the consent cannot move to another
 /// chain, payer, placement or price, and it is spent when the payer's nonce
 /// advances.
-/// WIRING: the in-block check is open_deal below; the outside caller is the operator-side consent signer of the storage RPC mutation path, which does not exist yet.
+/// WIRING: the in-block check is `open_deal` below; the outside caller is the operator-side consent signer of the storage RPC mutation path, which does not exist yet.
 #[must_use]
 pub fn open_deal_consent_digest(
     chain_id: u64,
@@ -1147,7 +1146,7 @@ fn register_manifest(
 ) -> Result<(), StorageTxError> {
     manifest
         .validate_untrusted()
-        .map_err(|e| StorageTxError::Refused(e.to_string()))?;
+        .map_err(|e| StorageTxError::Refused(e.clone()))?;
     if manifest.erasure.n > manifest.erasure.k {
         let parity = manifest.erasure.parity_count() as usize;
         if manifest.column_roots.len() != parity {

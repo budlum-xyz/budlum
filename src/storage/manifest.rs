@@ -50,6 +50,7 @@ impl ShardRef {
     /// Construct a `ShardRef` from a chunk's bytes. The `ContentId` is
     /// Computed deterministically; `index` is assigned by the caller
     /// (e.g. the off-chain chunker).
+    #[must_use]
     pub fn from_bytes(index: u32, chunk: &[u8]) -> Self {
         Self {
             kind: ShardKind::Data,
@@ -212,6 +213,7 @@ pub struct ErasureScheme {
 
 impl ErasureScheme {
     /// Plain replication: every shard is data, nothing reconstructs anything.
+    #[must_use]
     pub const fn replication(shard_count: u32) -> Self {
         Self {
             k: shard_count,
@@ -219,11 +221,13 @@ impl ErasureScheme {
         }
     }
 
+    #[must_use]
     pub const fn parity_count(&self) -> u32 {
         self.n.saturating_sub(self.k)
     }
 
     /// How many shards may be lost before the object is unrecoverable.
+    #[must_use]
     pub fn loss_tolerance(&self) -> u32 {
         self.parity_count()
     }
@@ -268,6 +272,7 @@ impl ErasureScheme {
     /// Replication (`n == k`) has no parity to spend and returns 0; for those
     /// `needs_repair` still fires at `live == k`, which is every copy but one
     /// being gone, and there is nothing better available.
+    #[must_use]
     pub fn repair_margin(&self) -> u32 {
         let parity = self.parity_count();
         if parity == 0 {
@@ -280,6 +285,7 @@ impl ErasureScheme {
 
     /// Bytes stored per byte of content, as a ratio scaled by 1000 to stay in
     /// integer arithmetic. Replication of 3 is 3000; a (4,6) code is 1500.
+    #[must_use]
     pub const fn overhead_per_mille(&self) -> u32 {
         if self.k == 0 {
             return u32::MAX;
@@ -705,6 +711,7 @@ impl ContentManifest {
     /// `content_size` existed. Those were replication-only, where the two are
     /// the same number, so the fallback is their actual meaning rather than a
     /// guess.
+    #[must_use]
     pub const fn content_size(&self) -> u64 {
         if self.content_size == 0 {
             self.total_size
@@ -1072,6 +1079,7 @@ impl ContentManifest {
     }
 
     /// Whether an object is still reconstructible with `live` shards left.
+    #[must_use]
     pub const fn is_recoverable(&self, live: u32) -> bool {
         live >= self.erasure.k
     }
@@ -1086,6 +1094,7 @@ impl ContentManifest {
     /// Returns false once the object is already unrecoverable: there is
     /// nothing to reconstruct from, and a repair deal opened then would just
     /// burn an operator bond.
+    #[must_use]
     pub const fn needs_repair(&self, live: u32, margin: u32) -> bool {
         if live < self.erasure.k {
             return false;
@@ -1100,6 +1109,7 @@ impl ContentManifest {
     /// `erasure` at every call site would let one of them quietly substitute
     /// a different number. Named here so a caller cannot ask the question
     /// any way but the right one.
+    #[must_use]
     pub fn repair_margin(&self) -> u32 {
         self.erasure.repair_margin()
     }
@@ -1133,6 +1143,7 @@ impl ContentManifest {
     /// Set the content owner, after `from_shards`. If `manifest_id` were bound
     /// to the owner it would have to be recomputed; for now `manifest_id` is
     /// shards-only, preserving shard-only content addressing.
+    #[must_use]
     pub const fn with_owner(mut self, owner: crate::core::address::Address) -> Self {
         self.owner = owner;
         self
@@ -1169,6 +1180,7 @@ impl ContentManifest {
     /// Look up a shard by `ContentId`. Returns `None` if the shard is not
     /// In this manifest - used by the removed legacy per-shard deal query
     /// Path and the E2E test (`src/tests/bud_e2e.rs`).
+    #[must_use]
     pub fn shard(&self, shard_id: &ContentId) -> Option<&ShardRef> {
         self.shards.iter().find(|s| &s.shard_id == shard_id)
     }
@@ -1181,6 +1193,7 @@ impl ContentManifest {
 /// Kept for manifests that predate erasure coding, where every shard was
 /// data and the scheme was replication. New code should call
 /// [`manifest_id_from_parts_stored`], which also binds the redundancy claim.
+#[must_use]
 pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
     let mut buf = Vec::with_capacity(8 + shards.len() * (4 + 32 + 4));
     buf.extend_from_slice(b"BDLM_MANIFEST_V1");

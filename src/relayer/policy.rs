@@ -117,7 +117,7 @@ impl RelayerActionKind {
     /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         match self {
-            RelayerActionKind::ExternalTransaction {
+            Self::ExternalTransaction {
                 target_address,
                 payload_hash,
                 ..
@@ -138,7 +138,7 @@ impl RelayerActionKind {
                     return Err("RelayerAction external payload_hash cannot be zero".into());
                 }
             }
-            RelayerActionKind::DwebResolve { name } => {
+            Self::DwebResolve { name } => {
                 if name.is_empty() || name.len() > 253 {
                     return Err("RelayerAction dweb name length invalid".into());
                 }
@@ -151,7 +151,7 @@ impl RelayerActionKind {
                     return Err("RelayerAction dweb name contains an invalid label".into());
                 }
             }
-            RelayerActionKind::PollenRead { asset_id, grant_id } => {
+            Self::PollenRead { asset_id, grant_id } => {
                 if *asset_id == crate::pollen::AssetId::zero()
                     || *grant_id == crate::pollen::GrantId::zero()
                 {
@@ -207,6 +207,7 @@ impl PolicyEnvelope {
         Ok(())
     }
 
+    #[must_use]
     pub fn policy_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_RELAYER_POLICY_ENVELOPE_V1");
@@ -256,6 +257,7 @@ pub struct UserIntent {
 
 impl UserIntent {
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new(
         owner: Address,
         source_domain: u32,
@@ -283,6 +285,7 @@ impl UserIntent {
         intent
     }
 
+    #[must_use]
     pub fn calculate_id(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         // V2: the emitter is part of the id. A `V1` id did not commit to one,
@@ -300,6 +303,7 @@ impl UserIntent {
         hasher.finalize().into()
     }
 
+    #[must_use]
     pub fn verify_id(&self) -> bool {
         self.intent_id == self.calculate_id()
     }
@@ -565,6 +569,7 @@ pub struct RelayerPolicyRegistry {
 }
 
 impl RelayerPolicyRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -630,6 +635,7 @@ impl RelayerPolicyRegistry {
         })
     }
 
+    #[must_use]
     pub fn escrowed_amount(&self, intent_id: &[u8; 32]) -> u64 {
         self.escrowed.get(intent_id).copied().unwrap_or(0)
     }
@@ -917,6 +923,7 @@ impl RelayerPolicyRegistry {
         to_remove
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_RELAYER_POLICY_REGISTRY_V1");

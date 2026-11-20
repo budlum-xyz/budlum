@@ -179,7 +179,7 @@ fn pow_header_finality_authorizes_bridge_mint_but_legacy_does_not() {
     );
 }
 
-/// Shared fixture: a registered PoW header-chain domain plus four chained
+/// Shared fixture: a registered `PoW` header-chain domain plus four chained
 /// mined headers. The first header's state root is parameterized so tests
 /// can exercise the zero-root boundary; the later headers always carry
 /// distinct non-zero roots.

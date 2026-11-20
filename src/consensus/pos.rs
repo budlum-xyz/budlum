@@ -739,8 +739,7 @@ impl PoSEngine {
                             let mut used = 0usize;
                             for evidence in evidences.iter() {
                                 let encoded = serde_json::to_vec(evidence)
-                                    .map(|bytes| bytes.len())
-                                    .unwrap_or(usize::MAX);
+                                    .map_or(usize::MAX, |bytes| bytes.len());
                                 if encoded <= crate::consensus::MAX_SLASHING_EVIDENCE_BYTES
                                     && used.saturating_add(encoded)
                                         <= crate::consensus::MAX_SLASHING_EVIDENCE_BYTES
@@ -1523,10 +1522,13 @@ impl ConsensusEngine for PoSEngine {
         let next_slot = block.index.saturating_add(1);
         let next_epoch = next_slot / self.config.epoch_length;
         match self.epoch_randomness_from_chain(block.chain_id, next_epoch, chain) {
-            Ok(randomness) => match self.epoch_seed.write() {
-                Ok(mut cached) => *cached = randomness,
-                Err(_) => tracing::error!("PoS replay-derived randomness cache lock is poisoned"),
-            },
+            Ok(randomness) => {
+                if let Ok(mut cached) = self.epoch_seed.write() {
+                    *cached = randomness
+                } else {
+                    tracing::error!("PoS replay-derived randomness cache lock is poisoned")
+                }
+            }
             Err(error) => {
                 tracing::error!("Failed to refresh replay-derived PoS randomness cache: {error}")
             }

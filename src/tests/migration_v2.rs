@@ -10,7 +10,7 @@ mod migration_tests {
     use crate::core::address::Address;
 
     /// Schema-2 snapshot migration: the report is checked directly on the
-    /// snapshot, because `from_bytes` raises the schema_version, so the report is
+    /// snapshot, because `from_bytes` raises the `schema_version`, so the report is
     /// taken BEFORE `from_bytes`.
     #[test]
     fn schema2_migration_preserves_data() {

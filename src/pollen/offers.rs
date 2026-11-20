@@ -50,6 +50,7 @@ pub struct PollenPurchaseReceipt {
 
 impl PollenPurchaseReceipt {
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new(
         authorization_id: SaleAuthorizationId,
         asset_id: AssetId,
@@ -96,6 +97,7 @@ impl PollenPurchaseReceipt {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn derive_id(
         authorization_id: SaleAuthorizationId,
         asset_id: AssetId,
@@ -181,6 +183,7 @@ impl PollenPurchaseReceipt {
         Ok(())
     }
 
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -280,6 +283,7 @@ pub struct MarketplaceRegistry {
 }
 
 impl MarketplaceRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -388,6 +392,7 @@ impl MarketplaceRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn get_offer(&self, id: u64) -> Option<&DataOffer> {
         self.offers.get(&id)
     }
@@ -593,10 +598,12 @@ impl MarketplaceRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn get_encryption_policy(&self, version: u32) -> Option<&EncryptionPolicy> {
         self.encryption_policies.get(&version)
     }
 
+    #[must_use]
     pub fn active_encryption_policies(&self) -> Vec<&EncryptionPolicy> {
         self.encryption_policies
             .values()
@@ -818,6 +825,7 @@ impl MarketplaceRegistry {
         Ok((grant_id, receipt))
     }
 
+    #[must_use]
     pub fn get_sale_authorization(
         &self,
         authorization_id: &SaleAuthorizationId,
@@ -1042,6 +1050,7 @@ impl MarketplaceRegistry {
         grant.record_read()
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();

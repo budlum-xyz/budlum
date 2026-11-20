@@ -222,16 +222,15 @@ impl SubnetKey {
                 let [a, b, c, _] = v4.octets();
                 Self::ipv4([a, b, c])
             }
-            std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-                Some(v4) => {
+            std::net::IpAddr::V6(v6) => {
+                if let Some(v4) = v6.to_ipv4_mapped() {
                     let [a, b, c, _] = v4.octets();
                     Self::ipv4([a, b, c])
-                }
-                None => {
+                } else {
                     let [p0, p1, p2, p3, p4, p5, p6, p7, ..] = v6.octets();
                     Self::ipv6([p0, p1, p2, p3, p4, p5, p6, p7])
                 }
-            },
+            }
         }
     }
 }
@@ -386,7 +385,7 @@ impl PeerManager {
         if self.max_outbound_per_subnet == 0 {
             return true;
         }
-        let key = subnet.map(Into::into).unwrap_or(SubnetKey::UNADDRESSED);
+        let key = subnet.map_or(SubnetKey::UNADDRESSED, Into::into);
         self.outbound_subnet_counts.get(&key).copied().unwrap_or(0) < self.max_outbound_per_subnet
     }
 
@@ -400,7 +399,7 @@ impl PeerManager {
         if self.protected_peers.contains(&peer_id) {
             return true;
         }
-        let key = subnet.map(Into::into).unwrap_or(SubnetKey::UNADDRESSED);
+        let key = subnet.map_or(SubnetKey::UNADDRESSED, Into::into);
         if !self.can_admit_outbound_subnet(Some(key)) {
             return false;
         }
@@ -429,7 +428,7 @@ impl PeerManager {
 
     /// Returns false if admitting `subnet` would exceed the eclipse bound.
     pub fn can_admit_subnet<K: Into<SubnetKey>>(&self, subnet: Option<K>) -> bool {
-        let key = subnet.map(Into::into).unwrap_or(SubnetKey::UNADDRESSED);
+        let key = subnet.map_or(SubnetKey::UNADDRESSED, Into::into);
         self.subnet_counts.get(&key).copied().unwrap_or(0) < self.max_peers_per_subnet
     }
 
@@ -450,7 +449,7 @@ impl PeerManager {
         if self.protected_peers.contains(&peer_id) {
             return true;
         }
-        let key = subnet.map(Into::into).unwrap_or(SubnetKey::UNADDRESSED);
+        let key = subnet.map_or(SubnetKey::UNADDRESSED, Into::into);
         *self.subnet_counts.entry(key).or_insert(0) += 1;
         self.peer_subnets.insert(peer_id, key);
         true

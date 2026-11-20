@@ -663,6 +663,7 @@ impl QcFaultProof {
 
     /// Test-only constructor for the stubbed ZK kind.
     #[cfg(test)]
+    #[must_use]
     pub fn new_zk_invalid_attestation(
         epoch: u64,
         checkpoint_height: u64,
@@ -672,7 +673,7 @@ impl QcFaultProof {
         proof_bytes: Vec<u8>,
         public_inputs: ZkQcPublicInputs,
     ) -> Self {
-        QcFaultProof {
+        Self {
             version: Self::CURRENT_VERSION,
             epoch,
             checkpoint_height,

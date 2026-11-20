@@ -7,7 +7,7 @@
 //! The signing preimage is domain-separated (`BDLM_TX_V4` plus the chain id),
 //! so a Budlum signature was never replayable onto Ethereum. The damage was to
 //! users: every EVM wallet resolves a chain id through that registry, so an
-//! RPC announcing `1` presents itself to MetaMask as Ethereum Mainnet and the
+//! RPC announcing `1` presents itself to `MetaMask` as Ethereum Mainnet and the
 //! user approves what looks like an Ethereum transaction.
 //!
 //! These tests are offline on purpose. A gate that reaches the network is a

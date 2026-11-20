@@ -429,19 +429,16 @@ pub fn admit_observed(
     // Verify through `verify_observed` and ensure any declared security scheme
     // is faithfully reported to the crypto observer (no silent CRQC omission).
     let golden_verified = if version_declared {
-        match adapter.verify_observed(&golden, policy, &mut observed) {
-            Ok(att) => {
-                if let Some(declared) = att.security.observed_scheme() {
-                    if observed.count(declared) == 0 {
-                        observed.record(declared);
-                    }
+        if let Ok(att) = adapter.verify_observed(&golden, policy, &mut observed) {
+            if let Some(declared) = att.security.observed_scheme() {
+                if observed.count(declared) == 0 {
+                    observed.record(declared);
                 }
-                true
             }
-            Err(_) => {
-                observed = crate::crypto::facts::CryptoFacts::new();
-                false
-            }
+            true
+        } else {
+            observed = crate::crypto::facts::CryptoFacts::new();
+            false
         }
     } else {
         false

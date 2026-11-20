@@ -59,7 +59,7 @@ pub enum HomeVmFamily {
 }
 
 impl HomeVmFamily {
-    pub const ALL: [HomeVmFamily; 4] = [Self::Evm, Self::CosmWasm, Self::Svm, Self::Move];
+    pub const ALL: [Self; 4] = [Self::Evm, Self::CosmWasm, Self::Svm, Self::Move];
 
     #[must_use]
     pub fn as_str(&self) -> &'static str {

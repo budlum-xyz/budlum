@@ -1,5 +1,5 @@
-//! CometBFT RPC (`127.0.0.1:18550`) & Cosmos LCD (`127.0.0.1:18551`) gateway
-//! ( & section 8.11.5) supporting CosmJS `SigningCosmWasmClient`.
+//! `CometBFT` RPC (`127.0.0.1:18550`) & Cosmos LCD (`127.0.0.1:18551`) gateway
+//! ( & section 8.11.5) supporting `CosmJS` `SigningCosmWasmClient`.
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::account::{AccountState, ATTOS_PER_ATOM};
@@ -14,8 +14,8 @@ use crate::rpc::compat::{
 
 const DEFAULT_COSMOS_MAX_REQUESTS_PER_WINDOW: u32 = 120;
 /// Maximum hex payload length for `abci_query` data field.
-/// 64 KB covers any realistic CosmWasm query; larger payloads are a
-/// DoS vector that must be refused before hex decoding.
+/// 64 KB covers any realistic `CosmWasm` query; larger payloads are a
+/// `DoS` vector that must be refused before hex decoding.
 const MAX_HEX_PAYLOAD_CHARS: usize = 64 * 1024;
 
 const fn row(name: &'static str, effect: CompatEffect) -> CompatMethodClass {
@@ -52,7 +52,7 @@ pub const ABCI_QUERY_PATHS: &[&str] = &[
     "/cosmos.tx.v1beta1.Service/Simulate",
 ];
 
-/// CometBFT + Cosmos gRPC-REST compatibility gateway (`state` is read-only).
+/// `CometBFT` + Cosmos gRPC-REST compatibility gateway (`state` is read-only).
 #[derive(Debug, Clone)]
 pub struct CosmosCompatGateway {
     config: CosmosCompatConfig,

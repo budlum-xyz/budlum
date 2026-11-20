@@ -1,5 +1,5 @@
 //! Tests for this turn's features:
-//! 1. CrossDomainMessage -> relayer registration gating
+//! 1. `CrossDomainMessage` -> relayer registration gating
 //! 2. Slashing-report anti-spam fee (with refund on actionable reports)
 //! 3. Liveness fault detection -> slash via the existing report flow
 //!

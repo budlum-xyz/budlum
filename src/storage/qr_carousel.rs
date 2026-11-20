@@ -1426,7 +1426,7 @@ mod tests {
             h.update(trial.to_le_bytes());
             h.update(i.to_le_bytes());
             let d = h.finalize();
-            for b in d.iter() {
+            for b in &d {
                 if out.len() < n {
                     out.push(u32::from(*b) * 1000 / 256 >= drop_permille);
                 }

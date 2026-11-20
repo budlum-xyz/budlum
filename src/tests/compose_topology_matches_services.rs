@@ -136,8 +136,10 @@ fn both_stacks_pin_the_same_prometheus() {
     let pin = |body: &str| -> String {
         body.lines()
             .find_map(|line| line.trim().strip_prefix("image: prom/prometheus:"))
-            .map(|rest| rest.trim().to_string())
-            .unwrap_or_else(|| panic!("no prometheus image"))
+            .map_or_else(
+                || panic!("no prometheus image"),
+                |rest| rest.trim().to_string(),
+            )
     };
     assert_eq!(
         pin(&devnet),

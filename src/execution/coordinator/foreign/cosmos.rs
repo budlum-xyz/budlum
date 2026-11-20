@@ -401,8 +401,7 @@ pub fn decode_cosmos_tx(
         .mode_info
         .as_ref()
         .and_then(|m| m.single.as_ref())
-        .map(|s| s.mode)
-        .unwrap_or(0);
+        .map_or(0, |s| s.mode);
     if mode != SIGN_MODE_DIRECT {
         return Err(CosmosEnvelopeError::UnsupportedSignMode(mode));
     }

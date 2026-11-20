@@ -248,6 +248,7 @@ impl StorageEconomicsParams {
     /// escrowed anyway, and the caller checks the payer balance against the
     /// value returned here, so a saturated total is refused at that check
     /// rather than silently becoming a small number.
+    #[must_use]
     pub fn total_fee(&self, shard_bytes: u64, epochs: u64) -> u64 {
         let scaled = u128::from(self.fee_per_byte_epoch)
             .saturating_mul(u128::from(shard_bytes))
@@ -316,6 +317,7 @@ pub struct StorageDeal {
 }
 
 impl StorageDeal {
+    #[must_use]
     pub fn is_active(&self) -> bool {
         self.status == DealStatus::Active
     }
@@ -325,12 +327,14 @@ impl StorageDeal {
     /// Reads `shard_bytes` recorded at open time rather than looking the
     /// manifest up again, so the price cannot move under an agreement that
     /// has already been escrowed.
+    #[must_use]
     pub fn total_fee(&self, epochs: u64) -> u64 {
         self.economics.total_fee(self.shard_bytes, epochs)
     }
 
     /// Number of epochs the deal is scheduled to last. `0` is a
     /// Configuration error caught at deal-open time.
+    #[must_use]
     pub fn duration_epochs(&self) -> u64 {
         self.deal_end_epoch.saturating_sub(self.deal_start_epoch)
     }
@@ -469,6 +473,7 @@ pub struct StorageChallengeRangeInput<'a> {
 
 impl StorageChallengeProofContext {
     /// Builds a challenge proof context from registry state.
+    #[must_use]
     pub fn from_registry(
         chain_id: u64,
         challenge: &RetrievalChallenge,
@@ -495,6 +500,7 @@ impl StorageChallengeProofContext {
         }
     }
 
+    #[must_use]
     pub fn digest(&self, storage_root: &Hash32, range_hash: &ContentId) -> [u8; 32] {
         use sha3::{Digest, Keccak256};
         let mut hasher = Keccak256::new();
@@ -577,6 +583,7 @@ pub struct ChallengeResult {
 }
 
 /// Fixed devnet/testnet replication target for devnet hardening.
+///
 /// A missed challenge creates a reallocation ticket for the failed replica slot
 /// So independent nodes can observe and repair under-replication without an
 /// Off-chain team-operated scheduler. Mainnet storage remains fail-closed until
@@ -1581,6 +1588,7 @@ fn prove_storage_challenge_proof_with_mode(
 }
 
 impl StorageRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -1605,6 +1613,7 @@ impl StorageRegistry {
         self.results.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.next_deal_id == 0
             && self.next_challenge_id == 0
@@ -1629,6 +1638,7 @@ impl StorageRegistry {
             && self.scoped_self_host_policies.is_empty()
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -2444,6 +2454,7 @@ impl StorageRegistry {
         floor.saturating_add(steps).min(STORAGE_REPLICATION_TARGET)
     }
 
+    #[must_use]
     pub fn get_manifest(&self, manifest_id: &ContentId) -> Option<&ContentManifest> {
         self.manifests.get(manifest_id)
     }
@@ -3192,6 +3203,7 @@ impl StorageRegistry {
     ///
     /// Rounds the range up to whole KiB so a 1-byte challenge costs the same
     /// as a 1 KiB one; the operator's seek dominates at that size anyway.
+    #[must_use]
     pub fn required_opener_bond(range_len: u64) -> u64 {
         let kib = range_len.div_ceil(1024);
         Self::MIN_OPENER_BOND.max(kib.saturating_mul(Self::OPENER_BOND_PER_KIB))
@@ -4724,6 +4736,7 @@ impl StorageRegistry {
     /// Excludes deals that have already matured: past `deal_end_epoch` the
     /// renewal offer has expired and the shard is the reallocation path's
     /// problem.
+    #[must_use]
     pub fn deals_in_renewal_window(&self, now_epoch: u64) -> Vec<(u64, Address, u64)> {
         self.deals
             .values()
@@ -5051,14 +5064,17 @@ impl StorageRegistry {
 
     /// Rows in the ticket map, for the `budlum_storage_reallocation_rows`
     /// gauge: a number that only ever rises means the sweep is not running.
+    #[must_use]
     pub fn reallocation_ticket_count(&self) -> usize {
         self.reallocations.len()
     }
 
+    #[must_use]
     pub fn all_reallocation_tickets(&self) -> Vec<&StorageReallocationTicket> {
         self.reallocations.values().collect()
     }
 
+    #[must_use]
     pub fn get_reallocation_ticket(&self, ticket_id: u64) -> Option<&StorageReallocationTicket> {
         self.reallocations.get(&ticket_id)
     }
@@ -5148,6 +5164,7 @@ impl StorageRegistry {
     /// Deliberately not `k + margin`. The margin belongs to the reallocation
     /// sweep, which opens a ticket the moment a term lapses; this number is
     /// the hard line where refusing the exit is the only thing left.
+    #[must_use]
     pub fn permanence_floor(&self, manifest_id: ContentId) -> u32 {
         self.manifests
             .get(&manifest_id)
@@ -5192,14 +5209,17 @@ impl StorageRegistry {
 
     // ---- Queries (all read-only, no state change) --------------------
 
+    #[must_use]
     pub fn get_deal(&self, deal_id: u64) -> Option<&StorageDeal> {
         self.deals.get(&deal_id)
     }
 
+    #[must_use]
     pub fn get_challenge(&self, challenge_id: u64) -> Option<&RetrievalChallenge> {
         self.challenges.get(&challenge_id)
     }
 
+    #[must_use]
     pub fn get_result(&self, challenge_id: u64) -> Option<&ChallengeResult> {
         self.results.get(&challenge_id)
     }
@@ -5210,6 +5230,7 @@ impl StorageRegistry {
     /// Tests, and later pruning/archive logic reason about the richer lifecycle
     /// Vocabulary without changing the currently stable `DealStatus` storage
     /// Format in one step.
+    #[must_use]
     pub fn lifecycle_state(&self, deal_id: u64) -> Option<crate::storage::StorageLifecycleState> {
         let deal = self.deals.get(&deal_id)?;
         match deal.status {
@@ -5255,6 +5276,7 @@ impl StorageRegistry {
         }
     }
 
+    #[must_use]
     pub fn deals_for_shard(
         &self,
         manifest_id: &ContentId,
@@ -5266,6 +5288,7 @@ impl StorageRegistry {
             .unwrap_or_default()
     }
 
+    #[must_use]
     pub fn deals_for_manifest(&self, manifest_id: &ContentId) -> Vec<&StorageDeal> {
         self.deals
             .values()
@@ -5315,6 +5338,7 @@ impl StorageRegistry {
     /// active and keep earning their epoch rewards, and the manifest stays
     /// registered, so crediting the unearned fee here would pay the same epochs
     /// twice.
+    #[must_use]
     pub fn prune_fee_refunds(
         &self,
         manifest_id: &ContentId,
@@ -5387,14 +5411,17 @@ impl StorageRegistry {
         total.saturating_add(cur_end - cur_start)
     }
 
+    #[must_use]
     pub fn all_deals(&self) -> Vec<&StorageDeal> {
         self.deals.values().collect()
     }
 
+    #[must_use]
     pub fn all_challenges(&self) -> Vec<&RetrievalChallenge> {
         self.challenges.values().collect()
     }
 
+    #[must_use]
     pub fn all_results(&self) -> Vec<&ChallengeResult> {
         self.results.values().collect()
     }
@@ -5450,6 +5477,7 @@ impl StorageRegistry {
         dropped
     }
 
+    #[must_use]
     pub fn active_replica_count(&self, manifest_id: &ContentId, shard_id: &ContentId) -> usize {
         self.deals_for_shard(manifest_id, shard_id)
             .into_iter()
@@ -5471,6 +5499,7 @@ impl StorageRegistry {
     /// There is one version, parameterised by `epoch`. Leaving two versions,
     /// one that sees demand and one that does not, would let the caller choose
     /// which target is applied.
+    #[must_use]
     pub fn under_replicated_shards(&self, epoch: u64) -> Vec<(ContentId, ContentId, usize)> {
         self.deals_by_shard
             .keys()
@@ -5552,6 +5581,7 @@ impl StorageRegistry {
     /// shards held once is fully recoverable, yet every shard is "under
     /// replicated" at 1 < 3. The same object down to three shards, each held
     /// three times, looks healthy shard-by-shard and is already unrecoverable.
+    #[must_use]
     pub fn live_shard_count(&self, manifest_id: &ContentId) -> u32 {
         let Some(manifest) = self.manifests.get(manifest_id) else {
             return 0;
@@ -5574,6 +5604,7 @@ impl StorageRegistry {
     /// and a repair deal opened then would only burn an operator bond. Use
     /// [`StorageRegistry::unrecoverable_objects`] to see those; they need an
     /// operator alarm, not a repair.
+    #[must_use]
     pub fn objects_needing_repair(&self, margin: u32) -> Vec<(ContentId, u32, u32)> {
         self.manifests
             .iter()
@@ -5599,6 +5630,7 @@ impl StorageRegistry {
     ///
     /// Returns `(manifest_id, live, k, margin)` so a caller can log why an
     /// object was selected without recomputing the rule.
+    #[must_use]
     pub fn objects_below_own_repair_margin(&self) -> Vec<(ContentId, u32, u32, u32)> {
         self.manifests
             .iter()
@@ -5623,6 +5655,7 @@ impl StorageRegistry {
     /// unrecoverable one has already lost data, and opening deals for it
     /// accomplishes nothing. Surfacing the two together would let the second
     /// hide inside the first.
+    #[must_use]
     pub fn unrecoverable_objects(&self) -> Vec<(ContentId, u32, u32)> {
         self.manifests
             .iter()
@@ -5741,6 +5774,7 @@ impl StorageRegistry {
 /// Canonical, domain-tagged byte encoding of a `StorageDeal`. Used in
 /// Audit logs and the (future) `GlobalBlockHeader.storage_root` aggregation
 /// (vision).
+#[must_use]
 pub fn storage_deal_leaf_hash(deal: &StorageDeal) -> Hash32 {
     let status = [match deal.status {
         DealStatus::Active => 0,

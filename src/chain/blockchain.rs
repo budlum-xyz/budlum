@@ -528,12 +528,9 @@ impl Blockchain {
                 .set(i64::try_from(self.state.timed_burn.years_burned).unwrap_or(i64::MAX));
             m.tokenomics_timed_burned_total
                 .set(i64::try_from(self.state.timed_burn.total_burned).unwrap_or(i64::MAX));
-            let team_locked = self
-                .state
-                .team_vesting
-                .as_ref()
-                .map(|(_, schedule)| schedule.locked_at(self.state.epoch_index))
-                .unwrap_or(0);
+            let team_locked = self.state.team_vesting.as_ref().map_or(0, |(_, schedule)| {
+                schedule.locked_at(self.state.epoch_index)
+            });
             m.tokenomics_team_locked
                 .set(i64::try_from(team_locked).unwrap_or(i64::MAX));
             m.proof_market_active_tasks.set(
@@ -1262,7 +1259,7 @@ impl Blockchain {
         // disagree about a gate that decides writes inside blocks.
         state.execution_domain = consensus.domain_kind();
 
-        let mut bc = Blockchain {
+        let mut bc = Self {
             chain: chain_vec,
             consensus,
             mempool,
@@ -2214,9 +2211,7 @@ impl Blockchain {
         // structural proof check does not bound the field lengths. Such an
         // entry can never be included, so it is refused here rather than
         // occupying a queue slot that a live proof could have used.
-        let encoded_bytes = serde_json::to_vec(&evidence)
-            .map(|bytes| bytes.len())
-            .unwrap_or(usize::MAX);
+        let encoded_bytes = serde_json::to_vec(&evidence).map_or(usize::MAX, |bytes| bytes.len());
         if encoded_bytes > crate::consensus::MAX_SLASHING_EVIDENCE_BYTES {
             return Err(format!(
                 "Slashing evidence is larger than the {} byte block allowance",
@@ -2911,9 +2906,8 @@ impl Blockchain {
             .global_headers
             .latest()
             .or_else(|| self.global_headers.last());
-        let previous_global_hash = previous
-            .map(GlobalBlockHeader::calculate_hash_bytes)
-            .unwrap_or([0u8; 32]);
+        let previous_global_hash =
+            previous.map_or([0u8; 32], GlobalBlockHeader::calculate_hash_bytes);
         let global_height = previous.map_or(0, |header| header.global_height.saturating_add(1));
 
         let settlement_window = self.settlement_finality_window();
@@ -5797,13 +5791,14 @@ impl Blockchain {
         // on-chain record of the escrow, so this is the last chance to pay it.
         for (requester, max_fee) in refunds {
             let account = state.get_or_create(&requester);
-            match account.balance.checked_add(max_fee) {
-                Some(updated) => account.balance = updated,
-                None => tracing::error!(
+            if let Some(updated) = account.balance.checked_add(max_fee) {
+                account.balance = updated
+            } else {
+                tracing::error!(
                     %requester,
                     max_fee,
                     "AI prune refund would overflow the balance; fee left uncredited"
-                ),
+                )
             }
         }
         let expired = state.ai_registry.expire_dispute_window(block_height);
@@ -6284,9 +6279,7 @@ impl Blockchain {
         // guarantee that one un-embeddable entry cannot wedge production.
         let mut unembeddable_evidence = 0usize;
         self.pending_slashing_evidence.retain(|evidence| {
-            let fits = serde_json::to_vec(evidence)
-                .map(|bytes| bytes.len())
-                .unwrap_or(usize::MAX)
+            let fits = serde_json::to_vec(evidence).map_or(usize::MAX, |bytes| bytes.len())
                 <= crate::consensus::MAX_SLASHING_EVIDENCE_BYTES;
             if !fits {
                 unembeddable_evidence = unembeddable_evidence.saturating_add(1);
@@ -6308,9 +6301,7 @@ impl Blockchain {
             let mut used = 0usize;
             let mut deferred = 0usize;
             for evidence in &self.pending_slashing_evidence {
-                let encoded = serde_json::to_vec(evidence)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(usize::MAX);
+                let encoded = serde_json::to_vec(evidence).map_or(usize::MAX, |bytes| bytes.len());
                 if encoded <= crate::consensus::MAX_SLASHING_EVIDENCE_BYTES
                     && used.saturating_add(encoded) <= crate::consensus::MAX_SLASHING_EVIDENCE_BYTES
                     && encoded <= remaining_json_bytes
@@ -6345,9 +6336,7 @@ impl Blockchain {
         let mut unembeddable_reports = 0usize;
         let mut repriced_reports = 0usize;
         self.pending_registry_slashing_reports.retain(|report| {
-            let fits = serde_json::to_vec(report)
-                .map(|bytes| bytes.len())
-                .unwrap_or(usize::MAX)
+            let fits = serde_json::to_vec(report).map_or(usize::MAX, |bytes| bytes.len())
                 <= MAX_SINGLE_REPORT_BYTES;
             if !fits {
                 unembeddable_reports = unembeddable_reports.saturating_add(1);
@@ -6377,9 +6366,7 @@ impl Blockchain {
             let mut fitting = Vec::new();
             let mut used = 0usize;
             for report in &self.pending_registry_slashing_reports {
-                let encoded = serde_json::to_vec(report)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(usize::MAX);
+                let encoded = serde_json::to_vec(report).map_or(usize::MAX, |bytes| bytes.len());
                 if encoded <= MAX_SINGLE_REPORT_BYTES
                     && used.saturating_add(encoded) <= max_report_json_bytes
                 {
@@ -7201,7 +7188,7 @@ impl Blockchain {
         self.prune_consensus_evidence_after_commit(expected_height);
 
         if let Some(last_block) = self.chain.last() {
-            for tx in last_block.transactions.iter() {
+            for tx in &last_block.transactions {
                 self.mempool.remove_transaction(&tx.hash);
                 if let Some(ref store) = self.storage {
                     let _ = store.remove_mempool_tx(&tx.hash);
@@ -7334,17 +7321,14 @@ impl Blockchain {
                 && chain.get(*idx).is_some_and(|b| &b.hash == hash)
         });
 
-        let (mut state, replay_from) = match anchor {
-            Some((idx, _, anchored_state)) => {
-                let mut cloned = anchored_state.clone();
-                cloned.execution_domain = self.consensus.domain_kind();
-                (cloned, idx + 1)
-            }
-            None => {
-                let mut fresh = self.genesis_config.build_state();
-                fresh.execution_domain = self.consensus.domain_kind();
-                (fresh, 1usize)
-            }
+        let (mut state, replay_from) = if let Some((idx, _, anchored_state)) = anchor {
+            let mut cloned = anchored_state.clone();
+            cloned.execution_domain = self.consensus.domain_kind();
+            (cloned, idx + 1)
+        } else {
+            let mut fresh = self.genesis_config.build_state();
+            fresh.execution_domain = self.consensus.domain_kind();
+            (fresh, 1usize)
         };
 
         for (index, block) in chain.iter().enumerate().skip(replay_from) {
@@ -7899,7 +7883,7 @@ impl Blockchain {
         F: FnMut(&Block, &AccountState) -> Result<(), String>,
     {
         let mut current_state = if fork_point > 0 {
-            Blockchain::rebuild_state(
+            Self::rebuild_state(
                 &chain[..fork_point],
                 &self.genesis_config,
                 self.consensus.domain_kind(),
@@ -8480,15 +8464,14 @@ impl Blockchain {
             if cert.epoch != snapshot.epoch {
                 return Err("Epoch mismatch".into());
             }
-            let blob = match self.get_qc_blob(cert.checkpoint_height) {
-                Some(blob) => blob,
-                None => {
-                    let checkpoint_height = cert.checkpoint_height;
-                    self.queue_pending_finality_cert(cert);
-                    return Err(format!(
-                        "Missing verified QC blob for checkpoint {checkpoint_height}"
-                    ));
-                }
+            let blob = if let Some(blob) = self.get_qc_blob(cert.checkpoint_height) {
+                blob
+            } else {
+                let checkpoint_height = cert.checkpoint_height;
+                self.queue_pending_finality_cert(cert);
+                return Err(format!(
+                    "Missing verified QC blob for checkpoint {checkpoint_height}"
+                ));
             };
             Self::ensure_blob_matches_checkpoint(&blob, &cert.checkpoint_hash)?;
             let verified_signers = blob.verify_against_snapshot_in(
@@ -8563,15 +8546,14 @@ impl Blockchain {
         let blob = if let Some(blob) = alarm_verified_blob {
             blob
         } else {
-            let blob = match self.get_qc_blob(cert.checkpoint_height) {
-                Some(blob) => blob,
-                None => {
-                    let checkpoint_height = cert.checkpoint_height;
-                    self.queue_pending_finality_cert(cert);
-                    return Err(format!(
-                        "Missing verified QC blob for checkpoint {checkpoint_height}"
-                    ));
-                }
+            let blob = if let Some(blob) = self.get_qc_blob(cert.checkpoint_height) {
+                blob
+            } else {
+                let checkpoint_height = cert.checkpoint_height;
+                self.queue_pending_finality_cert(cert);
+                return Err(format!(
+                    "Missing verified QC blob for checkpoint {checkpoint_height}"
+                ));
             };
             Self::ensure_blob_matches_checkpoint(&blob, &cert.checkpoint_hash)?;
             let signer_indices = cert.signer_indices(snapshot.validators.len());
@@ -9153,7 +9135,7 @@ impl Blockchain {
             // quorum is in, and it is published once.
             self.replay_early_precommits();
         }
-        result.map_err(|e| e.to_string())
+        result.map_err(|e| e.clone())
     }
 
     pub fn handle_precommit(&mut self, vote: Precommit) -> Result<Option<FinalityCert>, String> {
@@ -9454,7 +9436,7 @@ impl Blockchain {
         for report in reports {
             self.enqueue_pending_slashing_report(report);
         }
-        result.map_err(|e| e.to_string())?;
+        result.map_err(|e| e.clone())?;
 
         if !quorum_reached {
             return Ok(None);
@@ -10944,7 +10926,7 @@ impl crate::storage::bud3::view::NetworkSymbolSource for BlockchainSymbolSource<
 
 impl Clone for Blockchain {
     fn clone(&self) -> Self {
-        Blockchain {
+        Self {
             chain: self.chain.clone(),
             consensus: Arc::clone(&self.consensus),
             mempool: self.mempool.clone(),

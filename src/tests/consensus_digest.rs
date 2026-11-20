@@ -85,8 +85,8 @@ fn run_scenario() -> Vec<String> {
     let addrs = [alice, bob, carol];
     let mut nonces = [0u64; 3];
 
-    for plan in rounds.iter() {
-        for &(from_i, to_i, amount, fee) in plan.iter() {
+    for plan in &rounds {
+        for &(from_i, to_i, amount, fee) in *plan {
             let mut tx = Transaction::new_with_fee(
                 addrs[from_i],
                 addrs[to_i],

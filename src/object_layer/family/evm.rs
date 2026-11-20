@@ -412,7 +412,7 @@ pub(crate) mod fixture {
                 word_id(native_id),
                 word_u(amount),
                 word_addr(depositor),
-                recipient.map(|a| a.0).unwrap_or([0u8; 32]),
+                recipient.map_or([0u8; 32], |a| a.0),
             ];
             event(endpoint, ARRIVE_SIGNATURE, words, &[])
         }

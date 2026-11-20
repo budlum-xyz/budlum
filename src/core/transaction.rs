@@ -150,9 +150,10 @@ pub struct GasSchedule {
 const TX_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/transaction";
 
 impl crate::core::chain_config::Network {
+    #[must_use]
     pub fn gas_schedule(&self) -> GasSchedule {
         match self {
-            crate::core::chain_config::Network::Mainnet => GasSchedule {
+            Self::Mainnet => GasSchedule {
                 base_fee: 10,
                 gas_per_byte: 2,
                 gas_per_signature: 1_000,
@@ -161,7 +162,7 @@ impl crate::core::chain_config::Network {
                 vote_gas: 35_000,
                 contract_call_gas: 50_000,
             },
-            crate::core::chain_config::Network::Testnet => GasSchedule {
+            Self::Testnet => GasSchedule {
                 base_fee: 1,
                 gas_per_byte: 1,
                 gas_per_signature: 500,
@@ -170,7 +171,7 @@ impl crate::core::chain_config::Network {
                 vote_gas: 25_000,
                 contract_call_gas: 35_000,
             },
-            crate::core::chain_config::Network::Devnet => GasSchedule {
+            Self::Devnet => GasSchedule {
                 base_fee: 1,
                 gas_per_byte: 1,
                 gas_per_signature: 100,
@@ -199,6 +200,7 @@ impl ExternalChain {
     /// Canonical domain id used by the consensus-owned external-root anchor
     /// Registry. These ids are part of the bridge wire contract and must not
     /// Be derived from an untrusted relayer payload.
+    #[must_use]
     pub const fn domain_id(self) -> u32 {
         match self {
             Self::Ethereum => 1,
@@ -321,6 +323,7 @@ impl BridgeBurnTx {
     /// `holder_signature` itself is not in here (it is the result of signing
     /// this value), and neither is an amount: the amount comes from the
     /// transfer row, which the row's own id pins.
+    #[must_use]
     pub fn authorization_hash(&self, chain_id: u64) -> [u8; 32] {
         crate::core::hash::hash_fields_bytes(&[
             BRIDGE_BURN_AUTHORIZATION_TAG,
@@ -1067,6 +1070,7 @@ pub fn decode_v7_signer_key(
 }
 
 impl Transaction {
+    #[must_use]
     pub fn new(from: Address, to: Address, amount: u64, data: Vec<u8>) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1080,6 +1084,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_stake(from: Address, amount: u64, nonce: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1094,6 +1099,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_delegate(
         from: Address,
         validator: Address,
@@ -1115,6 +1121,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_undelegate(
         from: Address,
         validator: Address,
@@ -1136,6 +1143,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_withdraw_delegation(
         from: Address,
         validator: Address,
@@ -1156,6 +1164,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_validator_commission(
         from: Address,
         commission_ppm: u32,
@@ -1175,6 +1184,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_consensus_key_registration(
         from: Address,
         fee: u64,
@@ -1194,6 +1204,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_bond(
         from: Address,
         amount: u64,
@@ -1213,6 +1224,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_unbond(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1226,6 +1238,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_withdraw(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1239,6 +1252,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_proposal(from: Address, p_type: ProposalType, duration: u64, nonce: u64) -> Self {
         let mut data = Vec::new();
         data.extend_from_slice(&duration.to_le_bytes());
@@ -1258,6 +1272,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_vote(from: Address, proposal_id: u64, vote_for: bool, nonce: u64) -> Self {
         let mut data = Vec::new();
         data.push(if vote_for { 1 } else { 0 });
@@ -1275,6 +1290,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_contract_call(from: Address, fee: u64, nonce: u64, bytecode: Vec<u8>) -> Self {
         Self::new_contract_call_to(from, Address::zero(), fee, nonce, bytecode)
     }
@@ -1285,6 +1301,7 @@ impl Transaction {
     /// bytecode-only calls. A non-zero `to` is an explicit application identity
     /// and enables the testnet application revenue split at block settlement.
     /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    #[must_use]
     pub fn new_contract_call_to(
         from: Address,
         to: Address,
@@ -1305,6 +1322,7 @@ impl Transaction {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new_with_chain_id(
         from: Address,
         to: Address,
@@ -1318,7 +1336,7 @@ impl Transaction {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
-        let mut tx = Transaction {
+        let mut tx = Self {
             from,
             to,
             amount,
@@ -1341,6 +1359,7 @@ impl Transaction {
         tx.hash = tx.calculate_hash();
         tx
     }
+    #[must_use]
     pub fn new_with_fee(
         from: Address,
         to: Address,
@@ -1360,8 +1379,9 @@ impl Transaction {
             TransactionType::Transfer,
         )
     }
+    #[must_use]
     pub fn genesis() -> Self {
-        let mut tx = Transaction {
+        let mut tx = Self {
             from: Address::zero(),
             to: Address::zero(),
             amount: 0,
@@ -1387,6 +1407,7 @@ impl Transaction {
     /// Canonical V4 signing preimage. Every execution-relevant variant
     /// Field is committed explicitly; serde/bincode/JSON are never used as a
     /// Consensus signing encoding.
+    #[must_use]
     pub fn signing_hash(&self) -> [u8; 32] {
         let mut preimage = Vec::new();
         put_u8(&mut preimage, transaction_type_tag(&self.tx_type));
@@ -1456,6 +1477,7 @@ impl Transaction {
         }
         wrapped.finalize().into()
     }
+    #[must_use]
     pub fn calculate_hash(&self) -> String {
         hex::encode(self.signing_hash())
     }
@@ -2106,6 +2128,7 @@ impl Transaction {
     /// Verify under the scheme statuses of a fresh genesis. Every path that
     /// decides on behalf of a chain calls [`Self::verify_in`] with the
     /// chain-state registry.
+    #[must_use]
     pub fn verify(&self) -> bool {
         self.verify_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
     }
@@ -2177,12 +2200,11 @@ impl Transaction {
             debug!("only a V6 transaction may carry a multisig authorization");
             return false;
         }
-        let signature = match &self.signature {
-            Some(s) => s,
-            None => {
-                debug!("TX has no signature");
-                return false;
-            }
+        let signature = if let Some(s) = &self.signature {
+            s
+        } else {
+            debug!("TX has no signature");
+            return false;
         };
         let signing_hash = self.signing_hash();
         if self.signature_version == SIGNATURE_VERSION_V5 {
@@ -2545,9 +2567,11 @@ impl Transaction {
         }
         true
     }
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap_or_else(|_| TX_SERIALIZE_FAILED.to_vec())
     }
+    #[must_use]
     pub fn fee_bid(&self) -> crate::chain::fee_market::FeeBid {
         crate::chain::fee_market::FeeBid {
             max_fee: if self.max_fee == 0 {
@@ -2563,6 +2587,7 @@ impl Transaction {
     ///
     /// `max_fee` and `priority_fee` remain signed wire-compatibility fields;
     /// State validation rejects any value that diverges from this flat fee.
+    #[must_use]
     pub fn fee_limit(&self) -> u64 {
         self.fee
     }
@@ -2593,6 +2618,7 @@ impl Transaction {
     ///
     /// Do not use this helper for admission or state transitions. Those paths
     /// must use `checked_liquid_cost` and reject overflow.
+    #[must_use]
     pub fn total_cost(&self) -> u64 {
         self.checked_total_cost().unwrap_or(u64::MAX)
     }
@@ -2618,6 +2644,7 @@ impl Transaction {
     /// Caller reaching for this to size a transaction will get a number the
     /// Chain has never charged. `bud_estimateGas` deliberately does not use it;
     /// It returns the flat fee floor instead.
+    #[must_use]
     pub fn estimate_gas_with_schedule(&self, schedule: GasSchedule) -> u64 {
         let intrinsic = match &self.tx_type {
             TransactionType::Transfer => schedule.transfer_gas,

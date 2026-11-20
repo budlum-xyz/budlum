@@ -1,7 +1,7 @@
-//! Arweave SPoRA / Recall-Weave permanent storage external finality adapter.
+//! Arweave `SPoRA` / Recall-Weave permanent storage external finality adapter.
 //!
 //! Arweave funds permanent storage through an on-chain endowment pool paired
-//! with Succinct Proofs of Random Access (SPoRA). This adapter verifies external
+//! with Succinct Proofs of Random Access (`SPoRA`). This adapter verifies external
 //! Arweave storage-recall evidence under four fail-closed rules:
 //!
 //! 1. **Domain-separated Merkle inclusion**: reconstructs the canonical weave
@@ -22,7 +22,7 @@
 //!    domain-separated attestation digest binding the network, height, epoch,
 //!    weave root, chunk commitment and endowment parameters.
 //!
-//! WIRING: unwired - external Arweave SPoRA recall adapter awaits `AdapterSpec`
+//! WIRING: unwired - external Arweave `SPoRA` recall adapter awaits `AdapterSpec`
 //! variant binding in `external_tx` domain intake.
 
 use serde::{Deserialize, Serialize};
@@ -58,7 +58,7 @@ const BPS_DENOMINATOR: u128 = 10_000;
 const MIN_SUSTAINANCE_EPOCHS: u64 = 26;
 const MAX_MERKLE_PROOF_DEPTH: usize = 64;
 
-/// Arweave SPoRA storage attestation evidence.
+/// Arweave `SPoRA` storage attestation evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArweaveSpOraEvidence {
     /// Protocol magic (`b"BDLARA01"`).
@@ -83,7 +83,7 @@ pub struct ArweaveSpOraEvidence {
     pub gross_endowment: u128,
     /// Encumbered endowment committed to existing storage obligations.
     pub encumbered_endowment: u128,
-    /// Current SPoRA storage rate in winston per byte per epoch.
+    /// Current `SPoRA` storage rate in winston per byte per epoch.
     pub spora_rate: u128,
     /// Classical Ed25519 operator signature over [`Self::signing_digest`].
     pub operator_signature: Vec<u8>,
@@ -380,7 +380,7 @@ fn verify_operator_signatures(
     Ok(())
 }
 
-/// Arweave SPoRA / Recall-Weave permanent storage adapter.
+/// Arweave `SPoRA` / Recall-Weave permanent storage adapter.
 #[derive(Debug, Clone)]
 pub struct ArweaveSpOraAdapter {
     network: String,

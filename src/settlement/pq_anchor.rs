@@ -514,6 +514,7 @@ pub fn build_anchor_inclusion_proof(
 }
 
 /// Aggregates ordered leaf digests into the single root the anchor signs.
+///
 /// Uses the same SHA-3 helpers the QC blob trees use; the ordering contract
 /// (domain-id ascending, as the caller presents it) is part of the signed
 /// meaning.

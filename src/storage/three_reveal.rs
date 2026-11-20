@@ -204,23 +204,22 @@ impl RevealSession {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             map.get(&key).copied()
         };
-        let pass_fold = match cached {
-            Some(fold) => fold,
-            None => {
-                let pass = oneshot_drop_count(self.k, ONESHOT_REPAIR_PERMILLAGE);
-                let (_, fold) = self.emitter.emit_frames(0, pass)?;
-                let mut map = pass_folds()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                while map.len() >= MAX_CACHED_PASSES {
-                    let Some(oldest) = map.keys().next().copied() else {
-                        break;
-                    };
-                    map.remove(&oldest);
-                }
-                map.insert(key, fold);
-                fold
+        let pass_fold = if let Some(fold) = cached {
+            fold
+        } else {
+            let pass = oneshot_drop_count(self.k, ONESHOT_REPAIR_PERMILLAGE);
+            let (_, fold) = self.emitter.emit_frames(0, pass)?;
+            let mut map = pass_folds()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while map.len() >= MAX_CACHED_PASSES {
+                let Some(oldest) = map.keys().next().copied() else {
+                    break;
+                };
+                map.remove(&oldest);
             }
+            map.insert(key, fold);
+            fold
         };
         self.emitter.verify_stream_id(&pass_fold)?;
         self.verified.store(true, Ordering::Release);
@@ -351,9 +350,9 @@ mod tests {
         // A block length that yields the same `k` over the same bytes.
         let other_block_len = (base.carousel.block_len + 1..=base.carousel.block_len + 64)
             .find(|bl| {
-                CarouselEncoder::new(&packed, *bl)
-                    .map(|e| e.params().k == k && e.params().block_len != base.carousel.block_len)
-                    .unwrap_or(false)
+                CarouselEncoder::new(&packed, *bl).is_ok_and(|e| {
+                    e.params().k == k && e.params().block_len != base.carousel.block_len
+                })
             })
             .expect("a neighbouring block length keeps k over the same payload");
         let other_encoder = CarouselEncoder::new(&packed, other_block_len).unwrap();

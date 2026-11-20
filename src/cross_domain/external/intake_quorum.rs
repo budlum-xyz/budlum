@@ -234,6 +234,7 @@ impl crate::core::map_keys::MapKey for RoundKey {
 }
 
 /// How many local blocks a decided or stale round is kept before sweeping.
+///
 /// Undecided rounds older than this are also swept: a round that never
 /// gathered a quorum is itself information, but unbounded retention is a
 /// memory promise nobody made.
@@ -292,119 +293,115 @@ impl QuorumRounds {
         let digest = evidence.digest();
         let substance = evidence.substance_digest();
         let key = RoundKey { domain, height };
-        match self.rounds.get_mut(&key) {
-            Some(round) => {
-                // An AgreedRefusal answers the consensus substance that was
-                // submitted, independent of which bonded address carried it.
-                // Rotating submitter addresses on the same refused payload
-                // stays closed; genuinely distinct evidence at the same height
-                // reopens a fresh vote while preserving the bounded refusal
-                // memory up to MAX_REFUSED_SUBSTANCES_PER_ROUND.
-                use subtle::ConstantTimeEq;
-                let seen_digest = round
-                    .entries
-                    .iter()
-                    .any(|e| bool::from(e.evidence_digest.ct_eq(&digest)));
-                let seen_substance = round
-                    .refused_substances
-                    .iter()
-                    .any(|s| bool::from(s.ct_eq(&substance)));
-                if matches!(round.state, RoundState::AgreedRefusal { .. })
-                    && !seen_digest
-                    && !seen_substance
-                    && round.refused_substances.len() < MAX_REFUSED_SUBSTANCES_PER_ROUND
-                {
-                    let carried = std::mem::take(&mut round.refused_substances);
-                    *round = QuorumRound {
-                        domain,
-                        height,
-                        state: RoundState::Open,
-                        entries: Vec::new(),
-                        opened_at: local_height,
-                        refused_substances: carried,
-                    };
-                } else if !matches!(round.state, RoundState::Open) {
-                    return Err(RoundError::RoundClosed {
-                        state: state_name(&round.state).to_string(),
-                    });
-                }
+        if let Some(round) = self.rounds.get_mut(&key) {
+            // An AgreedRefusal answers the consensus substance that was
+            // submitted, independent of which bonded address carried it.
+            // Rotating submitter addresses on the same refused payload
+            // stays closed; genuinely distinct evidence at the same height
+            // reopens a fresh vote while preserving the bounded refusal
+            // memory up to MAX_REFUSED_SUBSTANCES_PER_ROUND.
+            use subtle::ConstantTimeEq;
+            let seen_digest = round
+                .entries
+                .iter()
+                .any(|e| bool::from(e.evidence_digest.ct_eq(&digest)));
+            let seen_substance = round
+                .refused_substances
+                .iter()
+                .any(|s| bool::from(s.ct_eq(&substance)));
+            if matches!(round.state, RoundState::AgreedRefusal { .. })
+                && !seen_digest
+                && !seen_substance
+                && round.refused_substances.len() < MAX_REFUSED_SUBSTANCES_PER_ROUND
+            {
+                let carried = std::mem::take(&mut round.refused_substances);
+                *round = QuorumRound {
+                    domain,
+                    height,
+                    state: RoundState::Open,
+                    entries: Vec::new(),
+                    opened_at: local_height,
+                    refused_substances: carried,
+                };
+            } else if !matches!(round.state, RoundState::Open) {
+                return Err(RoundError::RoundClosed {
+                    state: state_name(&round.state).to_string(),
+                });
             }
-            None => {
-                // Only rounds still awaiting a decision occupy a cap slot;
-                // decided (`AgreedClaim`, `AgreedRefusal`) or `Disputed` rounds
-                // have closed voting and must not starve future heights (CWE-400).
-                // Bound each prover's share of open rounds and never evict a
-                // round that already holds another prover's collected vote.
-                let submitter = evidence.submitter;
-                let no_other_prover =
-                    |r: &QuorumRound| r.entries.iter().all(|e| e.prover == submitter);
-                let prover_open = self
+        } else {
+            // Only rounds still awaiting a decision occupy a cap slot;
+            // decided (`AgreedClaim`, `AgreedRefusal`) or `Disputed` rounds
+            // have closed voting and must not starve future heights (CWE-400).
+            // Bound each prover's share of open rounds and never evict a
+            // round that already holds another prover's collected vote.
+            let submitter = evidence.submitter;
+            let no_other_prover = |r: &QuorumRound| r.entries.iter().all(|e| e.prover == submitter);
+            let prover_open = self
+                .rounds
+                .iter()
+                .filter(|(k, r)| {
+                    k.domain == domain
+                        && matches!(r.state, RoundState::Open)
+                        && r.entries.iter().any(|e| e.prover == submitter)
+                })
+                .count();
+            let open = self
+                .rounds
+                .iter()
+                .filter(|(k, r)| k.domain == domain && matches!(r.state, RoundState::Open))
+                .count();
+            let evict_key = if prover_open >= MAX_OPEN_ROUNDS_PER_PROVER {
+                let Some(own_oldest) = self
                     .rounds
                     .iter()
                     .filter(|(k, r)| {
                         k.domain == domain
                             && matches!(r.state, RoundState::Open)
-                            && r.entries.iter().any(|e| e.prover == submitter)
+                            && !r.entries.is_empty()
+                            && no_other_prover(r)
                     })
-                    .count();
-                let open = self
+                    .min_by_key(|(k, r)| (r.opened_at, **k))
+                    .map(|(k, _)| *k)
+                else {
+                    return Err(RoundError::TooManyOpenRounds {
+                        max: MAX_OPEN_ROUNDS_PER_PROVER,
+                    });
+                };
+                Some(own_oldest)
+            } else if open >= MAX_OPEN_ROUNDS_PER_DOMAIN {
+                let Some(oldest) = self
                     .rounds
                     .iter()
-                    .filter(|(k, r)| k.domain == domain && matches!(r.state, RoundState::Open))
-                    .count();
-                let evict_key = if prover_open >= MAX_OPEN_ROUNDS_PER_PROVER {
-                    let Some(own_oldest) = self
-                        .rounds
-                        .iter()
-                        .filter(|(k, r)| {
-                            k.domain == domain
-                                && matches!(r.state, RoundState::Open)
-                                && !r.entries.is_empty()
-                                && no_other_prover(r)
-                        })
-                        .min_by_key(|(k, r)| (r.opened_at, **k))
-                        .map(|(k, _)| *k)
-                    else {
-                        return Err(RoundError::TooManyOpenRounds {
-                            max: MAX_OPEN_ROUNDS_PER_PROVER,
-                        });
-                    };
-                    Some(own_oldest)
-                } else if open >= MAX_OPEN_ROUNDS_PER_DOMAIN {
-                    let Some(oldest) = self
-                        .rounds
-                        .iter()
-                        .filter(|(k, r)| {
-                            k.domain == domain
-                                && matches!(r.state, RoundState::Open)
-                                && no_other_prover(r)
-                        })
-                        .min_by_key(|(k, r)| (r.opened_at, **k))
-                        .map(|(k, _)| *k)
-                    else {
-                        return Err(RoundError::TooManyOpenRounds {
-                            max: MAX_OPEN_ROUNDS_PER_DOMAIN,
-                        });
-                    };
-                    Some(oldest)
-                } else {
-                    None
+                    .filter(|(k, r)| {
+                        k.domain == domain
+                            && matches!(r.state, RoundState::Open)
+                            && no_other_prover(r)
+                    })
+                    .min_by_key(|(k, r)| (r.opened_at, **k))
+                    .map(|(k, _)| *k)
+                else {
+                    return Err(RoundError::TooManyOpenRounds {
+                        max: MAX_OPEN_ROUNDS_PER_DOMAIN,
+                    });
                 };
-                if let Some(victim) = evict_key {
-                    self.rounds.remove(&victim);
-                }
-                self.rounds.insert(
-                    key,
-                    QuorumRound {
-                        domain,
-                        height,
-                        state: RoundState::Open,
-                        entries: Vec::new(),
-                        opened_at: local_height,
-                        refused_substances: Vec::new(),
-                    },
-                );
+                Some(oldest)
+            } else {
+                None
+            };
+            if let Some(victim) = evict_key {
+                self.rounds.remove(&victim);
             }
+            self.rounds.insert(
+                key,
+                QuorumRound {
+                    domain,
+                    height,
+                    state: RoundState::Open,
+                    entries: Vec::new(),
+                    opened_at: local_height,
+                    refused_substances: Vec::new(),
+                },
+            );
         }
         let Some(round) = self.rounds.get_mut(&key) else {
             // The round was created or reopened above; a missing one here is

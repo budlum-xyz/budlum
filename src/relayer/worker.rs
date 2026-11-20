@@ -231,6 +231,7 @@ struct DeadLetter {
 const DEAD_LETTER_FILE_NAME: &str = "relayer-deadletter.jsonl";
 
 impl RelayerWorker {
+    #[must_use]
     pub fn new(chain: ChainHandle, relayer_address: Address) -> Self {
         Self {
             chain,
@@ -1152,33 +1153,30 @@ impl RelayerWorker {
                 // to do until `reap_finalized` says otherwise.
                 return RelayOutcome::Submitted;
             }
-            match &kept.result {
-                Some(result) => {
-                    info!(
-                        request,
-                        "Relayer: resubmitting the verified result of an earlier pass; the \
-                         external action is not repeated"
-                    );
-                    result.clone()
-                }
-                None => {
-                    // A reservation from a run that stopped between the
-                    // broadcast and the verified result. The external
-                    // transaction may or may not have gone out; repeating it
-                    // would risk a second transfer, so the request is held
-                    // and named until the operator resolves it.
-                    error!(
-                        request,
-                        chain = ?ext_tx.chain,
-                        target = %ext_tx.target_address,
-                        external_nonce = ext_tx.external_nonce,
-                        "Relayer: a previous run stopped with this request's external action \
-                         in flight; refusing to broadcast it again. Look the transaction up \
-                         on the external chain by its nonce, then clear or complete the \
-                         entry in the pending store"
-                    );
-                    return RelayOutcome::Held;
-                }
+            if let Some(result) = &kept.result {
+                info!(
+                    request,
+                    "Relayer: resubmitting the verified result of an earlier pass; the \
+                     external action is not repeated"
+                );
+                result.clone()
+            } else {
+                // A reservation from a run that stopped between the
+                // broadcast and the verified result. The external
+                // transaction may or may not have gone out; repeating it
+                // would risk a second transfer, so the request is held
+                // and named until the operator resolves it.
+                error!(
+                    request,
+                    chain = ?ext_tx.chain,
+                    target = %ext_tx.target_address,
+                    external_nonce = ext_tx.external_nonce,
+                    "Relayer: a previous run stopped with this request's external action \
+                     in flight; refusing to broadcast it again. Look the transaction up \
+                     on the external chain by its nonce, then clear or complete the \
+                     entry in the pending store"
+                );
+                return RelayOutcome::Held;
             }
         } else {
             // Reserve first, act second: if the process dies during the

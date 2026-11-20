@@ -322,6 +322,7 @@ fn warning_hash(warning: &Option<String>) -> Option<[u8; 32]> {
     })
 }
 
+#[must_use]
 pub fn build_passport_proof_bundle(
     profile: &DwebPassportProfile,
     generated_at_block: u64,
@@ -466,6 +467,7 @@ fn owned_by(address: &Address, asset: &DataAsset) -> bool {
     &asset.owner == address
 }
 
+#[must_use]
 pub fn build_passport_profile(
     name: String,
     resolved: Option<BnsResolved>,

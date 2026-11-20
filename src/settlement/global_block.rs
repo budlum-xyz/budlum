@@ -191,6 +191,7 @@ impl GlobalHeaderWindow {
 }
 
 impl GlobalBlockHeader {
+    #[must_use]
     pub fn calculate_hash_bytes(&self) -> Hash32 {
         let proposer = self
             .proposer
@@ -245,6 +246,7 @@ impl GlobalBlockHeader {
         ])
     }
 
+    #[must_use]
     pub fn calculate_hash(&self) -> String {
         hex::encode(self.calculate_hash_bytes())
     }

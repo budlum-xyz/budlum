@@ -446,7 +446,7 @@ fn target_from_bits(bits: u32) -> Result<[u8; 32], AdapterError> {
 }
 
 /// Leading zero bits the target demands. This is the unit
-/// `SecurityBacking::Work` uses, shared with the local PoW header-chain
+/// `SecurityBacking::Work` uses, shared with the local `PoW` header-chain
 /// adapter, so an operator can compare two work claims without reading either
 /// adapter's source.
 fn difficulty_bits(bits: u32) -> Result<u32, AdapterError> {
@@ -904,7 +904,7 @@ impl BitcoinSpvAdapter {
     ///
     /// # Errors
     ///
-    /// Returns [`AdapterError`] on any consensus, PoW, retarget, `MTP-11`,
+    /// Returns [`AdapterError`] on any consensus, `PoW`, retarget, `MTP-11`,
     /// per-header `+2h` future-time, freshness, depth, or declaration failure.
     pub fn verify_chain(
         &self,
@@ -1944,8 +1944,7 @@ pub(crate) fn spv_evidence(
     let last = header_bytes
         .last()
         .copied()
-        .map(|h| sha256d(h.as_slice()))
-        .unwrap_or([0u8; 32]);
+        .map_or([0u8; 32], |h| sha256d(h.as_slice()));
     let height = adapter
         .anchor
         .as_ref()

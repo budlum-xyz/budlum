@@ -750,7 +750,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
             ),
         };
 
-        pb::ProtoTransaction {
+        Self {
             from: tx.from.to_string(),
             to: tx.to.to_string(),
             amount: tx.amount,
@@ -2063,7 +2063,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             }
         };
 
-        Ok(Transaction {
+        Ok(Self {
             from: Address::from_hex(&proto.from)
                 .map_err(|e| format!("Invalid from address: {e}"))?,
             to: Address::from_hex(&proto.to).map_err(|e| format!("Invalid to address: {e}"))?,
@@ -2128,7 +2128,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
 
 impl From<&SlashingEvidence> for pb::ProtoSlashingEvidence {
     fn from(ev: &SlashingEvidence) -> Self {
-        pb::ProtoSlashingEvidence {
+        Self {
             header1: Some(pb::ProtoBlockHeader::from(&ev.header1)),
             header2: Some(pb::ProtoBlockHeader::from(&ev.header2)),
             signature1: ev.signature1.clone(),
@@ -2142,7 +2142,7 @@ impl TryFrom<pb::ProtoSlashingEvidence> for SlashingEvidence {
     fn try_from(proto: pb::ProtoSlashingEvidence) -> Result<Self, Self::Error> {
         let header1 = proto.header1.ok_or("Missing header1 in proto evidence")?;
         let header2 = proto.header2.ok_or("Missing header2 in proto evidence")?;
-        Ok(SlashingEvidence {
+        Ok(Self {
             header1: BlockHeader::try_from(header1)?,
             header2: BlockHeader::try_from(header2)?,
             signature1: proto.signature1,
@@ -2153,7 +2153,7 @@ impl TryFrom<pb::ProtoSlashingEvidence> for SlashingEvidence {
 
 impl From<&BlockHeader> for pb::ProtoBlockHeader {
     fn from(header: &BlockHeader) -> Self {
-        pb::ProtoBlockHeader {
+        Self {
             index: header.index,
             timestamp: header.timestamp.to_string(),
             previous_hash: header.previous_hash.clone(),
@@ -2238,7 +2238,7 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
         } else {
             Some(reports)
         };
-        Ok(BlockHeader {
+        Ok(Self {
             index: proto.index,
             timestamp,
             previous_hash: proto.previous_hash,
@@ -2270,7 +2270,7 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
 
 impl From<&Block> for pb::ProtoBlock {
     fn from(block: &Block) -> Self {
-        pb::ProtoBlock {
+        Self {
             index: block.index,
             timestamp: block.timestamp.to_string(),
             previous_hash: block.previous_hash.clone(),
@@ -2381,7 +2381,7 @@ impl TryFrom<pb::ProtoBlock> for Block {
             transactions.push(Transaction::try_from(t)?);
         }
 
-        Ok(Block {
+        Ok(Self {
             index: proto.index,
             timestamp,
             previous_hash: proto.previous_hash,
@@ -2683,7 +2683,7 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
             }
         };
 
-        pb::ProtoNetworkMessage {
+        Self {
             payload: Some(payload),
         }
     }
@@ -2700,7 +2700,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 if h.supported_schemes.len() > 64 {
                     return Err("Handshake supported_schemes exceeds limit".into());
                 }
-                Ok(NetworkMessage::Handshake {
+                Ok(Self::Handshake {
                     version_major: h.version_major,
                     version_minor: h.version_minor,
                     chain_id: h.chain_id,
@@ -2713,7 +2713,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 if h.supported_schemes.len() > 64 {
                     return Err("HandshakeAck supported_schemes exceeds limit".into());
                 }
-                Ok(NetworkMessage::HandshakeAck {
+                Ok(Self::HandshakeAck {
                     version_major: h.version_major,
                     version_minor: h.version_minor,
                     chain_id: h.chain_id,
@@ -2722,17 +2722,15 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                     supported_schemes: h.supported_schemes,
                 })
             }
-            pb::proto_network_message::Payload::Block(b) => {
-                Ok(NetworkMessage::Block(Block::try_from(b)?))
-            }
+            pb::proto_network_message::Payload::Block(b) => Ok(Self::Block(Block::try_from(b)?)),
             pb::proto_network_message::Payload::Transaction(t) => {
-                Ok(NetworkMessage::Transaction(Transaction::try_from(t)?))
+                Ok(Self::Transaction(Transaction::try_from(t)?))
             }
             pb::proto_network_message::Payload::GetHeaders(h) => {
                 if h.locator.len() > crate::network::protocol::MAX_HEADER_LOCATOR_HASHES {
                     return Err("GetHeaders locator exceeds the limit".into());
                 }
-                Ok(NetworkMessage::GetHeaders {
+                Ok(Self::GetHeaders {
                     locator: h.locator,
                     limit: h.limit,
                 })
@@ -2747,14 +2745,12 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 for header in h.headers {
                     headers.push(BlockHeader::try_from(header)?);
                 }
-                Ok(NetworkMessage::Headers(headers))
+                Ok(Self::Headers(headers))
             }
-            pb::proto_network_message::Payload::GetBlocksRange(r) => {
-                Ok(NetworkMessage::GetBlocksRange {
-                    from: r.from_index,
-                    to: r.to_index,
-                })
-            }
+            pb::proto_network_message::Payload::GetBlocksRange(r) => Ok(Self::GetBlocksRange {
+                from: r.from_index,
+                to: r.to_index,
+            }),
             pb::proto_network_message::Payload::Blocks(b) => {
                 if b.blocks.len() > crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS {
                     return Err("Blocks message exceeds the block limit".into());
@@ -2763,10 +2759,10 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 for block in b.blocks {
                     blocks.push(Block::try_from(block)?);
                 }
-                Ok(NetworkMessage::Blocks(blocks))
+                Ok(Self::Blocks(blocks))
             }
             pb::proto_network_message::Payload::GetBlocksByHeight(r) => {
-                Ok(NetworkMessage::GetBlocksByHeight {
+                Ok(Self::GetBlocksByHeight {
                     from_height: r.from_height,
                     to_height: r.to_height,
                 })
@@ -2779,32 +2775,30 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 for block in b.blocks {
                     blocks.push(Block::try_from(block)?);
                 }
-                Ok(NetworkMessage::BlocksByHeight(blocks))
+                Ok(Self::BlocksByHeight(blocks))
             }
             pb::proto_network_message::Payload::StateSnapshotResponse(r) => {
-                Ok(NetworkMessage::StateSnapshotResponse {
+                Ok(Self::StateSnapshotResponse {
                     height: r.height,
                     state_root: r.state_root,
                     ok: r.ok,
                 })
             }
-            pb::proto_network_message::Payload::NewTip(t) => Ok(NetworkMessage::NewTip {
+            pb::proto_network_message::Payload::NewTip(t) => Ok(Self::NewTip {
                 height: t.height,
                 hash: t.hash,
             }),
             pb::proto_network_message::Payload::GetStateSnapshot(s) => {
-                Ok(NetworkMessage::GetStateSnapshot { height: s.height })
+                Ok(Self::GetStateSnapshot { height: s.height })
             }
-            pb::proto_network_message::Payload::SnapshotChunk(c) => {
-                Ok(NetworkMessage::SnapshotChunk {
-                    height: c.height,
-                    index: c.index,
-                    total: c.total,
-                    data: c.data,
-                    session_id: c.session_id,
-                })
-            }
-            pb::proto_network_message::Payload::Prevote(v) => Ok(NetworkMessage::Prevote {
+            pb::proto_network_message::Payload::SnapshotChunk(c) => Ok(Self::SnapshotChunk {
+                height: c.height,
+                index: c.index,
+                total: c.total,
+                data: c.data,
+                session_id: c.session_id,
+            }),
+            pb::proto_network_message::Payload::Prevote(v) => Ok(Self::Prevote {
                 epoch: v.epoch,
                 checkpoint_height: v.checkpoint_height,
                 checkpoint_hash: v.checkpoint_hash,
@@ -2812,7 +2806,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 sig_bls: v.sig_bls,
                 auth_sig: v.auth_sig,
             }),
-            pb::proto_network_message::Payload::Precommit(v) => Ok(NetworkMessage::Precommit {
+            pb::proto_network_message::Payload::Precommit(v) => Ok(Self::Precommit {
                 epoch: v.epoch,
                 checkpoint_height: v.checkpoint_height,
                 checkpoint_hash: v.checkpoint_hash,
@@ -2821,23 +2815,19 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 auth_sig: v.auth_sig,
                 pq_sig: v.pq_sig,
             }),
-            pb::proto_network_message::Payload::FinalityCert(f) => {
-                Ok(NetworkMessage::FinalityCert {
-                    epoch: f.epoch,
-                    checkpoint_height: f.checkpoint_height,
-                    checkpoint_hash: f.checkpoint_hash,
-                    agg_sig_bls: f.agg_sig_bls,
-                    bitmap: f.bitmap,
-                    set_hash: f.set_hash,
-                    scheme_id: f.scheme_id,
-                    seat_table_version: f.seat_table_version,
-                })
-            }
-            pb::proto_network_message::Payload::GetFinalityCert(q) => {
-                Ok(NetworkMessage::GetFinalityCert {
-                    checkpoint_height: q.checkpoint_height,
-                })
-            }
+            pb::proto_network_message::Payload::FinalityCert(f) => Ok(Self::FinalityCert {
+                epoch: f.epoch,
+                checkpoint_height: f.checkpoint_height,
+                checkpoint_hash: f.checkpoint_hash,
+                agg_sig_bls: f.agg_sig_bls,
+                bitmap: f.bitmap,
+                set_hash: f.set_hash,
+                scheme_id: f.scheme_id,
+                seat_table_version: f.seat_table_version,
+            }),
+            pb::proto_network_message::Payload::GetFinalityCert(q) => Ok(Self::GetFinalityCert {
+                checkpoint_height: q.checkpoint_height,
+            }),
             pb::proto_network_message::Payload::FinalityCertResponse(r) => {
                 if !r.found {
                     if r.cert.is_some() {
@@ -2845,7 +2835,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                             "FinalityCertResponse with found=false must not carry cert".into()
                         );
                     }
-                    return Ok(NetworkMessage::FinalityCertResponse {
+                    return Ok(Self::FinalityCertResponse {
                         found: false,
                         epoch: 0,
                         checkpoint_height: 0,
@@ -2860,7 +2850,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 let f = r
                     .cert
                     .ok_or("FinalityCertResponse with found=true is missing cert")?;
-                Ok(NetworkMessage::FinalityCertResponse {
+                Ok(Self::FinalityCertResponse {
                     found: true,
                     epoch: f.epoch,
                     checkpoint_height: f.checkpoint_height,
@@ -2872,38 +2862,34 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                     seat_table_version: f.seat_table_version,
                 })
             }
-            pb::proto_network_message::Payload::GetQcBlob(q) => Ok(NetworkMessage::GetQcBlob {
+            pb::proto_network_message::Payload::GetQcBlob(q) => Ok(Self::GetQcBlob {
                 epoch: q.epoch,
                 checkpoint_height: q.checkpoint_height,
                 chunk_index: q.chunk_index,
             }),
-            pb::proto_network_message::Payload::QcBlobResponse(q) => {
-                Ok(NetworkMessage::QcBlobResponse {
-                    epoch: q.epoch,
-                    checkpoint_height: q.checkpoint_height,
-                    checkpoint_hash: q.checkpoint_hash,
-                    blob_data: q.blob_data,
-                    found: q.found,
-                    chunk_index: q.chunk_index,
-                    chunk_count: q.chunk_count,
-                })
-            }
-            pb::proto_network_message::Payload::QcFaultProof(p) => {
-                Ok(NetworkMessage::QcFaultProof {
-                    proof_data: p.proof_data,
-                })
-            }
+            pb::proto_network_message::Payload::QcBlobResponse(q) => Ok(Self::QcBlobResponse {
+                epoch: q.epoch,
+                checkpoint_height: q.checkpoint_height,
+                checkpoint_hash: q.checkpoint_hash,
+                blob_data: q.blob_data,
+                found: q.found,
+                chunk_index: q.chunk_index,
+                chunk_count: q.chunk_count,
+            }),
+            pb::proto_network_message::Payload::QcFaultProof(p) => Ok(Self::QcFaultProof {
+                proof_data: p.proof_data,
+            }),
             pb::proto_network_message::Payload::DomainCommitment(c) => {
                 let commitment = decode_bounded_json(&c.data, "domain commitment payload")?;
-                Ok(NetworkMessage::DomainCommitment(commitment))
+                Ok(Self::DomainCommitment(commitment))
             }
             pb::proto_network_message::Payload::VerifiedDomainCommitment(c) => {
                 let payload = decode_bounded_json(&c.data, "verified domain commitment payload")?;
-                Ok(NetworkMessage::VerifiedDomainCommitment(payload))
+                Ok(Self::VerifiedDomainCommitment(payload))
             }
-            pb::proto_network_message::Payload::SlashingEvidence(e) => Ok(
-                NetworkMessage::SlashingEvidence(SlashingEvidence::try_from(e)?),
-            ),
+            pb::proto_network_message::Payload::SlashingEvidence(e) => {
+                Ok(Self::SlashingEvidence(SlashingEvidence::try_from(e)?))
+            }
             pb::proto_network_message::Payload::AggObject(object) => {
                 if object.envelope.is_empty()
                     || object.envelope.len() > crate::network::protocol::MAX_AGG_OBJECT_BYTES
@@ -2913,7 +2899,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 let transaction = object
                     .transaction
                     .ok_or_else(|| "AggObject carries no transaction".to_string())?;
-                Ok(NetworkMessage::AggObject {
+                Ok(Self::AggObject {
                     envelope: object.envelope,
                     transaction: Transaction::try_from(transaction)?,
                 })
@@ -2922,15 +2908,15 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 if frame.frame.is_empty() {
                     return Err("AggFrame is empty".into());
                 }
-                Ok(NetworkMessage::AggFrame(frame.frame))
+                Ok(Self::AggFrame(frame.frame))
             }
             pb::proto_network_message::Payload::GlobalHeader(h) => {
                 let header = decode_bounded_json(&h.data, "global header payload")?;
-                Ok(NetworkMessage::GlobalHeader(header))
+                Ok(Self::GlobalHeader(header))
             }
             pb::proto_network_message::Payload::CrossDomainMessage(m) => {
                 let msg = decode_bounded_json(&m.data, "cross domain message payload")?;
-                Ok(NetworkMessage::CrossDomainMessage(msg))
+                Ok(Self::CrossDomainMessage(msg))
             }
         }
     }

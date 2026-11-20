@@ -40,6 +40,7 @@ fn genesis(sender: Address) -> GenesisConfig {
 
 impl BlockHarness {
     /// Open a fresh chain at `path` with a new funded sender.
+    #[must_use]
     pub fn open(path: &str) -> Self {
         let key = KeyPair::generate().expect("a key pair generates");
         let sender = Address::from(key.public_key_bytes());

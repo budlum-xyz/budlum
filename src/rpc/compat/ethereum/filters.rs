@@ -70,6 +70,7 @@ pub enum FilterError {
 
 impl FilterError {
     /// The JSON-RPC code for this failure.
+    #[must_use]
     pub fn code(self) -> i32 {
         match self {
             Self::SpecTooLarge | Self::InvalidId | Self::UnknownFilter | Self::Expired => -32602,
@@ -80,6 +81,7 @@ impl FilterError {
     }
 
     /// One line for a client log. Short sentences, one meaning per line.
+    #[must_use]
     pub fn message(self) -> &'static str {
         match self {
             Self::SpecTooLarge => "filter object exceeds the record limit",
@@ -96,6 +98,7 @@ impl FilterError {
     }
 
     /// A stable machine-readable reason for the error data.
+    #[must_use]
     pub fn reason(self) -> &'static str {
         match self {
             Self::SpecTooLarge => "spec_too_large",
@@ -112,6 +115,7 @@ impl FilterError {
     }
 
     /// The Budlum door that answers the same question, when one exists.
+    #[must_use]
     pub fn door(self) -> Option<&'static str> {
         match self {
             Self::ExecutionEnvironmentUnavailable => Some("bud_subscribe"),
@@ -140,21 +144,25 @@ pub struct FilterPool {
 
 impl FilterPool {
     /// An empty pool.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// The number of live records.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether the pool holds no records.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// The number of live records owned by one peer.
+    #[must_use]
     pub fn peer_len(&self, peer: &str) -> usize {
         self.entries
             .values()
@@ -276,11 +284,11 @@ impl FilterPool {
 
 /// Whole seconds since the Unix epoch, or zero when that clock is unavailable.
 /// The hard count and byte bounds still apply if wall-clock expiry cannot move.
+#[must_use]
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|span| span.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |span| span.as_secs())
 }
 
 /// The quota key for one server transport connection.

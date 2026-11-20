@@ -37,6 +37,7 @@ use crate::crypto::scheme::SchemeStatusRegistry;
 use sha3::{Digest, Sha3_256};
 
 /// The domain tag of the bundle root.
+///
 /// exposed for: the bundle door - `bud_sendTxBundle` and `bud tx bundle` both
 /// speak a root under this tag, so it stays a named constant instead of a
 /// literal copied into three files.
