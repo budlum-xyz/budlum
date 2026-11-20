@@ -2607,6 +2607,15 @@ fn parse_content_id(hex_str: &str) -> Result<ContentId, ErrorObjectOwned> {
     Ok(ContentId(parse_hex32_field(hex_str, "ContentId")?))
 }
 
+/// The refusal every byte-serving door answers for Pollen-listed content.
+fn pollen_grant_required() -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(
+        -32004,
+        "Content is Pollen-protected; an AccessGrant is required",
+        None::<()>,
+    )
+}
+
 fn parse_pollen_asset_id(hex_str: &str) -> Result<crate::pollen::AssetId, ErrorObjectOwned> {
     Ok(crate::pollen::AssetId(parse_hex32_field(
         hex_str, "AssetId",
@@ -9072,6 +9081,18 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
+        // The right to read Pollen-listed bytes is sold through an
+        // AccessGrant; the paid storage view is a storage-fee door, not a
+        // grant, and the public web gateway serves over this method. Listed
+        // content therefore never leaves through here.
+        if self
+            .chain
+            .pollen_asset_for_content(crate::storage::ContentId(object))
+            .await
+            .is_some()
+        {
+            return Err(pollen_grant_required());
+        }
         let reservation = PaidViewReservation::acquire(&self.consumed_paid_views, receipt_id)?;
         let receipt = crate::storage::bud3::view::PaidViewReceipt {
             payer,
@@ -9124,6 +9145,17 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ),
         })?;
+        // A binding may key the content digest rather than the commitment;
+        // the digest is only known once the bytes exist, so it is checked
+        // here, before the receipt is burned or anything is returned.
+        if self
+            .chain
+            .pollen_asset_for_content(crate::storage::ContentId::of(&bytes))
+            .await
+            .is_some()
+        {
+            return Err(pollen_grant_required());
+        }
         reservation.commit()?;
         Ok(serde_json::json!({
             "object": hex::encode(object),
