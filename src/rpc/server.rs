@@ -2604,6 +2604,16 @@ fn reveal_gateway_rpc_error(e: crate::storage::RevealGatewayError) -> ErrorObjec
             format!("reveal: session {id} grant revoked"),
             None::<()>,
         ),
+        RevealGatewayError::PackedTooLarge { len, max } => ErrorObjectOwned::owned(
+            -32602,
+            format!("reveal: packed {len} bytes, per-session cap {max}"),
+            None::<()>,
+        ),
+        RevealGatewayError::PinnedBudget { needed, max } => ErrorObjectOwned::owned(
+            -32003,
+            format!("reveal: pinned-byte budget full ({needed} more over {max})"),
+            None::<()>,
+        ),
         RevealGatewayError::Reveal(_) => ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>),
     }
 }
@@ -4988,6 +4998,19 @@ impl BudlumApiServer for RpcServer {
         };
         let packed = hex::decode(packed.strip_prefix("0x").unwrap_or(&packed))
             .map_err(|e| ErrorObjectOwned::owned(-32602, format!("packed: {e}"), None::<()>))?;
+        // The session keeps a padded copy of these bytes for its whole TTL:
+        // the per-session cap is enforced before any signature or chain work.
+        if packed.len() > crate::storage::reveal_gateway::MAX_REVEAL_PACKED_BYTES {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "packed: {} bytes exceeds the per-session cap {}",
+                    packed.len(),
+                    crate::storage::reveal_gateway::MAX_REVEAL_PACKED_BYTES
+                ),
+                None::<()>,
+            ));
+        }
         let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner))
             .map_err(|e| ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>))?;
         let key_id = parse_hex32_field(&key_id, "key_id")?;
