@@ -183,10 +183,16 @@ impl QuantumAccountRegistry {
                 declared: account.pact_root,
             });
         }
-        self.insert_account(account)
+        if let Err(reason) = account.validate_all() {
+            return Err(QuantumAccountRegistryError::InvalidAccount {
+                address: account.address,
+                reason: reason.to_string(),
+            });
+        }
+        self.insert_validated_account(account)
     }
 
-    fn insert_account(
+    fn insert_validated_account(
         &mut self,
         account: QuantumAccount,
     ) -> Result<(), QuantumAccountRegistryError> {
@@ -195,12 +201,6 @@ impl QuantumAccountRegistry {
             return Err(QuantumAccountRegistryError::AddressDoesNotMatchKey {
                 declared: account.address,
                 derived,
-            });
-        }
-        if let Err(reason) = account.validate_all() {
-            return Err(QuantumAccountRegistryError::InvalidAccount {
-                address: account.address,
-                reason: reason.to_string(),
             });
         }
         if self.accounts.contains_key(&account.address) {
@@ -247,7 +247,13 @@ impl QuantumAccountRegistry {
                 computed: pacts.root,
             });
         }
-        self.insert_account(account)
+        if let Err(reason) = account.validate_all() {
+            return Err(QuantumAccountRegistryError::InvalidAccount {
+                address: account.address,
+                reason: reason.to_string(),
+            });
+        }
+        self.insert_validated_account(account)
     }
 
     #[must_use]

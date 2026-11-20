@@ -3803,22 +3803,28 @@ fn prepare_publish_site_payloads(
             ));
         }
     }
+    let n = u32::try_from(custody_validators.len())
+        .map_err(|_| "too many custody validators for one object".to_string())?;
     let mut shares = Vec::with_capacity(prepared.segments.len() * custody_validators.len());
     for (seg_idx, syms) in prepared.segments.iter().enumerate() {
-        let total = syms.len() as u32;
-        if custody_validators.len() > usize::try_from(total).unwrap_or(0) {
+        // A segment that cannot give each custodian a symbol would put an empty
+        // share in the placement, which the registry refuses with a message
+        // about ESIs rather than about the object being too small.
+        let total = u32::try_from(syms.len()).map_err(|_| {
+            format!("segment {seg_idx} carries more coded symbols than one share can name")
+        })?;
+        if n > total {
             return Err(format!(
                 "segment {seg_idx} has {total} coded symbols, fewer than the {} custody validators; \
                  use a larger object or fewer `--validator` flags",
-                custody_validators.len()
+                n
             ));
         }
-        let n = custody_validators.len() as u32;
         let base = total / n;
         let extra = total % n;
         let mut first = 0u32;
         for (i, validator) in custody_validators.iter().enumerate() {
-            let take = base + u32::from((i as u32) < extra);
+            let take = base + u32::from(u32::try_from(i).unwrap_or(u32::MAX) < extra);
             shares.push((
                 seg_idx as u64,
                 Share {

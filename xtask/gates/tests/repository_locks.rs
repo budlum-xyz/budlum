@@ -220,12 +220,29 @@ fn the_two_runtime_indexes_are_panic_free() {
     );
     let filter = read("src/storage/bud3/dedup_index.rs");
     assert!(
-        filter.contains("lanes.iter_mut().zip(digest.chunks_exact(8))"),
+        filter.contains("lanes.iter_mut().zip(digest.as_chunks::<8>().0)"),
         "the digest lanes must be filled by zip, not a runtime index"
     );
     assert!(
         !filter.contains("lanes[i] = v"),
         "a runtime index on the lane array is outside the indexing baseline"
+    );
+}
+
+/// The B.U.D. 3.0 key-backup parser reads untrusted bytes, so it must not index
+/// them: `pair[..32]` panics out of bounds on a body that somehow reached it
+/// short, and a panic in a parser is a denial of service on every node that
+/// loads the package.
+#[test]
+fn the_key_backup_parser_indexes_nothing() {
+    let keys = read("src/storage/bud3/keys.rs");
+    assert!(
+        keys.contains("pair.as_chunks::<32>().0"),
+        "the backup pair must be split by pattern, not by range"
+    );
+    assert!(
+        !keys.contains("pair[..32]") && !keys.contains("pair[32..64]"),
+        "a runtime range index on untrusted backup bytes is outside the indexing baseline"
     );
 }
 
