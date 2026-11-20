@@ -325,6 +325,30 @@ impl QuantumAccountRegistry {
         self.register(account)
     }
 
+    /// The replay-safe pact-carrying entry point: the root check of
+    /// [`Self::register_at_root`] and the pact-evidence check of
+    /// [`Self::register_with_pacts`] on one door, so a production caller can
+    /// register an account whose `pact_root` is non-zero without either
+    /// bypassing the presented-pact verification or racing a moved state.
+    ///
+    /// WIRING: `AccountState::register_quantum_account_with_pacts_at_root`
+    /// is the state-level caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QuantumAccountRegistryError::RootMismatch`] when
+    /// `based_on_root` is not the current root, and every error
+    /// [`Self::register_with_pacts`] returns.
+    pub fn register_with_pacts_at_root(
+        &mut self,
+        based_on_root: [u8; 32],
+        account: QuantumAccount,
+        pacts: &crate::storage::pact_binding::PactRegistry,
+    ) -> Result<(), QuantumAccountRegistryError> {
+        self.expect_root(based_on_root)?;
+        self.register_with_pacts(account, pacts)
+    }
+
     /// Update a registered account, refusing a change computed against an
     /// older root; the change function does not run when the root is stale.
     ///
@@ -673,6 +697,52 @@ mod tests {
             .register_with_pacts(account, &pacts)
             .expect("the root matches");
         assert!(registry.is_registered(&address));
+    }
+
+    /// The pact-carrying state door is replay-safe: the registration binds
+    /// to the registry root the caller read, and a retry over the moved
+    /// state is refused before the pact evidence is even consulted.
+    #[test]
+    fn the_pact_carrying_door_refuses_a_stale_state_root_and_lands_on_the_live_one() {
+        use crate::storage::pact_binding::Pact;
+        use sha3::{Digest, Sha3_256};
+
+        let payload = b"tarif";
+        let mut h = Sha3_256::new();
+        h.update(payload);
+        let commitment: [u8; 32] = h.finalize().into();
+        let mut pacts = PactRegistry::new();
+        pacts
+            .add_pact(
+                Pact::new(
+                    [1u8; 32], [0u8; 32], [0u8; 32], commitment, [0u8; 32], 10, 0,
+                )
+                .expect("valid pact"),
+            )
+            .expect("pact accepted");
+
+        let mut state = crate::core::account::AccountState::new();
+        let live_root = state.quantum_accounts.root();
+
+        let mut account = account_with(2, 3);
+        account.storage_root = [9u8; 32];
+        account.pact_root = pacts.root;
+        let address = account.address;
+
+        // A root read from an older state refuses the registration.
+        assert!(matches!(
+            state.register_quantum_account_with_pacts_at_root(
+                [0x55u8; 32],
+                account.clone(),
+                &pacts
+            ),
+            Err(QuantumAccountRegistryError::RootMismatch { .. })
+        ));
+        // The live root admits it, through the full pact-evidence check.
+        state
+            .register_quantum_account_with_pacts_at_root(live_root, account, &pacts)
+            .expect("the live root and the pact set both match");
+        assert!(state.quantum_accounts.is_registered(&address));
     }
 
     /// A fabricated `pact_root` must be refused: a non-zero field does not mean
