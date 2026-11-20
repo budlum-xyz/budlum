@@ -207,6 +207,20 @@ impl ExecutionEnvironment for BudZeroWorker {
                         gas_used: call.gas_limit,
                     });
                 }
+                // Published code is permanent state every validator keeps:
+                // the deploy pays the shared per-byte publication rate.
+                let deploy_gas = 5_000u64.saturating_add(
+                    u64::try_from(call.input.len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(25),
+                );
+                if deploy_gas > call.gas_limit || host.charge(deploy_gas).is_err() {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::OutOfGas,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    });
+                }
                 if matches!(host.read(&prog_ns, &call.target.id), Ok(Some(_))) {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
@@ -243,7 +257,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                 Ok(EeOutcome {
                     status: OutcomeStatus::Success,
                     output: call.target.id.clone(),
-                    gas_used: 0,
+                    gas_used: deploy_gas,
                 })
             }
             EeCallKind::Call => {

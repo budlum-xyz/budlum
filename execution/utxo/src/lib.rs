@@ -451,6 +451,19 @@ impl ExecutionEnvironment for UtxoScriptWorker {
                     gas_used,
                 });
             };
+            // Published code is permanent state every validator keeps:
+            // the deploy pays the shared per-byte publication rate.
+            let publish_gas = u64::try_from(call.input.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(25);
+            gas_used = gas_used.saturating_add(publish_gas);
+            if gas_used > call.gas_limit || host.charge(publish_gas).is_err() {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                });
+            }
             let utxo_id = derive_utxo_id(&call.caller.id, &call.tx_hash);
             match host.read(&ns, &utxo_key(&utxo_id)) {
                 Ok(Some(_)) => {

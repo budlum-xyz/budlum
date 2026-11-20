@@ -342,7 +342,7 @@ impl ExecutionEnvironment for PlutusWorker {
                 gas_used: 0,
             });
         }
-        let gas_used = 1_000u64;
+        let mut gas_used = 1_000u64;
         if gas_used > call.gas_limit || host.charge(gas_used).is_err() {
             return Ok(EeOutcome {
                 status: OutcomeStatus::OutOfGas,
@@ -359,6 +359,19 @@ impl ExecutionEnvironment for PlutusWorker {
                     gas_used,
                 });
             };
+            // Published code is permanent state every validator keeps:
+            // the deploy pays the shared per-byte publication rate.
+            let publish_gas = u64::try_from(call.input.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(25);
+            gas_used = gas_used.saturating_add(publish_gas);
+            if gas_used > call.gas_limit || host.charge(publish_gas).is_err() {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                });
+            }
             let script_hash = derive_script_hash(&call.caller.id, &call.tx_hash);
             match host.read(&ns, &script_key(&script_hash)) {
                 Ok(Some(_)) => {
