@@ -331,6 +331,23 @@ fn precommit_height_is_new(signed_height: u64, last_precommit_height: u64) -> bo
     signed_height > last_precommit_height
 }
 
+/// The precommit door: a height ahead of the mark, or the same hash this node
+/// already precommitted at the marked height. A different hash at or below the
+/// mark is refused (`vote_would_equivocate`).
+fn precommit_is_due(
+    checkpoint_height: u64,
+    checkpoint_hash: &str,
+    last_precommit_height: u64,
+    last_precommit_hash: Option<&str>,
+) -> bool {
+    !vote_would_equivocate(
+        checkpoint_height,
+        checkpoint_hash,
+        last_precommit_height,
+        last_precommit_hash,
+    )
+}
+
 /// How long a cast vote waits for its round to reach quorum before the node
 /// publishes the same vote again.
 ///
@@ -397,21 +414,38 @@ fn vote_retry_due(
 /// height past the high-water mark, so the first door opens again. What must
 /// not happen is the reverse - a node that re-signs to "catch up" and equivocates.
 #[must_use]
-fn prevote_is_due(checkpoint_height: u64, last_prevote_height: u64, retry: bool) -> bool {
-    checkpoint_height > last_prevote_height || retry
+fn prevote_is_due(
+    checkpoint_height: u64,
+    checkpoint_hash: &str,
+    last_prevote_height: u64,
+    last_prevote_hash: Option<&str>,
+    retry: bool,
+) -> bool {
+    !vote_would_equivocate(
+        checkpoint_height,
+        checkpoint_hash,
+        last_prevote_height,
+        last_prevote_hash,
+    ) || retry
 }
 
 fn record_cast_prevote(
     last_prevote_height: &mut u64,
+    last_prevote_hash: &mut Option<String>,
     prevote_published: &mut Option<PublishedVote>,
     epoch: u64,
     checkpoint_height: u64,
     checkpoint_hash: &str,
     now: std::time::Instant,
 ) -> bool {
+    // Re-publishing the hash already marked must not clear it: the mark keeps
+    // naming the one hash this node is allowed to re-sign at that height.
     let advanced = checkpoint_height > *last_prevote_height;
     if advanced {
         *last_prevote_height = checkpoint_height;
+        *last_prevote_hash = Some(checkpoint_hash.to_string());
+    } else if *last_prevote_height == checkpoint_height {
+        *last_prevote_hash = Some(checkpoint_hash.to_string());
     }
     *prevote_published = Some(PublishedVote {
         epoch,
@@ -1391,6 +1425,11 @@ pub struct Node {
     /// signing twice at one height. It used to be a local variable inside the
     /// event loop, which meant it started at zero on every restart.
     pub last_prevote_height: u64,
+    /// The checkpoint hash signed at `last_prevote_height`, so a restart can
+    /// tell "I already signed this" from "I am about to equivocate".
+    last_prevote_hash: Option<String>,
+    /// The checkpoint hash signed at `last_precommit_height`.
+    last_precommit_hash: Option<String>,
     /// The prevote this node last published, for the retry in
     /// [`FINALITY_VOTE_RETRY`]: the once-per-height marks above say a vote was
     /// signed, not that it arrived.
@@ -1599,6 +1638,19 @@ struct VoteHistory {
     last_prevote_height: u64,
     #[serde(default)]
     last_precommit_height: u64,
+    /// The checkpoint hash this node signed at `last_prevote_height`.
+    ///
+    /// Absent in files written before this field existed. It turns the mark
+    /// from "do not sign at or below this height" into "do not sign a
+    /// *different* hash at this height": after a restart the chain replays the
+    /// same blocks, the aggregator re-opens the same rounds, and a validator
+    /// that refused to re-publish its own identical vote could never help its
+    /// cluster reach quorum again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prevote_hash: Option<String>,
+    /// The checkpoint hash this node signed at `last_precommit_height`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    precommit_hash: Option<String>,
     /// The P2P identity that cast these votes.
     ///
     /// Absent in files written before this field existed. A file without an
@@ -1615,6 +1667,34 @@ struct VoteHistory {
 /// with no owner fails it.
 fn vote_history_was_written_by(history: &VoteHistory, ours: &str) -> bool {
     history.node.as_deref() == Some(ours)
+}
+
+/// Whether signing `hash` at `height` would be equivocation.
+///
+/// The high-water mark exists to stop one key signing twice at one height.
+/// A *different* hash at or below the marked height is exactly that, and is
+/// refused. The same hash at exactly the marked height is not: it is the vote
+/// this node already cast, and re-publishing it is what makes a restart
+/// survivable (`src/network/node.rs` documents the same rule for the
+/// in-memory retry: same epoch, same height, same hash is idempotent at the
+/// receiver). A height below the mark is still refused whatever the hash,
+/// because the mark no longer remembers which hash sat there.
+///
+/// `marked_hash` is `None` for a file written before hashes were recorded;
+/// such a file can only authorise the strict rule it always implied.
+fn vote_would_equivocate(
+    height: u64,
+    hash: &str,
+    marked_height: u64,
+    marked_hash: Option<&str>,
+) -> bool {
+    if height > marked_height {
+        return false;
+    }
+    if height < marked_height {
+        return true;
+    }
+    marked_hash != Some(hash)
 }
 
 impl Node {
@@ -3420,6 +3500,8 @@ impl Node {
             validator_address: None,
             last_precommit_height: 0,
             last_prevote_height: 0,
+            last_prevote_hash: None,
+            last_precommit_hash: None,
             prevote_published: None,
             precommit_published: None,
             vote_history_db: None,
@@ -4003,10 +4085,13 @@ impl Node {
         }
         self.last_prevote_height = restored.last_prevote_height;
         self.last_precommit_height = restored.last_precommit_height;
+        self.last_prevote_hash = restored.prevote_hash.clone();
+        self.last_precommit_hash = restored.precommit_hash.clone();
         info!(
             prevote = restored.last_prevote_height,
             precommit = restored.last_precommit_height,
-            "Vote history restored; this node will not re-sign at or below these heights"
+            re_publish_allowed = restored.prevote_hash.is_some(),
+            "Vote history restored; this node will not sign a different hash at or below these heights"
         );
     }
 
@@ -4021,10 +4106,12 @@ impl Node {
             return Ok(());
         };
         let owner = self.peer_id.to_base58();
-        Self::write_vote_history_file(
+        Self::write_vote_history_file_with_hashes(
             path,
             self.last_prevote_height,
             self.last_precommit_height,
+            self.last_prevote_hash.as_deref(),
+            self.last_precommit_hash.as_deref(),
             &owner,
         )
     }
@@ -4035,6 +4122,25 @@ impl Node {
         last_precommit_height: u64,
         node: &str,
     ) -> Result<(), String> {
+        Self::write_vote_history_file_with_hashes(
+            path,
+            last_prevote_height,
+            last_precommit_height,
+            None,
+            None,
+            node,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_vote_history_file_with_hashes(
+        path: &std::path::Path,
+        last_prevote_height: u64,
+        last_precommit_height: u64,
+        prevote_hash: Option<&str>,
+        precommit_hash: Option<&str>,
+        node: &str,
+    ) -> Result<(), String> {
         let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
             warn!(path = %path.display(), "vote-history path has no parent directory");
             return Err("vote-history path has no parent directory".into());
@@ -4043,11 +4149,17 @@ impl Node {
             warn!(error = %e, path = %path.display(), "Cannot create vote-history directory");
             return Err(format!("cannot create vote-history directory: {e}"));
         }
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "last_prevote_height": last_prevote_height,
             "last_precommit_height": last_precommit_height,
             "node": node,
         });
+        if let Some(hash) = prevote_hash {
+            body["prevote_hash"] = serde_json::Value::String(hash.to_string());
+        }
+        if let Some(hash) = precommit_hash {
+            body["precommit_hash"] = serde_json::Value::String(hash.to_string());
+        }
         let tmp = parent.join(format!(
             ".{}.tmp",
             path.file_name()
@@ -4484,9 +4596,11 @@ impl Node {
                     if agg_state.active
                         && agg_state.prevote_quorum_reached
                         && !agg_state.precommit_quorum_reached
-                        && (precommit_height_is_new(
+                        && (precommit_is_due(
                             agg_state.checkpoint_height,
+                            &agg_state.checkpoint_hash,
                             self.last_precommit_height,
+                            self.last_precommit_hash.as_deref(),
                         ) || precommit_retry)
                     {
                         if precommit_retry {
@@ -4522,14 +4636,26 @@ impl Node {
                                 // hash, and a round that has moved to another
                                 // hash at the same height is never signed again.
                                 let prev_precommit_height = self.last_precommit_height;
+                                let prev_precommit_hash = self.last_precommit_hash.clone();
                                 let advanced = precommit_height_is_new(
                                     agg_state.checkpoint_height,
                                     self.last_precommit_height,
                                 );
-                                if advanced {
+                                let marks_the_same_round = self.last_precommit_height
+                                    == agg_state.checkpoint_height
+                                    && self.last_precommit_hash.as_deref()
+                                        == Some(agg_state.checkpoint_hash.as_str());
+                                // A re-publication of the round this node
+                                // already marked needs no new durable write;
+                                // a new height (or the first hash for the
+                                // marked height) does.
+                                if advanced || !marks_the_same_round {
                                     self.last_precommit_height = agg_state.checkpoint_height;
+                                    self.last_precommit_hash =
+                                        Some(agg_state.checkpoint_hash.clone());
                                     if let Err(e) = self.save_vote_history() {
                                         self.last_precommit_height = prev_precommit_height;
+                                        self.last_precommit_hash = prev_precommit_hash.clone();
                                         tracing::error!(
                                             error = %e,
                                             height = agg_state.checkpoint_height,
@@ -4653,7 +4779,9 @@ impl Node {
                         && agg_state.checkpoint_height > 0
                         && prevote_is_due(
                             agg_state.checkpoint_height,
+                            &agg_state.checkpoint_hash,
                             self.last_prevote_height,
+                            self.last_prevote_hash.as_deref(),
                             prevote_retry,
                         )
                     {
@@ -4689,9 +4817,11 @@ impl Node {
                                 // signed prevote on the wire with a stale mark
                                 // on disk.
                                 let prev_prevote_height = self.last_prevote_height;
+                                let prev_prevote_hash = self.last_prevote_hash.clone();
                                 let prev_published = self.prevote_published.clone();
                                 if record_cast_prevote(
                                     &mut self.last_prevote_height,
+                                    &mut self.last_prevote_hash,
                                     &mut self.prevote_published,
                                     epoch,
                                     checkpoint_height,
@@ -4700,6 +4830,7 @@ impl Node {
                                 ) {
                                     if let Err(e) = self.save_vote_history() {
                                         self.last_prevote_height = prev_prevote_height;
+                                        self.last_prevote_hash = prev_prevote_hash.clone();
                                         self.prevote_published = prev_published;
                                         tracing::error!(
                                             error = %e,
@@ -8447,16 +8578,22 @@ mod vote_history_wiring_tests {
         let own_record = super::VoteHistory {
             last_prevote_height: 9,
             last_precommit_height: 7,
+            prevote_hash: Some("aa".to_string()),
+            precommit_hash: Some("aa".to_string()),
             node: Some("node-a".to_string()),
         };
         let imported = super::VoteHistory {
             last_prevote_height: 66,
             last_precommit_height: 66,
+            prevote_hash: None,
+            precommit_hash: None,
             node: Some("node-b".to_string()),
         };
         let legacy = super::VoteHistory {
             last_prevote_height: 66,
             last_precommit_height: 66,
+            prevote_hash: None,
+            precommit_hash: None,
             node: None,
         };
         assert!(super::vote_history_was_written_by(&own_record, "node-a"));
@@ -8474,6 +8611,60 @@ mod vote_history_wiring_tests {
             serde_json::from_str("{\"last_prevote_height\":1,\"last_precommit_height\":1}")
                 .unwrap();
         assert!(legacy_decoded.node.is_none());
+    }
+
+    /// A restart must be able to re-publish its own vote, and nothing else.
+    ///
+    /// The high-water mark was a bare height, so a restarted validator refused
+    /// to sign anything at or below it - including the identical vote it had
+    /// already cast on the identical chain. Measured on a four-node devnet that
+    /// was stopped and restarted on its own databases: finality froze at 40
+    /// while the chain kept producing, and the nodes settled at precommit
+    /// heights 40/30/0/8 because none of them would re-open its round.
+    ///
+    /// Re-publishing the same hash at the same height is not equivocation: the
+    /// aggregator counts each voter once and de-duplicates by
+    /// (voter, epoch, height), which this file already documents for the
+    /// in-memory retry. A different hash at or below the mark is equivocation
+    /// and stays refused, and so does any height below the mark, whose hash the
+    /// mark no longer remembers.
+    ///
+    /// Canary: make the mark a bare height again and the same-hash branch
+    /// below fails; drop the hash comparison and the different-hash branch
+    /// fails.
+    #[test]
+    fn a_restart_may_re_publish_its_own_vote_but_never_a_different_one() {
+        // Same height, same hash: the vote this node already cast.
+        assert!(!super::vote_would_equivocate(40, "aa", 40, Some("aa")));
+        // Same height, different hash: the one thing a validator must never do.
+        assert!(super::vote_would_equivocate(40, "bb", 40, Some("aa")));
+        // Below the mark: refused whatever the hash, because the mark no longer
+        // remembers which hash sat there.
+        assert!(super::vote_would_equivocate(38, "aa", 40, Some("aa")));
+        // Ahead of the mark: a new round, always allowed.
+        assert!(!super::vote_would_equivocate(42, "cc", 40, Some("aa")));
+        // A mark written before hashes were recorded can only imply the strict
+        // rule it always had: nothing at or below the height is re-signable.
+        assert!(super::vote_would_equivocate(40, "aa", 40, None));
+        // The doors agree with the rule.
+        assert!(super::prevote_is_due(40, "aa", 40, Some("aa"), false));
+        assert!(!super::prevote_is_due(40, "bb", 40, Some("aa"), false));
+        assert!(super::precommit_is_due(40, "aa", 40, Some("aa")));
+        assert!(!super::precommit_is_due(40, "bb", 40, Some("aa")));
+        // Recording the same round twice keeps the hash rather than clearing it.
+        let mut height = 40u64;
+        let mut hash = Some("aa".to_string());
+        let mut published = None;
+        assert!(!super::record_cast_prevote(
+            &mut height,
+            &mut hash,
+            &mut published,
+            2,
+            40,
+            "aa",
+            std::time::Instant::now(),
+        ));
+        assert_eq!(hash.as_deref(), Some("aa"));
     }
 
     /// Every network must get a vote-history path by default.
@@ -9165,7 +9356,9 @@ mod sync_handler_order_tests {
         assert!(
             !super::prevote_is_due(
                 published.checkpoint_height,
+                "bb",
                 published.checkpoint_height,
+                Some("aa"),
                 other_hash
             ),
             "so the node signs nothing at the reorged checkpoint height"
@@ -9173,7 +9366,9 @@ mod sync_handler_order_tests {
         assert!(
             super::prevote_is_due(
                 published.checkpoint_height + 10,
+                "cc",
                 published.checkpoint_height,
+                Some("aa"),
                 false
             ),
             "and it votes again as soon as the interval clears the high-water mark"
@@ -9540,17 +9735,27 @@ mod finality_publish_tests {
             prevote_is_due, record_cast_prevote, vote_retry_due, PublishedVote, FINALITY_VOTE_RETRY,
         };
         let mut last_prevote_height = 0u64;
+        let mut last_prevote_hash: Option<String> = None;
         let mut prevote_published: Option<PublishedVote> = None;
         let t0 = std::time::Instant::now();
+        let hash_a = "aa".repeat(32);
+        let hash_b = "bb".repeat(32);
 
         // Validator signs prevote for hash_a at height 100; publish fails (e.g. NoPeersSubscribedToTopic).
-        assert!(prevote_is_due(100, last_prevote_height, false));
+        assert!(prevote_is_due(
+            100,
+            &hash_a,
+            last_prevote_height,
+            None,
+            false
+        ));
         let advanced = record_cast_prevote(
             &mut last_prevote_height,
+            &mut last_prevote_hash,
             &mut prevote_published,
             1,
             100,
-            "aa".repeat(32).as_str(),
+            &hash_a,
             t0,
         );
         assert!(advanced);
@@ -9561,12 +9766,18 @@ mod finality_publish_tests {
             prevote_published.as_ref(),
             1,
             100,
-            "bb".repeat(32).as_str(),
+            &hash_b,
             t0 + FINALITY_VOTE_RETRY,
         );
         assert!(!retry_different_hash);
         assert!(
-            !prevote_is_due(100, last_prevote_height, retry_different_hash),
+            !prevote_is_due(
+                100,
+                &hash_b,
+                last_prevote_height,
+                last_prevote_hash.as_deref(),
+                retry_different_hash
+            ),
             "validator must stay silent rather than signing a second hash at height 100"
         );
 
@@ -9575,17 +9786,40 @@ mod finality_publish_tests {
             prevote_published.as_ref(),
             1,
             100,
-            "aa".repeat(32).as_str(),
+            &hash_a,
             t0 + FINALITY_VOTE_RETRY,
         );
         assert!(retry_same_hash);
-        assert!(prevote_is_due(100, last_prevote_height, retry_same_hash));
+        assert!(prevote_is_due(
+            100,
+            &hash_a,
+            last_prevote_height,
+            last_prevote_hash.as_deref(),
+            retry_same_hash
+        ));
+        // A restart reads the same mark from disk: the same round is still
+        // eligible without a retry flag, because the hash matches.
+        assert!(prevote_is_due(
+            100,
+            &hash_a,
+            last_prevote_height,
+            last_prevote_hash.as_deref(),
+            false
+        ));
     }
     #[test]
     fn write_vote_history_file_persists_atomically_and_reports_unwritable_target() {
         let dir = tempfile::tempdir().unwrap();
         let history_path = dir.path().join("votes").join("history.json");
-        super::Node::write_vote_history_file(&history_path, 14, 12, "node-a").unwrap();
+        super::Node::write_vote_history_file_with_hashes(
+            &history_path,
+            14,
+            12,
+            Some("aa"),
+            Some("bb"),
+            "node-a",
+        )
+        .unwrap();
         let persisted: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&history_path).unwrap()).unwrap();
         assert_eq!(persisted["last_prevote_height"], 14);
@@ -9594,6 +9828,11 @@ mod finality_publish_tests {
             persisted["node"], "node-a",
             "the mark must name the node that cast the votes it stands for"
         );
+        assert_eq!(
+            persisted["prevote_hash"], "aa",
+            "the mark must name the hash it permits a restart to re-publish"
+        );
+        assert_eq!(persisted["precommit_hash"], "bb");
 
         // Pointing the history file at an existing directory must fail loudly
         // so the caller withholds the vote instead of gossiping unrecorded bytes.
