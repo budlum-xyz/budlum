@@ -50,6 +50,11 @@ pub const SUI_PUBLISH_PER_BYTE_BGU: u64 = 25;
 /// same cap as a package).
 pub const MAX_SUI_OBJECT_BYTES: usize = 102_400;
 
+/// Maximum number of elements handled in a single `SplitCoins`, `MergeCoins`, or
+/// `TransferObjects` PTB command. Matches the 1,024-command PTB cap so one command
+/// cannot fan out unboundedly.
+pub const MAX_SUI_BATCH_ITEMS: usize = 1_024;
+
 /// Gas charged per byte of an object a `MoveCall` rewrites, in BGU. The write rewrites the whole
 /// object, so the object's new size is what it costs.
 pub const SUI_OBJECT_WRITE_PER_BYTE_BGU: u64 = 25;
@@ -324,6 +329,31 @@ impl ExecutionEnvironment for MoveSuiWorker {
             *gas_used = next;
             Ok(())
         }
+        fn ensure_fresh_object_id(
+            h: &dyn HostApi,
+            id: &[u8; 32],
+            gas_used: u64,
+            gas_limit: u64,
+            dup_msg: &'static [u8],
+        ) -> Result<(), EeOutcome> {
+            match read_sui_object(h, id) {
+                Ok(None) => Ok(()),
+                Ok(Some(_)) => Err(ee_reverted(dup_msg.to_vec(), gas_used)),
+                Err(HostError::OutOfGas) => Err(ee_out_of_gas(gas_limit)),
+                Err(_) => Err(ee_reverted(
+                    b"object existence check failed".to_vec(),
+                    gas_used,
+                )),
+            }
+        }
+        fn next_ordinal(ordinal: &mut u64, gas_used: u64) -> Result<u64, EeOutcome> {
+            let cur = *ordinal;
+            let Some(next) = cur.checked_add(1) else {
+                return Err(ee_reverted(b"object ordinal overflow".to_vec(), gas_used));
+            };
+            *ordinal = next;
+            Ok(cur)
+        }
         let mut gas_used: u64 = 0;
         if charge_gas(&mut gas_used, call.gas_limit, SUI_PTB_BASE_BGU, host).is_err() {
             return Ok(ee_out_of_gas(call.gas_limit));
@@ -341,8 +371,14 @@ impl ExecutionEnvironment for MoveSuiWorker {
                 ));
             };
             let pkg_id = derive_sui_object_id(&call.tx_hash, 0);
-            if matches!(read_sui_object(host, &pkg_id), Ok(Some(_))) {
-                return Ok(ee_reverted(b"package already deployed".to_vec(), gas_used));
+            if let Err(outcome) = ensure_fresh_object_id(
+                host,
+                &pkg_id,
+                gas_used,
+                call.gas_limit,
+                b"package already deployed",
+            ) {
+                return Ok(outcome);
             }
             let contents = serde_json::to_vec(&mods).unwrap_or_default();
             let pkg_obj = SuiObject {
@@ -398,11 +434,15 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         if decode_sui_package_bundle(&bundle).is_err() {
                             return Err(ee_reverted(b"bad Sui modules".to_vec(), gas_used));
                         }
-                        let pkg_id = derive_sui_object_id(&call.tx_hash, ordinal);
-                        ordinal = ordinal.saturating_add(1);
-                        if matches!(read_sui_object(host, &pkg_id), Ok(Some(_))) {
-                            return Err(ee_reverted(b"package already exists".to_vec(), gas_used));
-                        }
+                        let pkg_ord = next_ordinal(&mut ordinal, gas_used)?;
+                        let pkg_id = derive_sui_object_id(&call.tx_hash, pkg_ord);
+                        ensure_fresh_object_id(
+                            host,
+                            &pkg_id,
+                            gas_used,
+                            call.gas_limit,
+                            b"package already exists",
+                        )?;
                         let pkg_obj = SuiObject {
                             object_id: pkg_id,
                             version: 1,
@@ -434,8 +474,15 @@ impl ExecutionEnvironment for MoveSuiWorker {
                                     gas_used,
                                 ));
                             }
-                            let coin_id = derive_sui_object_id(&call.tx_hash, ordinal);
-                            ordinal = ordinal.saturating_add(1);
+                            let coin_ord = next_ordinal(&mut ordinal, gas_used)?;
+                            let coin_id = derive_sui_object_id(&call.tx_hash, coin_ord);
+                            ensure_fresh_object_id(
+                                host,
+                                &coin_id,
+                                gas_used,
+                                call.gas_limit,
+                                b"object id already exists",
+                            )?;
                             let coin_obj = SuiObject {
                                 object_id: coin_id,
                                 version: 1,
@@ -465,8 +512,15 @@ impl ExecutionEnvironment for MoveSuiWorker {
                                 gas_used,
                             ));
                         }
-                        let coin_id = derive_sui_object_id(&call.tx_hash, ordinal);
-                        ordinal = ordinal.saturating_add(1);
+                        let coin_ord = next_ordinal(&mut ordinal, gas_used)?;
+                        let coin_id = derive_sui_object_id(&call.tx_hash, coin_ord);
+                        ensure_fresh_object_id(
+                            host,
+                            &coin_id,
+                            gas_used,
+                            call.gas_limit,
+                            b"object id already exists",
+                        )?;
                         let coin = SuiObject {
                             object_id: coin_id,
                             version: 1,
@@ -496,9 +550,20 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         let Ok(bal_bytes) = <[u8; 8]>::try_from(src.contents.as_slice()) else {
                             return Err(ee_reverted(b"corrupt coin".to_vec(), gas_used));
                         };
+                        if amounts_mist.len() > MAX_SUI_BATCH_ITEMS {
+                            return Err(ee_reverted(
+                                b"SplitCoins exceeds max batch size".to_vec(),
+                                gas_used,
+                            ));
+                        }
                         let mut rem = u64::from_le_bytes(bal_bytes);
                         let mut lamport_max = src.version;
                         for amt in amounts_mist {
+                            if charge_gas(&mut gas_used, call.gas_limit, SUI_CMD_STEP_BGU, host)
+                                .is_err()
+                            {
+                                return Err(ee_out_of_gas(call.gas_limit));
+                            }
                             let Some(next_rem) = rem.checked_sub(*amt) else {
                                 return Err(ee_reverted(
                                     b"coin split underflow".to_vec(),
@@ -506,8 +571,15 @@ impl ExecutionEnvironment for MoveSuiWorker {
                                 ));
                             };
                             rem = next_rem;
-                            let new_id = derive_sui_object_id(&call.tx_hash, ordinal);
-                            ordinal = ordinal.saturating_add(1);
+                            let new_ord = next_ordinal(&mut ordinal, gas_used)?;
+                            let new_id = derive_sui_object_id(&call.tx_hash, new_ord);
+                            ensure_fresh_object_id(
+                                host,
+                                &new_id,
+                                gas_used,
+                                call.gas_limit,
+                                b"object id already exists",
+                            )?;
                             let child = SuiObject {
                                 object_id: new_id,
                                 version: lamport_max.saturating_add(1),
@@ -546,8 +618,19 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         };
                         let mut total = u64::from_le_bytes(p_arr);
                         let mut max_ver = prim.version;
+                        if sources.len() > MAX_SUI_BATCH_ITEMS {
+                            return Err(ee_reverted(
+                                b"MergeCoins exceeds max batch size".to_vec(),
+                                gas_used,
+                            ));
+                        }
                         let mut seen = std::collections::BTreeSet::new();
                         for sid in sources {
+                            if charge_gas(&mut gas_used, call.gas_limit, SUI_CMD_STEP_BGU, host)
+                                .is_err()
+                            {
+                                return Err(ee_out_of_gas(call.gas_limit));
+                            }
                             if sid == primary_coin || !seen.insert(*sid) {
                                 return Err(ee_reverted(
                                     b"cannot self-merge or duplicate coin".to_vec(),
@@ -588,7 +671,18 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         object_ids,
                         recipient,
                     } => {
+                        if object_ids.len() > MAX_SUI_BATCH_ITEMS {
+                            return Err(ee_reverted(
+                                b"TransferObjects exceeds max batch size".to_vec(),
+                                gas_used,
+                            ));
+                        }
                         for oid in object_ids {
+                            if charge_gas(&mut gas_used, call.gas_limit, SUI_CMD_STEP_BGU, host)
+                                .is_err()
+                            {
+                                return Err(ee_out_of_gas(call.gas_limit));
+                            }
                             let Ok(Some(mut obj)) = read_sui_object(host, oid) else {
                                 return Err(ee_reverted(b"object missing".to_vec(), gas_used));
                             };
@@ -695,8 +789,15 @@ impl ExecutionEnvironment for MoveSuiWorker {
                                 return Err(ee_reverted(b"shared write err".to_vec(), gas_used));
                             }
                         }
-                        let out_id = derive_sui_object_id(&call.tx_hash, ordinal);
-                        ordinal = ordinal.saturating_add(1);
+                        let out_ord = next_ordinal(&mut ordinal, gas_used)?;
+                        let out_id = derive_sui_object_id(&call.tx_hash, out_ord);
+                        ensure_fresh_object_id(
+                            host,
+                            &out_id,
+                            gas_used,
+                            call.gas_limit,
+                            b"object id already exists",
+                        )?;
                         let produced = SuiObject {
                             object_id: out_id,
                             version: lamport_ver,
@@ -1459,5 +1560,81 @@ mod tests {
         assert_eq!(self_merge.status, OutcomeStatus::Revert);
         let after = read_sui_object(&host, &coin).expect("read").expect("coin");
         assert_eq!(after.contents, 250u64.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn split_coins_is_metered_per_output_and_refuses_derived_object_id_overwrite() {
+        let mut worker = MoveSuiWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(20_000_000);
+        let who = EeIdentity {
+            ee: EeId::MOVE_SUI,
+            id: vec![0x66; 32],
+        };
+        let (_, coin) = publish(&mut worker, &mut host, &who, "fanout", 0xA1);
+
+        // 1. Splitting into 200 zero-mist coins with gas only sufficient for ~3 commands
+        // must hit OutOfGas instead of writing 200 state objects for 1 flat step cost.
+        let Ok(ptb_bytes) = serde_json::to_vec(&SuiPtb {
+            commands: vec![SuiPtbCommand::SplitCoins {
+                coin_id: coin,
+                amounts_mist: vec![0u64; 200],
+            }],
+        }) else {
+            panic!("encode ptb");
+        };
+        let Ok(fanout_out) = worker.execute(
+            &BlockContext {
+                chain_id: BUDLUM_TESTNET_CHAIN_ID,
+                height: 10,
+                timestamp_ms: 1_793_923_200_000,
+            },
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: who.clone(),
+                target: who.clone(),
+                value: BudAmount(0),
+                input: ptb_bytes,
+                gas_limit: SUI_PTB_BASE_BGU + SUI_CMD_STEP_BGU * 4,
+                depth: 0,
+                tx_hash: [0xA2; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("fanout call");
+        };
+        assert_eq!(
+            fanout_out.status,
+            OutcomeStatus::OutOfGas,
+            "SplitCoins must meter gas per created coin object"
+        );
+
+        // 2. Re-minting with an already-used tx_hash must NOT overwrite the existing 250 MIST coin.
+        host.balances.insert(who.clone(), 1_000_000_000_000);
+        let first = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![SuiPtbCommand::MintGasCoin { amount_mist: 500 }],
+            0xA3,
+        );
+        assert_eq!(first.status, OutcomeStatus::Success);
+        let minted_id = derive_sui_object_id(&[0xA3; 32], 0);
+
+        let overwrite = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![SuiPtbCommand::MintGasCoin { amount_mist: 1 }],
+            0xA3,
+        );
+        assert_eq!(
+            overwrite.status,
+            OutcomeStatus::Revert,
+            "derived object_id collision must revert instead of overwriting an existing coin"
+        );
+        let Ok(Some(still_500)) = read_sui_object(&host, &minted_id) else {
+            panic!("original coin missing");
+        };
+        assert_eq!(still_500.contents, 500u64.to_le_bytes().to_vec());
     }
 }
