@@ -2260,5 +2260,23 @@ mod tests {
         // Another seller is untouched by the first one's ceiling.
         let other = addr(9);
         reg.create_name_offer(other, request(900, 500), 1).unwrap();
+
+        // Data-offer table bounds per-seller live occupancy and refuses overflow prices.
+        assert!(
+            reg.create_offer(seller, ContentId::of(b"unbuyable"), u64::MAX)
+                .is_err(),
+            "u64::MAX price makes purchase arithmetic overflow and permanently pins the slot"
+        );
+        for n in 0..256u32 {
+            reg.create_offer(seller, ContentId::of(&n.to_le_bytes()), 100)
+                .expect("seller within 256 live data offers");
+        }
+        assert!(
+            reg.create_offer(seller, ContentId::of(b"257th-offer"), 100)
+                .is_err(),
+            "seller exceeding 256 live data offers must be refused"
+        );
+        reg.create_offer(other, ContentId::of(b"other-seller-offer"), 100)
+            .expect("independent seller remains able to list");
     }
 }
