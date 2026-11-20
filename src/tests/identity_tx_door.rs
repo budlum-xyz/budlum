@@ -241,7 +241,13 @@ fn a_signed_recovery_cannot_bypass_the_domain_gate_through_the_executor() {
         .clone();
 
     let new_key = [9u8; 32];
-    let digest = recovery_digest(&subject, &new_key, state.epoch_index, DEFAULT_CHAIN_ID);
+    let digest = recovery_digest(
+        &subject,
+        &new_key,
+        state.epoch_index,
+        DEFAULT_CHAIN_ID,
+        state.identity.recovery_nonce_of(&subject),
+    );
     let approvals = vec![
         GuardianApproval {
             public_key: guardian_one.public_key_bytes().to_vec(),

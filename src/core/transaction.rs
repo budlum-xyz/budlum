@@ -5848,6 +5848,8 @@ mod v29_signing_tests {
             credential_roots: Default::default(),
             guardians: vec![],
             recovery_threshold: 0,
+            issued_credentials: 0,
+            recovery_nonce: 0,
         };
         let base_credential = CredentialCommitment {
             issuer: test_addr_from_byte(2u8),
