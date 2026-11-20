@@ -335,10 +335,10 @@ mod tests {
     /// A backup whose declared count disagrees with its body must be refused,
     /// and the refusal must come from the length check, never from an index.
     ///
-    /// Measured: `pair[..32]` / `pair[32..64]` are indexing expressions on a
-    /// `&[u8]`; a slice index panics when out of range and release builds abort
-    /// on panic, so the import door must not depend on the iterator yielding a
-    /// full 64-byte chunk to stay in bounds.
+    /// Measured: the pair used to be split with range-index expressions on a
+    /// byte slice. A range index panics when out of range and release builds
+    /// abort on panic, so the import door must not depend on the iterator
+    /// yielding a full 64-byte chunk to stay in bounds.
     #[test]
     fn a_truncated_backup_body_is_refused_not_indexed() {
         let seed = [0x44u8; 32];
