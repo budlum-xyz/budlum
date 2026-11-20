@@ -45,7 +45,7 @@ permissions:
 
 jobs:
   next-stable:
-    name: Clippy drift (next stable toolchain)
+    name: Clippy drift (stable 1.100.0)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -53,11 +53,18 @@ jobs:
         with:
           persist-credentials: false
       # DELIBERATE-TOOLCHAIN-DIVERGENCE
-      # This job checks the tree against the newest stable compiler on purpose, so the pin is not used.
-      - name: Install Rust (latest stable, NOT the pin)
+      # This job checks the tree against a stable compiler that is newer than the
+      # pin on purpose, so the pin is not used. The version is pinned (instead of
+      # floating "stable") so the drift surface is reproducible run to run; the
+      # council decision on 2026-11-20 (fail-closed default) fixed it to 1.100.0.
+      # Remaining known drift on 1.100.0: Atomic::fetch_update is deprecated here
+      # (renamed try_update, which does not exist on the merge-barrier pin), and
+      # the NetworkBehaviour derive emits unreachable code; both need a
+      # coordinated pin bump and stay documented in the drift-surface report.
+      - name: Install Rust (stable 1.100.0, NOT the pin)
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
-          toolchain: stable
+          toolchain: 1.100.0
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:

@@ -186,7 +186,7 @@ fn verify_program_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
         return Err(RuleRefusal::WrongShape);
     }
     let mut words = Vec::with_capacity(raw_code.len() / 8);
-    for chunk in raw_code.chunks_exact(8) {
+    for chunk in raw_code.as_chunks::<8>().0 {
         let mut arr = [0u8; 8];
         arr.copy_from_slice(chunk);
         words.push(u64::from_le_bytes(arr));

@@ -168,10 +168,7 @@ impl Bud3ContentGateway {
         let bytes = item_count
             .max(u64::from(req.count))
             .saturating_mul(u64::from(symbol_size));
-        if !mobile_policy.admit_serve(link, bytes) {
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(mobile_policy.admit_serve(link, bytes))
     }
 }
 

@@ -393,13 +393,11 @@ pub fn compute_uer_batch_root(
 
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        let mut chunks = level.chunks_exact(2);
-        for pair in &mut chunks {
-            if let [left, right] = pair {
-                next.push(hash_uer_node(left, right));
-            }
+        let (chunks, remainder) = level.as_chunks::<2>();
+        for pair in chunks {
+            next.push(hash_uer_node(&pair[0], &pair[1]));
         }
-        if let [odd] = chunks.remainder() {
+        if let [odd] = remainder {
             next.push(hash_uer_odd_promote(odd));
         }
         level = next;
@@ -460,13 +458,11 @@ pub fn prove_uer_inclusion(
         }
 
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        let mut chunks = level.chunks_exact(2);
-        for pair in &mut chunks {
-            if let [left, right] = pair {
-                next.push(hash_uer_node(left, right));
-            }
+        let (chunks, remainder) = level.as_chunks::<2>();
+        for pair in chunks {
+            next.push(hash_uer_node(&pair[0], &pair[1]));
         }
-        if let [odd] = chunks.remainder() {
+        if let [odd] = remainder {
             next.push(hash_uer_odd_promote(odd));
         }
         level = next;

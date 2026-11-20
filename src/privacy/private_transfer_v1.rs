@@ -894,10 +894,8 @@ fn build_transfer_v1_circuit(
     );
     emit_absorb_public_word(&mut prog, n_in as u64, &mut rolling_log);
     emit_absorb_public_word(&mut prog, n_out as u64, &mut rolling_log);
-    for chunk in parsed.context_digest.chunks_exact(8) {
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(chunk);
-        let raw = u64::from_le_bytes(buf);
+    for chunk in parsed.context_digest.as_chunks::<8>().0 {
+        let raw = u64::from_le_bytes(*chunk);
         emit_absorb_public_word(&mut prog, raw % GOLDILOCKS_P, &mut rolling_log);
         emit_absorb_public_word(&mut prog, u64::from(raw >= GOLDILOCKS_P), &mut rolling_log);
     }

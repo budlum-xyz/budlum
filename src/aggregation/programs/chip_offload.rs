@@ -172,7 +172,12 @@ fn single_block_state(parts: &[&[u8]]) -> Result<[u64; 25], TickChipError> {
 
 fn squeeze_hash(output: &[u64; 25]) -> Hash32 {
     let mut out = [0u8; 32];
-    for (chunk, word) in out.chunks_exact_mut(8).zip(output.iter().take(4)) {
+    for (chunk, word) in out
+        .as_chunks_mut::<8>()
+        .0
+        .iter_mut()
+        .zip(output.iter().take(4))
+    {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
     out

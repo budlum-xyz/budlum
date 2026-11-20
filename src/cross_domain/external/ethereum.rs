@@ -701,7 +701,7 @@ pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError>
         });
     }
     let mut finality_branch = Vec::with_capacity(expected_depth);
-    for chunk in branch_bytes.chunks_exact(32) {
+    for chunk in branch_bytes.as_chunks::<32>().0 {
         let mut node = [0u8; 32];
         node.copy_from_slice(chunk);
         finality_branch.push(node);

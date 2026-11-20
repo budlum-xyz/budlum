@@ -1189,11 +1189,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 crate::core::transaction::MAX_CLAIM_REFS_PER_TX
             ));
         }
-        let claim_refs: Vec<[u8; 32]> = proto
-            .claim_refs
-            .chunks_exact(32)
-            .filter_map(|reference| <[u8; 32]>::try_from(reference).ok())
-            .collect();
+        let claim_refs: Vec<[u8; 32]> = proto.claim_refs.as_chunks::<32>().0.to_vec();
         let tx_type_proto = pb::ProtoTransactionType::try_from(proto.tx_type)
             .map_err(|_| "Invalid transaction type in proto payload")?;
 

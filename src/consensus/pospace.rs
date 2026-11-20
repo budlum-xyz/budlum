@@ -172,7 +172,7 @@ pub fn build_plot_merkle_tree(leaves: &[[u8; 32]]) -> Result<([u8; 32], u8), Con
         .collect();
     while layer.len() > 1 {
         let mut next = Vec::with_capacity(layer.len() / 2);
-        for pair in layer.chunks_exact(2) {
+        for pair in layer.as_chunks::<2>().0 {
             let Some(left) = pair.first() else {
                 break;
             };
@@ -225,7 +225,7 @@ pub fn open_plot_merkle_leaf(
             .ok_or_else(|| ConsensusError("PoSpace sibling missing".into()))?;
         siblings.push(sib);
         let mut next = Vec::with_capacity(layer.len() / 2);
-        for pair in layer.chunks_exact(2) {
+        for pair in layer.as_chunks::<2>().0 {
             if let (Some(l), Some(r)) = (pair.first(), pair.get(1)) {
                 next.push(pospace_node_hash(l, r));
             }

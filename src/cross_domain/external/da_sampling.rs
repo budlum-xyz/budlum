@@ -1038,10 +1038,8 @@ pub fn commit_da_axis(leaves: &[Hash32]) -> Result<Hash32, AdapterError> {
     let mut level = leaves.to_vec();
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len() / 2);
-        for pair in level.chunks_exact(2) {
-            if let [left, right] = pair {
-                next.push(hash_da_axis_node(left, right));
-            }
+        for pair in level.as_chunks::<2>().0 {
+            next.push(hash_da_axis_node(&pair[0], &pair[1]));
         }
         level = next;
     }
@@ -1086,10 +1084,8 @@ pub fn open_da_axis_leaf(leaves: &[Hash32], index: u16) -> Result<Vec<Hash32>, A
             })?;
         branch.push(sib);
         let mut next = Vec::with_capacity(level.len() / 2);
-        for pair in level.chunks_exact(2) {
-            if let [left, right] = pair {
-                next.push(hash_da_axis_node(left, right));
-            }
+        for pair in level.as_chunks::<2>().0 {
+            next.push(hash_da_axis_node(&pair[0], &pair[1]));
         }
         level = next;
         idx >>= 1;

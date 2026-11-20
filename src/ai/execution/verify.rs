@@ -168,7 +168,7 @@ pub fn expected_mlp_output_event_digest(
         ));
     }
     let mut rolling = 0u64;
-    for chunk in output_ref.chunks_exact(4) {
+    for chunk in output_ref.as_chunks::<4>().0 {
         let mut word = [0u8; 4];
         word.copy_from_slice(chunk);
         let limb = i32::from_le_bytes(word);

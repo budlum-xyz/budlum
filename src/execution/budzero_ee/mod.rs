@@ -112,11 +112,8 @@ fn decode_gated_program(code: &[u8]) -> Result<Vec<u64>, EeRefusal> {
         });
     }
     let mut words = Vec::with_capacity(code.len() / 8);
-    for chunk in code.chunks_exact(8) {
-        let arr: [u8; 8] = chunk.try_into().map_err(|_| EeRefusal {
-            code: RefusalCode::InvalidCode,
-            message: "bad instruction slice".into(),
-        })?;
+    for chunk in code.as_chunks::<8>().0 {
+        let arr: [u8; 8] = *chunk;
         let raw = u64::from_le_bytes(arr);
         Instruction::decode_for_mainnet(raw, MainnetActivation::default()).map_err(|e| {
             EeRefusal {
