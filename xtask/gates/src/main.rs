@@ -169,7 +169,6 @@ mod gates {
     pub mod proof_deps_are_exactly_pinned;
     pub mod qr_is_derivative_only;
     pub mod quantum_account;
-    pub mod re_pin_commits_are_inert;
     pub mod readme_claims_are_wired;
     pub mod readme_definition_block_is_verbatim;
     pub mod readme_has_no_placeholders;
@@ -185,6 +184,7 @@ mod gates {
     pub mod rust_literals;
     pub mod rust_syntax_is_parseable;
     pub mod scheme_is_never_inferred;
+    pub mod seals_move_with_their_tree;
     pub mod security_parameters;
     pub mod security_quality_wired;
     pub mod security_scans_can_fail;
@@ -1395,12 +1395,12 @@ const GATES: &[Gate] = &[
         self_test: gates::lock_failures::self_test,
     },
     Gate {
-        name: "re-pin-commits-are-inert",
-        replaces: None,
-        run: gates::re_pin_commits_are_inert::run,
+        name: "seals-move-with-their-tree",
+        replaces: Some("re-pin-commits-are-inert"),
+        run: gates::seals_move_with_their_tree::run,
         run_log: None,
         run_args: None,
-        self_test: gates::re_pin_commits_are_inert::self_test,
+        self_test: gates::seals_move_with_their_tree::self_test,
     },
     Gate {
         name: "sources-are-whole",

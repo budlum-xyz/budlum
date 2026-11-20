@@ -6,7 +6,11 @@
 # they may fall, and they may only rise in the same change that
 # re-measures them. A job whose matrix is not literal text is counted once
 # and listed in `opaque`, so hiding a matrix behind an expression is a
-# finding rather than free capacity.
+# finding rather than free capacity. A job that calls a reusable workflow
+# carries the callee's own jobs and runners, because GitHub queues the
+# callee's work under the same push; a call into another repository cannot
+# be read here, so it is counted once and listed in `opaque` too. A callee
+# that is missing, or that calls back into its caller, is a finding.
 #
 # Re-measure in the same change that moves it:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-pull-request-fanout-is-budgeted --print-baseline
