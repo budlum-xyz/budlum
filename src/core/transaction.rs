@@ -3809,6 +3809,13 @@ fn encode_identity_record(record: &crate::registry::IdentityRecord, out: &mut Ve
         put_fixed(out, guardian.as_bytes());
     }
     put_u64(out, record.recovery_threshold as u64);
+    // The per-subject credential ceiling reads `issued_credentials`, and the
+    // recovery digest reads `recovery_nonce` to refuse a replayed guardian
+    // quorum. Both ride on the wire, so both are inside the signed preimage:
+    // otherwise a relay could lower the counter or rewind the nonce on a
+    // record whose signature still verifies.
+    put_u64(out, record.issued_credentials);
+    put_u64(out, record.recovery_nonce);
 }
 fn encode_credential_commitment(
     credential: &crate::registry::CredentialCommitment,
@@ -5924,6 +5931,26 @@ mod v29_signing_tests {
         let mut r = base_record.clone();
         r.recovery_threshold = 1;
         assert_ne!(base_register, hash_of(register(r)), "recovery_threshold");
+        // `issued_credentials` is the per-subject ceiling the credential door
+        // reads, and `recovery_nonce` is what stops an applied guardian quorum
+        // from being replayed into the same epoch. A record carries both on the
+        // wire, so a relay that lowered the counter or rewound the nonce would
+        // otherwise be editing an authorization outcome behind a signature that
+        // still verifies.
+        let mut r = base_record.clone();
+        r.issued_credentials = 7;
+        assert_ne!(
+            base_register,
+            hash_of(register(r)),
+            "issued_credentials must be in the signed preimage"
+        );
+        let mut r = base_record.clone();
+        r.recovery_nonce = 3;
+        assert_ne!(
+            base_register,
+            hash_of(register(r)),
+            "recovery_nonce must be in the signed preimage"
+        );
 
         let base_issue = hash_of(issue(base_credential.clone()));
         let mut c = base_credential.clone();
