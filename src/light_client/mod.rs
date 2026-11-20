@@ -58,6 +58,13 @@ pub struct UniversalRoutePolicy {
     pub crqc_alarm_active: bool,
     /// Require every traversed domain to hold post-quantum attestation under Frost Alarm.
     pub require_pq_on_crqc_alarm: bool,
+    /// Caller-pinned `ULP-1` domain-set Merkle root the bundle must match.
+    ///
+    /// The bundle's own `domains_merkle_root` is a free witness of the proof,
+    /// so it can never anchor itself. Until the global header carries a
+    /// domain-set root, the only honest anchor is one the caller pins here;
+    /// `None` fails every route closed.
+    pub trusted_domains_root: Option<crate::domain::types::Hash32>,
 }
 
 impl UniversalRoutePolicy {
@@ -73,6 +80,25 @@ impl UniversalRoutePolicy {
             min_security_weight: 1,
             crqc_alarm_active,
             require_pq_on_crqc_alarm: true,
+            trusted_domains_root: None,
+        }
+    }
+
+    /// The strict policy with a caller-pinned domain-set root. Without a
+    /// pinned root every route verification fails closed, so this is the only
+    /// constructor that can produce an accepting policy.
+    #[must_use]
+    pub const fn strict_value_pinned(
+        trusted_domains_root: crate::domain::types::Hash32,
+        crqc_alarm_active: bool,
+    ) -> Self {
+        Self {
+            max_hops: MAX_UNIVERSAL_ROUTE_HOPS,
+            max_outflow_bps: crate::aggregation::universal_light_proof::MAX_ULP_OUTFLOW_BPS,
+            min_security_weight: 1,
+            crqc_alarm_active,
+            require_pq_on_crqc_alarm: true,
+            trusted_domains_root: Some(trusted_domains_root),
         }
     }
 }
@@ -1016,15 +1042,50 @@ impl LightClient {
             )));
         }
 
+        // Every trust anchor below comes from the verified global header or
+        // the caller's policy, never from the packet: a bundle cannot vouch
+        // for its own hub, program, or domain set.
+        let verified_hub_chain_id = u32::try_from(global_header.chain_id).map_err(|_| {
+            LightClientError::VerificationFailed(
+                "ULP-1 verified hub chain id does not fit the domain id space".into(),
+            )
+        })?;
+        if packet.ulp_bundle.hub_chain_id != verified_hub_chain_id {
+            return Err(LightClientError::VerificationFailed(format!(
+                "ULP-1 bundle hub_chain_id {} is not this hub's verified chain id {}",
+                packet.ulp_bundle.hub_chain_id, verified_hub_chain_id
+            )));
+        }
+        let canonical = crate::aggregation::universal_light_proof::compile_ulp_program(
+            verified_hub_chain_id,
+            usize::try_from(packet.ulp_bundle.domain_count).unwrap_or(usize::MAX),
+        )
+        .map_err(|e| LightClientError::VerificationFailed(e.to_string()))?;
+        if packet.expected_program_hash != canonical.program_hash {
+            return Err(LightClientError::VerificationFailed(
+                "ULP-1 packet program hash differs from the canonical circuit".into(),
+            ));
+        }
+        let Some(trusted_domains_root) = policy.trusted_domains_root else {
+            return Err(LightClientError::VerificationFailed(
+                "ULP-1 route policy pins no trusted domains root; value routes stay fail-closed"
+                    .into(),
+            ));
+        };
         let hub_root = global_header.calculate_hash_bytes();
         let ulp_header = open_universal_light_proof(
             &packet.ulp_bundle,
-            &packet.expected_program_hash,
-            packet.ulp_bundle.hub_chain_id,
+            &canonical.program_hash,
+            verified_hub_chain_id,
             &hub_root,
             registry,
         )
         .map_err(|e| LightClientError::VerificationFailed(e.to_string()))?;
+        if ulp_header.domains_merkle_root != trusted_domains_root {
+            return Err(LightClientError::VerificationFailed(
+                "ULP-1 bundle domain-set root differs from the pinned trusted root".into(),
+            ));
+        }
 
         if ulp_header.max_outflow_bps > effective_ceiling {
             return Err(LightClientError::VerificationFailed(format!(
@@ -2458,6 +2519,7 @@ mod tests {
         }
 
         let (prog_hash, bundle6, sorted6) = six_bundle_opt.unwrap();
+        let pinned_root = bundle6.domains_merkle_root;
         let snap = |id: u32| sorted6.iter().find(|s| s.domain_id == id).unwrap().clone();
         let proof = |id: u32| prove_ulp_domain_inclusion(&sorted6, id).unwrap();
 
@@ -2494,7 +2556,7 @@ mod tests {
                 &state_body,
                 &global_header,
                 &pq_route,
-                &UniversalRoutePolicy::strict_value(true),
+                &UniversalRoutePolicy::strict_value_pinned(pinned_root, true),
                 &registry,
             )
             .expect("PQ-clean multi-hop route passes under Frost Alarm");
@@ -2543,7 +2605,7 @@ mod tests {
                 &state_body,
                 &global_header,
                 &mixed_route,
-                &UniversalRoutePolicy::strict_value(false),
+                &UniversalRoutePolicy::strict_value_pinned(pinned_root, false),
                 &registry,
             )
             .expect("mixed route passes when Frost Alarm is inactive");
@@ -2554,7 +2616,7 @@ mod tests {
                 &state_body,
                 &global_header,
                 &mixed_route,
-                &UniversalRoutePolicy::strict_value(true),
+                &UniversalRoutePolicy::strict_value_pinned(pinned_root, true),
                 &registry,
             )
             .expect_err("Frost Alarm must reject non-PQ hop fail-closed");
@@ -2571,7 +2633,7 @@ mod tests {
                 &state_body,
                 &global_header,
                 &over_cap,
-                &UniversalRoutePolicy::strict_value(false),
+                &UniversalRoutePolicy::strict_value_pinned(pinned_root, false),
                 &registry,
             )
             .is_err());
@@ -2587,7 +2649,7 @@ mod tests {
                 &state_body,
                 &global_header,
                 &forged_leaf,
-                &UniversalRoutePolicy::strict_value(false),
+                &UniversalRoutePolicy::strict_value_pinned(pinned_root, false),
                 &registry,
             )
             .is_err());
@@ -2623,9 +2685,73 @@ mod tests {
                 &state_body,
                 &global_header,
                 &cycle_route,
-                &UniversalRoutePolicy::strict_value(false),
+                &UniversalRoutePolicy::strict_value_pinned(pinned_root, false),
                 &registry,
             )
             .is_err());
+
+        // 6. A bundle proved for another hub is not accepted as this hub's
+        //    finality: the verified header's chain id is the anchor.
+        let mut foreign_hub = pq_route.clone();
+        foreign_hub.ulp_bundle.hub_chain_id = hub_chain_id + 1;
+        let foreign_err = client
+            .verify_multi_hop_light_route(
+                &checkpoint,
+                &state_body,
+                &global_header,
+                &foreign_hub,
+                &UniversalRoutePolicy::strict_value_pinned(pinned_root, false),
+                &registry,
+            )
+            .expect_err("a foreign hub id must be refused against the verified header");
+        assert!(foreign_err.to_string().contains("verified chain id"));
+
+        // 7. A packet-declared program hash that differs from the canonical
+        //    circuit is refused before any proof work.
+        let mut forged_program = pq_route.clone();
+        forged_program.expected_program_hash[0] ^= 0x01;
+        let program_err = client
+            .verify_multi_hop_light_route(
+                &checkpoint,
+                &state_body,
+                &global_header,
+                &forged_program,
+                &UniversalRoutePolicy::strict_value_pinned(pinned_root, false),
+                &registry,
+            )
+            .expect_err("a non-canonical program hash must be refused");
+        assert!(program_err.to_string().contains("canonical circuit"));
+
+        // 8. Without a pinned domain-set root the route fails closed: the
+        //    bundle's own root is a free witness and cannot anchor itself.
+        let unpinned_err = client
+            .verify_multi_hop_light_route(
+                &checkpoint,
+                &state_body,
+                &global_header,
+                &pq_route,
+                &UniversalRoutePolicy::strict_value(false),
+                &registry,
+            )
+            .expect_err("a policy without a pinned root must fail closed");
+        assert!(unpinned_err
+            .to_string()
+            .contains("pins no trusted domains root"));
+
+        // 9. A pinned root that differs from the bundle's domain set refuses
+        //    the route even though every proof inside the bundle verifies.
+        let mut wrong_root = pinned_root;
+        wrong_root[0] ^= 0xFF;
+        let wrong_root_err = client
+            .verify_multi_hop_light_route(
+                &checkpoint,
+                &state_body,
+                &global_header,
+                &pq_route,
+                &UniversalRoutePolicy::strict_value_pinned(wrong_root, false),
+                &registry,
+            )
+            .expect_err("a mismatched pinned root must refuse the route");
+        assert!(wrong_root_err.to_string().contains("pinned trusted root"));
     }
 }
