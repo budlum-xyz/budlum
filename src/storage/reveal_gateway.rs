@@ -296,10 +296,23 @@ impl RevealGateway {
         now: u64,
     ) -> Result<u64, RevealGatewayError> {
         let req = Self::with_default_budget(req);
-        Self::check_packed_len(req.packed.len())?;
-        let pinned_bytes = req.packed.len();
+        let pinned_bytes = Self::effective_packed_bytes(&req.packed);
+        Self::check_packed_len(pinned_bytes)?;
         let handle = open_reveal_session(registry, recorded_owner, &req)?;
         self.admit(handle, GrantScope::of(&req), now, pinned_bytes)
+    }
+
+    /// Effective resident footprint of `packed`: the larger of its wire byte
+    /// length and its `BDL3` uncompressed `orig_len` header (`[7..15]` LE),
+    /// closing zlib compression bombs alongside raw oversized bodies.
+    fn effective_packed_bytes(packed: &[u8]) -> usize {
+        let declared_orig = packed
+            .get(7..15)
+            .and_then(|slice| <[u8; 8]>::try_from(slice).ok())
+            .map_or(0usize, |le| {
+                usize::try_from(u64::from_le_bytes(le)).unwrap_or(usize::MAX)
+            });
+        packed.len().max(declared_orig)
     }
 
     /// The per-session byte cap, applied before any expensive open work.
@@ -344,8 +357,8 @@ impl RevealGateway {
         grant_allows: bool,
     ) -> Result<PreparedReveal, RevealGatewayError> {
         let req = Self::with_default_budget(req);
-        Self::check_packed_len(req.packed.len())?;
-        let pinned_bytes = req.packed.len();
+        let pinned_bytes = Self::effective_packed_bytes(&req.packed);
+        Self::check_packed_len(pinned_bytes)?;
         let handle = open_reveal_session_prechecked(&req, grant_allows)?;
         Ok(PreparedReveal {
             grant: GrantScope::of(&req),
@@ -539,7 +552,9 @@ impl RevealGateway {
             let _ = self.sessions.remove(&id);
             return Err(RevealGatewayError::Revoked { id });
         }
-        Ok(session.handle.emit_frames(seq_start, count)?)
+        let emitted = session.handle.emit_frames(seq_start, count)?;
+        self.sweep(now);
+        Ok(emitted)
     }
 
     /// Close a session early. Returns whether it existed.
@@ -664,9 +679,41 @@ mod gateway_tests {
             Err(RevealGatewayError::PinnedBudget { .. })
         ));
         assert!(gw.close(7), "the hog existed");
-        let again = RevealGateway::prepare_prechecked(make(), false).unwrap();
-        gw.open_prepared(again, 100)
+        let stale_id = gw
+            .open_prepared(
+                RevealGateway::prepare_prechecked(make(), false).unwrap(),
+                100,
+            )
             .expect("freed budget admits the honest session");
+        let _ = stale_id;
+        let fresh_id = gw
+            .open_prepared(
+                RevealGateway::prepare_prechecked(make(), false).unwrap(),
+                350,
+            )
+            .expect("second session opens");
+        assert_eq!(gw.session_count(), 2);
+        gw.emit_frames(fresh_id, 0, 1, 450, true).unwrap();
+        assert_eq!(
+            gw.session_count(),
+            1,
+            "serving frames on a live session sweeps expired peer sessions"
+        );
+
+        // Zlib-compressed BDL3 bomb whose wire length is tiny (< 4 KiB) but
+        // whose declared uncompressed `orig_len` exceeds MAX_REVEAL_PACKED_BYTES.
+        let bomb_packed = pack_payload(
+            PayloadKind::ContentBytes,
+            &vec![0xAAu8; MAX_REVEAL_PACKED_BYTES + 1],
+        )
+        .unwrap();
+        assert!(bomb_packed.len() < 4096);
+        let mut bomb_req = make();
+        bomb_req.packed = bomb_packed;
+        assert!(matches!(
+            RevealGateway::prepare_prechecked(bomb_req, false),
+            Err(RevealGatewayError::PackedTooLarge { .. })
+        ));
     }
 
     /// The expensive half of an open needs no table, so a handler
