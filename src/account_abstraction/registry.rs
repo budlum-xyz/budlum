@@ -360,6 +360,24 @@ mod tests {
         assert_eq!(registry.len(), 1);
     }
 
+    /// A non-zero pact root is evidence-backed state, not a caller-provided claim.
+    #[test]
+    fn registering_a_nonzero_pact_root_without_pact_evidence_is_refused() {
+        let mut account = account_with(2, 3);
+        account.storage_root = [9u8; 32];
+        account.pact_root = [7u8; 32];
+
+        let mut registry = QuantumAccountRegistry::new();
+        assert!(
+            registry.register(account).is_err(),
+            "a non-zero pact root must enter through register_with_pacts"
+        );
+        assert!(
+            registry.is_empty(),
+            "a refused claim must not enter the registry"
+        );
+    }
+
     /// A change that invalidates must not be applied and must not corrupt the record.
     #[test]
     fn an_update_that_invalidates_the_account_is_refused_and_changes_nothing() {
