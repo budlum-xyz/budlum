@@ -834,9 +834,11 @@ mod tests {
             .register(account_with(2, 3))
             .expect("valid account");
 
+        // Re-pinned after the epoch joined the root fold: the old pin was
+        // written before `root()` committed the registry epoch.
         assert_eq!(
             hex::encode(registry.root()),
-            "a67a4961e1619127a480972a186b258524f81fc2136ec98171b9322a30d048ad"
+            "5c2e357278711e6fd824b72ece2557ebf902f853617a923643a8ab64258ce988"
         );
     }
 
