@@ -287,6 +287,23 @@ jobs:
               exit 1
             }
           done
+      - name: Service binary tests
+        if: always() && steps.rust.outcome == 'success'
+        # `budlum-gateway`, `budlum-indexer`, `budlum-light` and
+        # `budlum-relayer` each carry their own tests and none of them ran in
+        # any workflow. The relayer's client construction panicked with "No
+        # provider set" the moment its tests were actually executed: it is built
+        # with the provider-less rustls feature and only `main` installed the
+        # process-wide provider, so every unit test that built a client hit it.
+        run: |
+          set -euo pipefail
+          cargo test --bin budlum-gateway --bin budlum-indexer --bin budlum-light --bin budlum-relayer 2>&1 | tee /tmp/service-bin-tests.log
+          for name in deposit_proof_builder_is_fail_closed_until_real_impl_exists; do
+            grep -Eq "${name} \.\.\. ok" /tmp/service-bin-tests.log || {
+              echo "::error::service binary regression $name did not pass"
+              exit 1
+            }
+          done
       - name: Public service admission tests
         if: always() && steps.rust.outcome == 'success'
         run: |
