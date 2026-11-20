@@ -1159,4 +1159,58 @@ mod tests {
             "datum host.read error must fail closed instead of rolling back to initial_datum_int"
         );
     }
+
+    #[test]
+    fn plutus_deploy_charges_per_byte_of_published_blob() {
+        let mut worker = PlutusWorker::with_activation_height(Some(0));
+        let prog = PlutusValidatorProgram {
+            uplc_version: String::from("1.1.0"),
+            initial_datum_int: 1,
+            validator: UplcTerm::ConstBytes(vec![0xAB; 600]),
+        };
+        let Ok(blob) = encode_plutus_blob(&prog) else {
+            panic!("blob");
+        };
+        let expected_gas = 1_000 + (blob.len() as u64) * 25;
+        let Ok(alice) = EeIdentity::new(EeId::PLUTUS, vec![0x99; 32]) else {
+            panic!("alice");
+        };
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(low) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice.clone(),
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob.clone(),
+                gas_limit: expected_gas - 1,
+                depth: 0,
+                tx_hash: [0xD1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low");
+        };
+        assert_eq!(low.status, OutcomeStatus::OutOfGas);
+
+        let Ok(ok) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice,
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob,
+                gas_limit: expected_gas,
+                depth: 0,
+                tx_hash: [0xD2; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("ok");
+        };
+        assert_eq!(ok.status, OutcomeStatus::Success);
+        assert_eq!(ok.gas_used, expected_gas);
+    }
 }

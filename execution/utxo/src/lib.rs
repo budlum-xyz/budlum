@@ -1198,4 +1198,62 @@ mod tests {
             "host.read error on spent marker must fail closed instead of double-spending"
         );
     }
+
+    #[test]
+    fn utxo_deploy_charges_per_byte_of_published_script() {
+        let mut worker = UtxoScriptWorker::with_activation_height(Some(0));
+        let lock = UtxoLockScript {
+            witness_ops: Vec::new(),
+            lock_ops: vec![
+                ScriptOp::PushBytes(vec![0x5A; 400]),
+                ScriptOp::OpDrop,
+                ScriptOp::PushNum(1),
+            ],
+            value_atoms: 0,
+        };
+        let Ok(blob) = encode_utxo_script(&lock) else {
+            panic!("blob");
+        };
+        let expected_gas = 1_000 + (blob.len() as u64) * 25;
+        let Ok(caller) = EeIdentity::new(EeId::UTXO, vec![0x88; 32]) else {
+            panic!("caller");
+        };
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(low) = worker.execute(
+            &ctx(1),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob.clone(),
+                gas_limit: expected_gas - 1,
+                depth: 0,
+                tx_hash: [0x71; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low");
+        };
+        assert_eq!(low.status, OutcomeStatus::OutOfGas);
+
+        let Ok(ok) = worker.execute(
+            &ctx(1),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller,
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob,
+                gas_limit: expected_gas,
+                depth: 0,
+                tx_hash: [0x72; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("ok");
+        };
+        assert_eq!(ok.status, OutcomeStatus::Success);
+        assert_eq!(ok.gas_used, expected_gas);
+    }
 }

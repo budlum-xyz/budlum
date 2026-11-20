@@ -278,6 +278,12 @@ fn run_near_ops(
         }
         match op {
             NearOp::StorageWrite { key, value } => {
+                let write_cost = u64::try_from(value.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(NEAR_CODE_LOAD_PER_BYTE_BGU);
+                if !charge_step(gas_used, scope.gas_limit, write_cost, host) {
+                    return Err(b"OUT_OF_GAS".to_vec());
+                }
                 if host
                     .write(scope.ns, &state_key(scope.contract_id, key), Some(value))
                     .is_err()
@@ -1103,5 +1109,133 @@ mod tests {
             OutcomeStatus::Revert,
             "NEAR Deploy must fail closed on code: host.read error"
         );
+    }
+
+    #[test]
+    fn near_per_byte_deploy_code_load_and_storage_write_gas() {
+        let mut worker = NearWasmWorker::with_activation_height(Some(0));
+        let prog = NearContractProgram {
+            abi_version: String::from("near-sdk-5.0"),
+            init_ops: vec![NearOp::StorageWrite {
+                key: String::from("init"),
+                value: vec![b'z'; 16],
+            }],
+            methods: vec![
+                NearMethod {
+                    name: String::from("ping"),
+                    is_view: true,
+                    ops: vec![NearOp::StorageReturn {
+                        key: "k".repeat(2_200),
+                    }],
+                },
+                NearMethod {
+                    name: String::from("put"),
+                    is_view: false,
+                    ops: vec![NearOp::SetFromArg {
+                        storage_key: String::from("blob"),
+                        arg_key: String::from("v"),
+                    }],
+                },
+            ],
+        };
+        let Ok(blob) = encode_near_blob(&prog) else {
+            panic!("encode_near_blob");
+        };
+        let expected_deploy_gas = 1_500 + (blob.len() as u64) * NEAR_CODE_LOAD_PER_BYTE_BGU;
+        let Ok(alice) = EeIdentity::new(EeId::NEAR_WASM, b"alice.budlum.near".to_vec()) else {
+            panic!("alice");
+        };
+        let mut host = MemoryHost::new(10_000_000);
+
+        let Ok(low_dep) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice.clone(),
+                value: BudAmount(0),
+                input: blob.clone(),
+                gas_limit: expected_deploy_gas - 1,
+                depth: 0,
+                tx_hash: [0xA1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low deploy");
+        };
+        assert_eq!(low_dep.status, OutcomeStatus::OutOfGas);
+
+        let Ok(dep) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice.clone(),
+                value: BudAmount(0),
+                input: blob.clone(),
+                gas_limit: expected_deploy_gas + 10_000,
+                depth: 0,
+                tx_hash: [0xA2; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        assert!(dep.gas_used >= expected_deploy_gas + 16 * NEAR_CODE_LOAD_PER_BYTE_BGU);
+        let Ok(contract) = EeIdentity::new(EeId::NEAR_WASM, dep.output) else {
+            panic!("contract");
+        };
+
+        let Ok(ping_in) = serde_json::to_vec(&NearFunctionCall {
+            method_name: String::from("ping"),
+            args: BTreeMap::new(),
+        }) else {
+            panic!("ping json");
+        };
+        let expected_load_gas = 1_500 + (blob.len() as u64) * NEAR_CODE_LOAD_PER_BYTE_BGU;
+        let Ok(low_call) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: alice.clone(),
+                target: contract.clone(),
+                value: BudAmount(0),
+                input: ping_in,
+                gas_limit: expected_load_gas - 1,
+                depth: 0,
+                tx_hash: [0xA3; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low call");
+        };
+        assert_eq!(low_call.status, OutcomeStatus::OutOfGas);
+
+        let mut args = BTreeMap::new();
+        args.insert(String::from("v"), vec![b'x'; 4_000]);
+        let Ok(put_in) = serde_json::to_vec(&NearFunctionCall {
+            method_name: String::from("put"),
+            args,
+        }) else {
+            panic!("put json");
+        };
+        let Ok(low_put) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: alice,
+                target: contract,
+                value: BudAmount(0),
+                input: put_in,
+                gas_limit: expected_load_gas + 50_000,
+                depth: 0,
+                tx_hash: [0xA4; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low put");
+        };
+        assert_eq!(low_put.status, OutcomeStatus::OutOfGas);
     }
 }

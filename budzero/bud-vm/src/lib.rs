@@ -653,7 +653,13 @@ impl Vm {
                 } else {
                     constant_storage_slot(inst.imm)
                 };
+                if slot >= GOLDILOCKS_P {
+                    return Err(VmError::InvalidMemoryAccess);
+                }
                 let val = *self.storage.get(&slot).unwrap_or(&0);
+                if val >= GOLDILOCKS_P {
+                    return Err(VmError::InvalidMemoryAccess);
+                }
                 self.registers[dst_idx as usize] = val;
                 self.pc += 1;
                 (val, cur_pc + 1)
@@ -664,6 +670,9 @@ impl Vm {
                 } else {
                     constant_storage_slot(inst.imm)
                 };
+                if slot >= GOLDILOCKS_P || src1_val >= GOLDILOCKS_P {
+                    return Err(VmError::InvalidMemoryAccess);
+                }
                 self.storage.insert(slot, src1_val);
                 self.state_writes.push((slot, src1_val));
                 self.pc += 1;
@@ -689,7 +698,9 @@ impl Vm {
                     6 => {
                         self.events.push(0x00A1_00A1);
                         self.events.push(src1_val);
-                        self.context.block_height.saturating_add(src1_val)
+                        let p = u128::from(GOLDILOCKS_P);
+                        ((u128::from(self.context.block_height) % p + u128::from(src1_val) % p) % p)
+                            as u64
                     }
                     10..=13 if self.mainnet_mode || self.context.sender_words != [0u64; 4] => {
                         let words = self.context.effective_sender_words();
@@ -2236,5 +2247,81 @@ mod poseidon_parameter_tests {
         assert!(!receipt.success);
         assert_eq!(receipt.error, Some(VmError::OutOfGas));
         assert!(vm.trace.len() <= MAX_CONTRACT_TRACE_STEPS + 1);
+    }
+
+    #[test]
+    fn sread_swrite_canonicality_and_syscall6_goldilocks_wrap() {
+        // 1. SWrite with non-canonical slot >= GOLDILOCKS_P must fail InvalidMemoryAccess.
+        let swrite_reg = Instruction {
+            opcode: Opcode::SWrite,
+            rd: 0,
+            rs1: 1,
+            rs2: 2,
+            imm: -1,
+        }
+        .encode();
+        let halt = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let mut vm = Vm::new(256);
+        vm.registers[1] = 42;
+        vm.registers[2] = GOLDILOCKS_P;
+        assert_eq!(
+            vm.run(&[swrite_reg, halt]).err(),
+            Some(VmError::InvalidMemoryAccess),
+            "SWrite with slot >= GOLDILOCKS_P must fail InvalidMemoryAccess"
+        );
+        assert!(vm.state_writes.is_empty());
+
+        // 2. SWrite with non-canonical value >= GOLDILOCKS_P must fail InvalidMemoryAccess.
+        let mut vm2 = Vm::new(256);
+        vm2.registers[1] = GOLDILOCKS_P;
+        vm2.registers[2] = 7;
+        assert_eq!(
+            vm2.run(&[swrite_reg, halt]).err(),
+            Some(VmError::InvalidMemoryAccess),
+            "SWrite with value >= GOLDILOCKS_P must fail InvalidMemoryAccess"
+        );
+        assert!(vm2.state_writes.is_empty());
+
+        // 3. SRead with non-canonical slot >= GOLDILOCKS_P must fail InvalidMemoryAccess.
+        let sread_reg = Instruction {
+            opcode: Opcode::SRead,
+            rd: 3,
+            rs1: 0,
+            rs2: 2,
+            imm: -1,
+        }
+        .encode();
+        let mut vm3 = Vm::new(256);
+        vm3.registers[2] = GOLDILOCKS_P;
+        assert_eq!(
+            vm3.run(&[sread_reg, halt]).err(),
+            Some(VmError::InvalidMemoryAccess),
+            "SRead with slot >= GOLDILOCKS_P must fail InvalidMemoryAccess"
+        );
+
+        // 4. Syscall 6 must use Goldilocks field addition matching BudAir, not saturating_add.
+        let sys6 = Instruction {
+            opcode: Opcode::Syscall,
+            rd: 4,
+            rs1: 1,
+            rs2: 0,
+            imm: 6,
+        }
+        .encode();
+        let mut vm4 = Vm::new(256);
+        vm4.context.block_height = GOLDILOCKS_P - 5;
+        vm4.registers[1] = 10;
+        vm4.run(&[sys6, halt]).expect("syscall 6 must succeed");
+        assert_eq!(
+            vm4.registers[4], 5,
+            "Syscall 6 must compute (block_height + rs1) mod GOLDILOCKS_P == 5"
+        );
     }
 }

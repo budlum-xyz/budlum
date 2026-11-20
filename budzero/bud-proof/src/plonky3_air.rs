@@ -746,9 +746,21 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
             // A word that does not decode contributes zero for the immediate.
             // Such a row can never be matched by a CPU row anyway: the VM
             // refuses to step on it, so no trace row carries that pc.
-            let imm = bud_isa::Instruction::decode_any(inst)
-                .map(|d| d.imm)
-                .unwrap_or(0);
+            let decoded = bud_isa::Instruction::decode_any(inst).ok();
+            // Extended 256-bit caller-word syscalls (10..=13) are only valid in
+            // native UEL execution; ExecutionPublicInputs commits only the 64-bit
+            // `sender`, so BudAir must reject any program containing Syscall
+            // 10..=13 fail-closed rather than folding them into `unknown_syscall`.
+            if i < self.program.len()
+                && matches!(
+                    decoded,
+                    Some(d)
+                        if d.opcode == bud_isa::Opcode::Syscall && (10..=13).contains(&d.imm)
+                )
+            {
+                return None;
+            }
+            let imm = decoded.map(|d| d.imm).unwrap_or(0);
             let imm_field = match u64::try_from(imm) {
                 Ok(non_neg) => F::from_u64(non_neg),
                 Err(_) => F::ZERO - F::from_u64(u64::from(imm.unsigned_abs())),
