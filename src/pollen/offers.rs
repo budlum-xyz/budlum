@@ -217,8 +217,10 @@ pub const MAX_NAME_OFFERS_PER_SELLER: usize = 64;
 
 /// How far ahead a name listing may expire. The full-table sweep reclaims
 /// only expired rows, so the expiry a seller picks is also the lifetime of
-/// the table space it occupies.
-pub const MAX_NAME_OFFER_TTL_EPOCHS: u64 = 10_000;
+/// the table space it occupies. The bound is the longest registration a
+/// settled offer could grant: a listing has no reason to outlive the
+/// longest life its own product can have.
+pub const MAX_NAME_OFFER_TTL_EPOCHS: u64 = crate::registry::params::MAX_DURATION;
 /// Most data assets the registry holds.
 ///
 /// Convenience: pub so marketplace callers can refuse past the
