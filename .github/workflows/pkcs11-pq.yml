@@ -7,6 +7,7 @@ name: PKCS#11 3.2 post-quantum token
 # software token (src/crypto/mainnet_policy.rs).
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   # Heavy battery. It runs on pull requests to `main` (the PR that merges the
