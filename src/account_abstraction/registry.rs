@@ -57,6 +57,13 @@ pub enum QuantumAccountRegistryError {
     PactRegistryRootIsStale { reason: &'static str },
     /// A non-zero pact root was submitted without the pact set that proves it.
     PactRegistryRequired { declared: [u8; 32] },
+    /// A change named a registry root that is not the current one: it was
+    /// computed against an older state and replaying it would move the
+    /// registry backwards.
+    RootMismatch {
+        expected: [u8; 32],
+        current: [u8; 32],
+    },
 }
 
 impl std::fmt::Display for QuantumAccountRegistryError {
@@ -105,6 +112,12 @@ impl std::fmt::Display for QuantumAccountRegistryError {
                 f,
                 "non-zero pact root {} requires its pact registry",
                 hex::encode(declared)
+            ),
+            Self::RootMismatch { expected, current } => write!(
+                f,
+                "quantum account registry: change was computed against root {} but the registry root is {}",
+                hex::encode(expected),
+                hex::encode(current)
             ),
         }
     }
@@ -155,9 +168,27 @@ fn account_commitment(account: &QuantumAccount) -> [u8; 32] {
 }
 
 /// The registry of quantum accounts.
-#[derive(Debug, Clone, Default)]
+///
+/// The registry is state, not an operator convenience: it is folded into the
+/// block state root (only while nonempty, on the identity pattern) and it is
+/// carried and digested by the snapshot. Its `root()` commits to every account
+/// field in ascending address order plus the epoch, so two nodes that reach
+/// the same accounts agree on one root whatever order the registrations
+/// arrived in.
+///
+/// Replay protection lives in the two `*_at_root` entry points: a change names
+/// the root it was computed against, and it is applied only when that root is
+/// the registry's current root. A replayed copy from an older state therefore
+/// fails on the root and never runs its change - the same counter-measurement
+/// an ordered chain gets from a sequence number that cannot go backwards.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct QuantumAccountRegistry {
     accounts: BTreeMap<[u8; 32], QuantumAccount>,
+    /// The chain epoch this registry state belongs to. Persisted and folded
+    /// into `root()`: an older copy applied at a later epoch must not read the
+    /// same as the current one.
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 impl QuantumAccountRegistry {
@@ -256,6 +287,73 @@ impl QuantumAccountRegistry {
         self.insert_validated_account(account)
     }
 
+    /// Set the epoch this registry state belongs to. Genesis, the executor
+    /// and the snapshot restore are the callers; the epoch is folded into
+    /// [`Self::root`], so a state restored under another epoch does not read
+    /// the same as the current one.
+    /// WIRING: `AccountState::stamp_quantum_account_epoch` is the caller.
+    pub fn set_epoch(&mut self, epoch: u64) {
+        self.epoch = epoch;
+    }
+
+    /// Register an account, refusing a change computed against an older root.
+    ///
+    /// This is the replay-safe entry point: an operator or a block executor
+    /// that read the registry at `based_on_root` re-sends the same change when
+    /// a transfer retries; the second attempt carries the old root and is
+    /// refused instead of registering onto a state that has moved.
+    ///
+    /// WIRING: `AccountState::register_quantum_account_at_root` calls this
+    /// from the state-level door; the block executor reaches it through that
+    /// account, which is why the name appears in the tree only there. Before
+    /// the execution path lands, the unit canaries are the proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QuantumAccountRegistryError::RootMismatch`] when `based_on_root`
+    /// is not the current root, and every error [`Self::register_with_pacts`]
+    /// and [`Self::register`] return.
+    pub fn register_at_root(
+        &mut self,
+        based_on_root: [u8; 32],
+        account: QuantumAccount,
+    ) -> Result<(), QuantumAccountRegistryError> {
+        self.expect_root(based_on_root)?;
+        self.register(account)
+    }
+
+    /// Update a registered account, refusing a change computed against an
+    /// older root; the change function does not run when the root is stale.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QuantumAccountRegistryError::RootMismatch`] when `based_on_root`
+    /// is not the current root, and every error [`Self::update`] returns.
+    /// WIRING: `AccountState::update_quantum_account_at_root` is the caller.
+    pub fn update_at_root<F>(
+        &mut self,
+        address: &[u8; 32],
+        based_on_root: [u8; 32],
+        change: F,
+    ) -> Result<(), QuantumAccountRegistryError>
+    where
+        F: FnOnce(&mut QuantumAccount),
+    {
+        self.expect_root(based_on_root)?;
+        self.update(address, change)
+    }
+
+    fn expect_root(&self, based_on_root: [u8; 32]) -> Result<(), QuantumAccountRegistryError> {
+        let current = self.root();
+        if based_on_root != current {
+            return Err(QuantumAccountRegistryError::RootMismatch {
+                expected: based_on_root,
+                current,
+            });
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn get(&self, address: &[u8; 32]) -> Option<&QuantumAccount> {
         self.accounts.get(address)
@@ -290,9 +388,11 @@ impl QuantumAccountRegistry {
     #[must_use]
     pub fn root(&self) -> [u8; 32] {
         let account_count = canonical_usize(self.accounts.len());
+        let epoch = self.epoch.to_le_bytes();
         let commitments: Vec<[u8; 32]> = self.accounts.values().map(account_commitment).collect();
-        let mut fields: Vec<&[u8]> = Vec::with_capacity(commitments.len() + 2);
+        let mut fields: Vec<&[u8]> = Vec::with_capacity(commitments.len() + 3);
         fields.push(REGISTRY_ROOT_DOMAIN_V1);
+        fields.push(&epoch);
         fields.push(&account_count);
         fields.extend(commitments.iter().map(<[u8; 32]>::as_slice));
         hash_fields_bytes(&fields)
@@ -739,6 +839,100 @@ mod tests {
                 .expect_err("unknown address"),
             QuantumAccountRegistryError::NotRegistered { .. }
         ));
+    }
+
+    /// A replayed registration (the same account copy applied a second time
+    /// from an older state) must be refused against the current root, and the
+    /// refusal must name the root the caller based the change on: a transfer
+    /// made against a stale root cannot resurrect an account or move state
+    /// backwards.
+    #[test]
+    fn a_replayed_registration_against_a_stale_root_is_refused() {
+        let mut registry = QuantumAccountRegistry::new();
+        let stale_root = registry.root();
+        registry
+            .register_at_root(stale_root, account_with(2, 3))
+            .expect("fresh registration at the current root");
+        let current = account_with(2, 3);
+        let err = registry
+            .register_at_root(stale_root, current)
+            .expect_err("the root it was based on is no longer current");
+        assert!(
+            matches!(err, QuantumAccountRegistryError::RootMismatch { .. }),
+            "a replayed change must fail on the root check, got {err:?}"
+        );
+        assert_eq!(registry.len(), 1);
+    }
+
+    /// An update replayed from an older state must not re-apply: the second
+    /// attempt still carries the old root and is refused before the change
+    /// function runs.
+    #[test]
+    fn a_replayed_update_against_a_stale_root_is_refused() {
+        let address = account_with(2, 3).address;
+        let mut registry = QuantumAccountRegistry::new();
+        registry.register(account_with(2, 3)).expect("register");
+        let stale_root = registry.root();
+        registry
+            .update_at_root(&address, stale_root, |a| a.nonce += 1)
+            .expect("first update at the current root");
+        let mut ran = false;
+        let err = registry
+            .update_at_root(&address, stale_root, |_| ran = true)
+            .expect_err("the replay carries the old root");
+        assert!(
+            matches!(err, QuantumAccountRegistryError::RootMismatch { .. }),
+            "a replayed update must fail on the root check, got {err:?}"
+        );
+        assert!(!ran, "the change must not run when the root is stale");
+        assert_eq!(registry.get(&address).map(|a| a.nonce), Some(1));
+    }
+
+    /// The registry must survive a snapshot round trip: the epoch and every
+    /// account travel through serde, and a restored registry reproduces the
+    /// same root.
+    #[test]
+    fn a_restored_registry_reproduces_its_root() {
+        let mut registry = QuantumAccountRegistry::new();
+        registry.set_epoch(7);
+        registry.register(account_with(2, 3)).expect("register");
+        let encoded = serde_json::to_string(&registry).expect("serialize");
+        let restored: QuantumAccountRegistry = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(restored.epoch, 7);
+        assert_eq!(restored.root(), registry.root());
+    }
+
+    /// The root must describe the accounts, not the arrival order: the
+    /// account count and every account field are folded in ascending address
+    /// order (a `BTreeMap`), and the epoch is a separate domain-separated
+    /// commitment.
+    #[test]
+    fn the_registry_root_binds_every_account_field() {
+        let mut registry = QuantumAccountRegistry::new();
+        registry.register(account_with(2, 3)).expect("register");
+        let root = registry.root();
+        let address = account_with(2, 3).address;
+        for edit in [
+            |a: &mut QuantumAccount| a.nonce += 1,
+            |a: &mut QuantumAccount| a.balance += 1,
+            |a: &mut QuantumAccount| a.storage_bytes += 1,
+            |a: &mut QuantumAccount| a.timelock_blocks += 1,
+        ] {
+            let mut changed = registry.clone();
+            changed.update(&address, edit).expect("update");
+            assert_ne!(
+                changed.root(),
+                root,
+                "an editable field must move the registry root"
+            );
+        }
+        let mut epoch_moved = registry.clone();
+        epoch_moved.set_epoch(1);
+        assert_ne!(
+            epoch_moved.root(),
+            root,
+            "the epoch must move the registry root"
+        );
     }
 
     #[test]

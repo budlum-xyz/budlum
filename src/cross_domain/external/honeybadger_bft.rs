@@ -843,6 +843,10 @@ impl ExternalFinalityAdapter for HoneyBadgerBftAdapter {
             });
         }
 
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
+        }
+
         // Record only pure post-quantum ML-DSA-65 after every check succeeds.
         for _ in 0..ev.votes.len() {
             observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
@@ -862,7 +866,9 @@ impl ExternalFinalityAdapter for HoneyBadgerBftAdapter {
                 signers,
                 required,
                 total_weight,
-                slashable: true,
+                // External HoneyBadgerBFT committees have no local Budlum
+                // confiscation bond or BridgeEconomicGuard arm yet.
+                slashable: false,
             },
             evidence_digest: evidence.digest(),
             adapter_version: self.descriptor.adapter_version,
@@ -1052,7 +1058,7 @@ mod tests {
         let (_keys, pinned, ev, raw) = fixture();
         let adapter = HoneyBadgerBftAdapter::new("hbbft-testnet", Some(pinned)).with_golden(raw);
         let mut policy = VerificationPolicy::strict(15);
-        policy.require_slashable = true;
+        policy.require_slashable = false;
         policy.max_age = 10;
 
         let (report, facts) = admit_observed(&adapter, &policy);
@@ -1178,5 +1184,32 @@ mod tests {
         let mut forged = proof;
         forged.second_sig = keys[0].sign(CROSS_DOMAIN_V1, &msg_b).expect("signs");
         assert!(verify_rbc_equivocation(&pinned, &forged).is_err());
+
+        let (_keys2, pinned2, _ev2, raw2) = fixture();
+        let adapter2 = HoneyBadgerBftAdapter::new("hbbft-testnet", Some(pinned2));
+        let mut unbonded_policy = VerificationPolicy::strict(15);
+        unbonded_policy.max_age = 10;
+        let att = adapter2
+            .verify(&raw2, &unbonded_policy)
+            .expect("valid HoneyBadgerBFT evidence verifies when slashability is not required");
+        assert!(
+            matches!(
+                att.security,
+                SecurityBacking::SignatureSet {
+                    slashable: false,
+                    ..
+                }
+            ),
+            "bare HoneyBadgerBFT committee without a local Budlum confiscation arm must report slashable=false"
+        );
+        let mut slash_policy = unbonded_policy;
+        slash_policy.require_slashable = true;
+        assert!(
+            matches!(
+                adapter2.verify(&raw2, &slash_policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "require_slashable=true must fail closed with UnslashableBacking"
+        );
     }
 }

@@ -772,6 +772,15 @@ pub struct AccountState {
     /// through the snapshot's schema-6 field; the state root folds its
     /// `root()` only when non-empty, on the identity pattern.
     pub vault: crate::socialfi::VaultRegistry,
+    /// The quantum-account registry (`account_abstraction::registry`).
+    ///
+    /// Consensus state: an account registered through the replay-safe
+    /// `*_at_root` doors must be something every node computes the same root
+    /// over. Folded into the state root only while nonempty, on the identity
+    /// pattern, so a chain that never opened account abstraction keeps the
+    /// roots it always had. Persisted through the snapshot's schema-16 field
+    /// and digested under the same gate.
+    pub quantum_accounts: crate::account_abstraction::registry::QuantumAccountRegistry,
     /// The scheme and suite statuses of this chain.
     ///
     /// Consensus state: every signature check that decides a block or a
@@ -1029,6 +1038,7 @@ impl AccountState {
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
             vault: crate::socialfi::VaultRegistry::new(),
+            quantum_accounts: crate::account_abstraction::registry::QuantumAccountRegistry::new(),
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
@@ -1103,6 +1113,7 @@ impl AccountState {
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
             vault: crate::socialfi::VaultRegistry::new(),
+            quantum_accounts: crate::account_abstraction::registry::QuantumAccountRegistry::new(),
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
@@ -1180,6 +1191,7 @@ impl AccountState {
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
             vault: crate::socialfi::VaultRegistry::new(),
+            quantum_accounts: crate::account_abstraction::registry::QuantumAccountRegistry::new(),
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
@@ -1311,6 +1323,7 @@ impl AccountState {
             nft_registry: snapshot.nft_registry.clone().unwrap_or_default(),
             identity: snapshot.identity.clone().unwrap_or_default(),
             vault: snapshot.vault.clone().unwrap_or_default(),
+            quantum_accounts: snapshot.quantum_accounts.clone().unwrap_or_default(),
             // `verify_authentic` refuses a registry that does not restore, so
             // reaching the fallback means the snapshot carried none.
             scheme_registry: snapshot
@@ -6146,6 +6159,12 @@ impl AccountState {
             final_hasher.update(b"vault_v1");
             final_hasher.update(self.vault.root());
         }
+        // Gated on non-empty like its neighbours: a chain that never opened
+        // account abstraction sees no root change from this field existing.
+        if !self.quantum_accounts.is_empty() {
+            final_hasher.update(b"quantum_accounts_v1");
+            final_hasher.update(self.quantum_accounts.root());
+        }
         // The scheme registry folds in once any status has moved from genesis
         // (a chain that never moved one keeps its root byte-exact).
         if !self.scheme_registry.is_genesis() {
@@ -8874,5 +8893,53 @@ mod validator_v7_binding_tests {
 impl AccountState {
     pub fn credit_account(&mut self, address: &Address, amount: u64) {
         self.add_balance(address, amount);
+    }
+
+    /// Register a quantum account against the state's current registry root.
+    ///
+    /// This is the state-level door: the root the caller computed the change
+    /// against is the one this state carries, so a transaction replayed from
+    /// an older state fails here before the account enters. The check lives
+    /// in `QuantumAccountRegistry::register_at_root`, and the refusal is
+    /// `RootMismatch`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry error; `RootMismatch` when this state has moved
+    /// since the caller read it.
+    pub fn register_quantum_account_at_root(
+        &mut self,
+        based_on_root: [u8; 32],
+        account: crate::account_abstraction::registry::QuantumAccount,
+    ) -> Result<(), crate::account_abstraction::registry::QuantumAccountRegistryError> {
+        self.quantum_accounts
+            .register_at_root(based_on_root, account)
+    }
+
+    /// Update a registered quantum account against the state's current
+    /// registry root; the change function does not run on a stale root.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry error; `RootMismatch` when this state has moved
+    /// since the caller read it.
+    pub fn update_quantum_account_at_root<F>(
+        &mut self,
+        address: &[u8; 32],
+        based_on_root: [u8; 32],
+        change: F,
+    ) -> Result<(), crate::account_abstraction::registry::QuantumAccountRegistryError>
+    where
+        F: FnOnce(&mut crate::account_abstraction::registry::QuantumAccount),
+    {
+        self.quantum_accounts
+            .update_at_root(address, based_on_root, change)
+    }
+
+    /// Stamp the current chain epoch on the quantum-account registry. The
+    /// epoch is folded into the registry root, so a state restored under
+    /// another epoch does not read as the current one.
+    pub fn stamp_quantum_account_epoch(&mut self, epoch: u64) {
+        self.quantum_accounts.set_epoch(epoch);
     }
 }

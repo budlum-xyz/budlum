@@ -450,6 +450,10 @@ impl ChainKeyNiDkgAdapter {
             }
         }
 
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
+        }
+
         verify_delegation_and_cup(&self.network, pinned, &bundle)?;
 
         Ok(FinalityAttestation {
@@ -647,10 +651,20 @@ mod tests {
 
     #[test]
     fn chain_key_nidkg_adapter_passes_full_selftest_admission() {
-        let (adapter, _) = sample_adapter_with_golden();
+        let (adapter, ev) = sample_adapter_with_golden();
         let report = admit(&adapter, &VerificationPolicy::strict(0));
         assert!(report.admitted, "selftest failed: {report:?}");
         assert_eq!(report.probes.len(), 8);
+
+        let mut slash_policy = VerificationPolicy::strict(0);
+        slash_policy.require_slashable = true;
+        assert!(
+            matches!(
+                adapter.verify(&ev, &slash_policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "Chain-Key NiDKG without a local Budlum confiscation bond must refuse require_slashable=true"
+        );
     }
 
     #[test]

@@ -712,6 +712,10 @@ impl AptosJolteonAdapter {
             }
         }
 
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
+        }
+
         let (min_signers, all_pq) =
             verify_jolteon_bundle_chain(&self.network, pinned, &bundle, &member_map, total_power)?;
         let required_signers = (u64::try_from(pinned.validators.len())
@@ -736,7 +740,9 @@ impl AptosJolteonAdapter {
                 signers: min_signers,
                 required: required_signers,
                 total_weight: total_power,
-                slashable: true,
+                // External Aptos stake has no local Budlum confiscation bond or
+                // BridgeEconomicGuard arm yet, so slashability is disclosed as false.
+                slashable: false,
             },
             evidence_digest: evidence.digest(),
             adapter_version: self.descriptor.adapter_version,
@@ -1025,5 +1031,32 @@ mod tests {
             verify_jolteon_equivocation("aptos-mainnet", &epoch_state, &eq_proof).unwrap();
         assert_eq!(offender, s.ed_pk);
         assert_eq!(power, 100);
+
+        // Honest disclosure: bare external Jolteon stake without a local Budlum
+        // confiscation bond reports slashable=false and refuses require_slashable=true.
+        let (_, _, clean_adapter, clean_ev) = sample_adapter_with_round_skip_tc();
+        let unbonded_policy = VerificationPolicy::strict(0);
+        let att = clean_adapter
+            .verify(&clean_ev, &unbonded_policy)
+            .expect("valid Jolteon 2-chain evidence verifies when slashability is not required");
+        assert!(
+            matches!(
+                att.security,
+                SecurityBacking::SignatureSet {
+                    slashable: false,
+                    ..
+                }
+            ),
+            "bare external Jolteon stake without a local Budlum confiscation arm must report slashable=false"
+        );
+        let mut slash_policy = unbonded_policy;
+        slash_policy.require_slashable = true;
+        assert!(
+            matches!(
+                clean_adapter.verify(&clean_ev, &slash_policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "require_slashable=true must fail closed with UnslashableBacking"
+        );
     }
 }

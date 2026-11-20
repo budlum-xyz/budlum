@@ -619,7 +619,14 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// Once a claim writes either watermark, the snapshot must identify itself as
 /// schema 15: an older binary must skip it as future state rather than ignore
 /// the fields and restore replayable ownership claims.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 15;
+///
+/// Schema 16 carries and digests the quantum-account registry. The registry
+/// is folded into the state root only while nonempty, so an empty registry
+/// keeps this snapshot byte-exact even under the new version; a node that
+/// dropped a registered account would compute a different root, which is why
+/// the field enters the digest under the `>= 16` gate rather than being left
+/// for serde defaults to silently restore as empty.
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -801,6 +808,11 @@ pub struct StateSnapshotV2 {
     /// verifying against their pinned digests.
     #[serde(default)]
     pub vault: Option<crate::socialfi::VaultRegistry>,
+    /// The quantum-account registry (schema-16 bump). `#[serde(default)]` so
+    /// pre-registry snapshots load; the field enters the digest under the
+    /// `>= 16` gate, so a pre-16 pinned digest stays byte-exact.
+    #[serde(default)]
+    pub quantum_accounts: Option<crate::account_abstraction::registry::QuantumAccountRegistry>,
 
     // --- C4 (P2): manifest signature (schema-4 wire). ---
     // RFC_GAP1 section 7: Ed25519 single signature + trust list + AllowUnsigned transition.
@@ -1016,6 +1028,7 @@ impl StateSnapshotV2 {
             proof_market: Some(account_state.proof_market.clone()),
             identity: Some(account_state.identity.clone()),
             vault: Some(account_state.vault.clone()),
+            quantum_accounts: Some(account_state.quantum_accounts.clone()),
             // `Registry`, `liveness`, and `invalid_votes` are no longer
             // Fields on `AccountState` (ghost-hunted). The struct fields were
             // Already removed above; the live state is recovered by routing
@@ -1218,6 +1231,14 @@ impl StateSnapshotV2 {
         //     different hash rather than a quietly-valid snapshot. ---
         if self.schema_version >= 6 {
             hash_opt_serializable(&mut hasher, &self.vault);
+        }
+        // --- The quantum-account registry (schema-16 bump). At 15 and below
+        //     the field cannot affect the digest, so every pre-registry pinned
+        //     hash stays reproducible byte for byte; at 16 and above a node
+        //     that dropped a registered account produces a different hash
+        //     rather than a quietly-valid snapshot. ---
+        if self.schema_version >= 16 {
+            hash_opt_serializable(&mut hasher, &self.quantum_accounts);
         }
         // --- The PoA admission + compliance pair (schema-7 bump, /.
         // Same gate logic as identity and vault: at 6 and

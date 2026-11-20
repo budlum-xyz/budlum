@@ -1593,12 +1593,28 @@ impl Drop for ReorgSlot {
 /// Declared at module level rather than inside `load_vote_history`: an item
 /// After a statement is legal but confusing, since it is in scope for the
 /// Whole function including the lines above it.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct VoteHistory {
     #[serde(default)]
     last_prevote_height: u64,
     #[serde(default)]
     last_precommit_height: u64,
+    /// The P2P identity that cast these votes.
+    ///
+    /// Absent in files written before this field existed. A file without an
+    /// owner is not evidence of anything, so `load_vote_history` ignores it
+    /// rather than adopting a height some other process may have written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node: Option<String>,
+}
+
+/// Whether `history` was written by the node called `ours`.
+///
+/// Free function rather than a method so the rule is testable without a live
+/// `Node`: the rule is "an owner we can read and that is not us", and a file
+/// with no owner fails it.
+fn vote_history_was_written_by(history: &VoteHistory, ours: &str) -> bool {
+    history.node.as_deref() == Some(ours)
 }
 
 impl Node {
@@ -3560,8 +3576,10 @@ impl Node {
         // Marks that do not survive a restart cost half the bond. There is no
         // Network on which the unsafe default is the right one.
         if self.vote_history_db.is_none() {
-            self.vote_history_db = Some(std::path::PathBuf::from(
-                format!("./data/{network:?}/vote-history.json").to_lowercase(),
+            self.vote_history_db = Some(Self::default_vote_history_path(
+                network,
+                std::path::Path::new("data"),
+                &self.peer_id.to_base58(),
             ));
         }
         // Kademlia poisoning: `Identify` accepts whatever a peer
@@ -3896,6 +3914,31 @@ impl Node {
         Ok(())
     }
 
+    /// Where one node's vote high-water marks live when nothing names a path.
+    ///
+    /// Scoped by node, not only by network. A path keyed on the network alone
+    /// is shared by every node that starts from the same working directory,
+    /// which is what a devnet, a multi-node rehearsal and two side-by-side
+    /// experiments all do: the first validator to precommit writes its mark
+    /// there and the next node reads it as its own. The mark that exists to
+    /// stop one key signing twice then stops every *other* key from signing
+    /// at all, which is a liveness failure on a fresh chain rather than the
+    /// double-sign it was meant to prevent.
+    ///
+    /// `<data_dir>/<network>/<node-id>/vote-history.json`, where `node-id` is
+    /// the node's P2P identity: the one thing two nodes never share.
+    fn default_vote_history_path(
+        network: crate::core::chain_config::Network,
+        data_dir: &std::path::Path,
+        node_id: &str,
+    ) -> std::path::PathBuf {
+        data_dir
+            .join(network.name().to_lowercase())
+            .join("nodes")
+            .join(node_id)
+            .join("vote-history.json")
+    }
+
     /// Restore the vote high-water marks written by a previous run.
     ///
     /// Both marks exist to stop this node signing twice at one checkpoint
@@ -3921,26 +3964,50 @@ impl Node {
         // Bounded: the vote history is two integers. Anything larger is not
         // a vote history, and reading it would be an allocation chosen by
         // whatever wrote the file rather than by this node.
-        match crate::core::bounded_read::read_to_string_bounded(
+        let data = match crate::core::bounded_read::read_to_string_bounded(
             path,
             crate::core::bounded_read::MAX_CONTROL_FILE_BYTES,
         ) {
-            Ok(data) => match serde_json::from_str::<VoteHistory>(&data) {
-                Ok(v) => {
-                    self.last_prevote_height = v.last_prevote_height;
-                    self.last_precommit_height = v.last_precommit_height;
-                    info!(
-                        prevote = v.last_prevote_height,
-                        precommit = v.last_precommit_height,
-                        "Vote history restored; this node will not re-sign at or below these heights"
-                    );
-                }
-                Err(e) => warn!(error = %e, path = %path.display(),
-                    "Vote history unreadable; starting from zero (a restart across a reorg could double-sign)"),
-            },
-            Err(e) if e.is_not_found() => {}
-            Err(e) => warn!(error = %e, path = %path.display(), "Vote history could not be read"),
+            Ok(data) => data,
+            Err(e) if e.is_not_found() => return,
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "Vote history could not be read");
+                return;
+            }
+        };
+        let restored = match serde_json::from_str::<VoteHistory>(&data) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, path = %path.display(),
+                    "Vote history unreadable; starting from zero (a restart across a reorg could double-sign)");
+                return;
+            }
+        };
+        // A mark this node did not write is not this node's mark. The file has
+        // always been keyed by network alone, so any two nodes started from one
+        // directory have been reading each other's heights; taking a foreign
+        // mark silently is the safe direction for double-signing and the fatal
+        // one for liveness, because a consensus key would then refuse to sign
+        // anything at or below a height it never voted at. Refuse the file, say
+        // so once, and start from zero: this node's own mark can only come from
+        // this node's own votes.
+        let ours = self.peer_id.to_base58();
+        if !vote_history_was_written_by(&restored, &ours) {
+            warn!(
+                path = %path.display(),
+                owner = restored.node.as_deref().unwrap_or("<unowned file>"),
+                ours,
+                "Vote history was not written by this node; ignoring it so a foreign mark cannot stop this validator signing"
+            );
+            return;
         }
+        self.last_prevote_height = restored.last_prevote_height;
+        self.last_precommit_height = restored.last_precommit_height;
+        info!(
+            prevote = restored.last_prevote_height,
+            precommit = restored.last_precommit_height,
+            "Vote history restored; this node will not re-sign at or below these heights"
+        );
     }
 
     /// Record the vote high-water marks before any vote reaches the wire.
@@ -3953,13 +4020,20 @@ impl Node {
         let Some(ref path) = self.vote_history_db else {
             return Ok(());
         };
-        Self::write_vote_history_file(path, self.last_prevote_height, self.last_precommit_height)
+        let owner = self.peer_id.to_base58();
+        Self::write_vote_history_file(
+            path,
+            self.last_prevote_height,
+            self.last_precommit_height,
+            &owner,
+        )
     }
 
     fn write_vote_history_file(
         path: &std::path::Path,
         last_prevote_height: u64,
         last_precommit_height: u64,
+        node: &str,
     ) -> Result<(), String> {
         let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
             warn!(path = %path.display(), "vote-history path has no parent directory");
@@ -3972,6 +4046,7 @@ impl Node {
         let body = serde_json::json!({
             "last_prevote_height": last_prevote_height,
             "last_precommit_height": last_precommit_height,
+            "node": node,
         });
         let tmp = parent.join(format!(
             ".{}.tmp",
@@ -8317,6 +8392,90 @@ mod peer_count_saturation_tests {
 mod vote_history_wiring_tests {
     use crate::core::chain_config::Network;
 
+    /// A default vote-history path must be private to *one node*, not to one
+    /// network.
+    ///
+    /// Every live devnet measured on 2026-11-20 shared one directory: four
+    /// validator processes started from the same working directory, and the
+    /// default `./data/devnet/vote-history.json` gave them one file. One node's
+    /// precommit high-water mark then reached the others through that file, and
+    /// the report below is what a real run printed: a freshly assembled genesis
+    /// whose chain was three blocks old, and a node refusing to sign because a
+    /// mark left by a *different* validator said height 66 was already voted.
+    ///
+    /// Two independent devnets in one directory is the same defect without any
+    /// restart, and it needs no unusual configuration: that is what the default
+    /// path does on its own.
+    ///
+    /// Canary: give the default back its network-only path and this fails.
+    #[test]
+    fn default_vote_history_path_is_private_to_one_node() {
+        let first = super::Node::default_vote_history_path(
+            Network::Devnet,
+            std::path::Path::new("/srv/bud/data"),
+            "12D3KooWA",
+        );
+        let second = super::Node::default_vote_history_path(
+            Network::Devnet,
+            std::path::Path::new("/srv/bud/data"),
+            "12D3KooWB",
+        );
+        assert_ne!(
+            first, second,
+            "two nodes on one network must not share one vote-history file: {first:?}"
+        );
+        assert!(
+            first.starts_with("/srv/bud/data/devnet"),
+            "the mark stays under the data directory it was derived from: {first:?}"
+        );
+        assert!(first.ends_with("vote-history.json"));
+    }
+
+    /// A vote-history file that names another node must not be adopted.
+    ///
+    /// This is the case the default path created for real: one directory, four
+    /// validators, one file. Relocating the default fixes the runs that never
+    /// name a path; this fixes the runs that name one, deliberately or by
+    /// copy-paste, and the file a previous buggy run left behind. Ignoring the
+    /// file is the safe direction: a wrong high-water mark can only withhold a
+    /// vote this node owes, never authorise one it has already cast.
+    ///
+    /// Canary: drop the owner comparison from `load_vote_history` and the
+    /// foreign branch below stops being reachable in the way this asserts.
+    #[test]
+    fn a_foreign_vote_history_file_is_not_adopted() {
+        let own_record = super::VoteHistory {
+            last_prevote_height: 9,
+            last_precommit_height: 7,
+            node: Some("node-a".to_string()),
+        };
+        let imported = super::VoteHistory {
+            last_prevote_height: 66,
+            last_precommit_height: 66,
+            node: Some("node-b".to_string()),
+        };
+        let legacy = super::VoteHistory {
+            last_prevote_height: 66,
+            last_precommit_height: 66,
+            node: None,
+        };
+        assert!(super::vote_history_was_written_by(&own_record, "node-a"));
+        assert!(!super::vote_history_was_written_by(&imported, "node-a"));
+        assert!(
+            !super::vote_history_was_written_by(&legacy, "node-a"),
+            "a file with no owner says nothing about who wrote it"
+        );
+        // The owner round-trips through the on-disk shape, including absence.
+        let encoded = serde_json::to_string(&imported).unwrap();
+        assert!(encoded.contains("\"node\":\"node-b\""));
+        let decoded: super::VoteHistory = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.node.as_deref(), Some("node-b"));
+        let legacy_decoded: super::VoteHistory =
+            serde_json::from_str("{\"last_prevote_height\":1,\"last_precommit_height\":1}")
+                .unwrap();
+        assert!(legacy_decoded.node.is_none());
+    }
+
     /// Every network must get a vote-history path by default.
     ///
     /// `load_vote_history` / `save_vote_history` were written to stop a
@@ -9426,17 +9585,21 @@ mod finality_publish_tests {
     fn write_vote_history_file_persists_atomically_and_reports_unwritable_target() {
         let dir = tempfile::tempdir().unwrap();
         let history_path = dir.path().join("votes").join("history.json");
-        super::Node::write_vote_history_file(&history_path, 14, 12).unwrap();
+        super::Node::write_vote_history_file(&history_path, 14, 12, "node-a").unwrap();
         let persisted: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&history_path).unwrap()).unwrap();
         assert_eq!(persisted["last_prevote_height"], 14);
         assert_eq!(persisted["last_precommit_height"], 12);
+        assert_eq!(
+            persisted["node"], "node-a",
+            "the mark must name the node that cast the votes it stands for"
+        );
 
         // Pointing the history file at an existing directory must fail loudly
         // so the caller withholds the vote instead of gossiping unrecorded bytes.
         let dir_as_file = dir.path().join("occupied_dir");
         std::fs::create_dir_all(&dir_as_file).unwrap();
-        assert!(super::Node::write_vote_history_file(&dir_as_file, 16, 14).is_err());
+        assert!(super::Node::write_vote_history_file(&dir_as_file, 16, 14, "node-a").is_err());
     }
 
     #[test]

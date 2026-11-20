@@ -909,13 +909,12 @@ impl HeterogeneousMultiProverAdapter {
                 signers: u64::try_from(legs.len()).unwrap_or(2),
                 required: u64::try_from(req).unwrap_or(u64::MAX),
                 total_weight,
-                slashable: true,
+                // External rollup fault bonds and re-execution committees have no
+                // local Budlum confiscation arm in BridgeEconomicGuard yet.
+                slashable: false,
             }
         };
-        if policy.require_slashable
-            && matches!(security, SecurityBacking::Zk { .. })
-            && !legs.iter().any(|l| l.family == ProverFamily::FaultWindow)
-        {
+        if policy.require_slashable {
             return Err(AdapterError::UnslashableBacking);
         }
         let att = FinalityAttestation {
@@ -1361,5 +1360,50 @@ mod tests {
         assert_eq!(conflict.first.0, ProverFamily::HashStark);
         assert_eq!(conflict.second.0, ProverFamily::PqAttestedCommittee);
         assert_ne!(conflict.first.1, conflict.second.1);
+
+        // 4. Non-STARK signature quorum (FaultWindow + Committee) reports slashable=false
+        //    and refuses require_slashable=true without a local Budlum confiscation arm.
+        let fx2 = make_fixture();
+        let fault2 = sign_fault_leg(&fx2, fx2.claim.post_state_root, fx2.claim.withdrawal_root);
+        let committee2 =
+            sign_committee_leg(&fx2, fx2.claim.post_state_root, fx2.claim.withdrawal_root);
+        let non_stark = MultiProverEvidence {
+            claim: fx2.claim.clone(),
+            stark_leg: None,
+            fault_leg: Some(fault2),
+            committee_leg: Some(committee2),
+        };
+        let non_stark_raw = RawConsensusEvidence {
+            adapter: AdapterId::from_name(ADAPTER_NAME),
+            network: NET.into(),
+            evidence_version: EVIDENCE_VERSION,
+            declared_height: fx2.claim.batch_index,
+            declared_root: fx2.claim.post_state_root,
+            payload: encode_multiprover_evidence(&non_stark).unwrap(),
+            submitter: crate::core::address::Address([0x09; 32]),
+        };
+        let adapter2 = HeterogeneousMultiProverAdapter::new(NET, Some(fx2.pinned));
+        let att2 = adapter2
+            .verify(&non_stark_raw, &mature_policy)
+            .expect("mature fault+committee quorum verifies when slashability is not required");
+        assert!(
+            matches!(
+                att2.security,
+                SecurityBacking::SignatureSet {
+                    slashable: false,
+                    ..
+                }
+            ),
+            "non-STARK committee+fault quorum without a local Budlum confiscation arm must report slashable=false"
+        );
+        let mut slash_policy = mature_policy;
+        slash_policy.require_slashable = true;
+        assert!(
+            matches!(
+                adapter2.verify(&non_stark_raw, &slash_policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "require_slashable=true must fail closed with UnslashableBacking"
+        );
     }
 }
