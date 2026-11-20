@@ -409,6 +409,15 @@ impl ExecutionEnvironment for PolkaVmWorker {
             let Ok(prog) = decode_polkavm_blob(&call.input) else {
                 return Ok(ee_reverted(b"bad PolkaVM blob".to_vec(), gas_used));
             };
+            // Published code is permanent state every validator keeps:
+            // the deploy pays the shared per-byte publication rate.
+            let publish_gas = u64::try_from(call.input.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(25);
+            gas_used = gas_used.saturating_add(publish_gas);
+            if gas_used > call.gas_limit || host.charge(publish_gas).is_err() {
+                return Ok(ee_out_of_gas(call.gas_limit));
+            }
             let addr = derive_contract_addr(&caller32, &call.tx_hash);
             match host.read(&ns, &code_key(&addr)) {
                 Ok(Some(_)) => {

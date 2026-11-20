@@ -41,6 +41,11 @@ pub const WASM_MAGIC_V1: [u8; 8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x
 /// Maximum NEAR contract payload size (`1 MiB`).
 pub const MAX_NEAR_CONTRACT_BYTES: usize = 1_048_576;
 
+/// Gas charged per byte of a stored program loaded on a call, and per byte
+/// published or written to storage, at the rate the sibling expansion
+/// environments charge for stored code.
+pub const NEAR_CODE_LOAD_PER_BYTE_BGU: u64 = 25;
+
 /// Declarative NEAR contract method opcodes executed deterministically over `HostApi`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NearOp {
@@ -304,6 +309,13 @@ fn run_near_ops(
                 arg_key,
             } => {
                 let val = args.get(arg_key).cloned().unwrap_or_default();
+                // A caller-sized value is permanent state: pay per byte.
+                let write_cost = u64::try_from(val.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(NEAR_CODE_LOAD_PER_BYTE_BGU);
+                if !charge_step(gas_used, scope.gas_limit, write_cost, host) {
+                    return Err(b"OUT_OF_GAS".to_vec());
+                }
                 if host
                     .write(
                         scope.ns,
@@ -480,6 +492,17 @@ impl ExecutionEnvironment for NearWasmWorker {
                     gas_used,
                 ));
             };
+            // Published code is permanent state every validator keeps.
+            if !charge_step(
+                &mut gas_used,
+                call.gas_limit,
+                u64::try_from(call.input.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(NEAR_CODE_LOAD_PER_BYTE_BGU),
+                host,
+            ) {
+                return Ok(ee_out_of_gas(call.gas_limit));
+            }
             let mut h = Sha256::new();
             h.update((call.caller.id.len() as u64).to_le_bytes());
             h.update(&call.caller.id);
@@ -563,6 +586,18 @@ impl ExecutionEnvironment for NearWasmWorker {
         let Ok(Some(blob)) = host.read(&ns, &code_key(&contract_id)) else {
             return Ok(ee_reverted(b"NEAR contract not found".to_vec(), gas_used));
         };
+        // The stored program is re-read on every call; the read pays for
+        // its own bytes so a large contract cannot ride the flat entry fee.
+        if !charge_step(
+            &mut gas_used,
+            call.gas_limit,
+            u64::try_from(blob.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(NEAR_CODE_LOAD_PER_BYTE_BGU),
+            host,
+        ) {
+            return Ok(ee_out_of_gas(call.gas_limit));
+        }
         let Ok(parsed) = decode_near_blob(&blob) else {
             return Ok(ee_reverted(b"corrupt NEAR contract".to_vec(), gas_used));
         };

@@ -687,7 +687,15 @@ impl SvmWorker {
                 }
                 Ok(false) => {}
             }
-            if call.gas_limit < 2_000 || host.charge(2_000).is_err() {
+            // Published code is permanent state every validator keeps:
+            // the deploy pays the shared per-byte publication rate on top
+            // of the flat entry fee.
+            let deploy_gas = 2_000u64.saturating_add(
+                u64::try_from(call.input.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(25),
+            );
+            if call.gas_limit < deploy_gas || host.charge(deploy_gas).is_err() {
                 return EeOutcome {
                     status: OutcomeStatus::OutOfGas,
                     output: Vec::new(),
@@ -710,7 +718,7 @@ impl SvmWorker {
             return EeOutcome {
                 status: OutcomeStatus::Success,
                 output: target_pk.to_vec(),
-                gas_used: 2_000,
+                gas_used: deploy_gas,
             };
         }
 
@@ -1210,6 +1218,7 @@ mod tests {
         let code = minimal_sbpf_ok_program();
         let mut worker = SvmWorker;
         let mut host = MemoryHost::new(10_000);
+        let deploy_gas = 2_000u64 + (code.len() as u64) * 25;
         let low_gas = test_call(target, EeCallKind::Deploy, code.clone(), 1_999);
         let outcome = worker
             .execute(&test_ctx(), &low_gas, &mut host)
@@ -1218,13 +1227,22 @@ mod tests {
         assert!(host.state.is_empty());
         assert_eq!(host.gas_charged, 0);
 
-        let call = test_call(target, EeCallKind::Deploy, code, 2_000);
+        // The old flat fee no longer covers the published bytes.
+        let flat_only = test_call(target, EeCallKind::Deploy, code.clone(), 2_000);
+        let outcome = worker
+            .execute(&test_ctx(), &flat_only, &mut host)
+            .expect("worker must not fault");
+        assert_eq!(outcome.status, OutcomeStatus::OutOfGas);
+        assert!(host.state.is_empty());
+        assert_eq!(host.gas_charged, 0);
+
+        let call = test_call(target, EeCallKind::Deploy, code, deploy_gas);
         let outcome = worker
             .execute(&test_ctx(), &call, &mut host)
             .expect("worker must not fault");
         assert_eq!(outcome.status, OutcomeStatus::Success);
-        assert_eq!(outcome.gas_used, 2_000);
-        assert_eq!(host.gas_charged, 2_000);
+        assert_eq!(outcome.gas_used, deploy_gas);
+        assert_eq!(host.gas_charged, deploy_gas);
         let saved_state = host.state.clone();
 
         let outcome = worker
@@ -1232,7 +1250,7 @@ mod tests {
             .expect("worker must not fault");
         assert_eq!(outcome.status, OutcomeStatus::Revert);
         assert_eq!(host.state, saved_state);
-        assert_eq!(host.gas_charged, 2_000);
+        assert_eq!(host.gas_charged, deploy_gas);
     }
 
     #[test]

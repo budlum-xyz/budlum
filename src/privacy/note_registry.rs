@@ -65,9 +65,11 @@ pub struct L1NoteRegistry {
     #[serde(default)]
     spent_commitments: BTreeSet<NoteHash>,
     /// Owner bound to each live note commitment (hex-keyed for JSON-safe
-    /// serialization). Spending through `apply_transfer_for_owner` requires
-    /// every input note to be bound to `spender` or derived from `spender` and
-    /// its secret `proof` (`derive_commitment`).
+    /// serialization). This is a DEPOSITOR quota ledger, not an authority
+    /// map: spend authority always comes from `derive_commitment(spender,
+    /// proof)`, whose preimage folds the spender's address, so a recorded
+    /// depositor can neither spend a note bound to someone else nor lock
+    /// the bound address out.
     #[serde(default)]
     note_owners: BTreeMap<String, Address>,
 }
@@ -149,8 +151,11 @@ impl L1NoteRegistry {
         Ok(())
     }
 
-    /// Insert a live note commitment bound to `owner`, so only `owner` may
-    /// authorize spending it via `PrivateTransferSubmit`.
+    /// Insert a live note commitment, recording `owner` as its depositor
+    /// for the per-depositor quota. Spend authority is NOT granted here:
+    /// it comes from the commitment's own `derive_commitment` binding at
+    /// spend time, so inserting someone else's commitment neither claims
+    /// it nor locks its true owner out.
     ///
     /// # Errors
     ///
@@ -224,20 +229,21 @@ impl L1NoteRegistry {
             .zip(nullifier_proofs.iter())
             .enumerate()
         {
-            let key = hex::encode(commitment);
-            let recorded_owner = self.note_owners.get(&key);
-            let owns_note = match recorded_owner {
-                Some(owner) if owner == spender => {
-                    recorded_spent_keys.insert(key);
-                    true
-                }
-                Some(_) => false,
-                None => *commitment == Self::derive_commitment(spender, proof),
-            };
-            if !owns_note {
+            // Spend authority is the commitment binding itself: the spender's
+            // address is folded into derive_commitment, so only the address
+            // the note was built for, holding its secret, can pass. The
+            // depositor ledger below never grants or vetoes authority - a
+            // recorded depositor is bookkeeping for the per-depositor quota,
+            // and insertion order can neither steal a note nor lock its true
+            // owner out.
+            if *commitment != Self::derive_commitment(spender, proof) {
                 return Err(format!(
                     "spend ownership invalid for input {i}: spender does not own note"
                 ));
+            }
+            let key = hex::encode(commitment);
+            if self.note_owners.get(&key) == Some(spender) {
+                recorded_spent_keys.insert(key);
             }
         }
         let owner_live = self
@@ -941,6 +947,55 @@ mod h3_tests {
         assert!(err.contains("packed Goldilocks"), "unexpected error: {err}");
         assert_eq!(r.live_count(), 0);
         assert!(r.note_owners.is_empty());
+    }
+
+    #[test]
+    fn a_squatter_insert_cannot_lock_the_bound_address_out() {
+        let mut r = L1NoteRegistry::new();
+        let victim = Address::from([0x11u8; 32]);
+        let squatter = Address::from([0x22u8; 32]);
+        let secret = budlum_note_packing::hash_from_field(0x5A5A);
+        let note = L1NoteRegistry::derive_commitment(&victim, &secret);
+        // The squatter deposits the victim-bound commitment first.
+        r.insert_note_for_owner(note, squatter).unwrap();
+        // Depositing grants nothing: the squatter cannot spend it...
+        let nf = L1NoteRegistry::derive_nullifier(&note, &secret);
+        let out = budlum_note_packing::hash_from_field(7);
+        let err = r
+            .apply_transfer_for_owner(&squatter, &[note], &[nf], &[out], &[secret])
+            .expect_err("a depositor without the binding cannot spend");
+        assert!(err.contains("does not own note"), "got: {err}");
+        // ...and the bound address spends exactly as if it had deposited.
+        r.apply_transfer_for_owner(&victim, &[note], &[nf], &[out], &[secret])
+            .expect("the bound address spends through its own binding");
+        assert!(!r.contains_commitment(&note));
+    }
+
+    #[test]
+    fn a_payee_spends_the_output_a_transfer_paid_it_and_the_payer_cannot() {
+        let mut r = L1NoteRegistry::new();
+        let payer = Address::from([0x31u8; 32]);
+        let payee = Address::from([0x32u8; 32]);
+        let payer_secret = budlum_note_packing::hash_from_field(0xAA01);
+        let funding = L1NoteRegistry::derive_commitment(&payer, &payer_secret);
+        r.insert_note_for_owner(funding, payer).unwrap();
+        // The wallet builds the payment output bound to the PAYEE.
+        let payee_secret = budlum_note_packing::hash_from_field(0xBB02);
+        let payment = L1NoteRegistry::derive_commitment(&payee, &payee_secret);
+        let nf = L1NoteRegistry::derive_nullifier(&funding, &payer_secret);
+        r.apply_transfer_for_owner(&payer, &[funding], &[nf], &[payment], &[payer_secret])
+            .expect("the payer spends its own note into the payee-bound output");
+        // The payer holds the depositor row but not the binding: refused.
+        let nf2 = L1NoteRegistry::derive_nullifier(&payment, &payee_secret);
+        let change = budlum_note_packing::hash_from_field(0xCC03);
+        let err = r
+            .apply_transfer_for_owner(&payer, &[payment], &[nf2], &[change], &[payee_secret])
+            .expect_err("the payer cannot spend the payee-bound output");
+        assert!(err.contains("does not own note"), "got: {err}");
+        // The payee spends it, never having touched the chain before.
+        r.apply_transfer_for_owner(&payee, &[payment], &[nf2], &[change], &[payee_secret])
+            .expect("the payee spends the note the transfer paid it");
+        assert!(!r.contains_commitment(&payment));
     }
 
     #[test]

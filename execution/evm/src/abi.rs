@@ -27,6 +27,13 @@ pub const UOL_PRECOMPILE_GAS: u64 = 2_600;
 /// Linear BGU cost per 32-byte calldata or returndata word on UEL/UOL precompiles.
 pub const PRECOMPILE_WORD_GAS: u64 = 3;
 
+/// BGU charged per byte of permanent state a UOL record adds, matching the
+/// EVM state-growth schedule applied to newly persisted storage bytes.
+pub const UOL_STATE_GROWTH_GAS_PER_BYTE: u64 = 16;
+
+/// Length of a UOL offer `taker` (an EVM address); empty means any taker.
+pub const UOL_TAKER_LEN: usize = 20;
+
 /// Hard ceiling (1 MiB) on precompile calldata and decoded dynamic byte slices.
 pub const MAX_PRECOMPILE_BYTES: usize = 1024 * 1024;
 

@@ -37,8 +37,8 @@ fn private_transfer_with_composite_authorization_executes() {
     let from = Address::from(account.address);
     let mut state = funded_state(from, 1_000_000);
     let chain_id = crate::core::transaction::DEFAULT_CHAIN_ID;
-    let commitment = hash_from_field(101);
     let proof = hash_from_field(0xA11CE);
+    let commitment = L1NoteRegistry::derive_commitment(&from, &proof);
     let nullifier = L1NoteRegistry::derive_nullifier(&commitment, &proof);
     let output = hash_from_field(103);
     state
@@ -99,8 +99,8 @@ fn private_transfer_submit_spend_and_create() {
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
 
-    let c_in = hash_from_field(1);
     let proof = budlum_note_packing::hash_from_field(0xA11CE);
+    let c_in = L1NoteRegistry::derive_commitment(&from, &proof);
     let n1 = crate::privacy::L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(3);
     state
@@ -148,8 +148,8 @@ fn private_transfer_double_spend_fails() {
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
-    let c_in = hash_from_field(9);
     let proof = budlum_note_packing::hash_from_field(0xA11CE);
+    let c_in = L1NoteRegistry::derive_commitment(&from, &proof);
     let n1 = crate::privacy::L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(7);
     state
@@ -368,11 +368,11 @@ fn transfer_fixture(
     kp: &KeyPair,
     state: &mut AccountState,
 ) -> (PrivateTransferSubmit, [u8; 32], [u8; 32]) {
-    let c_in = hash_from_field(21);
+    let from = Address::from(kp.public_key_bytes());
     let proof = hash_from_field(0xA11CE);
+    let c_in = L1NoteRegistry::derive_commitment(&from, &proof);
     let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(23);
-    let from = Address::from(kp.public_key_bytes());
     state
         .note_registry
         .insert_note_for_owner(c_in, from)
@@ -415,8 +415,8 @@ fn private_transfer_admission_and_execution_are_closed_on_public_chains() {
     let from = Address::from(account.address);
     for chain_id in [Network::Mainnet.chain_id().value(), 999_999] {
         let mut state = funded_state(from, 1_000_000);
-        let c_in = hash_from_field(21);
         let proof = hash_from_field(0xA11CE);
+        let c_in = L1NoteRegistry::derive_commitment(&from, &proof);
         let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
         let c_out = hash_from_field(23);
         state
@@ -626,8 +626,8 @@ fn private_transfer_is_open_on_devnet() {
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
-    let c_in = hash_from_field(11);
     let proof = hash_from_field(0xA11CE);
+    let c_in = L1NoteRegistry::derive_commitment(&from, &proof);
     let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(12);
     state

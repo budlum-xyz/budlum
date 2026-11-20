@@ -2523,6 +2523,63 @@ mod tests {
 
         let (prog_hash, bundle6, sorted6) = six_bundle_opt.unwrap();
         let pinned_root = bundle6.domains_merkle_root;
+
+        // Statement binding: with the full snapshot set every declared
+        // header field must be the one the proof witnessed.
+        {
+            use crate::aggregation::universal_light_proof::open_universal_light_proof_with_snapshots;
+            open_universal_light_proof_with_snapshots(
+                &bundle6,
+                &prog_hash,
+                hub_chain_id,
+                &hub_root,
+                &sorted6,
+                &registry,
+            )
+            .expect("the honest bundle's declarations are its statement");
+            let mut lied_epoch = bundle6.clone();
+            lied_epoch.settlement_epoch += 1;
+            assert!(
+                open_universal_light_proof_with_snapshots(
+                    &lied_epoch,
+                    &prog_hash,
+                    hub_chain_id,
+                    &hub_root,
+                    &sorted6,
+                    &registry,
+                )
+                .is_err(),
+                "a declared epoch the proof never witnessed must be refused"
+            );
+            let mut lied_root = bundle6.clone();
+            lied_root.domains_merkle_root[0] ^= 0xFF;
+            assert!(
+                open_universal_light_proof_with_snapshots(
+                    &lied_root,
+                    &prog_hash,
+                    hub_chain_id,
+                    &hub_root,
+                    &sorted6,
+                    &registry,
+                )
+                .is_err(),
+                "a declared domain root that is not the leaves' fold must be refused"
+            );
+            let mut lied_outflow = bundle6.clone();
+            lied_outflow.max_outflow_bps = lied_outflow.max_outflow_bps.saturating_sub(1);
+            assert!(
+                open_universal_light_proof_with_snapshots(
+                    &lied_outflow,
+                    &prog_hash,
+                    hub_chain_id,
+                    &hub_root,
+                    &sorted6,
+                    &registry,
+                )
+                .is_err(),
+                "a declared outflow ceiling off the witnessed one must be refused"
+            );
+        }
         let snap = |id: u32| sorted6.iter().find(|s| s.domain_id == id).unwrap().clone();
         let proof = |id: u32| prove_ulp_domain_inclusion(&sorted6, id).unwrap();
 

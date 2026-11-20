@@ -373,6 +373,11 @@ fn handle_uol_precompile_call(
             if !payment.is_empty() && payment.len() != 16 && payment.len() != 48 {
                 return uol_revert(b"unsupported UOL offer payment encoding", gas, mem_offset);
             }
+            // Only the maker's own 20-byte address can ever satisfy `accept`,
+            // so any other non-empty length is a record nothing can delete.
+            if !taker.is_empty() && taker.len() != crate::abi::UOL_TAKER_LEN {
+                return uol_revert(b"unsupported UOL offer taker encoding", gas, mem_offset);
+            }
             let host = &mut *context.journaled_state.db_mut().host;
             if asset_id != [0u8; 32] {
                 let Some(cur) = host.read(&ns, &uol_holder_key(&asset_id)).ok().flatten() else {
@@ -420,6 +425,17 @@ fn handle_uol_precompile_call(
             }) else {
                 return uol_revert(b"UOL offer payload too large", gas, mem_offset);
             };
+            // A committed offer is permanent state every validator keeps:
+            // charge the EVM state-growth rate for the bytes it adds.
+            let state_growth = u64::try_from(enc.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(crate::abi::UOL_STATE_GROWTH_GAS_PER_BYTE);
+            if !gas.record_regular_cost(state_growth) {
+                return Some(CallOutcome::new(
+                    InterpreterResult::new(InstructionResult::OutOfGas, Bytes::new(), gas),
+                    mem_offset,
+                ));
+            }
             if host.write(&ns, &offer_key, Some(&enc)).is_err() {
                 return uol_revert(b"UOL offer write failed", gas, mem_offset);
             }
