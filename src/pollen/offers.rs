@@ -355,13 +355,15 @@ impl MarketplaceRegistry {
         // Listing is a claim on the payment stream for these bytes: when the
         // content is already a registered asset or is bound to one, only
         // that asset's owner may list it. Anyone can still list content
-        // nobody has registered, exactly as before.
+        // nobody has registered.
         let owner_of = |asset_id: &AssetId| self.data_assets.get(asset_id).map(|asset| asset.owner);
         if let Some(bound) = self.protected_content.asset_for(&cid) {
             match owner_of(&bound) {
                 Some(owner) if owner == seller => {}
                 Some(_) | None => {
-                    return Err("Content is bound to a Pollen asset another account owns".into());
+                    return Err(
+                        "Content is bound to a data-market asset another account owns".into(),
+                    );
                 }
             }
         }
@@ -2074,7 +2076,7 @@ mod tests {
         // The owner still lists it.
         reg.create_offer(owner, cid, 100).unwrap();
 
-        // Pollen-bound content follows its asset's owner the same way.
+        // Bound content follows its asset's owner the same way.
         reg.protected_content
             .bind(cid, asset_id, owner, owner)
             .unwrap();

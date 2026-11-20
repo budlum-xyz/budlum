@@ -6,6 +6,7 @@ mod rpc_tests {
     use crate::core::address::Address;
     use crate::core::transaction::Transaction;
     use crate::network::node::Node;
+    use crate::pollen::DataAsset;
     use crate::rpc::api::BudlumApiServer;
     use crate::rpc::server::{RpcMode, RpcSecurityConfig, RpcServer};
     use std::sync::Arc;
@@ -2180,28 +2181,28 @@ mod rpc_tests {
             .record_paid_view(payer.0, pub_key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 0)
             .unwrap();
 
-        // A Pollen-bound commitment: the paid view door must refuse it
+        // A market-bound commitment: the paid view door must refuse it
         // before touching storage, receipts, or symbols.
-        let pollen_owner = alice;
-        let pollen_asset = crate::pollen::DataAsset::new(
-            pollen_owner,
+        let listed_owner = alice;
+        let listed_asset = DataAsset::new(
+            listed_owner,
             crate::storage::ContentId([0x77u8; 32]),
             [0x66; 32],
             false,
         );
-        let pollen_asset_id = pollen_asset.asset_id;
+        let listed_asset_id = listed_asset.asset_id;
         bc.state
             .marketplace
-            .register_data_asset(pollen_asset)
+            .register_data_asset(listed_asset)
             .unwrap();
         bc.state
             .marketplace
             .protected_content
             .bind(
                 crate::storage::ContentId([0x77u8; 32]),
-                pollen_asset_id,
-                pollen_owner,
-                pollen_owner,
+                listed_asset_id,
+                listed_owner,
+                listed_owner,
             )
             .unwrap();
 
@@ -2400,7 +2401,7 @@ mod rpc_tests {
             -32602
         );
 
-        // Pollen-listed bytes never leave through the paid storage view: the
+        // Market-listed bytes never leave through the paid storage view: the
         // commitment-bound refusal fires before any decode or receipt burn.
         assert_eq!(
             pub_server
@@ -2862,7 +2863,7 @@ mod rpc_tests {
         );
     }
 
-    /// third descent: the marketplace, Pollen, AI and directory
+    /// third descent: the marketplace, data market, AI and directory
     /// listings. Every one of them is a delegation to the chain actor, so on a
     /// fresh chain each answers with an empty collection. The lock worth keeping
     /// is that none of them errors and none of them collapses to a flag: a
@@ -3082,7 +3083,7 @@ mod rpc_tests {
     #[tokio::test]
     async fn data_market_prepare_purchase_ok_and_refused() {
         use crate::crypto::primitives::KeyPair;
-        use crate::pollen::{DataAsset, MarketplaceRegistry, SaleAuthorization, Signature64};
+        use crate::pollen::{MarketplaceRegistry, SaleAuthorization, Signature64};
         use crate::storage::ContentId;
 
         let seller_keys = KeyPair::from_seed(&[0x41; 32]).unwrap();

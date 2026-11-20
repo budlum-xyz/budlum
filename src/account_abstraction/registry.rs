@@ -707,7 +707,7 @@ mod tests {
         use crate::storage::pact_binding::Pact;
         use sha3::{Digest, Sha3_256};
 
-        let payload = b"tarif";
+        let payload = b"pact payload";
         let mut h = Sha3_256::new();
         h.update(payload);
         let commitment: [u8; 32] = h.finalize().into();
