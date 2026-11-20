@@ -220,7 +220,6 @@ crates/wallet-core/src/lib.rs	fn	ensure_view_key
 crates/wallet-core/src/lib.rs	fn	export_view_key_for_disclosure
 crates/wallet-core/src/lib.rs	fn	from_mnemonic
 crates/wallet-core/src/lib.rs	fn	from_user_opt_in
-crates/wallet-core/src/lib.rs	fn	guardian_count
 crates/wallet-core/src/lib.rs	fn	is_executable
 crates/wallet-core/src/lib.rs	fn	is_note_privacy_active
 crates/wallet-core/src/lib.rs	fn	is_privacy_active
@@ -276,7 +275,6 @@ src/account_abstraction/quantum_account.rs	const	RECOVERY_DOMAIN_V3
 src/account_abstraction/quantum_account.rs	const	SEED_DOMAIN_V1
 src/account_abstraction/quantum_account.rs	const	STORAGE_PACT_DOMAIN
 src/account_abstraction/quantum_account.rs	enum	SeedError
-src/account_abstraction/quantum_account.rs	fn	guardian_root
 src/account_abstraction/quantum_account.rs	fn	is_timelock_satisfied
 src/account_abstraction/quantum_account.rs	fn	seed_from_entropy
 src/account_abstraction/quantum_account.rs	fn	verify_multisig_threshold

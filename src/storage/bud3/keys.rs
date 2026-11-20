@@ -274,13 +274,14 @@ impl ClientSealedDedupIndex {
                 return Err(KeyPkgBud3Error::MalformedBackup);
             }
             for pair in body.as_chunks::<64>().0 {
-                let tag: [u8; 32] = pair[..32]
-                    .try_into()
-                    .map_err(|_| KeyPkgBud3Error::MalformedBackup)?;
-                let obj: [u8; 32] = pair[32..64]
-                    .try_into()
-                    .map_err(|_| KeyPkgBud3Error::MalformedBackup)?;
-                idx.entries.insert(tag, obj);
+                // Split the chunk by pattern rather than by range: a range index
+                // panics out of bounds, and a key backup is untrusted input. The
+                // length check above already decided the shape, so the split
+                // cannot fail.
+                let [tag_bytes, obj_bytes] = pair.as_chunks::<32>().0 else {
+                    return Err(KeyPkgBud3Error::MalformedBackup);
+                };
+                idx.entries.insert(*tag_bytes, *obj_bytes);
             }
             Ok(())
         })();

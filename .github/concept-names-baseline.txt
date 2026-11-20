@@ -18,7 +18,7 @@ Gövde|1|1
 Kiragi|6|16
 Liquid storage|0|0
 Living Threshold|6|16
-Mikoriza|19|65
+Mikoriza|19|67
 Mobile Self|10|69
 PUL|12|98
 Pollen|62|724
