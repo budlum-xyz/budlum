@@ -2987,13 +2987,13 @@ mod tests {
         // satisfy one floor and fail the other. The ordering is pinned here
         // rather than left implicit: inverted, the door's guard would be the
         // only thing between an opener and a deadline too short to answer.
-        assert!(
-            StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS >= MIN_AUDIT_RESPONSE_WINDOW_EPOCHS,
-            "the registry floor {} is below the audit response floor {}; the door \
-             would then refuse windows the registry allowed",
-            StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS,
-            MIN_AUDIT_RESPONSE_WINDOW_EPOCHS
-        );
+        const {
+            assert!(
+                StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS >= MIN_AUDIT_RESPONSE_WINDOW_EPOCHS,
+                "the registry floor is below the audit response floor; the door \
+                 would then refuse windows the registry allowed",
+            );
+        }
         let mut state = AccountState::new();
         let (_operator, opener, deal_id) = challengeable(&mut state);
         let epoch = state.epoch_index;
