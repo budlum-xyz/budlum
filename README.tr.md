@@ -25,7 +25,7 @@ alanlar arasında hareket eder.
 > [!WARNING]
 > **Herkese açık testnet veya ana ağ açılışı için kanıt yoktur; dış denetim
 > yapılmadı.** Bu yazılım geliştirme aşamasındadır. Gerçek değer taşıyan trafik
-> için kullanmayın. [Testnet açılış kapısı kaydı](docs/audit/TLG_REPORT.md),
+> için kullanmayın. Testnet açılış kapısı kaydı (operatör çalışma deposunda tutulur, bu ağaçta değildir),
 > depodaki kodu ve benzetimli testleri doğrulanmış dağıtımdan ayırır.
 
 ---
@@ -304,7 +304,7 @@ bir tören dosyasına karşı yanlışlıkla "ana ağ" başlatamaz.
 
 Testnet profilinin zincir kimliği `45261`, ağ imzası `BDLT`'dir. Bu yapılandırma,
 herkese açık bir ağın açıldığının **kanıtı değildir**. İşletmecilerin önce
-[açılış kapısını](docs/audit/TLG_REPORT.md), genesis törenini ve uç nokta
+açılış kapısını (kanıt kaydı operatör çalışma deposunda tutulur), genesis törenini ve uç nokta
 kurulumunu tamamlaması gerekir. Yerel prova için:
 
 - **Cüzdan oluşturun:** `bud wallet create --key-file ./secrets/wallet.json`
@@ -488,7 +488,7 @@ depolama modülleri, BNS, pazar ve SocialFi modülleri, EVM zincir bağdaştır�
 tokenomi ve anlık görüntüler depoda bulunur. Kodun varlığı; köprünün, birleşik
 B.U.D. 3.0 üretim yolunun, ortamlar arası yürütmenin veya fiziksel cihazlarla
 testnet provasının geçtiği anlamına **gelmez**. Gereken kanıtlar için
-[açılış kapısı kaydına](docs/audit/TLG_REPORT.md) bakın.
+açılış kapısı kaydına (operatör çalışma deposunda tutulur) bakın.
 
 **Bilerek etkinleştirilmemiş ve bu durum değişirse kırılan testlerle sabitlenmiş:** zincir
 üstü yapay zeka çıkarım kanıtı *doğrulaması* ([durum](docs/AI_VERIFICATION_STATUS.md)) ·

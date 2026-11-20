@@ -3,7 +3,6 @@ mode = "count"            # Switch to "absolute" when every count reaches zero
 global_allow_paths = [
   "config/naming/",
   "docs/NAMING.md",
-  "docs/audit/",
   ".github/concept-names-baseline.txt",
   "xtask/gates/src/gates/bud3_forbidden_phrases.rs",
   "xtask/gates/src/gates/no_legacy_storage.rs",
