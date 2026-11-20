@@ -321,14 +321,52 @@ impl EotsEquivocationProof {
 
     /// Check the proof with nothing but the proof: both signatures must
     /// verify under the named key over the named messages, the messages must
-    /// differ, and the digest must be the one the fields produce.
+    /// differ, both messages must decode as canonical epoch-vote statements
+    /// for the same non-zero `(chain_id, height, epoch)` bound to the proof's
+    /// state roots, checkpoints, and EOTS key, and the digest must be the one
+    /// the fields produce.
     ///
     /// # Errors
     ///
     /// The reason the proof does not hold.
     pub fn check(&self) -> Result<(), String> {
+        if self.provider.iter().all(|b| *b == 0) {
+            return Err("the equivocation proof names an all-zero finality provider".to_string());
+        }
         if !self.messages_differ() {
             return Err("the two votes sign the same message: not an equivocation".to_string());
+        }
+        let first = parse_epoch_vote_message(&self.first_message)
+            .map_err(|reason| format!("first vote message: {reason}"))?;
+        let second = parse_epoch_vote_message(&self.second_message)
+            .map_err(|reason| format!("second vote message: {reason}"))?;
+        if first.chain_id != second.chain_id
+            || first.height != second.height
+            || first.epoch != second.epoch
+        {
+            return Err(
+                "the two votes do not target the same (chain_id, height, epoch)".to_string(),
+            );
+        }
+        if first.eots_key != self.eots_key || second.eots_key != self.eots_key {
+            return Err("the signed messages do not bind to the proof's EOTS key".to_string());
+        }
+        if first.state_root != self.first_state_root
+            || second.state_root != self.second_state_root
+            || first.checkpoint != self.first_checkpoint
+            || second.checkpoint != self.second_checkpoint
+        {
+            return Err(
+                "the proof's state_root or checkpoint fields do not match the signed messages"
+                    .to_string(),
+            );
+        }
+        if self.first_state_root == self.second_state_root
+            && self.first_checkpoint == self.second_checkpoint
+        {
+            return Err(
+                "the two votes carry identical state_root and checkpoint claims".to_string(),
+            );
         }
         verify_schnorr(&self.first_message, &self.first_signature, &self.eots_key)
             .map_err(|reason| format!("first vote: {reason}"))?;
@@ -339,6 +377,73 @@ impl EotsEquivocationProof {
         }
         Ok(())
     }
+}
+
+struct ParsedEpochVoteMessage {
+    chain_id: u64,
+    height: u64,
+    epoch: u64,
+    state_root: [u8; 32],
+    checkpoint: BtcCheckpoint,
+    eots_key: [u8; SCHNORR_PUBLIC_KEY_LEN],
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize) -> Option<u64> {
+    let slice = bytes.get(offset..offset.checked_add(8)?)?;
+    let arr: [u8; 8] = slice.try_into().ok()?;
+    Some(u64::from_le_bytes(arr))
+}
+
+fn read_arr32(bytes: &[u8], offset: usize) -> Option<[u8; 32]> {
+    let slice = bytes.get(offset..offset.checked_add(32)?)?;
+    slice.try_into().ok()
+}
+
+fn parse_epoch_vote_message(message: &[u8]) -> Result<ParsedEpochVoteMessage, String> {
+    let expected_len = EPOCH_VOTE_TAG.len() + 8 * 4 + 32 * 4;
+    if message.len() != expected_len {
+        return Err(format!(
+            "epoch-vote message is {} bytes, not the canonical {expected_len} bytes",
+            message.len()
+        ));
+    }
+    let body = message
+        .strip_prefix(EPOCH_VOTE_TAG)
+        .ok_or_else(|| "epoch-vote message does not start with EPOCH_VOTE_TAG".to_string())?;
+    let chain_id = read_u64_le(body, 0).ok_or_else(|| "missing chain_id".to_string())?;
+    let height = read_u64_le(body, 8).ok_or_else(|| "missing height".to_string())?;
+    let epoch = read_u64_le(body, 16).ok_or_else(|| "missing epoch".to_string())?;
+    let state_root = read_arr32(body, 24).ok_or_else(|| "missing state_root".to_string())?;
+    let block_hash = read_arr32(body, 56).ok_or_else(|| "missing block_hash".to_string())?;
+    let btc_height = read_u64_le(body, 88).ok_or_else(|| "missing btc_height".to_string())?;
+    let mmr_root = read_arr32(body, 96).ok_or_else(|| "missing mmr_root".to_string())?;
+    let eots_key = read_arr32(body, 128).ok_or_else(|| "missing eots_key".to_string())?;
+    if chain_id == 0 || height == 0 || btc_height == 0 {
+        return Err(
+            "epoch-vote message carries a zero chain_id, height, or btc_height".to_string(),
+        );
+    }
+    if state_root.iter().all(|b| *b == 0)
+        || block_hash.iter().all(|b| *b == 0)
+        || mmr_root.iter().all(|b| *b == 0)
+    {
+        return Err(
+            "epoch-vote message carries an all-zero state_root, block_hash, or mmr_root"
+                .to_string(),
+        );
+    }
+    Ok(ParsedEpochVoteMessage {
+        chain_id,
+        height,
+        epoch,
+        state_root,
+        checkpoint: BtcCheckpoint {
+            block_hash,
+            btc_height,
+            mmr_root,
+        },
+        eots_key,
+    })
 }
 
 /// The Bitcoin weak-subjectivity anchor a domain is registered with: the most
@@ -547,6 +652,9 @@ pub struct BabylonEotsAdapter {
     /// The EOTS key announced for each epoch, as the pinned registration
     /// recorded it. An epoch nobody announced a key for has no provider.
     epoch_keys: Vec<(u64, EotsPublicKey)>,
+    /// The post-quantum ML-DSA-65 public key announced for each epoch, when
+    /// the registration pins one.
+    epoch_pq_keys: Vec<(u64, Vec<u8>)>,
     /// The anchor, when the operator supplied one.
     anchor: Option<BtcWeakSubjectivityAnchor>,
     golden: Option<RawConsensusEvidence>,
@@ -573,6 +681,7 @@ impl BabylonEotsAdapter {
             network: network.to_string(),
             chain_id,
             epoch_keys: Vec::new(),
+            epoch_pq_keys: Vec::new(),
             anchor: None,
             golden: None,
         }
@@ -585,6 +694,16 @@ impl BabylonEotsAdapter {
     #[must_use]
     pub fn with_epoch_key(mut self, epoch: u64, key: EotsPublicKey) -> Self {
         self.epoch_keys.push((epoch, key));
+        self
+    }
+
+    /// Convenience: pin the post-quantum ML-DSA-65 public key announced for `epoch`.
+    ///
+    /// WIRING: the registration pins the post-quantum announcement table from
+    /// the domain record alongside `with_epoch_key`.
+    #[must_use]
+    pub fn with_epoch_pq_key(mut self, epoch: u64, pq_public_key: Vec<u8>) -> Self {
+        self.epoch_pq_keys.push((epoch, pq_public_key));
         self
     }
 
@@ -623,6 +742,13 @@ impl BabylonEotsAdapter {
             .iter()
             .find(|(announced, _)| *announced == epoch)
             .map(|(_, key)| *key)
+    }
+
+    fn announced_pq_key(&self, epoch: u64) -> Option<&[u8]> {
+        self.epoch_pq_keys
+            .iter()
+            .find(|(announced, _)| *announced == epoch)
+            .map(|(_, key)| key.as_slice())
     }
 
     /// Whether the caller's policy requires a post-quantum half.
@@ -678,6 +804,15 @@ impl BabylonEotsAdapter {
             });
         }
 
+        let anchor = self.anchor.as_ref().ok_or_else(|| {
+            rule("no Bitcoin weak-subjectivity anchor is pinned for this Babylon domain")
+        })?;
+        if anchor.required_confirmations == 0 {
+            return Err(rule(
+                "pinned Bitcoin weak-subjectivity anchor must require at least 1 confirmation",
+            ));
+        }
+
         let decoded = EotsEvidence::decode(&evidence.payload)?;
         decoded.validate_shape()?;
         if decoded.chain_id != self.chain_id {
@@ -686,8 +821,14 @@ impl BabylonEotsAdapter {
                 decoded.chain_id, self.chain_id
             )));
         }
+        if decoded.votes.len() == 2 && decoded.conflict().is_none() {
+            return Err(rule(
+                "a two-vote evidence bundle must carry two conflicting votes for the same provider, height, and epoch",
+            ));
+        }
 
         let requires_pq = Self::requires_post_quantum(policy);
+        let mut all_pq_pinned_and_verified = true;
         for (index, vote) in decoded.votes.iter().enumerate() {
             let announced = self.announced_key(vote.epoch).ok_or_else(|| {
                 rule(format!(
@@ -701,10 +842,10 @@ impl BabylonEotsAdapter {
                     vote.epoch
                 )));
             }
-            if let Some(anchor) = &self.anchor {
-                self.check_buried(index, vote, anchor)?;
-            }
-            if requires_pq && vote.post_quantum.is_none() {
+            self.check_buried(index, vote, anchor)?;
+            if requires_pq
+                && (vote.post_quantum.is_none() || self.announced_pq_key(vote.epoch).is_none())
+            {
                 return Err(AdapterError::UnslashableBacking);
             }
             let message = vote_message(vote);
@@ -714,6 +855,18 @@ impl BabylonEotsAdapter {
                 }
             })?;
             if let Some(pq) = &vote.post_quantum {
+                let Some(pinned_pq) = self.announced_pq_key(vote.epoch) else {
+                    return Err(rule(format!(
+                        "vote {index} carries a post-quantum signature in epoch {}, which has no pinned ML-DSA-65 key",
+                        vote.epoch
+                    )));
+                };
+                if pq.public_key.as_slice() != pinned_pq {
+                    return Err(rule(format!(
+                        "vote {index} carries a post-quantum public key that does not match the pinned epoch {} ML-DSA-65 key",
+                        vote.epoch
+                    )));
+                }
                 crate::crypto::pq::verify(
                     crate::crypto::scheme::SchemeId::ML_DSA_65,
                     &pq.public_key,
@@ -726,6 +879,8 @@ impl BabylonEotsAdapter {
                         "vote {index}: the ML-DSA-65 half does not sign the same epoch-vote message as the EOTS half: {e}"
                     ),
                 })?;
+            } else {
+                all_pq_pinned_and_verified = false;
             }
         }
 
@@ -762,7 +917,7 @@ impl BabylonEotsAdapter {
             }
         }
 
-        let attestation = self.attest(evidence, &decoded.votes[0]);
+        let attestation = self.attest(evidence, &decoded.votes[0], all_pq_pinned_and_verified);
         let proof = decoded
             .conflict()
             .map(|(first, second)| equivocation_proof(first, second));
@@ -799,7 +954,33 @@ impl BabylonEotsAdapter {
     }
 
     /// The attestation a verified vote produces.
-    fn attest(&self, evidence: &RawConsensusEvidence, vote: &EotsVote) -> FinalityAttestation {
+    fn attest(
+        &self,
+        evidence: &RawConsensusEvidence,
+        vote: &EotsVote,
+        pq_pinned_and_verified: bool,
+    ) -> FinalityAttestation {
+        let total_weight = u128::from(
+            self.anchor
+                .map_or(0, |anchor| anchor.required_confirmations),
+        );
+        let security = if pq_pinned_and_verified {
+            SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Secp256k1,
+                signers: 1,
+                required: 1,
+                total_weight,
+                slashable: true,
+            }
+        } else {
+            SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Secp256k1,
+                signers: 1,
+                required: 1,
+                total_weight,
+                slashable: false,
+            }
+        };
         FinalityAttestation {
             adapter: self.descriptor.id,
             domain: DomainKey::from_parts(&self.descriptor.id, &self.network),
@@ -807,22 +988,7 @@ impl BabylonEotsAdapter {
             state_root: vote.state_root,
             finalized_at: vote.epoch,
             time_unit: TimeUnit::Epoch,
-            security: SecurityBacking::SignatureSet {
-                scheme: ObservedScheme::Secp256k1,
-                signers: 1,
-                required: 1,
-                // The weight a Babylon provider's vote carries is its Bitcoin
-                // stake, which this adapter cannot read: it is reported as the
-                // Bitcoin depth the domain's anchor requires, and the profile
-                // spells out that unit rather than a number of coins.
-                total_weight: u128::from(
-                    self.anchor
-                        .map_or(0, |anchor| anchor.required_confirmations),
-                ),
-                // A second epoch vote reveals the key, so the stake is
-                // slashable by anybody holding both.
-                slashable: true,
-            },
+            security,
             evidence_digest: evidence.digest(),
             adapter_version: self.descriptor.adapter_version,
             evidence_version: evidence.evidence_version,
@@ -845,8 +1011,13 @@ impl ExternalFinalityAdapter for BabylonEotsAdapter {
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
-        self.verify_evidence(evidence, policy)
-            .map(|(attestation, _)| attestation)
+        let (attestation, conflict) = self.verify_evidence(evidence, policy)?;
+        if conflict.is_some() {
+            return Err(rule(
+                "evidence carries two conflicting epoch votes (equivocation) and cannot attest finality",
+            ));
+        }
+        Ok(attestation)
     }
 
     fn fault_probes(&self) -> Vec<FaultProbe> {
@@ -1094,8 +1265,10 @@ mod tests {
     }
 
     fn adapter() -> BabylonEotsAdapter {
+        let pq_pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &[0x7B; 32]).expect("ml-dsa-65 key");
         BabylonEotsAdapter::new(NETWORK, CHAIN_ID)
             .with_epoch_key(EPOCH, eots_public_key())
+            .with_epoch_pq_key(EPOCH, pq_pk)
             .with_anchor(BtcWeakSubjectivityAnchor {
                 tip_block_hash: [0xC4; 32],
                 tip_height: 870_010,
@@ -1210,7 +1383,7 @@ mod tests {
             Err(AdapterError::UnslashableBacking)
         );
         // Without that requirement a classical half is attestable, and the
-        // attestation still says which scheme backed it.
+        // attestation still says which scheme backed it (with slashable=false).
         let attestation = adapter()
             .verify(&evidence, &policy())
             .expect("a classical vote attests when nobody asked for more");
@@ -1218,6 +1391,33 @@ mod tests {
             attestation.security.observed_scheme(),
             Some(ObservedScheme::Secp256k1)
         );
+        assert!(matches!(
+            attestation.security,
+            SecurityBacking::SignatureSet {
+                slashable: false,
+                ..
+            }
+        ));
+        // An ephemeral unpinned ML-DSA-65 public key on the wire must also be refused.
+        let mut unpinned_pq_vote = golden_vote();
+        let rogue_seed = [0xFEu8; 32];
+        let rogue_pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &rogue_seed).expect("rogue key");
+        let rogue_sig = ml_dsa_sign(
+            SchemeId::ML_DSA_65,
+            &rogue_seed,
+            &vote_message(&unpinned_pq_vote),
+            crate::crypto::ctx::CROSS_DOMAIN_V1,
+            &[0x11; 32],
+        )
+        .expect("rogue sign");
+        unpinned_pq_vote.post_quantum = Some(PostQuantumHalf {
+            public_key: rogue_pk,
+            signature: rogue_sig,
+        });
+        assert!(matches!(
+            adapter().verify(&envelope(vec![unpinned_pq_vote]), &pq_policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
     }
 
     #[test]
@@ -1295,23 +1495,18 @@ mod tests {
         assert!(adapter.verify(&envelope(vec![at_depth]), &policy()).is_ok());
     }
 
-    /// Without an anchor the adapter refuses nothing for depth - and says so
-    /// by reporting zero weight rather than inventing a Bitcoin tip.
+    /// Without an anchor the adapter refuses every vote until an anchor is
+    /// pinned, matching `BabylonEotsAdapter::new`'s documented starting state.
     #[test]
     fn an_unanchored_domain_reports_no_bitcoin_weight() {
-        let adapter =
-            BabylonEotsAdapter::new(NETWORK, CHAIN_ID).with_epoch_key(EPOCH, eots_public_key());
-        let attestation = adapter
+        let pq_pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &[0x7B; 32]).expect("ml-dsa-65 key");
+        let adapter = BabylonEotsAdapter::new(NETWORK, CHAIN_ID)
+            .with_epoch_key(EPOCH, eots_public_key())
+            .with_epoch_pq_key(EPOCH, pq_pk);
+        let refused = adapter
             .verify(&envelope(vec![golden_vote()]), &policy())
-            .expect("verifies without an anchor");
-        assert!(matches!(
-            attestation.security,
-            SecurityBacking::SignatureSet {
-                total_weight: 0,
-                slashable: true,
-                ..
-            }
-        ));
+            .expect_err("an unanchored domain must refuse votes rather than bypass check_buried");
+        assert!(matches!(refused, AdapterError::ConsensusRule { .. }));
     }
 
     #[test]
@@ -1325,11 +1520,16 @@ mod tests {
             [0x91; 32],
             checkpoint(869_000, 0x44),
         );
-        let evidence = envelope(vec![first, second]);
+        let evidence = envelope(vec![first.clone(), second]);
         let (attestation, proof) = adapter()
             .verify_evidence(&evidence, &policy())
-            .expect("two conflicting votes still attest, and yield a proof");
+            .expect("two conflicting votes still attest in verify_evidence, and yield a proof");
         assert_eq!(attestation.height, HEIGHT);
+        // ExternalFinalityAdapter::verify must refuse a self-contradicting 2-vote envelope.
+        assert!(matches!(
+            adapter().verify(&evidence, &policy()),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
         let proof = proof.expect("a conflicting pair yields a proof");
         assert!(proof.messages_differ());
         assert_eq!(proof.proof_digest, proof.recomputed_digest());
@@ -1337,6 +1537,32 @@ mod tests {
         assert_eq!(proof.second_checkpoint.btc_height, 869_000);
         // Checkable with nothing but the proof.
         proof.check().expect("the proof holds");
+        // Cross-height honest votes or spoofed state roots must be rejected by check().
+        let honest_other_height = signed_vote(
+            [0x11; 32],
+            eots_public_key(),
+            HEIGHT + 1,
+            EPOCH,
+            [0x92; 32],
+            checkpoint(870_000, 0x44),
+        );
+        let mut cross_height = proof.clone();
+        cross_height.second_message = vote_message(&honest_other_height);
+        cross_height.second_signature = honest_other_height.signature;
+        cross_height.second_state_root = honest_other_height.state_root;
+        cross_height.second_checkpoint = honest_other_height.checkpoint;
+        cross_height.proof_digest = cross_height.recomputed_digest();
+        assert!(
+            cross_height.check().is_err(),
+            "two honest votes from different heights must not verify as equivocation"
+        );
+        let mut spoofed_root = proof.clone();
+        spoofed_root.first_state_root = [0xEE; 32];
+        spoofed_root.proof_digest = spoofed_root.recomputed_digest();
+        assert!(
+            spoofed_root.check().is_err(),
+            "spoofed state_root not bound to signed message must be rejected"
+        );
         // And a tampered pair no longer holds together.
         let mut tampered = proof;
         tampered.second_message[EPOCH_VOTE_TAG.len()] ^= 0xFF;
@@ -1402,9 +1628,17 @@ mod tests {
         let mut moved = vote.clone();
         moved.epoch = EPOCH + 1;
         let evidence = envelope(vec![moved]);
+        let pq_pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &[0x7B; 32]).expect("ml-dsa-65 key");
         let refused = BabylonEotsAdapter::new(NETWORK, CHAIN_ID)
             .with_epoch_key(EPOCH, eots_public_key())
             .with_epoch_key(EPOCH + 1, eots_public_key())
+            .with_epoch_pq_key(EPOCH, pq_pk.clone())
+            .with_epoch_pq_key(EPOCH + 1, pq_pk)
+            .with_anchor(BtcWeakSubjectivityAnchor {
+                tip_block_hash: [0xC4; 32],
+                tip_height: 870_010,
+                required_confirmations: DEFAULT_REQUIRED_BTC_CONFIRMATIONS,
+            })
             .verify(&evidence, &policy())
             .expect_err("the epoch is inside the signed message");
         assert!(
