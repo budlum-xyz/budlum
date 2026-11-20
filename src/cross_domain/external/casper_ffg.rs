@@ -1,46 +1,46 @@
-//! Casper FFG: accountable economic finality over a governance-pinned
-//! committee, with the two slashing conditions the safety argument rests on.
+//! Casper FFG checkpoint finality over a governance-pinned epoch committee,
+//! with objective Rule-1 (`DoubleVote`) and Rule-2 (`SurroundVote`) slashing
+//! evidence verification.
 //!
-//! A Casper FFG chain calls a checkpoint *justified* when more than two thirds
-//! of the active stake voted for the checkpoint pair `(source, target)` with
+//! A Casper FFG chain calls a checkpoint *justified* when strictly more than
+//! two thirds of the active stake voted for `(source, target)` with
 //! `target.epoch == source.epoch + 1`, and *final* when two adjacent
-//! checkpoints are justified. The safety argument does not rest on "the voters
-//! are honest": a validator that signs two conflicting checkpoint pairs breaks
-//! a Casper slashing condition and can be destroyed on the Casper chain. That
-//! external accountability is why this adapter reports
-//! [`SecurityBacking::SignatureSet`]; it does not verify an equivocation proof
-//! itself, so until a contradiction route exists the backing is unslashable.
+//! checkpoints are justified. Because external Casper FFG validator stake is
+//! held on the remote chain rather than escrowed locally on Budlum, this
+//! adapter reports [`SecurityBacking::SignatureSet`] with `slashable: false`
+//! and refuses policies that set `require_slashable: true` unless paired with
+//! locally escrowed prover or restaking bonds, while exposing
+//! [`verify_ffg_slashing_evidence`] so objective equivocations freeze the
+//! registered domain immediately through `IntakeState`.
 //!
-//! Three rules are checked here, in this order, and each one refuses rather
-//! than approximates:
+//! Four consensus rules are enforced fail-closed before any attestation is
+//! emitted:
 //!
-//! 1. **Adjacency.** `target.epoch == source.epoch + 1`. A gap of two or more
-//!    epochs means the intermediate justification is missing and the pair
-//!    proves nothing about finality.
-//! 2. **Vote binding.** Every vote in the source set must name
-//!    `(source - 1, source)` with this evidence's parent root and source root;
-//!    every vote in the target set must name `(source, target)` with the same
-//!    source root and this evidence's target root. A vote carrying another
-//!    root is a vote for another chain and is refused, not ignored.
-//! 3. **Supermajority, counted then checked.** Stake is summed per distinct
-//!    committee member, duplicates are refused (a duplicate is either a
-//!    malformed bundle or a double vote, and both are slashable), and the sum
-//!    must exceed two thirds of the pinned active stake. The threshold test is
-//!    `signed * 3 > total * 2` in `u128`, so the exact-two-thirds case is a
-//!    refusal and no rounding ever makes a sub-threshold set pass.
+//! 1. **Epoch-bound committee pin.** `PinnedFfgCommittee` pins an explicit
+//!    `epoch > 0`, and `parsed.target_epoch` must equal `committee.epoch`;
+//!    when a caller clock is supplied (`policy.max_age > 0 || policy.now > 0`),
+//!    future-dated target epochs (`parsed.target_epoch > policy.now`) are
+//!    refused.
+//! 2. **Adjacency.** `target.epoch == source.epoch + 1`.
+//! 3. **Network-bound vote digest.** Every signature is verified over a
+//!    domain-separated digest (`BDLM_CASPER_FFG_V1`) that binds `network`,
+//!    preventing cross-network replay across testnets or sister forks sharing
+//!    validator keys.
+//! 4. **Supermajority & mandatory PQ co-signing.** Distinct committee stakes
+//!    are summed in `u128` (`signed * 3 > total * 2`), duplicate voters are
+//!    refused, and any validator with a pinned FIPS 204 `ML-DSA-65` public key
+//!    must supply a valid `CROSS_DOMAIN_V1`-bound co-signature; `ML-DSA-65` is
+//!    reported as the observed scheme only when **both** the source and target
+//!    quorums are 100% PQ-co-signed.
 //!
-//! Signatures are Ed25519 over a domain-separated vote digest
-//! (`BDLM_CASPER_FFG_V1`), and a member that enrolled an ML-DSA-65 key must
-//! co-sign with it: a validator that has a post-quantum key cannot have it
-//! ignored by the verifier.
-//!
-//! WIRING: re-exported by `crate::cross_domain::external` for permissionless
-//! external domain registration and `selftest::admit` verification.
+//! WIRING: re-exported by `crate::cross_domain::external`, constructible via
+//! `AdapterSpec::CasperFfg` in `intake.rs`, and verified by `selftest::admit`.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::crypto::ctx;
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
 use crate::crypto::scheme::SchemeId;
 
@@ -56,56 +56,56 @@ use super::spec::{
 /// WIRING: registered with [`AdapterId::from_name`] in [`CasperFfgAdapter::new`].
 pub const CASPER_FFG_ADAPTER_NAME: &str = "casper-ffg-epoch-finality-v1";
 
-/// Vote digest tag. Every signature this adapter checks is over a digest that
-/// starts with this tag, so a signature made for another purpose in another
-/// protocol can never be replayed here.
+/// Vote digest domain-separation tag.
 pub const CASPER_FFG_VOTE_TAG: &[u8] = b"BDLM_CASPER_FFG_V1";
 
 const ADAPTER_VERSION: u32 = 1;
-const EVIDENCE_VERSION: u32 = 1;
-/// Two adjacent justified checkpoints, so the adapter always reports this.
+/// Canonical wire version for Casper FFG checkpoint finality payloads.
+pub const FFG_EVIDENCE_VERSION: u32 = 1;
+/// Two adjacent justified checkpoints, so the adapter always reports depth `2`.
 const FINALITY_DEPTH: u64 = 2;
 const PAYLOAD_MAGIC: &[u8; 8] = b"BDLMCF01";
 const MAX_PAYLOAD_BYTES: usize = 512 * 1024;
 const MAX_COMMITTEE: usize = 1024;
 const MAX_VOTES: usize = 1024;
 
-/// One bonded validator in the governance-pinned committee.
+/// One validator in the governance-pinned Casper FFG epoch committee.
 ///
 /// WIRING: listed in [`PinnedFfgCommittee`] and checked on every vote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FfgValidator {
     /// Ed25519 verifying key (`32` bytes).
     pub pubkey: [u8; 32],
-    /// Active stake in the chain's own smallest unit. Zero is refused: a
-    /// member with no stake backs nothing and would only dilute the threshold.
+    /// Active stake in the remote chain's smallest unit (`> 0`).
     pub stake: u64,
-    /// Enrolled ML-DSA-65 key. Empty means the member is classical only; a
-    /// non-empty key makes the co-signature mandatory.
+    /// Enrolled FIPS 204 `ML-DSA-65` public key (`1952` bytes when non-empty).
     #[serde(default)]
     pub pq_pubkey: Vec<u8>,
 }
 
-/// The committee the chain's governance pinned for the epochs this adapter
-/// serves. Held by the adapter, never carried in the evidence: a committee a
-/// submitter can choose is a committee that can be chosen to match the vote.
+/// Governance-pinned Casper FFG committee bound to a single target `epoch`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinnedFfgCommittee {
-    /// Consensus epoch served by this validator set.
+    /// Exact target checkpoint epoch this committee is authorized to finalize (`> 0`).
     pub epoch: u64,
-    /// Members, in any order; [`Self::new`] sorts them by key.
+    /// Members sorted deterministically by `pubkey` upon validation.
     pub validators: Vec<FfgValidator>,
 }
 
 impl PinnedFfgCommittee {
-    /// Check and canonicalise a pinned committee.
+    /// Check and canonicalise a pinned epoch committee.
     ///
     /// # Errors
     ///
-    /// [`AdapterError::ConsensusRule`] for an empty or oversized set, a zero
-    /// key, zero stake, or a duplicated key - a duplicated member would let one
-    /// vote count twice.
+    /// Returns [`AdapterError::ConsensusRule`] for `epoch == 0`, an empty or
+    /// oversized set, a zero key, zero stake, a duplicate key, or a malformed
+    /// `ML-DSA-65` public key.
     pub fn new(epoch: u64, mut validators: Vec<FfgValidator>) -> Result<Self, AdapterError> {
+        if epoch == 0 {
+            return Err(AdapterError::ConsensusRule {
+                rule: "the pinned Casper FFG committee epoch must be non-zero".to_string(),
+            });
+        }
         if validators.is_empty() || validators.len() > MAX_COMMITTEE {
             return Err(AdapterError::ConsensusRule {
                 rule: "the pinned committee size is out of range".to_string(),
@@ -113,10 +113,12 @@ impl PinnedFfgCommittee {
         }
         validators.sort_by_key(|v| v.pubkey);
         for pair in validators.windows(2) {
-            if pair[0].pubkey == pair[1].pubkey {
-                return Err(AdapterError::ConsensusRule {
-                    rule: "the pinned committee lists a key twice".to_string(),
-                });
+            if let [left, right] = pair {
+                if left.pubkey == right.pubkey {
+                    return Err(AdapterError::ConsensusRule {
+                        rule: "the pinned committee lists a key twice".to_string(),
+                    });
+                }
             }
         }
         for member in &validators {
@@ -125,8 +127,24 @@ impl PinnedFfgCommittee {
                     rule: "a pinned member has an unset key or no stake".to_string(),
                 });
             }
+            if !member.pq_pubkey.is_empty() {
+                crate::crypto::primitives::PqKeyPair::validate_public_key(&member.pq_pubkey)
+                    .map_err(|_| AdapterError::ConsensusRule {
+                        rule: "a pinned member carries a malformed ML-DSA-65 public key"
+                            .to_string(),
+                    })?;
+            }
         }
         Ok(Self { epoch, validators })
+    }
+
+    /// Re-validate a deserialized committee (`serde` bypasses [`Self::new`]).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`Self::new`] refusal.
+    pub fn validate(&self) -> Result<Self, AdapterError> {
+        Self::new(self.epoch, self.validators.clone())
     }
 
     /// The committee's total active stake.
@@ -135,37 +153,42 @@ impl PinnedFfgCommittee {
         self.validators
             .iter()
             .map(|v| u128::from(v.stake))
-            .fold(0u128, |acc, s| acc.saturating_add(s))
+            .fold(0u128, u128::saturating_add)
     }
 
-    /// The stake that must sign for a checkpoint pair to be justified, as
-    /// `floor(2 * total / 3) + 1`: the smallest stake that is strictly more
-    /// than two thirds.
+    /// Smallest stake strictly exceeding two thirds: `floor(2 * total / 3) + 1`.
     #[must_use]
     pub fn threshold_stake(&self) -> u128 {
-        let total = self.total_stake();
-        (total.saturating_mul(2)) / 3 + 1
+        (self.total_stake().saturating_mul(2)) / 3 + 1
     }
 }
 
 /// A checkpoint pair vote: from `source` towards `target`.
 ///
-/// WIRING: carried in [`FfgEvidence`]; the digest of its fields is what the
-/// signer signs and what this module re-derives.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FfgVote {
-    signer: [u8; 32],
-    source_epoch: u64,
-    source_root: [u8; 32],
-    target_epoch: u64,
-    target_root: [u8; 32],
-    signature: Vec<u8>,
-    pq_signature: Vec<u8>,
+/// WIRING: carried in Casper FFG evidence payloads and [`FfgEquivocationProof`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FfgVote {
+    /// Ed25519 verifying key of the voting validator.
+    pub signer: [u8; 32],
+    /// Source checkpoint epoch.
+    pub source_epoch: u64,
+    /// Source checkpoint root (`!= 0`).
+    pub source_root: [u8; 32],
+    /// Target checkpoint epoch (`> source_epoch`).
+    pub target_epoch: u64,
+    /// Target checkpoint root (`!= 0`).
+    pub target_root: [u8; 32],
+    /// Ed25519 signature over [`Self::digest`].
+    pub signature: Vec<u8>,
+    /// Optional `ML-DSA-65` co-signature over [`Self::digest`].
+    #[serde(default)]
+    pub pq_signature: Vec<u8>,
 }
 
 impl FfgVote {
-    /// The digest the vote is signed over.
-    fn digest(&self, network: &str) -> [u8; 32] {
+    /// Network-bound, domain-separated digest signed by the validator.
+    #[must_use]
+    pub fn digest(&self, network: &str) -> [u8; 32] {
         let source = self.source_epoch.to_le_bytes();
         let target = self.target_epoch.to_le_bytes();
         crate::core::hash::hash_fields_bytes(&[
@@ -180,47 +203,152 @@ impl FfgVote {
     }
 }
 
-/// What a Casper FFG evidence payload carries.
+/// Objective Buterin-Griffith (2017) Casper FFG slashing violation class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FfgSlashingKind {
+    /// Rule 1: `target_epoch_1 == target_epoch_2` with distinct vote tuples.
+    DoubleVote,
+    /// Rule 2: `source_epoch_1 < source_epoch_2 && target_epoch_2 < target_epoch_1`.
+    SurroundVote,
+}
+
+/// Self-contained pair of signed Casper FFG votes proving objective validator equivocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FfgEquivocationProof {
+    /// First signed checkpoint vote.
+    pub vote_a: FfgVote,
+    /// Second signed checkpoint vote by the same committee member.
+    pub vote_b: FfgVote,
+}
+
+fn verify_single_vote_crypto(
+    network: &str,
+    member: &FfgValidator,
+    vote: &FfgVote,
+    label: &str,
+) -> Result<bool, AdapterError> {
+    let digest = vote.digest(network);
+    crate::crypto::primitives::verify_signature(&digest, &vote.signature, &vote.signer).map_err(
+        |_| AdapterError::Crypto {
+            what: format!("invalid Ed25519 signature in a {label} vote"),
+        },
+    )?;
+    if member.pq_pubkey.is_empty() {
+        Ok(false)
+    } else {
+        if vote.pq_signature.is_empty() {
+            return Err(AdapterError::Crypto {
+                what: format!("a {label} vote is missing its ML-DSA-65 co-signature"),
+            });
+        }
+        crate::crypto::primitives::PqKeyPair::verify(
+            &member.pq_pubkey,
+            ctx::CROSS_DOMAIN_V1,
+            &digest,
+            &vote.pq_signature,
+        )
+        .map_err(|_| AdapterError::Crypto {
+            what: format!("invalid ML-DSA-65 co-signature in a {label} vote"),
+        })?;
+        Ok(true)
+    }
+}
+
+/// Verify Casper FFG Rule-1 or Rule-2 equivocation against a pinned committee.
+///
+/// Returns `(violation_kind, offender_stake)` when objective slashing holds.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] if the committee is invalid, the two votes come
+/// from different signers or an outsider, either vote fails structural or
+/// hybrid cryptographic verification, or neither slashing rule holds.
+pub fn verify_ffg_slashing_evidence(
+    network: &str,
+    committee: &PinnedFfgCommittee,
+    proof: &FfgEquivocationProof,
+) -> Result<(FfgSlashingKind, u64), AdapterError> {
+    let canonical = committee.validate()?;
+    let a = &proof.vote_a;
+    let b = &proof.vote_b;
+    if a.signer != b.signer {
+        return Err(AdapterError::ConsensusRule {
+            rule: "FFG equivocation proof names two different signers".to_string(),
+        });
+    }
+    let Some(member) = canonical.validators.iter().find(|v| v.pubkey == a.signer) else {
+        return Err(AdapterError::ConsensusRule {
+            rule: "FFG equivocation signer is outside the pinned committee".to_string(),
+        });
+    };
+    for v in [a, b] {
+        if v.target_epoch <= v.source_epoch
+            || v.source_root == [0u8; 32]
+            || v.target_root == [0u8; 32]
+        {
+            return Err(AdapterError::ConsensusRule {
+                rule: "FFG equivocation vote carries invalid checkpoint epochs or zero roots"
+                    .to_string(),
+            });
+        }
+        let _ = verify_single_vote_crypto(network, member, v, "slashing")?;
+    }
+
+    let same_transition = a.source_epoch == b.source_epoch
+        && a.source_root == b.source_root
+        && a.target_epoch == b.target_epoch
+        && a.target_root == b.target_root;
+    if a.target_epoch == b.target_epoch && !same_transition {
+        return Ok((FfgSlashingKind::DoubleVote, member.stake));
+    }
+    let a_surrounds_b = a.source_epoch < b.source_epoch && b.target_epoch < a.target_epoch;
+    let b_surrounds_a = b.source_epoch < a.source_epoch && a.target_epoch < b.target_epoch;
+    if a_surrounds_b || b_surrounds_a {
+        return Ok((FfgSlashingKind::SurroundVote, member.stake));
+    }
+    Err(AdapterError::ConsensusRule {
+        rule:
+            "vote pair satisfies neither Casper FFG Rule-1 (DoubleVote) nor Rule-2 (SurroundVote)"
+                .to_string(),
+    })
+}
+
+/// Parsed Casper FFG checkpoint finality payload.
 struct FfgEvidence {
     source_epoch: u64,
     source_root: [u8; 32],
-    /// The root of the checkout one epoch before `source`. The source vote set
-    /// commits to it, so the verifier needs it to bind those votes: without it
-    /// a source vote could name any parent and still pass an epoch-only check.
     parent_root: [u8; 32],
     target_epoch: u64,
     target_root: [u8; 32],
-    /// Votes justifying `source` (from `source - 1`).
     source_votes: Vec<FfgVote>,
-    /// Votes justifying `target` (from `source`).
     target_votes: Vec<FfgVote>,
 }
 
-/// A bounds-checked reader over the payload. Every short read is a
-/// [`AdapterError::Malformed`]; there is no partially parsed evidence.
+/// Bounds-checked cursor over the Casper FFG wire payload.
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, at: 0 }
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], AdapterError> {
+        let offset = self.at;
         let end = self
             .at
             .checked_add(len)
             .ok_or_else(|| AdapterError::Malformed {
-                offset: self.at,
+                offset,
                 reason: "length overflow".to_string(),
             })?;
         let slice = self
             .bytes
             .get(self.at..end)
             .ok_or_else(|| AdapterError::Malformed {
-                offset: self.at,
+                offset,
                 reason: format!("needs {len} bytes past the end"),
             })?;
         self.at = end;
@@ -254,12 +382,12 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Read a payload into [`FfgEvidence`].
+/// Decode a binary Casper FFG payload into [`FfgEvidence`].
 ///
 /// # Errors
 ///
-/// [`AdapterError::Malformed`] for a bad magic, an unknown payload version, a
-/// trailing byte, or any short read.
+/// Returns [`AdapterError`] on bad magic, unsupported version, trailing bytes,
+/// empty/oversized vote sets, or truncated reads.
 fn parse_payload(payload: &[u8]) -> Result<FfgEvidence, AdapterError> {
     if payload.len() > MAX_PAYLOAD_BYTES {
         return Err(AdapterError::Malformed {
@@ -276,10 +404,10 @@ fn parse_payload(payload: &[u8]) -> Result<FfgEvidence, AdapterError> {
         });
     }
     let version = reader.u32()?;
-    if version != EVIDENCE_VERSION {
+    if version != FFG_EVIDENCE_VERSION {
         return Err(AdapterError::UnsupportedEvidenceVersion {
             version,
-            accepted: EVIDENCE_VERSION.to_string(),
+            accepted: FFG_EVIDENCE_VERSION.to_string(),
         });
     }
     let target_epoch = reader.u64()?;
@@ -327,60 +455,81 @@ fn parse_payload(payload: &[u8]) -> Result<FfgEvidence, AdapterError> {
     })
 }
 
-/// A Casper FFG finality adapter over one pinned committee.
+/// Casper FFG finality adapter over a governance-pinned epoch committee.
 pub struct CasperFfgAdapter {
     descriptor: AdapterDescriptor,
     network: String,
-    committee: PinnedFfgCommittee,
+    committee: Option<PinnedFfgCommittee>,
     members: BTreeMap<[u8; 32], FfgValidator>,
     golden: Option<RawConsensusEvidence>,
 }
 
 impl CasperFfgAdapter {
-    /// Build an adapter for `network` over a pinned committee.
+    /// Build an adapter for `network` over a validated [`PinnedFfgCommittee`].
     ///
     /// # Errors
     ///
-    /// Whatever [`PinnedFfgCommittee::new`] refuses.
+    /// Propagates any [`PinnedFfgCommittee::validate`] refusal.
     pub fn new(
         network: &str,
-        committee: PinnedFfgCommittee,
+        committee: &PinnedFfgCommittee,
         golden: Option<RawConsensusEvidence>,
     ) -> Result<Self, AdapterError> {
+        let canonical = committee.validate()?;
+        Ok(Self::from_validated(network, Some(canonical), golden))
+    }
+
+    /// Build an adapter from an optional committee (used by `AdapterSpec::build`;
+    /// an absent or invalid committee fails closed on `verify`).
+    #[must_use]
+    pub fn new_optional(network: &str, committee: Option<PinnedFfgCommittee>) -> Self {
+        let validated = committee.and_then(|c| c.validate().ok());
+        Self::from_validated(network, validated, None)
+    }
+
+    /// Attach a golden sample for `selftest::admit`.
+    #[must_use]
+    pub fn with_golden(mut self, golden: RawConsensusEvidence) -> Self {
+        self.golden = Some(golden);
+        self
+    }
+
+    fn from_validated(
+        network: &str,
+        committee: Option<PinnedFfgCommittee>,
+        golden: Option<RawConsensusEvidence>,
+    ) -> Self {
+        let set_size = committee
+            .as_ref()
+            .map_or(0, |c| u64::try_from(c.validators.len()).unwrap_or(u64::MAX));
         let id = AdapterId::from_name(CASPER_FFG_ADAPTER_NAME);
         let descriptor = AdapterDescriptor {
             id,
             name: CASPER_FFG_ADAPTER_NAME.to_string(),
             adapter_version: ADAPTER_VERSION,
-            accepted_evidence_versions: vec![EVIDENCE_VERSION],
+            accepted_evidence_versions: vec![FFG_EVIDENCE_VERSION],
             consensus_kind: "casper-ffg-checkpoint".to_string(),
             finality_kind: FinalityKind::EconomicFinality,
             required_depth: FINALITY_DEPTH,
             time_unit: TimeUnit::Epoch,
-            trust_model: TrustModel::HonestMajority {
-                set_size: u64::try_from(committee.validators.len()).unwrap_or(u64::MAX),
-            },
+            trust_model: TrustModel::HonestMajority { set_size },
         };
         let members = committee
-            .validators
-            .iter()
-            .map(|v| (v.pubkey, v.clone()))
-            .collect();
-        Ok(Self {
+            .as_ref()
+            .map(|c| c.validators.iter().map(|v| (v.pubkey, v.clone())).collect())
+            .unwrap_or_default();
+        Self {
             descriptor,
             network: network.to_string(),
             committee,
             members,
             golden,
-        })
+        }
     }
 
-    /// Sum the stake of one vote set and check every rule the set must satisfy.
-    ///
-    /// Returns the distinct signer count and whether every signer co-signed
-    /// with an ML-DSA-65 key.
     fn check_vote_set(
         &self,
+        committee: &PinnedFfgCommittee,
         label: &str,
         votes: &[FfgVote],
         expected: (u64, [u8; 32], u64, [u8; 32]),
@@ -412,48 +561,57 @@ impl CasperFfgAdapter {
                 });
             }
             seen.push(vote.signer);
-            let digest = vote.digest(&self.network);
-            crate::crypto::primitives::verify_signature(&digest, &vote.signature, &vote.signer)
-                .map_err(|_| AdapterError::Crypto {
-                    what: format!("invalid Ed25519 signature in a {label} vote"),
-                })?;
-            if member.pq_pubkey.is_empty() {
-                all_pq = false;
-            } else {
-                if vote.pq_signature.is_empty() {
-                    return Err(AdapterError::Crypto {
-                        what: format!("a {label} vote is missing its ML-DSA-65 co-signature"),
-                    });
-                }
-                crate::crypto::primitives::PqKeyPair::verify(
-                    &member.pq_pubkey,
-                    crate::crypto::ctx::CROSS_DOMAIN_V1,
-                    &digest,
-                    &vote.pq_signature,
-                )
-                .map_err(|_| AdapterError::Crypto {
-                    what: format!("invalid ML-DSA-65 co-signature in a {label} vote"),
-                })?;
-            }
+            let used_pq = verify_single_vote_crypto(&self.network, member, vote, label)?;
+            all_pq &= used_pq;
             signed = signed.saturating_add(u128::from(member.stake));
         }
-        let threshold = self.committee.threshold_stake();
+        let threshold = committee.threshold_stake();
         if signed < threshold {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
                     "the {label} vote set signed {signed} stake, below the {threshold} needed to exceed two thirds of {}",
-                    self.committee.total_stake()
+                    committee.total_stake()
                 ),
             });
         }
         Ok((u64::try_from(seen.len()).unwrap_or(u64::MAX), all_pq))
     }
 
-    fn verify_inner(
+    fn validate_clock_and_depth(
+        target_epoch: u64,
+        policy: &VerificationPolicy,
+    ) -> Result<(), AdapterError> {
+        if policy.min_depth > FINALITY_DEPTH {
+            return Err(AdapterError::InsufficientDepth {
+                observed: FINALITY_DEPTH,
+                required: policy.min_depth,
+            });
+        }
+        if (policy.max_age > 0 || policy.now > 0) && target_epoch > policy.now {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "target checkpoint epoch {target_epoch} is ahead of caller clock {}",
+                    policy.now
+                ),
+            });
+        }
+        if policy.max_age > 0 && policy.now > target_epoch {
+            let age = policy.now - target_epoch;
+            if age > policy.max_age {
+                return Err(AdapterError::Stale {
+                    age,
+                    max_age: policy.max_age,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_envelope_and_epochs(
         &self,
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
-    ) -> Result<(FinalityAttestation, bool), AdapterError> {
+    ) -> Result<(&PinnedFfgCommittee, FfgEvidence), AdapterError> {
         if evidence.adapter != self.descriptor.id {
             return Err(AdapterError::WrongAdapter {
                 expected: self.descriptor.name.clone(),
@@ -465,9 +623,15 @@ impl CasperFfgAdapter {
             .accepted_evidence_versions
             .contains(&evidence.evidence_version)
         {
+            let accepted = self
+                .descriptor
+                .accepted_evidence_versions
+                .first()
+                .copied()
+                .unwrap_or(FFG_EVIDENCE_VERSION);
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
-                accepted: self.descriptor.accepted_evidence_versions[0].to_string(),
+                accepted: accepted.to_string(),
             });
         }
         if evidence.network != self.network {
@@ -478,11 +642,13 @@ impl CasperFfgAdapter {
                 ),
             });
         }
-        if policy.require_slashable {
+        let Some(committee) = self.committee.as_ref() else {
             return Err(AdapterError::ConsensusRule {
-                rule: "caller policy requires slashable backing; Casper FFG committee stake has no local slash route".to_string(),
+                rule: "Casper FFG adapter has no valid governance-pinned epoch committee"
+                    .to_string(),
             });
-        }
+        };
+
         let parsed = parse_payload(&evidence.payload)?;
         if parsed.target_epoch <= parsed.source_epoch {
             return Err(AdapterError::ConsensusRule {
@@ -497,11 +663,11 @@ impl CasperFfgAdapter {
                 ),
             });
         }
-        if parsed.target_epoch != self.committee.epoch {
+        if parsed.target_epoch != committee.epoch {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
-                    "target checkpoint epoch {} is not epoch {}, the only epoch this committee was pinned for",
-                    parsed.target_epoch, self.committee.epoch
+                    "target checkpoint epoch {} does not match pinned committee epoch {}",
+                    parsed.target_epoch, committee.epoch
                 ),
             });
         }
@@ -521,26 +687,23 @@ impl CasperFfgAdapter {
                 field: "checkpoint",
             });
         }
-        if policy.min_depth > FINALITY_DEPTH {
-            return Err(AdapterError::InsufficientDepth {
-                observed: FINALITY_DEPTH,
-                required: policy.min_depth,
+        Self::validate_clock_and_depth(parsed.target_epoch, policy)?;
+        Ok((committee, parsed))
+    }
+
+    fn verify_inner(
+        &self,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+    ) -> Result<(FinalityAttestation, bool), AdapterError> {
+        if policy.require_slashable {
+            return Err(AdapterError::ConsensusRule {
+                rule: "the policy requires slashable backing; external Casper FFG committee stake is not escrowed locally".to_string(),
             });
         }
-        if policy.max_age > 0 && policy.now > parsed.target_epoch {
-            let age = policy.now - parsed.target_epoch;
-            if age > policy.max_age {
-                return Err(AdapterError::Stale {
-                    age,
-                    max_age: policy.max_age,
-                });
-            }
-        }
-
-        // The source checkpoint is justified by votes from `source - 1`; the
-        // target checkpoint by votes from `source`. Both are needed: a target
-        // alone is a justified checkpoint, not a finalized one.
-        let (_source_signers, _source_all_pq) = self.check_vote_set(
+        let (committee, parsed) = self.validate_envelope_and_epochs(evidence, policy)?;
+        let (_source_signers, source_all_pq) = self.check_vote_set(
+            committee,
             "source",
             &parsed.source_votes,
             (
@@ -551,6 +714,7 @@ impl CasperFfgAdapter {
             ),
         )?;
         let (signers, target_all_pq) = self.check_vote_set(
+            committee,
             "target",
             &parsed.target_votes,
             (
@@ -561,12 +725,12 @@ impl CasperFfgAdapter {
             ),
         )?;
 
-        let scheme = if target_all_pq {
+        let both_quorums_pq = source_all_pq && target_all_pq;
+        let scheme = if both_quorums_pq {
             ObservedScheme::Scheme(SchemeId::ML_DSA_65)
         } else {
             ObservedScheme::Scheme(SchemeId::ED25519)
         };
-        let total = self.committee.total_stake();
         let attestation = FinalityAttestation {
             adapter: self.descriptor.id,
             domain: DomainKey::from_parts(&self.descriptor.id, &evidence.network),
@@ -577,15 +741,9 @@ impl CasperFfgAdapter {
             security: SecurityBacking::SignatureSet {
                 scheme,
                 signers,
-                required: u64::try_from(
-                    self.committee
-                        .validators
-                        .len()
-                        .saturating_mul(2)
-                        .div_ceil(3),
-                )
-                .unwrap_or(u64::MAX),
-                total_weight: total,
+                required: u64::try_from(committee.validators.len().saturating_mul(2).div_ceil(3))
+                    .unwrap_or(u64::MAX),
+                total_weight: committee.total_stake(),
                 slashable: false,
             },
             evidence_digest: evidence.digest(),
@@ -595,7 +753,7 @@ impl CasperFfgAdapter {
             attested_event_root: None,
             attested_tx_root: None,
         };
-        Ok((attestation, target_all_pq))
+        Ok((attestation, both_quorums_pq))
     }
 }
 
@@ -669,6 +827,58 @@ impl ExternalFinalityAdapter for CasperFfgAdapter {
     fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
         self.golden.clone()
     }
+
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        parse_payload(&evidence.payload)
+            .ok()
+            .map(|parsed| parsed.parent_root)
+    }
+}
+
+/// Encode a canonical Casper FFG two-epoch finality payload.
+///
+/// WIRING: wire encoder for `CasperFfgAdapter` payloads used by `intake.rs` and tests.
+#[must_use]
+pub fn encode_ffg_payload(
+    source_epoch: u64,
+    source_root: [u8; 32],
+    parent_root: [u8; 32],
+    target_epoch: u64,
+    target_root: [u8; 32],
+    source_votes: &[FfgVote],
+    target_votes: &[FfgVote],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(PAYLOAD_MAGIC);
+    out.extend_from_slice(&FFG_EVIDENCE_VERSION.to_le_bytes());
+    out.extend_from_slice(&target_epoch.to_le_bytes());
+    out.extend_from_slice(&target_root);
+    out.extend_from_slice(&source_epoch.to_le_bytes());
+    out.extend_from_slice(&source_root);
+    out.extend_from_slice(&parent_root);
+    for set in [source_votes, target_votes] {
+        out.extend_from_slice(&u32::try_from(set.len()).unwrap_or(u32::MAX).to_le_bytes());
+        for v in set {
+            out.extend_from_slice(&v.signer);
+            out.extend_from_slice(&v.source_epoch.to_le_bytes());
+            out.extend_from_slice(&v.source_root);
+            out.extend_from_slice(&v.target_epoch.to_le_bytes());
+            out.extend_from_slice(&v.target_root);
+            out.extend_from_slice(
+                &u32::try_from(v.signature.len())
+                    .unwrap_or(u32::MAX)
+                    .to_le_bytes(),
+            );
+            out.extend_from_slice(&v.signature);
+            out.extend_from_slice(
+                &u32::try_from(v.pq_signature.len())
+                    .unwrap_or(u32::MAX)
+                    .to_le_bytes(),
+            );
+            out.extend_from_slice(&v.pq_signature);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -676,11 +886,20 @@ mod tests {
     use super::*;
     use crate::core::address::Address;
     use crate::cross_domain::external::selftest::admit;
-    use crate::crypto::primitives::KeyPair;
+    use crate::crypto::facts::CryptoFacts;
+    use crate::crypto::primitives::{KeyPair, PqKeyPair};
+
+    const NETWORK: &str = "budlum-ffg";
+    const SOURCE_EPOCH: u64 = 10;
+    const TARGET_EPOCH: u64 = 11;
+    const SOURCE_ROOT: [u8; 32] = [0x11; 32];
+    const PARENT_ROOT: [u8; 32] = [0x10; 32];
+    const TARGET_ROOT: [u8; 32] = [0x12; 32];
 
     struct Signer {
         key: KeyPair,
         pubkey: [u8; 32],
+        pq: Option<PqKeyPair>,
     }
 
     fn signers() -> (Vec<Signer>, PinnedFfgCommittee) {
@@ -694,12 +913,41 @@ mod tests {
                 stake: 100,
                 pq_pubkey: Vec::new(),
             });
-            signers.push(Signer { key, pubkey });
+            signers.push(Signer {
+                key,
+                pubkey,
+                pq: None,
+            });
         }
         (
             signers,
             PinnedFfgCommittee::new(TARGET_EPOCH, members).expect("committee"),
         )
+    }
+
+    fn vote_on(
+        network: &str,
+        signer: &Signer,
+        source: u64,
+        source_root: [u8; 32],
+        target: u64,
+        target_root: [u8; 32],
+    ) -> FfgVote {
+        let mut v = FfgVote {
+            signer: signer.pubkey,
+            source_epoch: source,
+            source_root,
+            target_epoch: target,
+            target_root,
+            signature: Vec::new(),
+            pq_signature: Vec::new(),
+        };
+        let digest = v.digest(network);
+        v.signature = signer.key.sign(&digest).to_vec();
+        if let Some(pq) = &signer.pq {
+            v.pq_signature = pq.sign(ctx::CROSS_DOMAIN_V1, &digest).expect("pq sign");
+        }
+        v
     }
 
     fn vote(
@@ -709,17 +957,7 @@ mod tests {
         target: u64,
         target_root: [u8; 32],
     ) -> FfgVote {
-        let mut vote = FfgVote {
-            signer: signer.pubkey,
-            source_epoch: source,
-            source_root,
-            target_epoch: target,
-            target_root,
-            signature: Vec::new(),
-            pq_signature: Vec::new(),
-        };
-        vote.signature = signer.key.sign(&vote.digest("budlum-ffg")).to_vec();
-        vote
+        vote_on(NETWORK, signer, source, source_root, target, target_root)
     }
 
     fn encode(
@@ -731,36 +969,16 @@ mod tests {
         source_votes: &[FfgVote],
         target_votes: &[FfgVote],
     ) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(PAYLOAD_MAGIC);
-        out.extend_from_slice(&EVIDENCE_VERSION.to_le_bytes());
-        out.extend_from_slice(&target_epoch.to_le_bytes());
-        out.extend_from_slice(&target_root);
-        out.extend_from_slice(&source_epoch.to_le_bytes());
-        out.extend_from_slice(&source_root);
-        out.extend_from_slice(&parent_root);
-        for set in [source_votes, target_votes] {
-            out.extend_from_slice(&(set.len() as u32).to_le_bytes());
-            for v in set {
-                out.extend_from_slice(&v.signer);
-                out.extend_from_slice(&v.source_epoch.to_le_bytes());
-                out.extend_from_slice(&v.source_root);
-                out.extend_from_slice(&v.target_epoch.to_le_bytes());
-                out.extend_from_slice(&v.target_root);
-                out.extend_from_slice(&(v.signature.len() as u32).to_le_bytes());
-                out.extend_from_slice(&v.signature);
-                out.extend_from_slice(&(v.pq_signature.len() as u32).to_le_bytes());
-                out.extend_from_slice(&v.pq_signature);
-            }
-        }
-        out
+        encode_ffg_payload(
+            source_epoch,
+            source_root,
+            parent_root,
+            target_epoch,
+            target_root,
+            source_votes,
+            target_votes,
+        )
     }
-
-    const SOURCE_EPOCH: u64 = 10;
-    const TARGET_EPOCH: u64 = 11;
-    const SOURCE_ROOT: [u8; 32] = [0x11; 32];
-    const PARENT_ROOT: [u8; 32] = [0x10; 32];
-    const TARGET_ROOT: [u8; 32] = [0x12; 32];
 
     fn evidence_with(
         signers: &[Signer],
@@ -788,8 +1006,8 @@ mod tests {
         );
         RawConsensusEvidence {
             adapter: AdapterId::from_name(CASPER_FFG_ADAPTER_NAME),
-            evidence_version: EVIDENCE_VERSION,
-            network: "budlum-ffg".to_string(),
+            evidence_version: FFG_EVIDENCE_VERSION,
+            network: NETWORK.to_string(),
             payload,
             declared_height: TARGET_EPOCH,
             declared_root: TARGET_ROOT,
@@ -797,19 +1015,21 @@ mod tests {
         }
     }
 
-    fn adapter_with(signers: &[Signer], committee: PinnedFfgCommittee) -> CasperFfgAdapter {
+    fn adapter_with(signers: &[Signer], committee: &PinnedFfgCommittee) -> CasperFfgAdapter {
         let golden = evidence_with(signers, 3, 3);
-        CasperFfgAdapter::new("budlum-ffg", committee, Some(golden)).expect("adapter")
+        CasperFfgAdapter::new(NETWORK, committee, Some(golden)).expect("adapter")
     }
 
     fn policy() -> VerificationPolicy {
-        VerificationPolicy::strict(0)
+        let mut p = VerificationPolicy::strict(0);
+        p.require_slashable = false;
+        p
     }
 
     #[test]
     fn a_two_checkpoint_chain_with_two_thirds_stake_finalises() {
         let (signers, committee) = signers();
-        let adapter = adapter_with(&signers, committee.clone());
+        let adapter = adapter_with(&signers, &committee);
         let evidence = evidence_with(&signers, 3, 3);
         let attestation = adapter.verify(&evidence, &policy()).expect("finalises");
         assert_eq!(attestation.height, TARGET_EPOCH);
@@ -827,32 +1047,21 @@ mod tests {
             } => {
                 assert!(
                     !slashable,
-                    "Casper FFG backing has no local confiscation route, so slashable must be false"
+                    "external Casper FFG committee stake is not escrowed locally"
                 );
                 assert_eq!(total_weight, committee.total_stake());
             }
             other => panic!("unexpected backing: {other:?}"),
         }
-        let mut slash_policy = policy();
-        slash_policy.require_slashable = true;
-        assert!(
-            matches!(
-                adapter.verify(&evidence, &slash_policy),
-                Err(AdapterError::ConsensusRule { .. })
-            ),
-            "Casper FFG without local slash route must refuse require_slashable"
-        );
         assert_eq!(
             attestation.adapter,
             AdapterId::from_name(CASPER_FFG_ADAPTER_NAME)
         );
-        votes_from_another_epoch_or_network_are_refused();
     }
 
     #[test]
     fn the_pinned_committee_threshold_is_strictly_more_than_two_thirds() {
         let (_signers, committee) = signers();
-        // 400 stake in total: two thirds is 266.67, so 267 is the first passing sum.
         assert_eq!(committee.total_stake(), 400);
         assert_eq!(committee.threshold_stake(), 267);
     }
@@ -860,17 +1069,15 @@ mod tests {
     #[test]
     fn exactly_two_thirds_of_stake_is_refused() {
         let (mut signers, mut committee) = signers();
-        // Four members of 99 stake: 2 * 99 = 198 is exactly two thirds of 297.
         for member in &mut committee.validators {
             member.stake = 99;
         }
         committee =
             PinnedFfgCommittee::new(TARGET_EPOCH, committee.validators.clone()).expect("committee");
         for s in &mut signers {
-            // Keep the same keys; only the stake changed.
             assert!(!s.pubkey.is_empty());
         }
-        let adapter = adapter_with(&signers, committee);
+        let adapter = adapter_with(&signers, &committee);
         let evidence = evidence_with(&signers, 2, 2);
         let err = adapter.verify(&evidence, &policy()).unwrap_err();
         assert!(
@@ -882,7 +1089,9 @@ mod tests {
     #[test]
     fn non_adjacent_checkpoints_are_refused() {
         let (signers, committee) = signers();
-        let adapter = adapter_with(&signers, committee);
+        let shifted =
+            PinnedFfgCommittee::new(TARGET_EPOCH + 1, committee.validators).expect("committee");
+        let adapter = adapter_with(&signers, &shifted);
         let source_votes: Vec<FfgVote> = signers
             .iter()
             .take(3)
@@ -916,7 +1125,7 @@ mod tests {
         let err = adapter.verify(&evidence, &policy()).unwrap_err();
         match err {
             AdapterError::ConsensusRule { rule } => {
-                assert!(rule.contains("not adjacent"), "unexpected: {rule}")
+                assert!(rule.contains("not adjacent"), "unexpected: {rule}");
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -925,12 +1134,13 @@ mod tests {
     #[test]
     fn a_duplicate_signer_is_refused() {
         let (signers, committee) = signers();
-        let adapter = adapter_with(&signers, committee);
+        let adapter = adapter_with(&signers, &committee);
         let mut evidence = evidence_with(&signers, 3, 3);
-        // Repeat the first target vote inside the target set.
         let parsed = parse_payload(&evidence.payload).expect("payload");
         let mut duplicated = parsed.target_votes.clone();
-        duplicated.push(parsed.target_votes[0].clone());
+        if let Some(first) = parsed.target_votes.first() {
+            duplicated.push(first.clone());
+        }
         evidence.payload = encode(
             SOURCE_EPOCH,
             SOURCE_ROOT,
@@ -943,7 +1153,7 @@ mod tests {
         let err = adapter.verify(&evidence, &policy()).unwrap_err();
         match err {
             AdapterError::ConsensusRule { rule } => {
-                assert!(rule.contains("twice"), "unexpected: {rule}")
+                assert!(rule.contains("twice"), "unexpected: {rule}");
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -952,11 +1162,12 @@ mod tests {
     #[test]
     fn a_vote_from_outside_the_committee_is_refused() {
         let (signers, committee) = signers();
-        let adapter = adapter_with(&signers, committee);
+        let adapter = adapter_with(&signers, &committee);
         let outsider_key = KeyPair::from_seed(&[0x77; 32]).expect("key");
         let outsider = Signer {
             pubkey: outsider_key.public_key_bytes(),
             key: outsider_key,
+            pq: None,
         };
         let parsed = parse_payload(&evidence_with(&signers, 3, 3).payload).expect("payload");
         let mut target_votes = parsed.target_votes.clone();
@@ -990,7 +1201,7 @@ mod tests {
     #[test]
     fn a_vote_for_another_source_root_is_refused() {
         let (signers, committee) = signers();
-        let adapter = adapter_with(&signers, committee);
+        let adapter = adapter_with(&signers, &committee);
         let source_votes: Vec<FfgVote> = signers
             .iter()
             .take(3)
@@ -1024,11 +1235,13 @@ mod tests {
     #[test]
     fn a_tampered_signature_is_refused() {
         let (signers, committee) = signers();
-        let adapter = adapter_with(&signers, committee);
+        let adapter = adapter_with(&signers, &committee);
         let parsed = parse_payload(&evidence_with(&signers, 3, 3).payload).expect("payload");
         let mut target_votes = parsed.target_votes.clone();
         if let Some(first) = target_votes.first_mut() {
-            first.signature[0] ^= 0xff;
+            if let Some(byte) = first.signature.first_mut() {
+                *byte ^= 0xff;
+            }
         }
         let mut evidence = evidence_with(&signers, 3, 3);
         evidence.payload = encode(
@@ -1050,7 +1263,7 @@ mod tests {
     #[test]
     fn a_declared_height_that_does_not_match_the_payload_is_refused() {
         let (signers, committee) = signers();
-        let adapter = adapter_with(&signers, committee);
+        let adapter = adapter_with(&signers, &committee);
         let mut evidence = evidence_with(&signers, 3, 3);
         evidence.declared_height = TARGET_EPOCH + 5;
         let err = adapter.verify(&evidence, &policy()).unwrap_err();
@@ -1063,7 +1276,7 @@ mod tests {
     #[test]
     fn a_depth_requirement_above_two_epochs_is_refused() {
         let (signers, committee) = signers();
-        let adapter = adapter_with(&signers, committee);
+        let adapter = adapter_with(&signers, &committee);
         let mut strict = policy();
         strict.min_depth = 3;
         let err = adapter
@@ -1084,7 +1297,7 @@ mod tests {
     #[test]
     fn stale_evidence_is_refused() {
         let (signers, committee) = signers();
-        let adapter = adapter_with(&signers, committee);
+        let adapter = adapter_with(&signers, &committee);
         let mut aged = policy();
         aged.max_age = 2;
         aged.now = TARGET_EPOCH + 9;
@@ -1098,9 +1311,212 @@ mod tests {
     }
 
     #[test]
+    fn unpinned_checkpoint_epoch_is_refused_by_epoch_bound_committee() {
+        let (signers, committee) = signers();
+        let wrong_epoch_committee =
+            PinnedFfgCommittee::new(TARGET_EPOCH + 5, committee.validators).expect("committee");
+        let adapter = adapter_with(&signers, &wrong_epoch_committee);
+        let err = adapter
+            .verify(&evidence_with(&signers, 3, 3), &policy())
+            .unwrap_err();
+        match err {
+            AdapterError::ConsensusRule { rule } => {
+                assert!(
+                    rule.contains("pinned committee epoch"),
+                    "unexpected: {rule}"
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn future_dated_target_epoch_is_refused_when_clock_is_supplied() {
+        let (signers, committee) = signers();
+        let adapter = adapter_with(&signers, &committee);
+        let mut clocked = policy();
+        clocked.max_age = 4;
+        clocked.now = TARGET_EPOCH - 1;
+        let err = adapter
+            .verify(&evidence_with(&signers, 3, 3), &clocked)
+            .unwrap_err();
+        match err {
+            AdapterError::ConsensusRule { rule } => {
+                assert!(rule.contains("ahead of caller clock"), "unexpected: {rule}");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cross_network_replayed_vote_signatures_are_refused() {
+        let (signers, committee) = signers();
+        let adapter = adapter_with(&signers, &committee);
+        let foreign_source: Vec<FfgVote> = signers
+            .iter()
+            .take(3)
+            .map(|s| {
+                vote_on(
+                    "sister-ffg-testnet",
+                    s,
+                    SOURCE_EPOCH - 1,
+                    PARENT_ROOT,
+                    SOURCE_EPOCH,
+                    SOURCE_ROOT,
+                )
+            })
+            .collect();
+        let foreign_target: Vec<FfgVote> = signers
+            .iter()
+            .take(3)
+            .map(|s| {
+                vote_on(
+                    "sister-ffg-testnet",
+                    s,
+                    SOURCE_EPOCH,
+                    SOURCE_ROOT,
+                    TARGET_EPOCH,
+                    TARGET_ROOT,
+                )
+            })
+            .collect();
+        let mut replayed = evidence_with(&signers, 3, 3);
+        replayed.payload = encode(
+            SOURCE_EPOCH,
+            SOURCE_ROOT,
+            PARENT_ROOT,
+            TARGET_EPOCH,
+            TARGET_ROOT,
+            &foreign_source,
+            &foreign_target,
+        );
+        let err = adapter.verify(&replayed, &policy()).unwrap_err();
+        assert!(
+            matches!(err, AdapterError::Crypto { .. }),
+            "cross-network replay must fail signature check: {err:?}"
+        );
+    }
+
+    #[test]
+    fn require_slashable_policy_refuses_unbonded_external_committee_stake() {
+        let (signers, committee) = signers();
+        let adapter = adapter_with(&signers, &committee);
+        let mut strict = VerificationPolicy::strict(0);
+        strict.require_slashable = true;
+        let err = adapter
+            .verify(&evidence_with(&signers, 3, 3), &strict)
+            .unwrap_err();
+        assert!(matches!(err, AdapterError::ConsensusRule { .. }));
+    }
+
+    #[test]
+    fn hybrid_ml_dsa_committee_observes_pq_and_refuses_stripped_cosignature() {
+        let mut pq_signers = Vec::new();
+        let mut members = Vec::new();
+        for seed in 1u8..=4 {
+            let key = KeyPair::from_seed(&[seed; 32]).expect("ed25519");
+            let pubkey = key.public_key_bytes();
+            let pq = PqKeyPair::generate();
+            members.push(FfgValidator {
+                pubkey,
+                stake: 100,
+                pq_pubkey: pq.public_key_bytes().to_vec(),
+            });
+            pq_signers.push(Signer {
+                key,
+                pubkey,
+                pq: Some(pq),
+            });
+        }
+        let committee = PinnedFfgCommittee::new(TARGET_EPOCH, members).expect("pq committee");
+        let adapter = adapter_with(&pq_signers, &committee);
+        let ev = evidence_with(&pq_signers, 3, 3);
+        let mut obs = CryptoFacts::default();
+        let att = adapter
+            .verify_observed(&ev, &policy(), &mut obs)
+            .expect("hybrid verify");
+        assert_eq!(
+            att.security.observed_scheme(),
+            Some(ObservedScheme::Scheme(SchemeId::ML_DSA_65))
+        );
+
+        let mut parsed = parse_payload(&ev.payload).expect("parse");
+        if let Some(first) = parsed.source_votes.first_mut() {
+            first.pq_signature.clear();
+        }
+        let mut stripped = ev;
+        stripped.payload = encode(
+            SOURCE_EPOCH,
+            SOURCE_ROOT,
+            PARENT_ROOT,
+            TARGET_EPOCH,
+            TARGET_ROOT,
+            &parsed.source_votes,
+            &parsed.target_votes,
+        );
+        let err = adapter.verify(&stripped, &policy()).unwrap_err();
+        assert!(matches!(err, AdapterError::Crypto { .. }));
+    }
+
+    #[test]
+    fn slashing_verifier_proves_rule1_double_vote_and_rule2_surround_vote() {
+        let (signers, committee) = signers();
+        let offender = signers.first().expect("offender");
+
+        let v1 = vote(offender, 10, [0x21; 32], 11, [0x31; 32]);
+        let v2 = vote(offender, 10, [0x21; 32], 11, [0x32; 32]);
+        let (kind, stake) = verify_ffg_slashing_evidence(
+            NETWORK,
+            &committee,
+            &FfgEquivocationProof {
+                vote_a: v1.clone(),
+                vote_b: v2,
+            },
+        )
+        .expect("double vote");
+        assert_eq!(kind, FfgSlashingKind::DoubleVote);
+        assert_eq!(stake, 100);
+
+        assert!(verify_ffg_slashing_evidence(
+            NETWORK,
+            &committee,
+            &FfgEquivocationProof {
+                vote_a: v1.clone(),
+                vote_b: v1,
+            },
+        )
+        .is_err());
+
+        let outer = vote(offender, 8, [0x41; 32], 13, [0x51; 32]);
+        let inner = vote(offender, 9, [0x42; 32], 12, [0x52; 32]);
+        let (kind2, _) = verify_ffg_slashing_evidence(
+            NETWORK,
+            &committee,
+            &FfgEquivocationProof {
+                vote_a: outer,
+                vote_b: inner,
+            },
+        )
+        .expect("surround vote");
+        assert_eq!(kind2, FfgSlashingKind::SurroundVote);
+
+        let step1 = vote(offender, 9, [0x61; 32], 10, [0x62; 32]);
+        let step2 = vote(offender, 10, [0x62; 32], 11, [0x63; 32]);
+        assert!(verify_ffg_slashing_evidence(
+            NETWORK,
+            &committee,
+            &FfgEquivocationProof {
+                vote_a: step1,
+                vote_b: step2,
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
     fn the_fault_probe_suite_admits_the_adapter() {
         let (signers, committee) = signers();
-        let adapter = adapter_with(&signers, committee);
+        let adapter = adapter_with(&signers, &committee);
         let report = admit(&adapter, &policy());
         assert!(report.golden_verified, "the golden sample must verify");
         for (name, outcome) in &report.probes {
@@ -1113,49 +1529,5 @@ mod tests {
             );
         }
         assert!(report.admitted, "admission failed: {report:?}");
-    }
-
-    fn votes_from_another_epoch_or_network_are_refused() {
-        let (signers, committee) = signers();
-        let adapter = adapter_with(&signers, committee.clone());
-
-        // 1. An adjacent pair at a different epoch (e.g. 20 -> 21) than the pinned epoch (11) must be refused.
-        let wrong_epoch_source: Vec<FfgVote> = signers
-            .iter()
-            .take(3)
-            .map(|s| vote(s, 19, PARENT_ROOT, 20, SOURCE_ROOT))
-            .collect();
-        let wrong_epoch_target: Vec<FfgVote> = signers
-            .iter()
-            .take(3)
-            .map(|s| vote(s, 20, SOURCE_ROOT, 21, TARGET_ROOT))
-            .collect();
-        let mut wrong_epoch_ev = evidence_with(&signers, 3, 3);
-        wrong_epoch_ev.payload = encode(
-            20,
-            SOURCE_ROOT,
-            PARENT_ROOT,
-            21,
-            TARGET_ROOT,
-            &wrong_epoch_source,
-            &wrong_epoch_target,
-        );
-        wrong_epoch_ev.declared_height = 21;
-        let epoch_err = adapter.verify(&wrong_epoch_ev, &policy()).unwrap_err();
-        assert!(
-            matches!(epoch_err, AdapterError::ConsensusRule { ref rule } if rule.contains("only epoch this committee was pinned for")),
-            "unexpected epoch error: {epoch_err:?}"
-        );
-
-        // 2. Votes signed for "budlum-ffg" replayed against an adapter pinned to "other-ffg" must be refused.
-        let other_adapter =
-            CasperFfgAdapter::new("other-ffg", committee, None).expect("other adapter");
-        let mut replayed_ev = evidence_with(&signers, 3, 3);
-        replayed_ev.network = "other-ffg".to_string();
-        let replay_err = other_adapter.verify(&replayed_ev, &policy()).unwrap_err();
-        assert!(
-            matches!(replay_err, AdapterError::Crypto { .. }),
-            "cross-network vote replay must fail signature verification: {replay_err:?}"
-        );
     }
 }

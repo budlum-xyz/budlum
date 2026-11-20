@@ -8916,6 +8916,26 @@ impl AccountState {
             .register_at_root(based_on_root, account)
     }
 
+    /// The pact-carrying state door: a quantum account whose `pact_root` is
+    /// non-zero enters chain state only here, against the presented pact set
+    /// and the root the caller read. The plain door refuses non-zero pact
+    /// roots, so the evidence check cannot be bypassed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry error: `RootMismatch` when this state has moved,
+    /// a stale pact-registry root, or an account root that does not match
+    /// the presented pacts.
+    pub fn register_quantum_account_with_pacts_at_root(
+        &mut self,
+        based_on_root: [u8; 32],
+        account: crate::account_abstraction::QuantumAccount,
+        pacts: &crate::storage::pact_binding::PactRegistry,
+    ) -> Result<(), crate::account_abstraction::QuantumAccountRegistryError> {
+        self.quantum_accounts
+            .register_with_pacts_at_root(based_on_root, account, pacts)
+    }
+
     /// Update a registered quantum account against the state's current
     /// registry root; the change function does not run on a stale root.
     ///

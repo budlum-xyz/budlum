@@ -107,6 +107,7 @@ pub mod auxpow_pop;
 pub mod babylon_eots;
 pub mod based_preconf;
 pub mod bitcoin_spv;
+pub mod bitvm_covenant;
 pub mod casper_ffg;
 pub mod chain_key_ni_dkg;
 pub mod da_sampling;
@@ -124,6 +125,7 @@ pub mod intake;
 pub mod intake_guard;
 pub mod intake_quorum;
 pub mod mina_recursive;
+pub mod mysticeti_dag;
 pub mod near_doomslug;
 pub mod nipopow;
 pub mod ouroboros_mithril;
@@ -172,9 +174,18 @@ pub use bitcoin_spv::{
     sha256d, BitcoinHeader, BitcoinSpvAdapter, PinnedBitcoinAnchor, EVIDENCE_VERSION, HEADER_LEN,
     MAX_FUTURE_SECONDS, MAX_HEADERS, REQUIRED_DEPTH,
 };
+pub use bitvm_covenant::{
+    cumulative_difficulty_bits, decode_bitvm_evidence, encode_bitvm_evidence,
+    evaluate_chunk_transition, expand_compact_bits, hash_trace_merkle_node, verify_disprove_script,
+    BitVmCovenantAdapter, BitVmCovenantEvidence, BitVmPegClaim, DisproveScriptProof, MerkleStep,
+    PinnedBitVmAnchor, TraceChunkStep, BITVM_CHUNK_LEAF_TAG, BITVM_CHUNK_NODE_TAG, BITVM_CLAIM_TAG,
+    BITVM_COVENANT_ADAPTER_NAME, BITVM_EVIDENCE_VERSION, BITVM_STEP_TRANSITION_TAG,
+    MIN_SAFE_POW_CONFIRMATIONS, POW_HEADER_LEN,
+};
 pub use casper_ffg::{
-    CasperFfgAdapter, FfgValidator, PinnedFfgCommittee, CASPER_FFG_ADAPTER_NAME,
-    CASPER_FFG_VOTE_TAG,
+    encode_ffg_payload, verify_ffg_slashing_evidence, CasperFfgAdapter, FfgEquivocationProof,
+    FfgSlashingKind, FfgValidator, FfgVote, PinnedFfgCommittee, CASPER_FFG_ADAPTER_NAME,
+    CASPER_FFG_VOTE_TAG, FFG_EVIDENCE_VERSION,
 };
 pub use chain_key_ni_dkg::{
     compute_nidkg_transcript_digest, cup_signing_digest, delegation_signing_digest,
@@ -232,6 +243,13 @@ pub use intake_quorum::{
     ROUND_RETENTION_BLOCKS,
 };
 pub use mina_recursive::{PinnedSuccinctGenesis, SuccinctRecursiveAdapter};
+pub use mysticeti_dag::{
+    decode_mysticeti_evidence, encode_mysticeti_evidence, verify_mysticeti_equivocation,
+    MysticetiAnchorCommitment, MysticetiDagAdapter, MysticetiEquivocationProof, MysticetiMember,
+    MysticetiVertex, MysticetiWaveEvidence, PinnedMysticetiCommittee, MYSTICETI_COMMITMENT_TAG,
+    MYSTICETI_DAG_ADAPTER_NAME, MYSTICETI_EVIDENCE_VERSION, MYSTICETI_VERTEX_TAG,
+    MYSTICETI_WAVE_ROUNDS,
+};
 pub use near_doomslug::{
     advance_near_epoch, verify_near_approval_slash, NearBlockProducer, NearDoomslugAdapter,
     PinnedNearEpoch,
