@@ -926,9 +926,14 @@ enum BnsAction {
         /// Paid B.U.D. 3.0 object lifetime in epochs.
         #[arg(long, default_value_t = 100_000)]
         lifetime_epochs: u64,
-        /// Optional 32-byte custody validator hex (defaults to wallet address).
+        /// 32-byte custody validator hex, repeatable.
+        ///
+        /// A B.U.D. 3.0 object refuses a single custodian, so pass at least
+        /// two: `--validator 0x.. --validator 0x..`. Defaults to the signing
+        /// wallet, which alone is never enough, so the CLI refuses to publish
+        /// until a second one is named.
         #[arg(long)]
-        validator: Option<String>,
+        validator: Vec<String>,
     },
 }
 
@@ -3743,7 +3748,7 @@ fn prepare_publish_site_payloads(
     payload: &[u8],
     mime: &str,
     lifetime_epochs: u64,
-    custody_validator: [u8; 32],
+    custody_validators: &[[u8; 32]],
 ) -> Result<
     (
         budlum_core::storage::bud3::tx::StorageTxV3,
@@ -3767,6 +3772,15 @@ fn prepare_publish_site_payloads(
     if lifetime_epochs == 0 {
         return Err("--lifetime-epochs must be greater than zero".into());
     }
+    // Placement refuses a segment that one custodian holds end to end, and it
+    // is right to: a lone holder is a lone point of loss. Refusing here, before
+    // the payload is built, names the fix the user can act on.
+    if custody_validators.len() < 2 {
+        return Err(format!(
+            "a B.U.D. 3.0 object needs at least two custody validators (got {}); pass --validator twice",
+            custody_validators.len()
+        ));
+    }
     const SITE_PROFILE: Profile = Profile {
         id: 0,
         qr_version: 40,
@@ -3776,17 +3790,46 @@ fn prepare_publish_site_payloads(
     };
     let prepared = prepare_public_upload(payload, &SITE_PROFILE, &Bud3Limits::default(), 8)
         .map_err(|e| format!("B.U.D. 3.0 site encoding failed: {e:?}"))?;
-    let mut shares = Vec::with_capacity(prepared.segments.len());
+    // Symbol ranges are split across the custody set in ESI order, so every
+    // segment names each custodian exactly once and together they cover the
+    // coded symbols. Duplicates are refused rather than deduplicated: a user who
+    // passed the same key twice believes two holders exist.
+    let mut seen = std::collections::BTreeSet::new();
+    for v in custody_validators {
+        if !seen.insert(v) {
+            return Err(format!(
+                "custody validator {} appears twice",
+                hex::encode(v)
+            ));
+        }
+    }
+    let mut shares = Vec::with_capacity(prepared.segments.len() * custody_validators.len());
     for (seg_idx, syms) in prepared.segments.iter().enumerate() {
-        shares.push((
-            seg_idx as u64,
-            Share {
-                validator: custody_validator,
-                class: Class::Full,
-                first_esi: 0,
-                symbols: syms.len() as u32,
-            },
-        ));
+        let total = syms.len() as u32;
+        if custody_validators.len() > usize::try_from(total).unwrap_or(0) {
+            return Err(format!(
+                "segment {seg_idx} has {total} coded symbols, fewer than the {} custody validators; \
+                 use a larger object or fewer `--validator` flags",
+                custody_validators.len()
+            ));
+        }
+        let n = custody_validators.len() as u32;
+        let base = total / n;
+        let extra = total % n;
+        let mut first = 0u32;
+        for (i, validator) in custody_validators.iter().enumerate() {
+            let take = base + u32::from((i as u32) < extra);
+            shares.push((
+                seg_idx as u64,
+                Share {
+                    validator: *validator,
+                    class: Class::Full,
+                    first_esi: first,
+                    symbols: take,
+                },
+            ));
+            first += take;
+        }
     }
     let cref = ContentRef::new(prepared.record.content_id, prepared.record.commitment, None)
         .map_err(|e| format!("invalid ContentRef: {e:?}"))?;
@@ -3811,16 +3854,23 @@ fn run_bns_publish_site(
     name: &str,
     path: &std::path::Path,
     lifetime_epochs: u64,
-    validator: Option<&str>,
+    validators: &[String],
 ) -> Result<(), String> {
     let key = open_wallet(signer)?;
     let (payload, mime) = bundle_site_payload(path)?;
-    let custody_validator = match validator {
-        Some(raw) => parse_address(raw.strip_prefix("0x").unwrap_or(raw))?.0,
-        None => key.address().0,
-    };
+    let mut custody_validators: Vec<[u8; 32]> = Vec::with_capacity(validators.len() + 1);
+    for raw in validators {
+        custody_validators.push(parse_address(raw.strip_prefix("0x").unwrap_or(raw))?.0);
+    }
+    // The signing wallet holds a share by default: it is the account paying for
+    // the object, and leaving it out of the placement would mean paying for
+    // custody it never holds.
+    let signer_address = key.address().0;
+    if !custody_validators.contains(&signer_address) {
+        custody_validators.push(signer_address);
+    }
     let (storage_tx, cref, set_content_data, set_records_data) =
-        prepare_publish_site_payloads(name, &payload, &mime, lifetime_epochs, custody_validator)?;
+        prepare_publish_site_payloads(name, &payload, &mime, lifetime_epochs, &custody_validators)?;
     let nonce_val = rpc_call(
         rpc_url,
         "bud_getNonce",
@@ -4260,7 +4310,7 @@ fn main() {
                 name,
                 path,
                 *lifetime_epochs,
-                validator.as_deref(),
+                validator,
             ),
         },
         Command::Node { action } => match action {
@@ -5189,6 +5239,15 @@ mod rpc_auth_tests {
         state.epoch_index = 5;
         state.add_balance(&seller, 50_000_000_000);
         state.add_balance(&alice, 50_000_000_000);
+        // A `RegisterObject` share holder must be an active consensus
+        // validator: the executor refuses a share held by anyone else, because
+        // the shares are the consensus set's custody obligations. Placement
+        // additionally refuses a segment held by one custodian, so the payload
+        // is built for two.
+        let custodian_kp = KeyPair::generate().unwrap();
+        let custodian = Address::from(custodian_kp.public_key_bytes());
+        state.add_validator(alice, 1_000);
+        state.add_validator(custodian, 1_000);
         state.bns_registry.set_primary_sellers([seller]).unwrap();
 
         let offer_req = budlum_core::bns::CreateNameOffer {
@@ -5226,9 +5285,14 @@ mod rpc_auth_tests {
         buy_tx.sign(&kp);
         Executor::apply_transaction_checked(&mut state, &buy_tx).unwrap();
 
-        let (storage_tx, cref, set_content_data, set_records_data) =
-            prepare_publish_site_payloads("ayaz.bud", &file_bytes, &file_mime, 100, alice.0)
-                .unwrap();
+        let (storage_tx, cref, set_content_data, set_records_data) = prepare_publish_site_payloads(
+            "ayaz.bud",
+            &file_bytes,
+            &file_mime,
+            100,
+            &[alice.0, custodian.0],
+        )
+        .unwrap();
 
         let mut tx1 = Transaction::new_with_chain_id(
             alice,
@@ -5352,5 +5416,37 @@ mod rpc_auth_tests {
         let mut forged_json = proof_json;
         forged_json["bns_root"] = serde_json::json!(format!("0x{}", "ee".repeat(32)));
         assert!(parse_and_verify_bns_proof_json(&forged_json, "ayaz.bud", &trusted).is_err());
+    }
+
+    #[test]
+    fn publishing_a_site_with_one_custody_validator_is_refused_before_it_is_built() {
+        let err = prepare_publish_site_payloads(
+            "ayaz.bud",
+            b"<html>site</html>",
+            "text/html; charset=utf-8",
+            100,
+            &[[0x11u8; 32]],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("at least two custody validators"),
+            "the refusal must name the cause, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_repeated_custody_validator_is_refused_rather_than_deduplicated() {
+        let err = prepare_publish_site_payloads(
+            "ayaz.bud",
+            b"<html>site</html>",
+            "text/html; charset=utf-8",
+            100,
+            &[[0x11u8; 32], [0x11u8; 32]],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("appears twice"),
+            "the refusal must name the cause, got: {err}"
+        );
     }
 }
