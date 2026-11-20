@@ -4119,6 +4119,9 @@ impl StorageRegistry {
                 now_epoch: response_epoch,
             });
         }
+        if deal.storage_root.is_none() {
+            return Err(StorageError::MerkleProofRequired);
+        }
 
         // === B.U.D.: full STARK proof verification ===
         //
@@ -6774,6 +6777,18 @@ mod tests {
         assert!(
             deal.merkle_proof.is_none() && deal.storage_root.is_some(),
             "no envelope claimed, but the commitment is always recorded"
+        );
+
+        // Even while challenge proofs are contained, a legacy/restored deal
+        // missing its commitment root cannot resolve Answered.
+        reg.deals.get_mut(&id).expect("deal exists").storage_root = None;
+        let cid = reg
+            .open_challenge(id, 0, 4, 11, 18, opener(), 50)
+            .expect("open challenge");
+        let ans = reg.answer_challenge(cid, ContentId([1u8; 32]), operator(), 12, None);
+        assert!(
+            matches!(ans, Err(StorageError::MerkleProofRequired)),
+            "a commitment-less deal must not resolve Answered under the contained regime"
         );
     }
 
