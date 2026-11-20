@@ -1223,6 +1223,73 @@ pub fn prove_universal_light_proof(
 ///
 /// Returns [`UlpError`] on any failed binding, STARK proof, Merkle inclusion,
 /// outflow bound, or `BudAir` algebraic constraint check.
+/// [`open_universal_light_proof`] with the full snapshot set: every header
+/// field the bundle declares is re-derived through the canonical mirror
+/// hashes and required to equal the in-circuit published statement, so
+/// `settlement_epoch`, the hub anchor, the domain-set root, the aggregate
+/// PQ flag and the outflow ceiling come out PROVEN rather than declared.
+///
+/// The route light client cannot call this (it holds only the hops'
+/// snapshots); callers that admit a bundle alongside its snapshot set must.
+///
+/// # Errors
+///
+/// Every refusal of [`open_universal_light_proof`], plus
+/// [`UlpError::BindingMismatch`] when any declared header field is not the
+/// one the proof's statement actually witnessed.
+pub fn open_universal_light_proof_with_snapshots(
+    bundle: &UniversalLightProofBundle,
+    expected_program_hash: &Hash32,
+    expected_hub_chain_id: DomainId,
+    expected_hub_checkpoint_root: &Hash32,
+    snapshots: &[UlpDomainSnapshot],
+    registry: &SchemeStatusRegistry,
+) -> Result<VerifiedUlpHeader, UlpError> {
+    if snapshots.len() != usize::try_from(bundle.domain_count).unwrap_or(usize::MAX) {
+        return Err(UlpError::BindingMismatch(
+            "snapshot count does not match bundle domain_count",
+        ));
+    }
+    // The leaves must fold to the declared root: without this the witness
+    // root is free and the output statement binds a root over nothing.
+    if !bool::from(ulp_domains_root(snapshots).ct_eq(&bundle.domains_merkle_root)) {
+        return Err(UlpError::BindingMismatch(
+            "domains_merkle_root is not the root of the presented snapshots",
+        ));
+    }
+    let expected_input = ulp_input_hash(
+        expected_hub_chain_id,
+        bundle.settlement_epoch,
+        &bundle.hub_checkpoint_root,
+        snapshots,
+    );
+    if !bool::from(expected_input.ct_eq(&bundle.input_hash)) {
+        return Err(UlpError::BindingMismatch(
+            "declared epoch/anchor are not the proof's input statement",
+        ));
+    }
+    let expected_output = ulp_output_hash(
+        expected_hub_chain_id,
+        bundle.settlement_epoch,
+        &bundle.domains_merkle_root,
+        bundle.all_pq_attested,
+        bundle.max_outflow_bps,
+        snapshots,
+    );
+    if !bool::from(expected_output.ct_eq(&bundle.output_hash)) {
+        return Err(UlpError::BindingMismatch(
+            "declared root/flags are not the proof's output statement",
+        ));
+    }
+    open_universal_light_proof(
+        bundle,
+        expected_program_hash,
+        expected_hub_chain_id,
+        expected_hub_checkpoint_root,
+        registry,
+    )
+}
+
 pub fn open_universal_light_proof(
     bundle: &UniversalLightProofBundle,
     expected_program_hash: &Hash32,
