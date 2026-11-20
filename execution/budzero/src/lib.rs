@@ -278,17 +278,70 @@ impl ExecutionEnvironment for BudZeroWorker {
 
                 for &slot in &declared {
                     let key = slot_key(&call.target.id, slot);
-                    if let Ok(Some(raw)) = host.read(&store_ns, &key) {
-                        if let Ok(arr) = raw.as_slice().try_into() {
-                            vm.storage.insert(slot, u64::from_le_bytes(arr));
+                    match host.read(&store_ns, &key) {
+                        Ok(Some(raw)) => {
+                            let Ok(arr) = <[u8; 8]>::try_from(raw.as_slice()) else {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"corrupt committed storage word".to_vec(),
+                                    gas_used: 0,
+                                });
+                            };
+                            let word = u64::from_le_bytes(arr);
+                            if word >= bud_vm::GOLDILOCKS_P {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"non-canonical committed storage word".to_vec(),
+                                    gas_used: 0,
+                                });
+                            }
+                            vm.storage.insert(slot, word);
+                        }
+                        Ok(None) => {}
+                        Err(HostError::OutOfGas) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::OutOfGas,
+                                output: Vec::new(),
+                                gas_used: call.gas_limit,
+                            });
+                        }
+                        Err(_) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"committed storage read failed".to_vec(),
+                                gas_used: 0,
+                            });
                         }
                     }
                 }
                 for (slot, val) in pairs {
+                    if val >= bud_vm::GOLDILOCKS_P {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"non-canonical field element in call input".to_vec(),
+                            gas_used: 0,
+                        });
+                    }
                     let key = slot_key(&call.target.id, slot);
-                    let collides_committed = declared.contains(&slot)
-                        || matches!(host.read(&store_ns, &key), Ok(Some(_)));
-                    if collides_committed {
+                    let has_committed = match host.read(&store_ns, &key) {
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(HostError::OutOfGas) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::OutOfGas,
+                                output: Vec::new(),
+                                gas_used: call.gas_limit,
+                            });
+                        }
+                        Err(_) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"committed storage read failed".to_vec(),
+                                gas_used: 0,
+                            });
+                        }
+                    };
+                    if declared.contains(&slot) || has_committed {
                         return Ok(EeOutcome {
                             status: OutcomeStatus::Revert,
                             output: b"call input slot collides with declared storage".to_vec(),
@@ -478,15 +531,48 @@ impl ExecutionEnvironment for BudZeroWorker {
         let mut vm = Vm::with_mainnet_mode(WORKER_VM_MEMORY_BYTES, 1_000_000, true)
             .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
         vm.context.block_height = ctx.height;
-        for slot in declared {
+        for &slot in &declared {
             let key = slot_key(&q.target.id, slot);
-            if let Ok(Some(raw)) = host.read(&store_ns, &key) {
-                if let Ok(arr) = raw.as_slice().try_into() {
-                    vm.storage.insert(slot, u64::from_le_bytes(arr));
+            let raw_opt = host.read(&store_ns, &key).map_err(|e| EeRefusal {
+                code: RefusalCode::Denied,
+                message: e.to_string(),
+            })?;
+            if let Some(raw) = raw_opt {
+                let arr = <[u8; 8]>::try_from(raw.as_slice()).map_err(|_| EeRefusal {
+                    code: RefusalCode::Denied,
+                    message: "corrupt committed storage word".into(),
+                })?;
+                let word = u64::from_le_bytes(arr);
+                if word >= bud_vm::GOLDILOCKS_P {
+                    return Err(EeRefusal {
+                        code: RefusalCode::Denied,
+                        message: "non-canonical committed storage word".into(),
+                    });
                 }
+                vm.storage.insert(slot, word);
             }
         }
         for (slot, val) in pairs {
+            if val >= bud_vm::GOLDILOCKS_P {
+                return Err(EeRefusal {
+                    code: RefusalCode::InvalidCode,
+                    message: "non-canonical field element in call input".into(),
+                });
+            }
+            let key = slot_key(&q.target.id, slot);
+            let has_committed = host
+                .read(&store_ns, &key)
+                .map_err(|e| EeRefusal {
+                    code: RefusalCode::Denied,
+                    message: e.to_string(),
+                })?
+                .is_some();
+            if declared.contains(&slot) || has_committed {
+                return Err(EeRefusal {
+                    code: RefusalCode::Denied,
+                    message: "call input slot collides with committed storage".into(),
+                });
+            }
             vm.storage.insert(slot, val);
         }
         let receipt = vm.run_receipt(&program);
@@ -845,5 +931,235 @@ mod tests {
             )
             .expect("no fault");
         assert_eq!(second.status, OutcomeStatus::Revert);
+    }
+
+    fn encode_call_payload(declared: &[u64], pairs: &[(u64, u64)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(declared.len() as u32).to_le_bytes());
+        for &slot in declared {
+            out.extend_from_slice(&slot.to_le_bytes());
+        }
+        out.extend_from_slice(&(pairs.len() as u32).to_le_bytes());
+        for &(slot, val) in pairs {
+            out.extend_from_slice(&slot.to_le_bytes());
+            out.extend_from_slice(&val.to_le_bytes());
+        }
+        out
+    }
+
+    fn read_slot_and_log_program(slot: i32) -> Vec<u8> {
+        let steps = [
+            Instruction {
+                opcode: Opcode::SRead,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: slot,
+            },
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 1,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+        ];
+        steps
+            .iter()
+            .flat_map(|ins| ins.encode().to_le_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn query_refuses_call_input_colliding_with_committed_or_declared_storage() {
+        let mut fx = Fixture::new();
+        fx.deploy(read_slot_and_log_program(7));
+
+        let Ok(store_ns) = Namespace::new(NS_BUDZERO_STORAGE) else {
+            panic!("storage namespace");
+        };
+        let key = slot_key(&fx.target.id, 7);
+        assert!(fx
+            .host
+            .write(&store_ns, &key, Some(&42u64.to_le_bytes()))
+            .is_ok());
+
+        // Legitimate read-only query returns the committed storage value.
+        let ok = fx.worker.query(
+            &fx.ctx,
+            &EeQuery {
+                target: fx.target.clone(),
+                input: encode_call_payload(&[7], &[]),
+            },
+            &fx.host,
+        );
+        assert_eq!(ok, Ok(42u64.to_le_bytes().to_vec()));
+
+        // Passing an input pair for a declared slot must be refused.
+        let collide_declared = fx.worker.query(
+            &fx.ctx,
+            &EeQuery {
+                target: fx.target.clone(),
+                input: encode_call_payload(&[7], &[(7, 999)]),
+            },
+            &fx.host,
+        );
+        assert!(
+            matches!(&collide_declared, Err(r) if r.code == RefusalCode::Denied),
+            "query must refuse input colliding with declared slot: {collide_declared:?}"
+        );
+
+        // Omitting the slot from `declared` while it is already committed in storage must also be refused.
+        let collide_committed = fx.worker.query(
+            &fx.ctx,
+            &EeQuery {
+                target: fx.target.clone(),
+                input: encode_call_payload(&[], &[(7, 999)]),
+            },
+            &fx.host,
+        );
+        assert!(
+            matches!(&collide_committed, Err(r) if r.code == RefusalCode::Denied),
+            "query must refuse input colliding with committed storage: {collide_committed:?}"
+        );
+    }
+
+    #[test]
+    fn execute_and_query_refuse_non_canonical_goldilocks_input_words() {
+        let mut fx = Fixture::new();
+        fx.deploy(read_slot_and_log_program(9));
+
+        for bad_word in [bud_vm::GOLDILOCKS_P, u64::MAX] {
+            let Ok(call_res) = fx.worker.execute(
+                &fx.ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: fx.caller.clone(),
+                    target: fx.target.clone(),
+                    value: BudAmount(0),
+                    input: encode_call_payload(&[], &[(9, bad_word)]),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [3u8; 32],
+                },
+                &mut fx.host,
+            ) else {
+                panic!("call faulted unexpectedly");
+            };
+            assert_eq!(
+                call_res.status,
+                OutcomeStatus::Revert,
+                "execute must refuse non-canonical word {bad_word}"
+            );
+
+            let query_res = fx.worker.query(
+                &fx.ctx,
+                &EeQuery {
+                    target: fx.target.clone(),
+                    input: encode_call_payload(&[], &[(9, bad_word)]),
+                },
+                &fx.host,
+            );
+            assert!(
+                query_res.is_err(),
+                "query must refuse non-canonical word {bad_word}: {query_res:?}"
+            );
+        }
+
+        let max_canonical = bud_vm::GOLDILOCKS_P - 1;
+        let Ok(ok_call) = fx.worker.execute(
+            &fx.ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: fx.caller.clone(),
+                target: fx.target.clone(),
+                value: BudAmount(0),
+                input: encode_call_payload(&[], &[(9, max_canonical)]),
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [4u8; 32],
+            },
+            &mut fx.host,
+        ) else {
+            panic!("call faulted unexpectedly");
+        };
+        assert_eq!(ok_call.status, OutcomeStatus::Success);
+        assert_eq!(ok_call.output, max_canonical.to_le_bytes().to_vec());
+
+        let ok_query = fx.worker.query(
+            &fx.ctx,
+            &EeQuery {
+                target: fx.target.clone(),
+                input: encode_call_payload(&[], &[(9, max_canonical)]),
+            },
+            &fx.host,
+        );
+        assert_eq!(ok_query, Ok(max_canonical.to_le_bytes().to_vec()));
+    }
+
+    #[test]
+    fn execute_and_query_refuse_corrupt_or_non_canonical_committed_storage_word() {
+        let mut fx = Fixture::new();
+        fx.deploy(read_slot_and_log_program(11));
+
+        let Ok(store_ns) = Namespace::new(NS_BUDZERO_STORAGE) else {
+            panic!("storage namespace");
+        };
+        assert!(fx
+            .host
+            .write(&store_ns, &slot_key(&fx.target.id, 11), Some(&[1, 2, 3, 4]))
+            .is_ok());
+        assert!(fx
+            .host
+            .write(
+                &store_ns,
+                &slot_key(&fx.target.id, 12),
+                Some(&bud_vm::GOLDILOCKS_P.to_le_bytes()),
+            )
+            .is_ok());
+
+        for bad_slot in [11u64, 12u64] {
+            let Ok(call_res) = fx.worker.execute(
+                &fx.ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: fx.caller.clone(),
+                    target: fx.target.clone(),
+                    value: BudAmount(0),
+                    input: encode_call_payload(&[bad_slot], &[]),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [5u8; 32],
+                },
+                &mut fx.host,
+            ) else {
+                panic!("call faulted unexpectedly");
+            };
+            assert_eq!(
+                call_res.status,
+                OutcomeStatus::Revert,
+                "execute must fail closed on corrupt/non-canonical committed slot {bad_slot}"
+            );
+
+            let query_res = fx.worker.query(
+                &fx.ctx,
+                &EeQuery {
+                    target: fx.target.clone(),
+                    input: encode_call_payload(&[bad_slot], &[]),
+                },
+                &fx.host,
+            );
+            assert!(
+                query_res.is_err(),
+                "query must fail closed on corrupt/non-canonical committed slot {bad_slot}: {query_res:?}"
+            );
+        }
     }
 }
