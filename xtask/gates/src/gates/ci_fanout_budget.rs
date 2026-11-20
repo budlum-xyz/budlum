@@ -75,7 +75,8 @@ struct Load {
     jobs: usize,
     /// Jobs with countable matrices multiplied out.
     fanout: usize,
-    /// Jobs whose matrix this reader cannot count from literal text.
+    /// Jobs this reader cannot count from literal text: a matrix that is not
+    /// literal, or a reusable call into another repository.
     opaque: usize,
     /// The names of those jobs, so a finding can point at the axis that hid.
     /// Not part of the baseline: names move without the budget moving.
@@ -407,27 +408,136 @@ fn count_flow(value: &str, next: usize) -> (usize, bool, usize) {
     }
 }
 
+/// The target of a job-level `uses:`, which calls a reusable workflow.
+///
+/// A job's own keys sit at one indentation below the job key. The `- uses:` of
+/// a step is deeper and carries a `- `, so it is never read as this.
+fn job_reusable_call(lines: &[String]) -> Option<String> {
+    let own_indent = lines
+        .iter()
+        .filter(|line| !is_skippable(line))
+        .map(|line| indent_of(line))
+        .min()?;
+    for line in lines {
+        if is_skippable(line) || indent_of(line) != own_indent {
+            continue;
+        }
+        let Some(target) = line.trim().strip_prefix("uses:") else {
+            continue;
+        };
+        let target = target.trim().trim_matches('"').trim_matches('\'');
+        if !target.is_empty() {
+            return Some(String::from(target));
+        }
+    }
+    None
+}
+
+/// Where a job-level `uses:` target lives.
+enum ReusableTarget {
+    /// A workflow file in this tree, so its jobs can be read and counted.
+    Local(String),
+    /// Another repository's workflow, whose jobs this reader cannot see.
+    Foreign(String),
+}
+
+/// A reusable call is local exactly when this reader can open its target: a
+/// path under the workflows directory, with or without a leading `./`, in one
+/// of the two extensions `workflow_files` collects. Anything else - another
+/// repository, a pinned revision, an extension this reader would skip - is
+/// foreign, and foreign is counted once and pinned as uncountable rather than
+/// guessed at.
+fn classify_reusable(target: &str) -> ReusableTarget {
+    let cleaned = target.trim_start_matches("./");
+    let readable = Path::new(cleaned)
+        .extension()
+        .is_some_and(|ext| ext == "yml" || ext == "yaml");
+    if cleaned.starts_with(WORKFLOWS_REL) && readable {
+        ReusableTarget::Local(String::from(cleaned))
+    } else {
+        ReusableTarget::Foreign(String::from(target))
+    }
+}
+
 /// The fan-out one workflow contributes to a pull-request push.
-fn load_of(path: &str, src: &str) -> Load {
+///
+/// A job that calls a reusable workflow holds no runner of its own: GitHub
+/// queues the callee's jobs under this same push, so the callee's load is this
+/// job's load and is measured here, recursively. `calling` is the chain of
+/// workflows already being measured, so a circle is a finding rather than a
+/// loop that never ends.
+fn load_of(
+    path: &str,
+    src: &str,
+    tree: &BTreeMap<String, String>,
+    calling: &mut Vec<String>,
+) -> Result<Load, String> {
     let bodies = job_bodies(src);
+    let mut jobs = 0usize;
     let mut fanout = 0usize;
     let mut opaque = 0usize;
     let mut opaque_jobs: Vec<String> = Vec::new();
     for body in &bodies {
-        let (factor, hidden) = matrix_factor(&body.lines);
-        fanout = fanout.saturating_add(factor);
-        if hidden {
-            opaque += 1;
-            opaque_jobs.push(body.name.clone());
+        match job_reusable_call(&body.lines)
+            .as_deref()
+            .map(classify_reusable)
+        {
+            Some(ReusableTarget::Foreign(target)) => {
+                // The callee's jobs are queued by this push but live in another
+                // repository, so they are counted once and pinned as
+                // uncountable rather than taken as free capacity.
+                jobs += 1;
+                fanout += 1;
+                opaque += 1;
+                opaque_jobs.push(format!("{} calls {target}", body.name));
+            }
+            Some(ReusableTarget::Local(callee)) => {
+                let Some(callee_src) = tree.get(&callee) else {
+                    return Err(format!(
+                        "{path}: job `{}` calls `{callee}`, which is not in this tree; a \
+                         reusable call this reader cannot open is fan-out nobody has measured",
+                        body.name
+                    ));
+                };
+                if calling.contains(&callee) {
+                    return Err(format!(
+                        "{path}: job `{}` calls `{callee}`, which is already being measured in \
+                         this chain ({}); reusable workflows may not call each other in a \
+                         circle, and this reader will not loop to find out how deep it goes",
+                        body.name,
+                        calling.join(" -> ")
+                    ));
+                }
+                calling.push(callee.clone());
+                let sub = load_of(&callee, callee_src, tree, calling)?;
+                calling.pop();
+                jobs = jobs.saturating_add(sub.jobs);
+                fanout = fanout.saturating_add(sub.fanout);
+                opaque = opaque.saturating_add(sub.opaque);
+                opaque_jobs.extend(
+                    sub.opaque_jobs
+                        .iter()
+                        .map(|name| format!("{callee} {name}")),
+                );
+            }
+            None => {
+                let (factor, hidden) = matrix_factor(&body.lines);
+                jobs += 1;
+                fanout = fanout.saturating_add(factor);
+                if hidden {
+                    opaque += 1;
+                    opaque_jobs.push(body.name.clone());
+                }
+            }
         }
     }
-    Load {
+    Ok(Load {
         path: String::from(path),
-        jobs: bodies.len(),
+        jobs,
         fanout,
         opaque,
         opaque_jobs,
-    }
+    })
 }
 
 /// Every workflow file under `.github/workflows`, sorted by relative path.
@@ -454,8 +564,12 @@ fn workflow_files(root: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Measure the pull-request fan-out of a tree.
+///
+/// Every workflow file is read first, including the ones that only answer
+/// `workflow_call`, so that a reusable workflow cannot be a hideout for jobs
+/// the pull-request path does queue.
 fn measure(root: &Path) -> Result<Vec<Load>, String> {
-    let mut loads = Vec::new();
+    let mut tree: BTreeMap<String, String> = BTreeMap::new();
     for path in workflow_files(root)? {
         let relative = path
             .strip_prefix(root)
@@ -464,10 +578,15 @@ fn measure(root: &Path) -> Result<Vec<Load>, String> {
             .replace('\\', "/");
         let src =
             fs::read_to_string(&path).map_err(|e| format!("{relative} could not be read: {e}"))?;
-        if !triggers_on_pull_request(&src) {
+        tree.insert(relative, src);
+    }
+    let mut loads = Vec::new();
+    for (relative, src) in &tree {
+        if !triggers_on_pull_request(src) {
             continue;
         }
-        loads.push(load_of(&relative, &src));
+        let mut calling = vec![relative.clone()];
+        loads.push(load_of(relative, src, &tree, &mut calling)?);
     }
     loads.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(loads)
@@ -488,7 +607,11 @@ fn baseline_text(loads: &[Load]) -> String {
     text.push_str("# they may fall, and they may only rise in the same change that\n");
     text.push_str("# re-measures them. A job whose matrix is not literal text is counted once\n");
     text.push_str("# and listed in `opaque`, so hiding a matrix behind an expression is a\n");
-    text.push_str("# finding rather than free capacity.\n");
+    text.push_str("# finding rather than free capacity. A job that calls a reusable workflow\n");
+    text.push_str("# carries the callee's own jobs and runners, because GitHub queues the\n");
+    text.push_str("# callee's work under the same push; a call into another repository cannot\n");
+    text.push_str("# be read here, so it is counted once and listed in `opaque` too. A callee\n");
+    text.push_str("# that is missing, or that calls back into its caller, is a finding.\n");
     text.push_str("#\n");
     text.push_str("# Re-measure in the same change that moves it:\n");
     text.push_str("#   ");
@@ -658,8 +781,9 @@ fn findings(loads: &[Load], budget: &Budget) -> Vec<String> {
         }
         if load.opaque > pinned.opaque {
             out.push(format!(
-                "{} has {} job(s) whose matrix this gate cannot count ({}), {} were pinned: an \
-                 expression replaced literal text, which hides fan-out instead of budgeting it",
+                "{} has {} job(s) this gate cannot count ({}), {} were pinned: an expression \
+                 replaced literal text, or a reusable call reached outside this tree, either of \
+                 which hides fan-out instead of budgeting it",
                 load.path,
                 load.opaque,
                 load.opaque_jobs.join(", "),
@@ -728,8 +852,8 @@ fn check(root: &Path) -> Result<String, String> {
         }
         let _ = writeln!(
             message,
-            "measured: {} workflow(s), {} job(s), {} queued runner(s), {} uncountable matrix job(s); \
-             pinned: {}, {}, {}, {}",
+            "measured: {} workflow(s), {} job(s), {} queued runner(s), {} job(s) this reader \
+             cannot count; pinned: {}, {}, {}, {}",
             loads.len(),
             sum(&loads, |load| load.jobs),
             sum(&loads, |load| load.fanout),
@@ -743,9 +867,9 @@ fn check(root: &Path) -> Result<String, String> {
     }
     Ok(format!(
         "ci-pull-request-fanout-is-budgeted OK: {} pull-request workflow(s) queue {} job(s) \
-         ({} runner(s) at least, once countable matrices are multiplied out; {} job(s) carry a \
-         matrix this reader cannot count, so that runner figure is a floor) against a pinned \
-         budget of {} job(s)",
+         ({} runner(s) at least, once countable matrices and reusable calls inside this tree are \
+         multiplied out; {} job(s) this reader cannot count, so that runner figure is a floor) \
+         against a pinned budget of {} job(s)",
         loads.len(),
         sum(&loads, |load| load.jobs),
         sum(&loads, |load| load.fanout),
@@ -873,6 +997,14 @@ fn pin_fixture(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Measure one workflow source on its own, for the reader canaries.
+///
+/// These fixtures declare no reusable call, so the tree they are read against
+/// is empty and the measurement cannot fail.
+fn load_alone(path: &str, src: &str) -> Result<Load, String> {
+    load_of(path, src, &BTreeMap::new(), &mut vec![String::from(path)])
+}
+
 /// Reader canaries: the trigger, the job count and the matrix product.
 fn reader_suite() -> Result<(), String> {
     trigger_reader_suite()?;
@@ -914,14 +1046,14 @@ fn trigger_reader_suite() -> Result<(), String> {
 /// hide a count behind an expression, an `include:` beside another axis or an
 /// `exclude:`.
 fn load_reader_suite() -> Result<(), String> {
-    let light = load_of(".github/workflows/light.yml", FIXTURE_LIGHT);
+    let light = load_alone(".github/workflows/light.yml", FIXTURE_LIGHT)?;
     if (light.jobs, light.fanout, light.opaque) != (1, 1, 0) {
         return Err(format!(
             "self-test: the light fixture measured jobs={} fanout={} opaque={}, expected 1/1/0",
             light.jobs, light.fanout, light.opaque
         ));
     }
-    let heavy = load_of(".github/workflows/heavy.yml", FIXTURE_HEAVY);
+    let heavy = load_alone(".github/workflows/heavy.yml", FIXTURE_HEAVY)?;
     if (heavy.jobs, heavy.fanout, heavy.opaque) != (2, 3, 0) {
         return Err(format!(
             "self-test: the heavy fixture measured jobs={} fanout={} opaque={}, expected 2/3/0 \
@@ -933,7 +1065,7 @@ fn load_reader_suite() -> Result<(), String> {
         "os: [ubuntu-latest, macos-latest]",
         "os:\n          - ubuntu-latest\n          - macos-latest\n          - windows-latest",
     );
-    let counted = load_of(".github/workflows/heavy.yml", &block_sequence);
+    let counted = load_alone(".github/workflows/heavy.yml", &block_sequence)?;
     if (counted.jobs, counted.fanout, counted.opaque) != (2, 4, 0) {
         return Err(format!(
             "self-test: a block-sequence matrix measured jobs={} fanout={} opaque={}, expected 2/4/0",
@@ -944,7 +1076,7 @@ fn load_reader_suite() -> Result<(), String> {
         "os: [ubuntu-latest, macos-latest]",
         "os: ${{ fromJSON(needs.plan.outputs.os) }}",
     );
-    let hidden = load_of(".github/workflows/heavy.yml", &expression);
+    let hidden = load_alone(".github/workflows/heavy.yml", &expression)?;
     if (hidden.jobs, hidden.fanout, hidden.opaque) != (2, 2, 1) {
         return Err(format!(
             "self-test: an expression matrix measured jobs={} fanout={} opaque={}, expected 2/2/1 \
@@ -958,7 +1090,7 @@ fn load_reader_suite() -> Result<(), String> {
         "os: [ubuntu-latest, macos-latest]",
         "os: [ubuntu-latest]\n        include:\n          - os: macos-latest",
     );
-    if load_of(".github/workflows/heavy.yml", &include).opaque != 1 {
+    if load_alone(".github/workflows/heavy.yml", &include)?.opaque != 1 {
         return Err(String::from(
             "self-test: a matrix mixing `include:` with another axis was counted instead of \
              marked uncountable",
@@ -979,7 +1111,7 @@ strategy:\n      fail-fast: false\n      \
 matrix:\n        include:\n          - arch: x86_64\n            \
 runner: ubuntu-24.04\n          - arch: aarch64\n            \
 runner: ubuntu-24.04-arm\n    steps:\n      - run: echo prove\n";
-    let counted_include = load_of(".github/workflows/two-arch.yml", include_only);
+    let counted_include = load_alone(".github/workflows/two-arch.yml", include_only)?;
     if (
         counted_include.jobs,
         counted_include.fanout,
@@ -997,7 +1129,7 @@ runner: ubuntu-24.04-arm\n    steps:\n      - run: echo prove\n";
         "os: [ubuntu-latest, macos-latest]",
         "os: [ubuntu-latest, macos-latest]\n        exclude:\n          - os: macos-latest",
     );
-    if load_of(".github/workflows/heavy.yml", &excluded).opaque != 1 {
+    if load_alone(".github/workflows/heavy.yml", &excluded)?.opaque != 1 {
         return Err(String::from(
             "self-test: a matrix with an `exclude:` list was counted instead of marked uncountable",
         ));
@@ -1007,7 +1139,7 @@ runner: ubuntu-24.04-arm\n    steps:\n      - run: echo prove\n";
         "os: [ubuntu-latest, macos-latest]",
         "os: [\n          ubuntu-latest,\n          macos-latest,\n          windows-latest,\n        ]",
     );
-    let spread_load = load_of(".github/workflows/heavy.yml", &spread);
+    let spread_load = load_alone(".github/workflows/heavy.yml", &spread)?;
     if (spread_load.fanout, spread_load.opaque) != (4, 0) {
         return Err(format!(
             "self-test: a multi-line flow sequence measured fanout={} opaque={}, expected 4/0",
@@ -1117,6 +1249,172 @@ fn budget_suite() -> Result<(), String> {
     Ok(())
 }
 
+/// A reusable workflow: it answers `workflow_call` only, and declares two jobs
+/// that each spread over a three-entry literal matrix.
+const FIXTURE_CALLEE: &str = "name: Deep\n\
+on:\n  \
+workflow_call:\n\
+jobs:\n  \
+first:\n    \
+runs-on: ubuntu-latest\n    \
+strategy:\n      \
+matrix:\n        \
+os: [a, b, c]\n    \
+steps:\n      - run: echo first\n  \
+second:\n    \
+runs-on: ubuntu-latest\n    \
+strategy:\n      \
+matrix:\n        \
+os: [a, b, c]\n    \
+steps:\n      - run: echo second\n";
+
+/// A pull-request workflow that calls the reusable one and also queues a job of
+/// its own. A `uses:` job holds no runner, so this measures 3 jobs and 7
+/// runners, not 2 and 2.
+const FIXTURE_CALLER: &str = "name: Caller\n\
+on:\n  \
+pull_request:\n\
+jobs:\n  \
+deep:\n    \
+uses: ./.github/workflows/deep.yml\n  \
+plain:\n    \
+runs-on: ubuntu-latest\n    \
+steps:\n      - run: echo plain\n";
+
+/// A pull-request workflow whose reusable call leaves this repository, so its
+/// callee's jobs cannot be read here.
+const FIXTURE_FOREIGN_CALLER: &str = "name: Foreign\n\
+on:\n  \
+pull_request:\n\
+jobs:\n  \
+borrowed:\n    \
+uses: budlum-xyz/elsewhere/.github/workflows/deep.yml@v1\n";
+
+/// Write a tree of workflow files, replacing whatever was there.
+fn fixture_call_tree(dir: &Path, files: &[(&str, &str)]) -> Result<(), String> {
+    let workflows = dir.join(WORKFLOWS_REL);
+    let _ = fs::remove_dir_all(&workflows);
+    fs::create_dir_all(&workflows)
+        .map_err(|e| format!("fixture tree could not be created: {e}"))?;
+    for (name, body) in files {
+        fs::write(workflows.join(name), body)
+            .map_err(|e| format!("fixture {name} could not be written: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Measure one fixture tree the way `measure` does.
+fn measure_call_tree(dir: &Path) -> Result<Load, String> {
+    let loads = measure(dir)?;
+    loads
+        .into_iter()
+        .find(|load| load.path == ".github/workflows/caller.yml")
+        .ok_or_else(|| String::from("self-test: the caller workflow was not measured"))
+}
+
+/// Reusable-call canaries: a callee's jobs are this push's jobs, a call out of
+/// the tree is uncountable, and a missing or circular callee is a finding.
+fn reusable_suite() -> Result<(), String> {
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-fanout-calls")?;
+    fixture_call_tree(
+        &dir,
+        &[("deep.yml", FIXTURE_CALLEE), ("caller.yml", FIXTURE_CALLER)],
+    )?;
+
+    // Reader: the callee's load is attributed to the caller.
+    let load = measure_call_tree(&dir)?;
+    if (load.jobs, load.fanout, load.opaque) != (3, 7, 0) {
+        return Err(format!(
+            "self-test: a job calling a reusable workflow with 2 jobs and 6 runners measured \
+             {} job(s) and {} runner(s); the callee's fan-out is invisible to this reader",
+            load.jobs, load.fanout
+        ));
+    }
+
+    // Budget: honest pin is green, the callee growing under a stale pin is red.
+    pin_fixture(&dir)?;
+    expect_green("a correctly pinned reusable call", &check(&dir))?;
+    let widened = FIXTURE_CALLEE.replace(
+        "  second:\n",
+        "  third:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo third\n  second:\n",
+    );
+    if widened == FIXTURE_CALLEE {
+        return Err(String::from(
+            "self-test: the callee-widening canary changed nothing, so the red expectation \
+             below would pass for the wrong reason",
+        ));
+    }
+    fixture_call_tree(
+        &dir,
+        &[("deep.yml", &widened), ("caller.yml", FIXTURE_CALLER)],
+    )?;
+    expect_red(
+        "a reusable callee that grew under a stale pin",
+        &check(&dir),
+    )?;
+    pin_fixture(&dir)?;
+    expect_green("the same growth once re-measured", &check(&dir))?;
+
+    // Reader: a step-level `- uses:` is not a reusable call.
+    let stepped = "on:\n  pull_request:\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n";
+    let load = load_of(
+        ".github/workflows/stepped.yml",
+        stepped,
+        &BTreeMap::new(),
+        &mut vec![String::from(".github/workflows/stepped.yml")],
+    )?;
+    if (load.jobs, load.fanout, load.opaque) != (1, 1, 0) {
+        return Err(format!(
+            "self-test: a step-level `- uses:` was read as a reusable workflow call ({} job(s), \
+             {} runner(s), {} uncountable)",
+            load.jobs, load.fanout, load.opaque
+        ));
+    }
+
+    // Reader: a call out of this tree is counted once and pinned as uncountable.
+    fixture_call_tree(&dir, &[("caller.yml", FIXTURE_FOREIGN_CALLER)])?;
+    let load = measure_call_tree(&dir)?;
+    if load.opaque != 1 || load.fanout != 1 {
+        return Err(format!(
+            "self-test: a reusable call into another repository measured {} runner(s) and {} \
+             uncountable job(s); it must be counted once and pinned, not taken as free capacity",
+            load.fanout, load.opaque
+        ));
+    }
+    if !load
+        .opaque_jobs
+        .iter()
+        .any(|name| name.contains("budlum-xyz/elsewhere"))
+    {
+        return Err(String::from(
+            "self-test: an uncountable reusable call did not name the repository it reaches",
+        ));
+    }
+
+    // A callee that is not in the tree is a finding, not a guess: the
+    // measurement itself refuses, so there is no budget to pin and no way for
+    // the gate to fall back to counting the call as one cheap job.
+    fixture_call_tree(&dir, &[("caller.yml", FIXTURE_CALLER)])?;
+    expect_red(
+        "a reusable call to a workflow that is not in the tree",
+        &check(&dir),
+    )?;
+    expect_red(
+        "emitting a budget for a tree with a missing callee",
+        &run_args(&dir, &["--print-baseline"]),
+    )?;
+
+    // A circle is a finding, and the reader must not loop to find that out.
+    let circle_a = "on:\n  pull_request:\njobs:\n  next:\n    uses: ./.github/workflows/b.yml\n";
+    let circle_b = "on:\n  workflow_call:\njobs:\n  back:\n    uses: ./.github/workflows/a.yml\n";
+    fixture_call_tree(&dir, &[("a.yml", circle_a), ("b.yml", circle_b)])?;
+    expect_red(
+        "reusable workflows that call each other in a circle",
+        &check(&dir),
+    )?;
+    Ok(())
+}
+
 /// Prove the gate can fail, then that it passes on the shape it wants.
 ///
 /// # Errors
@@ -1125,10 +1423,11 @@ fn budget_suite() -> Result<(), String> {
 pub fn self_test() -> Result<String, String> {
     reader_suite()?;
     budget_suite()?;
+    reusable_suite()?;
     Ok(String::from(
-        "ci-pull-request-fanout-is-budgeted self-test: the reader counts triggers, jobs and \
-         literal matrices, and the budget refuses growth, staleness, hidden matrices and every \
-         corrupt baseline shape",
+        "ci-pull-request-fanout-is-budgeted self-test: the reader counts triggers, jobs, literal \
+         matrices and reusable calls, and the budget refuses growth, staleness, hidden matrices, \
+         a callee that is missing or circular, and every corrupt baseline shape",
     ))
 }
 
@@ -1167,9 +1466,55 @@ mod tests {
     }
 
     #[test]
+    fn a_job_level_uses_is_a_reusable_call_and_a_step_level_one_is_not() {
+        let job = vec![
+            String::from("    uses: ./.github/workflows/deep.yml"),
+            String::from("    with:"),
+            String::from("      flag: true"),
+        ];
+        assert_eq!(
+            job_reusable_call(&job).as_deref(),
+            Some("./.github/workflows/deep.yml")
+        );
+        let stepped = vec![
+            String::from("    runs-on: ubuntu-latest"),
+            String::from("    steps:"),
+            String::from("      - uses: actions/checkout@v4"),
+        ];
+        assert_eq!(job_reusable_call(&stepped), None);
+    }
+
+    #[test]
+    fn a_reusable_target_inside_the_tree_is_local_and_anywhere_else_is_foreign() {
+        assert!(matches!(
+            classify_reusable("./.github/workflows/deep.yml"),
+            ReusableTarget::Local(path) if path == ".github/workflows/deep.yml"
+        ));
+        assert!(matches!(
+            classify_reusable(".github/workflows/deep.yaml"),
+            ReusableTarget::Local(_)
+        ));
+        assert!(matches!(
+            classify_reusable("budlum-xyz/elsewhere/.github/workflows/deep.yml@v1"),
+            ReusableTarget::Foreign(_)
+        ));
+        // A local-looking path that carries a revision is not readable here.
+        assert!(matches!(
+            classify_reusable("./.github/workflows/deep.yml@branch"),
+            ReusableTarget::Foreign(_)
+        ));
+    }
+
+    #[test]
     fn an_expression_matrix_is_counted_once_and_marked() {
         let src = "on:\n  pull_request:\njobs:\n  a:\n    strategy:\n      matrix:\n        os: ${{ fromJSON(x) }}\n    steps:\n      - run: true\n";
-        let load = load_of(".github/workflows/a.yml", src);
+        let load = load_of(
+            ".github/workflows/a.yml",
+            src,
+            &BTreeMap::new(),
+            &mut vec![String::from(".github/workflows/a.yml")],
+        )
+        .expect("a single workflow with no reusable call always measures");
         assert_eq!((load.jobs, load.fanout, load.opaque), (1, 1, 1));
     }
 }
