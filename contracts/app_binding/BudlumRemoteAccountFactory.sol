@@ -3,6 +3,7 @@
 // aderyn-fp-next-line(push-zero-opcode)
 pragma solidity 0.8.26;
 
+import {FinalityMode} from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumPaymentReceiver, AppBindingPayment, IBudlumFinality, PaymentProof} from "./BudlumPaymentReceiver.sol";
 
 /// @title BudlumRemoteAccount
@@ -26,6 +27,7 @@ contract BudlumRemoteAccount is BudlumPaymentReceiver {
     error CallFailed(bytes reason);
     error InvalidOwner();
     error ReentrantCall();
+    error HybridFinalityRequired(FinalityMode got);
 
     constructor(IBudlumFinality finality_, bytes32 appBindingId_, bytes32 budlumOwner_)
         BudlumPaymentReceiver(finality_, appBindingId_)
@@ -67,6 +69,10 @@ contract BudlumRemoteAccount is BudlumPaymentReceiver {
     {
         if (msg.sender == address(0) || target == address(0) || target == address(this)) {
             revert InvalidCallTarget();
+        }
+        FinalityMode mode = finality.finalityModeAtHeight(proof.header.checkpointHeight);
+        if (mode != FinalityMode.Hybrid) {
+            revert HybridFinalityRequired(mode);
         }
         AppBindingPayment calldata payment = _consumePayment(proof);
         if (payment.payer != budlumOwner) {

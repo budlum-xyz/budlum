@@ -3,7 +3,7 @@
 // aderyn-fp-next-line(push-zero-opcode)
 pragma solidity 0.8.26;
 
-import {IBudlumFinality} from "../external-domain/BudlumFinalityVerifier.sol";
+import {FinalityMode, IBudlumFinality} from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumHash} from "../lib/BudlumHash.sol";
 
 /// @notice A Budlum AppBinding payment as `AppBindingPayment` (src/settlement/app_binding.rs).
@@ -99,6 +99,12 @@ abstract contract BudlumPaymentReceiver {
         appBindingId = appBindingId_;
     }
 
+    /// @notice Whether this consumer requires both classical and post-quantum
+    ///         finality halves. Defaults to fail-closed hybrid finality.
+    function _requiresHybridFinality() internal pure virtual returns (bool) {
+        return true;
+    }
+
     function _consumePayment(PaymentProof calldata proof) internal returns (AppBindingPayment calldata) {
         if (proof.payment.appBindingId != appBindingId) {
             revert WrongAppBinding(appBindingId, proof.payment.appBindingId);
@@ -159,6 +165,13 @@ abstract contract BudlumPaymentReceiver {
         uint64 height = proof.header.checkpointHeight;
         if (!finality.heightFinal(height)) {
             return "checkpoint not final";
+        }
+        FinalityMode mode = finality.finalityModeAtHeight(height);
+        if (mode == FinalityMode.None) {
+            return "checkpoint not final";
+        }
+        if (_requiresHybridFinality() && mode != FinalityMode.Hybrid) {
+            return "hybrid finality required";
         }
         uint64 latest = finality.latestFinalHeight();
         if (
