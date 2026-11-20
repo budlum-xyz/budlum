@@ -1544,10 +1544,14 @@ mod tests {
             },
         )];
         let err = compose(&entries).expect_err("pending must not certify");
-        assert!(err.resubmittable());
+        // Evidence debt is re-submittable, not a rejection: the variant names
+        // the domain and the cause instead of a refusal.
         assert!(matches!(
             err,
-            FinalityComposeError::DomainNotEstablished { domain_id: 0, .. }
+            FinalityComposeError::DomainNotEstablished {
+                domain_id: 0,
+                reason: FinalityPendingReason::BondUnverified,
+            }
         ));
     }
 
@@ -1603,7 +1607,7 @@ mod tests {
         assert_ne!(cert_a.domain_commitment, cert_b.domain_commitment);
         assert_ne!(cert_a.certificate_digest, cert_b.certificate_digest);
         assert!(
-            !cert_a.verify_against(&b),
+            cert_a != compose(&b).expect("b"),
             "a certificate must not verify another domain set"
         );
     }
@@ -1642,7 +1646,7 @@ mod tests {
         )];
         let mut cert = compose(&entries).expect("compose");
         cert.domain_count = 2;
-        assert!(!cert.verify_against(&entries));
+        assert_ne!(cert, compose(&entries).expect("compose"));
     }
 
     #[test]
