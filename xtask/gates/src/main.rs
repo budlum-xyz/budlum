@@ -214,10 +214,12 @@ mod gates {
     pub mod udeps;
     pub mod uncheckable_proof;
     pub mod untrusted_manifests;
+    pub mod unwired_code_is_ratcheted;
     pub mod value_transfers;
     pub mod wallet_core_gate;
     pub mod wallet_node_address_agree;
     pub mod wire_fields_are_signed;
+    pub mod workflow_red_keeps_its_words;
     pub mod workflows_cover_every_workspace;
     pub mod workflows_produce_jobs;
     pub mod zero_address_sender_is_verified;
@@ -1389,6 +1391,22 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::sources_are_whole::self_test,
+    },
+    Gate {
+        name: "workflow-red-keeps-its-words",
+        replaces: None,
+        run: gates::workflow_red_keeps_its_words::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::workflow_red_keeps_its_words::self_test,
+    },
+    Gate {
+        name: "unwired-code-is-ratcheted",
+        replaces: None,
+        run: gates::unwired_code_is_ratcheted::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::unwired_code_is_ratcheted::self_test,
     },
     Gate {
         name: "source-reading-tests-are-narrowed",

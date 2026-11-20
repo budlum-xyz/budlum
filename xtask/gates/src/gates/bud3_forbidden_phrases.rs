@@ -214,7 +214,10 @@ pub fn self_test() -> Result<String, String> {
         run(&dir).map_err(|e| format!("canary: a clean tree failed: {e}"))?;
         // A word glued to a phrase is not the phrase: this file says the
         // opposite of the forbidden claim and must not be reported.
-        put("src/namespaced.rs", "// dynamic BudZero storage slot operand\n")?;
+        put(
+            "src/namespaced.rs",
+            "// dynamic BudZero storage slot operand\n",
+        )?;
         run(&dir).map_err(|e| format!("canary: a namespaced symbol was read as a claim: {e}"))?;
         std::fs::remove_file(dir.join("src/namespaced.rs")).map_err(|e| e.to_string())?;
         put("src/bad.rs", "// The network Holds Nothing.\n")?;
@@ -250,9 +253,15 @@ mod tests {
     /// the same letters. `BudZero storage` is the subsystem's own name.
     #[test]
     fn a_phrase_must_stand_on_its_own_word_boundaries() {
-        assert!(!super::mentions("dynamic budzero storage slot", "zero storage"));
+        assert!(!super::mentions(
+            "dynamic budzero storage slot",
+            "zero storage"
+        ));
         assert!(!super::mentions("budzero_storage", "zero storage"));
-        assert!(super::mentions("the object needs zero storage at rest", "zero storage"));
+        assert!(super::mentions(
+            "the object needs zero storage at rest",
+            "zero storage"
+        ));
         assert!(super::mentions("zero storage", "zero storage"));
         assert!(super::mentions("(zero storage)", "zero storage"));
     }
