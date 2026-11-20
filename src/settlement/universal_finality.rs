@@ -15,17 +15,18 @@
 //! associative, commutative weakest-link meet across any 2-hop or N-hop route.
 //!
 //! WIRING: the global certificate layer ([`FINALITY_BINDS_ALL`],
-//! [`DomainFinalityEntry`], [`FinalityVerdict`], [`FinalityComposeError`] and
-//! [`compose`]) is composed here and called by the settlement aggregator that
-//! builds one `GlobalFinalityHeader` per window; that call site does not exist
-//! in this tree yet, so today the composer's only callers are the tests below.
-//! The note is the door, not a claim that the door is hung.
+//! [`DomainFinalityEntry`], [`FinalityVerdict`], [`FinalityComposeError`],
+//! [`compose`], and [`compose_with_bar`]) is consumed by
+//! `crate::cross_domain::external::attestation_binding` to bind external
+//! `FinalityAttestation` records into settlement certificates.
 
+use crate::core::hash::hash_fields_bytes;
 use crate::cross_domain::external::AdapterSpec;
 use crate::crypto::facts::QuantumClass;
 use crate::domain::types::{ConsensusDomain, ConsensusKind};
 use crate::settlement::domains::CommitmentAttestation;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 /// Basis-point ceiling representing `100.00%` (`10_000 bps`).
 const BPS_SCALE: u16 = 10_000;
@@ -767,14 +768,24 @@ pub enum FinalityComposeError {
     TooManyDomains,
 }
 
+impl FinalityComposeError {
+    /// Returns `true` iff the composition failed solely on incomplete evidence
+    /// (`DomainNotEstablished`) rather than a structural contradiction, domain
+    /// refutation, or unbound commitment bar.
+    #[must_use]
+    pub const fn is_resubmittable(&self) -> bool {
+        matches!(self, Self::DomainNotEstablished { .. })
+    }
+}
+
 /// Single global header committing to bounded, individually certified domain
 /// finality verdicts.
 ///
-/// The certificate is *derived*, never asserted: [`compose`] is the only
-/// constructor, and re-deriving it from the same entries is the verification
-/// rule, so a certificate cannot claim a weaker or stronger guarantee than its
-/// inputs support. The transport-side re-derivation lands with the settlement
-/// aggregator; until then the rule is enforced by the composer itself.
+/// The certificate is *derived*, never asserted: [`compose`] and
+/// [`compose_with_bar`] are the constructors, and re-deriving it from the same
+/// entries in canonical domain-ID order is the constant-time verification rule,
+/// so a certificate cannot claim a weaker or stronger guarantee than its inputs
+/// support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GlobalFinalityCertificate {
     /// Bit `i` set iff domain `i` is `Established` and bound in this certificate.
@@ -784,42 +795,102 @@ pub struct GlobalFinalityCertificate {
     /// Weakest-link guarantee across all bound domains.
     pub guarantee: FinalityGuarantee,
     /// Digest over every `(domain_id, height, state_root, guarantee, verdict)`
-    /// tuple: two certificates over different domain roots can never collide.
+    /// tuple in canonical ascending `domain_id` order.
     pub domain_commitment: [u8; 32],
-    /// Digest over the certificate header including [`Self::domain_commitment`].
+    /// Digest over the certificate header including [`Self::domain_commitment`]
+    /// and the full algebraic [`FinalityGuarantee`] tuple.
     pub certificate_digest: [u8; 32],
 }
 
-/// Mix one entry into a running SHA-256 state, length-prefixed and
-/// domain-separated so that no two tuples share an encoding.
-fn absorb_entry(hasher: &mut impl sha2::Digest, entry: &DomainFinalityEntry) {
-    hasher.update(b"budlum.finality.entry.v1");
-    hasher.update(entry.domain_id.to_be_bytes());
-    hasher.update(entry.height.to_be_bytes());
-    hasher.update(entry.state_root);
-    hasher.update(entry.guarantee.fault_tolerance_bps.to_be_bytes());
-    hasher.update([u8::from(entry.guarantee.slashable_backing)]);
-    hasher.update([
-        u8::from(entry.guarantee.attestation.state_root),
-        u8::from(entry.guarantee.attestation.tx_root),
-        u8::from(entry.guarantee.attestation.event_root),
-        u8::from(entry.guarantee.attestation.parent),
-    ]);
-    hasher.update([match entry.verdict {
-        FinalityVerdict::Established => 0u8,
-        FinalityVerdict::Refuted { .. } => 1,
-        FinalityVerdict::Pending { .. } => 2,
-    }]);
-    hasher.update([entry.guarantee.reversibility.rank()]);
+#[must_use]
+const fn quantum_posture_tag(q: QuantumClass) -> u8 {
+    match q {
+        QuantumClass::Classical => 1,
+        QuantumClass::Lattice => 2,
+        QuantumClass::Hash => 3,
+    }
 }
 
-/// Compose a [`GlobalFinalityCertificate`] from per-domain verdicts.
+#[must_use]
+const fn encode_reversibility(rev: FinalityReversibility) -> [u8; 9] {
+    let rank = rev.rank();
+    match rev {
+        FinalityReversibility::ProbabilisticWork { confirmations } => {
+            let [b0, b1, b2, b3, b4, b5, b6, b7] = confirmations.to_be_bytes();
+            [rank, b0, b1, b2, b3, b4, b5, b6, b7]
+        }
+        FinalityReversibility::DataAvailabilitySampled { min_samples } => {
+            let [s0, s1] = min_samples.to_be_bytes();
+            [rank, s0, s1, 0, 0, 0, 0, 0, 0]
+        }
+        FinalityReversibility::DeterministicQuorum
+        | FinalityReversibility::CryptographicValidity => [rank, 0, 0, 0, 0, 0, 0, 0, 0],
+    }
+}
+
+#[must_use]
+const fn encode_attestation(att: CommitmentAttestation) -> [u8; 4] {
+    [
+        att.state_root as u8,
+        att.tx_root as u8,
+        att.event_root as u8,
+        att.parent as u8,
+    ]
+}
+
+#[must_use]
+const fn attestation_satisfies(
+    actual: CommitmentAttestation,
+    required: CommitmentAttestation,
+) -> bool {
+    (!required.state_root || actual.state_root)
+        && (!required.tx_root || actual.tx_root)
+        && (!required.event_root || actual.event_root)
+        && (!required.parent || actual.parent)
+}
+
+/// Canonical domain-separated digest of one [`DomainFinalityEntry`], binding
+/// every field of [`FinalityGuarantee`] (including `quantum_posture`,
+/// `confirmations`, `min_samples`, and `slashable_backing`) via length-prefixed
+/// [`hash_fields_bytes`].
+#[must_use]
+fn entry_digest(entry: &DomainFinalityEntry) -> [u8; 32] {
+    let rev_bytes = encode_reversibility(entry.guarantee.reversibility);
+    let att_bytes = encode_attestation(entry.guarantee.attestation);
+    let (verdict_tag, verdict_detail): (u8, [u8; 2]) = match entry.verdict {
+        FinalityVerdict::Established => (0, [0, 0]),
+        FinalityVerdict::Refuted { code } => (1, code.to_be_bytes()),
+        FinalityVerdict::Pending { reason } => {
+            let r = match reason {
+                FinalityPendingReason::EvidenceMissing => 1u16,
+                FinalityPendingReason::AttestationUnbound => 2,
+                FinalityPendingReason::RuleNotSatisfied => 3,
+                FinalityPendingReason::BondUnverified => 4,
+            };
+            (2, r.to_be_bytes())
+        }
+    };
+    hash_fields_bytes(&[
+        b"BDLM_FINALITY_ENTRY_V1",
+        &entry.domain_id.to_be_bytes(),
+        &entry.height.to_be_bytes(),
+        &entry.state_root,
+        &rev_bytes,
+        &[quantum_posture_tag(entry.guarantee.quantum_posture)],
+        &att_bytes,
+        &[u8::from(entry.guarantee.slashable_backing)],
+        &entry.guarantee.fault_tolerance_bps.to_be_bytes(),
+        &[verdict_tag],
+        &verdict_detail,
+    ])
+}
+
+/// Compose a [`GlobalFinalityCertificate`] requiring [`FINALITY_BINDS_ALL`].
 ///
-/// Order of refusal is fixed and therefore testable:
-/// empty set, duplicate domain, refuted domain, unbound attestation, pending
-/// evidence, and only then the weakest-link fold. Structural contradictions
-/// outrank findings, and findings outrank evidence debt; a missing measurement
-/// is never allowed to mask a real contradiction.
+/// Order of refusal is fixed and deterministic across permutations:
+/// empty set, domain mask bounds / conflicting or duplicate domain, refuted
+/// domain, unbound attestation, pending evidence, and only then the canonical
+/// ascending `domain_id` weakest-link fold.
 ///
 /// # Errors
 ///
@@ -827,30 +898,63 @@ fn absorb_entry(hasher: &mut impl sha2::Digest, entry: &DomainFinalityEntry) {
 pub fn compose(
     entries: &[DomainFinalityEntry],
 ) -> Result<GlobalFinalityCertificate, FinalityComposeError> {
-    use sha2::{Digest as _, Sha256};
+    compose_with_bar(entries, FINALITY_BINDS_ALL)
+}
 
-    let Some(first) = entries.first() else {
+/// Compose a [`GlobalFinalityCertificate`] against an explicit non-empty
+/// [`CommitmentAttestation`] bar (used for external finality proofs that bind
+/// `state_root` or header ancestry without full Hub four-root coverage).
+///
+/// # Errors
+///
+/// Returns [`FinalityComposeError`] if the set is empty, exceeds 16 domains,
+/// contains conflicting or duplicate domain indices, has a refuted or pending
+/// domain, or fails to satisfy `required` (including an all-false `required`).
+pub fn compose_with_bar(
+    entries: &[DomainFinalityEntry],
+    required: CommitmentAttestation,
+) -> Result<GlobalFinalityCertificate, FinalityComposeError> {
+    if entries.is_empty() {
         return Err(FinalityComposeError::EmptyDomainSet);
-    };
-    if entries.len() > 16 {
-        return Err(FinalityComposeError::TooManyDomains);
     }
-
-    let mut seen: u16 = 0;
     for entry in entries {
         if entry.domain_id >= 16 {
             return Err(FinalityComposeError::TooManyDomains);
         }
-        let bit = 1u16 << entry.domain_id;
-        if seen & bit != 0 {
+    }
+    if entries.len() > 16 {
+        // Check duplicate/conflicting domain indices before reporting overflow
+        // only when <=16; >16 entries cannot fit a 16-bit mask without collision.
+        return Err(FinalityComposeError::TooManyDomains);
+    }
+
+    let mut seen_entries: [Option<&DomainFinalityEntry>; 16] = [None; 16];
+    let mut seen_mask: u16 = 0;
+    for entry in entries {
+        let slot_idx = usize::from(entry.domain_id);
+        if let Some(prev) = seen_entries.get(slot_idx).and_then(|s| *s) {
+            if prev.verdict != entry.verdict {
+                return Err(FinalityComposeError::ConflictingVerdicts {
+                    first: prev.domain_id,
+                    second: entry.domain_id,
+                });
+            }
             return Err(FinalityComposeError::DuplicateDomain {
                 domain_id: entry.domain_id,
             });
         }
-        seen |= bit;
+        if let Some(slot) = seen_entries.get_mut(slot_idx) {
+            *slot = Some(entry);
+        }
+        seen_mask |= 1u16 << entry.domain_id;
     }
 
-    for entry in entries {
+    // Canonical ascending domain_id order guarantees permutation invariance of
+    // error precedence, meet fold, domain_commitment, and certificate_digest.
+    let mut canonical: Vec<DomainFinalityEntry> = entries.to_vec();
+    canonical.sort_by_key(|e| e.domain_id);
+
+    for entry in &canonical {
         if let FinalityVerdict::Refuted { code } = entry.verdict {
             return Err(FinalityComposeError::RefutedDomain {
                 domain_id: entry.domain_id,
@@ -859,15 +963,17 @@ pub fn compose(
         }
     }
 
-    for entry in entries {
-        if entry.guarantee.attestation != FINALITY_BINDS_ALL {
+    for entry in &canonical {
+        let any_bound =
+            required.state_root || required.tx_root || required.event_root || required.parent;
+        if !any_bound || !attestation_satisfies(entry.guarantee.attestation, required) {
             return Err(FinalityComposeError::AttestationUnbound {
                 domain_id: entry.domain_id,
             });
         }
     }
 
-    for entry in entries {
+    for entry in &canonical {
         if let FinalityVerdict::Pending { reason } = entry.verdict {
             return Err(FinalityComposeError::DomainNotEstablished {
                 domain_id: entry.domain_id,
@@ -876,38 +982,81 @@ pub fn compose(
         }
     }
 
-    let guarantee = entries
+    let Some((first, rest)) = canonical.split_first() else {
+        return Err(FinalityComposeError::EmptyDomainSet);
+    };
+    let guarantee = rest
         .iter()
-        .skip(1)
         .fold(first.guarantee, |acc, entry| acc.meet(&entry.guarantee));
 
-    let mut entry_hasher = Sha256::new();
-    entry_hasher.update(b"budlum.finality.commitment.v1");
-    entry_hasher.update((entries.len() as u64).to_be_bytes());
-    for entry in entries {
-        absorb_entry(&mut entry_hasher, entry);
+    let entry_digests: Vec<[u8; 32]> = canonical.iter().map(entry_digest).collect();
+    let count_be = (canonical.len() as u64).to_be_bytes();
+    let mut commit_fields: Vec<&[u8]> = Vec::with_capacity(2 + entry_digests.len());
+    commit_fields.push(b"BDLM_FINALITY_COMMIT_V1");
+    commit_fields.push(&count_be);
+    for d in &entry_digests {
+        commit_fields.push(d);
     }
-    let domain_commitment: [u8; 32] = entry_hasher.finalize().into();
+    let domain_commitment = hash_fields_bytes(&commit_fields);
 
-    let domain_count = seen.count_ones();
-    let domain_count_u8 = u8::try_from(domain_count).unwrap_or(u8::MAX);
+    let domain_count_u8 = u8::try_from(seen_mask.count_ones()).unwrap_or(u8::MAX);
+    let mask_be = seen_mask.to_be_bytes();
+    let count_arr = [domain_count_u8];
+    let rev_bytes = encode_reversibility(guarantee.reversibility);
+    let q_arr = [quantum_posture_tag(guarantee.quantum_posture)];
+    let att_bytes = encode_attestation(guarantee.attestation);
+    let req_bytes = encode_attestation(required);
+    let slash_arr = [u8::from(guarantee.slashable_backing)];
+    let bps_be = guarantee.fault_tolerance_bps.to_be_bytes();
 
-    let mut header = Sha256::new();
-    header.update(b"budlum.finality.certificate.v1");
-    header.update(seen.to_be_bytes());
-    header.update([domain_count_u8]);
-    header.update(guarantee.fault_tolerance_bps.to_be_bytes());
-    header.update([guarantee.reversibility.rank()]);
-    header.update(domain_commitment);
-    let certificate_digest: [u8; 32] = header.finalize().into();
+    let certificate_digest = hash_fields_bytes(&[
+        b"BDLM_FINALITY_CERT_V1",
+        &mask_be,
+        &count_arr,
+        &rev_bytes,
+        &q_arr,
+        &att_bytes,
+        &req_bytes,
+        &slash_arr,
+        &bps_be,
+        &domain_commitment,
+    ]);
 
     Ok(GlobalFinalityCertificate {
-        domain_mask: seen,
+        domain_mask: seen_mask,
         domain_count: domain_count_u8,
         guarantee,
         domain_commitment,
         certificate_digest,
     })
+}
+
+impl GlobalFinalityCertificate {
+    /// Constant-time re-derivation check against `entries` under `required`.
+    ///
+    /// WIRING: Called by `crate::cross_domain::external::attestation_binding`
+    /// when verifying external attestation binding proofs.
+    #[must_use]
+    pub fn verify_against_with_bar(
+        &self,
+        entries: &[DomainFinalityEntry],
+        required: CommitmentAttestation,
+    ) -> bool {
+        let Ok(recomputed) = compose_with_bar(entries, required) else {
+            return false;
+        };
+        let commitments_match =
+            bool::from(self.domain_commitment.ct_eq(&recomputed.domain_commitment));
+        let digests_match = bool::from(
+            self.certificate_digest
+                .ct_eq(&recomputed.certificate_digest),
+        );
+        commitments_match
+            && digests_match
+            && self.domain_mask == recomputed.domain_mask
+            && self.domain_count == recomputed.domain_count
+            && self.guarantee == recomputed.guarantee
+    }
 }
 
 /// Overflow-free `floor(amount * bps / 10_000)` on `u128`.
@@ -1662,5 +1811,134 @@ mod tests {
             })
             .collect();
         assert_eq!(compose(&entries), Err(FinalityComposeError::TooManyDomains));
+    }
+
+    #[test]
+    fn permutation_invariance_holds_for_commitment_and_digest() {
+        let e0 = cert_entry(
+            0,
+            3_333,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Established,
+        );
+        let e5 = cert_entry(
+            5,
+            4_999,
+            FinalityReversibility::ProbabilisticWork { confirmations: 6 },
+            FinalityVerdict::Established,
+        );
+        let e12 = cert_entry(
+            12,
+            9_999,
+            FinalityReversibility::CryptographicValidity,
+            FinalityVerdict::Established,
+        );
+        let forward = compose(&[e0, e5, e12]).expect("forward");
+        let reversed = compose(&[e12, e5, e0]).expect("reversed");
+        let rotated = compose(&[e5, e12, e0]).expect("rotated");
+        assert_eq!(forward, reversed);
+        assert_eq!(forward, rotated);
+    }
+
+    #[test]
+    fn quantum_posture_confirmations_and_slashable_backing_affect_digest() {
+        let base = cert_entry(
+            2,
+            4_999,
+            FinalityReversibility::ProbabilisticWork { confirmations: 6 },
+            FinalityVerdict::Established,
+        );
+        let mut diff_conf = base;
+        diff_conf.guarantee.reversibility =
+            FinalityReversibility::ProbabilisticWork { confirmations: 1 };
+
+        let mut diff_quantum = base;
+        diff_quantum.guarantee.quantum_posture = QuantumClass::Classical;
+
+        let mut diff_slash = base;
+        diff_slash.guarantee.slashable_backing = false;
+
+        let c_base = compose(&[base]).expect("base");
+        let c_conf = compose(&[diff_conf]).expect("conf");
+        let c_quantum = compose(&[diff_quantum]).expect("quantum");
+        let c_slash = compose(&[diff_slash]).expect("slash");
+
+        assert_ne!(c_base.domain_commitment, c_conf.domain_commitment);
+        assert_ne!(c_base.certificate_digest, c_conf.certificate_digest);
+        assert_ne!(c_base.domain_commitment, c_quantum.domain_commitment);
+        assert_ne!(c_base.certificate_digest, c_quantum.certificate_digest);
+        assert_ne!(c_base.domain_commitment, c_slash.domain_commitment);
+        assert_ne!(c_base.certificate_digest, c_slash.certificate_digest);
+    }
+
+    #[test]
+    fn conflicting_verdicts_on_same_domain_index_are_refuted_distinctly() {
+        let established = cert_entry(
+            4,
+            3_333,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Established,
+        );
+        let refuted = cert_entry(
+            4,
+            3_333,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Refuted { code: 42 },
+        );
+        assert_eq!(
+            compose(&[established, refuted]),
+            Err(FinalityComposeError::ConflictingVerdicts {
+                first: 4,
+                second: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn compose_with_bar_binds_external_state_root_and_refuses_empty_bar() {
+        let state_bar = CommitmentAttestation {
+            state_root: true,
+            tx_root: false,
+            event_root: false,
+            parent: false,
+        };
+        let mut ext = cert_entry(
+            7,
+            3_333,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Established,
+        );
+        ext.guarantee.attestation = state_bar;
+        assert_eq!(
+            compose(&[ext]),
+            Err(FinalityComposeError::AttestationUnbound { domain_id: 7 })
+        );
+        let cert = compose_with_bar(&[ext], state_bar).expect("state_root bar satisfied");
+        assert!(cert.verify_against_with_bar(&[ext], state_bar));
+        assert!(!cert.verify_against_with_bar(&[ext], FINALITY_BINDS_ALL));
+        let empty_bar = CommitmentAttestation {
+            state_root: false,
+            tx_root: false,
+            event_root: false,
+            parent: false,
+        };
+        assert_eq!(
+            compose_with_bar(&[ext], empty_bar),
+            Err(FinalityComposeError::AttestationUnbound { domain_id: 7 })
+        );
+    }
+
+    #[test]
+    fn resubmittable_classifier_distinguishes_pending_from_refusal() {
+        let pending = FinalityComposeError::DomainNotEstablished {
+            domain_id: 1,
+            reason: FinalityPendingReason::EvidenceMissing,
+        };
+        let refuted = FinalityComposeError::RefutedDomain {
+            domain_id: 1,
+            code: 9,
+        };
+        assert!(pending.is_resubmittable());
+        assert!(!refuted.is_resubmittable());
     }
 }

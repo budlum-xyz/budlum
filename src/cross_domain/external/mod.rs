@@ -109,6 +109,7 @@
 pub mod algorand_stateproof;
 pub mod aptos_jolteon_bft;
 pub mod arweave_spora;
+pub mod attestation_binding;
 pub mod auxpow_pop;
 pub mod babylon_eots;
 pub mod based_preconf;
@@ -167,6 +168,11 @@ pub use aptos_jolteon_bft::{
     JolteonValidatorSig, PinnedJolteonEpochState, APTOS_JOLTEON_ADAPTER_NAME,
 };
 pub use arweave_spora::{ArweaveSpOraAdapter, ArweaveSpOraEvidence};
+pub use attestation_binding::{
+    build_external_attestation_binding, check_attestation_binding_invariants,
+    verify_external_attestation_binding, AttestationBindingError, ExternalAttestationBindingProof,
+    EXTERNAL_STATE_ROOT_BAR,
+};
 pub use auxpow_pop::{
     AuxPowPopAdapter, PinnedAuxPowAnchor, PopAnchorSigner, PopEquivocationProof, U256Bytes,
 };
