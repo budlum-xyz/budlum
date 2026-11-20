@@ -5215,6 +5215,71 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
+        // Tag 7: dual-quorum Casper-FFG checkpoint adapter, appended last.
+        AdapterSpec::CasperFfg { network, committee } => {
+            put_u8(out, 7);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.validators.len() as u64);
+                    for member in &pin.validators {
+                        let crate::cross_domain::external::casper_ffg::FfgValidator {
+                            pubkey,
+                            stake,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, pubkey);
+                        put_u64(out, *stake);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 8: uncertified 3-round Mysticeti DAG adapter, appended last.
+        AdapterSpec::MysticetiDag { network, committee } => {
+            put_u8(out, 8);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::mysticeti_dag::MysticetiMember {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 9: BitVM2 / DisproveScript PoW covenant adapter, appended last.
+        AdapterSpec::BitVmCovenant { network, anchor } => {
+            put_u8(out, 9);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.height);
+                    put_fixed(out, &pin.block_hash);
+                    put_u32(out, pin.bits);
+                    put_fixed(out, &pin.program_hash);
+                    put_u64(out, pin.min_pow_confirmations);
+                    put_u64(out, pin.challenge_blocks);
+                    put_fixed(out, &pin.operator_ed25519_pubkey);
+                    put_bytes(out, &pin.operator_pq_pubkey);
+                }
+                None => put_u8(out, 0),
+            }
+        }
     }
 }
 

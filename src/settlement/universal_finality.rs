@@ -47,7 +47,7 @@ pub enum FinalityReversibility {
 }
 
 impl FinalityReversibility {
-    fn rank(self) -> u8 {
+    const fn rank(self) -> u8 {
         match self {
             Self::ProbabilisticWork { .. } => 0,
             Self::DataAvailabilitySampled { .. } => 1,
@@ -429,6 +429,107 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            AdapterSpec::CasperFfg { committee, .. } => {
+                let (valid, pq_all) = committee.as_ref().map_or((false, false), |c| {
+                    if c.epoch == 0 {
+                        return (false, false);
+                    }
+                    validate_pinned_committee_keys(
+                        c.validators
+                            .iter()
+                            .map(|m| (&m.pubkey, m.stake, m.pq_pubkey.as_slice())),
+                    )
+                });
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if pq_all {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: false,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::MysticetiDag { committee, .. } => {
+                let (valid, pq_all) = committee.as_ref().map_or((false, false), |c| {
+                    if c.epoch == 0 {
+                        return (false, false);
+                    }
+                    validate_pinned_committee_keys(
+                        c.members
+                            .iter()
+                            .map(|m| (&m.ed25519_pubkey, m.voting_weight, m.pq_pubkey.as_slice())),
+                    )
+                });
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if pq_all {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: valid,
+                        parent: valid,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::BitVmCovenant { anchor, .. } => {
+                let (valid, confs, pq_op) = anchor.as_ref().map_or((false, 0, false), |a| {
+                    let ok = a.validate().is_ok();
+                    let pq = ok && !a.operator_pq_pubkey.is_empty();
+                    (ok, if ok { a.min_pow_confirmations } else { 0 }, pq)
+                });
+                Self {
+                    reversibility: FinalityReversibility::ProbabilisticWork {
+                        confirmations: confs,
+                    },
+                    quantum_posture: if pq_op {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: valid,
+                        parent: valid,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+        }
+    }
+
+    /// Associative, commutative weakest-link meet across two domain guarantees.
+    #[must_use]
+    fn meet(&self, other: &Self) -> Self {
+        Self {
+            reversibility: self.reversibility.meet(other.reversibility),
+            quantum_posture: quantum_meet(self.quantum_posture, other.quantum_posture),
+            attestation: CommitmentAttestation {
+                state_root: self.attestation.state_root && other.attestation.state_root,
+                tx_root: self.attestation.tx_root && other.attestation.tx_root,
+                event_root: self.attestation.event_root && other.attestation.event_root,
+                parent: self.attestation.parent && other.attestation.parent,
+            },
+            slashable_backing: self.slashable_backing && other.slashable_backing,
+            fault_tolerance_bps: self
+                .fault_tolerance_bps
+                .min(other.fault_tolerance_bps)
+                .min(BPS_SCALE),
         }
     }
 
@@ -536,6 +637,15 @@ pub fn compose_cross_domain_route(
     }
 }
 
+/// Compose the weakest-link [`FinalityGuarantee`] across a domain bundle.
+///
+/// WIRING: `N`-domain atomic bundle finality composer complementing `compose_cross_domain_route`.
+#[must_use]
+pub fn compose_multi_domain_finality(domains: &[FinalityGuarantee]) -> Option<FinalityGuarantee> {
+    let (first, rest) = domains.split_first()?;
+    Some(rest.iter().fold(*first, |acc, next| acc.meet(next)))
+}
+
 /// Overflow-free `floor(amount * bps / 10_000)` on `u128`.
 #[must_use]
 const fn mul_bps_floor_u128(amount: u128, bps: u16) -> u128 {
@@ -596,6 +706,27 @@ impl EconomicSecurityBound {
             corruption_cost_atoms,
             safe_value_outflow_ceiling_atoms,
         }
+    }
+
+    /// Derive the weakest-link economic security bound across a multi-domain
+    /// atomic settlement bundle `(guarantee, slashable_bond_atoms, routing_ceiling_atoms)`.
+    /// WIRING: `N`-domain economic outflow conservation surface paired with `compose_multi_domain_finality`.
+    #[must_use]
+    pub fn derive_multi_domain(legs: &[(FinalityGuarantee, u128, u128)]) -> Option<Self> {
+        let (first, rest) = legs.split_first()?;
+        let mut combined = Self::derive(&first.0, first.1, first.2);
+        for (g, bond, ceiling) in rest {
+            let b = Self::derive(g, *bond, *ceiling);
+            combined = Self {
+                slashable_bond_atoms: combined.slashable_bond_atoms.min(b.slashable_bond_atoms),
+                routing_ceiling_atoms: combined.routing_ceiling_atoms.min(b.routing_ceiling_atoms),
+                corruption_cost_atoms: combined.corruption_cost_atoms.min(b.corruption_cost_atoms),
+                safe_value_outflow_ceiling_atoms: combined
+                    .safe_value_outflow_ceiling_atoms
+                    .min(b.safe_value_outflow_ceiling_atoms),
+            };
+        }
+        Some(combined)
     }
 
     /// Enforce value-outflow conservation: rejects zero-admitted domains,
@@ -684,12 +815,12 @@ mod tests {
         poh.validator_set_hash = [0xBB; 32];
         let mut pospace = default_domain(3, ConsensusKind::Pospace, 1003, "pospace-plot-v1", 1);
         pospace.validator_set_hash = [0xCC; 32];
-        let poh_pq = crate::domain::FinalityProof::PohPq {
+        let poh_auth = crate::domain::FinalityProof::PohPq {
             chain: Vec::new(),
             authorities: Vec::new(),
             signatures: Vec::new(),
         };
-        let pos_pq = crate::domain::FinalityProof::PospacePq {
+        let pospace_auth = crate::domain::FinalityProof::PospacePq {
             prover: crate::core::address::Address::from([0x01; 32]),
             plot_id: [0x02; 32],
             quality_bits: 8,
@@ -697,10 +828,13 @@ mod tests {
             authorities: Vec::new(),
             signatures: Vec::new(),
         };
-        assert!(!FinalityGuarantee::for_proof(&poh, &poh_pq, false).slashable_backing);
-        assert!(!FinalityGuarantee::for_proof(&poh, &poh_pq, false).admits_cross_domain_value());
-        assert!(!FinalityGuarantee::for_proof(&pospace, &pos_pq, false).slashable_backing);
-        assert!(!FinalityGuarantee::for_proof(&pospace, &pos_pq, false).admits_cross_domain_value());
+        assert!(!FinalityGuarantee::for_proof(&poh, &poh_auth, false).slashable_backing);
+        assert!(!FinalityGuarantee::for_proof(&poh, &poh_auth, false).admits_cross_domain_value());
+        assert!(!FinalityGuarantee::for_proof(&pospace, &pospace_auth, false).slashable_backing);
+        assert!(
+            !FinalityGuarantee::for_proof(&pospace, &pospace_auth, false)
+                .admits_cross_domain_value()
+        );
         // Bonded PoS/BFT domains retain `slashable_backing = true` on `for_domain`
         // and on stake-weighted `PoSPq` / `BftPq` proofs.
         let mut bft_dom = default_domain(99, ConsensusKind::Bft, 1099, "bft-qc-v1", 1);
@@ -972,5 +1106,85 @@ mod tests {
         });
         assert_eq!(dup_dag.fault_tolerance_bps, 0);
         assert!(!dup_dag.slashable_backing);
+    }
+
+    #[test]
+    fn casper_mysticeti_bitvm_and_multi_domain_composition_enforce_weakest_link() {
+        use crate::cross_domain::external::{
+            FfgValidator, MysticetiMember, PinnedBitVmAnchor, PinnedFfgCommittee,
+            PinnedMysticetiCommittee,
+        };
+        use crate::crypto::primitives::PqKeyPair;
+
+        let pq = PqKeyPair::generate();
+        let pq_bytes = pq.public_key_bytes().to_vec();
+
+        let g_ffg = FinalityGuarantee::for_external_spec(&AdapterSpec::CasperFfg {
+            network: "eth-ffg".into(),
+            committee: Some(
+                PinnedFfgCommittee::new(
+                    4,
+                    vec![FfgValidator {
+                        pubkey: [0x11; 32],
+                        stake: 1_000,
+                        pq_pubkey: pq_bytes.clone(),
+                    }],
+                )
+                .expect("ffg"),
+            ),
+        });
+        assert_eq!(g_ffg.quantum_posture, QuantumClass::Lattice);
+        assert!(!g_ffg.slashable_backing);
+        assert_eq!(g_ffg.fault_tolerance_bps, BFT_FAULT_TOLERANCE_BPS);
+
+        let g_my = FinalityGuarantee::for_external_spec(&AdapterSpec::MysticetiDag {
+            network: "sui-my".into(),
+            committee: Some(
+                PinnedMysticetiCommittee::new(
+                    2,
+                    vec![MysticetiMember {
+                        ed25519_pubkey: [0x22; 32],
+                        voting_weight: 500,
+                        pq_pubkey: pq_bytes.clone(),
+                    }],
+                )
+                .expect("my"),
+            ),
+        });
+        assert!(g_my.attestation.event_root);
+        assert!(!g_my.slashable_backing);
+
+        let g_bv = FinalityGuarantee::for_external_spec(&AdapterSpec::BitVmCovenant {
+            network: "btc-bv".into(),
+            anchor: Some(PinnedBitVmAnchor {
+                height: 10,
+                block_hash: [0x33; 32],
+                bits: 0x207f_ffff,
+                program_hash: [0x44; 32],
+                min_pow_confirmations: 6,
+                challenge_blocks: 3,
+                operator_ed25519_pubkey: [0x55; 32],
+                operator_pq_pubkey: pq_bytes,
+            }),
+        });
+        assert!(g_bv.admits_cross_domain_value());
+        assert_eq!(g_bv.fault_tolerance_bps, POW_FAULT_TOLERANCE_BPS);
+
+        let hub = FinalityGuarantee::settlement_hub();
+        assert_eq!(g_bv.meet(&hub), hub.meet(&g_bv));
+        assert_eq!(compose_multi_domain_finality(&[]), None);
+        let composed =
+            compose_multi_domain_finality(&[hub, g_bv, g_my]).expect("non-empty composition");
+        assert_eq!(
+            composed.reversibility,
+            FinalityReversibility::ProbabilisticWork { confirmations: 6 }
+        );
+        assert_eq!(composed.fault_tolerance_bps, BFT_FAULT_TOLERANCE_BPS);
+        assert!(!composed.slashable_backing);
+
+        let econ =
+            EconomicSecurityBound::derive_multi_domain(&[(hub, 90_000, 50_000), (g_bv, 0, 20_000)])
+                .expect("econ");
+        assert_eq!(econ.safe_value_outflow_ceiling_atoms, 20_000);
     }
 }
