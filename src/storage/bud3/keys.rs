@@ -331,4 +331,38 @@ mod tests {
             ClientSealedDedupIndex::import_sealed_backup(&seed, &backup, &mut m).unwrap();
         assert_eq!(restored.lookup(b"photo-1"), Some([0xa1u8; 32]));
     }
+
+    /// A backup whose declared count disagrees with its body must be refused,
+    /// and the refusal must come from the length check, never from an index.
+    ///
+    /// Measured: `pair[..32]` / `pair[32..64]` are indexing expressions on a
+    /// `&[u8]`; a slice index panics when out of range and release builds abort
+    /// on panic, so the import door must not depend on the iterator yielding a
+    /// full 64-byte chunk to stay in bounds.
+    #[test]
+    fn a_truncated_backup_body_is_refused_not_indexed() {
+        let seed = [0x44u8; 32];
+        let mut idx = ClientSealedDedupIndex::from_wallet_seed(&seed);
+        idx.record(b"photo-1", [0xb1u8; 32]);
+        let backup = idx.export_sealed_backup([0x78u8; SEAL_SALT_LEN]).unwrap();
+        let mut m = Meter::for_object(1 << 20);
+        assert!(ClientSealedDedupIndex::import_sealed_backup(&seed, &backup, &mut m).is_ok());
+
+        // Forge a body whose declared count claims one more entry than it has.
+        // The door must refuse on the length check, before any chunk is split,
+        // so the refusal cannot come from an out-of-range slice index (which
+        // aborts in release builds).
+        let mut body = vec![0u8; 8 + 64];
+        body[..8].copy_from_slice(&2u64.to_le_bytes());
+        let dedup_key = hash_fields_bytes(&[OWNER_DEDUP_TAG, &seed]);
+        let forged = seal_object(&body, &ContentKey(dedup_key), [0x78u8; SEAL_SALT_LEN])
+            .expect("the forged object seals");
+        assert!(
+            matches!(
+                ClientSealedDedupIndex::import_sealed_backup(&seed, &forged, &mut m),
+                Err(KeyPkgBud3Error::MalformedBackup)
+            ),
+            "a body shorter than its declared count is refused, not indexed"
+        );
+    }
 }

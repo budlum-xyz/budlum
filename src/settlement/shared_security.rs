@@ -925,7 +925,7 @@ pub fn quarantine_correlated_sources(
                     // Deterministic, chain-scoped domain tag: the same
                     // evidence is what quarantines the correlated source.
                     evidence_id: crate::core::hash::hash_fields_bytes(&[
-                        b"BDLM_MIKORIZA_CORRELATED_SLASH_V1",
+                        b"BDLM_SHARED_SECURITY_CORRELATED_SLASH_V1",
                         &[slashed_source.tag()],
                         operator,
                     ]),
