@@ -133,7 +133,7 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
             if !SKIP_DIRS.contains(&name.as_str()) {
                 walk(&p, root, out);
             }
-        } else if name.ends_with(".rs") {
+        } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("rs")) {
             if let Ok(rel) = p.strip_prefix(root) {
                 out.push((rel.to_string_lossy().replace('\\', "/"), p.clone()));
             }
@@ -179,7 +179,9 @@ fn elision_reason(body: &str, is_doc: bool) -> Option<&'static str> {
             .chars()
             .all(|c| c == '.' || c == '…' || c.is_whitespace());
         if only_dots && !is_doc && !low.is_empty() {
-            return Some("a plain comment whose whole body is an ellipsis stands where code should");
+            return Some(
+                "a plain comment whose whole body is an ellipsis stands where code should",
+            );
         }
     }
     if PAREN_CLAIMS.iter().any(|c| low.contains(c)) {
@@ -357,7 +359,10 @@ pub fn self_test() -> Result<String, String> {
         std::fs::remove_file(dir.join("src/placeholder.rs")).map_err(|e| e.to_string())?;
 
         // Shape 3: a module that declares nothing, with no placeholder text.
-        put("src/empty_module.rs", "//! A module header and nothing else.\n")?;
+        put(
+            "src/empty_module.rs",
+            "//! A module header and nothing else.\n",
+        )?;
         if run(&dir).is_ok() {
             return Err(String::from("canary: an item-less module passed"));
         }
@@ -398,15 +403,16 @@ mod tests {
     /// The exact prose lines in this tree that must stay quiet.
     #[test]
     fn prose_with_an_ellipsis_is_not_a_placeholder() {
-        assert!(
-            elision_reason(
-                "     `Blockchain::new(...)` has to be byte for byte the same as the direct",
-                true
-            )
-            .is_none()
-        );
+        assert!(elision_reason(
+            "     `Blockchain::new(...)` has to be byte for byte the same as the direct",
+            true
+        )
+        .is_none());
         assert!(elision_reason(" unchanged value, a cap, ...).", true).is_none());
-        assert!(elision_reason(" ...", true).is_none(), "a doc ellipsis is prose");
+        assert!(
+            elision_reason(" ...", true).is_none(),
+            "a doc ellipsis is prose"
+        );
     }
 
     #[test]

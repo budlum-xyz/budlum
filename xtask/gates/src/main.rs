@@ -214,6 +214,7 @@ mod gates {
     pub mod udeps;
     pub mod uncheckable_proof;
     pub mod untrusted_manifests;
+    pub mod unwired_code_is_ratcheted;
     pub mod value_transfers;
     pub mod wallet_core_gate;
     pub mod wallet_node_address_agree;
@@ -1389,6 +1390,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::sources_are_whole::self_test,
+    },
+    Gate {
+        name: "unwired-code-is-ratcheted",
+        replaces: None,
+        run: gates::unwired_code_is_ratcheted::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::unwired_code_is_ratcheted::self_test,
     },
     Gate {
         name: "source-reading-tests-are-narrowed",
