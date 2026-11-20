@@ -2939,6 +2939,16 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --self-test
       - name: Gate source provenance
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance
+      # One push to a branch that heads an open pull request queues every
+      # workflow that triggers on that event, and the pool those jobs share is
+      # finite. The budget this gate pins is what keeps the queue shorter than
+      # the interval between pushes, so a run can reach a conclusion instead of
+      # being cancelled by the commit behind it. The canary runs first: a gate
+      # that cannot fail proves nothing.
+      - name: Pull-request fan-out budget canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-pull-request-fanout-is-budgeted --self-test
+      - name: Pull-request fan-out is budgeted
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-pull-request-fanout-is-budgeted
       - name: Rust gates canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
       - name: Rust gates

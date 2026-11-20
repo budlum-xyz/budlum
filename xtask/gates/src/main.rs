@@ -76,6 +76,7 @@ mod gates {
     pub mod capability_modules_are_wired;
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
+    pub mod ci_fanout_budget;
     pub mod ci_jobs_end_on_cancel;
     pub mod ci_workflow_guards;
     pub mod classical_crypto_is_paired;
@@ -503,6 +504,14 @@ const GATES: &[Gate] = &[
         run: gates::workflows_produce_jobs::run,
         run_args: None,
         self_test: gates::workflows_produce_jobs::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "ci-pull-request-fanout-is-budgeted",
+        replaces: None,
+        run: gates::ci_fanout_budget::run,
+        run_args: Some(gates::ci_fanout_budget::run_args),
+        self_test: gates::ci_fanout_budget::self_test,
         run_log: None,
     },
     Gate {

@@ -534,7 +534,7 @@ fn canary_cutoffs(base: &Path) -> Result<(), String> {
     write_in(base, CUTOFF_FILE, "next quarter\n")?;
     if evaluate(base).is_ok() {
         return Err(String::from(
-            "canary `unparseable-cutoff` passed when it must fail closed",
+            "canary `unparsable-cutoff` passed when it must fail closed",
         ));
     }
 
@@ -570,7 +570,7 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&base);
     outcome?;
     Ok(String::from(
-        "re-pin-commits-are-inert canary OK: pin-plus-logic, baseline-plus-logic and pin-deletion-plus-logic refused; split-seed and split-in-two accepted; a future cutoff grandfathers; unparseable cutoff and unresolvable base ref fail closed",
+        "re-pin-commits-are-inert canary OK: pin-plus-logic, baseline-plus-logic and pin-deletion-plus-logic refused; split-seed and split-in-two accepted; a future cutoff grandfathers; unparsable cutoff and unresolvable base ref fail closed",
     ))
 }
 
