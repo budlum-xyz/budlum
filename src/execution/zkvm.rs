@@ -575,13 +575,10 @@ fn hash_u64_words(words: &[u64]) -> [u8; 32] {
 
 fn decode_program(bytecode: &[u8]) -> Result<Vec<u64>, String> {
     bytecode
-        .chunks_exact(8)
-        .map(|chunk| {
-            let bytes: [u8; 8] = chunk
-                .try_into()
-                .map_err(|_| "Invalid BudZKVM instruction encoding".to_string())?;
-            Ok(u64::from_le_bytes(bytes))
-        })
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| Ok(u64::from_le_bytes(*chunk)))
         .collect()
 }
 

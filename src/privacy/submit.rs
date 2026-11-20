@@ -24,7 +24,7 @@ pub const MAX_CONFIDENTIAL_VALUE: u64 = (1u64 << 59) - 1;
 fn fold_bytes32_to_poseidon(acc: u64, bytes: &[u8; 32]) -> u64 {
     let p = budlum_note_packing::GOLDILOCKS_P;
     let mut cur = acc;
-    for chunk in bytes.chunks_exact(8) {
+    for chunk in bytes.as_chunks::<8>().0 {
         let mut limb_bytes = [0u8; 8];
         limb_bytes.copy_from_slice(chunk);
         let raw = u64::from_le_bytes(limb_bytes);
@@ -237,7 +237,7 @@ impl PrivateTransferSubmit {
         words_to_absorb.push(u64::from(chain_id >= p));
         words_to_absorb.push(self.spent_commitments.len() as u64);
         words_to_absorb.push(self.output_commitments.len() as u64);
-        for chunk in self.public_digest.chunks_exact(8) {
+        for chunk in self.public_digest.as_chunks::<8>().0 {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(chunk);
             let raw = u64::from_le_bytes(buf);

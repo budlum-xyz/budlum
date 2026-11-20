@@ -202,10 +202,8 @@ fn decode_checked_budzero(code: &[u8]) -> Result<Vec<u64>, String> {
         return Err("BudZero bytecode must be non-empty and 8-byte aligned".into());
     }
     let mut words = Vec::with_capacity(code.len() / 8);
-    for chunk in code.chunks_exact(8) {
-        let arr: [u8; 8] = chunk
-            .try_into()
-            .map_err(|_| "bad instruction word".to_string())?;
+    for chunk in code.as_chunks::<8>().0 {
+        let arr: [u8; 8] = *chunk;
         let raw = u64::from_le_bytes(arr);
         Instruction::decode_for_mainnet(raw, bud_isa::MainnetActivation::default())
             .map_err(|e| e.to_string())?;

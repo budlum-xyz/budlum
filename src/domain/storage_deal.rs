@@ -1417,8 +1417,8 @@ pub struct StorageChallengeProofBundle {
 fn storage_challenge_hash4(tag: &[u8], a: &[u8], b: &[u8], level: u64) -> [u64; 4] {
     let digest = crate::core::hash::hash_fields_bytes(&[tag, a, b, &level.to_le_bytes()]);
     let mut out = [0u64; 4];
-    for (idx, chunk) in digest.chunks_exact(8).enumerate() {
-        let arr: [u8; 8] = chunk.try_into().unwrap_or([0u8; 8]);
+    for (idx, chunk) in digest.as_chunks::<8>().0.iter().enumerate() {
+        let arr: [u8; 8] = *chunk;
         out[idx] = u64::from_le_bytes(arr) % bud_vm::GOLDILOCKS_P;
     }
     out

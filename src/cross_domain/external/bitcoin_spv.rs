@@ -240,7 +240,7 @@ impl ChainWork256 {
     pub fn to_be_bytes(self) -> [u8; 32] {
         let [w0, w1, w2, w3] = self.0;
         let mut out = [0u8; 32];
-        for (chunk, word) in out.chunks_exact_mut(8).zip([w0, w1, w2, w3]) {
+        for (chunk, word) in out.as_chunks_mut::<8>().0.iter_mut().zip([w0, w1, w2, w3]) {
             chunk.copy_from_slice(&word.to_be_bytes());
         }
         out
@@ -1308,10 +1308,8 @@ const BTC_STARK_HEADER_STRIDE: u64 = 13;
 /// Fold a 32-byte digest into one Goldilocks field element via `poseidon4_hash`.
 fn fold_digest_poseidon(digest: &[u8; 32]) -> u64 {
     let mut acc = BTC_STARK_HASH_FOLD_TAG;
-    for chunk in digest.chunks_exact(4) {
-        let [b0, b1, b2, b3] = *chunk else {
-            continue;
-        };
+    for chunk in digest.as_chunks::<4>().0 {
+        let [b0, b1, b2, b3] = *chunk;
         let limb = u64::from(u32::from_le_bytes([b0, b1, b2, b3]));
         acc = bud_vm::poseidon4_hash(acc, limb);
     }

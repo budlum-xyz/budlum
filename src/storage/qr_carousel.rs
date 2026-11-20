@@ -862,9 +862,7 @@ impl CarouselDecoder {
         if self.pivots.len() != k {
             self.pivots = vec![None; k];
         }
-        for slot in &mut self.pivots {
-            *slot = None;
-        }
+        self.pivots.fill(None);
         for (i, r) in self.residuals.iter().enumerate() {
             if let Some(c) = bitset_first(&r.mask) {
                 if let Some(slot) = self.pivots.get_mut(c) {

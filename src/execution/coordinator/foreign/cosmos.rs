@@ -254,12 +254,10 @@ pub fn ripemd160(data: &[u8]) -> [u8; 20] {
     let mut h3: u32 = 0x1032_5476;
     let mut h4: u32 = 0xc3d2_e1f0;
 
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut x = [0u32; 16];
-        for (word_slot, word_bytes) in x.iter_mut().zip(chunk.chunks_exact(4)) {
-            if let Ok(arr) = <[u8; 4]>::try_from(word_bytes) {
-                *word_slot = u32::from_le_bytes(arr);
-            }
+        for (word_slot, word_bytes) in x.iter_mut().zip(chunk.as_chunks::<4>().0) {
+            *word_slot = u32::from_le_bytes(*word_bytes);
         }
         let (mut al, mut bl, mut cl, mut dl, mut el) = (h0, h1, h2, h3, h4);
         let (mut ar, mut br, mut cr, mut dr, mut er) = (h0, h1, h2, h3, h4);

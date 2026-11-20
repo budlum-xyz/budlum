@@ -637,10 +637,8 @@ fn open_sealed_object_field_native(
     }
 
     let mut decoded = Vec::with_capacity(body_words.len());
-    for (idx, word_bytes) in body_words.chunks_exact(8).enumerate() {
-        let mut word_arr = [0u8; 8];
-        word_arr.copy_from_slice(word_bytes);
-        let cipher_word = u64::from_le_bytes(word_arr);
+    for (idx, word_bytes) in body_words.as_chunks::<8>().0.iter().enumerate() {
+        let cipher_word = u64::from_le_bytes(*word_bytes);
         if cipher_word >= GOLDILOCKS_P {
             decoded.zeroize();
             return Err(SealBud3Error::DecryptFailed);

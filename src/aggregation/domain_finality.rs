@@ -93,10 +93,9 @@ const fn split_u128_limbs(value: u128) -> [u64; TIMESTAMP_LIMBS] {
 #[must_use]
 fn digest_limbs(digest: &Hash32) -> [u64; DIGEST_LIMBS] {
     let mut out = [0u64; DIGEST_LIMBS];
-    for (dst, chunk) in out.iter_mut().zip(digest.chunks_exact(4)) {
-        if let [b0, b1, b2, b3] = *chunk {
-            *dst = u64::from(u32::from_le_bytes([b0, b1, b2, b3]));
-        }
+    for (dst, chunk) in out.iter_mut().zip(digest.as_chunks::<4>().0) {
+        let [b0, b1, b2, b3] = *chunk;
+        *dst = u64::from(u32::from_le_bytes([b0, b1, b2, b3]));
     }
     out
 }
@@ -116,7 +115,7 @@ fn poseidon_sponge_256(tag: &[u8], limbs: &[u64]) -> Hash32 {
         acc_b = poseidon4_hash(acc_b, limb);
     }
     let mut out = [0u8; 32];
-    for (idx, chunk) in (0u64..).zip(out.chunks_exact_mut(4)) {
+    for (idx, chunk) in (0u64..).zip(out.as_chunks_mut::<4>().0) {
         let domain_idx = squeeze_base.wrapping_add(idx) % GOLDILOCKS_MODULUS;
         let inner = poseidon4_hash(acc_a, domain_idx);
         let word = poseidon4_hash(inner, acc_b);
