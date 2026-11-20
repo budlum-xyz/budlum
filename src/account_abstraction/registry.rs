@@ -21,8 +21,11 @@
 //! it yet; callers must not describe its root as chain-committed state.
 
 use super::quantum_account::QuantumAccount;
-use crate::storage::pact_binding::PactRegistry;
+use crate::{core::hash::hash_fields_bytes, storage::pact_binding::PactRegistry};
 use std::collections::BTreeMap;
+
+const ACCOUNT_COMMITMENT_DOMAIN_V1: &[u8] = b"budlum/quantum-account/v1";
+const REGISTRY_ROOT_DOMAIN_V1: &[u8] = b"budlum/quantum-account-registry/v1";
 
 /// Registry errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +115,45 @@ impl std::error::Error for QuantumAccountRegistryError {}
 /// Convenience: upper bound on live quantum accounts in [`QuantumAccountRegistry`].
 pub const MAX_QUANTUM_ACCOUNTS: usize = 100_000;
 
+fn canonical_usize(value: usize) -> [u8; 8] {
+    match u64::try_from(value) {
+        Ok(value) => value.to_le_bytes(),
+        Err(_) => u64::MAX.to_le_bytes(),
+    }
+}
+
+fn account_commitment(account: &QuantumAccount) -> [u8; 32] {
+    let guardian_count = canonical_usize(account.guardians.len());
+    let mut guardians = Vec::new();
+    guardians.extend_from_slice(&guardian_count);
+    for guardian in &account.guardians {
+        guardians.extend_from_slice(guardian);
+    }
+
+    let multisig_threshold = canonical_usize(account.multisig_threshold);
+    let recovery_threshold = canonical_usize(account.recovery_threshold);
+    let timelock_blocks = account.timelock_blocks.to_le_bytes();
+    let nonce = account.nonce.to_le_bytes();
+    let balance = account.balance.to_le_bytes();
+    let storage_bytes = account.storage_bytes.to_le_bytes();
+
+    hash_fields_bytes(&[
+        ACCOUNT_COMMITMENT_DOMAIN_V1,
+        &account.address,
+        &account.pq_public_key,
+        &account.storage_root,
+        &account.pact_root,
+        &account.guardian_root,
+        &guardians,
+        &multisig_threshold,
+        &recovery_threshold,
+        &timelock_blocks,
+        &nonce,
+        &balance,
+        &storage_bytes,
+    ])
+}
+
 /// The registry of quantum accounts.
 #[derive(Debug, Clone, Default)]
 pub struct QuantumAccountRegistry {
@@ -178,12 +220,10 @@ impl QuantumAccountRegistry {
 
     /// Register the account together with the pact set its `pact_root` names.
     ///
-    /// `register` validates the **shape** of an account and accepts `pact_root` as
-    /// given. That was not enough: the field carried a root, but nothing checked
-    /// that the root named a real pact set, so `pact_root` was a claim,
-    /// not a binding. The same class existed in `ProofFixture::bind_verified`: a field
-    /// being non-zero does not mean there is something
-    /// behind it.
+    /// Plain [`register`](Self::register) accepts only the zero pact root. A
+    /// non-zero root comes through this method so the field cannot name a pact
+    /// set that the caller never presented. A field being non-zero does not by
+    /// itself prove there is something behind it.
     ///
     /// There are two gates. The presented registry's own root must be recomputable from the
     /// pacts inside it, **and** the account's `pact_root` must equal that
@@ -191,9 +231,8 @@ impl QuantumAccountRegistry {
     ///
     /// # Errors
     ///
-    /// Every error [`register`](Self::register) returns, plus an error if the pact registry's
-    /// root is stale or the account's root does not match
-    /// it.
+    /// Errors if the account cannot be inserted, the pact registry's root is
+    /// stale, or the account's root does not match it.
     pub fn register_with_pacts(
         &mut self,
         account: QuantumAccount,
@@ -229,6 +268,28 @@ impl QuantumAccountRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.accounts.is_empty()
+    }
+
+    /// Return a deterministic commitment to every registered account field.
+    ///
+    /// Each account is encoded in a fixed schema whose fields are independently
+    /// length-prefixed by [`hash_fields_bytes`]. Account commitments are then
+    /// folded in ascending address order (the order of the [`BTreeMap`]), with
+    /// a separate registry domain and an explicit account count. Integer fields
+    /// use canonical little-endian `u64` encodings, including Rust `usize`
+    /// fields, so the result is independent of the host architecture.
+    ///
+    /// This is an in-memory registry commitment only. It is not included in
+    /// `AccountState`, a transaction, a snapshot, or a block consensus root.
+    #[must_use]
+    pub fn root(&self) -> [u8; 32] {
+        let account_count = canonical_usize(self.accounts.len());
+        let commitments: Vec<[u8; 32]> = self.accounts.values().map(account_commitment).collect();
+        let mut fields: Vec<&[u8]> = Vec::with_capacity(commitments.len() + 2);
+        fields.push(REGISTRY_ROOT_DOMAIN_V1);
+        fields.push(&account_count);
+        fields.extend(commitments.iter().map(<[u8; 32]>::as_slice));
+        hash_fields_bytes(&fields)
     }
 
     /// Mutate a registered account.
@@ -584,6 +645,19 @@ mod tests {
             plain.root(),
             bound.root(),
             "the registry root must commit the account pact root"
+        );
+    }
+
+    #[test]
+    fn registry_root_has_stable_canonical_encoding() {
+        let mut registry = QuantumAccountRegistry::new();
+        registry
+            .register(account_with(2, 3))
+            .expect("valid account");
+
+        assert_eq!(
+            hex::encode(registry.root()),
+            "a67a4961e1619127a480972a186b258524f81fc2136ec98171b9322a30d048ad"
         );
     }
 
