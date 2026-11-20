@@ -482,7 +482,7 @@ where
 /// Upper bound on `log_num_quotient_chunks` (`1 << 8 == 256` unrandomized chunks),
 /// matching the on-chain Stage 2 quotient-chunk ceiling so an untrusted Stage 1
 /// opening statement cannot request millions of quotient subdomains.
-const MAX_LOG_QUOTIENT_CHUNKS: usize = 8;
+pub const MAX_LOG_QUOTIENT_CHUNKS: usize = 8;
 
 type TranscriptOutcome<SC> = Result<
     (

@@ -1807,3 +1807,87 @@ fn stark_tick_master_scaling_and_10k_split_stark_differential_campaign() {
         "AGG_METRIC split_stark_differential vectors=10000 false_accepts={false_accepts} false_rejects={false_rejects}"
     );
 }
+
+/// A `PcsOpeningObject` arrives from an untrusted peer, so its declared
+/// `log_num_quotient_chunks` is a free one-byte claim while the chunk openings
+/// it carries cost real bytes. `decode` admitted any `u8` value and
+/// `verify_pcs_opening` never compared the declaration against the carried
+/// data, so a peer could park objects in the pool whose shape the Stage 2
+/// verifier is guaranteed to refuse (`1 << 255` chunk fan-out declared against
+/// two carried chunks). Admission must fail closed on both the declaration
+/// ceiling and the declaration/carry consistency.
+#[test]
+fn pcs_opening_refuses_inflated_quotient_chunk_declaration_and_inconsistent_carry() {
+    let (proof, pvs, shape) = prove_fibonacci(6, 1, 1).expect("prove fib");
+    let honest = PcsOpeningObject::from_chip_proof(&proof, shape, &pvs, None).expect("pcs obj");
+
+    // The honest object is fully self-consistent: this must keep working.
+    assert_eq!(verify_pcs_opening(&honest), verify_pcs_opening(&honest));
+    assert!(verify_pcs_opening(&honest).is_ok());
+    let roundtrip = PcsOpeningObject::decode(&honest.encode().expect("encode honest"))
+        .expect("honest object must decode");
+    assert_eq!(roundtrip, honest);
+
+    // (1) A declared chunk count above the Stage 2 ceiling is refused at
+    //     admission, before it can ever reach a shift or a subdomain expansion.
+    let ceiling = u8::try_from(bud_proof::bud_stark::MAX_LOG_QUOTIENT_CHUNKS).expect("fits u8");
+    let mut inflated = honest.clone();
+    inflated.log_num_quotient_chunks = ceiling.saturating_add(1);
+    assert_eq!(
+        PcsOpeningObject::decode(&inflated.encode().expect("encode inflated")),
+        Err(ObjectError::Invalid),
+        "declared log_num_quotient_chunks above the ceiling must be refused at decode"
+    );
+
+    // (2) The same refusal must hold on the Stage 1 path without a round trip,
+    //     because `shape()` is public and is the only shape the verifier sees.
+    assert_eq!(
+        verify_pcs_opening(&inflated),
+        Err(ObjectError::Invalid),
+        "inflated declaration must be refused by verify_pcs_opening"
+    );
+
+    // (3) The declaration must equal the number of chunk openings carried, in
+    //     both directions: over-declaring and under-carrying are refused.
+    let mut over_declared = honest.clone();
+    over_declared.log_num_quotient_chunks = honest.log_num_quotient_chunks.saturating_add(1);
+    assert_eq!(
+        PcsOpeningObject::decode(&over_declared.encode().expect("encode over-declared")),
+        Err(ObjectError::Invalid),
+        "a declaration above the carried chunk openings must be refused at decode"
+    );
+    assert_eq!(
+        verify_pcs_opening(&over_declared),
+        Err(ObjectError::Invalid),
+        "a declaration above the carried chunk openings must be refused at Stage 1"
+    );
+
+    let mut under_carried = honest.clone();
+    assert_eq!(
+        under_carried.opened_values.quotient_chunks.pop().is_some(),
+        true
+    );
+    assert_eq!(
+        PcsOpeningObject::decode(&under_carried.encode().expect("encode under-carried")),
+        Err(ObjectError::Invalid),
+        "a declaration with a missing carried chunk opening must be refused at decode"
+    );
+    assert_eq!(
+        verify_pcs_opening(&under_carried),
+        Err(ObjectError::Invalid),
+        "a declaration with a missing carried chunk opening must be refused at Stage 1"
+    );
+
+    // (4) The prover-side constructor refuses the same over-claim, so an
+    //     honest producer fails closed instead of publishing an object that
+    //     every verifier will reject.
+    let over_claimed = bud_proof::bud_stark::PcsOpeningShape {
+        log_num_quotient_chunks: usize::from(ceiling) + 1,
+        ..shape
+    };
+    assert_eq!(
+        PcsOpeningObject::from_chip_proof(&proof, over_claimed, &pvs, None),
+        Err(ObjectError::Invalid),
+        "from_chip_proof must refuse a shape above the chunk ceiling"
+    );
+}
