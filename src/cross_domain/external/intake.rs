@@ -413,7 +413,7 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::da_sampling::PinnedDaCommittee,
     >,
-    /// Governance-pinned HotStuff 3-chain epoch validator committees keyed by external network.
+    /// Governance-pinned `HotStuff` 3-chain epoch validator committees keyed by external network.
     #[serde(default)]
     pub pinned_hotstuff_committees: std::collections::BTreeMap<
         String,
@@ -765,8 +765,8 @@ impl IntakeState {
         self.pinned_da_committees.insert(network.into(), committee);
     }
 
-    /// Installs or updates the consensus-pinned HotStuff epoch committee for `network`.
-    /// WIRING: governance/genesis HotStuff validator-set surface paired with `register_domain`.
+    /// Installs or updates the consensus-pinned `HotStuff` epoch committee for `network`.
+    /// WIRING: governance/genesis `HotStuff` validator-set surface paired with `register_domain`.
     pub fn pin_hotstuff_committee(
         &mut self,
         network: impl Into<String>,
@@ -792,7 +792,7 @@ impl IntakeState {
     /// execution is the only production caller. The four `pin_*` helpers above
     /// remain the genesis/test initializers; anything that can be reached from
     /// an operator RPC or a node-local flag would fork the chain, because these
-    /// maps are inside `state_digest`. (HotStuff and DAG-BFT committees are not
+    /// maps are inside `state_digest`. (`HotStuff` and DAG-BFT committees are not
     /// yet part of `PinnedExternalAnchor`/`AnchorFamily`; they stay genesis/test
     /// -only until their own governance door is added.)
     pub fn install_pinned_anchor(&mut self, network: &str, anchor: PinnedExternalAnchor) {
@@ -1136,7 +1136,7 @@ impl IntakeState {
     /// 3. Self-challenge (`challenger == carrier`) is unconditionally forbidden
     ///    so a dishonest prover cannot reclaim the challenger reward share.
     /// 4. State-root divergence is evaluated via [`subtle::ConstantTimeEq`].
-    /// 5. For PoW domains, the contradicting proof must carry at least the
+    /// 5. For `PoW` domains, the contradicting proof must carry at least the
     ///    accumulated difficulty bits of the accepted attestation.
     /// 6. The penalty is always computed at `economics.routing_ceiling_atoms`
     ///    so a colluding front-runner cannot dust-slash for 1 atom.
@@ -1530,12 +1530,11 @@ impl IntakeState {
                     .quorum
                     .round_of(&key, evidence.declared_height)
                     .and_then(|round| first_carrier(round, &winner_claim));
-                let carrier = match carrier {
-                    Some(carrier) => carrier,
-                    None => {
-                        self.quorum = quorum_before;
-                        return Err(IntakeError::MissingCarrier);
-                    }
+                let carrier = if let Some(carrier) = carrier {
+                    carrier
+                } else {
+                    self.quorum = quorum_before;
+                    return Err(IntakeError::MissingCarrier);
                 };
                 match self.registry.commit_attestation(&winner, carrier) {
                     Ok(()) => Ok(Some(winner)),
@@ -2676,7 +2675,7 @@ mod tests {
         );
     }
 
-    /// EthereumSync admission is
+    /// `EthereumSync` admission is
     /// closed until a sync committee is pinned - the old shape let the
     /// submitter name their own aggregate key.
     #[test]
@@ -2728,7 +2727,7 @@ mod tests {
         assert!(matches!(err, IntakeError::CommitteeNotPinned), "got: {err}");
     }
 
-    /// EthereumSync remains available on devnet for cryptographic integration
+    /// `EthereumSync` remains available on devnet for cryptographic integration
     /// tests, while public Testnet and Mainnet refuse the complete lifecycle.
     #[test]
     fn ethereum_sync_committee_is_closed_on_public_networks() {

@@ -712,6 +712,7 @@ pub struct ChainHandle {
 }
 
 impl ChainHandle {
+    #[must_use]
     pub fn new(tx: mpsc::Sender<ChainCommand>) -> Self {
         Self { tx }
     }
@@ -3213,7 +3214,7 @@ impl ChainActor {
                     let _ = res_tx.send(
                         self.blockchain
                             .add_transaction(tx_obj)
-                            .map_err(|e| e.to_string()),
+                            .map_err(|e| e.clone()),
                     );
                 }
                 ChainCommand::EnableAggregator(signer_seed, res_tx) => {
@@ -3318,7 +3319,7 @@ impl ChainActor {
                     let res = self
                         .blockchain
                         .handle_finality_cert(cert)
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| e.clone());
                     if res.is_ok() {
                         self.blockchain.start_pending_finality_round();
                     }
@@ -3380,10 +3381,7 @@ impl ChainActor {
                     let _ = response.send(result);
                 }
                 ChainCommand::ImportQcBlob(blob, res_tx) => {
-                    let res = self
-                        .blockchain
-                        .import_qc_blob(blob)
-                        .map_err(|e| e.to_string());
+                    let res = self.blockchain.import_qc_blob(blob).map_err(|e| e.clone());
                     if res.is_ok() {
                         self.blockchain.start_pending_finality_round();
                     }
@@ -3393,7 +3391,7 @@ impl ChainActor {
                     let _ = res_tx.send(
                         self.blockchain
                             .handle_qc_fault_proof(proof)
-                            .map_err(|e| e.to_string()),
+                            .map_err(|e| e.clone()),
                     );
                 }
                 ChainCommand::SubmitSlashingEvidence(evidence, res_tx) => {
@@ -3448,7 +3446,7 @@ impl ChainActor {
                     let _ = tx.send(removed);
                 }
                 ChainCommand::TryReorg(fork, res_tx) => {
-                    let outcome = self.blockchain.try_reorg(fork).map_err(|e| e.to_string());
+                    let outcome = self.blockchain.try_reorg(fork).map_err(|e| e.clone());
                     // After a successful reorg the old tip's
                     // finality round is dead (0186 invalidated it), but nobody
                     // restarted voting - the node just sat there and the post-
@@ -3465,7 +3463,7 @@ impl ChainActor {
                     let outcome = self
                         .blockchain
                         .try_reorg_suffix(suffix)
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| e.clone());
                     self.resume_finality_after_reorg(&outcome);
                     let _ = res_tx.send(outcome);
                 }
@@ -3609,7 +3607,7 @@ impl ChainActor {
                 }
                 ChainCommand::ApplySnapshot(snapshot, res_tx) => {
                     let res = self.blockchain.apply_state_snapshot(snapshot);
-                    let _ = res_tx.send(res.map_err(|e: String| e.to_string()));
+                    let _ = res_tx.send(res.map_err(|e: String| e.clone()));
                 }
                 ChainCommand::GetSettlementInfo(tx) => {
                     let header = self.blockchain.build_global_header(None);

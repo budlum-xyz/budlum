@@ -269,8 +269,8 @@ fn compute_seized_collateral(
     // = debt_x * twap_price_scaled * penalty_multiplier / (scale * BPS_DEN)
     let debt_in_y = debt_x
         .saturating_mul(twap_price_scaled)
-        .saturating_mul(penalty_multiplier as u128)
-        / (scale * BPS_DEN as u128);
+        .saturating_mul(u128::from(penalty_multiplier))
+        / (scale * u128::from(BPS_DEN));
 
     let seized = debt_in_y.min(collateral_y);
     let remainder = collateral_y.saturating_sub(seized);
@@ -318,7 +318,7 @@ pub fn execute_liquidation(
     }
 
     let twap_price = compute_twap_price(observations)?;
-    let twap_epoch = observations.last().map(|o| o.epoch).unwrap_or(0);
+    let twap_epoch = observations.last().map_or(0, |o| o.epoch);
 
     let mut outcomes = Vec::new();
     let scale: u128 = 1_000_000_000_000_000_000; // 1e18
@@ -340,7 +340,7 @@ pub fn execute_liquidation(
             .checked_div(pos.debt_x)
             .unwrap_or(u128::from(u64::MAX));
 
-        if health_bps > pos.maintenance_threshold_bps as u128 {
+        if health_bps > u128::from(pos.maintenance_threshold_bps) {
             // Position is healthy, skip.
             continue;
         }

@@ -242,13 +242,13 @@ impl PohEngine {
 
     #[cfg(test)]
     fn state(&self) -> PohState {
-        self.ledger
-            .read()
-            .map(|l| l.state.clone())
-            .unwrap_or(PohState {
+        self.ledger.read().map_or(
+            PohState {
                 current_hash: [0u8; 32],
                 hash_count: 0,
-            })
+            },
+            |l| l.state.clone(),
+        )
     }
 
     fn current_hash_count(&self) -> u64 {

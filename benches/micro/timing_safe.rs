@@ -2,7 +2,7 @@
 // never part of a running validator. A failed setup step should stop the
 // measurement loudly rather than be threaded through `Result`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! benches/micro/timing_safe.rs - a dudect-style statistical timing regression test.
+//! `benches/micro/timing_safe.rs` - a dudect-style statistical timing regression test.
 //!
 //! Statistically audits that the `constant_time_eq_str` comparison in RPC
 //! authentication really stays constant time:
@@ -21,8 +21,8 @@
 //! variance is tiny; as the denominator shrinks t inflates. The tighter the measurement the
 //! MORE red the gate goes - even as constant-timeness improves. A real run:
 //!
-//! control (naive, LEAKY) : mean_first=19.05ns mean_last=41.41ns |t|=83.62
-//! constant_time_eq_str : mean_first=119.48ns mean_last=118.45ns |t|=7.62
+//! control (naive, LEAKY) : `mean_first=19.05ns` `mean_last=41.41ns` |t|=83.62
+//! `constant_time_eq_str` : `mean_first=119.48ns` `mean_last=118.45ns` |t|=7.62
 //!
 //! The naive implementation leaks 22.36 ns; the real function 1.03 ns - three cycles at 3 GHz,
 //! that is on the order of `Instant::now()` resolution. The gate counted that as a
@@ -37,10 +37,10 @@
 //! literature). The threshold 4.5 is the dudect standard.
 //!
 //! Running:
-//! cargo bench --bench timing_safe (this is what CI uses)
+//! cargo bench --bench `timing_safe` (this is what CI uses)
 //! Environment variables (for local in-depth analysis):
-//! TIMING_SAFE_BATCHES (default 64), TIMING_SAFE_ITERS (default 4096 per batch per class)
-//! TIMING_SAFE_PQ_SAMPLES (default 400) and TIMING_SAFE_SLH_SAMPLES (default 10): signs per
+//! `TIMING_SAFE_BATCHES` (default 64), `TIMING_SAFE_ITERS` (default 4096 per batch per class)
+//! `TIMING_SAFE_PQ_SAMPLES` (default 400) and `TIMING_SAFE_SLH_SAMPLES` (default 10): signs per
 //! key class for the post-quantum signers
 
 use std::env;

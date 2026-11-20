@@ -32,7 +32,7 @@ pub enum ProofVerificationError {
 impl std::fmt::Display for ProofVerificationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProofVerificationError::MissingCommitment {
+            Self::MissingCommitment {
                 domain_id,
                 domain_height,
                 sequence,
@@ -40,31 +40,31 @@ impl std::fmt::Display for ProofVerificationError {
                 f,
                 "Missing commitment for domain={domain_id}, height={domain_height}, sequence={sequence}"
             ),
-            ProofVerificationError::EventDomainMismatch => {
+            Self::EventDomainMismatch => {
                 write!(f, "Event domain does not match commitment domain")
             }
-            ProofVerificationError::EventHeightMismatch => {
+            Self::EventHeightMismatch => {
                 write!(f, "Event height does not match commitment height")
             }
-            ProofVerificationError::EventIndexMismatch => {
+            Self::EventIndexMismatch => {
                 write!(f, "Event index does not match Merkle proof index")
             }
-            ProofVerificationError::EventMessageIdMismatch => {
+            Self::EventMessageIdMismatch => {
                 write!(f, "cross-domain message body does not match its id")
             }
-            ProofVerificationError::EventLeafMismatch => {
+            Self::EventLeafMismatch => {
                 write!(f, "Event leaf hash does not match Merkle proof leaf")
             }
-            ProofVerificationError::InvalidMerkleProof => {
+            Self::InvalidMerkleProof => {
                 write!(f, "Invalid event Merkle proof")
             }
-            ProofVerificationError::CommitmentBlockHashMismatch => {
+            Self::CommitmentBlockHashMismatch => {
                 write!(
                     f,
                     "Commitment block hash does not match expected block hash"
                 )
             }
-            ProofVerificationError::UnattestedEventRoot => write!(
+            Self::UnattestedEventRoot => write!(
                 f,
                 "Commitment event root is not bound by its finality proof"
             ),

@@ -183,39 +183,36 @@ pub fn accept_reallocation_escrowed(
     // Bind `payer` to the authority behind the ticket before any write:
     // a failed-deal ticket may only be funded by the client whose deal failed,
     // and a never-placed ticket may only be funded by the manifest's owner.
-    match ticket.cause {
-        ReallocationCause::NeverPlaced => {
-            if !state
+    if ticket.cause == ReallocationCause::NeverPlaced {
+        if !state
+            .storage_registry
+            .has_manifest_claim(&ticket.manifest_id, &payer)
+            || state
                 .storage_registry
-                .has_manifest_claim(&ticket.manifest_id, &payer)
-                || state
-                    .storage_registry
-                    .owner_of(&ticket.manifest_id)
-                    .is_some_and(|owner| owner != payer)
-            {
-                return Err(format!(
-                    "manifest {} does not belong to payer {payer}; refusing to fund never-placed ticket {ticket_id}",
-                    ticket.manifest_id
-                ));
-            }
+                .owner_of(&ticket.manifest_id)
+                .is_some_and(|owner| owner != payer)
+        {
+            return Err(format!(
+                "manifest {} does not belong to payer {payer}; refusing to fund never-placed ticket {ticket_id}",
+                ticket.manifest_id
+            ));
         }
-        _ => {
-            let funded_by = state
-                .storage_registry
-                .get_deal(ticket.failed_deal_id)
-                .and_then(|deal| deal.payer)
-                .ok_or_else(|| {
-                    format!(
-                        "failed deal {} behind ticket {ticket_id} records no payer; refusing a repair funded by an unnamed account",
-                        ticket.failed_deal_id
-                    )
-                })?;
-            if payer != funded_by {
-                return Err(format!(
-                    "failed deal {} behind ticket {ticket_id} was funded by {funded_by}, not by payer {payer}",
+    } else {
+        let funded_by = state
+            .storage_registry
+            .get_deal(ticket.failed_deal_id)
+            .and_then(|deal| deal.payer)
+            .ok_or_else(|| {
+                format!(
+                    "failed deal {} behind ticket {ticket_id} records no payer; refusing a repair funded by an unnamed account",
                     ticket.failed_deal_id
-                ));
-            }
+                )
+            })?;
+        if payer != funded_by {
+            return Err(format!(
+                "failed deal {} behind ticket {ticket_id} was funded by {funded_by}, not by payer {payer}",
+                ticket.failed_deal_id
+            ));
         }
     }
     // Same durability guard as `open_deal_escrowed`: one operator holds at

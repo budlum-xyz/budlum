@@ -360,14 +360,14 @@ struct Layout {
 impl Layout {
     fn of(scheme: SchemeId) -> Self {
         if scheme == SchemeId::ML_DSA_65 {
-            Layout {
+            Self {
                 c_tilde: 48,
                 z: 3200,
                 omega: 55,
                 k: 6,
             }
         } else {
-            Layout {
+            Self {
                 c_tilde: 64,
                 z: 4480,
                 omega: 75,

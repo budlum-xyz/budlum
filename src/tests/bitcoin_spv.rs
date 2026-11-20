@@ -155,7 +155,7 @@ fn domain_and_commitment(
 
 /// RED before the adapter was wired: this variant did not exist. The test
 /// pins the whole path from permissionless registration to a settlement
-/// commitment that a GlobalBlockHeader can anchor.
+/// commitment that a `GlobalBlockHeader` can anchor.
 #[test]
 fn bitcoin_spv_domain_registers_and_passes_admission() {
     let mut state = IntakeState::new();

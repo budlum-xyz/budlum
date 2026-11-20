@@ -19,7 +19,7 @@ fn fixture_asset() -> AssetId {
     AssetId([42u8; 32])
 }
 
-/// A chain with two bridge-enabled PoW domains (1, 2) and one registered asset.
+/// A chain with two bridge-enabled `PoW` domains (1, 2) and one registered asset.
 fn fixture_bridge_chain() -> Blockchain {
     let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
     for (id, operator) in [(1u32, fixture_addr(11)), (2u32, fixture_addr(12))] {

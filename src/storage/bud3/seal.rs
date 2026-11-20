@@ -210,7 +210,7 @@ pub fn padme_padded_len(raw_len: u64) -> u64 {
         return base;
     }
     let e = 63u32.saturating_sub(base.leading_zeros());
-    let s = 64u32.saturating_sub((e as u64).leading_zeros());
+    let s = 64u32.saturating_sub(u64::from(e).leading_zeros());
     let last_bits = e.saturating_sub(s);
     if last_bits == 0 || last_bits >= 63 {
         return base;
@@ -504,12 +504,11 @@ fn seal_object_field_native(
 ) -> Result<Object, SealBud3Error> {
     let cid = ContentId::sealed(content_key, content);
     let mut inner = encode_inner_padme(content, &cid)?;
-    let inner_len_u64 = match u64::try_from(inner.len()) {
-        Ok(v) => v,
-        Err(_) => {
-            inner.zeroize();
-            return Err(SealBud3Error::EncryptFailed);
-        }
+    let inner_len_u64 = if let Ok(v) = u64::try_from(inner.len()) {
+        v
+    } else {
+        inner.zeroize();
+        return Err(SealBud3Error::EncryptFailed);
     };
 
     let mut ciphertext_words = Vec::with_capacity((1 + inner.len().div_ceil(7)) * 8);

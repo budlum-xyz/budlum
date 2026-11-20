@@ -664,7 +664,7 @@ impl ContentSource for DirectorySource {
         // The rehearsal source serves the same objects the production source
         // does, so it applies the same ceiling, and refuses an object above it
         // before the bytes are read rather than after they are hashed.
-        if std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) > ceiling {
+        if std::fs::metadata(&path).map_or(0, |meta| meta.len()) > ceiling {
             return Err(format!("{} exceeds the gateway ceiling", path.display()));
         }
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -925,9 +925,7 @@ impl Bud3RpcSource {
             return;
         }
         let target = self.cache_path(digest);
-        let replaced = std::fs::metadata(&target)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        let replaced = std::fs::metadata(&target).map_or(0, |meta| meta.len());
         let len = bytes.len() as u64;
         if len > self.cache_max_bytes {
             return;
@@ -1143,8 +1141,7 @@ fn answer(
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     {
         let mut limiter = match state.limiter.lock() {
             Ok(guard) => guard,
@@ -1203,8 +1200,8 @@ fn answer(
             state.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
             bytes
         }
-        None => match state.content.fetch(&route.content) {
-            Ok(bytes) => {
+        None => {
+            if let Ok(bytes) = state.content.fetch(&route.content) {
                 state.counters.cache_fills.fetch_add(1, Ordering::Relaxed);
                 let mut cache = match state.cache.lock() {
                     Ok(guard) => guard,
@@ -1218,12 +1215,11 @@ fn answer(
                         return plain(StatusCode::BAD_GATEWAY, "content unavailable");
                     }
                 }
-            }
-            Err(_) => {
+            } else {
                 let response = plain(StatusCode::BAD_GATEWAY, "content unavailable");
                 return response;
             }
-        },
+        }
     };
 
     let headers = content_headers_with_csp(&route.mime, IMMUTABLE_CACHE, manifest.csp.as_deref());
@@ -1331,8 +1327,7 @@ fn resolve_name(
 ) -> Result<CachedResolution, GatewayError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let key = format!("{name}|{:?}", target.sub);
     {
         let cache = match state.resolved.lock() {

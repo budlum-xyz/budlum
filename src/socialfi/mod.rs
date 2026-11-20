@@ -57,6 +57,7 @@ pub struct NftRegistry {
 }
 
 impl NftRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -231,6 +232,7 @@ impl NftRegistry {
         Ok(cid)
     }
 
+    #[must_use]
     pub fn get_nft(&self, id: u64) -> Option<&Nft> {
         self.nfts.get(&id)
     }
@@ -258,10 +260,12 @@ impl NftRegistry {
 }
 
 impl NftRegistry {
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.nfts.is_empty() && self.ownership.is_empty() && self.next_id == 0
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();

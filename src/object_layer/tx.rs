@@ -184,7 +184,7 @@ pub enum ObjectLayerTx {
     HomeStipendCall {
         domain: DomainId,
         auth: HomeKeyStipendAuth,
-        action: Box<ObjectLayerTx>,
+        action: Box<Self>,
     },
 }
 

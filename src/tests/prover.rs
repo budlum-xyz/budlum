@@ -88,7 +88,7 @@ fn real_proof() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
     prove_bytecode(&sample_bytecode(), DEFAULT_CONTRACT_GAS_LIMIT).expect("proving must succeed")
 }
 
-/// Build a submission whose message payload_hash correctly binds the proof.
+/// Build a submission whose message `payload_hash` correctly binds the proof.
 fn submission(
     sender: Address,
     domain: u32,

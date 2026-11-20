@@ -1522,8 +1522,7 @@ fn register_class_verified_rejects_operatorless_charter_when_home_proof_required
     let state_root = class_reg
         .state_proof
         .as_ref()
-        .map(|p| p.state_root)
-        .unwrap_or([0xAA; 32]);
+        .map_or([0xAA; 32], |p| p.state_root);
     // Even with a valid slice proof, an unbound charter must fail closed when
     // home proofs are required so arbitrary signers cannot claim classes.
     assert_eq!(

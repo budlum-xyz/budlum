@@ -1,4 +1,5 @@
 //! WIRING: unwired - default-private tier classifier awaits consensus transaction integration.
+//!
 //! Default-private `K1 / K2 / K3 / K4` cryptographic data-layering, post-quantum
 //! selective disclosure, and off-chain anchor registry.
 //!

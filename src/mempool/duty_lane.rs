@@ -106,15 +106,15 @@ pub enum DutyRefusal {
 impl std::fmt::Display for DutyRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DutyRefusal::SecondBatchInWindow { window, open_nonce } => write!(
+            Self::SecondBatchInWindow { window, open_nonce } => write!(
                 f,
                 "a duty batch for window {window} is already pending at nonce {open_nonce}"
             ),
-            DutyRefusal::LaneBytesFull { lane_bytes, cap } => write!(
+            Self::LaneBytesFull { lane_bytes, cap } => write!(
                 f,
                 "the duty lane would hold {lane_bytes} bytes against its {cap} byte ceiling"
             ),
-            DutyRefusal::BatchExceedsBlockShare { batch_bytes, share } => write!(
+            Self::BatchExceedsBlockShare { batch_bytes, share } => write!(
                 f,
                 "a duty batch of {batch_bytes} bytes exceeds the lane's {share} byte share of a block"
             ),

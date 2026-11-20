@@ -6,7 +6,7 @@
 //!     `src/network/node.rs` holds ~20 lock sites; all but one already matched
 //!     on the result or exited deliberately, and the odd one out turned an
 //!     optional content fetch into a node-wide panic.
-//!   * `Gossipsub`'s defaults are the network's DoS surface. They are currently
+//!   * `Gossipsub`'s defaults are the network's `DoS` surface. They are currently
 //!     accepted deliberately, and this file records which ones were checked so
 //!     "we never looked" cannot be confused with "we looked and accepted".
 
@@ -344,7 +344,7 @@ mod tests {
     /// published to the topic reaches the whole mesh, not the asker. The
     /// requesting side was never moved, so every `GetHeaders` this node sent
     /// was published to a topic on which every receiver only logs and
-    /// `continue`s. No `Headers` ever came back, the request_response chain
+    /// `continue`s. No `Headers` ever came back, the `request_response` chain
     /// never started, and a node that missed one block could not catch up
     /// again. `sync_state` sat at 1 until `SYNC_TIMEOUT_SECS` reset it, and
     /// the next trigger repeated the cycle.

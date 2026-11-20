@@ -1,4 +1,4 @@
-//! benches/agg_baseline.rs - the Phase 0 baseline of the aggregation layer.
+//! `benches/agg_baseline.rs` - the Phase 0 baseline of the aggregation layer.
 //!
 //! The aggregation layer replaces the post-quantum witness of a transaction
 //! (public key and signature) with a short claim. Before any of it exists this

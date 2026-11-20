@@ -59,6 +59,7 @@ pub struct ConsensusDomainRegistry {
 }
 
 impl ConsensusDomainRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             domains: BTreeMap::new(),
@@ -260,6 +261,7 @@ impl ConsensusDomainRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn get(&self, id: DomainId) -> Option<&ConsensusDomain> {
         self.domains.get(&id)
     }
@@ -419,6 +421,7 @@ impl ConsensusDomainRegistry {
             .filter(|domain| domain.status == DomainStatus::Active)
     }
 
+    #[must_use]
     pub fn domains(&self) -> Vec<ConsensusDomain> {
         self.domains.values().cloned().collect()
     }
@@ -464,6 +467,7 @@ impl ConsensusDomainRegistry {
 
 /// A domain with a zk program allowlist or a committed plugin code hash gets a V4 leaf that
 /// mixes both in. Other domains keep their earlier leaf byte for byte.
+#[must_use]
 pub fn domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
     let base = base_domain_leaf_hash(domain);
     let leaf = if domain.zk_program_allowlist.is_empty() && domain.plugin_code_hash.is_none() {

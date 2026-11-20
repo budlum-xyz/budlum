@@ -34,7 +34,7 @@ impl std::error::Error for DomainError {}
 
 impl From<ConsensusError> for DomainError {
     fn from(value: ConsensusError) -> Self {
-        DomainError(value.0)
+        Self(value.0)
     }
 }
 

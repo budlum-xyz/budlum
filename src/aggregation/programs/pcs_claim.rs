@@ -482,15 +482,12 @@ fn update_opt_ext_vec(
     hasher: &mut Keccak256,
     opt: Option<&Vec<[u64; 3]>>,
 ) -> Result<(), ObjectError> {
-    match opt {
-        Some(v) => {
-            hasher.update([1u8]);
-            update_ext_vec(hasher, v)
-        }
-        None => {
-            hasher.update([0u8]);
-            Ok(())
-        }
+    if let Some(v) = opt {
+        hasher.update([1u8]);
+        update_ext_vec(hasher, v)
+    } else {
+        hasher.update([0u8]);
+        Ok(())
     }
 }
 

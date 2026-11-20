@@ -1835,6 +1835,7 @@ impl Storage {
         chain.reverse();
         Ok(chain)
     }
+    #[must_use]
     pub const fn db(&self) -> &Db {
         &self.db
     }
@@ -2060,7 +2061,7 @@ impl Storage {
             // leaves the node with no checkpoints and no seen blocks, which
             // turns off checkpoint enforcement and double-sign detection.
             let parsed: Result<_, String> = (|| {
-                let producer = Address::from_hex(parts[0]).map_err(|e| e.to_string())?;
+                let producer = Address::from_hex(parts[0]).map_err(|e| e.clone())?;
                 let index: u64 = parts[1].parse().map_err(|e| format!("bad height: {e}"))?;
                 let data: (crate::core::block::BlockHeader, Vec<u8>) =
                     decode(&val).map_err(|e| e.to_string())?;

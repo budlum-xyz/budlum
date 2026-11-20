@@ -322,6 +322,7 @@ pub mod test_adapter {
     }
 
     impl StubAdapter {
+        #[must_use]
         pub fn new(chain: ExternalChain) -> Self {
             Self { chain }
         }

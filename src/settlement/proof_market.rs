@@ -322,6 +322,7 @@ impl ProofTaskStatus {
     /// `assign` changes ownership and timing inside the `status` field, so if
     /// the root skips the status, two different assignment states produce the
     /// same root.
+    #[must_use]
     pub fn root_bytes(&self) -> Vec<u8> {
         match self {
             Self::Pending => vec![0],
@@ -412,6 +413,7 @@ impl ProofTask {
     /// go into the task id: a task whose penalty could be edited after the id
     /// was published would let a creator advertise one risk and settle
     /// against another.
+    #[must_use]
     pub fn new(
         kind: ProofTaskKind,
         creator: Address,
@@ -468,6 +470,7 @@ impl ProofTask {
         ])
     }
 
+    #[must_use]
     pub fn verify_id(&self) -> bool {
         self.task_id
             == Self::compute_task_id(
@@ -619,6 +622,7 @@ impl ProofTask {
     }
 
     /// Is the task active, meaning pending or assigned?
+    #[must_use]
     pub fn is_active(&self) -> bool {
         matches!(
             self.status,
@@ -658,6 +662,7 @@ pub enum ReceiptStatus {
 impl ReceiptStatus {
     /// Root commitment bytes (HIGH CWE-345, 2026-08-17): two different
     /// payment-eligibility states must not share one settlement root.
+    #[must_use]
     pub fn root_bytes(&self) -> Vec<u8> {
         match self {
             Self::Pending => vec![0],
@@ -673,6 +678,7 @@ impl ReceiptStatus {
 
 impl ProofReceipt {
     /// Creates a new proof receipt.
+    #[must_use]
     pub fn new(
         task_id: [u8; 32],
         prover: Address,
@@ -758,11 +764,13 @@ impl ProofReceipt {
     }
 
     /// Is the receipt payable?
+    #[must_use]
     pub fn is_payable(&self) -> bool {
         self.status == ReceiptStatus::Pending
     }
 
     /// Check if receipt has been paid (for pruning).
+    #[must_use]
     pub fn is_paid(&self) -> bool {
         matches!(self.status, ReceiptStatus::Paid)
     }
@@ -777,6 +785,7 @@ impl ProofReceipt {
     }
 
     /// Settled means nothing more will happen: paid or revoked.
+    #[must_use]
     pub fn is_settled(&self) -> bool {
         self.is_paid() || self.is_revoked()
     }
@@ -825,6 +834,7 @@ pub struct ProofMarketState {
 }
 
 impl ProofMarketState {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }

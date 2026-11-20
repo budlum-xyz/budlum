@@ -159,6 +159,7 @@ impl RewardPoolSchedule {
         Ok(())
     }
 
+    #[must_use]
     pub const fn per_epoch_budget(&self, epoch: u64, remaining_pool: u64) -> u64 {
         if epoch < self.reward_pool_start_epoch || self.validation_pool_epochs == 0 {
             return 0;
@@ -185,6 +186,7 @@ impl RewardPoolSchedule {
 /// active validator stakes. The first address in sorted order receives the
 /// rounding remainder. The storage share and the repair and relay share are
 /// not paid here (see [`RewardPoolSplit`]).
+#[must_use]
 pub fn reward_for_epoch(
     schedule: RewardPoolSchedule,
     epoch: u64,
@@ -281,6 +283,7 @@ fn split_budget(budget: u64) -> PoolSplit {
     }
 }
 
+#[must_use]
 pub fn total_epoch_payout(payouts: &[(Address, u64)]) -> u64 {
     payouts
         .iter()

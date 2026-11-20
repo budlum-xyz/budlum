@@ -198,20 +198,17 @@ pub fn group_answers(answers: &[Answer]) -> (Vec<AnswerGroup>, usize) {
             continue;
         }
         let key = answer.group_key();
-        match keys.iter().position(|k| *k == key) {
-            Some(at) => {
-                if let Some(group) = groups.get_mut(at) {
-                    group.count = group.count.saturating_add(1);
-                }
+        if let Some(at) = keys.iter().position(|k| *k == key) {
+            if let Some(group) = groups.get_mut(at) {
+                group.count = group.count.saturating_add(1);
             }
-            None => {
-                keys.push(key.clone());
-                groups.push(AnswerGroup {
-                    key,
-                    count: 1,
-                    answer: *answer,
-                });
-            }
+        } else {
+            keys.push(key.clone());
+            groups.push(AnswerGroup {
+                key,
+                count: 1,
+                answer: *answer,
+            });
         }
     }
     // Deterministic order: largest group first, then by key. Without this the

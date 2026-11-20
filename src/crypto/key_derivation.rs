@@ -40,6 +40,7 @@ pub const ENTROPY_LEN: usize = 32;
 pub const ROOT_LEN: usize = 64;
 
 /// The SLH-DSA-SHAKE-256s seed length (three `n = 32` values).
+///
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const SLH_SEED_LEN: usize = 96;
 
