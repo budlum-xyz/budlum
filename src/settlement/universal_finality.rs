@@ -13,6 +13,13 @@
 //! `(reversibility, quantum_posture, attestation, slashable_backing, fault_tolerance_bps)`
 //! in pure integer arithmetic, and [`compose_cross_domain_route`] computes the
 //! associative, commutative weakest-link meet across any 2-hop or N-hop route.
+//!
+//! WIRING: the global certificate layer ([`FINALITY_BINDS_ALL`],
+//! [`DomainFinalityEntry`], [`FinalityVerdict`], [`FinalityComposeError`] and
+//! [`compose`]) is composed here and called by the settlement aggregator that
+//! builds one `GlobalFinalityHeader` per window; that call site does not exist
+//! in this tree yet, so today the composer's only callers are the tests below.
+//! The note is the door, not a claim that the door is hung.
 
 use crate::cross_domain::external::AdapterSpec;
 use crate::crypto::facts::QuantumClass;
@@ -514,8 +521,13 @@ impl FinalityGuarantee {
     }
 
     /// Associative, commutative weakest-link meet across two domain guarantees.
+    ///
+    /// Public because the global certificate composer ([`compose`]) folds the
+    /// same operation across an arbitrary domain set: a caller that can compose
+    /// a route must be able to compose the identical lattice by hand and get the
+    /// identical guarantee.
     #[must_use]
-    fn meet(&self, other: &Self) -> Self {
+    pub fn meet(&self, other: &Self) -> Self {
         Self {
             reversibility: self.reversibility.meet(other.reversibility),
             quantum_posture: quantum_meet(self.quantum_posture, other.quantum_posture),
@@ -644,6 +656,258 @@ pub fn compose_cross_domain_route(
 pub fn compose_multi_domain_finality(domains: &[FinalityGuarantee]) -> Option<FinalityGuarantee> {
     let (first, rest) = domains.split_first()?;
     Some(rest.iter().fold(*first, |acc, next| acc.meet(next)))
+}
+
+/// Every commitment a domain finality proof must bind before its verdict may
+/// enter a global certificate.
+///
+/// This is the "binds all" bar: a certificate whose `state_root` reads `true`
+/// while `event_root` reads `false` describes a proof that authenticated the
+/// account trie but not the logs, and no amount of quorum weight repairs it.
+pub const FINALITY_BINDS_ALL: CommitmentAttestation = CommitmentAttestation {
+    state_root: true,
+    tx_root: true,
+    event_root: true,
+    parent: true,
+};
+
+/// Why a domain verdict is still `Pending` rather than `Established`.
+///
+/// Every variant is *re-submittable*: a missing-evidence verdict is not a
+/// rejection, it is a debt with a named cause. Collapsing these into a single
+/// `false` (or into `Refuted`) is the failure mode this type exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FinalityPendingReason {
+    /// The adapter produced no proof within the settlement window.
+    EvidenceMissing,
+    /// The proof arrived but does not bind the full commitment set.
+    AttestationUnbound,
+    /// The domain's finality rule is not yet satisfied (e.g. confirmations).
+    RuleNotSatisfied,
+    /// Slashable backing was claimed but could not be verified on chain.
+    BondUnverified,
+}
+
+/// Three-valued verdict for a single domain, in the evidence algebra
+/// `Established` / `Refuted` / `Pending`.
+///
+/// `Pending` carries a [`FinalityPendingReason`] and therefore cannot be
+/// confused with `Refuted { .. }`: a certificate composer may never turn a
+/// missing measurement into a rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FinalityVerdict {
+    /// The domain's finality proof verifies and binds every commitment.
+    Established,
+    /// The domain's own rule rejects the claimed block; `code` is the domain's
+    /// exit reason and is preserved verbatim for the dispute record.
+    Refuted {
+        /// Domain-defined rejection code.
+        code: u16,
+    },
+    /// Measurement is incomplete; the verdict must be re-submitted, not rejected.
+    Pending {
+        /// Named cause of the gap.
+        reason: FinalityPendingReason,
+    },
+}
+
+/// One domain's certified verdict, as fed into [`compose`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainFinalityEntry {
+    /// Index of the consensus domain in the settlement registry (`0..16`).
+    pub domain_id: u16,
+    /// Finalized height the verdict refers to.
+    pub height: u64,
+    /// Domain state root the verdict commits to.
+    pub state_root: [u8; 32],
+    /// Exact finality guarantee the domain proof provides.
+    pub guarantee: FinalityGuarantee,
+    /// Three-valued verdict of the domain's own finality rule.
+    pub verdict: FinalityVerdict,
+}
+
+/// Failure of [`compose`]. Ordered: structural contradictions first, then
+/// findings, then evidence debt, so a caller always sees the strongest reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FinalityComposeError {
+    /// No domain entries were supplied; an empty certificate proves nothing.
+    EmptyDomainSet,
+    /// The same domain index appears twice with different heights or roots.
+    DuplicateDomain {
+        /// Offending domain index.
+        domain_id: u16,
+    },
+    /// Two domains report the same index but contradictory verdicts.
+    ConflictingVerdicts {
+        /// First domain index.
+        first: u16,
+        /// Second domain index.
+        second: u16,
+    },
+    /// A domain's own rule rejected its block.
+    RefutedDomain {
+        /// Offending domain tier.
+        domain_id: u16,
+        /// Domain-defined rejection code.
+        code: u16,
+    },
+    /// A proof was measured but does not bind the full commitment set.
+    AttestationUnbound {
+        /// Offending domain index.
+        domain_id: u16,
+    },
+    /// Measurement is incomplete; the certificate must be re-submitted.
+    DomainNotEstablished {
+        /// Domain index whose evidence is missing.
+        domain_id: u16,
+        /// Named cause.
+        reason: FinalityPendingReason,
+    },
+    /// More than sixteen domains were supplied; the mask cannot represent them.
+    TooManyDomains,
+}
+
+/// Single global header committing to bounded, individually certified domain
+/// finality verdicts.
+///
+/// The certificate is *derived*, never asserted: [`compose`] is the only
+/// constructor, and re-deriving it from the same entries is the verification
+/// rule, so a certificate cannot claim a weaker or stronger guarantee than its
+/// inputs support. The transport-side re-derivation lands with the settlement
+/// aggregator; until then the rule is enforced by the composer itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobalFinalityCertificate {
+    /// Bit `i` set iff domain `i` is `Established` and bound in this certificate.
+    pub domain_mask: u16,
+    /// Number of bound domains (`domain_mask.count_ones()`).
+    pub domain_count: u8,
+    /// Weakest-link guarantee across all bound domains.
+    pub guarantee: FinalityGuarantee,
+    /// Digest over every `(domain_id, height, state_root, guarantee, verdict)`
+    /// tuple: two certificates over different domain roots can never collide.
+    pub domain_commitment: [u8; 32],
+    /// Digest over the certificate header including [`Self::domain_commitment`].
+    pub certificate_digest: [u8; 32],
+}
+
+/// Mix one entry into a running SHA-256 state, length-prefixed and
+/// domain-separated so that no two tuples share an encoding.
+fn absorb_entry(hasher: &mut impl sha2::Digest, entry: &DomainFinalityEntry) {
+    hasher.update(b"budlum.finality.entry.v1");
+    hasher.update(entry.domain_id.to_be_bytes());
+    hasher.update(entry.height.to_be_bytes());
+    hasher.update(entry.state_root);
+    hasher.update(entry.guarantee.fault_tolerance_bps.to_be_bytes());
+    hasher.update([u8::from(entry.guarantee.slashable_backing)]);
+    hasher.update([
+        u8::from(entry.guarantee.attestation.state_root),
+        u8::from(entry.guarantee.attestation.tx_root),
+        u8::from(entry.guarantee.attestation.event_root),
+        u8::from(entry.guarantee.attestation.parent),
+    ]);
+    hasher.update([match entry.verdict {
+        FinalityVerdict::Established => 0u8,
+        FinalityVerdict::Refuted { .. } => 1,
+        FinalityVerdict::Pending { .. } => 2,
+    }]);
+    hasher.update([entry.guarantee.reversibility.rank()]);
+}
+
+/// Compose a [`GlobalFinalityCertificate`] from per-domain verdicts.
+///
+/// Order of refusal is fixed and therefore testable:
+/// empty set, duplicate domain, refuted domain, unbound attestation, pending
+/// evidence, and only then the weakest-link fold. Structural contradictions
+/// outrank findings, and findings outrank evidence debt; a missing measurement
+/// is never allowed to mask a real contradiction.
+///
+/// # Errors
+///
+/// Returns the strongest applicable [`FinalityComposeError`]; see its variants.
+pub fn compose(
+    entries: &[DomainFinalityEntry],
+) -> Result<GlobalFinalityCertificate, FinalityComposeError> {
+    use sha2::{Digest as _, Sha256};
+
+    let Some(first) = entries.first() else {
+        return Err(FinalityComposeError::EmptyDomainSet);
+    };
+    if entries.len() > 16 {
+        return Err(FinalityComposeError::TooManyDomains);
+    }
+
+    let mut seen: u16 = 0;
+    for entry in entries {
+        if entry.domain_id >= 16 {
+            return Err(FinalityComposeError::TooManyDomains);
+        }
+        let bit = 1u16 << entry.domain_id;
+        if seen & bit != 0 {
+            return Err(FinalityComposeError::DuplicateDomain {
+                domain_id: entry.domain_id,
+            });
+        }
+        seen |= bit;
+    }
+
+    for entry in entries {
+        if let FinalityVerdict::Refuted { code } = entry.verdict {
+            return Err(FinalityComposeError::RefutedDomain {
+                domain_id: entry.domain_id,
+                code,
+            });
+        }
+    }
+
+    for entry in entries {
+        if entry.guarantee.attestation != FINALITY_BINDS_ALL {
+            return Err(FinalityComposeError::AttestationUnbound {
+                domain_id: entry.domain_id,
+            });
+        }
+    }
+
+    for entry in entries {
+        if let FinalityVerdict::Pending { reason } = entry.verdict {
+            return Err(FinalityComposeError::DomainNotEstablished {
+                domain_id: entry.domain_id,
+                reason,
+            });
+        }
+    }
+
+    let guarantee = entries
+        .iter()
+        .skip(1)
+        .fold(first.guarantee, |acc, entry| acc.meet(&entry.guarantee));
+
+    let mut entry_hasher = Sha256::new();
+    entry_hasher.update(b"budlum.finality.commitment.v1");
+    entry_hasher.update((entries.len() as u64).to_be_bytes());
+    for entry in entries {
+        absorb_entry(&mut entry_hasher, entry);
+    }
+    let domain_commitment: [u8; 32] = entry_hasher.finalize().into();
+
+    let domain_count = seen.count_ones();
+    let domain_count_u8 = u8::try_from(domain_count).unwrap_or(u8::MAX);
+
+    let mut header = Sha256::new();
+    header.update(b"budlum.finality.certificate.v1");
+    header.update(seen.to_be_bytes());
+    header.update([domain_count_u8]);
+    header.update(guarantee.fault_tolerance_bps.to_be_bytes());
+    header.update([guarantee.reversibility.rank()]);
+    header.update(domain_commitment);
+    let certificate_digest: [u8; 32] = header.finalize().into();
+
+    Ok(GlobalFinalityCertificate {
+        domain_mask: seen,
+        domain_count: domain_count_u8,
+        guarantee,
+        domain_commitment,
+        certificate_digest,
+    })
 }
 
 /// Overflow-free `floor(amount * bps / 10_000)` on `u128`.
@@ -1186,5 +1450,213 @@ mod tests {
             EconomicSecurityBound::derive_multi_domain(&[(hub, 90_000, 50_000), (g_bv, 0, 20_000)])
                 .expect("econ");
         assert_eq!(econ.safe_value_outflow_ceiling_atoms, 20_000);
+    }
+
+    // --- Global certificate composer (TIP-03 production slice) --------------
+    //
+    // These are the same cases proven in the offline scratch crate before the
+    // port; each one pins a rule a naive composer gets wrong.
+
+    fn cert_entry(
+        id: u16,
+        bps: u16,
+        reversibility: FinalityReversibility,
+        verdict: FinalityVerdict,
+    ) -> DomainFinalityEntry {
+        DomainFinalityEntry {
+            domain_id: id,
+            height: 100 + u64::from(id),
+            state_root: [u8::try_from(id).unwrap_or(0); 32],
+            guarantee: FinalityGuarantee {
+                reversibility,
+                quantum_posture: QuantumClass::Hash,
+                attestation: FINALITY_BINDS_ALL,
+                slashable_backing: true,
+                fault_tolerance_bps: bps,
+            },
+            verdict,
+        }
+    }
+
+    #[test]
+    fn certificate_covers_all_domain_families() {
+        let entries: Vec<_> = (0u16..9)
+            .map(|i| {
+                cert_entry(
+                    i,
+                    3_333 + i,
+                    FinalityReversibility::DeterministicQuorum,
+                    FinalityVerdict::Established,
+                )
+            })
+            .collect();
+        let cert = compose(&entries).expect("nine established domains must compose");
+        assert_eq!(cert.domain_count, 9);
+        assert_eq!(cert.domain_mask, 0b1_1111_1111);
+        assert_eq!(cert.guarantee.fault_tolerance_bps, 3_333);
+        assert_eq!(
+            compose(&entries),
+            Ok(cert),
+            "composition must be deterministic"
+        );
+    }
+
+    #[test]
+    fn empty_domain_set_produces_no_certificate() {
+        assert_eq!(compose(&[]), Err(FinalityComposeError::EmptyDomainSet));
+    }
+
+    #[test]
+    fn refutation_outranks_missing_evidence() {
+        let entries = vec![
+            cert_entry(
+                0,
+                3_333,
+                FinalityReversibility::DeterministicQuorum,
+                FinalityVerdict::Pending {
+                    reason: FinalityPendingReason::EvidenceMissing,
+                },
+            ),
+            cert_entry(
+                1,
+                3_333,
+                FinalityReversibility::DeterministicQuorum,
+                FinalityVerdict::Refuted { code: 7 },
+            ),
+        ];
+        assert_eq!(
+            compose(&entries),
+            Err(FinalityComposeError::RefutedDomain {
+                domain_id: 1,
+                code: 7
+            })
+        );
+    }
+
+    #[test]
+    fn pending_domain_is_resubmittable_not_rejected() {
+        let entries = vec![cert_entry(
+            0,
+            3_333,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Pending {
+                reason: FinalityPendingReason::BondUnverified,
+            },
+        )];
+        let err = compose(&entries).expect_err("pending must not certify");
+        assert!(err.resubmittable());
+        assert!(matches!(
+            err,
+            FinalityComposeError::DomainNotEstablished { domain_id: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn unbound_attestation_cannot_enter_a_certificate() {
+        let mut entry = cert_entry(
+            0,
+            3_333,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Established,
+        );
+        entry.guarantee.attestation.parent = false;
+        assert_eq!(
+            compose(&[entry]),
+            Err(FinalityComposeError::AttestationUnbound { domain_id: 0 })
+        );
+    }
+
+    #[test]
+    fn duplicate_domain_index_is_refused() {
+        let entries = vec![
+            cert_entry(
+                3,
+                3_333,
+                FinalityReversibility::DeterministicQuorum,
+                FinalityVerdict::Established,
+            ),
+            cert_entry(
+                3,
+                3_333,
+                FinalityReversibility::DeterministicQuorum,
+                FinalityVerdict::Established,
+            ),
+        ];
+        assert_eq!(
+            compose(&entries),
+            Err(FinalityComposeError::DuplicateDomain { domain_id: 3 })
+        );
+    }
+
+    #[test]
+    fn same_guarantee_different_domain_roots_are_distinguished() {
+        let a = vec![cert_entry(
+            0,
+            3_333,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Established,
+        )];
+        let mut b = a.clone();
+        b[0].state_root = [9u8; 32];
+        let cert_a = compose(&a).expect("a");
+        let cert_b = compose(&b).expect("b");
+        assert_ne!(cert_a.domain_commitment, cert_b.domain_commitment);
+        assert_ne!(cert_a.certificate_digest, cert_b.certificate_digest);
+        assert!(
+            !cert_a.verify_against(&b),
+            "a certificate must not verify another domain set"
+        );
+    }
+
+    #[test]
+    fn weakest_link_wins_across_reversibility_classes() {
+        let entries = vec![
+            cert_entry(
+                0,
+                9_999,
+                FinalityReversibility::CryptographicValidity,
+                FinalityVerdict::Established,
+            ),
+            cert_entry(
+                1,
+                4_999,
+                FinalityReversibility::ProbabilisticWork { confirmations: 6 },
+                FinalityVerdict::Established,
+            ),
+        ];
+        let cert = compose(&entries).expect("compose");
+        assert_eq!(cert.guarantee.fault_tolerance_bps, 4_999);
+        assert_eq!(
+            cert.guarantee.reversibility,
+            FinalityReversibility::ProbabilisticWork { confirmations: 6 }
+        );
+    }
+
+    #[test]
+    fn tampered_certificate_fails_verification() {
+        let entries = vec![cert_entry(
+            0,
+            3_333,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Established,
+        )];
+        let mut cert = compose(&entries).expect("compose");
+        cert.domain_count = 2;
+        assert!(!cert.verify_against(&entries));
+    }
+
+    #[test]
+    fn more_than_sixteen_domains_is_refused() {
+        let entries: Vec<_> = (0u16..17)
+            .map(|i| {
+                cert_entry(
+                    i,
+                    3_333,
+                    FinalityReversibility::DeterministicQuorum,
+                    FinalityVerdict::Established,
+                )
+            })
+            .collect();
+        assert_eq!(compose(&entries), Err(FinalityComposeError::TooManyDomains));
     }
 }
