@@ -4105,14 +4105,15 @@ impl Node {
         let Some(ref path) = self.vote_history_db else {
             return Ok(());
         };
-        let owner = self.peer_id.to_base58();
         Self::write_vote_history_file_with_hashes(
             path,
-            self.last_prevote_height,
-            self.last_precommit_height,
-            self.last_prevote_hash.as_deref(),
-            self.last_precommit_hash.as_deref(),
-            &owner,
+            &VoteHistory {
+                last_prevote_height: self.last_prevote_height,
+                last_precommit_height: self.last_precommit_height,
+                prevote_hash: self.last_prevote_hash.clone(),
+                precommit_hash: self.last_precommit_hash.clone(),
+                node: Some(self.peer_id.to_base58()),
+            },
         )
     }
 
@@ -4124,22 +4125,28 @@ impl Node {
     ) -> Result<(), String> {
         Self::write_vote_history_file_with_hashes(
             path,
-            last_prevote_height,
-            last_precommit_height,
-            None,
-            None,
-            node,
+            &VoteHistory {
+                last_prevote_height,
+                last_precommit_height,
+                prevote_hash: None,
+                precommit_hash: None,
+                node: Some(node.to_string()),
+            },
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Persists the high-water marks as the one on-disk shape both sides share.
+    ///
+    /// The writer takes [`VoteHistory`] rather than a widening list of loose
+    /// fields. Hand-building the JSON here is how the reader and the writer
+    /// drift: `load_vote_history` deserialises `VoteHistory`, so a field added
+    /// to the struct and forgotten in a hand-written `json!` literal is read
+    /// back as its `#[serde(default)]` - a silently reset high-water mark,
+    /// which is the double-sign this file exists to prevent. One struct, one
+    /// shape, and the parameter count stops growing with it.
     fn write_vote_history_file_with_hashes(
         path: &std::path::Path,
-        last_prevote_height: u64,
-        last_precommit_height: u64,
-        prevote_hash: Option<&str>,
-        precommit_hash: Option<&str>,
-        node: &str,
+        history: &VoteHistory,
     ) -> Result<(), String> {
         let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
             warn!(path = %path.display(), "vote-history path has no parent directory");
@@ -4149,17 +4156,10 @@ impl Node {
             warn!(error = %e, path = %path.display(), "Cannot create vote-history directory");
             return Err(format!("cannot create vote-history directory: {e}"));
         }
-        let mut body = serde_json::json!({
-            "last_prevote_height": last_prevote_height,
-            "last_precommit_height": last_precommit_height,
-            "node": node,
-        });
-        if let Some(hash) = prevote_hash {
-            body["prevote_hash"] = serde_json::Value::String(hash.to_string());
-        }
-        if let Some(hash) = precommit_hash {
-            body["precommit_hash"] = serde_json::Value::String(hash.to_string());
-        }
+        let Ok(body) = serde_json::to_string(history) else {
+            warn!(path = %path.display(), "Vote history could not be encoded; withholding the vote rather than losing the mark");
+            return Err("cannot encode vote history".into());
+        };
         let tmp = parent.join(format!(
             ".{}.tmp",
             path.file_name()
@@ -4170,7 +4170,7 @@ impl Node {
             {
                 use std::io::Write;
                 let mut f = std::fs::File::create(&tmp)?;
-                f.write_all(body.to_string().as_bytes())?;
+                f.write_all(body.as_bytes())?;
                 f.sync_all()?;
             }
             std::fs::rename(&tmp, path)?;
@@ -9813,11 +9813,13 @@ mod finality_publish_tests {
         let history_path = dir.path().join("votes").join("history.json");
         super::Node::write_vote_history_file_with_hashes(
             &history_path,
-            14,
-            12,
-            Some("aa"),
-            Some("bb"),
-            "node-a",
+            &super::VoteHistory {
+                last_prevote_height: 14,
+                last_precommit_height: 12,
+                prevote_hash: Some("aa".to_string()),
+                precommit_hash: Some("bb".to_string()),
+                node: Some("node-a".to_string()),
+            },
         )
         .unwrap();
         let persisted: serde_json::Value =
