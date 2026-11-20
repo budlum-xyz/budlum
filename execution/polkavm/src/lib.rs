@@ -280,13 +280,17 @@ fn run_rv32em(
             }
             PolkaVmInsn::SealGetStorageU32 { rd, slot } => {
                 let sk = stor_key(scope.contract, &slot);
-                let val = host
-                    .read(scope.ns, &sk)
-                    .ok()
-                    .flatten()
-                    .and_then(|b| <[u8; 4]>::try_from(b.as_slice()).ok())
-                    .map(u32::from_le_bytes)
-                    .unwrap_or(0);
+                let val = match host.read(scope.ns, &sk) {
+                    Ok(Some(bytes)) => {
+                        let Ok(arr) = <[u8; 4]>::try_from(bytes.as_slice()) else {
+                            return Err(b"SEAL_STORAGE_CORRUPT");
+                        };
+                        u32::from_le_bytes(arr)
+                    }
+                    Ok(None) => 0,
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS"),
+                    Err(_) => return Err(b"SEAL_STORAGE_READ_ERR"),
+                };
                 if let Some(r) = regs.get_mut(rd as usize) {
                     *r = val;
                 }
@@ -406,11 +410,20 @@ impl ExecutionEnvironment for PolkaVmWorker {
                 return Ok(ee_reverted(b"bad PolkaVM blob".to_vec(), gas_used));
             };
             let addr = derive_contract_addr(&caller32, &call.tx_hash);
-            if matches!(host.read(&ns, &code_key(&addr)), Ok(Some(_))) {
-                return Ok(ee_reverted(
-                    b"PolkaVM contract already deployed".to_vec(),
-                    gas_used,
-                ));
+            match host.read(&ns, &code_key(&addr)) {
+                Ok(Some(_)) => {
+                    return Ok(ee_reverted(
+                        b"PolkaVM contract already deployed".to_vec(),
+                        gas_used,
+                    ));
+                }
+                Ok(None) => {}
+                Err(budlum_uel_abi::HostError::OutOfGas) => {
+                    return Ok(ee_out_of_gas(call.gas_limit));
+                }
+                Err(_) => {
+                    return Ok(ee_reverted(b"PolkaVM code read err".to_vec(), gas_used));
+                }
             }
             let Ok(cp) = host.checkpoint_begin() else {
                 return Ok(ee_reverted(b"checkpoint begin err".to_vec(), gas_used));
@@ -888,5 +901,142 @@ mod tests {
         let out = message(&mut worker, &mut host, &bob, &contract, for_bob, 13);
         assert_eq!(out.status, OutcomeStatus::Success);
         assert_eq!(stored(&worker, &host, &contract, slot), 13);
+    }
+
+    #[test]
+    fn seal_get_storage_and_deploy_fail_closed_on_host_read_error() {
+        use budlum_uel_abi::{HostError, HostRead, OutOfGas, UniversalCall, UniversalResult};
+
+        struct FaultyReadHost {
+            inner: MemoryHost,
+            fail_prefix: &'static [u8],
+        }
+        impl HostRead for FaultyReadHost {
+            fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+                if key.starts_with(self.fail_prefix) {
+                    return Err(HostError::Invalid("injected pvm read error".into()));
+                }
+                self.inner.read(ns, key)
+            }
+            fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+                self.inner.bud_balance(who)
+            }
+        }
+        impl HostApi for FaultyReadHost {
+            fn write(
+                &mut self,
+                ns: &Namespace,
+                key: &[u8],
+                value: Option<&[u8]>,
+            ) -> Result<(), HostError> {
+                self.inner.write(ns, key, value)
+            }
+            fn universal_call(
+                &mut self,
+                call: UniversalCall,
+            ) -> Result<UniversalResult, HostError> {
+                self.inner.universal_call(call)
+            }
+            fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+                self.inner.emit_log(log)
+            }
+            fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+                self.inner.charge(bgu)
+            }
+            fn bud_transfer(
+                &mut self,
+                from: &EeIdentity,
+                to: &EeIdentity,
+                attos: u128,
+            ) -> Result<(), HostError> {
+                self.inner.bud_transfer(from, to, attos)
+            }
+            fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+                self.inner.checkpoint_begin()
+            }
+            fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_commit(id)
+            }
+            fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_rollback(id)
+            }
+        }
+
+        let mut worker = PolkaVmWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(alice) = EeIdentity::new(EeId::POLKAVM, vec![0x51; 32]) else {
+            panic!("alice");
+        };
+        let slot = [0x01; 32];
+        let sel = [0xAA, 0xBB, 0xCC, 0xDD];
+        let prog = PolkaVmProgram {
+            constructor: vec![
+                PolkaVmInsn::LoadImm { rd: 1, imm: 77 },
+                PolkaVmInsn::SealSetStorageU32 { slot, rs: 1 },
+            ],
+            dispatches: vec![PolkaVmDispatch {
+                selector: sel,
+                insns: vec![
+                    PolkaVmInsn::SealGetStorageU32 { rd: 1, slot },
+                    PolkaVmInsn::SealReturnU32 { rs: 1 },
+                ],
+            }],
+        };
+        let contract = deploy_as(&mut worker, &mut host, &alice, &prog);
+        let Ok(blob) = encode_polkavm_blob(&prog) else {
+            panic!("blob");
+        };
+
+        let mut faulty_stor = FaultyReadHost {
+            inner: host,
+            fail_prefix: b"stor:",
+        };
+        let Ok(get_res) = worker.execute(
+            &ctx_open(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: alice.clone(),
+                target: contract,
+                value: BudAmount(0),
+                input: sel.to_vec(),
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xE2; 32],
+            },
+            &mut faulty_stor,
+        ) else {
+            panic!("get");
+        };
+        assert_eq!(
+            get_res.status,
+            OutcomeStatus::Revert,
+            "SealGetStorageU32 must fail closed on host.read error instead of loading 0"
+        );
+
+        let mut faulty_code = FaultyReadHost {
+            inner: faulty_stor.inner,
+            fail_prefix: b"code:",
+        };
+        let Ok(dep_res) = worker.execute(
+            &ctx_open(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice,
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xE1; 32],
+            },
+            &mut faulty_code,
+        ) else {
+            panic!("dep");
+        };
+        assert_eq!(
+            dep_res.status,
+            OutcomeStatus::Revert,
+            "PolkaVM Deploy must fail closed on code: host.read error"
+        );
     }
 }

@@ -41,6 +41,10 @@ pub const MAX_SIERRA_CLASS_BYTES: usize = 4 * 1024 * 1024;
 /// Base gas charged per Starknet AA invocation (`__validate__` + `__execute__`) in BGU.
 pub const CAIRO_AA_BASE_BGU: u64 = 2_500;
 
+/// Gas charged per published/loaded byte of a Sierra class artifact in BGU, matching the
+/// per-byte publication rate charged by sibling execution workers.
+pub const CAIRO_PUBLISH_PER_BYTE_BGU: u64 = 25;
+
 /// Gas charged per Cairo syscall / instruction step in BGU.
 pub const CAIRO_STEP_BGU: u64 = 150;
 
@@ -242,6 +246,25 @@ pub fn derive_starknet_contract_address(
     mask_to_felt252(h.finalize().into())
 }
 
+/// Charges `bytes` of a Sierra class artifact at [`CAIRO_PUBLISH_PER_BYTE_BGU`]. Returns
+/// `false` when the cost exceeds the call's gas limit or the host refuses the charge.
+fn charge_class_bytes(
+    gas_used: &mut u64,
+    gas_limit: u64,
+    bytes: usize,
+    host: &mut dyn HostApi,
+) -> bool {
+    let cost = u64::try_from(bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(CAIRO_PUBLISH_PER_BYTE_BGU);
+    let next = gas_used.saturating_add(cost);
+    if next > gas_limit || host.charge(cost).is_err() {
+        return false;
+    }
+    *gas_used = next;
+    true
+}
+
 fn cairo_ns() -> Result<Namespace, HostError> {
     Namespace::new(NS_CAIRO_STATE).map_err(|_| HostError::Invalid("bad cairo ns".into()))
 }
@@ -342,6 +365,9 @@ fn run_entrypoint(
     let Ok(Some(cls_bytes)) = host.read(&ns, &class_key(&ch32)) else {
         return Err(b"CLASS_NOT_DECLARED");
     };
+    if !charge_class_bytes(gas_used, gas_limit, cls_bytes.len(), host) {
+        return Err(b"OUT_OF_GAS");
+    }
     let Ok(cls) = serde_json::from_slice::<SierraContractClass>(&cls_bytes) else {
         return Err(b"corrupt Sierra class");
     };
@@ -536,6 +562,9 @@ impl ExecutionEnvironment for CairoWorker {
             let Ok(encoded) = serde_json::to_vec(&cls) else {
                 return Ok(ee_reverted(b"class encode failed".to_vec(), gas_used));
             };
+            if !charge_class_bytes(&mut gas_used, call.gas_limit, encoded.len(), host) {
+                return Ok(ee_out_of_gas(call.gas_limit));
+            }
             if host.write(&ns, &class_key(&ch), Some(&encoded)).is_err() {
                 return Ok(ee_reverted(b"declare write failed".to_vec(), gas_used));
             }
@@ -568,7 +597,15 @@ impl ExecutionEnvironment for CairoWorker {
                         Ok(None) => match serde_json::to_vec(&cls) {
                             Err(_) => ee_reverted(b"class encode err".to_vec(), gas_used),
                             Ok(encoded) => {
-                                if host.write(&ns, &class_key(&ch), Some(&encoded)).is_err() {
+                                if !charge_class_bytes(
+                                    &mut gas_used,
+                                    call.gas_limit,
+                                    encoded.len(),
+                                    host,
+                                ) {
+                                    ee_out_of_gas(call.gas_limit)
+                                } else if host.write(&ns, &class_key(&ch), Some(&encoded)).is_err()
+                                {
                                     ee_reverted(b"class write err".to_vec(), gas_used)
                                 } else {
                                     ee_success(ch.to_vec(), gas_used)
@@ -1247,5 +1284,108 @@ mod tests {
             OutcomeStatus::Revert,
             "StorageAddU64 must fail closed on host.read error instead of resetting counter to 0 + delta"
         );
+    }
+
+    #[test]
+    fn declare_and_deploy_charge_per_byte_class_publish_gas() {
+        let mut worker = CairoWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(50_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::CAIRO, vec![0x77; 32]) else {
+            panic!("caller");
+        };
+        // Build a ~8 KiB Sierra class bundle.
+        let mut ops = Vec::with_capacity(64);
+        for i in 0u8..64 {
+            ops.push(CairoSyscallOp::StorageAddU64 {
+                slot: [i; 32],
+                delta: 1,
+            });
+        }
+        let cls = SierraContractClass {
+            sierra_version: String::from("1.6.0"),
+            entrypoints: vec![CairoEntrypoint {
+                name: String::from("bulk"),
+                ops,
+            }],
+        };
+        let Ok(bundle) = encode_sierra_class(&cls) else {
+            panic!("encode");
+        };
+        let Ok(encoded_cls) = serde_json::to_vec(&cls) else {
+            panic!("json cls");
+        };
+        assert!(encoded_cls.len() > 2_000);
+
+        // 1. Deploy door with gas only covering CAIRO_AA_BASE_BGU must OutOfGas.
+        let Ok(dep_oog) = worker.execute(
+            &active_ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input: bundle.clone(),
+                gas_limit: CAIRO_AA_BASE_BGU + 1_000,
+                depth: 0,
+                tx_hash: [0xC1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("deploy oog");
+        };
+        assert_eq!(
+            dep_oog.status,
+            OutcomeStatus::OutOfGas,
+            "Deploy door must charge per-byte class publish gas"
+        );
+
+        // 2. Declare door with gas only covering CAIRO_AA_BASE_BGU must OutOfGas.
+        let Ok(decl_in) = serde_json::to_vec(&CairoAction::Declare {
+            class_bundle: bundle,
+            nonce: 0,
+        }) else {
+            panic!("decl json");
+        };
+        let Ok(decl_oog) = worker.execute(
+            &active_ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input: decl_in.clone(),
+                gas_limit: CAIRO_AA_BASE_BGU + 1_000,
+                depth: 0,
+                tx_hash: [0xC2; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("declare oog");
+        };
+        assert_eq!(
+            decl_oog.status,
+            OutcomeStatus::OutOfGas,
+            "Declare door must charge per-byte class publish gas"
+        );
+
+        // 3. With adequate gas, Declare succeeds and charges per-byte publication cost.
+        let Ok(decl_ok) = worker.execute(
+            &active_ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: caller,
+                value: BudAmount(0),
+                input: decl_in,
+                gas_limit: 5_000_000,
+                depth: 0,
+                tx_hash: [0xC3; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("declare ok");
+        };
+        assert_eq!(decl_ok.status, OutcomeStatus::Success);
+        assert!(decl_ok.gas_used > CAIRO_AA_BASE_BGU + 50_000);
     }
 }

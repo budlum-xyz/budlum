@@ -261,12 +261,17 @@ fn run_tvm_body(
                 }
             }
             TvmInsn::LoadC4Word { key } => {
-                let raw = host
-                    .read(scope.ns, &c4_key(scope.addr32, key))
-                    .ok()
-                    .flatten()
-                    .and_then(|b| <[u8; 16]>::try_from(b.as_slice()).ok())
-                    .map_or(0i128, i128::from_le_bytes);
+                let raw = match host.read(scope.ns, &c4_key(scope.addr32, key)) {
+                    Ok(Some(bytes)) => {
+                        let Ok(arr) = <[u8; 16]>::try_from(bytes.as_slice()) else {
+                            return Err(b"TVM corrupt c4 word".to_vec());
+                        };
+                        i128::from_le_bytes(arr)
+                    }
+                    Ok(None) => 0i128,
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS".to_vec()),
+                    Err(_) => return Err(b"TVM c4 read failed".to_vec()),
+                };
                 stack.push(raw);
             }
             TvmInsn::StoreC4Word { key } => {
@@ -285,11 +290,12 @@ fn run_tvm_body(
                 }
             }
             TvmInsn::HashC4Cell { key } => {
-                let raw = host
-                    .read(scope.ns, &c4_key(scope.addr32, key))
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
+                let raw = match host.read(scope.ns, &c4_key(scope.addr32, key)) {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => Vec::new(),
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS".to_vec()),
+                    Err(_) => return Err(b"TVM c4 read failed".to_vec()),
+                };
                 let d: [u8; 32] = Sha256::digest(&raw).into();
                 let mut head = [0u8; 16];
                 if let Some(src) = d.get(..16) {
@@ -414,12 +420,29 @@ impl ExecutionEnvironment for TvmWorker {
                 });
             };
             let addr = derive_tvm_addr(&call.caller.id, &call.tx_hash);
-            if matches!(host.read(&ns, &code_key(&addr)), Ok(Some(_))) {
-                return Ok(EeOutcome {
-                    status: OutcomeStatus::Revert,
-                    output: b"TVM contract already deployed".to_vec(),
-                    gas_used,
-                });
+            match host.read(&ns, &code_key(&addr)) {
+                Ok(Some(_)) => {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"TVM contract already deployed".to_vec(),
+                        gas_used,
+                    });
+                }
+                Ok(None) => {}
+                Err(budlum_uel_abi::HostError::OutOfGas) => {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::OutOfGas,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    });
+                }
+                Err(_) => {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"TVM code read error".to_vec(),
+                        gas_used,
+                    });
+                }
             }
             let Ok(cp) = host.checkpoint_begin() else {
                 return Ok(EeOutcome {
@@ -909,5 +932,152 @@ mod tests {
         let out = send(&mut worker, &mut host, &bob, &target, 0x12, 13);
         assert_eq!(out.status, OutcomeStatus::Success);
         assert_eq!(balance(&worker, &host, &target), 13);
+    }
+
+    #[test]
+    fn load_c4_word_and_deploy_fail_closed_on_host_read_error() {
+        use budlum_uel_abi::{
+            BudAmount, HostError, HostRead, OutOfGas, UniversalCall, UniversalResult,
+        };
+
+        struct FaultyReadHost {
+            inner: MemoryHost,
+            fail_prefix: &'static [u8],
+        }
+        impl HostRead for FaultyReadHost {
+            fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+                if key.starts_with(self.fail_prefix) {
+                    return Err(HostError::Invalid("injected tvm read error".into()));
+                }
+                self.inner.read(ns, key)
+            }
+            fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+                self.inner.bud_balance(who)
+            }
+        }
+        impl HostApi for FaultyReadHost {
+            fn write(
+                &mut self,
+                ns: &Namespace,
+                key: &[u8],
+                value: Option<&[u8]>,
+            ) -> Result<(), HostError> {
+                self.inner.write(ns, key, value)
+            }
+            fn universal_call(
+                &mut self,
+                call: UniversalCall,
+            ) -> Result<UniversalResult, HostError> {
+                self.inner.universal_call(call)
+            }
+            fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+                self.inner.emit_log(log)
+            }
+            fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+                self.inner.charge(bgu)
+            }
+            fn bud_transfer(
+                &mut self,
+                from: &EeIdentity,
+                to: &EeIdentity,
+                attos: u128,
+            ) -> Result<(), HostError> {
+                self.inner.bud_transfer(from, to, attos)
+            }
+            fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+                self.inner.checkpoint_begin()
+            }
+            fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_commit(id)
+            }
+            fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_rollback(id)
+            }
+        }
+
+        let mut worker = TvmWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(alice) = EeIdentity::new(EeId::TVM, vec![0x41; 32]) else {
+            panic!("alice");
+        };
+        let contract = TvmContract {
+            init: vec![
+                TvmInsn::PushInt(99),
+                TvmInsn::StoreC4Word {
+                    key: String::from("bal"),
+                },
+            ],
+            handlers: vec![TvmMethod {
+                op: 1,
+                body: vec![
+                    TvmInsn::LoadC4Word {
+                        key: String::from("bal"),
+                    },
+                    TvmInsn::AcceptRetTop,
+                ],
+            }],
+        };
+        let target = deploy_as(&mut worker, &mut host, &alice, &contract);
+        let Ok(blob) = encode_tvm_blob(&contract) else {
+            panic!("blob");
+        };
+
+        let mut faulty_c4 = FaultyReadHost {
+            inner: host,
+            fail_prefix: b"c4:",
+        };
+        let Ok(msg_bytes) = serde_json::to_vec(&TvmInternalMsg {
+            op: 1,
+            args: Vec::new(),
+        }) else {
+            panic!("msg");
+        };
+        let Ok(c4_res) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: alice.clone(),
+                target,
+                value: BudAmount(0),
+                input: msg_bytes,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xD2; 32],
+            },
+            &mut faulty_c4,
+        ) else {
+            panic!("c4 call");
+        };
+        assert_eq!(
+            c4_res.status,
+            OutcomeStatus::Revert,
+            "LoadC4Word must fail closed on host.read error instead of returning 0"
+        );
+
+        let mut faulty_code = FaultyReadHost {
+            inner: faulty_c4.inner,
+            fail_prefix: b"code:",
+        };
+        let Ok(dep_res) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice,
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xD1; 32],
+            },
+            &mut faulty_code,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(
+            dep_res.status,
+            OutcomeStatus::Revert,
+            "TVM Deploy must fail closed on code: host.read error"
+        );
     }
 }
