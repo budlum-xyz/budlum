@@ -1253,6 +1253,29 @@ impl Blockchain {
         state.bridge_root = state.bridge_state.root();
         state.message_root = state.message_registry.root();
 
+        // Finality persisted by `finalize_checkpoint` outlives the process:
+        // a node with no snapshot (or an older one) otherwise restarts at
+        // finality 0, reopens aggregators for checkpoints whose votes were
+        // delivered long ago, cannot vote there itself because its own
+        // vote-history mark is higher, and never converges with the live
+        // cluster again. The stored certificate wins only when it names the
+        // block this chain holds at that height.
+        if let Some(ref store) = storage {
+            let interval =
+                crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+            if let Some((height, hash)) =
+                Self::stored_finality_matching_chain(store, &chain_vec, interval)
+            {
+                if height > restored_finalized_height {
+                    info!(
+                        "Restored finality from stored certificate at height {height} (snapshot had {restored_finalized_height})"
+                    );
+                    restored_finalized_height = height;
+                    restored_finalized_hash = hash;
+                }
+            }
+        }
+
         // The domain the identity gate runs under is the engine this node
         // started with. Stamped here and at every site that replaces `state`
         // wholesale, so a restart, a reorg replay, and a snapshot sync cannot
@@ -4064,6 +4087,46 @@ impl Blockchain {
         Ok(())
     }
 
+    /// The highest stored finality certificate whose checkpoint hash is the
+    /// block at that height on `chain`, walking down from the tip one
+    /// checkpoint at a time.
+    ///
+    /// Certificates only ever exist at multiples of `checkpoint_interval`, so
+    /// the walk starts at the highest multiple at or below the tip rather
+    /// than at the tip itself; starting at the tip keeps its residue for ever
+    /// and lands on a real checkpoint only one height in `interval`.
+    ///
+    /// A stored cert is adopted only when its hash matches the chain: adopting
+    /// whatever the disk holds let a cert for another fork set the finalized
+    /// marker.
+    fn stored_finality_matching_chain(
+        store: &Storage,
+        chain: &[Block],
+        checkpoint_interval: u64,
+    ) -> Option<(u64, String)> {
+        if checkpoint_interval == 0 {
+            return None;
+        }
+        let tip = chain.len().checked_sub(1)? as u64;
+        let mut height = (tip / checkpoint_interval) * checkpoint_interval;
+        while height >= checkpoint_interval {
+            if let Ok(Some(cert)) = store.get_finality_cert(height) {
+                let matches_chain = chain
+                    .get(height as usize)
+                    .is_some_and(|block| block.hash == cert.checkpoint_hash);
+                if matches_chain {
+                    return Some((cert.checkpoint_height, cert.checkpoint_hash));
+                }
+                tracing::warn!(
+                    height,
+                    "stored finality cert does not match the chain at that height; not adopted"
+                );
+            }
+            height = height.saturating_sub(checkpoint_interval);
+        }
+        None
+    }
+
     fn invalidate_finality_from_height(&mut self, from_height: u64) {
         let upper_bound = self.chain.len().saturating_sub(1) as u64;
         self.invalidate_finality_range(from_height, upper_bound);
@@ -4107,64 +4170,23 @@ impl Blockchain {
             }
         }
 
-        let mut new_finalized_height = 0;
-        let mut new_finalized_hash = self
+        let genesis_hash = self
             .chain
             .first()
             .map(|block| block.hash.clone())
             .unwrap_or_default();
-
-        if let Some(store) = &self.storage {
-            // Walk back from the highest checkpoint at or below the tip, not
-            // from the tip itself.
-            //
-            // Certificates only ever exist at multiples of
-            // `checkpoint_interval` - `import_qc_blob` rejects anything else
-            // via `is_checkpoint_height_for_chain`. Starting at
-            // `chain.len() - 1` and stepping down by the interval keeps the
-            // tip's residue forever, so the scan only lands on a real
-            // checkpoint when the tip happens to be a multiple. At an interval
-            // of 10 that is one height in ten; the other nine probe heights
-            // where no certificate was ever written, find nothing, and leave
-            // `finalized_height` at 0.
-            //
-            // Measured at interval 10 before the fix:
-            //
-            // tip 57 -> probes 57, 47, 37, 27, 17 -> no hit, finality 0
-            // tip 60 -> probes 60, 50, 40, 30, .. -> hit at 60
-            //
-            // Dropping finality to zero after a QC fault is the wrong
-            // direction to fail: the chain keeps the blocks but forgets they
-            // were finalised, so a reorg that `reorg_rejects_fork_at_finalized_height`
-            // would have refused becomes allowed again.
-            let tip = self.chain.len().saturating_sub(1) as u64;
-            let mut height = (tip / checkpoint_interval) * checkpoint_interval;
-            while height >= checkpoint_interval {
-                if let Ok(Some(cert)) = store.get_finality_cert(height) {
-                    // A stored cert is adopted only when
-                    // its checkpoint hash matches the block actually at that
-                    // height on THIS chain. Adopting whatever the disk holds
-                    // let a cert for another fork set the finalized marker.
-                    let matches_chain = self
-                        .chain
-                        .get(height as usize)
-                        .is_some_and(|block| block.hash == cert.checkpoint_hash);
-                    if matches_chain {
-                        new_finalized_height = cert.checkpoint_height;
-                        new_finalized_hash = cert.checkpoint_hash;
-                        break;
-                    }
-                    tracing::warn!(
-                        height,
-                        "stored finality cert does not match the chain at that height; not adopted"
-                    );
-                }
-                height = height.saturating_sub(checkpoint_interval);
-                if height == 0 {
-                    break;
-                }
-            }
-        }
+        // Walk back from the highest checkpoint at or below the tip. Dropping
+        // finality to zero after a QC fault is the wrong direction to fail:
+        // the chain keeps the blocks but forgets they were finalised, so a
+        // reorg that `reorg_rejects_fork_at_finalized_height` would have
+        // refused becomes allowed again.
+        let (new_finalized_height, new_finalized_hash) = self
+            .storage
+            .as_ref()
+            .and_then(|store| {
+                Self::stored_finality_matching_chain(store, &self.chain, checkpoint_interval)
+            })
+            .unwrap_or((0, genesis_hash));
 
         self.finalized_height = new_finalized_height;
         self.finalized_hash = new_finalized_hash;
@@ -15328,6 +15350,73 @@ mod bond_and_reorg_tests {
                 .unwrap()
                 .is_none(),
             "unaligned fork invalidation at height 7 must clear checkpoint 10"
+        );
+    }
+
+    fn reopen_with_stored_cert(cert_hash_for: impl Fn(&Blockchain) -> String) -> Blockchain {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("restart_finality.db");
+        let open = || Storage::new(db_path.to_str().unwrap()).unwrap();
+        let miner = Address::from([0x12; 32]);
+        {
+            let mut bc = Blockchain::new(
+                Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+                Some(open()),
+                45261,
+                None,
+            );
+            for _ in 0..12 {
+                let _ = bc.produce_block(miner).unwrap();
+            }
+            let cert_10 = crate::chain::finality::FinalityCert {
+                epoch: 0,
+                checkpoint_height: 10,
+                checkpoint_hash: cert_hash_for(&bc),
+                chain_id: 45261,
+                agg_sig_bls: vec![0xAA; 48],
+                bitmap: vec![0x01],
+                set_hash: "00".repeat(32),
+                seat_table_version: 0,
+            };
+            bc.storage
+                .as_ref()
+                .unwrap()
+                .save_finality_cert(10, &cert_10)
+                .unwrap();
+        }
+        // Keep the directory alive for the reopened store.
+        let reopened = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(open()),
+            45261,
+            None,
+        );
+        std::mem::forget(dir);
+        reopened
+    }
+
+    #[test]
+    fn a_restart_adopts_the_stored_finality_cert_that_matches_the_chain() {
+        // Without this a node that restarts with no snapshot falls back to
+        // finality 0 and reopens aggregators for checkpoints whose votes
+        // were delivered long ago; the live cluster never converges again.
+        let bc = reopen_with_stored_cert(|bc| bc.chain[10].hash.clone());
+        assert_eq!(
+            bc.chain.len(),
+            13,
+            "the chain itself must survive the restart"
+        );
+        assert_eq!(bc.finalized_height, 10);
+        assert_eq!(bc.finalized_hash, bc.chain[10].hash);
+    }
+
+    #[test]
+    fn a_restart_ignores_a_stored_cert_for_another_fork() {
+        let bc = reopen_with_stored_cert(|_| "ff".repeat(32));
+        assert_eq!(bc.chain.len(), 13);
+        assert_eq!(
+            bc.finalized_height, 0,
+            "a cert for a hash not on this chain proves nothing"
         );
     }
 
