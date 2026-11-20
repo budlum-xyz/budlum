@@ -96,14 +96,17 @@ fn uol_read_balance(
     ns: &Namespace,
     class_id: &[u8; 32],
     holder: &[u8],
-) -> Option<u128> {
-    let bytes = host.read(ns, &uol_bal_key(class_id, holder)).ok()??;
-    if bytes.len() != 16 {
-        return None;
+) -> Result<u128, &'static [u8]> {
+    match host.read(ns, &uol_bal_key(class_id, holder)) {
+        Ok(None) => Ok(0),
+        Ok(Some(bytes)) => {
+            let Ok(arr) = <[u8; 16]>::try_from(bytes.as_slice()) else {
+                return Err(b"UOL corrupt balance");
+            };
+            Ok(u128::from_le_bytes(arr))
+        }
+        Err(_) => Err(b"UOL balance read failed"),
     }
-    let mut arr = [0u8; 16];
-    arr.copy_from_slice(&bytes);
-    Some(u128::from_le_bytes(arr))
 }
 
 fn uol_revert(msg: &[u8], gas: Gas, mem_offset: std::ops::Range<usize>) -> Option<CallOutcome> {
@@ -191,8 +194,15 @@ fn handle_uol_precompile_call(
 
     match decoded {
         DecodedUolCall::BalanceOf { class_id, holder } => {
-            let bal = uol_read_balance(context.journaled_state.db().host, &ns, &class_id, &holder)
-                .unwrap_or(0);
+            let bal = match uol_read_balance(
+                context.journaled_state.db().host,
+                &ns,
+                &class_id,
+                &holder,
+            ) {
+                Ok(v) => v,
+                Err(msg) => return uol_revert(msg, gas, mem_offset),
+            };
             let mut word = [0u8; 32];
             if let Some(dst) = word.get_mut(16..32) {
                 dst.copy_from_slice(&bal.to_be_bytes());
@@ -207,14 +217,16 @@ fn handle_uol_precompile_call(
             ))
         }
         DecodedUolCall::HolderOf { asset_id } => {
-            let holder = context
+            let holder = match context
                 .journaled_state
                 .db()
                 .host
                 .read(&ns, &uol_holder_key(&asset_id))
-                .ok()
-                .flatten()
-                .unwrap_or_default();
+            {
+                Ok(Some(raw)) => raw,
+                Ok(None) => Vec::new(),
+                Err(_) => return uol_revert(b"UOL holder read failed", gas, mem_offset),
+            };
             let mut out = vec![0u8; 64 + holder.len().div_ceil(32) * 32];
             if !gas.record_regular_cost(precompile_word_gas(out.len())) {
                 return Some(CallOutcome::new(
@@ -280,7 +292,13 @@ fn handle_uol_precompile_call(
                 }
             }
             if amount > 0 {
-                let from_bal = uol_read_balance(host, &ns, &class_id, &caller20).unwrap_or(0);
+                let from_bal = match uol_read_balance(host, &ns, &class_id, &caller20) {
+                    Ok(v) => v,
+                    Err(msg) => {
+                        let _ = host.checkpoint_rollback(cp);
+                        return uol_revert(msg, gas, mem_offset);
+                    }
+                };
                 let Some(rem) = from_bal.checked_sub(amount) else {
                     let _ = host.checkpoint_rollback(cp);
                     return uol_revert(b"UOL insufficient balance", gas, mem_offset);
@@ -289,7 +307,13 @@ fn handle_uol_precompile_call(
                     let _ = host.checkpoint_rollback(cp);
                     return uol_revert(b"UOL host write failed", gas, mem_offset);
                 }
-                let to_bal = uol_read_balance(host, &ns, &class_id, &to).unwrap_or(0);
+                let to_bal = match uol_read_balance(host, &ns, &class_id, &to) {
+                    Ok(v) => v,
+                    Err(msg) => {
+                        let _ = host.checkpoint_rollback(cp);
+                        return uol_revert(msg, gas, mem_offset);
+                    }
+                };
                 let Some(next_to) = to_bal.checked_add(amount) else {
                     let _ = host.checkpoint_rollback(cp);
                     return uol_revert(b"UOL balance overflow", gas, mem_offset);
@@ -358,9 +382,14 @@ fn handle_uol_precompile_call(
                     return uol_revert(b"UOL offerer does not hold asset", gas, mem_offset);
                 }
             }
-            if amount > 0 && uol_read_balance(host, &ns, &class_id, &caller20).unwrap_or(0) < amount
-            {
-                return uol_revert(b"UOL offerer balance exhausted", gas, mem_offset);
+            if amount > 0 {
+                let bal = match uol_read_balance(host, &ns, &class_id, &caller20) {
+                    Ok(v) => v,
+                    Err(msg) => return uol_revert(msg, gas, mem_offset),
+                };
+                if bal < amount {
+                    return uol_revert(b"UOL offerer balance exhausted", gas, mem_offset);
+                }
             }
             let mut preimage = Vec::with_capacity(112 + taker.len() + payment.len());
             preimage.extend_from_slice(b"BDLM_UOL_OFFER_V1");
@@ -375,8 +404,10 @@ fn handle_uol_precompile_call(
             preimage.extend_from_slice(&expiry.to_le_bytes());
             let offer_id: [u8; 32] = keccak256(&preimage).into();
             let offer_key = uol_offer_key(&offer_id);
-            if matches!(host.read(&ns, &offer_key), Ok(Some(_))) {
-                return uol_revert(b"UOL offer already exists", gas, mem_offset);
+            match host.read(&ns, &offer_key) {
+                Ok(Some(_)) => return uol_revert(b"UOL offer already exists", gas, mem_offset),
+                Ok(None) => {}
+                Err(_) => return uol_revert(b"UOL offer read failed", gas, mem_offset),
             }
             let Some(enc) = encode_uol_offer_bytes(&UolOfferRecord {
                 maker: caller20,
@@ -487,7 +518,13 @@ fn handle_uol_precompile_call(
                 let pay_amt = u128::from_le_bytes(pay_arr);
                 if pay_amt > 0 {
                     let host = &mut *context.journaled_state.db_mut().host;
-                    let payer_bal = uol_read_balance(host, &ns, &pay_class, &caller20).unwrap_or(0);
+                    let payer_bal = match uol_read_balance(host, &ns, &pay_class, &caller20) {
+                        Ok(v) => v,
+                        Err(msg) => {
+                            rollback_all(context, Some(cp));
+                            return uol_revert(msg, gas, mem_offset);
+                        }
+                    };
                     let Some(rem_pay) = payer_bal.checked_sub(pay_amt) else {
                         rollback_all(context, Some(cp));
                         return uol_revert(b"UOL taker payment balance exhausted", gas, mem_offset);
@@ -496,8 +533,13 @@ fn handle_uol_precompile_call(
                         rollback_all(context, Some(cp));
                         return uol_revert(b"UOL payment write failed", gas, mem_offset);
                     }
-                    let maker_pay =
-                        uol_read_balance(host, &ns, &pay_class, &offer.maker).unwrap_or(0);
+                    let maker_pay = match uol_read_balance(host, &ns, &pay_class, &offer.maker) {
+                        Ok(v) => v,
+                        Err(msg) => {
+                            rollback_all(context, Some(cp));
+                            return uol_revert(msg, gas, mem_offset);
+                        }
+                    };
                     let Some(next_maker_pay) = maker_pay.checked_add(pay_amt) else {
                         rollback_all(context, Some(cp));
                         return uol_revert(b"UOL payment overflow", gas, mem_offset);
@@ -531,8 +573,13 @@ fn handle_uol_precompile_call(
             }
             if offer.amount > 0 {
                 let host = &mut *context.journaled_state.db_mut().host;
-                let maker_bal =
-                    uol_read_balance(host, &ns, &offer.class_id, &offer.maker).unwrap_or(0);
+                let maker_bal = match uol_read_balance(host, &ns, &offer.class_id, &offer.maker) {
+                    Ok(v) => v,
+                    Err(msg) => {
+                        rollback_all(context, Some(cp));
+                        return uol_revert(msg, gas, mem_offset);
+                    }
+                };
                 let Some(rem) = maker_bal.checked_sub(offer.amount) else {
                     rollback_all(context, Some(cp));
                     return uol_revert(b"UOL maker balance exhausted", gas, mem_offset);
@@ -541,8 +588,13 @@ fn handle_uol_precompile_call(
                     rollback_all(context, Some(cp));
                     return uol_revert(b"UOL maker write failed", gas, mem_offset);
                 }
-                let taker_bal =
-                    uol_read_balance(host, &ns, &offer.class_id, &caller20).unwrap_or(0);
+                let taker_bal = match uol_read_balance(host, &ns, &offer.class_id, &caller20) {
+                    Ok(v) => v,
+                    Err(msg) => {
+                        rollback_all(context, Some(cp));
+                        return uol_revert(msg, gas, mem_offset);
+                    }
+                };
                 let Some(next_taker) = taker_bal.checked_add(offer.amount) else {
                     rollback_all(context, Some(cp));
                     return uol_revert(b"UOL balance overflow", gas, mem_offset);
@@ -912,5 +964,148 @@ mod tests {
             expiry: 10,
         };
         assert!(encode_uol_offer_bytes(&huge).is_none());
+    }
+
+    #[test]
+    fn uol_transfer_fails_closed_on_recipient_balance_read_error_without_wiping_balance() {
+        use crate::abi::{uol_selector, NS_UEL_ASSETS, UOL_PRECOMPILE};
+        use crate::{EvmWorker, BUDLUM_EVM_CHAIN_ID};
+        use budlum_uel_abi::mock::MemoryHost;
+        use budlum_uel_abi::{
+            BlockContext, BudAmount, EeCall, EeCallKind, EeId, EeIdentity, EeLog,
+            ExecutionEnvironment, HostApi, HostError, HostRead, Namespace, OutOfGas, OutcomeStatus,
+            UniversalCall, UniversalResult,
+        };
+
+        struct FailCreditReadHost {
+            inner: MemoryHost,
+            fail_key: Vec<u8>,
+        }
+        impl HostRead for FailCreditReadHost {
+            fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+                if key == self.fail_key.as_slice() {
+                    return Err(HostError::Invalid("injected uol credit read error".into()));
+                }
+                self.inner.read(ns, key)
+            }
+            fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+                self.inner.bud_balance(who)
+            }
+        }
+        impl HostApi for FailCreditReadHost {
+            fn write(
+                &mut self,
+                ns: &Namespace,
+                key: &[u8],
+                value: Option<&[u8]>,
+            ) -> Result<(), HostError> {
+                self.inner.write(ns, key, value)
+            }
+            fn universal_call(
+                &mut self,
+                call: UniversalCall,
+            ) -> Result<UniversalResult, HostError> {
+                self.inner.universal_call(call)
+            }
+            fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+                self.inner.emit_log(log)
+            }
+            fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+                self.inner.charge(bgu)
+            }
+            fn bud_transfer(
+                &mut self,
+                from: &EeIdentity,
+                to: &EeIdentity,
+                attos: u128,
+            ) -> Result<(), HostError> {
+                self.inner.bud_transfer(from, to, attos)
+            }
+            fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+                self.inner.checkpoint_begin()
+            }
+            fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_commit(id)
+            }
+            fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_rollback(id)
+            }
+        }
+
+        let mut host = MemoryHost::new(10_000_000);
+        let sender_raw = [0x11u8; 20];
+        let recipient_raw = [0x22u8; 20];
+        let class_id = [0xAAu8; 32];
+        let Ok(ns_assets) = Namespace::new(NS_UEL_ASSETS) else {
+            panic!("ns");
+        };
+        let sender_key = super::uol_bal_key(&class_id, &sender_raw);
+        let recipient_key = super::uol_bal_key(&class_id, &recipient_raw);
+        let _ = host.write(&ns_assets, &sender_key, Some(&100u128.to_le_bytes()));
+        let _ = host.write(&ns_assets, &recipient_key, Some(&500u128.to_le_bytes()));
+
+        // Encode transfer(bytes32 class_id, bytes32 asset_id=0, bytes to=recipient_raw, uint128 amount=10)
+        let mut cd = Vec::new();
+        cd.extend_from_slice(&uol_selector("transfer(bytes32,bytes32,bytes,uint128)"));
+        cd.extend_from_slice(&class_id);
+        cd.extend_from_slice(&[0u8; 32]); // asset_id = 0
+        let mut off_word = [0u8; 32];
+        off_word[31] = 128; // dynamic bytes offset = 4 * 32
+        cd.extend_from_slice(&off_word);
+        let mut amt_word = [0u8; 32];
+        amt_word[16..32].copy_from_slice(&10u128.to_be_bytes());
+        cd.extend_from_slice(&amt_word);
+        let mut len_word = [0u8; 32];
+        len_word[31] = 20;
+        cd.extend_from_slice(&len_word);
+        let mut padded_to = [0u8; 32];
+        padded_to[..20].copy_from_slice(&recipient_raw);
+        cd.extend_from_slice(&padded_to);
+
+        let mut faulty = FailCreditReadHost {
+            inner: host,
+            fail_key: recipient_key.clone(),
+        };
+        let mut worker = EvmWorker;
+        let Ok(sender_id) = EeIdentity::new(EeId::EVM, sender_raw.to_vec()) else {
+            panic!("sender");
+        };
+        let Ok(uol_id) = EeIdentity::new(EeId::EVM, UOL_PRECOMPILE.into_array().to_vec()) else {
+            panic!("uol");
+        };
+        let Ok(out) = worker.execute(
+            &BlockContext {
+                chain_id: BUDLUM_EVM_CHAIN_ID,
+                height: 10,
+                timestamp_ms: 1_793_923_200_000,
+            },
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: sender_id,
+                target: uol_id,
+                value: BudAmount(0),
+                input: cd,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xF5; 32],
+            },
+            &mut faulty,
+        ) else {
+            panic!("execute");
+        };
+        assert_eq!(
+            out.status,
+            OutcomeStatus::Revert,
+            "UOL transfer must fail closed on recipient balance read error instead of wiping recipient to 0 + amount"
+        );
+        // Verify both sender (100) and recipient (500) balances remained completely intact.
+        let Ok(Some(s_raw)) = faulty.inner.read(&ns_assets, &sender_key) else {
+            panic!("sender bal missing");
+        };
+        let Ok(Some(r_raw)) = faulty.inner.read(&ns_assets, &recipient_key) else {
+            panic!("recipient bal missing");
+        };
+        assert_eq!(s_raw, 100u128.to_le_bytes().to_vec());
+        assert_eq!(r_raw, 500u128.to_le_bytes().to_vec());
     }
 }

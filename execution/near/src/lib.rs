@@ -486,11 +486,20 @@ impl ExecutionEnvironment for NearWasmWorker {
             h.update(call.tx_hash);
             let derived: [u8; 32] = h.finalize().into();
             let contract_id = account_id_key(&derived);
-            if matches!(host.read(&ns, &code_key(&contract_id)), Ok(Some(_))) {
-                return Ok(ee_reverted(
-                    b"NEAR contract already deployed".to_vec(),
-                    gas_used,
-                ));
+            match host.read(&ns, &code_key(&contract_id)) {
+                Ok(Some(_)) => {
+                    return Ok(ee_reverted(
+                        b"NEAR contract already deployed".to_vec(),
+                        gas_used,
+                    ));
+                }
+                Ok(None) => {}
+                Err(budlum_uel_abi::HostError::OutOfGas) => {
+                    return Ok(ee_out_of_gas(call.gas_limit));
+                }
+                Err(_) => {
+                    return Ok(ee_reverted(b"NEAR code read failed".to_vec(), gas_used));
+                }
             }
             let Ok(cp) = host.checkpoint_begin() else {
                 return Ok(ee_reverted(
@@ -972,5 +981,92 @@ mod tests {
         );
         assert_eq!(out.status, OutcomeStatus::Success);
         assert_eq!(stored(&worker, &host, &target), b"by-bob".to_vec());
+    }
+
+    #[test]
+    fn deploy_fails_closed_on_code_read_error() {
+        use budlum_uel_abi::{HostError, HostRead, OutOfGas, UniversalCall, UniversalResult};
+
+        struct FaultyCodeReadHost {
+            inner: MemoryHost,
+        }
+        impl HostRead for FaultyCodeReadHost {
+            fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+                if key.starts_with(b"code:") {
+                    return Err(HostError::Invalid("injected near code read error".into()));
+                }
+                self.inner.read(ns, key)
+            }
+            fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+                self.inner.bud_balance(who)
+            }
+        }
+        impl HostApi for FaultyCodeReadHost {
+            fn write(
+                &mut self,
+                ns: &Namespace,
+                key: &[u8],
+                value: Option<&[u8]>,
+            ) -> Result<(), HostError> {
+                self.inner.write(ns, key, value)
+            }
+            fn universal_call(
+                &mut self,
+                call: UniversalCall,
+            ) -> Result<UniversalResult, HostError> {
+                self.inner.universal_call(call)
+            }
+            fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+                self.inner.emit_log(log)
+            }
+            fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+                self.inner.charge(bgu)
+            }
+            fn bud_transfer(
+                &mut self,
+                from: &EeIdentity,
+                to: &EeIdentity,
+                attos: u128,
+            ) -> Result<(), HostError> {
+                self.inner.bud_transfer(from, to, attos)
+            }
+            fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+                self.inner.checkpoint_begin()
+            }
+            fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_commit(id)
+            }
+            fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_rollback(id)
+            }
+        }
+
+        let mut worker = NearWasmWorker::with_activation_height(Some(0));
+        let host = MemoryHost::new(5_000_000);
+        let Ok(alice) = EeIdentity::new(EeId::NEAR_WASM, b"alice.budlum.near".to_vec()) else {
+            panic!("alice");
+        };
+        let mut faulty = FaultyCodeReadHost { inner: host };
+        let Ok(res) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice,
+                value: BudAmount(0),
+                input: b"\x00asm\x01\x00\x00\x00".to_vec(),
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xF1; 32],
+            },
+            &mut faulty,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(
+            res.status,
+            OutcomeStatus::Revert,
+            "NEAR Deploy must fail closed on code: host.read error"
+        );
     }
 }
