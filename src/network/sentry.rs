@@ -957,10 +957,23 @@ mod tests {
         use crate::consensus::pow::PoWEngine;
         use crate::network::node::Node;
 
-        fn pick_free_port() -> u16 {
-            let listener =
-                std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral port");
-            listener.local_addr().expect("local addr").port()
+        /// Four distinct free ports.
+        ///
+        /// Held together: a port released and asked for again can be handed
+        /// back, and two nodes listening on one port is a failure that looks
+        /// like a sentry policy refusal.
+        fn pick_free_ports() -> [u16; 4] {
+            let listeners: Vec<std::net::TcpListener> = (0..4)
+                .map(|_| {
+                    std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                        .expect("bind ephemeral port")
+                })
+                .collect();
+            let mut ports = [0u16; 4];
+            for (port, listener) in ports.iter_mut().zip(&listeners) {
+                *port = listener.local_addr().expect("local addr").port();
+            }
+            ports
         }
 
         fn make_chain() -> crate::chain::chain_actor::ChainHandle {
@@ -972,22 +985,20 @@ mod tests {
         }
 
         // Start Sentry A and Sentry B plus an unauthorized public attacker node.
+        let [port_a, port_b, port_att, port_val] = pick_free_ports();
         let mut sentry_a = Node::new(make_chain()).expect("sentry A");
         let sentry_a_id = sentry_a.peer_id;
-        let port_a = pick_free_port();
         sentry_a
             .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_a)
             .expect("listen sentry A");
 
         let mut sentry_b = Node::new(make_chain()).expect("sentry B");
         let sentry_b_id = sentry_b.peer_id;
-        let port_b = pick_free_port();
         sentry_b
             .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_b)
             .expect("listen sentry B");
 
         let mut attacker = Node::new(make_chain()).expect("attacker");
-        let port_att = pick_free_port();
         attacker
             .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_att)
             .expect("listen attacker");
@@ -1008,7 +1019,6 @@ mod tests {
             .expect("validator")
             .with_sentry_policy(val_policy);
         let validator_id = validator.peer_id;
-        let port_val = pick_free_port();
         validator
             .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_val)
             .expect("listen validator");
