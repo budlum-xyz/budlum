@@ -1917,7 +1917,7 @@ mod tests {
         // policy is refused before it ever guards a domain.
         let mut guard = BridgeEconomicGuard::new();
         let oversized = DomainCeilingPolicy {
-            backing: backing.clone(),
+            backing,
             finder_reward_bps: MAX_FINDER_REWARD_BPS + 1,
             prover_ed25519_pubkey: Some(prover_ed.public_key_bytes()),
             prover_pq_pubkey: prover_pq.public_key_bytes().to_vec(),

@@ -5251,7 +5251,11 @@ impl BudlumApiServer for RpcServer {
             .map(crate::storage::content_gateway::pollen_guard_ids)
             .unwrap_or_default()
         {
-            if self.content_is_listed(cid).await {
+            // Ask Pollen directly rather than through `content_is_listed`: the
+            // endpoint gate is a source-shape check, and a read path that hides
+            // the market lookup one call deeper is the shape it cannot see. The
+            // two calls are the same query.
+            if self.chain.pollen_asset_for_content(cid).await.is_some() {
                 needs_grant = true;
             }
         }
