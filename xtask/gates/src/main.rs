@@ -193,6 +193,7 @@ mod gates {
     pub mod shard_placement;
     pub mod slash_expression;
     pub mod source_reading;
+    pub mod sources_are_whole;
     pub mod state_recovery_door;
     pub mod storage_penalties;
     pub mod storage_priced;
@@ -1380,6 +1381,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::lock_failures::self_test,
+    },
+    Gate {
+        name: "sources-are-whole",
+        replaces: None,
+        run: gates::sources_are_whole::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::sources_are_whole::self_test,
     },
     Gate {
         name: "source-reading-tests-are-narrowed",
