@@ -334,18 +334,39 @@ fn precommit_height_is_new(signed_height: u64, last_precommit_height: u64) -> bo
 /// The precommit door: a height ahead of the mark, or the same hash this node
 /// already precommitted at the marked height. A different hash at or below the
 /// mark is refused (`vote_would_equivocate`).
+/// May this node sign a precommit at `checkpoint_height`?
+///
+/// The same two doors as [`prevote_is_due`]: a round above the mark, or the
+/// identical round re-published on the retry cadence. The second door is
+/// never open on every beat: a vote re-signed four times a second trips the
+/// receivers' vote rate limit and gets this node banned from the very round
+/// it is trying to complete.
 fn precommit_is_due(
     checkpoint_height: u64,
     checkpoint_hash: &str,
     last_precommit_height: u64,
     last_precommit_hash: Option<&str>,
+    retry: bool,
 ) -> bool {
-    !vote_would_equivocate(
-        checkpoint_height,
-        checkpoint_hash,
-        last_precommit_height,
-        last_precommit_hash,
-    )
+    checkpoint_height > last_precommit_height
+        || (retry
+            && !vote_would_equivocate(
+                checkpoint_height,
+                checkpoint_hash,
+                last_precommit_height,
+                last_precommit_hash,
+            ))
+}
+
+/// Whether the beat may re-publish the round it already marked.
+///
+/// On the retry cadence once a publication is remembered; once, immediately,
+/// when nothing is remembered - that is a process that restarted mid-round
+/// with its mark on disk, and its one re-publication is what lets the round
+/// it left complete. After that first send `published` is set and the
+/// cadence applies.
+fn same_round_retry(retry_due: bool, published: Option<&PublishedVote>) -> bool {
+    retry_due || published.is_none()
 }
 
 /// How long a cast vote waits for its round to reach quorum before the node
@@ -421,12 +442,14 @@ fn prevote_is_due(
     last_prevote_hash: Option<&str>,
     retry: bool,
 ) -> bool {
-    !vote_would_equivocate(
-        checkpoint_height,
-        checkpoint_hash,
-        last_prevote_height,
-        last_prevote_hash,
-    ) || retry
+    checkpoint_height > last_prevote_height
+        || (retry
+            && !vote_would_equivocate(
+                checkpoint_height,
+                checkpoint_hash,
+                last_prevote_height,
+                last_prevote_hash,
+            ))
 }
 
 fn record_cast_prevote(
@@ -4578,12 +4601,13 @@ impl Node {
                     if agg_state.active
                         && agg_state.prevote_quorum_reached
                         && !agg_state.precommit_quorum_reached
-                        && (precommit_is_due(
+                        && precommit_is_due(
                             agg_state.checkpoint_height,
                             &agg_state.checkpoint_hash,
                             self.last_precommit_height,
                             self.last_precommit_hash.as_deref(),
-                        ) || precommit_retry)
+                            same_round_retry(precommit_retry, self.precommit_published.as_ref()),
+                        )
                     {
                         if precommit_retry {
                             info!(
@@ -4764,7 +4788,7 @@ impl Node {
                             &agg_state.checkpoint_hash,
                             self.last_prevote_height,
                             self.last_prevote_hash.as_deref(),
-                            prevote_retry,
+                            same_round_retry(prevote_retry, self.prevote_published.as_ref()),
                         )
                     {
                         if prevote_retry {
@@ -8614,6 +8638,36 @@ mod vote_history_wiring_tests {
     /// Canary: make the mark a bare height again and the same-hash branch
     /// below fails; drop the hash comparison and the different-hash branch
     /// fails.
+    /// Four nodes restarted together re-signed the round they came back to
+    /// on every 250 ms beat (683 publications in 150 s), tripped each other's
+    /// vote rate limit, banned one another and never reached quorum again.
+    /// The same-round door opens once for a process that remembers no
+    /// publication, then only on the retry cadence.
+    #[test]
+    fn the_same_round_is_re_published_once_after_a_restart_then_on_the_cadence() {
+        let t0 = std::time::Instant::now();
+        let published = super::PublishedVote {
+            epoch: 4,
+            checkpoint_height: 40,
+            checkpoint_hash: "aa".repeat(32),
+            at: t0,
+        };
+        // Nothing remembered: the restart door.
+        assert!(super::same_round_retry(false, None));
+        // Remembered and fresh: closed.
+        let fresh = super::vote_retry_due(Some(&published), 4, 40, &"aa".repeat(32), t0);
+        assert!(!super::same_round_retry(fresh, Some(&published)));
+        // Remembered and overdue: the cadence door.
+        let overdue = super::vote_retry_due(
+            Some(&published),
+            4,
+            40,
+            &"aa".repeat(32),
+            t0 + super::FINALITY_VOTE_RETRY,
+        );
+        assert!(super::same_round_retry(overdue, Some(&published)));
+    }
+
     #[test]
     fn a_restart_may_re_publish_its_own_vote_but_never_a_different_one() {
         // Same height, same hash: the vote this node already cast.
@@ -8628,11 +8682,17 @@ mod vote_history_wiring_tests {
         // A mark written before hashes were recorded can only imply the strict
         // rule it always had: nothing at or below the height is re-signable.
         assert!(super::vote_would_equivocate(40, "aa", 40, None));
-        // The doors agree with the rule.
-        assert!(super::prevote_is_due(40, "aa", 40, Some("aa"), false));
-        assert!(!super::prevote_is_due(40, "bb", 40, Some("aa"), false));
-        assert!(super::precommit_is_due(40, "aa", 40, Some("aa")));
-        assert!(!super::precommit_is_due(40, "bb", 40, Some("aa")));
+        // The doors agree with the rule, and the same round only opens on a
+        // retry: without one the marked vote is NOT re-signed on every beat.
+        assert!(super::prevote_is_due(40, "aa", 40, Some("aa"), true));
+        assert!(!super::prevote_is_due(40, "aa", 40, Some("aa"), false));
+        assert!(!super::prevote_is_due(40, "bb", 40, Some("aa"), true));
+        assert!(super::precommit_is_due(40, "aa", 40, Some("aa"), true));
+        assert!(!super::precommit_is_due(40, "aa", 40, Some("aa"), false));
+        assert!(!super::precommit_is_due(40, "bb", 40, Some("aa"), true));
+        // A fresh round needs no retry flag.
+        assert!(super::prevote_is_due(42, "cc", 40, Some("aa"), false));
+        assert!(super::precommit_is_due(42, "cc", 40, Some("aa"), false));
         // Recording the same round twice keeps the hash rather than clearing it.
         let mut height = 40u64;
         let mut hash = Some("aa".to_string());
@@ -9779,14 +9839,22 @@ mod finality_publish_tests {
             last_prevote_hash.as_deref(),
             retry_same_hash
         ));
-        // A restart reads the same mark from disk: the same round is still
-        // eligible without a retry flag, because the hash matches.
+        // A restart reads the same mark from disk and remembers no
+        // publication: the same round is eligible exactly once through the
+        // restart door, and not on every beat afterwards.
         assert!(prevote_is_due(
             100,
             &hash_a,
             last_prevote_height,
             last_prevote_hash.as_deref(),
-            false
+            super::same_round_retry(false, None)
+        ));
+        assert!(!prevote_is_due(
+            100,
+            &hash_a,
+            last_prevote_height,
+            last_prevote_hash.as_deref(),
+            super::same_round_retry(false, prevote_published.as_ref())
         ));
     }
     #[test]

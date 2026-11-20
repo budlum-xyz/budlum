@@ -1264,7 +1264,7 @@ impl Blockchain {
             let interval =
                 crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
             if let Some((height, hash)) =
-                Self::stored_finality_matching_chain(store, &chain_vec, interval)
+                Self::stored_finality_matching_chain(store, &chain_vec, chain_id, interval)
             {
                 if height > restored_finalized_height {
                     info!(
@@ -4102,6 +4102,7 @@ impl Blockchain {
     fn stored_finality_matching_chain(
         store: &Storage,
         chain: &[Block],
+        chain_id: u64,
         checkpoint_interval: u64,
     ) -> Option<(u64, String)> {
         if checkpoint_interval == 0 {
@@ -4111,11 +4112,19 @@ impl Blockchain {
         let mut height = (tip / checkpoint_interval) * checkpoint_interval;
         while height >= checkpoint_interval {
             if let Ok(Some(cert)) = store.get_finality_cert(height) {
-                let matches_chain = chain
-                    .get(height as usize)
-                    .is_some_and(|block| block.hash == cert.checkpoint_hash);
+                // The record must describe this height on this chain and
+                // carry a signature: a stray or corrupt row keyed at `height`
+                // but naming another height could otherwise pin finality
+                // above the tip.
+                let matches_chain = cert.checkpoint_height == height
+                    && cert.chain_id == chain_id
+                    && !cert.agg_sig_bls.is_empty()
+                    && !cert.bitmap.is_empty()
+                    && chain
+                        .get(height as usize)
+                        .is_some_and(|block| block.hash == cert.checkpoint_hash);
                 if matches_chain {
-                    return Some((cert.checkpoint_height, cert.checkpoint_hash));
+                    return Some((height, cert.checkpoint_hash));
                 }
                 tracing::warn!(
                     height,
@@ -4184,7 +4193,12 @@ impl Blockchain {
             .storage
             .as_ref()
             .and_then(|store| {
-                Self::stored_finality_matching_chain(store, &self.chain, checkpoint_interval)
+                Self::stored_finality_matching_chain(
+                    store,
+                    &self.chain,
+                    self.chain_id,
+                    checkpoint_interval,
+                )
             })
             .unwrap_or((0, genesis_hash));
 
@@ -15354,6 +15368,13 @@ mod bond_and_reorg_tests {
     }
 
     fn reopen_with_stored_cert(cert_hash_for: impl Fn(&Blockchain) -> String) -> Blockchain {
+        reopen_with_stored_cert_at(cert_hash_for, 10)
+    }
+
+    fn reopen_with_stored_cert_at(
+        cert_hash_for: impl Fn(&Blockchain) -> String,
+        cert_height: u64,
+    ) -> Blockchain {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("restart_finality.db");
         let open = || Storage::new(db_path.to_str().unwrap()).unwrap();
@@ -15370,7 +15391,7 @@ mod bond_and_reorg_tests {
             }
             let cert_10 = crate::chain::finality::FinalityCert {
                 epoch: 0,
-                checkpoint_height: 10,
+                checkpoint_height: cert_height,
                 checkpoint_hash: cert_hash_for(&bc),
                 chain_id: 45261,
                 agg_sig_bls: vec![0xAA; 48],
@@ -15408,6 +15429,15 @@ mod bond_and_reorg_tests {
         );
         assert_eq!(bc.finalized_height, 10);
         assert_eq!(bc.finalized_hash, bc.chain[10].hash);
+    }
+
+    #[test]
+    fn a_restart_ignores_a_stored_cert_keyed_at_the_wrong_height() {
+        let bc = reopen_with_stored_cert_at(|bc| bc.chain[10].hash.clone(), 20);
+        assert_eq!(
+            bc.finalized_height, 0,
+            "a row keyed at 10 naming height 20 proves nothing"
+        );
     }
 
     #[test]
