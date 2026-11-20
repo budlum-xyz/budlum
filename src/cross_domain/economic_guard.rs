@@ -110,6 +110,14 @@ pub const DEFAULT_BOND_HAIRCUT_BPS: u64 = 9_000;
 ///
 /// WIRING: default protocol constant for [`DomainCeilingPolicy`].
 pub const DEFAULT_FINDER_REWARD_BPS: u64 = 1_000;
+
+/// Hard protocol ceiling on the contradiction finder reward.
+///
+/// The reward is carved out of the slashed prover bond, so an uncapped
+/// share lets a slashed prover reclaim its own bond through a second
+/// address. Capped at 20%, at least 80% of every slashed bond burns no
+/// matter who reports the contradiction.
+pub const MAX_FINDER_REWARD_BPS: u64 = 2_000;
 /// Default rolling flow-accounting window length in blocks.
 ///
 /// WIRING: default protocol constant for [`DomainCeilingPolicy`].
@@ -566,6 +574,14 @@ fn validate_policy(policy: &DomainCeilingPolicy) -> Result<(), EconomicGuardErro
         return Err(EconomicGuardError::InvalidPolicy(
             "basis-point parameters cannot exceed 10_000".into(),
         ));
+    }
+    if policy.finder_reward_bps > MAX_FINDER_REWARD_BPS {
+        return Err(EconomicGuardError::InvalidPolicy(format!(
+            "finder_reward_bps {} exceeds the protocol ceiling {MAX_FINDER_REWARD_BPS}; the \
+             reward is carved from the slashed bond and an uncapped share lets the slashed \
+             prover reclaim it",
+            policy.finder_reward_bps
+        )));
     }
     if let Some(ed_pk) = policy.prover_ed25519_pubkey {
         if bool::from(ed_pk.ct_eq(&[0u8; 32])) {
@@ -1585,7 +1601,11 @@ impl BridgeEconomicGuard {
                         (None, 0u128, 0u128, 0u128)
                     } else {
                         let prover = bond.prover;
-                        let paid = mul_bps_floor(live, finder_bps).min(live);
+                        // A prover reporting its own contradiction still
+                        // freezes the domain and loses the bond, but it can
+                        // never route the finder reward back to itself.
+                        let reward_bps = if challenger == prover { 0 } else { finder_bps };
+                        let paid = mul_bps_floor(live, reward_bps).min(live);
                         bond.bond_atoms = bond.bond_atoms.saturating_sub(live);
                         bond.slashed_atoms = bond.slashed_atoms.saturating_add(live);
                         bond.slashings.push(Slashing {
@@ -1872,6 +1892,80 @@ mod tests {
         let frozen = guard
             .check_and_record_flow(21, 1, 802)
             .expect_err("frozen domain must refuse all flows");
+        assert!(matches!(frozen, EconomicGuardError::DomainFrozen { .. }));
+    }
+
+    #[test]
+    fn a_self_challenging_prover_burns_its_whole_bond_and_an_oversized_finder_share_is_refused() {
+        let prover_ed = KeyPair::from_seed(&[0x72; 32]).unwrap();
+        let prover_pq = PqKeyPair::generate();
+        let prover_addr = Address::from([0x72; 32]);
+        let backing = SecurityBacking::SignatureSet {
+            scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+            signers: 4,
+            required: 3,
+            total_weight: 1_000_000,
+            slashable: true,
+        };
+
+        // The finder reward is carved from the slashed bond, so a share above
+        // the protocol ceiling would let the slashed prover reclaim it: the
+        // policy is refused before it ever guards a domain.
+        let mut guard = BridgeEconomicGuard::new();
+        let oversized = DomainCeilingPolicy {
+            backing: backing.clone(),
+            finder_reward_bps: MAX_FINDER_REWARD_BPS + 1,
+            prover_ed25519_pubkey: Some(prover_ed.public_key_bytes()),
+            prover_pq_pubkey: prover_pq.public_key_bytes().to_vec(),
+            ..DomainCeilingPolicy::default()
+        };
+        let err = guard
+            .configure_domain(22, oversized, Some(make_bond(prover_addr, 50_000)))
+            .expect_err("a finder share above the ceiling is an invalid policy");
+        assert!(matches!(err, EconomicGuardError::InvalidPolicy(_)));
+
+        // At the ceiling the policy stands; a prover that reports its own
+        // contradiction still freezes the domain and loses the bond, but the
+        // finder reward can never flow back to it: everything burns.
+        let policy = DomainCeilingPolicy {
+            backing,
+            finder_reward_bps: MAX_FINDER_REWARD_BPS,
+            prover_ed25519_pubkey: Some(prover_ed.public_key_bytes()),
+            prover_pq_pubkey: prover_pq.public_key_bytes().to_vec(),
+            ..DomainCeilingPolicy::default()
+        };
+        guard
+            .configure_domain(22, policy, Some(make_bond(prover_addr, 50_000)))
+            .unwrap();
+        let root_a = [0xA7; 32];
+        let root_b = [0xB7; 32];
+        let stmt_a = contradiction_statement_bytes(22, 900, &root_a);
+        let stmt_b = contradiction_statement_bytes(22, 900, &root_b);
+        let valid = ContradictionEvidence::SignedProverDoubleRoot {
+            domain_height: 900,
+            state_root_a: root_a,
+            ed25519_sig_a: prover_ed.sign(&stmt_a).to_vec(),
+            pq_sig_a: prover_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_a)
+                .unwrap(),
+            state_root_b: root_b,
+            ed25519_sig_b: prover_ed.sign(&stmt_b).to_vec(),
+            pq_sig_b: prover_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_b)
+                .unwrap(),
+        };
+        let outcome = guard
+            .submit_contradiction(22, &valid, prover_addr, 901)
+            .expect("the contradiction still lands when the prover reports itself");
+        assert_eq!(outcome.slashed_bond_atoms, 50_000);
+        assert_eq!(
+            outcome.challenger_reward_atoms, 0,
+            "a self-challenging prover earns nothing back"
+        );
+        assert_eq!(outcome.burned_bond_atoms, 50_000);
+        let frozen = guard
+            .check_and_record_flow(22, 1, 902)
+            .expect_err("the self-reported contradiction still freezes the domain");
         assert!(matches!(frozen, EconomicGuardError::DomainFrozen { .. }));
     }
 
