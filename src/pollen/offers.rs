@@ -210,6 +210,15 @@ impl PollenPurchaseReceipt {
 /// Convenience: pub so marketplace callers can refuse past the
 /// same bound the registry enforces in this module.
 pub const MAX_OFFERS: usize = 100_000;
+
+/// Live `.bud` listings one seller may hold at once: the table is shared,
+/// and without a per-seller ceiling one funded account fills it for good.
+pub const MAX_NAME_OFFERS_PER_SELLER: usize = 64;
+
+/// How far ahead a name listing may expire. The full-table sweep reclaims
+/// only expired rows, so the expiry a seller picks is also the lifetime of
+/// the table space it occupies.
+pub const MAX_NAME_OFFER_TTL_EPOCHS: u64 = 10_000;
 /// Most data assets the registry holds.
 ///
 /// Convenience: pub so marketplace callers can refuse past the
@@ -342,6 +351,24 @@ impl MarketplaceRegistry {
     ) -> Result<u64, String> {
         if price == 0 {
             return Err("Price must be greater than zero".into());
+        }
+        // Listing is a claim on the payment stream for these bytes: when the
+        // content is already a registered asset or is bound to one, only
+        // that asset's owner may list it. Anyone can still list content
+        // nobody has registered, exactly as before.
+        let owner_of = |asset_id: &AssetId| self.data_assets.get(asset_id).map(|asset| asset.owner);
+        if let Some(bound) = self.protected_content.asset_for(&cid) {
+            match owner_of(&bound) {
+                Some(owner) if owner == seller => {}
+                Some(_) | None => {
+                    return Err("Content is bound to a Pollen asset another account owns".into());
+                }
+            }
+        }
+        for asset in self.data_assets.values() {
+            if asset.manifest_id == cid && asset.owner != seller {
+                return Err("Content is registered as another account's data asset".into());
+            }
         }
         if self.offers.len() >= MAX_OFFERS {
             self.offers.retain(|_, o| o.active);
@@ -1140,6 +1167,27 @@ impl MarketplaceRegistry {
         }
         if request.expires_at_epoch <= current_epoch {
             return Err("Name offer expires_at_epoch must be in the future".into());
+        }
+        // The expiry is what lets the full-table sweep reclaim rows; a
+        // caller-chosen far future expiry would make its rows permanent.
+        if request.expires_at_epoch > current_epoch.saturating_add(MAX_NAME_OFFER_TTL_EPOCHS) {
+            return Err(format!(
+                "Name offer expires_at_epoch must be within {MAX_NAME_OFFER_TTL_EPOCHS} epochs"
+            ));
+        }
+        // One seller cannot hold the shared table: the per-seller ceiling
+        // counts its live rows before the global one is even consulted.
+        let live_rows = self
+            .name_offers
+            .values()
+            .filter(|offer| {
+                offer.seller == seller && offer.active && current_epoch < offer.expires_at_epoch
+            })
+            .count();
+        if live_rows >= MAX_NAME_OFFERS_PER_SELLER {
+            return Err(format!(
+                "Name offer seller reached {MAX_NAME_OFFERS_PER_SELLER} live listings"
+            ));
         }
         if request.kind == OfferKind::Primary {
             if !crate::bns::BnsRegistry::is_valid_duration(request.duration) {
@@ -2006,5 +2054,67 @@ mod tests {
         let next_v = (MAX_ENCRYPTION_POLICIES as u32) + 1;
         let over = EncryptionPolicy::post_quantum(next_v, 100, None);
         assert!(reg.set_encryption_policy(over).is_err());
+    }
+
+    #[test]
+    fn listing_anothers_registered_content_is_refused() {
+        let mut reg = MarketplaceRegistry::default();
+        let owner = addr(1);
+        let stranger = addr(2);
+        let cid = ContentId::of(b"owned bytes");
+        let asset = DataAsset::new(owner, cid, [0x10; 32], false);
+        let asset_id = asset.asset_id;
+        reg.register_data_asset(asset).unwrap();
+
+        // A stranger cannot claim the payment stream for registered content.
+        assert!(reg
+            .create_offer(stranger, cid, 100)
+            .unwrap_err()
+            .contains("another account"));
+        // The owner still lists it.
+        reg.create_offer(owner, cid, 100).unwrap();
+
+        // Pollen-bound content follows its asset's owner the same way.
+        reg.protected_content
+            .bind(cid, asset_id, owner, owner)
+            .unwrap();
+        assert!(reg.create_offer(stranger, cid, 100).is_err());
+        reg.create_offer(owner, cid, 150).unwrap();
+        // Unregistered content stays open to anyone, exactly as before.
+        reg.create_offer(stranger, ContentId::of(b"nobody registered this"), 5)
+            .unwrap();
+    }
+
+    #[test]
+    fn one_seller_cannot_hold_the_name_table_and_cannot_pick_an_immortal_expiry() {
+        let mut reg = MarketplaceRegistry::default();
+        let seller = crate::bns::BNS_PRIMARY_SELLERS[0];
+        let request = |n: usize, expires: u64| crate::bns::CreateNameOffer {
+            name: format!("isim{n:03}.bud"),
+            price_atoms: 1_000,
+            duration: 365,
+            kind: crate::bns::OfferKind::Primary,
+            expires_at_epoch: expires,
+        };
+
+        // The expiry is the lifetime of the table row: a far-future value is
+        // refused outright.
+        assert!(reg
+            .create_name_offer(seller, request(0, MAX_NAME_OFFER_TTL_EPOCHS + 2), 1)
+            .unwrap_err()
+            .contains("within"));
+
+        // The per-seller ceiling trips long before the shared table fills.
+        for n in 0..MAX_NAME_OFFERS_PER_SELLER {
+            reg.create_name_offer(seller, request(n, 500), 1).unwrap();
+        }
+        assert!(reg
+            .create_name_offer(seller, request(MAX_NAME_OFFERS_PER_SELLER, 500), 1)
+            .unwrap_err()
+            .contains("live listings"));
+
+        // Another seller is untouched by the first one's ceiling.
+        let other = addr(9);
+        reg.create_name_offer(other, request(900, 500), 1).unwrap();
     }
 }
