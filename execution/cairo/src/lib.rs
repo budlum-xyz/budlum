@@ -386,13 +386,17 @@ fn run_entrypoint(
             }
             CairoSyscallOp::StorageAddU64 { slot, delta } => {
                 let sk = storage_key(contract_addr, slot);
-                let cur_raw = host.read(&ns, &sk).ok().flatten();
-                let mut felt = [0u8; 32];
-                if let Some(bytes) = cur_raw {
-                    if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
-                        felt = arr;
+                let mut felt = match host.read(&ns, &sk) {
+                    Ok(Some(bytes)) => {
+                        let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+                            return Err(b"CAIRO_STORAGE_CORRUPT");
+                        };
+                        arr
                     }
-                }
+                    Ok(None) => [0u8; 32],
+                    Err(HostError::OutOfGas) => return Err(b"OUT_OF_GAS"),
+                    Err(_) => return Err(b"CAIRO_STORAGE_READ_ERR"),
+                };
                 let lo8: [u8; 8] = felt
                     .get(24..32)
                     .and_then(|s| s.try_into().ok())
@@ -410,12 +414,17 @@ fn run_entrypoint(
             }
             CairoSyscallOp::StorageReadReturn { slot } => {
                 let sk = storage_key(contract_addr, slot);
-                let felt = host
-                    .read(&ns, &sk)
-                    .ok()
-                    .flatten()
-                    .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
-                    .unwrap_or([0u8; 32]);
+                let felt = match host.read(&ns, &sk) {
+                    Ok(Some(bytes)) => {
+                        let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+                            return Err(b"CAIRO_STORAGE_CORRUPT");
+                        };
+                        arr
+                    }
+                    Ok(None) => [0u8; 32],
+                    Err(HostError::OutOfGas) => return Err(b"OUT_OF_GAS"),
+                    Err(_) => return Err(b"CAIRO_STORAGE_READ_ERR"),
+                };
                 ret_felts.push(felt);
             }
             CairoSyscallOp::EmitEvent { keys, data } => {
@@ -516,10 +525,17 @@ impl ExecutionEnvironment for CairoWorker {
                 ));
             };
             let ch = cls.class_hash();
-            if matches!(host.read(&ns, &class_key(&ch)), Ok(Some(_))) {
-                return Ok(ee_reverted(b"CLASS_ALREADY_DECLARED".to_vec(), gas_used));
+            match host.read(&ns, &class_key(&ch)) {
+                Ok(Some(_)) => {
+                    return Ok(ee_reverted(b"CLASS_ALREADY_DECLARED".to_vec(), gas_used));
+                }
+                Ok(None) => {}
+                Err(HostError::OutOfGas) => return Ok(ee_out_of_gas(call.gas_limit)),
+                Err(_) => return Ok(ee_reverted(b"declare read failed".to_vec(), gas_used)),
             }
-            let encoded = serde_json::to_vec(&cls).unwrap_or_default();
+            let Ok(encoded) = serde_json::to_vec(&cls) else {
+                return Ok(ee_reverted(b"class encode failed".to_vec(), gas_used));
+            };
             if host.write(&ns, &class_key(&ch), Some(&encoded)).is_err() {
                 return Ok(ee_reverted(b"declare write failed".to_vec(), gas_used));
             }
@@ -545,15 +561,20 @@ impl ExecutionEnvironment for CairoWorker {
                     ee_reverted(reason.to_vec(), gas_used)
                 } else if let Ok(cls) = decode_sierra_class(&class_bundle) {
                     let ch = cls.class_hash();
-                    if matches!(host.read(&ns, &class_key(&ch)), Ok(Some(_))) {
-                        ee_reverted(b"CLASS_ALREADY_DECLARED".to_vec(), gas_used)
-                    } else {
-                        let encoded = serde_json::to_vec(&cls).unwrap_or_default();
-                        if host.write(&ns, &class_key(&ch), Some(&encoded)).is_err() {
-                            ee_reverted(b"class write err".to_vec(), gas_used)
-                        } else {
-                            ee_success(ch.to_vec(), gas_used)
-                        }
+                    match host.read(&ns, &class_key(&ch)) {
+                        Ok(Some(_)) => ee_reverted(b"CLASS_ALREADY_DECLARED".to_vec(), gas_used),
+                        Err(HostError::OutOfGas) => ee_out_of_gas(call.gas_limit),
+                        Err(_) => ee_reverted(b"declare read err".to_vec(), gas_used),
+                        Ok(None) => match serde_json::to_vec(&cls) {
+                            Err(_) => ee_reverted(b"class encode err".to_vec(), gas_used),
+                            Ok(encoded) => {
+                                if host.write(&ns, &class_key(&ch), Some(&encoded)).is_err() {
+                                    ee_reverted(b"class write err".to_vec(), gas_used)
+                                } else {
+                                    ee_success(ch.to_vec(), gas_used)
+                                }
+                            }
+                        },
                     }
                 } else {
                     ee_reverted(b"invalid Sierra class bundle".to_vec(), gas_used)
@@ -1031,5 +1052,200 @@ mod tests {
         };
         assert_eq!(final_felt[31], 42);
         assert_eq!(host.logs.len(), 1);
+    }
+
+    #[test]
+    fn storage_add_u64_fails_closed_when_host_read_errors() {
+        use budlum_uel_abi::{
+            BudAmount, HostError, HostRead, OutOfGas, UniversalCall, UniversalResult,
+        };
+
+        struct FailingStorageReadHost {
+            inner: MemoryHost,
+        }
+        impl HostRead for FailingStorageReadHost {
+            fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+                if key.starts_with(b"stor:") {
+                    return Err(HostError::Invalid("injected storage read error".into()));
+                }
+                self.inner.read(ns, key)
+            }
+            fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+                self.inner.bud_balance(who)
+            }
+        }
+        impl HostApi for FailingStorageReadHost {
+            fn write(
+                &mut self,
+                ns: &Namespace,
+                key: &[u8],
+                value: Option<&[u8]>,
+            ) -> Result<(), HostError> {
+                self.inner.write(ns, key, value)
+            }
+            fn universal_call(
+                &mut self,
+                call: UniversalCall,
+            ) -> Result<UniversalResult, HostError> {
+                self.inner.universal_call(call)
+            }
+            fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+                self.inner.emit_log(log)
+            }
+            fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+                self.inner.charge(bgu)
+            }
+            fn bud_transfer(
+                &mut self,
+                from: &EeIdentity,
+                to: &EeIdentity,
+                attos: u128,
+            ) -> Result<(), HostError> {
+                self.inner.bud_transfer(from, to, attos)
+            }
+            fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+                self.inner.checkpoint_begin()
+            }
+            fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_commit(id)
+            }
+            fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_rollback(id)
+            }
+        }
+
+        let mut worker = CairoWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::CAIRO, vec![0x99; 32]) else {
+            panic!("caller");
+        };
+        let slot = [0x11; 32];
+        let class = SierraContractClass {
+            sierra_version: String::from("1.6.0"),
+            entrypoints: vec![CairoEntrypoint {
+                name: String::from("inc"),
+                ops: vec![CairoSyscallOp::StorageAddU64 { slot, delta: 100 }],
+            }],
+        };
+        let Ok(class_bundle) = encode_sierra_class(&class) else {
+            panic!("encode");
+        };
+        let Ok(decl_in) = serde_json::to_vec(&CairoAction::Declare {
+            class_bundle,
+            nonce: 0,
+        }) else {
+            panic!("decl_in");
+        };
+        let Ok(decl_out) = worker.execute(
+            &active_ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input: decl_in,
+                gas_limit: 1_000_000,
+                depth: 0,
+                tx_hash: [0xF1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("declare");
+        };
+        assert_eq!(decl_out.status, OutcomeStatus::Success);
+        let Ok(class_hash) = <[u8; 32]>::try_from(decl_out.output.as_slice()) else {
+            panic!("class hash");
+        };
+        let Ok(dep_in) = serde_json::to_vec(&CairoAction::DeployContract {
+            class_hash,
+            salt: [0x01; 32],
+            constructor_calldata: Vec::new(),
+            nonce: 1,
+        }) else {
+            panic!("dep_in");
+        };
+        let Ok(dep_out) = worker.execute(
+            &active_ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input: dep_in,
+                gas_limit: 1_000_000,
+                depth: 0,
+                tx_hash: [0xF2; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(dep_out.status, OutcomeStatus::Success);
+        let Ok(contract_address) = <[u8; 32]>::try_from(dep_out.output.as_slice()) else {
+            panic!("contract address");
+        };
+
+        // First invoke succeeds: 0 -> 100
+        let Ok(inv1_in) = serde_json::to_vec(&CairoAction::InvokeAccount {
+            calls: vec![StarknetCall {
+                contract_address,
+                entrypoint: String::from("inc"),
+                calldata: Vec::new(),
+            }],
+            nonce: 2,
+        }) else {
+            panic!("inv1");
+        };
+        let Ok(inv1) = worker.execute(
+            &active_ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input: inv1_in,
+                gas_limit: 1_000_000,
+                depth: 0,
+                tx_hash: [0xF3; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("inv1 exec");
+        };
+        assert_eq!(inv1.status, OutcomeStatus::Success);
+
+        // Second invoke under a storage-read error must revert instead of wiping 100 -> 0+100!
+        let mut faulty = FailingStorageReadHost { inner: host };
+        let Ok(inv2_in) = serde_json::to_vec(&CairoAction::InvokeAccount {
+            calls: vec![StarknetCall {
+                contract_address,
+                entrypoint: String::from("inc"),
+                calldata: Vec::new(),
+            }],
+            nonce: 3,
+        }) else {
+            panic!("inv2");
+        };
+        let Ok(inv2) = worker.execute(
+            &active_ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: caller,
+                value: BudAmount(0),
+                input: inv2_in,
+                gas_limit: 1_000_000,
+                depth: 0,
+                tx_hash: [0xF4; 32],
+            },
+            &mut faulty,
+        ) else {
+            panic!("inv2 exec");
+        };
+        assert_eq!(
+            inv2.status,
+            OutcomeStatus::Revert,
+            "StorageAddU64 must fail closed on host.read error instead of resetting counter to 0 + delta"
+        );
     }
 }
