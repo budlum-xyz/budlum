@@ -14,6 +14,9 @@ on:
   # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
     branches: [main, consensus-of-consensuses]
+  # The descriptor above promises an on-demand run; this trigger makes it
+  # dispatchable from the Actions tab without a push.
+  workflow_dispatch:
   # Section 16.2 puts this workflow on pull requests and on a periodic run.
   # The periodic half catches runner-image or toolchain drift with no commit in
   # front of it. It is staggered weekly because this file launches five jobs,
