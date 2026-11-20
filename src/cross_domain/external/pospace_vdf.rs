@@ -373,7 +373,10 @@ pub fn verify_double_signage_equivocation(
     first: &SignedPoSpaceSignage,
     second: &SignedPoSpaceSignage,
 ) -> Result<PoSpaceEquivocationProof, AdapterError> {
-    if first.network != expected_network || second.network != expected_network {
+    if expected_network.trim().is_empty()
+        || first.network != expected_network
+        || second.network != expected_network
+    {
         return Err(AdapterError::ConsensusRule {
             rule: "double-signage evidence network mismatch".into(),
         });
@@ -672,7 +675,13 @@ impl PoSpaceVdfAdapter {
                 field: "declared_root",
             });
         }
-        if policy.max_age > 0 && policy.now > target.height {
+        if policy.max_age > 0 {
+            if target.height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: target.height.saturating_sub(policy.now),
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now.saturating_sub(target.height);
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -819,7 +828,15 @@ impl PoSpaceVdfAdapter {
             .ok_or_else(|| AdapterError::ConsensusRule {
                 rule: "pospace-vdf missing segment tip".into(),
             })?;
-        if tip.cumulative_weight < pinned.min_cumulative_weight {
+        let verified_segment_weight = tip
+            .cumulative_weight
+            .checked_sub(decoded.base_cumulative_weight)
+            .ok_or_else(|| AdapterError::ConsensusRule {
+                rule: "pospace-vdf tip cumulative_weight underflows base_cumulative_weight".into(),
+            })?;
+        if tip.cumulative_weight < pinned.min_cumulative_weight
+            || verified_segment_weight < pinned.min_cumulative_weight
+        {
             return Err(AdapterError::ConsensusRule {
                 rule: "pospace-vdf tip cumulative_weight below pinned minimum".into(),
             });
@@ -863,13 +880,13 @@ impl PoSpaceVdfAdapter {
             return Err(AdapterError::UnslashableBacking);
         }
 
-        let weight_bits = 128u32.saturating_sub(tip.cumulative_weight.leading_zeros());
+        let weight_bits = 128u32.saturating_sub(verified_segment_weight.leading_zeros());
         let security = if pq_verified {
             SecurityBacking::SignatureSet {
                 scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
                 signers: 1,
                 required: 1,
-                total_weight: tip.cumulative_weight,
+                total_weight: verified_segment_weight,
                 // External PoSpace farmer/timelord signatures have no local Budlum
                 // confiscation bond or BridgeEconomicGuard arm yet.
                 slashable: false,
@@ -1235,7 +1252,7 @@ mod tests {
             Err(AdapterError::ConsensusRule { .. })
         ));
 
-        // 5. Stale evidence refused under bounded max_age policy.
+        // 5. Stale evidence refused under bounded max_age policy (both past and future heights).
         let strict_age = VerificationPolicy {
             now: 200,
             max_age: 10,
@@ -1244,6 +1261,38 @@ mod tests {
         assert!(matches!(
             adapter.verify(&raw, &strict_age),
             Err(AdapterError::Stale { .. })
+        ));
+        let future_age = VerificationPolicy {
+            now: 100,
+            max_age: 10,
+            ..VerificationPolicy::strict(100)
+        };
+        assert!(matches!(
+            adapter.verify(&raw, &future_age),
+            Err(AdapterError::Stale { .. })
+        ));
+
+        // 6. Unauthenticated base_cumulative_weight spoofing cannot bypass min_cumulative_weight.
+        let mut high_min_pinned = pinned.clone();
+        high_min_pinned.min_cumulative_weight = 100_000;
+        high_min_pinned.require_pq_attestation = false;
+        high_min_pinned.pq_attestor_pubkey = None;
+        let high_min_adapter = PoSpaceVdfAdapter::new("chia-pq-mainnet", Some(high_min_pinned));
+        let mut spoofed_base = ev_body.clone();
+        let spoof_offset = 1u128 << 126;
+        spoofed_base.base_cumulative_weight = spoof_offset;
+        spoofed_base.pq_attestation_sig.clear();
+        let mut running = spoof_offset;
+        for blk in &mut spoofed_base.blocks {
+            running += block_space_time_weight(blk.plot_k, blk.difficulty, blk.vdf_iterations);
+            blk.cumulative_weight = running;
+            blk.infusion_block_hash = blk.compute_infusion_hash("chia-pq-mainnet");
+        }
+        let mut spoofed_raw = raw.clone();
+        spoofed_raw.payload = encode_pospace_payload(&spoofed_base).unwrap();
+        assert!(matches!(
+            high_min_adapter.verify(&spoofed_raw, &policy),
+            Err(AdapterError::ConsensusRule { .. })
         ));
     }
 
@@ -1290,6 +1339,9 @@ mod tests {
 
         // Identical statement is not equivocation.
         assert!(verify_double_signage_equivocation(net, &s1, &s1).is_err());
+
+        // Empty or whitespace expected_network is refused.
+        assert!(verify_double_signage_equivocation("   ", &s1, &s2).is_err());
 
         // Different signage index is honest sequential farming, not equivocation.
         let msg_next = pospace_signage_sign_bytes(net, 42, 8, &block_b);
