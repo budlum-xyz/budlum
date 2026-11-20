@@ -841,6 +841,10 @@ impl NearDoomslugAdapter {
             }
         }
 
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
+        }
+
         let (signers, required, total_weight, all_pq) =
             verify_doomslug_bundle(&self.network, pinned, &bundle)?;
         let scheme = if all_pq {
@@ -860,7 +864,9 @@ impl NearDoomslugAdapter {
                 signers,
                 required,
                 total_weight,
-                slashable: true,
+                // External NEAR stake has no local Budlum confiscation bond or
+                // BridgeEconomicGuard arm yet, so slashability is disclosed as false.
+                slashable: false,
             },
             evidence_digest: evidence.digest(),
             adapter_version: self.descriptor.adapter_version,
@@ -1128,7 +1134,7 @@ mod tests {
         let adapter =
             NearDoomslugAdapter::new(NET, Some(fx.pinned.clone())).with_golden(fx.golden.clone());
         let policy = VerificationPolicy {
-            require_slashable: true,
+            require_slashable: false,
             min_depth: DOOMSLUG_BFT_DEPTH,
             max_age: 100,
             now: 130_000_010,
@@ -1183,7 +1189,7 @@ mod tests {
         let fx = build_near_fixture();
         let adapter = NearDoomslugAdapter::new(NET, Some(fx.pinned.clone()));
         let policy = VerificationPolicy {
-            require_slashable: true,
+            require_slashable: false,
             min_depth: 1,
             max_age: 0,
             now: 0,
@@ -1314,5 +1320,35 @@ mod tests {
         assert_eq!(acct2, "bp2.poolv1.near");
         assert_eq!(stake2, 250);
         assert_eq!(kind2, NearSlashKind::SurroundApproval);
+
+        let unbonded_policy = VerificationPolicy {
+            require_slashable: false,
+            min_depth: DOOMSLUG_BFT_DEPTH,
+            max_age: 100,
+            now: 130_000_010,
+            require_declared_match: true,
+        };
+        let att = adapter
+            .verify(&fx.golden, &unbonded_policy)
+            .expect("valid NEAR Doomslug evidence verifies when slashability is not required");
+        assert!(
+            matches!(
+                att.security,
+                SecurityBacking::SignatureSet {
+                    slashable: false,
+                    ..
+                }
+            ),
+            "bare external NEAR stake without a local Budlum confiscation arm must report slashable=false"
+        );
+        let mut slash_policy = unbonded_policy;
+        slash_policy.require_slashable = true;
+        assert!(
+            matches!(
+                adapter.verify(&fx.golden, &slash_policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "require_slashable=true must fail closed with UnslashableBacking"
+        );
     }
 }

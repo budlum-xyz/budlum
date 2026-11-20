@@ -601,13 +601,19 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
             }
         }
 
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
+        }
+
         let digest = ev.digest();
         let backing = SecurityBacking::SignatureSet {
             scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
             signers: ev.pq_signatures.len() as u64,
             required: ev.pq_threshold,
             total_weight: free_collateral,
-            slashable: true,
+            // External Symbiotic vault committees have no local Budlum
+            // confiscation bond or BridgeEconomicGuard arm yet.
+            slashable: false,
         };
 
         Ok(build_attestation(
@@ -961,5 +967,29 @@ mod tests {
                 max_age: 10
             })
         ));
+
+        let unbonded_policy = default_policy();
+        let att = adapter
+            .verify(&fresh_raw, &unbonded_policy)
+            .expect("valid Symbiotic vault evidence verifies when slashability is not required");
+        assert!(
+            matches!(
+                att.security,
+                SecurityBacking::SignatureSet {
+                    slashable: false,
+                    ..
+                }
+            ),
+            "external vault committee attestation without a local Budlum confiscation arm must report slashable=false"
+        );
+        let mut slash_policy = unbonded_policy;
+        slash_policy.require_slashable = true;
+        assert!(
+            matches!(
+                adapter.verify(&fresh_raw, &slash_policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "require_slashable=true must fail closed with UnslashableBacking"
+        );
     }
 }
