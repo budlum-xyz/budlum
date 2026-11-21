@@ -253,6 +253,22 @@ pub struct SolanaTowerBftAdapter {
     descriptor: AdapterDescriptor,
 }
 
+fn min_signers_for_quorum<I: IntoIterator<Item = u64>>(weights: I, total_stake: u128) -> u64 {
+    let mut sorted: Vec<u64> = weights.into_iter().filter(|&w| w > 0).collect();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    let mut acc = 0u128;
+    let mut count = 0u64;
+    let two_thirds = total_stake.saturating_mul(2);
+    for w in sorted {
+        acc = acc.saturating_add(u128::from(w));
+        count = count.saturating_add(1);
+        if acc.saturating_mul(3) > two_thirds {
+            return count;
+        }
+    }
+    count.max(1)
+}
+
 impl SolanaTowerBftAdapter {
     /// Construct a `SolanaTowerBftAdapter` bound to `network` and its pinned
     /// epoch stake table.
@@ -364,6 +380,11 @@ impl SolanaTowerBftAdapter {
                 accepted: EVIDENCE_VERSION.to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Solana Tower network identifier must not be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -423,8 +444,14 @@ impl SolanaTowerBftAdapter {
                 required: need_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > bank.slot {
-            let age = policy.now.saturating_sub(bank.slot);
+        if policy.max_age > 0 {
+            if bank.slot > policy.now {
+                return Err(AdapterError::Stale {
+                    age: bank.slot - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - bank.slot;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -541,11 +568,10 @@ impl SolanaTowerBftAdapter {
         } else {
             ObservedScheme::Scheme(SchemeId::ED25519)
         };
-        let required_stake = total_stake
-            .saturating_mul(2)
-            .checked_div(3)
-            .unwrap_or(u128::MAX)
-            .saturating_add(1);
+        let required_signers = min_signers_for_quorum(
+            pinned.validators.iter().map(|v| v.stake_lamports),
+            total_stake,
+        );
         let attestation = FinalityAttestation {
             adapter: self.descriptor.id,
             domain: DomainKey::from_parts(&self.descriptor.id, &evidence.network),
@@ -559,7 +585,7 @@ impl SolanaTowerBftAdapter {
             security: SecurityBacking::SignatureSet {
                 scheme,
                 signers: u64::try_from(seen.len()).unwrap_or(u64::MAX),
-                required: u64::try_from(required_stake).unwrap_or(u64::MAX),
+                required: required_signers,
                 total_weight: total_stake,
                 slashable: pinned.has_bonded_slash_escrow,
             },
@@ -837,7 +863,7 @@ mod tests {
             att.security,
             SecurityBacking::SignatureSet {
                 signers: 3,
-                required: 67,
+                required: 2,
                 total_weight: 100,
                 slashable: false,
                 ..
@@ -1029,6 +1055,65 @@ mod tests {
         assert!(matches!(
             adapter.verify(&ev, &policy),
             Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("pinned epoch")
+        ));
+    }
+
+    #[test]
+    fn regression_quorum_shape_future_slot_and_empty_network() {
+        use crate::domain::finality_proof_model::FinalityProofShape;
+
+        let (mut pinned, _, mut bundle, mut golden) = build_tower_fixture(false);
+        let adapter = SolanaTowerBftAdapter::new(NETWORK, Some(pinned.clone()));
+        let policy = VerificationPolicy {
+            min_depth: 1,
+            require_declared_match: true,
+            max_age: 1_000,
+            now: SLOT,
+            require_slashable: false,
+        };
+
+        // 1. Golden attestation must pass FinalityProofShape::from_external_attestation.
+        let att = adapter.verify(&golden, &policy).expect("golden verifies");
+        FinalityProofShape::from_external_attestation(&adapter.descriptor(), &att)
+            .expect("Solana Tower BFT golden attestation must not fail DegenerateSignatureQuorum");
+
+        // 2. Skewed stake [200, 25, 25, 25] (200/275 > 2/3) signed by validator 0 alone.
+        pinned
+            .validators
+            .first_mut()
+            .expect("validator 0")
+            .stake_lamports = 200;
+        bundle.votes.truncate(1);
+        golden.payload = encode_sol_evidence(&bundle).expect("encode skewed");
+        let skewed_adapter = SolanaTowerBftAdapter::new(NETWORK, Some(pinned.clone()));
+        let skewed_att = skewed_adapter
+            .verify(&golden, &policy)
+            .expect("single >2/3 whale validator verifies");
+        FinalityProofShape::from_external_attestation(&skewed_adapter.descriptor(), &skewed_att)
+            .expect("skewed >2/3 Solana quorum must pass FinalityProofShape");
+
+        // 3. Future bank.slot > policy.now when policy.max_age > 0 must be refused as Stale.
+        let mut future_policy = policy.clone();
+        future_policy.now = SLOT - 1;
+        assert!(
+            matches!(
+                skewed_adapter.verify(&golden, &future_policy),
+                Err(AdapterError::Stale {
+                    age: 1,
+                    max_age: 1_000
+                })
+            ),
+            "future slot above policy.now must fail closed with AdapterError::Stale"
+        );
+
+        // 4. Empty/whitespace network must be refused.
+        let blank_adapter = SolanaTowerBftAdapter::new("   ", Some(pinned));
+        let mut blank_ev = golden;
+        blank_ev.adapter = blank_adapter.descriptor().id;
+        blank_ev.network = "   ".to_string();
+        assert!(matches!(
+            blank_adapter.verify(&blank_ev, &policy),
+            Err(AdapterError::ConsensusRule { .. })
         ));
     }
 }

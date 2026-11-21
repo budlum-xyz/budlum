@@ -354,6 +354,22 @@ pub struct HotStuffThreeChainAdapter {
     descriptor: AdapterDescriptor,
 }
 
+fn min_signers_for_quorum<I: IntoIterator<Item = u64>>(weights: I, total_stake: u128) -> u64 {
+    let mut sorted: Vec<u64> = weights.into_iter().filter(|&w| w > 0).collect();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    let mut acc = 0u128;
+    let mut count = 0u64;
+    let two_thirds = total_stake.saturating_mul(2);
+    for w in sorted {
+        acc = acc.saturating_add(u128::from(w));
+        count = count.saturating_add(1);
+        if acc.saturating_mul(3) > two_thirds {
+            return count;
+        }
+    }
+    count.max(1)
+}
+
 impl HotStuffThreeChainAdapter {
     /// Construct a `HotStuffThreeChainAdapter` bound to `network` and its pinned committee.
     #[must_use]
@@ -399,6 +415,11 @@ impl HotStuffThreeChainAdapter {
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
                 accepted: EVIDENCE_VERSION.to_string(),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "HotStuff network identifier must not be empty".into(),
             });
         }
         if evidence.network != self.network {
@@ -460,7 +481,13 @@ impl HotStuffThreeChainAdapter {
                 required: policy.min_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > b0.height {
+        if policy.max_age > 0 {
+            if b0.height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: b0.height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - b0.height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -565,7 +592,8 @@ impl HotStuffThreeChainAdapter {
 
         let all_pq = pq0 && pq1 && pq2;
         let min_signers = s0.min(s1).min(s2);
-        let required_signers = ((pinned.members.len() as u64) * 2).div_ceil(3).max(1);
+        let required_signers =
+            min_signers_for_quorum(pinned.members.iter().map(|m| m.voting_weight), total_stake);
         let scheme = if all_pq {
             ObservedScheme::Scheme(SchemeId::ML_DSA_65)
         } else {
@@ -989,6 +1017,52 @@ mod tests {
         assert!(matches!(
             verify_hotstuff_equivocation("aptos-jolteon-1", &pinned, &framed),
             Err(AdapterError::Crypto { ref what }) if what.contains("ML-DSA-65")
+        ));
+    }
+
+    #[test]
+    fn regression_skewed_stake_future_height_and_empty_network() {
+        use crate::domain::finality_proof_model::FinalityProofShape;
+
+        let (mut pinned, _, mut bundle, mut ev) = hotstuff_fixture();
+        // Skewed stake [800, 100, 100, 100] (800/1100 > 2/3) signed by validator 0 alone.
+        pinned.members.first_mut().expect("member 0").voting_weight = 800;
+        bundle.prepare_qc.signatures.truncate(1);
+        bundle.precommit_qc.signatures.truncate(1);
+        bundle.commit_qc.signatures.truncate(1);
+        ev.payload = encode_hotstuff_evidence(&bundle).expect("encode skewed");
+
+        let adapter = HotStuffThreeChainAdapter::new("aptos-jolteon-1", Some(pinned.clone()));
+        let policy = VerificationPolicy::strict(1_010);
+        let att = adapter
+            .verify(&ev, &policy)
+            .expect("single >2/3 HotStuff validator verifies");
+        FinalityProofShape::from_external_attestation(&adapter.descriptor(), &att)
+            .expect("skewed >2/3 HotStuff quorum must pass FinalityProofShape");
+
+        // Future b0.height > policy.now when policy.max_age > 0 must return Stale.
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 10;
+        future_policy.now = bundle.prepare_block.height - 1;
+        assert!(
+            matches!(
+                adapter.verify(&ev, &future_policy),
+                Err(AdapterError::Stale {
+                    age: 1,
+                    max_age: 10
+                })
+            ),
+            "future HotStuff height above policy.now must fail closed with AdapterError::Stale"
+        );
+
+        // Empty/whitespace network must be refused.
+        let blank_adapter = HotStuffThreeChainAdapter::new("  ", Some(pinned));
+        let mut blank_ev = ev;
+        blank_ev.adapter = blank_adapter.descriptor().id;
+        blank_ev.network = "  ".to_string();
+        assert!(matches!(
+            blank_adapter.verify(&blank_ev, &policy),
+            Err(AdapterError::ConsensusRule { .. })
         ));
     }
 }

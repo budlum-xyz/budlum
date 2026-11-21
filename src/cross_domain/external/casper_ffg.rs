@@ -464,17 +464,38 @@ pub struct CasperFfgAdapter {
     golden: Option<RawConsensusEvidence>,
 }
 
+fn min_signers_for_quorum<I: IntoIterator<Item = u64>>(weights: I, total_stake: u128) -> u64 {
+    let mut sorted: Vec<u64> = weights.into_iter().filter(|&w| w > 0).collect();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    let mut acc = 0u128;
+    let mut count = 0u64;
+    let two_thirds = total_stake.saturating_mul(2);
+    for w in sorted {
+        acc = acc.saturating_add(u128::from(w));
+        count = count.saturating_add(1);
+        if acc.saturating_mul(3) > two_thirds {
+            return count;
+        }
+    }
+    count.max(1)
+}
+
 impl CasperFfgAdapter {
     /// Build an adapter for `network` over a validated [`PinnedFfgCommittee`].
     ///
     /// # Errors
     ///
-    /// Propagates any [`PinnedFfgCommittee::validate`] refusal.
+    /// Propagates any [`PinnedFfgCommittee::validate`] refusal or empty network name.
     pub fn new(
         network: &str,
         committee: &PinnedFfgCommittee,
         golden: Option<RawConsensusEvidence>,
     ) -> Result<Self, AdapterError> {
+        if network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Casper FFG network identifier must not be empty".to_string(),
+            });
+        }
         let canonical = committee.validate()?;
         Ok(Self::from_validated(network, Some(canonical), golden))
     }
@@ -587,7 +608,7 @@ impl CasperFfgAdapter {
                 required: policy.min_depth,
             });
         }
-        if (policy.max_age > 0 || policy.now > 0) && target_epoch > policy.now {
+        if policy.max_age > 0 && target_epoch > policy.now {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
                     "target checkpoint epoch {target_epoch} is ahead of caller clock {}",
@@ -632,6 +653,11 @@ impl CasperFfgAdapter {
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
                 accepted: accepted.to_string(),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Casper FFG network identifier must not be empty".to_string(),
             });
         }
         if evidence.network != self.network {
@@ -702,7 +728,7 @@ impl CasperFfgAdapter {
             });
         }
         let (committee, parsed) = self.validate_envelope_and_epochs(evidence, policy)?;
-        let (_source_signers, source_all_pq) = self.check_vote_set(
+        let (source_signers, source_all_pq) = self.check_vote_set(
             committee,
             "source",
             &parsed.source_votes,
@@ -713,7 +739,7 @@ impl CasperFfgAdapter {
                 parsed.source_root,
             ),
         )?;
-        let (signers, target_all_pq) = self.check_vote_set(
+        let (target_signers, target_all_pq) = self.check_vote_set(
             committee,
             "target",
             &parsed.target_votes,
@@ -725,6 +751,10 @@ impl CasperFfgAdapter {
             ),
         )?;
 
+        let signers = source_signers.min(target_signers);
+        let total_stake = committee.total_stake();
+        let required =
+            min_signers_for_quorum(committee.validators.iter().map(|v| v.stake), total_stake);
         let both_quorums_pq = source_all_pq && target_all_pq;
         let scheme = if both_quorums_pq {
             ObservedScheme::Scheme(SchemeId::ML_DSA_65)
@@ -741,9 +771,8 @@ impl CasperFfgAdapter {
             security: SecurityBacking::SignatureSet {
                 scheme,
                 signers,
-                required: u64::try_from(committee.validators.len().saturating_mul(2).div_ceil(3))
-                    .unwrap_or(u64::MAX),
-                total_weight: committee.total_stake(),
+                required,
+                total_weight: total_stake,
                 slashable: false,
             },
             evidence_digest: evidence.digest(),
@@ -1529,5 +1558,61 @@ mod tests {
             );
         }
         assert!(report.admitted, "admission failed: {report:?}");
+    }
+
+    #[test]
+    fn regression_intake_live_clock_skewed_stake_and_empty_network() {
+        use crate::domain::finality_proof_model::FinalityProofShape;
+
+        let (signers, committee) = signers();
+        let adapter = adapter_with(&signers, &committee);
+
+        // 1. IntakeState::submit sets policy.now = last_accepted_height (> 0)
+        // while policy.max_age == 0 (VerificationPolicy::strict(0)). Subsequent epochs
+        // must advance cleanly without deadlocking on "ahead of caller clock".
+        let mut intake_live_policy = VerificationPolicy::strict(SOURCE_EPOCH);
+        intake_live_policy.max_age = 0;
+        intake_live_policy.require_slashable = false;
+        let att_3_4 = adapter
+            .verify(&evidence_with(&signers, 3, 4), &intake_live_policy)
+            .expect("IntakeState live_policy_clock with max_age == 0 must not deadlock epoch N+1");
+
+        // 2. Weakest-link signer count across source (3) and target (4) checkpoints.
+        assert!(
+            matches!(
+                att_3_4.security,
+                SecurityBacking::SignatureSet {
+                    signers: 3,
+                    required: 3,
+                    ..
+                }
+            ),
+            "Casper FFG must report weakest-link min(source_signers, target_signers), got {:?}",
+            att_3_4.security
+        );
+
+        // 3. Skewed stake [800, 100, 100, 100] (800/1100 > 2/3) signed by validator 0 alone.
+        let skewed_members: Vec<FfgValidator> = signers
+            .iter()
+            .enumerate()
+            .map(|(i, s)| FfgValidator {
+                pubkey: s.pubkey,
+                stake: if i == 0 { 800 } else { 100 },
+                pq_pubkey: Vec::new(),
+            })
+            .collect();
+        let skewed_committee =
+            PinnedFfgCommittee::new(TARGET_EPOCH, skewed_members).expect("skewed committee");
+        let skewed_ev = evidence_with(&signers, 1, 1);
+        let skewed_adapter =
+            CasperFfgAdapter::new(NETWORK, &skewed_committee, None).expect("skewed adapter");
+        let skewed_att = skewed_adapter
+            .verify(&skewed_ev, &policy())
+            .expect("single >2/3 Casper validator verifies");
+        FinalityProofShape::from_external_attestation(&skewed_adapter.descriptor(), &skewed_att)
+            .expect("skewed >2/3 Casper FFG quorum must pass FinalityProofShape");
+
+        // 4. Empty/whitespace network must be refused.
+        assert!(CasperFfgAdapter::new("   ", &skewed_committee, None).is_err());
     }
 }

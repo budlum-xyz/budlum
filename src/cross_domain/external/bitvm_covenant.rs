@@ -945,6 +945,11 @@ impl BitVmCovenantAdapter {
                 accepted: BITVM_EVIDENCE_VERSION.to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "BitVM2 network identifier must not be empty".to_string(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -961,7 +966,14 @@ impl BitVmCovenantAdapter {
 
         let (anchor, parsed, parent_of_claim, tip_time, used_pq) =
             self.verify_chain_and_claim(evidence)?;
-        let depth = parsed.headers.len() as u64;
+        let claim_idx = usize::try_from(parsed.claim_header_index).unwrap_or(usize::MAX);
+        let depth =
+            u64::try_from(parsed.headers.len().checked_sub(claim_idx).ok_or_else(|| {
+                AdapterError::ConsensusRule {
+                    rule: "BitVM2 claim_header_index out of bounds".to_string(),
+                }
+            })?)
+            .unwrap_or(u64::MAX);
         if policy.min_depth > depth {
             return Err(AdapterError::InsufficientDepth {
                 observed: depth,
@@ -976,9 +988,7 @@ impl BitVmCovenantAdapter {
                 field: "bitvm_covenant_claim",
             });
         }
-        if (policy.max_age > 0 || policy.now > 0)
-            && tip_time > policy.now.saturating_add(MAX_FUTURE_SECONDS)
-        {
+        if policy.max_age > 0 && tip_time > policy.now.saturating_add(MAX_FUTURE_SECONDS) {
             return Err(AdapterError::ConsensusRule {
                 rule: format!("BitVM2 PoW tip timestamp {tip_time} exceeds future drift ceiling"),
             });
@@ -1350,5 +1360,83 @@ mod tests {
         assert_eq!(idx, 0);
         assert_eq!(claimed_post, bad_post);
         assert_ne!(expected_post, claimed_post);
+    }
+
+    #[test]
+    fn regression_live_clock_post_claim_depth_and_empty_network() {
+        let (op_ed, op_pq, mut anchor, _, mut bundle, raw) = fixture();
+        let adapter = BitVmCovenantAdapter::new(NET, Some(anchor.clone()));
+
+        // 1. IntakeState::submit sets policy.now = old_tip_time (> 0) while
+        // policy.max_age == 0. After a >2h relayer pause (10_800s > MAX_FUTURE_SECONDS=7_200s),
+        // verification must NOT brick the domain when max_age == 0.
+        let tip_ts = u64::from(header_timestamp(bundle.headers.last().expect("tip")));
+        let mut paused_intake_policy = VerificationPolicy::strict(tip_ts - 10_800);
+        paused_intake_policy.max_age = 0;
+        paused_intake_policy.require_slashable = false;
+        adapter
+            .verify(&raw, &paused_intake_policy)
+            .expect("BitVM2 domain must not brick after >2h relayer pause when max_age == 0");
+
+        // When policy.max_age > 0, future drift > MAX_FUTURE_SECONDS MUST still be refused.
+        let mut clocked = paused_intake_policy;
+        clocked.max_age = 86_400;
+        assert!(adapter.verify(&raw, &clocked).is_err());
+
+        // 2. Pre-claim historical PoW headers (0..claim_header_index) must NOT
+        // inflate confirmation depth or SecurityBacking::Work cumulative work.
+        // Put the claim in headers[4] of a 6-header chain (only 2 post-claim confirmations:
+        // headers[4] and headers[5], with challenge_blocks = 1).
+        anchor.challenge_blocks = 1;
+        bundle.claim_header_index = 4;
+        bundle.claim.claim_pow_height = ANCHOR_HEIGHT + 5;
+        let d = bundle.claim.signing_digest(NET);
+        bundle.claim.operator_ed25519_sig = op_ed.sign(&d).to_vec();
+        bundle.claim.operator_pq_sig = op_pq.sign(ctx::CROSS_DOMAIN_V1, &d).expect("pq sign");
+        let txid = sha256d(&bundle.claim.covenant_tx_bytes(NET));
+        let mut pair = [0u8; 64];
+        let (left_half, right_half) = pair.split_at_mut(32);
+        left_half.copy_from_slice(&txid);
+        right_half.copy_from_slice(&bundle.spv_merkle_proof.first().expect("step 0").sibling);
+        let claim_merkle_root = sha256d(&pair);
+        let mut headers = Vec::with_capacity(6);
+        let mut prev_block = anchor.block_hash;
+        for idx in 0u32..6 {
+            let mrk = if idx == 4 {
+                claim_merkle_root
+            } else {
+                [u8::try_from(idx + 0x20).unwrap_or(0x20); 32]
+            };
+            let hdr = mine_header(prev_block, mrk, 1_700_000_000 + idx * 600, REGTEST_BITS);
+            prev_block = sha256d(&hdr);
+            headers.push(hdr);
+        }
+        bundle.headers = headers;
+        let mut late_raw = raw.clone();
+        late_raw.declared_height = bundle.claim.claim_pow_height;
+        late_raw.payload = encode_bitvm_evidence(&bundle);
+        let shallow_adapter = BitVmCovenantAdapter::new(NET, Some(anchor.clone()));
+        let mut six_conf_policy = pow_policy();
+        six_conf_policy.min_depth = 6;
+        assert!(
+            matches!(
+                shallow_adapter.verify(&late_raw, &six_conf_policy),
+                Err(AdapterError::InsufficientDepth {
+                    observed: 2,
+                    required: 6
+                })
+            ),
+            "4 pre-claim historical blocks must not count toward 6 post-claim confirmations"
+        );
+
+        // 3. Empty/whitespace network must be refused.
+        let blank_adapter = BitVmCovenantAdapter::new("  ", Some(anchor));
+        let mut blank_raw = raw;
+        blank_raw.adapter = blank_adapter.descriptor().id;
+        blank_raw.network = "  ".to_string();
+        assert!(matches!(
+            blank_adapter.verify(&blank_raw, &pow_policy()),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
     }
 }
