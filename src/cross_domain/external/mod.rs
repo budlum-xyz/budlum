@@ -218,6 +218,7 @@ pub use evm_hybrid::{
 };
 pub use external_tx::{
     execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext, ExternalDomainTxError,
+    ObjectiveFaultProof,
 };
 pub use ghostdag::{
     encode_ghostdag_evidence, GhostdagEvidence, GhostdagHeader, GhostdagPowAdapter,

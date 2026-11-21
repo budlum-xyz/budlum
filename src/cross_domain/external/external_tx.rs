@@ -85,8 +85,37 @@ pub enum ExternalDomainTx {
     /// past, by supplying the successor proof that descends from a different
     /// parent. The successor's own adapter verifies it; the predecessor it
     /// contradicts is found from the accepted book at `height - 1`.
-    /// APPENDED LAST (tag `7`).
+    /// APPENDED (tag `7`).
     ChallengeAncestry(Box<RawConsensusEvidence>),
+    /// Submit an objective cryptographic protocol equivocation or `BitVM2`
+    /// single-step `DisproveScript` fraud proof against a serving external
+    /// domain (`HotStuffQc`, `CasperFfg`, `MysticetiDag`, or `BitVmCovenant`),
+    /// atomically recording an adverse round and freezing the domain
+    /// (`DomainState::Faulted`). APPENDED LAST (tag `8`).
+    SubmitFaultProof {
+        domain: DomainKey,
+        proof: ObjectiveFaultProof,
+    },
+}
+
+/// Objective protocol-level cryptographic equivocation or single-step fraud
+/// proof carried by [`ExternalDomainTx::SubmitFaultProof`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObjectiveFaultProof {
+    /// Double-vote equivocation in the same `(epoch, view)` for an
+    /// `AdapterSpec::HotStuffQc` domain.
+    HotStuffEquivocation(Box<crate::cross_domain::external::hotstuff::HotStuffEquivocationProof>),
+    /// Rule-1 (double-vote) or Rule-2 (surround-vote) equivocation for an
+    /// `AdapterSpec::CasperFfg` domain.
+    CasperFfgEquivocation(Box<crate::cross_domain::external::casper_ffg::FfgEquivocationProof>),
+    /// Same-round conflicting vertex equivocation for an
+    /// `AdapterSpec::MysticetiDag` domain.
+    MysticetiEquivocation(
+        Box<crate::cross_domain::external::mysticeti_dag::MysticetiEquivocationProof>,
+    ),
+    /// Single-step `DisproveScript` execution fraud proof for an
+    /// `AdapterSpec::BitVmCovenant` domain.
+    BitVmDisprove(Box<crate::cross_domain::external::bitvm_covenant::DisproveScriptProof>),
 }
 
 /// What the executor hands the door: the signer, the chain, the fee the
@@ -175,7 +204,8 @@ fn uses_ethereum_sync(state: &AccountState, tx: &ExternalDomainTx) -> bool {
         ExternalDomainTx::BondProver { domain, .. }
         | ExternalDomainTx::Readmit { domain, .. }
         | ExternalDomainTx::ScheduleFork { domain, .. }
-        | ExternalDomainTx::SetQuorumPolicy { domain, .. } => entry_is_sync(domain),
+        | ExternalDomainTx::SetQuorumPolicy { domain, .. }
+        | ExternalDomainTx::SubmitFaultProof { domain, .. } => entry_is_sync(domain),
     }
 }
 
@@ -239,6 +269,9 @@ pub fn execute_external_domain_tx(
             challenge_contradiction(state, ctx, evidence)
         }
         ExternalDomainTx::ChallengeAncestry(evidence) => challenge_ancestry(state, ctx, evidence),
+        ExternalDomainTx::SubmitFaultProof { domain, proof } => {
+            submit_fault_proof(state, domain, proof)
+        }
     }
 }
 
@@ -610,6 +643,29 @@ fn schedule_fork(
     intake
         .set_version_policy(domain, versions)
         .map_err(ExternalDomainTxError::Fork)
+}
+
+fn submit_fault_proof(
+    state: &mut AccountState,
+    domain: &DomainKey,
+    proof: &ObjectiveFaultProof,
+) -> Result<(), ExternalDomainTxError> {
+    let intake = &mut state.settlement.external_intake;
+    match proof {
+        ObjectiveFaultProof::HotStuffEquivocation(hs) => intake
+            .adjudicate_hotstuff_equivocation(domain, hs)
+            .map(|_| ()),
+        ObjectiveFaultProof::CasperFfgEquivocation(ffg) => intake
+            .adjudicate_casper_ffg_equivocation(domain, ffg)
+            .map(|_| ()),
+        ObjectiveFaultProof::MysticetiEquivocation(my) => intake
+            .adjudicate_mysticeti_equivocation(domain, my)
+            .map(|_| ()),
+        ObjectiveFaultProof::BitVmDisprove(bv) => {
+            intake.adjudicate_bitvm_disprove(domain, bv).map(|_| ())
+        }
+    }
+    .map_err(ExternalDomainTxError::from)
 }
 
 #[cfg(test)]
@@ -1281,5 +1337,555 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn submit_fault_proof_freezes_hotstuff_casper_mysticeti_bitvm_and_rejects_replay() {
+        use crate::crypto::primitives::{KeyPair, PqKeyPair};
+
+        let mut state = AccountState::new();
+        state.settlement.external_intake.on_block_committed(50);
+        let poster = addr(21);
+        state.add_balance(&poster, 50_000_000);
+        let challenger = addr(22);
+
+        let mut non_slash = VerificationPolicy::strict(0);
+        non_slash.require_slashable = false;
+        let econ = IntakeState::conservative_economics(1_000);
+        let ed = KeyPair::from_seed(&[0x51; 32]).expect("ed");
+        let pq = PqKeyPair::generate();
+
+        let (hs_key, hs_proof) =
+            check_hotstuff_fault_tx(&mut state, poster, challenger, &non_slash, econ);
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: hs_key,
+                proof: ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_proof.clone())),
+            },
+        )
+        .is_err());
+        check_casper_fault_tx(
+            &mut state,
+            (poster, challenger),
+            &non_slash,
+            econ,
+            &ed,
+            &pq,
+            hs_proof,
+        );
+        check_mysticeti_fault_tx(&mut state, (poster, challenger), &non_slash, econ, &ed, &pq);
+        check_bitvm_fault_tx(&mut state, (poster, challenger), &non_slash, econ, &ed, &pq);
+    }
+
+    fn check_hotstuff_fault_tx(
+        state: &mut AccountState,
+        poster: Address,
+        challenger: Address,
+        non_slash: &VerificationPolicy,
+        econ: crate::cross_domain::external::DomainEconomics,
+    ) -> (
+        DomainKey,
+        crate::cross_domain::external::hotstuff::HotStuffEquivocationProof,
+    ) {
+        use crate::cross_domain::external::hotstuff::{
+            hotstuff_fault_test_fixture, sign_hotstuff_equivocation_proof,
+        };
+
+        let hs_net = "aptos-hotstuff-tx";
+        let (hs_committee, hs_keys, hs_golden) = hotstuff_fault_test_fixture(hs_net, 7, poster);
+        state
+            .settlement
+            .external_intake
+            .pin_hotstuff_committee(hs_net, hs_committee.clone());
+        let hs_spec = AdapterSpec::HotStuffQc {
+            network: hs_net.to_string(),
+            committee: Some(hs_committee),
+        };
+        let hs_adapter = hs_spec.build(None, None);
+        let ver = hs_adapter
+            .descriptor()
+            .accepted_evidence_versions
+            .first()
+            .copied()
+            .unwrap_or(1);
+        execute_external_domain_tx(
+            state,
+            &ctx(poster),
+            &ExternalDomainTx::Register(Box::new(RegistrationRequest {
+                spec: hs_spec,
+                policy: non_slash.clone(),
+                economics: econ,
+                versions: VersionPolicy::single(hs_adapter.descriptor().id, ver, 0),
+                golden: hs_golden,
+                bond_atoms: econ.required_bond_atoms(),
+                poster,
+            })),
+        )
+        .expect("register hotstuff");
+        let hs_key = DomainKey::from_parts(&hs_adapter.descriptor().id, hs_net);
+
+        let Some((hs_ed, hs_pq)) = hs_keys.first() else {
+            panic!("missing hotstuff fixture key");
+        };
+        let hs_proof =
+            sign_hotstuff_equivocation_proof(hs_net, 7, 45, [0xA1; 32], [0xB2; 32], hs_ed, hs_pq);
+        let mut mainnet_ctx = ctx(challenger);
+        mainnet_ctx.chain_id = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let bad_tx = |proof| ExternalDomainTx::SubmitFaultProof {
+            domain: hs_key,
+            proof: ObjectiveFaultProof::HotStuffEquivocation(Box::new(proof)),
+        };
+        assert!(matches!(
+            execute_external_domain_tx(state, &mainnet_ctx, &bad_tx(hs_proof.clone())),
+            Err(ExternalDomainTxError::MainnetDisabled)
+        ));
+        let mut forged_hs = hs_proof.clone();
+        forged_hs.vote_a.pq_sig.clear();
+        assert!(execute_external_domain_tx(state, &ctx(challenger), &bad_tx(forged_hs)).is_err());
+        assert_eq!(
+            state
+                .settlement
+                .external_intake
+                .registry
+                .domain(&hs_key)
+                .expect("hs")
+                .record
+                .state,
+            DomainState::Admitted
+        );
+        execute_external_domain_tx(state, &ctx(challenger), &bad_tx(hs_proof.clone()))
+            .expect("hotstuff SubmitFaultProof");
+        assert_eq!(
+            state
+                .settlement
+                .external_intake
+                .registry
+                .domain(&hs_key)
+                .expect("hs")
+                .record
+                .state,
+            DomainState::Faulted
+        );
+        assert!(
+            execute_external_domain_tx(state, &ctx(challenger), &bad_tx(hs_proof.clone())).is_err()
+        );
+        (hs_key, hs_proof)
+    }
+
+    fn register_fault_test_domain(
+        state: &mut AccountState,
+        spec: AdapterSpec,
+        policy: &VerificationPolicy,
+        econ: crate::cross_domain::external::DomainEconomics,
+        golden: RawConsensusEvidence,
+        poster: Address,
+    ) -> DomainKey {
+        let adapter_id = golden.adapter;
+        let ver = golden.evidence_version;
+        let net = golden.network.clone();
+        let req = RegistrationRequest {
+            spec,
+            policy: policy.clone(),
+            economics: econ,
+            versions: VersionPolicy::single(adapter_id, ver, 0),
+            golden,
+            bond_atoms: econ.required_bond_atoms(),
+            poster,
+        };
+        execute_external_domain_tx(
+            state,
+            &ctx(poster),
+            &ExternalDomainTx::Register(Box::new(req)),
+        )
+        .expect("register fault test domain");
+        DomainKey::from_parts(&adapter_id, &net)
+    }
+
+    fn assert_fault_domain_state(state: &AccountState, key: &DomainKey, expected: DomainState) {
+        assert_eq!(
+            state
+                .settlement
+                .external_intake
+                .registry
+                .domain(key)
+                .expect("domain")
+                .record
+                .state,
+            expected
+        );
+    }
+
+    fn check_casper_fault_tx(
+        state: &mut AccountState,
+        (poster, challenger): (Address, Address),
+        non_slash: &VerificationPolicy,
+        econ: crate::cross_domain::external::DomainEconomics,
+        ed: &crate::crypto::primitives::KeyPair,
+        pq: &crate::crypto::primitives::PqKeyPair,
+        hs_proof: crate::cross_domain::external::hotstuff::HotStuffEquivocationProof,
+    ) {
+        use crate::cross_domain::external::casper_ffg::{
+            encode_ffg_payload, FfgEquivocationProof, FfgValidator, FfgVote, PinnedFfgCommittee,
+            CASPER_FFG_ADAPTER_NAME, FFG_EVIDENCE_VERSION,
+        };
+        use crate::cross_domain::external::spec::AdapterId;
+        use crate::crypto::ctx;
+
+        let pub_ed = ed.public_key_bytes();
+        let ffg_net = "eth-ffg-tx";
+        let ffg_committee = PinnedFfgCommittee::new(
+            10,
+            vec![FfgValidator {
+                pubkey: pub_ed,
+                stake: 1_000,
+                pq_pubkey: pq.public_key_bytes().to_vec(),
+            }],
+        )
+        .expect("ffg committee");
+        state
+            .settlement
+            .external_intake
+            .pin_casper_ffg_committee(ffg_net, ffg_committee.clone());
+        let sign_ffg = |se: u64, sr: [u8; 32], te: u64, tr: [u8; 32]| -> FfgVote {
+            let mut v = FfgVote {
+                signer: pub_ed,
+                source_epoch: se,
+                source_root: sr,
+                target_epoch: te,
+                target_root: tr,
+                signature: Vec::new(),
+                pq_signature: Vec::new(),
+            };
+            let d = v.digest(ffg_net);
+            v.signature = ed.sign(&d).to_vec();
+            v.pq_signature = pq.sign(ctx::CROSS_DOMAIN_V1, &d).expect("pq");
+            v
+        };
+        let fv1 = sign_ffg(8, [0x11; 32], 9, [0x21; 32]);
+        let fv2 = sign_ffg(9, [0x21; 32], 10, [0x31; 32]);
+        let ffg_id = AdapterId::from_name(CASPER_FFG_ADAPTER_NAME);
+        let payload = encode_ffg_payload(
+            9,
+            [0x21; 32],
+            [0x11; 32],
+            10,
+            [0x31; 32],
+            std::slice::from_ref(&fv1),
+            &[fv2],
+        );
+        let ffg_key = register_fault_test_domain(
+            state,
+            AdapterSpec::CasperFfg {
+                network: ffg_net.to_string(),
+                committee: Some(ffg_committee),
+            },
+            non_slash,
+            econ,
+            RawConsensusEvidence {
+                adapter: ffg_id,
+                evidence_version: FFG_EVIDENCE_VERSION,
+                network: ffg_net.to_string(),
+                payload,
+                declared_height: 10,
+                declared_root: [0x31; 32],
+                submitter: poster,
+            },
+            poster,
+        );
+        let wrong = ExternalDomainTx::SubmitFaultProof {
+            domain: ffg_key,
+            proof: ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_proof)),
+        };
+        assert!(execute_external_domain_tx(state, &ctx(challenger), &wrong).is_err());
+        assert_fault_domain_state(state, &ffg_key, DomainState::Admitted);
+        let ffg_proof = FfgEquivocationProof {
+            vote_a: sign_ffg(7, [0x17; 32], 10, [0x98; 32]),
+            vote_b: fv1,
+        };
+        let ok_tx = ExternalDomainTx::SubmitFaultProof {
+            domain: ffg_key,
+            proof: ObjectiveFaultProof::CasperFfgEquivocation(Box::new(ffg_proof)),
+        };
+        execute_external_domain_tx(state, &ctx(challenger), &ok_tx)
+            .expect("casper SubmitFaultProof");
+        assert_fault_domain_state(state, &ffg_key, DomainState::Faulted);
+    }
+
+    fn check_mysticeti_fault_tx(
+        state: &mut AccountState,
+        (poster, challenger): (Address, Address),
+        non_slash: &VerificationPolicy,
+        econ: crate::cross_domain::external::DomainEconomics,
+        ed: &crate::crypto::primitives::KeyPair,
+        pq: &crate::crypto::primitives::PqKeyPair,
+    ) {
+        use crate::cross_domain::external::mysticeti_dag::{
+            encode_mysticeti_evidence, MysticetiAnchorCommitment, MysticetiEquivocationProof,
+            MysticetiMember, MysticetiVertex, MysticetiWaveEvidence, PinnedMysticetiCommittee,
+            MYSTICETI_DAG_ADAPTER_NAME, MYSTICETI_EVIDENCE_VERSION,
+        };
+        use crate::cross_domain::external::spec::AdapterId;
+        use crate::crypto::ctx;
+
+        let pub_ed = ed.public_key_bytes();
+        let my_net = "sui-mysticeti-tx";
+        let my_committee = PinnedMysticetiCommittee::new(
+            4,
+            vec![MysticetiMember {
+                ed25519_pubkey: pub_ed,
+                voting_weight: 100,
+                pq_pubkey: pq.public_key_bytes().to_vec(),
+            }],
+        )
+        .expect("mysticeti committee");
+        state
+            .settlement
+            .external_intake
+            .pin_mysticeti_committee(my_net, my_committee.clone());
+        let sign_my = |round: u64, payload_digest: [u8; 32], parents: Vec<[u8; 32]>| {
+            let mut v = MysticetiVertex {
+                author: pub_ed,
+                epoch: 4,
+                round,
+                payload_digest,
+                parents,
+                ed25519_sig: Vec::new(),
+                pq_sig: Vec::new(),
+            };
+            let d = v.digest(my_net);
+            v.ed25519_sig = ed.sign(&d).to_vec();
+            v.pq_sig = pq.sign(ctx::CROSS_DOMAIN_V1, &d).expect("pq");
+            v
+        };
+        let commit = MysticetiAnchorCommitment {
+            state_root: [0x61; 32],
+            tx_root: [0x62; 32],
+            event_root: [0x63; 32],
+            block_hash: [0x44; 32],
+            parent_anchor_digest: [0x31; 32],
+        };
+        let anchor_v = sign_my(10, commit.digest(), vec![commit.parent_anchor_digest]);
+        let wave1_v = sign_my(11, [0x42; 32], vec![anchor_v.digest(my_net)]);
+        let wave2_v = sign_my(12, [0x43; 32], vec![wave1_v.digest(my_net)]);
+        let my_id = AdapterId::from_name(MYSTICETI_DAG_ADAPTER_NAME);
+        let payload = encode_mysticeti_evidence(&MysticetiWaveEvidence {
+            commitment: commit.clone(),
+            anchor: anchor_v.clone(),
+            voting_vertices: vec![wave1_v],
+            decision_vertices: vec![wave2_v],
+        });
+        let my_key = register_fault_test_domain(
+            state,
+            AdapterSpec::MysticetiDag {
+                network: my_net.to_string(),
+                committee: Some(my_committee),
+            },
+            non_slash,
+            econ,
+            RawConsensusEvidence {
+                adapter: my_id,
+                evidence_version: MYSTICETI_EVIDENCE_VERSION,
+                network: my_net.to_string(),
+                payload,
+                declared_height: 10,
+                declared_root: commit.state_root,
+                submitter: poster,
+            },
+            poster,
+        );
+        let my_fork = sign_my(10, [0xEE; 32], vec![commit.parent_anchor_digest]);
+        let proof =
+            ObjectiveFaultProof::MysticetiEquivocation(Box::new(MysticetiEquivocationProof {
+                vertex_a: anchor_v,
+                vertex_b: my_fork,
+            }));
+        let tx = ExternalDomainTx::SubmitFaultProof {
+            domain: my_key,
+            proof,
+        };
+        execute_external_domain_tx(state, &ctx(challenger), &tx)
+            .expect("mysticeti SubmitFaultProof");
+        assert_fault_domain_state(state, &my_key, DomainState::Faulted);
+    }
+
+    fn build_bitvm_disprove_proof(
+        bv_net: &str,
+        claim: crate::cross_domain::external::bitvm_covenant::BitVmPegClaim,
+        chunk: crate::cross_domain::external::bitvm_covenant::TraceChunkStep,
+        sib: [u8; 32],
+        ed: &crate::crypto::primitives::KeyPair,
+        pq: &crate::crypto::primitives::PqKeyPair,
+    ) -> ObjectiveFaultProof {
+        use crate::cross_domain::external::bitvm_covenant::{
+            hash_trace_merkle_node, BitVmPegClaim, DisproveScriptProof, MerkleStep, TraceChunkStep,
+        };
+        use crate::crypto::ctx;
+
+        let bad_chunk = TraceChunkStep {
+            claimed_post_state: [0xFE; 32],
+            ..chunk
+        };
+        let mut bad_claim = BitVmPegClaim {
+            state_root: [0xFE; 32],
+            trace_merkle_root: hash_trace_merkle_node(&bad_chunk.leaf_digest(), &sib),
+            ..claim
+        };
+        let bad_digest = bad_claim.signing_digest(bv_net);
+        bad_claim.operator_ed25519_sig = ed.sign(&bad_digest).to_vec();
+        bad_claim.operator_pq_sig = pq.sign(ctx::CROSS_DOMAIN_V1, &bad_digest).expect("pq");
+        ObjectiveFaultProof::BitVmDisprove(Box::new(DisproveScriptProof {
+            claim: bad_claim,
+            disputed_chunk: bad_chunk,
+            trace_merkle_proof: vec![MerkleStep {
+                sibling: sib,
+                sibling_is_left: false,
+            }],
+        }))
+    }
+
+    fn check_bitvm_fault_tx(
+        state: &mut AccountState,
+        (poster, challenger): (Address, Address),
+        non_slash: &VerificationPolicy,
+        econ: crate::cross_domain::external::DomainEconomics,
+        ed: &crate::crypto::primitives::KeyPair,
+        pq: &crate::crypto::primitives::PqKeyPair,
+    ) {
+        use crate::cross_domain::external::bitvm_covenant::{
+            encode_bitvm_evidence, evaluate_chunk_transition, hash_trace_merkle_node,
+            BitVmCovenantEvidence, BitVmPegClaim, PinnedBitVmAnchor, TraceChunkStep,
+            BITVM_COVENANT_ADAPTER_NAME, BITVM_EVIDENCE_VERSION,
+        };
+        use crate::cross_domain::external::spec::AdapterId;
+        use crate::crypto::ctx;
+
+        let bv_net = "btc-bitvm2-tx";
+        let (bits, prog) = (0x207f_ffffu32, [0x77; 32]);
+        let bv_anchor = PinnedBitVmAnchor {
+            height: 50,
+            block_hash: [0x12; 32],
+            bits,
+            program_hash: prog,
+            min_pow_confirmations: 6,
+            challenge_blocks: 4,
+            operator_ed25519_pubkey: ed.public_key_bytes(),
+            operator_pq_pubkey: pq.public_key_bytes().to_vec(),
+        };
+        state
+            .settlement
+            .external_intake
+            .pin_bitvm_anchor(bv_net, bv_anchor.clone());
+        let (pre, wit, sib) = ([0x81; 32], [0x82; 32], [0x83; 32]);
+        let post = evaluate_chunk_transition(&prog, 0, &pre, 3, &wit);
+        let chunk = TraceChunkStep {
+            chunk_index: 0,
+            pre_state: pre,
+            claimed_post_state: post,
+            step_opcode: 3,
+            step_witness: wit,
+        };
+        let mut claim = BitVmPegClaim {
+            state_root: post,
+            tx_root: [0x84; 32],
+            event_root: [0x85; 32],
+            program_hash: prog,
+            trace_merkle_root: hash_trace_merkle_node(&chunk.leaf_digest(), &sib),
+            trace_chunk_count: 2,
+            claim_pow_height: 51,
+            operator_ed25519_sig: Vec::new(),
+            operator_pq_sig: Vec::new(),
+        };
+        let claim_digest = claim.signing_digest(bv_net);
+        claim.operator_ed25519_sig = ed.sign(&claim_digest).to_vec();
+        claim.operator_pq_sig = pq.sign(ctx::CROSS_DOMAIN_V1, &claim_digest).expect("pq");
+        let headers = mine_bitvm_headers(bv_anchor.block_hash, bits, &claim, bv_net);
+        let bv_id = AdapterId::from_name(BITVM_COVENANT_ADAPTER_NAME);
+        let payload = encode_bitvm_evidence(&BitVmCovenantEvidence {
+            headers,
+            claim_header_index: 0,
+            spv_merkle_proof: Vec::new(),
+            claim: claim.clone(),
+        });
+        let bv_key = register_fault_test_domain(
+            state,
+            AdapterSpec::BitVmCovenant {
+                network: bv_net.to_string(),
+                anchor: Some(bv_anchor),
+            },
+            non_slash,
+            econ,
+            RawConsensusEvidence {
+                adapter: bv_id,
+                evidence_version: BITVM_EVIDENCE_VERSION,
+                network: bv_net.to_string(),
+                payload,
+                declared_height: 51,
+                declared_root: post,
+                submitter: poster,
+            },
+            poster,
+        );
+        let proof = build_bitvm_disprove_proof(bv_net, claim, chunk, sib, ed, pq);
+        execute_external_domain_tx(
+            state,
+            &ctx(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: bv_key,
+                proof,
+            },
+        )
+        .expect("bitvm SubmitFaultProof");
+        assert_fault_domain_state(state, &bv_key, DomainState::Faulted);
+    }
+
+    fn mine_bitvm_headers(
+        anchor_hash: [u8; 32],
+        bits: u32,
+        claim: &crate::cross_domain::external::bitvm_covenant::BitVmPegClaim,
+        bv_net: &str,
+    ) -> Vec<[u8; crate::cross_domain::external::bitvm_covenant::POW_HEADER_LEN]> {
+        use crate::cross_domain::external::bitcoin_spv::sha256d;
+        use crate::cross_domain::external::bitvm_covenant::{expand_compact_bits, POW_HEADER_LEN};
+        let txid = sha256d(&claim.covenant_tx_bytes(bv_net));
+        let target = expand_compact_bits(bits).expect("target");
+        let mine = |prev: [u8; 32], mr: [u8; 32], ts: u32| -> [u8; POW_HEADER_LEN] {
+            for nonce in 0u32..50_000 {
+                let mut hdr = [0u8; POW_HEADER_LEN];
+                let (ver_slot, rem1) = hdr.split_at_mut(4);
+                ver_slot.copy_from_slice(&0x2000_0000u32.to_le_bytes());
+                let (prev_slot, rem2) = rem1.split_at_mut(32);
+                prev_slot.copy_from_slice(&prev);
+                let (mr_slot, rem3) = rem2.split_at_mut(32);
+                mr_slot.copy_from_slice(&mr);
+                let (time_slot, rem4) = rem3.split_at_mut(4);
+                time_slot.copy_from_slice(&ts.to_le_bytes());
+                let (bits_slot, nonce_slot) = rem4.split_at_mut(4);
+                bits_slot.copy_from_slice(&bits.to_le_bytes());
+                nonce_slot.copy_from_slice(&nonce.to_le_bytes());
+                let mut be = sha256d(&hdr);
+                be.reverse();
+                if be <= target {
+                    return hdr;
+                }
+            }
+            panic!("mine failed");
+        };
+        let mut headers = Vec::new();
+        let mut prev = anchor_hash;
+        for idx in 0u32..6 {
+            let mr = if idx == 0 {
+                txid
+            } else {
+                [0x90u8.saturating_add(u8::try_from(idx).unwrap_or(0)); 32]
+            };
+            let hdr = mine(prev, mr, 1_700_000_000 + idx * 600);
+            prev = sha256d(&hdr);
+            headers.push(hdr);
+        }
+        headers
     }
 }

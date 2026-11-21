@@ -1,14 +1,16 @@
-//! WIRING: unwired - `HotStuff` pacemaker timeout-certificate and double-vote
-//! equivocation verifiers await the governance-gated external slashing intake door.
+//! WIRING: unwired - `HotStuff` pacemaker timeout-certificate verifier
+//! (`verify_hotstuff_timeout_certificate`) awaits its pacemaker view-change intake
+//! door; double-vote equivocation (`verify_hotstuff_equivocation`) is wired via
+//! `IntakeState::adjudicate_hotstuff_equivocation` and `ExternalDomainTx::SubmitFaultProof`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use super::{
-    hotstuff_timeout_sign_bytes, hotstuff_vote_sign_bytes, HotStuffTimeoutCertificate,
-    HotStuffVoteSig, PinnedHotStuffCommittee, MAX_HOTSTUFF_COMMITTEE,
+    hotstuff_timeout_sign_bytes, hotstuff_vote_sign_bytes, validate_pinned_committee,
+    HotStuffTimeoutCertificate, HotStuffVoteSig, PinnedHotStuffCommittee,
 };
 use crate::cross_domain::external::spec::AdapterError;
 
@@ -17,9 +19,9 @@ use crate::cross_domain::external::spec::AdapterError;
 ///
 /// # Errors
 ///
-/// Returns [`AdapterError`] if epoch, view, committee bounds, signer
-/// uniqueness, Ed25519 or ML-DSA-65 signatures, `max_high_qc_view`, or the
-/// strict 2/3 stake threshold fail.
+/// Returns [`AdapterError`] if `network` is blank, epoch, view, committee bounds,
+/// signer uniqueness, Ed25519 or ML-DSA-65 signatures, `max_high_qc_view`, or
+/// the strict 2/3 stake threshold fail.
 ///
 /// Convenience: exposed for `HotStuff` view-change safety auditing and bridges.
 pub fn verify_hotstuff_timeout_certificate(
@@ -27,6 +29,11 @@ pub fn verify_hotstuff_timeout_certificate(
     pinned: &PinnedHotStuffCommittee,
     tc: &HotStuffTimeoutCertificate,
 ) -> Result<(u64, u128, bool), AdapterError> {
+    if network.trim().is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff network identifier must not be empty".into(),
+        });
+    }
     if tc.epoch != pinned.epoch {
         return Err(AdapterError::ConsensusRule {
             rule: "HotStuff TC epoch mismatches pinned committee epoch".into(),
@@ -37,34 +44,11 @@ pub fn verify_hotstuff_timeout_certificate(
             rule: "HotStuff TC view must be non-zero".into(),
         });
     }
-    if pinned.members.is_empty() || pinned.members.len() > MAX_HOTSTUFF_COMMITTEE {
-        return Err(AdapterError::ConsensusRule {
-            rule: "HotStuff committee size outside valid bounds".into(),
-        });
-    }
+    let (member_map, total_stake) = validate_pinned_committee(pinned)?;
     if tc.votes.is_empty() || tc.votes.len() > pinned.members.len() {
         return Err(AdapterError::ConsensusRule {
             rule: "HotStuff TC vote count outside [1, committee.len()]".into(),
         });
-    }
-    let mut member_map = BTreeMap::new();
-    let mut total_stake = 0u128;
-    for m in &pinned.members {
-        if m.ed25519_pubkey == [0u8; 32] || m.voting_weight == 0 {
-            return Err(AdapterError::ConsensusRule {
-                rule: "HotStuff committee contains zero pubkey or zero weight".into(),
-            });
-        }
-        if member_map.insert(m.ed25519_pubkey, m).is_some() {
-            return Err(AdapterError::ConsensusRule {
-                rule: "HotStuff committee contains duplicate pubkey".into(),
-            });
-        }
-        total_stake = total_stake
-            .checked_add(u128::from(m.voting_weight))
-            .ok_or_else(|| AdapterError::ConsensusRule {
-                rule: "HotStuff committee total stake overflows u128".into(),
-            })?;
     }
 
     let mut seen = BTreeSet::new();
@@ -160,9 +144,10 @@ pub struct HotStuffEquivocationProof {
 ///
 /// # Errors
 ///
-/// Returns [`AdapterError`] if the proof epoch mismatches `pinned`, block
-/// hashes are zero or equal, votes are from different or unknown signers, or
-/// any Ed25519 or ML-DSA-65 signature check fails.
+/// Returns [`AdapterError`] if `network` is blank, the committee violates
+/// bounds/uniqueness, the proof epoch mismatches `pinned`, block hashes are
+/// zero or equal, votes are from different or unknown signers, or any Ed25519
+/// or ML-DSA-65 signature check fails.
 ///
 /// Convenience: exposed for `HotStuff` slashing and `ConsensusSentry` freeze hooks.
 pub fn verify_hotstuff_equivocation(
@@ -170,6 +155,11 @@ pub fn verify_hotstuff_equivocation(
     pinned: &PinnedHotStuffCommittee,
     proof: &HotStuffEquivocationProof,
 ) -> Result<([u8; 32], u64), AdapterError> {
+    if network.trim().is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff network identifier must not be empty".into(),
+        });
+    }
     if proof.epoch != pinned.epoch {
         return Err(AdapterError::ConsensusRule {
             rule: "HotStuff equivocation proof epoch mismatches pinned committee".into(),
@@ -195,18 +185,13 @@ pub fn verify_hotstuff_equivocation(
             rule: "HotStuff equivocation votes belong to different validators".into(),
         });
     }
-    let member = pinned
-        .members
-        .iter()
-        .find(|m| bool::from(m.ed25519_pubkey.ct_eq(&proof.vote_a.signer_pubkey)))
+    let (member_map, _total_stake) = validate_pinned_committee(pinned)?;
+    let member = member_map
+        .get(&proof.vote_a.signer_pubkey)
+        .copied()
         .ok_or_else(|| AdapterError::ConsensusRule {
             rule: "HotStuff equivocation signer is not in pinned committee".into(),
         })?;
-    if member.ed25519_pubkey == [0u8; 32] || member.voting_weight == 0 {
-        return Err(AdapterError::ConsensusRule {
-            rule: "HotStuff equivocation committee record has zero key or weight".into(),
-        });
-    }
 
     for (blk_hash, vote) in [
         (&proof.block_hash_a, &proof.vote_a),
@@ -241,4 +226,208 @@ pub fn verify_hotstuff_equivocation(
     }
 
     Ok((member.ed25519_pubkey, member.voting_weight))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{HotStuffTimeoutVote, HotStuffValidator, MAX_HOTSTUFF_COMMITTEE};
+    use super::*;
+    use crate::crypto::ctx;
+    use crate::crypto::primitives::{KeyPair, PqKeyPair};
+
+    #[test]
+    fn hotstuff_faults_reject_duplicate_committee_pubkeys_and_empty_network() {
+        let ed = KeyPair::from_seed(&[0x41; 32]).expect("ed");
+        let pq = PqKeyPair::generate();
+        let pub_ed = ed.public_key_bytes();
+        let pub_pq = pq.public_key_bytes().to_vec();
+
+        // Duplicate ed25519_pubkey with classical-only row preceding PQ-enrolled row must be rejected.
+        let dup_committee = PinnedHotStuffCommittee {
+            epoch: 7,
+            members: vec![
+                HotStuffValidator {
+                    ed25519_pubkey: pub_ed,
+                    voting_weight: 100,
+                    pq_pubkey: Vec::new(),
+                },
+                HotStuffValidator {
+                    ed25519_pubkey: pub_ed,
+                    voting_weight: 100,
+                    pq_pubkey: pub_pq.clone(),
+                },
+            ],
+        };
+        let ma = hotstuff_vote_sign_bytes("aptos-jolteon-1", 7, 12, &[0xAA; 32]);
+        let mb = hotstuff_vote_sign_bytes("aptos-jolteon-1", 7, 12, &[0xBB; 32]);
+        let classical_eq = HotStuffEquivocationProof {
+            epoch: 7,
+            view: 12,
+            block_hash_a: [0xAA; 32],
+            block_hash_b: [0xBB; 32],
+            vote_a: HotStuffVoteSig {
+                signer_pubkey: pub_ed,
+                ed25519_sig: ed.sign(&ma).to_vec(),
+                pq_sig: Vec::new(),
+            },
+            vote_b: HotStuffVoteSig {
+                signer_pubkey: pub_ed,
+                ed25519_sig: ed.sign(&mb).to_vec(),
+                pq_sig: Vec::new(),
+            },
+        };
+        assert!(matches!(
+            verify_hotstuff_equivocation("aptos-jolteon-1", &dup_committee, &classical_eq),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("duplicate")
+        ));
+
+        let mtc = hotstuff_timeout_sign_bytes("aptos-jolteon-1", 7, 15, 14);
+        let classical_tc = HotStuffTimeoutCertificate {
+            epoch: 7,
+            view: 15,
+            max_high_qc_view: 14,
+            votes: vec![HotStuffTimeoutVote {
+                signer_pubkey: pub_ed,
+                high_qc_view: 14,
+                ed25519_sig: ed.sign(&mtc).to_vec(),
+                pq_sig: Vec::new(),
+            }],
+        };
+        assert!(matches!(
+            verify_hotstuff_timeout_certificate("aptos-jolteon-1", &dup_committee, &classical_tc),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("duplicate")
+        ));
+
+        assert_blank_network_and_bad_pq_rejected(&ed, &pq, pub_ed, pub_pq);
+        assert_committee_bounds_rejected(&classical_eq, &classical_tc, pub_ed);
+    }
+
+    fn assert_committee_bounds_rejected(
+        classical_eq: &HotStuffEquivocationProof,
+        classical_tc: &HotStuffTimeoutCertificate,
+        pub_ed: [u8; 32],
+    ) {
+        let oversized = PinnedHotStuffCommittee {
+            epoch: 7,
+            members: (0..=MAX_HOTSTUFF_COMMITTEE)
+                .map(|i| {
+                    let mut pk = [0u8; 32];
+                    pk[..8].copy_from_slice(&(i as u64 + 1).to_le_bytes());
+                    HotStuffValidator {
+                        ed25519_pubkey: pk,
+                        voting_weight: 1,
+                        pq_pubkey: Vec::new(),
+                    }
+                })
+                .collect(),
+        };
+        assert!(verify_hotstuff_equivocation("aptos-jolteon-1", &oversized, classical_eq).is_err());
+
+        let ed2 = KeyPair::from_seed(&[0x42; 32]).expect("ed2");
+        let overflow_committee = PinnedHotStuffCommittee {
+            epoch: 7,
+            members: vec![
+                HotStuffValidator {
+                    ed25519_pubkey: pub_ed,
+                    voting_weight: u64::MAX,
+                    pq_pubkey: Vec::new(),
+                },
+                HotStuffValidator {
+                    ed25519_pubkey: ed2.public_key_bytes(),
+                    voting_weight: 1,
+                    pq_pubkey: Vec::new(),
+                },
+            ],
+        };
+        assert!(
+            verify_hotstuff_equivocation("aptos-jolteon-1", &overflow_committee, classical_eq)
+                .is_ok()
+        );
+
+        let zero_weight_committee = PinnedHotStuffCommittee {
+            epoch: 7,
+            members: vec![HotStuffValidator {
+                ed25519_pubkey: pub_ed,
+                voting_weight: 0,
+                pq_pubkey: Vec::new(),
+            }],
+        };
+        assert!(verify_hotstuff_equivocation(
+            "aptos-jolteon-1",
+            &zero_weight_committee,
+            classical_eq
+        )
+        .is_err());
+        assert!(verify_hotstuff_timeout_certificate(
+            "aptos-jolteon-1",
+            &zero_weight_committee,
+            classical_tc,
+        )
+        .is_err());
+    }
+
+    fn assert_blank_network_and_bad_pq_rejected(
+        ed: &KeyPair,
+        pq: &PqKeyPair,
+        pub_ed: [u8; 32],
+        pub_pq: Vec<u8>,
+    ) {
+        let single = PinnedHotStuffCommittee {
+            epoch: 7,
+            members: vec![HotStuffValidator {
+                ed25519_pubkey: pub_ed,
+                voting_weight: 100,
+                pq_pubkey: pub_pq,
+            }],
+        };
+        let blank_vote_first = hotstuff_vote_sign_bytes("   ", 7, 12, &[0xAA; 32]);
+        let blank_vote_second = hotstuff_vote_sign_bytes("   ", 7, 12, &[0xBB; 32]);
+        let blank_eq = HotStuffEquivocationProof {
+            epoch: 7,
+            view: 12,
+            block_hash_a: [0xAA; 32],
+            block_hash_b: [0xBB; 32],
+            vote_a: HotStuffVoteSig {
+                signer_pubkey: pub_ed,
+                ed25519_sig: ed.sign(&blank_vote_first).to_vec(),
+                pq_sig: pq
+                    .sign(ctx::CROSS_DOMAIN_V1, &blank_vote_first)
+                    .expect("pq"),
+            },
+            vote_b: HotStuffVoteSig {
+                signer_pubkey: pub_ed,
+                ed25519_sig: ed.sign(&blank_vote_second).to_vec(),
+                pq_sig: pq
+                    .sign(ctx::CROSS_DOMAIN_V1, &blank_vote_second)
+                    .expect("pq"),
+            },
+        };
+        assert!(verify_hotstuff_equivocation("   ", &single, &blank_eq).is_err());
+
+        let blank_tc_digest = hotstuff_timeout_sign_bytes("", 7, 15, 14);
+        let blank_tc = HotStuffTimeoutCertificate {
+            epoch: 7,
+            view: 15,
+            max_high_qc_view: 14,
+            votes: vec![HotStuffTimeoutVote {
+                signer_pubkey: pub_ed,
+                high_qc_view: 14,
+                ed25519_sig: ed.sign(&blank_tc_digest).to_vec(),
+                pq_sig: pq.sign(ctx::CROSS_DOMAIN_V1, &blank_tc_digest).expect("pq"),
+            }],
+        };
+        assert!(verify_hotstuff_timeout_certificate("", &single, &blank_tc).is_err());
+
+        let bad_pq_committee = PinnedHotStuffCommittee {
+            epoch: 7,
+            members: vec![HotStuffValidator {
+                ed25519_pubkey: pub_ed,
+                voting_weight: 100,
+                pq_pubkey: vec![0xAB; 4],
+            }],
+        };
+        assert!(
+            verify_hotstuff_equivocation("aptos-jolteon-1", &bad_pq_committee, &blank_eq).is_err()
+        );
+    }
 }

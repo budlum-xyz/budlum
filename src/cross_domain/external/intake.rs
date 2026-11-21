@@ -1975,15 +1975,77 @@ impl IntakeState {
         }
     }
 
-    /// Verify objective `Casper-FFG` double-vote or surround-vote slashing
-    /// evidence against the domain's pinned committee and freeze the domain.
+    fn serving_entry(&self, key: &DomainKey) -> Result<(&IntakeEntry, &str), IntakeError> {
+        let Some(entry) = self.entries.get(key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        let Some(reg) = self.registry.domain(key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        if !reg.record.state.serves() {
+            return Err(IntakeError::Registry(RegistryError::NotServing {
+                state: format!("{:?}", reg.record.state),
+            }));
+        }
+        Ok((entry, reg.record.descriptor.name.as_str()))
+    }
+
+    /// Verify objective `HotStuff` same-view double-vote equivocation against
+    /// the domain's pinned committee and freeze the domain.
     ///
-    /// WIRING: objective `Casper-FFG` equivocation door freezing `AdapterSpec::CasperFfg` domains (`ExternalDomainTx` follow-up).
+    /// WIRING: objective `HotStuff` equivocation door freezing `AdapterSpec::HotStuffQc` domains (wired via `ExternalDomainTx::SubmitFaultProof`).
     ///
     /// # Errors
     ///
-    /// Returns [`IntakeError`] if `key` is unknown, not a `CasperFfg` domain,
-    /// unpinned, or `evidence` fails cryptographic slashing verification.
+    /// Returns [`IntakeError`] if `key` is unknown, not serving, not a
+    /// `HotStuffQc` domain, unpinned, or `proof` fails cryptographic
+    /// equivocation verification.
+    pub fn adjudicate_hotstuff_equivocation(
+        &mut self,
+        key: &DomainKey,
+        proof: &crate::cross_domain::external::hotstuff::HotStuffEquivocationProof,
+    ) -> Result<([u8; 32], u64), IntakeError> {
+        let (entry, expected_name) = self.serving_entry(key)?;
+        let AdapterSpec::HotStuffQc { network, committee } = &entry.spec else {
+            return Err(IntakeError::Registry(RegistryError::DescriptorMismatch {
+                expected: expected_name.to_string(),
+                found: crate::cross_domain::external::hotstuff::ADAPTER_NAME.to_string(),
+            }));
+        };
+        let Some(pinned) = committee else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        let (offender, weight) =
+            crate::cross_domain::external::hotstuff::verify_hotstuff_equivocation(
+                network, pinned, proof,
+            )
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let local_height = self.registry.height();
+        let _ = self.guard.record_adverse_round(*key, local_height);
+        self.registry
+            .mark_faulted(
+                key,
+                &format!(
+                    "HotStuff validator {} equivocated at epoch {} view {} (weight={weight})",
+                    hex::encode(offender),
+                    proof.epoch,
+                    proof.view
+                ),
+            )
+            .map_err(IntakeError::Registry)?;
+        Ok((offender, weight))
+    }
+
+    /// Verify objective `Casper-FFG` double-vote or surround-vote slashing
+    /// evidence against the domain's pinned committee and freeze the domain.
+    ///
+    /// WIRING: objective `Casper-FFG` equivocation door freezing `AdapterSpec::CasperFfg` domains (wired via `ExternalDomainTx::SubmitFaultProof`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if `key` is unknown, not serving, not a
+    /// `CasperFfg` domain, unpinned, or `evidence` fails cryptographic
+    /// slashing verification.
     pub fn adjudicate_casper_ffg_equivocation(
         &mut self,
         key: &DomainKey,
@@ -1995,14 +2057,15 @@ impl IntakeState {
         ),
         IntakeError,
     > {
-        let Some(entry) = self.entries.get(key) else {
-            return Err(IntakeError::UnknownDomain);
+        let (entry, expected_name) = self.serving_entry(key)?;
+        let AdapterSpec::CasperFfg { network, committee } = &entry.spec else {
+            return Err(IntakeError::Registry(RegistryError::DescriptorMismatch {
+                expected: expected_name.to_string(),
+                found: crate::cross_domain::external::casper_ffg::CASPER_FFG_ADAPTER_NAME
+                    .to_string(),
+            }));
         };
-        let AdapterSpec::CasperFfg {
-            network,
-            committee: Some(pinned),
-        } = &entry.spec
-        else {
+        let Some(pinned) = committee else {
             return Err(IntakeError::CommitteeNotPinned);
         };
         let (kind, weight) =
@@ -2027,25 +2090,27 @@ impl IntakeState {
     /// Verify objective `Mysticeti` same-round `DAG` equivocation against the
     /// domain's pinned committee and freeze the domain.
     ///
-    /// WIRING: objective `Mysticeti` equivocation door freezing `AdapterSpec::MysticetiDag` domains (`ExternalDomainTx` follow-up).
+    /// WIRING: objective `Mysticeti` equivocation door freezing `AdapterSpec::MysticetiDag` domains (wired via `ExternalDomainTx::SubmitFaultProof`).
     ///
     /// # Errors
     ///
-    /// Returns [`IntakeError`] if `key` is unknown, not a `MysticetiDag` domain,
-    /// unpinned, or `proof` fails cryptographic equivocation verification.
+    /// Returns [`IntakeError`] if `key` is unknown, not serving, not a
+    /// `MysticetiDag` domain, unpinned, or `proof` fails cryptographic
+    /// equivocation verification.
     pub fn adjudicate_mysticeti_equivocation(
         &mut self,
         key: &DomainKey,
         proof: &crate::cross_domain::external::mysticeti_dag::MysticetiEquivocationProof,
     ) -> Result<([u8; 32], u64, u64), IntakeError> {
-        let Some(entry) = self.entries.get(key) else {
-            return Err(IntakeError::UnknownDomain);
+        let (entry, expected_name) = self.serving_entry(key)?;
+        let AdapterSpec::MysticetiDag { network, committee } = &entry.spec else {
+            return Err(IntakeError::Registry(RegistryError::DescriptorMismatch {
+                expected: expected_name.to_string(),
+                found: crate::cross_domain::external::mysticeti_dag::MYSTICETI_DAG_ADAPTER_NAME
+                    .to_string(),
+            }));
         };
-        let AdapterSpec::MysticetiDag {
-            network,
-            committee: Some(pinned),
-        } = &entry.spec
-        else {
+        let Some(pinned) = committee else {
             return Err(IntakeError::CommitteeNotPinned);
         };
         let (offender, round, weight) =
@@ -2070,25 +2135,27 @@ impl IntakeState {
     /// Verify a `BitVM2` `1-of-N` single-step `DisproveScript` fraud proof against
     /// the domain's pinned anchor and freeze the domain.
     ///
-    /// WIRING: objective `BitVM2` single-step fraud door freezing `AdapterSpec::BitVmCovenant` domains (`ExternalDomainTx` follow-up).
+    /// WIRING: objective `BitVM2` single-step fraud door freezing `AdapterSpec::BitVmCovenant` domains (wired via `ExternalDomainTx::SubmitFaultProof`).
     ///
     /// # Errors
     ///
-    /// Returns [`IntakeError`] if `key` is unknown, not a `BitVmCovenant` domain,
-    /// unpinned, or `proof` fails single-step fraud verification.
+    /// Returns [`IntakeError`] if `key` is unknown, not serving, not a
+    /// `BitVmCovenant` domain, unpinned, or `proof` fails single-step fraud
+    /// verification.
     pub fn adjudicate_bitvm_disprove(
         &mut self,
         key: &DomainKey,
         proof: &crate::cross_domain::external::bitvm_covenant::DisproveScriptProof,
     ) -> Result<(u32, [u8; 32], [u8; 32]), IntakeError> {
-        let Some(entry) = self.entries.get(key) else {
-            return Err(IntakeError::UnknownDomain);
+        let (entry, expected_name) = self.serving_entry(key)?;
+        let AdapterSpec::BitVmCovenant { network, anchor } = &entry.spec else {
+            return Err(IntakeError::Registry(RegistryError::DescriptorMismatch {
+                expected: expected_name.to_string(),
+                found: crate::cross_domain::external::bitvm_covenant::BITVM_COVENANT_ADAPTER_NAME
+                    .to_string(),
+            }));
         };
-        let AdapterSpec::BitVmCovenant {
-            network,
-            anchor: Some(pinned),
-        } = &entry.spec
-        else {
+        let Some(pinned) = anchor else {
             return Err(IntakeError::CommitteeNotPinned);
         };
         let (chunk_idx, expected_post, claimed_post) =
@@ -3528,18 +3595,29 @@ mod tests {
             10
         );
         let outer_v = sign_ffg(7, [0x17; 32], 10, [0x98; 32]);
+        let casper_proof = FfgEquivocationProof {
+            vote_a: outer_v,
+            vote_b: v1,
+        };
         intake
-            .adjudicate_casper_ffg_equivocation(
-                &ffg_key,
-                &FfgEquivocationProof {
-                    vote_a: outer_v,
-                    vote_b: v1,
-                },
-            )
+            .adjudicate_casper_ffg_equivocation(&ffg_key, &casper_proof)
             .expect("casper surround slash");
         assert_eq!(
             intake.registry.domain(&ffg_key).expect("dom").record.state,
             DomainState::Faulted
+        );
+        assert!(matches!(
+            intake.adjudicate_casper_ffg_equivocation(&ffg_key, &casper_proof),
+            Err(IntakeError::Registry(RegistryError::NotServing { .. }))
+        ));
+        assert_eq!(
+            intake
+                .guard
+                .record_of(&ffg_key)
+                .expect("guard")
+                .adverse_round_blocks
+                .len(),
+            1
         );
 
         let my_net = "sui-mysticeti-intake";
@@ -3611,18 +3689,29 @@ mod tests {
             )
             .expect("register mysticeti");
         let fork_v = sign_my(10, [0xEE; 32], vec![commit.parent_anchor_digest]);
+        let my_proof = MysticetiEquivocationProof {
+            vertex_a: anchor_v,
+            vertex_b: fork_v,
+        };
         intake
-            .adjudicate_mysticeti_equivocation(
-                &my_key,
-                &MysticetiEquivocationProof {
-                    vertex_a: anchor_v,
-                    vertex_b: fork_v,
-                },
-            )
+            .adjudicate_mysticeti_equivocation(&my_key, &my_proof)
             .expect("mysticeti equivocation");
         assert_eq!(
             intake.registry.domain(&my_key).expect("dom").record.state,
             DomainState::Faulted
+        );
+        assert!(matches!(
+            intake.adjudicate_mysticeti_equivocation(&my_key, &my_proof),
+            Err(IntakeError::Registry(RegistryError::NotServing { .. }))
+        ));
+        assert_eq!(
+            intake
+                .guard
+                .record_of(&my_key)
+                .expect("guard")
+                .adverse_round_blocks
+                .len(),
+            1
         );
     }
 
@@ -3770,24 +3859,125 @@ mod tests {
         let bad_digest = bad_claim.signing_digest(bv_net);
         bad_claim.operator_ed25519_sig = op_ed.sign(&bad_digest).to_vec();
         bad_claim.operator_pq_sig = op_pq.sign(ctx::CROSS_DOMAIN_V1, &bad_digest).expect("pq");
+        let disprove_proof = DisproveScriptProof {
+            claim: bad_claim,
+            disputed_chunk: bad_chunk,
+            trace_merkle_proof: vec![MerkleStep {
+                sibling: sib,
+                sibling_is_left: false,
+            }],
+        };
         intake
-            .adjudicate_bitvm_disprove(
-                &bv_key,
-                &DisproveScriptProof {
-                    claim: bad_claim,
-                    disputed_chunk: bad_chunk,
-                    trace_merkle_proof: vec![MerkleStep {
-                        sibling: sib,
-                        sibling_is_left: false,
-                    }],
-                },
-            )
+            .adjudicate_bitvm_disprove(&bv_key, &disprove_proof)
             .expect("bitvm disprove");
         assert_eq!(
             intake.registry.domain(&bv_key).expect("dom").record.state,
             DomainState::Faulted
         );
+        assert!(matches!(
+            intake.adjudicate_bitvm_disprove(&bv_key, &disprove_proof),
+            Err(IntakeError::Registry(RegistryError::NotServing { .. }))
+        ));
+        assert_eq!(
+            intake
+                .guard
+                .record_of(&bv_key)
+                .expect("guard")
+                .adverse_round_blocks
+                .len(),
+            1
+        );
         a_work_challenge_must_carry_strictly_more_difficulty_than_the_accepted_attestation();
+    }
+
+    #[test]
+    fn hotstuff_equivocation_freezes_domain_and_rejects_faulted_replay() {
+        use crate::cross_domain::external::hotstuff::{
+            hotstuff_fault_test_fixture, sign_hotstuff_equivocation_proof,
+        };
+        use crate::cross_domain::external::profile::DomainState;
+
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let net = "aptos-hotstuff-intake";
+        let (committee, keys, golden) = hotstuff_fault_test_fixture(net, 7, addr(1));
+        intake.pin_hotstuff_committee(net, committee.clone());
+
+        let mut policy = VerificationPolicy::strict(0);
+        policy.require_slashable = false;
+        let spec = AdapterSpec::HotStuffQc {
+            network: net.to_string(),
+            committee: Some(committee),
+        };
+        let hs_key = intake
+            .register_domain(
+                RegistrationRequest {
+                    spec: spec.clone(),
+                    policy,
+                    economics: IntakeState::conservative_economics(1_000),
+                    versions: versions_for(&spec),
+                    golden,
+                    bond_atoms: economics_bond(),
+                    poster: addr(1),
+                },
+                None,
+            )
+            .expect("register hotstuff");
+
+        let Some((culprit_ed, culprit_pq)) = keys.get(1) else {
+            panic!("missing validator fixture");
+        };
+        let mut proof = sign_hotstuff_equivocation_proof(
+            net, 7, 45, [0xA1; 32], [0xB2; 32], culprit_ed, culprit_pq,
+        );
+        // Missing ML-DSA-65 signature is rejected without faulting or adding adverse rounds.
+        let saved_pq = std::mem::take(&mut proof.vote_b.pq_sig);
+        assert!(intake
+            .adjudicate_hotstuff_equivocation(&hs_key, &proof)
+            .is_err());
+        assert_eq!(
+            intake.registry.domain(&hs_key).expect("dom").record.state,
+            DomainState::Admitted
+        );
+        assert!(intake
+            .guard
+            .record_of(&hs_key)
+            .is_none_or(|g| g.adverse_round_blocks.is_empty()));
+
+        proof.vote_b.pq_sig = saved_pq;
+        let (reported_signer, weight) = intake
+            .adjudicate_hotstuff_equivocation(&hs_key, &proof)
+            .expect("hotstuff equivocation");
+        assert_eq!(reported_signer, culprit_ed.public_key_bytes());
+        assert_eq!(weight, 100);
+        assert_eq!(
+            intake.registry.domain(&hs_key).expect("dom").record.state,
+            DomainState::Faulted
+        );
+        assert_eq!(
+            intake
+                .guard
+                .record_of(&hs_key)
+                .expect("guard")
+                .adverse_round_blocks
+                .len(),
+            1
+        );
+
+        // Replaying on an already-Faulted domain must fail closed with NotServing.
+        assert!(matches!(
+            intake.adjudicate_hotstuff_equivocation(&hs_key, &proof),
+            Err(IntakeError::Registry(RegistryError::NotServing { .. }))
+        ));
+        assert_eq!(
+            intake
+                .guard
+                .record_of(&hs_key)
+                .expect("guard")
+                .adverse_round_blocks
+                .len(),
+            1
+        );
     }
 
     fn a_work_challenge_must_carry_strictly_more_difficulty_than_the_accepted_attestation() {
