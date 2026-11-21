@@ -250,6 +250,11 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
                 found: "another adapter".to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "ZkVm network identifier must not be empty".to_string(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::WrongAdapter {
                 expected: self.network.clone(),
@@ -303,6 +308,21 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
             return Err(AdapterError::Unavailable {
                 reason: "a proven attestation has no depth; this caller asked for one".to_string(),
             });
+        }
+        if policy.max_age > 0 {
+            if decoded.inputs.block_height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: decoded.inputs.block_height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - decoded.inputs.block_height;
+            if age > policy.max_age {
+                return Err(AdapterError::Stale {
+                    age,
+                    max_age: policy.max_age,
+                });
+            }
         }
 
         // Empty or bare `[Halt]` bytecode performs zero computation and cannot
@@ -1194,6 +1214,58 @@ mod tests {
         raw_bad.payload = zero_trace.encode().expect("encodes");
         assert!(matches!(
             base.verify(&raw_bad, &policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+    }
+
+    #[test]
+    fn regression_max_age_past_and_future_and_empty_network() {
+        let program = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let pinned_hash = bud_proof::canonical_set::program_hash_of(&program);
+        let base = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1))
+            .with_air_chain_id_binding_for_test();
+        let mut raw = honest_evidence(&base, program);
+        let mut ev = ZkFinalityEvidence::decode(&raw.payload).expect("decodes");
+        ev.inputs.block_height = 50;
+        raw.declared_height = 50;
+        raw.payload = ev.encode().expect("encodes");
+
+        // 1. Ancient proof beyond caller max_age window must be refused as Stale BEFORE FRI.
+        let mut stale_past = VerificationPolicy::proven(100);
+        stale_past.max_age = 10;
+        assert!(
+            matches!(
+                base.verify(&raw, &stale_past),
+                Err(AdapterError::Stale {
+                    age: 50,
+                    max_age: 10
+                })
+            ),
+            "ZkVm proof older than policy.max_age must fail closed with AdapterError::Stale"
+        );
+
+        // 2. Future block_height > policy.now when policy.max_age > 0 must be refused as Stale.
+        let mut stale_future = VerificationPolicy::proven(40);
+        stale_future.max_age = 10;
+        assert!(
+            matches!(
+                base.verify(&raw, &stale_future),
+                Err(AdapterError::Stale {
+                    age: 10,
+                    max_age: 10
+                })
+            ),
+            "ZkVm proof ahead of policy.now must fail closed with AdapterError::Stale"
+        );
+
+        // 3. Empty/whitespace network must be refused.
+        let blank = ZkVmFinalityAdapter::new("   ", Some(pinned_hash), Some(1));
+        let mut blank_raw = raw;
+        blank_raw.adapter = blank.descriptor().id;
+        blank_raw.network = "   ".to_string();
+        assert!(matches!(
+            blank.verify(&blank_raw, &VerificationPolicy::proven(50)),
             Err(AdapterError::ConsensusRule { .. })
         ));
     }

@@ -614,6 +614,22 @@ struct ValidatedMysticetiAnchor<'a> {
     anchor_pq: bool,
 }
 
+fn min_signers_for_quorum<I: IntoIterator<Item = u64>>(weights: I, total_stake: u128) -> u64 {
+    let mut sorted: Vec<u64> = weights.into_iter().filter(|&w| w > 0).collect();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    let mut acc = 0u128;
+    let mut count = 0u64;
+    let two_thirds = total_stake.saturating_mul(2);
+    for w in sorted {
+        acc = acc.saturating_add(u128::from(w));
+        count = count.saturating_add(1);
+        if acc.saturating_mul(3) > two_thirds {
+            return count;
+        }
+    }
+    count.max(1)
+}
+
 impl MysticetiDagAdapter {
     /// Build a Mysticeti adapter for `network` over an optional pinned committee.
     #[must_use]
@@ -670,7 +686,7 @@ impl MysticetiDagAdapter {
                 required: policy.min_depth,
             });
         }
-        if (policy.max_age > 0 || policy.now > 0) && decision_round > policy.now {
+        if policy.max_age > 0 && decision_round > policy.now {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
                     "Mysticeti decision round {decision_round} is ahead of caller clock {}",
@@ -709,6 +725,11 @@ impl MysticetiDagAdapter {
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
                 accepted: MYSTICETI_EVIDENCE_VERSION.to_string(),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Mysticeti network identifier must not be empty".to_string(),
             });
         }
         if evidence.network != self.network {
@@ -912,8 +933,11 @@ impl MysticetiDagAdapter {
         } else {
             ObservedScheme::Scheme(SchemeId::ED25519)
         };
-        let required = u64::try_from(committee.members.len().saturating_mul(2).div_ceil(3))
-            .unwrap_or(u64::MAX);
+        let total_stake = committee.total_stake();
+        let required = min_signers_for_quorum(
+            committee.members.iter().map(|m| m.voting_weight),
+            total_stake,
+        );
         let att = FinalityAttestation {
             adapter: self.descriptor.id,
             domain: DomainKey::from_parts(&self.descriptor.id, &evidence.network),
@@ -925,7 +949,7 @@ impl MysticetiDagAdapter {
                 scheme,
                 signers,
                 required,
-                total_weight: committee.total_stake(),
+                total_weight: total_stake,
                 slashable: false,
             },
             evidence_digest: evidence.digest(),
@@ -1252,5 +1276,70 @@ mod tests {
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn regression_intake_live_clock_skewed_stake_and_empty_network() {
+        use crate::domain::finality_proof_model::FinalityProofShape;
+
+        let (signers, committee) = committee_fixture();
+        let (mut wave, raw) = wave_bundle(&signers);
+        let adapter = MysticetiDagAdapter::new(NET, Some(committee));
+
+        // 1. IntakeState::submit sets policy.now = last_accepted_height (> 0)
+        // while policy.max_age == 0 (VerificationPolicy::strict(0)). Subsequent waves
+        // (and even wave #1 when stored_now == ANCHOR_ROUND < decision_round) must not deadlock.
+        let mut intake_live_policy = VerificationPolicy::strict(ANCHOR_ROUND - 4);
+        intake_live_policy.max_age = 0;
+        intake_live_policy.require_slashable = false;
+        adapter.verify(&raw, &intake_live_policy).expect(
+            "IntakeState live_policy_clock with max_age == 0 must not deadlock Mysticeti wave",
+        );
+
+        // When policy.max_age > 0, future decision_round > policy.now MUST still be refused.
+        let mut clocked = intake_live_policy;
+        clocked.max_age = 10;
+        clocked.now = ANCHOR_ROUND + 1;
+        assert!(adapter.verify(&raw, &clocked).is_err());
+
+        // 2. Skewed stake [800, 100, 100, 100] (800/1100 > 2/3) signed by validator 0 alone.
+        let skewed_members: Vec<MysticetiMember> = signers
+            .iter()
+            .enumerate()
+            .map(|(i, s)| MysticetiMember {
+                ed25519_pubkey: s.pub_ed,
+                voting_weight: if i == 0 { 800 } else { 100 },
+                pq_pubkey: s.pq.public_key_bytes().to_vec(),
+            })
+            .collect();
+        let skewed_committee =
+            PinnedMysticetiCommittee::new(EPOCH, skewed_members).expect("skewed committee");
+        wave.voting_vertices.truncate(1);
+        let v0_digest = wave.voting_vertices.first().expect("v0").digest(NET);
+        wave.decision_vertices = vec![sign_vertex(
+            signers.first().expect("s0"),
+            NET,
+            ANCHOR_ROUND + 2,
+            [0x33; 32],
+            vec![v0_digest],
+        )];
+        let mut skewed_raw = raw;
+        skewed_raw.payload = encode_mysticeti_evidence(&wave);
+        let skewed_adapter = MysticetiDagAdapter::new(NET, Some(skewed_committee.clone()));
+        let skewed_att = skewed_adapter
+            .verify(&skewed_raw, &wave_policy())
+            .expect("single >2/3 Mysticeti validator verifies");
+        FinalityProofShape::from_external_attestation(&skewed_adapter.descriptor(), &skewed_att)
+            .expect("skewed >2/3 Mysticeti quorum must pass FinalityProofShape");
+
+        // 3. Empty/whitespace network must be refused.
+        let blank_adapter = MysticetiDagAdapter::new("  ", Some(skewed_committee));
+        let mut blank_raw = skewed_raw;
+        blank_raw.adapter = blank_adapter.descriptor().id;
+        blank_raw.network = "  ".to_string();
+        assert!(matches!(
+            blank_adapter.verify(&blank_raw, &wave_policy()),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
     }
 }

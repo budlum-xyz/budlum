@@ -353,6 +353,22 @@ pub struct DataAvailabilityAdapter {
     descriptor: AdapterDescriptor,
 }
 
+fn min_signers_for_quorum<I: IntoIterator<Item = u64>>(weights: I, total_stake: u128) -> u64 {
+    let mut sorted: Vec<u64> = weights.into_iter().filter(|&w| w > 0).collect();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    let mut acc = 0u128;
+    let mut count = 0u64;
+    let two_thirds = total_stake.saturating_mul(2);
+    for w in sorted {
+        acc = acc.saturating_add(u128::from(w));
+        count = count.saturating_add(1);
+        if acc.saturating_mul(3) > two_thirds {
+            return count;
+        }
+    }
+    count.max(1)
+}
+
 impl DataAvailabilityAdapter {
     /// Construct a `DataAvailabilityAdapter` bound to `network` and its pinned committee.
     #[must_use]
@@ -448,7 +464,13 @@ impl DataAvailabilityAdapter {
                 required: policy.min_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > header.height {
+        if policy.max_age > 0 {
+            if header.height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: header.height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - header.height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -729,7 +751,8 @@ impl DataAvailabilityAdapter {
             });
         }
 
-        let required_signers = ((pinned.members.len() as u64) * 2).div_ceil(3).max(1);
+        let required_signers =
+            min_signers_for_quorum(pinned.members.iter().map(|m| m.voting_weight), total_stake);
         let scheme = if all_pq {
             ObservedScheme::Scheme(SchemeId::ML_DSA_65)
         } else {
@@ -2188,5 +2211,39 @@ mod tests {
         );
         assert_eq!(eq_verdict.slashed_weight, 100);
         assert!(eq_verdict.quorum_safety_breached);
+    }
+
+    #[test]
+    fn regression_skewed_stake_and_future_height() {
+        use crate::domain::finality_proof_model::FinalityProofShape;
+
+        let (mut pinned, mut bundle, mut ev) = da_2x2_fixture();
+        // Skewed stake [800, 100, 100, 100] (800/1100 > 2/3) signed by validator 0 alone.
+        pinned.members.first_mut().expect("member 0").voting_weight = 800;
+        bundle.signatures.truncate(1);
+        ev.payload = encode_da_evidence(&bundle).expect("encode skewed");
+
+        let adapter = DataAvailabilityAdapter::new("celestia-mainnet", Some(pinned));
+        let policy = VerificationPolicy::strict(505);
+        let att = adapter
+            .verify(&ev, &policy)
+            .expect("single >2/3 DA validator verifies");
+        FinalityProofShape::from_external_attestation(&adapter.descriptor(), &att)
+            .expect("skewed >2/3 DA quorum must pass FinalityProofShape");
+
+        // Future header.height > policy.now when policy.max_age > 0 must return Stale.
+        let mut future_policy = policy;
+        future_policy.max_age = 10;
+        future_policy.now = bundle.header.height - 1;
+        assert!(
+            matches!(
+                adapter.verify(&ev, &future_policy),
+                Err(AdapterError::Stale {
+                    age: 1,
+                    max_age: 10
+                })
+            ),
+            "future DA header height above policy.now must fail closed with AdapterError::Stale"
+        );
     }
 }

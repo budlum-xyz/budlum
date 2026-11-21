@@ -327,6 +327,22 @@ pub struct BullsharkDagAdapter {
     descriptor: AdapterDescriptor,
 }
 
+fn min_signers_for_quorum<I: IntoIterator<Item = u64>>(weights: I, total_stake: u128) -> u64 {
+    let mut sorted: Vec<u64> = weights.into_iter().filter(|&w| w > 0).collect();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    let mut acc = 0u128;
+    let mut count = 0u64;
+    let two_thirds = total_stake.saturating_mul(2);
+    for w in sorted {
+        acc = acc.saturating_add(u128::from(w));
+        count = count.saturating_add(1);
+        if acc.saturating_mul(3) > two_thirds {
+            return count;
+        }
+    }
+    count.max(1)
+}
+
 impl BullsharkDagAdapter {
     /// Construct a `BullsharkDagAdapter` bound to `network` and its pinned committee.
     #[must_use]
@@ -454,7 +470,13 @@ impl BullsharkDagAdapter {
                 required: policy.min_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > anchor.round {
+        if policy.max_age > 0 {
+            if anchor.round > policy.now {
+                return Err(AdapterError::Stale {
+                    age: anchor.round - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - anchor.round;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -686,8 +708,11 @@ impl BullsharkDagAdapter {
             });
         }
 
-        let min_signers = (cert_signers.len() as u64).min(voter_authors.len() as u64);
-        let required_signers = ((pinned.members.len() as u64) * 2).div_ceil(3).max(1);
+        let min_signers = u64::try_from(cert_signers.len())
+            .unwrap_or(u64::MAX)
+            .min(u64::try_from(voter_authors.len()).unwrap_or(u64::MAX));
+        let required_signers =
+            min_signers_for_quorum(pinned.members.iter().map(|m| m.voting_weight), total_stake);
         let scheme = if all_pq {
             ObservedScheme::Scheme(SchemeId::ML_DSA_65)
         } else {
@@ -1016,7 +1041,31 @@ pub fn verify_indirect_dag_wave_commit(
         declared_root: proof.committing_wave.anchor.state_root,
         submitter: proof.submitter,
     };
-    let _direct_att = adapter.verify(&direct_raw, policy)?;
+    let direct_att = adapter.verify(&direct_raw, policy)?;
+    if policy.max_age > 0 {
+        if target.round > policy.now {
+            return Err(AdapterError::Stale {
+                age: target.round - policy.now,
+                max_age: policy.max_age,
+            });
+        }
+        let target_age = policy.now - target.round;
+        if target_age > policy.max_age {
+            return Err(AdapterError::Stale {
+                age: target_age,
+                max_age: policy.max_age,
+            });
+        }
+    }
+    let (direct_signers, direct_pq) = match direct_att.security {
+        SecurityBacking::SignatureSet {
+            signers, scheme, ..
+        } => (
+            signers,
+            scheme == ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+        ),
+        _ => (0, false),
+    };
 
     // 2. Verify target round-r anchor canonical leader, digest, >2/3 parents, and >2/3 cert.
     let (member_map, total_stake, _) = canonical_committee_map(pinned)?;
@@ -1165,12 +1214,16 @@ pub fn verify_indirect_dag_wave_commit(
         });
     }
 
-    let scheme = if all_pq {
+    let scheme = if all_pq && direct_pq {
         ObservedScheme::Scheme(SchemeId::ML_DSA_65)
     } else {
         ObservedScheme::Scheme(SchemeId::ED25519)
     };
-    let required_signers = ((pinned.members.len() as u64) * 2).div_ceil(3).max(1);
+    let min_signers = direct_signers
+        .min(u64::try_from(parent_authors.len()).unwrap_or(u64::MAX))
+        .min(u64::try_from(cert_signers.len()).unwrap_or(u64::MAX));
+    let required_signers =
+        min_signers_for_quorum(pinned.members.iter().map(|m| m.voting_weight), total_stake);
     let evidence_digest = crate::core::hash::hash_fields_bytes(&[
         b"BDLM_DAGBFT_INDIRECT_ATTEST_V1",
         network.as_bytes(),
@@ -1187,7 +1240,7 @@ pub fn verify_indirect_dag_wave_commit(
         time_unit: TimeUnit::Height,
         security: SecurityBacking::SignatureSet {
             scheme,
-            signers: cert_signers.len() as u64,
+            signers: min_signers,
             required: required_signers,
             total_weight: total_stake,
             slashable: true,
@@ -1855,5 +1908,158 @@ mod tests {
         assert_eq!(parent_eq.slashable_validators, vec![ek0.public_key_bytes()]);
         assert_eq!(parent_eq.slashed_weight, 100);
         assert!(!parent_eq.quorum_safety_breached);
+    }
+
+    fn sign_skewed_indirect_commit(
+        network: &str,
+        pinned: &PinnedDagCommittee,
+        ek0: &KeyPair,
+        pk0: &PqKeyPair,
+        bundle: &DagWaveCommitEvidence,
+        v0: DagVoterVertex,
+    ) -> DagIndirectWaveCommitProof {
+        let mut cp_101 = DagCausalParent {
+            round: 101,
+            author: ek0.public_key_bytes(),
+            payload_root: v0.digest,
+            digest: [0u8; 32],
+            author_ed25519_sig: Vec::new(),
+            author_pq_sig: Vec::new(),
+        };
+        cp_101.digest = cp_101.compute_digest(network, pinned.epoch);
+        cp_101.author_ed25519_sig = ek0.sign(&cp_101.digest).to_vec();
+        cp_101.author_pq_sig = pk0
+            .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &cp_101.digest)
+            .expect("pq sign");
+        let leader_102 = elect_dag_wave_leader(network, pinned, 102).expect("leader 102");
+        let mut anchor_102 = DagAnchorVertex {
+            epoch: pinned.epoch,
+            round: 102,
+            author: leader_102,
+            timestamp_secs: 1_750_100_002,
+            state_root: [0xC1; 32],
+            tx_root: [0xC2; 32],
+            event_root: [0xC3; 32],
+            parent_digests: vec![cp_101.digest],
+            digest: [0u8; 32],
+        };
+        anchor_102.digest = anchor_102.compute_digest(network);
+        let cert_102_msg =
+            dag_anchor_cert_sign_bytes(network, pinned.epoch, 102, &anchor_102.digest);
+        let cert_102_sigs = vec![DagBftSig {
+            signer_pubkey: ek0.public_key_bytes(),
+            ed25519_sig: ek0.sign(&cert_102_msg).to_vec(),
+            pq_sig: pk0
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &cert_102_msg)
+                .expect("pq sign"),
+        }];
+        let mut v_103 = DagVoterVertex {
+            round: 103,
+            author: ek0.public_key_bytes(),
+            parent_digests: vec![anchor_102.digest],
+            digest: [0u8; 32],
+            ed25519_sig: Vec::new(),
+            pq_sig: Vec::new(),
+        };
+        v_103.digest = v_103.compute_digest(network, pinned.epoch);
+        v_103.ed25519_sig = ek0.sign(&v_103.digest).to_vec();
+        v_103.pq_sig = pk0
+            .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &v_103.digest)
+            .expect("pq sign");
+        DagIndirectWaveCommitProof {
+            target_anchor: bundle.anchor.clone(),
+            target_causal_parents: bundle.causal_parents.clone(),
+            target_cert_sigs: bundle.anchor_cert_sigs.clone(),
+            relay_vertex: v0,
+            committing_wave: DagWaveCommitEvidence {
+                anchor: anchor_102,
+                causal_parents: vec![cp_101],
+                anchor_cert_sigs: cert_102_sigs,
+                voter_vertices: vec![v_103],
+            },
+            submitter: Address::from([0x0D; 32]),
+        }
+    }
+
+    #[test]
+    fn regression_skewed_stake_indirect_weakest_link_and_future_round() {
+        use crate::domain::finality_proof_model::FinalityProofShape;
+
+        let network = "sui-bullshark-1";
+        let (mut pinned, keys, mut bundle, mut ev) = dag_wave_fixture();
+
+        // Find which validator is leader under [800, 100, 100, 100] and build a 1-signer >2/3 wave.
+        let (ek0, pk0) = keys.first().expect("key 0");
+        pinned.members.first_mut().expect("member 0").voting_weight = 800;
+        let leader_100 = elect_dag_wave_leader(network, &pinned, 100).expect("leader 100");
+        bundle.causal_parents.truncate(1);
+        bundle.anchor.author = leader_100;
+        bundle.anchor.parent_digests = vec![bundle.causal_parents.first().expect("cp0").digest];
+        bundle.anchor.digest = bundle.anchor.compute_digest(network);
+        let cert_msg =
+            dag_anchor_cert_sign_bytes(network, pinned.epoch, 100, &bundle.anchor.digest);
+        bundle.anchor_cert_sigs = vec![DagBftSig {
+            signer_pubkey: ek0.public_key_bytes(),
+            ed25519_sig: ek0.sign(&cert_msg).to_vec(),
+            pq_sig: pk0
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &cert_msg)
+                .expect("pq sign"),
+        }];
+        let mut v0 = DagVoterVertex {
+            round: 101,
+            author: ek0.public_key_bytes(),
+            parent_digests: vec![bundle.anchor.digest],
+            digest: [0u8; 32],
+            ed25519_sig: Vec::new(),
+            pq_sig: Vec::new(),
+        };
+        v0.digest = v0.compute_digest(network, pinned.epoch);
+        v0.ed25519_sig = ek0.sign(&v0.digest).to_vec();
+        v0.pq_sig = pk0
+            .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &v0.digest)
+            .expect("pq sign");
+        bundle.voter_vertices = vec![v0.clone()];
+        ev.payload = encode_dag_evidence(&bundle).expect("encode skewed");
+
+        let adapter = BullsharkDagAdapter::new(network, Some(pinned.clone()));
+        let policy = VerificationPolicy::strict(110);
+        let att = adapter
+            .verify(&ev, &policy)
+            .expect("single >2/3 Bullshark validator verifies");
+        FinalityProofShape::from_external_attestation(&adapter.descriptor(), &att)
+            .expect("skewed >2/3 Bullshark direct quorum must pass FinalityProofShape");
+
+        // Future anchor.round > policy.now when policy.max_age > 0 must return Stale.
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 10;
+        future_policy.now = bundle.anchor.round - 1;
+        assert!(
+            matches!(
+                adapter.verify(&ev, &future_policy),
+                Err(AdapterError::Stale {
+                    age: 1,
+                    max_age: 10
+                })
+            ),
+            "future Bullshark round above policy.now must fail closed with AdapterError::Stale"
+        );
+
+        let indirect = sign_skewed_indirect_commit(network, &pinned, ek0, pk0, &bundle, v0);
+        let ind_att = verify_indirect_dag_wave_commit(network, &pinned, &indirect, &policy)
+            .expect("skewed indirect wave verifies");
+        FinalityProofShape::from_external_attestation(&adapter.descriptor(), &ind_att)
+            .expect("skewed indirect Bullshark quorum must pass FinalityProofShape");
+
+        // Target round 100 is stale at now=111, max_age=10 (age=11 > 10) even though commit_round=102 has age=9 <= 10.
+        let mut border_policy = policy;
+        border_policy.max_age = 10;
+        border_policy.now = 111;
+        assert!(matches!(
+            verify_indirect_dag_wave_commit(network, &pinned, &indirect, &border_policy),
+            Err(AdapterError::Stale {
+                age: 11,
+                max_age: 10
+            })
+        ));
     }
 }
