@@ -1038,8 +1038,14 @@ impl RestakingAvsAdapter {
             });
         }
 
-        if policy.max_age > 0 && policy.now > batch.height {
-            let age = policy.now.saturating_sub(batch.height);
+        if policy.max_age > 0 {
+            if batch.height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: batch.height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - batch.height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -1057,7 +1063,7 @@ impl RestakingAvsAdapter {
 
         let native_msg =
             native_vote_sign_bytes(&self.network, batch.epoch, batch.height, &batch.digest);
-        let (native_signers, _, native_pq) = verify_quorum_certificate(
+        let (_, _, native_pq) = verify_quorum_certificate(
             &native_idx,
             native_total,
             &decoded.native_sigs,
@@ -1072,7 +1078,7 @@ impl RestakingAvsAdapter {
             batch.unbonding_horizon_height,
             &batch.digest,
         );
-        let (restaked_signers, restaked_signed, restake_pq) = verify_quorum_certificate(
+        let (_, restaked_signed, restake_pq) = verify_quorum_certificate(
             &restaked_idx,
             restaked_total,
             &decoded.restaked_sigs,
@@ -1089,7 +1095,7 @@ impl RestakingAvsAdapter {
         }
 
         let mut all_pq = native_pq & restake_pq;
-        let mut min_signers = native_signers.min(restaked_signers);
+        let mut conservative_signed = restaked_signed;
         let mut conservative_total = restaked_total;
 
         match &eots_indexed {
@@ -1116,7 +1122,7 @@ impl RestakingAvsAdapter {
                     &batch.eots_rand_root,
                     &batch.digest,
                 );
-                let (eots_signers, _, eots_pq) = verify_quorum_certificate(
+                let (_, eots_signed, eots_pq) = verify_quorum_certificate(
                     eots_idx,
                     *eots_total,
                     &decoded.eots_sigs,
@@ -1124,10 +1130,19 @@ impl RestakingAvsAdapter {
                     "restaking-avs EOTS quorum",
                 )?;
                 all_pq &= eots_pq;
-                min_signers = min_signers.min(eots_signers);
+                conservative_signed = conservative_signed.min(eots_signed);
                 conservative_total = conservative_total.min(*eots_total);
             }
         }
+
+        let required_weight = min_bft_supermajority(conservative_total);
+        let shift = 128u32
+            .saturating_sub(conservative_total.leading_zeros())
+            .saturating_sub(64);
+        let signers = u64::try_from(conservative_signed >> shift).unwrap_or(u64::MAX);
+        let required = u64::try_from(required_weight >> shift)
+            .unwrap_or(u64::MAX)
+            .max(1);
 
         let scheme = if all_pq {
             ObservedScheme::Scheme(SchemeId::ML_DSA_65)
@@ -1146,9 +1161,8 @@ impl RestakingAvsAdapter {
             time_unit: TimeUnit::Height,
             security: SecurityBacking::SignatureSet {
                 scheme,
-                signers: min_signers,
-                required: u64::try_from(min_bft_supermajority(conservative_total))
-                    .unwrap_or(u64::MAX),
+                signers,
+                required,
                 total_weight: conservative_total,
                 slashable: true,
             },
@@ -1453,6 +1467,22 @@ mod tests {
         let (report, selftest_facts) = admit_observed(&adapter, &policy);
         assert!(report.admitted, "selftest must admit: {report:?}");
         assert_eq!(selftest_facts.quantum_class(), Some(QuantumClass::Lattice));
+
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("stake-weighted restaking-avs attestation must satisfy FinalityProofShape");
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 1_000;
+        future_policy.now = att.height.saturating_sub(1);
+        assert!(
+            matches!(
+                adapter.verify(&fx.raw, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future-dated batch height above policy.now must fail closed when max_age > 0"
+        );
     }
 
     #[test]

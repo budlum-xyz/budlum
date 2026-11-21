@@ -550,7 +550,7 @@ fn verify_simplex_quorum(
     sigs: &[SimplexSignature],
     msg: &Hash32,
     label: &str,
-) -> Result<(u64, bool), AdapterError> {
+) -> Result<(u128, bool), AdapterError> {
     if sigs.is_empty() || sigs.len() > index.len() {
         return Err(AdapterError::ConsensusRule {
             rule: format!(
@@ -589,7 +589,7 @@ fn verify_simplex_quorum(
             rule: format!("{label} signed stake {signed} below required >2/3 threshold {required}"),
         });
     }
-    Ok((u64::try_from(seen.len()).unwrap_or(u64::MAX), all_pq))
+    Ok((signed, all_pq))
 }
 
 fn verify_simplex_slash_side(
@@ -904,8 +904,14 @@ impl SimplexBftAdapter {
                 required: policy.min_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > block.height {
-            let age = policy.now.saturating_sub(block.height);
+        if policy.max_age > 0 {
+            if block.height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: block.height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - block.height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -1100,6 +1106,15 @@ impl SimplexBftAdapter {
                 rule: "caller policy requires slashable backing; foreign Simplex committee stake has no local confiscation escrow".into(),
             });
         }
+        let min_signed = notarize_signers.min(finalize_signers);
+        let required_weight = min_simplex_supermajority(active_total);
+        let shift = 128u32
+            .saturating_sub(active_total.leading_zeros())
+            .saturating_sub(64);
+        let signers = u64::try_from(min_signed >> shift).unwrap_or(u64::MAX);
+        let required = u64::try_from(required_weight >> shift)
+            .unwrap_or(u64::MAX)
+            .max(1);
         let attestation = FinalityAttestation {
             adapter: self.descriptor.id,
             domain: DomainKey::from_parts(&self.descriptor.id, &evidence.network),
@@ -1109,9 +1124,8 @@ impl SimplexBftAdapter {
             time_unit: TimeUnit::Height,
             security: SecurityBacking::SignatureSet {
                 scheme,
-                signers: notarize_signers.min(finalize_signers),
-                required: u64::try_from(min_simplex_supermajority(active_total))
-                    .unwrap_or(u64::MAX),
+                signers,
+                required,
                 total_weight: active_total,
                 slashable: false,
             },
@@ -1389,6 +1403,22 @@ mod tests {
 
         let (report, _) = admit_observed(&adapter, &policy);
         assert!(report.admitted, "simplex selftest must pass: {report:?}");
+
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("stake-weighted Simplex BFT attestation must satisfy FinalityProofShape");
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 500;
+        future_policy.now = att.height.saturating_sub(1);
+        assert!(
+            matches!(
+                adapter.verify(&raw, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future-dated Simplex block height above policy.now must fail closed when max_age > 0"
+        );
 
         // Verify epoch rotation from epoch 3 -> epoch 4 with fresh committee.
         let next_vals = [

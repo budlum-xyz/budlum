@@ -389,9 +389,24 @@ const fn has_bft_supermajority(signed: u128, total: u128) -> bool {
 }
 
 #[must_use]
-fn min_supermajority_weight(total: u128) -> u64 {
-    let required = (total.saturating_mul(2) / 3).saturating_add(1);
-    u64::try_from(required).unwrap_or(u64::MAX)
+const fn min_supermajority_weight(total: u128) -> u128 {
+    (total.saturating_mul(2) / 3).saturating_add(1)
+}
+
+#[must_use]
+fn project_stake_quorum_u64(
+    signed_weight: u128,
+    required_weight: u128,
+    total_weight: u128,
+) -> (u64, u64) {
+    let shift = 128u32
+        .saturating_sub(total_weight.leading_zeros())
+        .saturating_sub(64);
+    let signers = u64::try_from(signed_weight >> shift).unwrap_or(u64::MAX);
+    let required = u64::try_from(required_weight >> shift)
+        .unwrap_or(u64::MAX)
+        .max(1);
+    (signers, required)
 }
 
 fn verify_validator_sig(
@@ -857,8 +872,14 @@ impl BasedPreconfAdapter {
                 required: required_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > batch.l2_sequence {
-            let age = policy.now.saturating_sub(batch.l2_sequence);
+        if policy.max_age > 0 {
+            if batch.l2_sequence > policy.now {
+                return Err(AdapterError::Stale {
+                    age: batch.l2_sequence - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - batch.l2_sequence;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -897,7 +918,7 @@ impl BasedPreconfAdapter {
             batch.l2_sequence,
             &batch.digest,
         );
-        let (preconf_signers, _, cert_pq) = verify_quorum_sigs(
+        let (_, preconf_weight, cert_pq) = verify_quorum_sigs(
             &committee,
             total_weight,
             &decoded.preconf_sigs,
@@ -905,6 +926,7 @@ impl BasedPreconfAdapter {
             "based-preconf quorum",
         )?;
         all_pq &= cert_pq;
+        let mut min_signed_weight = preconf_weight;
 
         // 3. EIP-7805 FOCIL inclusion-list quorum and full Merkle inclusion check.
         if decoded.focil_proofs.len() > MAX_FOCIL_ENTRIES {
@@ -949,7 +971,7 @@ impl BasedPreconfAdapter {
             }
             let il_msg =
                 focil_vote_sign_bytes(&self.network, batch.epoch, batch.l1_slot, &batch.il_root);
-            let (_, _, il_pq) = verify_quorum_sigs(
+            let (_, focil_weight, il_pq) = verify_quorum_sigs(
                 &committee,
                 total_weight,
                 &decoded.focil_sigs,
@@ -957,6 +979,7 @@ impl BasedPreconfAdapter {
                 "FOCIL inclusion-list quorum",
             )?;
             all_pq &= il_pq;
+            min_signed_weight = min_signed_weight.min(focil_weight);
         }
 
         // 4. L1 settlement anchor upgrade certificate.
@@ -968,7 +991,7 @@ impl BasedPreconfAdapter {
             &batch.l1_anchor_root,
             &batch.digest,
         );
-        let (settle_signers, _, settle_pq) = verify_quorum_sigs(
+        let (_, settle_weight, settle_pq) = verify_quorum_sigs(
             &committee,
             total_weight,
             &decoded.l1_settle_sigs,
@@ -976,6 +999,12 @@ impl BasedPreconfAdapter {
             "based-preconf L1 settlement quorum",
         )?;
         all_pq &= settle_pq;
+        min_signed_weight = min_signed_weight.min(settle_weight);
+        let (signers, required) = project_stake_quorum_u64(
+            min_signed_weight,
+            min_supermajority_weight(total_weight),
+            total_weight,
+        );
 
         let scheme = if all_pq {
             ObservedScheme::Scheme(SchemeId::ML_DSA_65)
@@ -996,8 +1025,8 @@ impl BasedPreconfAdapter {
             time_unit: TimeUnit::Height,
             security: SecurityBacking::SignatureSet {
                 scheme,
-                signers: preconf_signers.min(settle_signers),
-                required: min_supermajority_weight(total_weight),
+                signers,
+                required,
                 total_weight,
                 slashable: true,
             },
@@ -1401,6 +1430,7 @@ mod tests {
             .unwrap();
 
         let att = registry.submit(&adapter, &ev_a, &policy).unwrap();
+        assert_based_shape_and_future_freshness(&adapter, &ev_a, &policy, &att);
         assert_eq!(
             registry
                 .domain(&domain)
@@ -1439,5 +1469,28 @@ mod tests {
             .unwrap()
             .attestations
             .contains_key(&(att.height, EVIDENCE_VERSION)));
+    }
+
+    fn assert_based_shape_and_future_freshness(
+        adapter: &BasedPreconfAdapter,
+        ev: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+        att: &FinalityAttestation,
+    ) {
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            att,
+        )
+        .expect("stake-weighted based-preconf attestation must satisfy FinalityProofShape");
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 100;
+        future_policy.now = att.height.saturating_sub(1);
+        assert!(
+            matches!(
+                adapter.verify(ev, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future-dated l2_sequence above policy.now must fail closed when max_age > 0"
+        );
     }
 }

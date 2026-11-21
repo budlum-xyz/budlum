@@ -369,14 +369,29 @@ fn validate_bp_table(
 }
 
 /// Overflow-free strict `signed_stake * 3 > total_stake * 2` check across `u128`.
+const fn min_two_thirds_stake(total_stake: u128) -> Option<u128> {
+    if total_stake == 0 {
+        return None;
+    }
+    let q = total_stake / 3;
+    let r = total_stake % 3;
+    match q.checked_mul(2) {
+        Some(v) => match v.checked_add((r * 2) / 3) {
+            Some(floor_val) => floor_val.checked_add(1),
+            None => None,
+        },
+        None => None,
+    }
+}
+
 const fn exceeds_two_thirds(signed_stake: u128, total_stake: u128) -> bool {
     if total_stake == 0 || signed_stake > total_stake {
         return false;
     }
-    let q = total_stake / 3;
-    let r = total_stake % 3;
-    let two_thirds_floor = q.saturating_mul(2).saturating_add((r * 2) / 3);
-    signed_stake > two_thirds_floor
+    match min_two_thirds_stake(total_stake) {
+        Some(req) => signed_stake >= req,
+        None => false,
+    }
 }
 
 fn verify_doomslug_bundle(
@@ -578,10 +593,15 @@ fn verify_doomslug_bundle(
         });
     }
 
-    let required = ((pinned.block_producers.len() as u64) * 2)
-        .div_ceil(3)
+    let required_stake = min_two_thirds_stake(total_stake).unwrap_or(1);
+    let shift = 128u32
+        .saturating_sub(total_stake.leading_zeros())
+        .saturating_sub(64);
+    let signers = u64::try_from(signed_stake >> shift).unwrap_or(u64::MAX);
+    let required = u64::try_from(required_stake >> shift)
+        .unwrap_or(u64::MAX)
         .max(1);
-    Ok((seen_signers.len() as u64, required, total_stake, all_pq))
+    Ok((signers, required, total_stake, all_pq))
 }
 
 /// Rotate a [`PinnedNearEpoch`] to `pinned.next_epoch_id` after verifying both
@@ -831,7 +851,13 @@ impl NearDoomslugAdapter {
                 required: policy.min_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > b0.height {
+        if policy.max_age > 0 {
+            if b0.height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: b0.height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - b0.height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -1182,6 +1208,72 @@ mod tests {
         assert_eq!(rotated.epoch_id, [0xE2; 32]);
         assert_eq!(rotated.next_epoch_id, [0xE3; 32]);
         assert_eq!(rotated.block_producers, fx.next_bps);
+        assert_near_skewed_stake_and_future_height(&fx, &adapter, &policy, &att);
+    }
+
+    fn assert_near_skewed_stake_and_future_height(
+        fx: &NearFixture,
+        adapter: &NearDoomslugAdapter,
+        policy: &VerificationPolicy,
+        att: &FinalityAttestation,
+    ) {
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 100;
+        future_policy.now = att.height.saturating_sub(1);
+        assert!(
+            matches!(
+                adapter.verify(&fx.golden, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future-dated NEAR block height above policy.now must fail closed when max_age > 0"
+        );
+
+        let unit: u128 = 1_000_000_000_000_000_000_000_000;
+        let skew_stakes = [75 * unit, 10 * unit, 10 * unit, 5 * unit];
+        let skew_bps: Vec<NearBlockProducer> = (0..4)
+            .map(|i| NearBlockProducer {
+                account_id: format!("bp{i}.poolv1.near"),
+                ed25519_pubkey: fx.ed_keys[i].public_key_bytes(),
+                stake: skew_stakes[i],
+                pq_pubkey: fx.pq_keys[i].public_key_bytes().to_vec(),
+            })
+            .collect();
+        let skew_pin = PinnedNearEpoch {
+            block_producers: skew_bps,
+            ..fx.pinned.clone()
+        };
+        let skew_inner = NearApprovalInner::Endorsement {
+            parent_hash: fx.b2.block_hash,
+            parent_height: fx.b2.height,
+        };
+        let skew_target = fx.b2.height + 1;
+        let skew_sig = sign_approval(
+            &fx.ed_keys[0],
+            &fx.pq_keys[0],
+            &skew_pin.epoch_id,
+            &skew_inner,
+            skew_target,
+        );
+        let skew_ev = RawConsensusEvidence {
+            payload: encode_near_doomslug_evidence(
+                fx.b0.clone(),
+                fx.b1.clone(),
+                fx.b2.clone(),
+                skew_target,
+                vec![skew_sig],
+            )
+            .expect("encode skew near"),
+            ..fx.golden.clone()
+        };
+        let skew_adapter = NearDoomslugAdapter::new(NET, Some(skew_pin));
+        let skew_att = skew_adapter
+            .verify(&skew_ev, policy)
+            .expect("75% yoctoNEAR single-producer BFT quorum verifies");
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &skew_adapter.descriptor(),
+            &skew_att,
+        )
+        .expect("skewed yoctoNEAR Doomslug attestation must satisfy FinalityProofShape");
     }
 
     #[test]

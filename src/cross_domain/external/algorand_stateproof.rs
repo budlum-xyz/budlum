@@ -401,33 +401,33 @@ pub fn stateproof_sign_digest(network: &str, message: &AlgorandStateProofMessage
 /// Overflow-free exact check for `proven * 10_000 >= total * threshold_bps` and
 /// `proven * 3 > total * 2` across the entire `u128` domain using split
 /// quotient/remainder arithmetic.
-fn meets_stake_threshold(proven: u128, total: u128, threshold_bps: u16) -> bool {
-    if total == 0 || proven == 0 || proven > total {
-        return false;
+fn required_stake_threshold(total: u128, threshold_bps: u16) -> Option<u128> {
+    if total == 0 || !(MIN_THRESHOLD_BPS..=MAX_THRESHOLD_BPS).contains(&threshold_bps) {
+        return None;
     }
-    if !(MIN_THRESHOLD_BPS..=MAX_THRESHOLD_BPS).contains(&threshold_bps) {
-        return false;
-    }
-    // Strict > 2/3 BFT supermajority: proven > floor(2 * total / 3).
+    // Strict > 2/3 BFT supermajority: proven >= floor(2 * total / 3) + 1.
     // Write total = 3*q + r (r in 0..3): floor(2*total/3) = 2*q + (2*r)/3.
     let q3 = total / 3;
     let r3 = total % 3;
-    let two_thirds_floor = q3.saturating_mul(2).saturating_add((r3 * 2) / 3);
-    if proven <= two_thirds_floor {
-        return false;
-    }
+    let strict_two_thirds = q3
+        .checked_mul(2)?
+        .checked_add((r3 * 2) / 3)?
+        .checked_add(1)?;
     // Exact bps check: proven >= ceil(total * bps / 10_000).
     let bps = u128::from(threshold_bps);
     let denom = u128::from(MAX_THRESHOLD_BPS);
     let q = total / denom;
     let r = total % denom;
     // r < 10_000 and bps <= 10_000 => r * bps <= 100_000_000 (never overflows).
-    let prod_r = r * bps;
-    let rem_ceil = prod_r.div_ceil(denom);
-    let Some(min_required) = q.checked_mul(bps).and_then(|v| v.checked_add(rem_ceil)) else {
-        return false;
-    };
-    proven >= min_required
+    let rem_ceil = (r * bps).div_ceil(denom);
+    let bps_required = q.checked_mul(bps)?.checked_add(rem_ceil)?;
+    Some(strict_two_thirds.max(bps_required))
+}
+
+fn meets_stake_threshold(proven: u128, total: u128, threshold_bps: u16) -> bool {
+    proven > 0
+        && proven <= total
+        && required_stake_threshold(total, threshold_bps).is_some_and(|req| proven >= req)
 }
 
 /// Wire payload carrying one Algorand post-quantum `StateProof` and its opened
@@ -742,10 +742,15 @@ fn verify_stateproof_bundle(
             ),
         });
     }
+    let required_weight =
+        required_stake_threshold(pinned.total_weight, pinned.threshold_bps).unwrap_or(1);
 
-    let signers = bundle.reveals.len() as u64;
-    let required = (u64::from(pinned.voter_count).saturating_mul(u64::from(pinned.threshold_bps)))
-        .div_ceil(u64::from(MAX_THRESHOLD_BPS))
+    let shift = 128u32
+        .saturating_sub(pinned.total_weight.leading_zeros())
+        .saturating_sub(64);
+    let signers = u64::try_from(proven_weight >> shift).unwrap_or(u64::MAX);
+    let required = u64::try_from(required_weight >> shift)
+        .unwrap_or(u64::MAX)
         .max(1);
     Ok((signers, required))
 }
@@ -1060,7 +1065,13 @@ impl AlgorandStateProofAdapter {
                 required: policy.min_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > hdr.round {
+        if policy.max_age > 0 {
+            if hdr.round > policy.now {
+                return Err(AdapterError::Stale {
+                    age: hdr.round - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - hdr.round;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -1391,6 +1402,98 @@ mod tests {
         assert_eq!(next.last_round, 10_511);
         assert_eq!(next.voters_commitment, fx.message.next_voters_commitment);
         assert_eq!(next.total_weight, 2_000);
+        assert_algorand_skewed_stake_and_future_round(&fx, &adapter, &policy, &att);
+    }
+
+    fn assert_algorand_skewed_stake_and_future_round(
+        fx: &Fixture,
+        adapter: &AlgorandStateProofAdapter,
+        policy: &VerificationPolicy,
+        att: &FinalityAttestation,
+    ) {
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 50;
+        future_policy.now = att.height.saturating_sub(1);
+        assert!(
+            matches!(
+                adapter.verify(&fx.golden, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future-dated Algorand round above policy.now must fail closed when max_age > 0"
+        );
+
+        let skew_voters = vec![
+            AlgorandVoterLeaf {
+                position: 0,
+                lower_weight: 0,
+                upper_weight: 750,
+                key_first_round: 10_000,
+                key_last_round: 10_255,
+                pubkey_commitment: algorand_pubkey_commitment(fx.keys[0].public_key_bytes()),
+            },
+            AlgorandVoterLeaf {
+                position: 1,
+                lower_weight: 750,
+                upper_weight: 850,
+                key_first_round: 10_000,
+                key_last_round: 10_255,
+                pubkey_commitment: algorand_pubkey_commitment(fx.keys[1].public_key_bytes()),
+            },
+            AlgorandVoterLeaf {
+                position: 2,
+                lower_weight: 850,
+                upper_weight: 950,
+                key_first_round: 10_000,
+                key_last_round: 10_255,
+                pubkey_commitment: algorand_pubkey_commitment(fx.keys[2].public_key_bytes()),
+            },
+            AlgorandVoterLeaf {
+                position: 3,
+                lower_weight: 950,
+                upper_weight: 1_000,
+                key_first_round: 10_000,
+                key_last_round: 10_255,
+                pubkey_commitment: algorand_pubkey_commitment(fx.keys[3].public_key_bytes()),
+            },
+        ];
+        let (skew_vroot, skew_vpath0) = build_voters_commitment(&skew_voters, Some(0));
+        let (_, skew_hdr_path) = build_headers_commitment(&fx.headers, Some(2));
+        let mut skew_pin = fx.pinned.clone();
+        skew_pin.voters_commitment = skew_vroot;
+        let skew_sign = stateproof_sign_digest(NET, &fx.message);
+        let skew_reveal = AlgorandVoterReveal {
+            position: 0,
+            lower_weight: 0,
+            upper_weight: 750,
+            key_first_round: 10_000,
+            key_last_round: 10_255,
+            mldsa65_pubkey: fx.keys[0].public_key_bytes().to_vec(),
+            mldsa65_sig: fx.keys[0]
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &skew_sign)
+                .expect("ML-DSA-65 sign"),
+            merkle_path: skew_vpath0,
+        };
+        let skew_ev = RawConsensusEvidence {
+            payload: encode_algorand_stateproof(
+                fx.message.clone(),
+                fx.headers[2].clone(),
+                2,
+                3,
+                skew_hdr_path,
+                vec![skew_reveal],
+            )
+            .expect("encode skew"),
+            ..fx.golden.clone()
+        };
+        let skew_adapter = AlgorandStateProofAdapter::new(NET, Some(skew_pin));
+        let skew_att = skew_adapter
+            .verify(&skew_ev, policy)
+            .expect("75% single-voter stake quorum verifies");
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &skew_adapter.descriptor(),
+            &skew_att,
+        )
+        .expect("skewed-stake Algorand StateProof must satisfy FinalityProofShape");
     }
 
     #[test]

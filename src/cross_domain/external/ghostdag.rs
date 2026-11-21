@@ -86,7 +86,6 @@ pub const MAX_GHOSTDAG_K: u8 = 64;
 const PAYLOAD_MAGIC: &[u8; 8] = b"GHDAGV01";
 const MAX_GHOSTDAG_PAYLOAD_BYTES: usize = 256 * 1024;
 const HEADER_TAG: &[u8] = b"bud-ghostdag-header-v1";
-const EVIDENCE_DIGEST_TAG: &[u8] = b"bud-ghostdag-evidence-v1";
 
 /// Fixed 128-vertex bitset for deterministic zero-allocation causal-past and
 /// blue-cluster set algebra within a single verification window.
@@ -177,6 +176,19 @@ impl U256 {
     const fn is_zero(self) -> bool {
         let [a0, a1, a2, a3] = self.0;
         a0 == 0 && a1 == 0 && a2 == 0 && a3 == 0
+    }
+
+    const fn bit_len(self) -> u32 {
+        let [a0, a1, a2, a3] = self.0;
+        if a3 != 0 {
+            256 - a3.leading_zeros()
+        } else if a2 != 0 {
+            192 - a2.leading_zeros()
+        } else if a1 != 0 {
+            128 - a1.leading_zeros()
+        } else {
+            64 - a0.leading_zeros()
+        }
     }
 
     fn from_be_bytes(bytes: &[u8; 32]) -> Self {
@@ -1203,7 +1215,13 @@ impl GhostdagPowAdapter {
         }
 
         // Freshness gate against `policy.max_age` (0 means disabled).
-        if policy.max_age > 0 && policy.now > fin.timestamp_secs {
+        if policy.max_age > 0 {
+            if fin.timestamp_secs > policy.now {
+                return Err(AdapterError::Stale {
+                    age: fin.timestamp_secs - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - fin.timestamp_secs;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -1228,12 +1246,18 @@ impl GhostdagPowAdapter {
             });
         }
 
-        let evidence_digest = hash_fields_bytes(&[
-            EVIDENCE_DIGEST_TAG,
-            self.descriptor.id.as_bytes(),
-            self.network.as_bytes(),
-            &evidence.payload,
-        ]);
+        let window_blue_work = tip
+            .blue_work
+            .checked_sub(U256(pinned.anchor_blue_work))
+            .ok_or_else(|| AdapterError::ConsensusRule {
+                rule: "ghostdag tip blue_work regressed below pinned anchor".into(),
+            })?;
+        let difficulty_bits = window_blue_work.bit_len();
+        if difficulty_bits == 0 {
+            return Err(AdapterError::ConsensusRule {
+                rule: "ghostdag window cumulative blue_work must be non-zero".into(),
+            });
+        }
 
         Ok(FinalityAttestation {
             adapter: self.descriptor.id,
@@ -1242,10 +1266,8 @@ impl GhostdagPowAdapter {
             state_root: fin.utxo_commitment,
             finalized_at: fin.timestamp_secs,
             time_unit: TimeUnit::UnixSeconds,
-            security: SecurityBacking::Work {
-                difficulty_bits: fin.bits,
-            },
-            evidence_digest,
+            security: SecurityBacking::Work { difficulty_bits },
+            evidence_digest: evidence.digest(),
             adapter_version: GHOSTDAG_ADAPTER_VERSION,
             evidence_version: GHOSTDAG_EVIDENCE_VERSION,
             attested_block_hash: Some(fin.hash),
@@ -1696,12 +1718,39 @@ mod tests {
             finalized_hash: main1.block_hash,
             tip_hash: tip.block_hash,
         };
-        adapter
-            .verify(
-                &wrap_evidence(&adapter, &ok_ev, main1.daa_score, main1.utxo_commitment),
-                &policy,
-            )
+        let ok_raw = wrap_evidence(&adapter, &ok_ev, main1.daa_score, main1.utxo_commitment);
+        let ok_att = adapter
+            .verify(&ok_raw, &policy)
             .expect("selected-parent chain block verifies");
+        assert_eq!(
+            ok_att.evidence_digest,
+            ok_raw.digest(),
+            "attestation evidence_digest must equal canonical RawConsensusEvidence::digest()"
+        );
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &ok_att,
+        )
+        .expect("verified GHOSTDAG attestation must satisfy FinalityProofShape");
+        match ok_att.security {
+            SecurityBacking::Work { difficulty_bits } => {
+                assert!(
+                    (1..=256).contains(&difficulty_bits),
+                    "Work difficulty_bits must be cumulative log2 work in 1..=256, not raw compact nBits ({difficulty_bits})"
+                );
+            }
+            other => panic!("expected Work security backing, got {other:?}"),
+        }
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 3_600;
+        future_policy.now = main1.timestamp_secs.saturating_sub(10);
+        assert!(
+            matches!(
+                adapter.verify(&ok_raw, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future-dated block timestamp above policy.now must fail closed when max_age > 0"
+        );
 
         // `side` is NOT on selected-parent chain -> rejected.
         let side_ev = GhostdagEvidence {
