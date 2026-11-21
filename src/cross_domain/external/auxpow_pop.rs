@@ -1084,8 +1084,14 @@ impl AuxPowPopAdapter {
                 });
             }
         }
-        if policy.max_age > 0 && policy.now > aux.aux_height {
-            let age = policy.now.saturating_sub(aux.aux_height);
+        if policy.max_age > 0 {
+            if aux.aux_height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: aux.aux_height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - aux.aux_height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -1300,14 +1306,21 @@ impl AuxPowPopAdapter {
                         }
                     })?;
                 }
-                let required = min_pop_supermajority(*pop_total);
-                if signed_bond < required {
+                let required_bond = min_pop_supermajority(*pop_total);
+                if signed_bond < required_bond {
                     return Err(AdapterError::ConsensusRule {
                         rule: format!(
-                            "auxpow PoP signed bond {signed_bond} below >2/3 threshold {required}"
+                            "auxpow PoP signed bond {signed_bond} below >2/3 threshold {required_bond}"
                         ),
                     });
                 }
+                let shift = 128u32
+                    .saturating_sub(pop_total.leading_zeros())
+                    .saturating_sub(64);
+                let signers = u64::try_from(signed_bond >> shift).unwrap_or(u64::MAX);
+                let required = u64::try_from(required_bond >> shift)
+                    .unwrap_or(u64::MAX)
+                    .max(1);
                 let scheme = if all_pq {
                     ObservedScheme::Scheme(SchemeId::ML_DSA_65)
                 } else {
@@ -1316,8 +1329,8 @@ impl AuxPowPopAdapter {
                 (
                     SecurityBacking::SignatureSet {
                         scheme,
-                        signers: u64::try_from(seen.len()).unwrap_or(u64::MAX),
-                        required: u64::try_from(required).unwrap_or(u64::MAX),
+                        signers,
+                        required,
                         total_weight: *pop_total,
                         slashable: true,
                     },
@@ -1672,6 +1685,22 @@ mod tests {
 
         let (report, _) = admit_observed(&adapter, &policy);
         assert!(report.admitted, "auxpow selftest must pass: {report:?}");
+
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("stake-weighted PoP attestation must satisfy FinalityProofShape");
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 1_000;
+        future_policy.now = att.height.saturating_sub(1);
+        assert!(
+            matches!(
+                adapter.verify(&raw, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future-dated aux_height above policy.now must fail closed when max_age > 0"
+        );
     }
 
     #[test]

@@ -531,8 +531,14 @@ impl SuccinctRecursiveAdapter {
                     .into(),
             });
         }
-        if policy.max_age > 0 && policy.now > tip.blockchain_length {
-            let age = policy.now.saturating_sub(tip.blockchain_length);
+        if policy.max_age > 0 {
+            if tip.blockchain_length > policy.now {
+                return Err(AdapterError::Stale {
+                    age: tip.blockchain_length - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - tip.blockchain_length;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -970,6 +976,21 @@ mod tests {
 
         let att = registry.submit(&adapter, &ev_a, &policy).unwrap();
         assert_eq!(att.height, 120);
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("recursive STARK attestation must satisfy FinalityProofShape");
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 50;
+        future_policy.now = att.height.saturating_sub(1);
+        assert!(
+            matches!(
+                adapter.verify(&ev_a, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future-dated blockchain_length above policy.now must fail closed when max_age > 0"
+        );
         // Pure Hash+Lattice PQ domain survives CRQC classical isolation untouched!
         assert_eq!(
             registry

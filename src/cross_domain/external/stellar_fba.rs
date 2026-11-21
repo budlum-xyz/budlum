@@ -803,8 +803,14 @@ impl StellarScpAdapter {
                 required: need_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > ledger.ledger_seq {
-            let age = policy.now.saturating_sub(ledger.ledger_seq);
+        if policy.max_age > 0 {
+            if ledger.ledger_seq > policy.now {
+                return Err(AdapterError::Stale {
+                    age: ledger.ledger_seq - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - ledger.ledger_seq;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -1350,6 +1356,7 @@ mod tests {
         registry.bond_prover(&domain, challenger, req_bond).unwrap();
 
         let att = registry.submit(&adapter, &ev_a, &policy).unwrap();
+        assert_stellar_shape_and_future_freshness(&adapter, &ev_a, &policy, &att);
         assert_eq!(
             registry
                 .domain(&domain)
@@ -1386,5 +1393,28 @@ mod tests {
             .unwrap()
             .attestations
             .contains_key(&(att.height, EVIDENCE_VERSION)));
+    }
+
+    fn assert_stellar_shape_and_future_freshness(
+        adapter: &StellarScpAdapter,
+        ev: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+        att: &FinalityAttestation,
+    ) {
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            att,
+        )
+        .expect("SCP closed-quorum attestation must satisfy FinalityProofShape");
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 1_000;
+        future_policy.now = att.height.saturating_sub(1);
+        assert!(
+            matches!(
+                adapter.verify(ev, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future-dated SCP ledger_seq above policy.now must fail closed when max_age > 0"
+        );
     }
 }

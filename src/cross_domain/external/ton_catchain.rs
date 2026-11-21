@@ -437,9 +437,8 @@ const fn has_supermajority(signed: u128, total: u128) -> bool {
 }
 
 #[must_use]
-fn min_supermajority_weight(total: u128) -> u64 {
-    let need = (total.saturating_mul(2) / 3).saturating_add(1);
-    u64::try_from(need).unwrap_or(u64::MAX)
+const fn min_supermajority_weight(total: u128) -> u128 {
+    (total.saturating_mul(2) / 3).saturating_add(1)
 }
 
 type TonValidatorIndex<'a> = (BTreeMap<[u8; 32], &'a TonValidator>, u128, Hash32);
@@ -499,7 +498,7 @@ fn verify_catchain_quorum(
     sigs: &[CatchainSig],
     msg: &Hash32,
     what: &str,
-) -> Result<(u64, bool), AdapterError> {
+) -> Result<(u128, bool), AdapterError> {
     if sigs.is_empty() || sigs.len() > committee.len() {
         return Err(AdapterError::ConsensusRule {
             rule: format!("invalid {what} signature count {}", sigs.len()),
@@ -552,7 +551,7 @@ fn verify_catchain_quorum(
             rule: format!("{what} signed weight {signed} does not exceed 2/3 of {total_weight}"),
         });
     }
-    Ok((seen.len() as u64, all_pq))
+    Ok((signed, all_pq))
 }
 
 fn verify_shard_proof(shard: &TonShardProof, mc_shard_root: &Hash32) -> Result<(), AdapterError> {
@@ -1069,8 +1068,14 @@ impl TonCatchainAdapter {
                 required: need_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > mc.mc_seqno {
-            let age = policy.now.saturating_sub(mc.mc_seqno);
+        if policy.max_age > 0 {
+            if mc.mc_seqno > policy.now {
+                return Err(AdapterError::Stale {
+                    age: mc.mc_seqno - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - mc.mc_seqno;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -1088,7 +1093,7 @@ impl TonCatchainAdapter {
             &mc.root_hash,
             &mc.file_hash,
         );
-        let (cc_signers, cc_pq) = verify_catchain_quorum(
+        let (cc_signed, cc_pq) = verify_catchain_quorum(
             &active_map,
             active_total,
             &decoded.catchain_sigs,
@@ -1096,6 +1101,14 @@ impl TonCatchainAdapter {
             "TON Catchain commit",
         )?;
         all_pq &= cc_pq;
+        let required_weight = min_supermajority_weight(active_total);
+        let shift = 128u32
+            .saturating_sub(active_total.leading_zeros())
+            .saturating_sub(64);
+        let signers = u64::try_from(cc_signed >> shift).unwrap_or(u64::MAX);
+        let required = u64::try_from(required_weight >> shift)
+            .unwrap_or(u64::MAX)
+            .max(1);
 
         let scheme = if all_pq {
             ObservedScheme::Scheme(SchemeId::ML_DSA_65)
@@ -1114,8 +1127,8 @@ impl TonCatchainAdapter {
             time_unit: TimeUnit::Height,
             security: SecurityBacking::SignatureSet {
                 scheme,
-                signers: cc_signers,
-                required: min_supermajority_weight(active_total),
+                signers,
+                required,
                 total_weight: active_total,
                 slashable: true,
             },
@@ -1507,6 +1520,7 @@ mod tests {
         registry.bond_prover(&domain, challenger, req_bond).unwrap();
 
         let att = registry.submit(&adapter, &ev_a, &policy).unwrap();
+        assert_ton_shape_and_future_freshness(&adapter, &ev_a, &policy, &att);
         assert_eq!(
             registry
                 .domain(&domain)
@@ -1543,5 +1557,28 @@ mod tests {
             .unwrap()
             .attestations
             .contains_key(&(att.height, EVIDENCE_VERSION)));
+    }
+
+    fn assert_ton_shape_and_future_freshness(
+        adapter: &TonCatchainAdapter,
+        ev: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+        att: &FinalityAttestation,
+    ) {
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            att,
+        )
+        .expect("stake-weighted TON Catchain attestation must satisfy FinalityProofShape");
+        let mut future_policy = policy.clone();
+        future_policy.max_age = 1_000;
+        future_policy.now = att.height.saturating_sub(1);
+        assert!(
+            matches!(
+                adapter.verify(ev, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future-dated Masterchain seqno above policy.now must fail closed when max_age > 0"
+        );
     }
 }
