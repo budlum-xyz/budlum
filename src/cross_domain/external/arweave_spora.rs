@@ -231,9 +231,14 @@ fn validate_evidence_fields(ev: &ArweaveSpOraEvidence) -> Result<(), AdapterErro
             rule: "Arweave weave_root must be non-zero".into(),
         });
     }
-    if ev.chunk_size == 0 {
+    if ev.block_height == 0 {
         return Err(AdapterError::ConsensusRule {
-            rule: "Arweave chunk_size must be non-zero".into(),
+            rule: "Arweave block_height must be non-zero".into(),
+        });
+    }
+    if ev.chunk_size == 0 || ev.chunk_offset.checked_add(ev.chunk_size).is_none() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Arweave chunk_size must be non-zero and chunk_offset + chunk_size must not overflow".into(),
         });
     }
     if !ev.chunk_offset.is_multiple_of(ev.chunk_size) {
@@ -407,7 +412,13 @@ impl ArweaveSpOraAdapter {
         ed25519_pk: [u8; ED25519_PK_LEN],
         pq_pk: Vec<u8>,
     ) -> Self {
-        self.pinned_operator = Some((ed25519_pk, pq_pk));
+        let valid_ed = ed25519_pk != [0u8; ED25519_PK_LEN];
+        let valid_pq = pq::validate_public_key(SchemeId::ML_DSA_65, &pq_pk).is_ok();
+        if valid_ed && valid_pq {
+            self.pinned_operator = Some((ed25519_pk, pq_pk));
+        } else {
+            self.pinned_operator = None;
+        }
         self
     }
 
@@ -420,15 +431,25 @@ impl ArweaveSpOraAdapter {
     /// Returns [`AdapterError`] if any structural, Merkle, solvency, or
     /// cryptographic signature check fails.
     pub fn verify_storage(&self, evidence: &ArweaveSpOraEvidence) -> Result<u128, AdapterError> {
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Arweave SPoRA adapter network must be non-empty".into(),
+            });
+        }
         validate_evidence_fields(evidence)?;
+        let Some((expected_ed, expected_pq)) = self.pinned_operator.as_ref() else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Arweave SPoRA adapter has no pinned operator; admission is closed".into(),
+            });
+        };
         verify_weave_inclusion(evidence)?;
         let free = validate_contamination(evidence)?;
         validate_endowment_solvency(evidence, free)?;
-        let pinned = self
-            .pinned_operator
-            .as_ref()
-            .map(|(ed, pq_pk)| (ed, pq_pk.as_slice()));
-        verify_operator_signatures(evidence, &self.network, pinned)?;
+        verify_operator_signatures(
+            evidence,
+            &self.network,
+            Some((expected_ed, expected_pq.as_slice())),
+        )?;
         Ok(free)
     }
 }
@@ -453,6 +474,17 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
+        if evidence.adapter != self.descriptor().id {
+            return Err(AdapterError::WrongAdapter {
+                expected: self.descriptor().name,
+                found: hex::encode(evidence.adapter.as_bytes()),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Arweave SPoRA adapter network must be non-empty".into(),
+            });
+        }
         if evidence.evidence_version != EVIDENCE_VERSION {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -491,7 +523,13 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             });
         }
 
-        if policy.max_age > 0 && policy.now > ev.block_height {
+        if policy.max_age > 0 {
+            if ev.block_height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: ev.block_height.saturating_sub(policy.now),
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now.saturating_sub(ev.block_height);
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -519,7 +557,7 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             return Err(AdapterError::UnslashableBacking);
         }
 
-        let digest = ev.digest();
+        let digest = ev.signing_digest(&self.network);
         let backing = SecurityBacking::SignatureSet {
             scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
             signers: 1,
@@ -715,8 +753,9 @@ mod tests {
 
     #[test]
     fn tampered_merkle_path_or_chunk_offset_is_refused_even_when_resigned() {
-        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet");
         let (mut bad_sibling, op) = sample_evidence_with_operator("arweave-mainnet");
+        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet")
+            .with_pinned_operator(op.ed.public_key_bytes(), op.pq.public_key_bytes().to_vec());
         bad_sibling.merkle_proof[1][0] ^= 0x01;
         op.sign("arweave-mainnet", &mut bad_sibling);
         assert!(
@@ -724,10 +763,14 @@ mod tests {
         );
 
         let (mut swapped_branch, op2) = sample_evidence_with_operator("arweave-mainnet");
+        let adapter2 = ArweaveSpOraAdapter::new("arweave-mainnet").with_pinned_operator(
+            op2.ed.public_key_bytes(),
+            op2.pq.public_key_bytes().to_vec(),
+        );
         swapped_branch.chunk_offset = 0; // flips direction bit 0
         op2.sign("arweave-mainnet", &mut swapped_branch);
         assert!(
-            matches!(adapter.verify_storage(&swapped_branch).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("Merkle"))
+            matches!(adapter2.verify_storage(&swapped_branch).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("Merkle"))
         );
     }
 
@@ -755,20 +798,34 @@ mod tests {
         assert!(
             matches!(adapter.verify_storage(&foreign).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("pinned"))
         );
+
+        let unpinned = ArweaveSpOraAdapter::new("arweave-mainnet");
+        assert!(matches!(
+            unpinned.verify_storage(&foreign),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("pinned")
+        ));
+        let bad_pin =
+            ArweaveSpOraAdapter::new("arweave-mainnet").with_pinned_operator([0u8; 32], Vec::new());
+        assert!(matches!(
+            bad_pin.verify_storage(&foreign),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("pinned")
+        ));
     }
 
     #[test]
     fn contamination_solvency_overflow_and_declared_mismatches_fail_closed() {
-        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet");
+        let (ev, op) = sample_evidence_with_operator("arweave-mainnet");
+        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet")
+            .with_pinned_operator(op.ed.public_key_bytes(), op.pq.public_key_bytes().to_vec());
 
-        let (mut contam, op) = sample_evidence_with_operator("arweave-mainnet");
+        let mut contam = ev.clone();
         contam.encumbered_endowment = 3_000_000_000_001;
         op.sign("arweave-mainnet", &mut contam);
         assert!(
             matches!(adapter.verify_storage(&contam).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("contamination"))
         );
 
-        let (mut insolvent, op) = sample_evidence_with_operator("arweave-mainnet");
+        let mut insolvent = ev.clone();
         insolvent.gross_endowment = 100;
         insolvent.encumbered_endowment = 0;
         op.sign("arweave-mainnet", &mut insolvent);
@@ -776,7 +833,7 @@ mod tests {
             matches!(adapter.verify_storage(&insolvent).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("insufficient"))
         );
 
-        let (mut overflow, op) = sample_evidence_with_operator("arweave-mainnet");
+        let mut overflow = ev.clone();
         overflow.spora_rate = u128::MAX;
         overflow.gross_endowment = u128::MAX;
         overflow.encumbered_endowment = 0;
@@ -785,7 +842,25 @@ mod tests {
             matches!(adapter.verify_storage(&overflow).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("overflow"))
         );
 
-        let (ev, _) = sample_evidence_with_operator("arweave-mainnet");
+        let mut zero_height = ev.clone();
+        zero_height.block_height = 0;
+        op.sign("arweave-mainnet", &mut zero_height);
+        assert!(
+            matches!(adapter.verify_storage(&zero_height).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("block_height"))
+        );
+
+        let mut off_overflow = ev.clone();
+        off_overflow.chunk_offset = u64::MAX - (u64::MAX % ev.chunk_size);
+        recompute_and_sign("arweave-mainnet", &op, &mut off_overflow);
+        assert!(
+            matches!(adapter.verify_storage(&off_overflow).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("overflow"))
+        );
+
+        let empty_net = ArweaveSpOraAdapter::new("")
+            .with_pinned_operator(op.ed.public_key_bytes(), op.pq.public_key_bytes().to_vec());
+        assert!(
+            matches!(empty_net.verify_storage(&ev).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("network"))
+        );
         let raw_bad_height = RawConsensusEvidence {
             adapter: adapter.descriptor().id,
             evidence_version: EVIDENCE_VERSION,
@@ -839,5 +914,22 @@ mod tests {
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
         );
+
+        let mut wrong_adapter = raw_valid.clone();
+        wrong_adapter.adapter = AdapterId([0x77; 32]);
+        assert!(matches!(
+            adapter.verify(&wrong_adapter, &VerificationPolicy::strict(0)),
+            Err(AdapterError::WrongAdapter { .. })
+        ));
+
+        let mut future_policy = VerificationPolicy::strict(ev.block_height.saturating_sub(50));
+        future_policy.max_age = 20;
+        assert!(matches!(
+            adapter.verify(&raw_valid, &future_policy),
+            Err(AdapterError::Stale {
+                age: 50,
+                max_age: 20
+            })
+        ));
     }
 }
