@@ -2525,10 +2525,53 @@ impl Executor {
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiOfferData { cid, price } => {
+                // Occupying a content-listing row locks the single-table
+                // ContentOffer deposit behind that exact row key; a registry
+                // refusal releases the fresh lock in the same breath so no
+                // partial write strands money. The offer id is assigned by
+                // the registry, so the row key is minted from the registry
+                // counter and the refusal path recomputes the same key.
+                let policy: crate::tokenomics::pool_deposit::PoolDepositPolicy =
+                    crate::tokenomics::pool_deposit::policy_of(
+                        crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+                    );
+                let crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable {
+                    ..
+                } = policy.class
+                else {
+                    return Err(BudlumError::validation(
+                        "offer_pool_deposit",
+                        "a content listing is not shielded-class; refusing the wrong ledger",
+                    ));
+                };
+                let full_cost = policy.deposit.checked_add(tx.fee).ok_or_else(|| {
+                    BudlumError::validation(
+                        "offer_pool_deposit",
+                        "deposit + fee arithmetic overflow",
+                    )
+                })?;
+                if state.spendable_balance(&tx.from) < full_cost {
+                    return Err(BudlumError::validation(
+                        "offer_pool_deposit",
+                        "spendable balance cannot cover the row deposit and the fee",
+                    ));
+                }
+                let row_key = format!(
+                    "content-offer:{}",
+                    state.marketplace.next_offer_id()
+                );
                 state
+                    .lock_pool_deposit_row(&row_key, &tx.from, policy.deposit)
+                    .map_err(|e| BudlumError::validation("offer_pool_deposit", e))?;
+                if let Err(e) = state
                     .marketplace
-                    .create_offer(tx.from, *cid, *price)
-                    .map_err(|e| BudlumError::validation("offer_invalid", e))?;
+                    .create_offer_at(tx.from, *cid, *price, state.current_block_height)
+                {
+                    state.release_pool_deposit_row(&row_key).map_err(|r| {
+                        BudlumError::validation("offer_pool_deposit_release", r)
+                    })?;
+                    return Err(BudlumError::validation("offer_invalid", e));
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -2551,6 +2594,12 @@ impl Executor {
                     .marketplace
                     .close_offer(*offer_id, &offer.seller)
                     .map_err(|e| BudlumError::validation("race", e))?;
+
+                // A settled row closes: release its locked deposit to whoever
+                // locked it. A row with no record (pre-deposit era) refunds
+                // nothing, so a recordless refund can never mint.
+                let row_key = format!("content-offer:{offer_id}");
+                let _ = state.release_pool_deposit_row(&row_key);
 
                 let total_cost = offer.price.checked_add(tx.fee).ok_or_else(|| {
                     BudlumError::validation("cost_overflow", "offer cost overflow")
@@ -7332,5 +7381,302 @@ mod tests {
             signers.contains(&live_mobile),
             "bonded unslashed mobile validator remains eligible for duty lane"
         );
+    }
+
+    fn offer_listing_funded_state() -> (AccountState, Address, u64) {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let seller = Address::from([0xA1; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&seller, 100_000_000);
+        (state, seller, mainnet)
+    }
+
+    fn offer_listing_tx(seller: Address, chain_id: u64) -> crate::core::transaction::Transaction {
+        crate::core::transaction::Transaction::new_with_chain_id(
+            seller,
+            Address::zero(),
+            0,
+            100,
+            0,
+            vec![],
+            chain_id,
+            TransactionType::AiOfferData {
+                cid: crate::storage::content_id::ContentId::of(b"market-dataset-d"),
+                price: 10,
+            },
+        )
+    }
+
+    #[test]
+    fn a_content_listing_locks_the_single_table_deposit_behind_its_row() {
+        let (mut state, seller, chain_id) = offer_listing_funded_state();
+        let deposit = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        )
+        .deposit;
+        let balance_before = state.get_balance(&seller);
+        let tx = offer_listing_tx(seller, chain_id);
+        Executor::apply_transaction_checked(&mut state, &tx).expect("listing locks deposit");
+        let row = state
+            .pool_deposit_rows
+            .get("content-offer:0")
+            .expect("row ledger carries the listing");
+        assert_eq!(row.0, seller);
+        assert_eq!(row.1, deposit);
+        assert_eq!(
+            state.get_balance(&seller),
+            balance_before - deposit - 100,
+            "deposit + fee leave spendable balance"
+        );
+        assert_eq!(
+            state.marketplace.get_offer(0).expect("offer exists").seller,
+            seller
+        );
+    }
+
+    #[test]
+    fn a_listing_without_deposit_capital_is_refused_before_any_write() {
+        let (_, seller, chain_id) = offer_listing_funded_state();
+        let mut state = AccountState::new();
+        // Below the listing fee alone: the frame-level spendable gate refuses
+        // first, so no deposit lock and no registry row can exist.
+        state.add_balance(&seller, 50);
+        let tx = offer_listing_tx(seller, chain_id);
+        let err = Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("capital below deposit + fee must refuse");
+        assert_eq!(err.code(), "vesting_locked");
+        assert!(state.marketplace.get_offer(0).is_none());
+        assert!(state.pool_deposit_rows.is_empty());
+        // Fee covered but deposit not: the offer arm's own deposit gate
+        // refuses with its named code.
+        let deposit = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        )
+        .deposit;
+        state.add_balance(&seller, 100);
+        let tx = offer_listing_tx(seller, chain_id);
+        let err = Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("deposit shortfall must refuse");
+        assert_eq!(err.code(), "offer_pool_deposit");
+        assert!(state.marketplace.get_offer(0).is_none());
+        assert!(state.pool_deposit_rows.is_empty());
+        let _ = deposit;
+    }
+
+    #[test]
+    fn a_refused_listing_releases_its_fresh_deposit_in_the_same_breath() {
+        let (mut state, seller, chain_id) = offer_listing_funded_state();
+        let balance_before = state.get_balance(&seller);
+        let deposit = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        )
+        .deposit;
+        let free_tx = offer_listing_tx(seller, chain_id);
+        Executor::apply_transaction_checked(&mut state, &free_tx).expect("first listing");
+        assert!(
+            state.pool_deposit_rows.contains_key("content-offer:0"),
+            "the first listing locks its row deposit"
+        );
+        // Wind the counter back to a live id: the second attempt locks a
+        // fresh row deposit, then the registry refuses the colliding id and
+        // the door must release that fresh lock in the same breath.
+        let registry = &mut state.marketplace;
+        registry.next_offer_id = 0;
+        let refused = offer_listing_tx(seller, chain_id);
+        let err = Executor::apply_transaction_checked(&mut state, &refused)
+            .expect_err("colliding registry counter must refuse");
+        assert_eq!(err.code(), "offer_pool_deposit");
+        assert_eq!(
+            state.pool_deposit_rows.len(),
+            1,
+            "refusal must not strand a second deposit"
+        );
+        assert!(
+            state.pool_deposit_rows.contains_key("content-offer:0"),
+            "the first listing keeps its deposit"
+        );
+        assert_eq!(
+            state.get_balance(&seller),
+            balance_before - deposit - 100,
+            "only the first listing holds a deposit"
+        );
+        assert_eq!(
+            state
+                .pool_deposit_rows
+                .get("content-offer:1")
+                .map(|(_, amount)| *amount),
+            None,
+            "the wound-back counter must not mint a parallel row"
+        );
+    }
+
+    #[test]
+    fn a_registry_refusal_after_lock_releases_the_fresh_deposit() {
+        let (mut state, seller, chain_id) = offer_listing_funded_state();
+        let deposit = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        )
+        .deposit;
+        let balance_before = state.get_balance(&seller);
+        // Zero price passes the frame gates but fails inside the registry,
+        // after the row deposit is already locked.
+        let bad = crate::core::transaction::Transaction::new_with_chain_id(
+            seller,
+            Address::zero(),
+            0,
+            100,
+            0,
+            vec![],
+            chain_id,
+            TransactionType::AiOfferData {
+                cid: crate::storage::content_id::ContentId::of(b"zero-price"),
+                price: 0,
+            },
+        );
+        let err = Executor::apply_transaction_checked(&mut state, &bad)
+            .expect_err("zero price must refuse inside the registry");
+        assert_eq!(err.code(), "offer_invalid");
+        assert!(
+            state.pool_deposit_rows.is_empty(),
+            "a registry refusal releases its fresh deposit in the same breath"
+        );
+        assert_eq!(
+            state.get_balance(&seller),
+            balance_before,
+            "no deposit and no fee leave the balance on refusal"
+        );
+        let _ = deposit;
+    }
+
+    #[test]
+    fn a_settled_listing_refunds_its_locker_exactly_once() {
+        let (mut state, seller, chain_id) = offer_listing_funded_state();
+        let deposit = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        )
+        .deposit;
+        let listed = offer_listing_tx(seller, chain_id);
+        Executor::apply_transaction_checked(&mut state, &listed).expect("listing");
+        let buyer = Address::from([0xB2; 32]);
+        state.add_balance(&buyer, 100_000_000);
+        let purchase = crate::core::transaction::Transaction::new_with_chain_id(
+            buyer,
+            Address::zero(),
+            0,
+            100,
+            0,
+            vec![],
+            chain_id,
+            TransactionType::AiPurchaseData { offer_id: 0 },
+        );
+        Executor::apply_transaction_checked(&mut state, &purchase).expect("purchase");
+        assert!(
+            state.pool_deposit_rows.get("content-offer:0").is_none(),
+            "settlement closes the row ledger entry"
+        );
+        assert_eq!(
+            state.get_balance(&seller),
+            100_000_000 - 100 + 10,
+            "seller keeps the sale price and recovers the deposit, minus the listing fee"
+        );
+        assert!(
+            !state
+                .marketplace
+                .get_offer(0)
+                .expect("settled offer stays readable")
+                .active
+        );
+        assert_eq!(
+            state
+                .release_pool_deposit_row("content-offer:0")
+                .expect("idempotent release of a closed row"),
+            0,
+            "a settled row refunds nothing twice"
+        );
+        assert_eq!(
+            state.get_balance(&seller),
+            100_000_000 - 100 + 10,
+            "no second refund moved after settlement"
+        );
+        let _ = deposit;
+    }
+
+    #[test]
+    fn a_pre_deposit_listing_settles_without_minting() {
+        let (mut state, seller, chain_id) = offer_listing_funded_state();
+        let first = state
+            .marketplace
+            .create_offer_at(
+                seller,
+                crate::storage::content_id::ContentId::of(b"legacy-listing"),
+                10,
+                0,
+            )
+            .expect("legacy row bypasses the deposit door");
+        assert!(state.pool_deposit_rows.is_empty());
+        let buyer = Address::from([0xB3; 32]);
+        state.add_balance(&buyer, 100_000_000);
+        let purchase = crate::core::transaction::Transaction::new_with_chain_id(
+            buyer,
+            Address::zero(),
+            0,
+            100,
+            0,
+            vec![],
+            chain_id,
+            TransactionType::AiPurchaseData { offer_id: first },
+        );
+        Executor::apply_transaction_checked(&mut state, &purchase)
+            .expect("legacy settlement must not mint");
+        assert_eq!(state.get_balance(&seller), 100_000_010);
+    }
+
+    #[test]
+    fn the_ttl_sweep_reclaims_only_expired_live_rows_oldest_first() {
+        let mut registry = crate::pollen::MarketplaceRegistry::new();
+        let seller = Address::from([0xC4; 32]);
+        let ttl = match crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        )
+        .class
+        {
+            crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable { ttl_blocks } => {
+                ttl_blocks
+            }
+            crate::tokenomics::pool_deposit::PoolDepositClass::ShieldedBalance => {
+                panic!("ContentOffer rows must be owner-refundable")
+            }
+        };
+        let old = registry
+            .create_offer_at(
+                seller,
+                crate::storage::content_id::ContentId::of(b"old"),
+                1,
+                10,
+            )
+            .expect("old listing");
+        let fresh = registry
+            .create_offer_at(
+                seller,
+                crate::storage::content_id::ContentId::of(b"fresh"),
+                1,
+                10 + ttl,
+            )
+            .expect("fresh listing");
+        registry.close_offer(fresh, &seller).expect("close fresh");
+        let reopened = registry
+            .create_offer_at(
+                seller,
+                crate::storage::content_id::ContentId::of(b"fresh-live"),
+                1,
+                10 + ttl,
+            )
+            .expect("fresh live listing");
+        let swept = registry.sweep_expired_offers(10 + ttl + 1, ttl);
+        assert_eq!(swept, vec![old], "only the expired live row is swept");
+        assert!(!registry.get_offer(old).expect("swept row").active);
+        assert!(registry.get_offer(reopened).expect("fresh row").active);
+        let boundary = registry.sweep_expired_offers(10 + ttl, ttl);
+        assert!(boundary.is_empty(), "the full TTL window is kept");
     }
 }

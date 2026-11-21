@@ -26,6 +26,11 @@ pub struct DataOffer {
     pub cid: ContentId,
     pub price: u64, // Price in $BUD
     pub active: bool,
+    /// Block height at which this listing was created. The TTL sweep reclaims
+    /// only live rows older than the single-table `ContentOffer` TTL; legacy
+    /// rows restored without this field were stamped at block 0.
+    #[serde(default)]
+    pub created_at_block: u64,
 }
 
 /// Receipt for an authorization-backed pollen purchase. This is not a LUM/DeFi
@@ -299,6 +304,14 @@ impl MarketplaceRegistry {
         Self::default()
     }
 
+    /// The offer id the next `create_offer_at` will mint. The executor reads
+    /// this before listing so the row deposit is locked behind the exact row
+    /// key that will be created.
+    #[must_use]
+    pub fn next_offer_id(&self) -> u64 {
+        self.next_offer_id
+    }
+
     /// The canonical signing preimage of a purchase request.
     ///
     /// Security review (HIGH): the buyer signature is bound to ALL of the
@@ -350,6 +363,22 @@ impl MarketplaceRegistry {
         seller: Address,
         cid: ContentId,
         price: u64,
+    ) -> Result<u64, String> {
+        self.create_offer_at(seller, cid, price, 0)
+    }
+
+    /// Create a content listing stamped with its creation block so the TTL
+    /// sweep can reclaim only live rows older than the pool policy allows.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn create_offer_at(
+        &mut self,
+        seller: Address,
+        cid: ContentId,
+        price: u64,
+        current_block: u64,
     ) -> Result<u64, String> {
         if price == 0 {
             return Err("Price must be greater than zero".into());
@@ -403,6 +432,7 @@ impl MarketplaceRegistry {
             cid,
             price,
             active: true,
+            created_at_block: current_block,
         };
         self.offers.insert(id, offer);
         self.next_offer_id = self.next_offer_id.saturating_add(1);
@@ -421,6 +451,33 @@ impl MarketplaceRegistry {
         }
         offer.active = false;
         Ok(())
+    }
+
+    /// Sweep live content listings older than `ttl_blocks` as of
+    /// `current_block`. A row is swept only when
+    /// `created_at_block + ttl_blocks < current_block` (strict: the row keeps
+    /// its full TTL window). Swept ids are returned oldest-first so the
+    /// executor releases each row's locked deposit back to its recorded
+    /// owner in deterministic order. Replay-protection and closed rows are
+    /// never touched: only `active` rows expire.
+    #[must_use]
+    pub fn sweep_expired_offers(&mut self, current_block: u64, ttl_blocks: u64) -> Vec<u64> {
+        let mut expired: Vec<(u64, u64)> = self
+            .offers
+            .values()
+            .filter(|offer| {
+                offer.active && offer.created_at_block.saturating_add(ttl_blocks) < current_block
+            })
+            .map(|offer| (offer.created_at_block, offer.id))
+            .collect();
+        expired.sort_unstable();
+        let ids: Vec<u64> = expired.into_iter().map(|(_, id)| id).collect();
+        for id in &ids {
+            if let Some(offer) = self.offers.get_mut(id) {
+                offer.active = false;
+            }
+        }
+        ids
     }
 
     #[must_use]
@@ -1489,6 +1546,7 @@ mod tests {
                     cid: ContentId::of(b"x"),
                     price: 1,
                     active: true,
+                    created_at_block: 0,
                 },
             );
         }
