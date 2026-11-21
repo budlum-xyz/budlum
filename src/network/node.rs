@@ -3769,6 +3769,40 @@ impl Node {
         self
     }
 
+    /// Dial `addr` using a freshly allocated OS ephemeral source port.
+    ///
+    /// `libp2p-tcp`'s default [`PortUse::Reuse`] binds outbound sockets to
+    /// `0.0.0.0:<listener_port>` whenever the node has a listener on
+    /// `127.0.0.1:<listener_port>`. On multi-homed hosts or sandboxes where a
+    /// non-`SO_REUSEPORT` socket holds `<listener_port>` on a secondary local
+    /// interface, `bind(0.0.0.0:<listener_port>)` fails with `EADDRINUSE`
+    /// before `connect()` and `libp2p-tcp` does not fall back. Allocating a
+    /// fresh port avoids wildcard listener-port collisions while
+    /// [`PeerCondition::DisconnectedAndNotDialing`] prevents duplicate
+    /// concurrent dials to the same known `PeerId`.
+    fn dial_multiaddr(
+        &mut self,
+        addr: Multiaddr,
+        known_peer: Option<PeerId>,
+    ) -> Result<(), libp2p::swarm::DialError> {
+        use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
+
+        let peer_id = known_peer.or_else(|| crate::network::sentry::peer_id_from_multiaddr(&addr));
+        let opts = if let Some(peer_id) = peer_id {
+            DialOpts::peer_id(peer_id)
+                .condition(PeerCondition::DisconnectedAndNotDialing)
+                .addresses(vec![addr])
+                .allocate_new_port()
+                .build()
+        } else {
+            DialOpts::unknown_peer_id()
+                .address(addr)
+                .allocate_new_port()
+                .build()
+        };
+        self.swarm.dial(opts)
+    }
+
     /// Dials every configured sentry peer that is not currently connected.
     /// Used on startup, periodic reconnect, and starvation recovery for
     /// [`crate::network::sentry::SentryRole::ShieldedValidator`].
@@ -3777,10 +3811,14 @@ impl Node {
             if self.peer_manager_lock().is_banned(&peer_id) || self.swarm.is_connected(&peer_id) {
                 continue;
             }
-            if let Err(e) = self.swarm.dial(addr.clone()) {
-                warn!("Shielded validator failed to dial sentry {peer_id} at {addr}: {e}");
-            } else {
-                info!("Shielded validator dialing sentry {peer_id} at {addr}");
+            match self.dial_multiaddr(addr.clone(), Some(peer_id)) {
+                Ok(()) => {
+                    info!("Shielded validator dialing sentry {peer_id} at {addr}");
+                }
+                Err(libp2p::swarm::DialError::DialPeerConditionFalse(_)) => {}
+                Err(e) => {
+                    warn!("Shielded validator failed to dial sentry {peer_id} at {addr}: {e}");
+                }
             }
         }
     }
@@ -3861,15 +3899,19 @@ impl Node {
                 .gossipsub
                 .add_explicit_peer(&peer_id);
             if !self.swarm.is_connected(&peer_id) {
-                if let Err(e) = self.swarm.dial(addr.clone()) {
-                    tracing::debug!(
-                        peer = %peer_id,
-                        addr = %addr,
-                        error = %e,
-                        "Sentry shield reconnect dial deferred"
-                    );
-                } else {
-                    info!("Sentry shield: dialing protected peer {peer_id} at {addr}");
+                match self.dial_multiaddr(addr.clone(), Some(peer_id)) {
+                    Ok(()) => {
+                        info!("Sentry shield: dialing protected peer {peer_id} at {addr}");
+                    }
+                    Err(libp2p::swarm::DialError::DialPeerConditionFalse(_)) => {}
+                    Err(e) => {
+                        tracing::debug!(
+                            peer = %peer_id,
+                            addr = %addr,
+                            error = %e,
+                            "Sentry shield reconnect dial deferred"
+                        );
+                    }
                 }
             }
         }
@@ -3953,7 +3995,10 @@ impl Node {
         {
             return Err("validator sentry shield refuses dialing non-sentry peer".into());
         }
-        self.swarm.dial(remote)?;
+        match self.dial_multiaddr(remote, target_peer) {
+            Ok(()) | Err(libp2p::swarm::DialError::DialPeerConditionFalse(_)) => {}
+            Err(e) => return Err(Box::new(e)),
+        }
         info!("Dialing {addr}");
         Ok(())
     }
@@ -3999,7 +4044,7 @@ impl Node {
         }
         if !self.sentry_policy.can_share_in_dht(&peer_id) {
             if !self.swarm.is_connected(&peer_id) {
-                let _ = self.swarm.dial(multiaddr);
+                let _ = self.dial_multiaddr(multiaddr, Some(peer_id));
             }
             return Ok(());
         }
@@ -4011,7 +4056,7 @@ impl Node {
                 .add_address(&peer_id, multiaddr.clone());
         }
         if !self.swarm.is_connected(&peer_id) {
-            let _ = self.swarm.dial(multiaddr);
+            let _ = self.dial_multiaddr(multiaddr, Some(peer_id));
         }
         if !self.sentry_shield.is_validator_shielded() {
             self.swarm.behaviour_mut().kad.bootstrap()?;
@@ -5154,10 +5199,16 @@ impl Node {
                                             .behaviour_mut()
                                             .gossipsub
                                             .add_explicit_peer(added_id);
-                                        if let Err(e) = self.swarm.dial(addr.clone()) {
-                                            warn!(
-                                                "Live sentry rotation failed to dial {added_id} at {addr}: {e}"
-                                            );
+                                        match self.dial_multiaddr(addr.clone(), Some(*added_id)) {
+                                            Ok(())
+                                            | Err(
+                                                libp2p::swarm::DialError::DialPeerConditionFalse(_),
+                                            ) => {}
+                                            Err(e) => {
+                                                warn!(
+                                                    "Live sentry rotation failed to dial {added_id} at {addr}: {e}"
+                                                );
+                                            }
                                         }
                                     }
                                     info!(
@@ -5320,6 +5371,18 @@ impl Node {
                                     "Shielded validator bound private listener {address} (external advertisement disabled)"
                                 );
                             }
+                        }
+                        SwarmEvent::ListenerError { listener_id, error } => {
+                            warn!("Listener {listener_id:?} error: {error}");
+                        }
+                        SwarmEvent::ListenerClosed {
+                            listener_id,
+                            addresses,
+                            reason: Err(err),
+                        } => {
+                            warn!(
+                                "Listener {listener_id:?} on {addresses:?} closed with error: {err}"
+                            );
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                             let remote = endpoint.get_remote_address();
@@ -5655,8 +5718,14 @@ impl Node {
                                     for (peer_id, addr) in peers {
                                         info!("mDNS discovered: {peer_id} at {addr}");
                                         self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                                        if let Err(e) = self.swarm.dial(addr.clone()) {
-                                            warn!("Failed to dial discovered peer: {e}");
+                                        match self.dial_multiaddr(addr, Some(peer_id)) {
+                                            Ok(())
+                                            | Err(
+                                                libp2p::swarm::DialError::DialPeerConditionFalse(_),
+                                            ) => {}
+                                            Err(e) => {
+                                                warn!("Failed to dial discovered peer: {e}");
+                                            }
                                         }
                                     }
                                 }
@@ -10879,5 +10948,155 @@ mod identity_file_tests {
             "hostname bootstrap must fail explicitly when DNS transport is unavailable"
         );
         actor_task.abort();
+    }
+
+    #[tokio::test]
+    async fn validator_dials_and_rotates_sentries_when_non_loopback_interface_holds_listen_port() {
+        use crate::chain::blockchain::Blockchain;
+        use crate::chain::chain_actor::ChainActor;
+        use crate::consensus::pow::PoWEngine;
+        use crate::network::sentry::{SentryConfig, SentryPolicy};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // Discover a local non-loopback IPv4 interface address (e.g. eth0 on
+        // multi-homed hosts or sandbox VMs) via UDP routing table lookup.
+        let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .expect("bind udp socket for local interface probe");
+        probe
+            .connect((Ipv4Addr::new(198, 51, 100, 1), 9))
+            .expect("route probe to TEST-NET-2");
+        let non_loopback_ip = match probe.local_addr().expect("probe local addr").ip() {
+            IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => ip,
+            other => panic!("expected non-loopback local IPv4 interface, got {other}"),
+        };
+
+        // Reserve three distinct ports and simultaneously occupy the validator's
+        // port on the non-loopback interface WITHOUT SO_REUSEPORT (just as a
+        // host port-forwarder or another tenant service does). When the
+        // validator listens on `127.0.0.1:port_val`, libp2p-tcp's default
+        // `PortUse::Reuse` binds outbound dials to `0.0.0.0:port_val`, colliding
+        // with `non_loopback_ip:port_val` (`EADDRINUSE`) unless outbound dials
+        // allocate a fresh ephemeral port.
+        let listener_a =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve sentry A port");
+        let listener_b =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve sentry B port");
+        let (port_val, _occupied_non_loopback_listener) = (0..64)
+            .find_map(|_| {
+                let lo = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).ok()?;
+                let port = lo.local_addr().ok()?.port();
+                let ext = std::net::TcpListener::bind((non_loopback_ip, port)).ok()?;
+                drop(lo);
+                Some((port, ext))
+            })
+            .expect("reserve port free on both loopback and non-loopback interface");
+        let port_a = listener_a.local_addr().expect("sentry A addr").port();
+        let port_b = listener_b.local_addr().expect("sentry B addr").port();
+        drop(listener_a);
+        drop(listener_b);
+
+        let make_chain = || {
+            let consensus = Arc::new(PoWEngine::new(0));
+            let blockchain = Blockchain::new(consensus, None, 45265, None);
+            let (actor, client) = ChainActor::new(blockchain);
+            let task = tokio::spawn(async move { Box::pin(actor.run()).await });
+            (client, task)
+        };
+
+        let (chain_a, chain_a_task) = make_chain();
+        let (chain_b, chain_b_task) = make_chain();
+        let (chain_val, chain_val_task) = make_chain();
+
+        let mut sentry_a = Node::new(chain_a).expect("sentry A");
+        let sentry_a_id = sentry_a.peer_id;
+        sentry_a
+            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_a)
+            .expect("listen sentry A");
+
+        let mut sentry_b = Node::new(chain_b).expect("sentry B");
+        let sentry_b_id = sentry_b.peer_id;
+        sentry_b
+            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_b)
+            .expect("listen sentry B");
+
+        let sentry_a_addr = format!("/ip4/127.0.0.1/tcp/{port_a}/p2p/{sentry_a_id}");
+        let sentry_b_addr = format!("/ip4/127.0.0.1/tcp/{port_b}/p2p/{sentry_b_id}");
+
+        let val_policy = SentryPolicy::from_config(&SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![sentry_a_addr],
+            allowed_private_cidrs: vec!["127.0.0.1/32".to_string()],
+            ..Default::default()
+        })
+        .expect("validator policy");
+        let mut validator = Node::new(chain_val)
+            .expect("validator")
+            .with_sentry_policy(val_policy);
+        let validator_id = validator.peer_id;
+        validator
+            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_val)
+            .expect("listen validator on loopback while non-loopback holds same port");
+
+        let sentry_policy = SentryPolicy::from_config(&SentryConfig {
+            role: "sentry".to_string(),
+            private_peers: vec![validator_id.to_string()],
+            allowed_private_cidrs: vec!["127.0.0.1/32".to_string()],
+            ..Default::default()
+        })
+        .expect("sentry policy");
+        let mut sentry_a = sentry_a.with_sentry_policy(sentry_policy.clone());
+        let mut sentry_b = sentry_b.with_sentry_policy(sentry_policy);
+
+        let val_client = validator.get_client();
+        let h_sa = tokio::spawn(async move { Box::pin(sentry_a.run()).await });
+        let h_sb = tokio::spawn(async move { Box::pin(sentry_b.run()).await });
+        let h_val = tokio::spawn(async move { Box::pin(validator.run()).await });
+
+        let mut connected_a = false;
+        let mut last_status_a = None;
+        for _ in 0..80 {
+            let st = val_client.admin_sentry_status().await.expect("status A");
+            if st.connected_sentries == vec![sentry_a_id.to_string()] {
+                connected_a = true;
+                break;
+            }
+            last_status_a = Some((st.configured_sentries, st.connected_sentries));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            connected_a,
+            "validator failed to connect to Sentry A while {non_loopback_ip}:{port_val} was occupied; last status: {last_status_a:?}"
+        );
+
+        let diff = val_client
+            .admin_update_sentries(vec![sentry_b_addr])
+            .await
+            .expect("live sentry rotation");
+        assert_eq!(diff.removed, vec![sentry_a_id]);
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].0, sentry_b_id);
+
+        let mut connected_b = false;
+        let mut last_status_b = None;
+        for _ in 0..80 {
+            let st = val_client.admin_sentry_status().await.expect("status B");
+            if st.connected_sentries == vec![sentry_b_id.to_string()] {
+                connected_b = true;
+                break;
+            }
+            last_status_b = Some((st.configured_sentries, st.connected_sentries));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            connected_b,
+            "validator failed live rotation to Sentry B while {non_loopback_ip}:{port_val} was occupied; last status: {last_status_b:?}"
+        );
+
+        h_val.abort();
+        h_sa.abort();
+        h_sb.abort();
+        chain_a_task.abort();
+        chain_b_task.abort();
+        chain_val_task.abort();
     }
 }
