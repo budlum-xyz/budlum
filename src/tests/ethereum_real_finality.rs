@@ -11,7 +11,8 @@ use crate::core::address::Address;
 use crate::cross_domain::external::ethereum::{EthereumSyncAdapter, SszCommitteePin};
 use crate::cross_domain::external::intake::PairingBls;
 use crate::cross_domain::external::spec::{
-    AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, SecurityBacking, VerificationPolicy,
+    AdapterError, AdapterId, ExternalFinalityAdapter, FinalityAttestation, RawConsensusEvidence,
+    SecurityBacking, VerificationPolicy,
 };
 
 const DENEB_UPDATE: &[u8] =
@@ -174,13 +175,13 @@ fn ranges(payload: &[u8]) -> Ranges {
     }
 }
 
-fn refuse(
+fn verify_v4(
     mut payload: Vec<u8>,
     period: u64,
     root: &str,
     height: u64,
     declared: [u8; 32],
-) -> String {
+) -> Result<FinalityAttestation, AdapterError> {
     let adapter = pinned(period, root);
     let ev = RawConsensusEvidence {
         adapter: AdapterId::from_name("ethereum-sync-mainnet"),
@@ -191,12 +192,7 @@ fn refuse(
         declared_root: declared,
         submitter: Address::zero(),
     };
-    format!(
-        "{:?}",
-        adapter
-            .verify(&ev, &VerificationPolicy::strict(height + 200))
-            .expect_err("tampered evidence must be refused")
-    )
+    adapter.verify(&ev, &VerificationPolicy::strict(height + 200))
 }
 
 fn deneb_payload() -> Vec<u8> {
@@ -211,25 +207,29 @@ fn deneb_payload() -> Vec<u8> {
 
 #[test]
 fn a_committee_pin_with_the_wrong_root_is_refused() {
-    let msg = refuse(
+    let err = verify_v4(
         deneb_payload(),
         1300,
         ELECTRA_ROOT,
         DENEB_FINALIZED_SLOT,
         hex32(DENEB_STATE_ROOT),
-    );
+    )
+    .expect_err("committee pin root mismatch must be refused");
+    let msg = format!("{err:?}");
     assert!(msg.contains("committee"), "got: {msg}");
 }
 
 #[test]
 fn a_committee_pin_for_the_wrong_period_is_refused() {
-    let msg = refuse(
+    let err = verify_v4(
         deneb_payload(),
         1299,
         DENEB_ROOT,
         DENEB_FINALIZED_SLOT,
         hex32(DENEB_STATE_ROOT),
-    );
+    )
+    .expect_err("committee pin period mismatch must be refused");
+    let msg = format!("{err:?}");
     assert!(msg.contains("period"), "got: {msg}");
 }
 
@@ -238,12 +238,20 @@ fn a_flipped_signature_byte_is_refused() {
     let mut payload = deneb_payload();
     let r = ranges(&payload);
     payload[r.signature.start] ^= 0x01;
-    refuse(
+    let err = verify_v4(
         payload,
         1300,
         DENEB_ROOT,
         DENEB_FINALIZED_SLOT,
         hex32(DENEB_STATE_ROOT),
+    )
+    .expect_err("corrupted BLS aggregate signature must be refused");
+    assert!(
+        matches!(
+            err,
+            AdapterError::Crypto { .. } | AdapterError::Malformed { .. }
+        ),
+        "unexpected error variant: {err:?}"
     );
 }
 
@@ -252,12 +260,17 @@ fn a_flipped_finality_branch_sibling_is_refused() {
     let mut payload = deneb_payload();
     let r = ranges(&payload);
     payload[r.first_branch_sibling.start] ^= 0x80;
-    refuse(
+    let err = verify_v4(
         payload,
         1300,
         DENEB_ROOT,
         DENEB_FINALIZED_SLOT,
         hex32(DENEB_STATE_ROOT),
+    )
+    .expect_err("corrupted finality Merkle sibling must be refused");
+    assert!(
+        matches!(err, AdapterError::ConsensusRule { .. }),
+        "unexpected error variant: {err:?}"
     );
 }
 
@@ -266,12 +279,20 @@ fn a_flipped_participation_bit_is_refused() {
     let mut payload = deneb_payload();
     let r = ranges(&payload);
     payload[r.bits.start] ^= 0x01;
-    refuse(
+    let err = verify_v4(
         payload,
         1300,
         DENEB_ROOT,
         DENEB_FINALIZED_SLOT,
         hex32(DENEB_STATE_ROOT),
+    )
+    .expect_err("mutated participation bitset must fail aggregate verification");
+    assert!(
+        matches!(
+            err,
+            AdapterError::Crypto { .. } | AdapterError::ConsensusRule { .. }
+        ),
+        "unexpected error variant: {err:?}"
     );
 }
 
@@ -286,12 +307,17 @@ fn an_msb_first_bit_order_is_refused() {
     .payload;
     let r = ranges(&payload);
     payload[r.bits].reverse();
-    refuse(
+    let err = verify_v4(
         payload,
         1915,
         FULU_ROOT,
         FULU_FINALIZED_SLOT,
         hex32(FULU_STATE_ROOT),
+    )
+    .expect_err("reversed sync-committee participation bits must be refused");
+    assert!(
+        matches!(err, AdapterError::Crypto { .. }),
+        "unexpected error variant: {err:?}"
     );
 }
 
@@ -300,12 +326,20 @@ fn an_attested_slot_mutation_is_refused() {
     let mut payload = deneb_payload();
     let r = ranges(&payload);
     payload[r.attested_slot.start] ^= 0x01;
-    refuse(
+    let err = verify_v4(
         payload,
         1300,
         DENEB_ROOT,
         DENEB_FINALIZED_SLOT,
         hex32(DENEB_STATE_ROOT),
+    )
+    .expect_err("mutated attested_header.slot must break signing root");
+    assert!(
+        matches!(
+            err,
+            AdapterError::Crypto { .. } | AdapterError::ConsensusRule { .. }
+        ),
+        "unexpected error variant: {err:?}"
     );
 }
 
@@ -314,12 +348,20 @@ fn a_signature_slot_mutation_is_refused() {
     let mut payload = deneb_payload();
     let r = ranges(&payload);
     payload[r.signature_slot.start] ^= 0x01;
-    refuse(
+    let err = verify_v4(
         payload,
         1300,
         DENEB_ROOT,
         DENEB_FINALIZED_SLOT,
         hex32(DENEB_STATE_ROOT),
+    )
+    .expect_err("mutated signature_slot must be refused");
+    assert!(
+        matches!(
+            err,
+            AdapterError::ConsensusRule { .. } | AdapterError::Malformed { .. }
+        ),
+        "unexpected error variant: {err:?}"
     );
 }
 
@@ -327,12 +369,20 @@ fn a_signature_slot_mutation_is_refused() {
 fn a_truncated_payload_is_refused() {
     let mut payload = deneb_payload();
     payload.truncate(payload.len() - 1);
-    refuse(
+    let err = verify_v4(
         payload,
         1300,
         DENEB_ROOT,
         DENEB_FINALIZED_SLOT,
         hex32(DENEB_STATE_ROOT),
+    )
+    .expect_err("truncated SSZ finality payload must be refused");
+    assert!(
+        matches!(
+            err,
+            AdapterError::Malformed { .. } | AdapterError::ConsensusRule { .. }
+        ),
+        "unexpected error variant: {err:?}"
     );
 }
 
@@ -340,12 +390,20 @@ fn a_truncated_payload_is_refused() {
 fn a_trailing_byte_is_refused() {
     let mut payload = deneb_payload();
     payload.push(0x00);
-    refuse(
+    let err = verify_v4(
         payload,
         1300,
         DENEB_ROOT,
         DENEB_FINALIZED_SLOT,
         hex32(DENEB_STATE_ROOT),
+    )
+    .expect_err("trailing byte past canonical SSZ extra_data bound must be refused");
+    assert!(
+        matches!(
+            err,
+            AdapterError::Malformed { .. } | AdapterError::ConsensusRule { .. }
+        ),
+        "unexpected error variant: {err:?}"
     );
 }
 
@@ -353,12 +411,17 @@ fn a_trailing_byte_is_refused() {
 fn a_wrong_committee_length_prefix_is_refused() {
     let mut payload = deneb_payload();
     payload[..4].copy_from_slice(&24_623u32.to_le_bytes());
-    refuse(
+    let err = verify_v4(
         payload,
         1300,
         DENEB_ROOT,
         DENEB_FINALIZED_SLOT,
         hex32(DENEB_STATE_ROOT),
+    )
+    .expect_err("non-canonical committee SSZ length prefix must be refused");
+    assert!(
+        matches!(err, AdapterError::Malformed { .. }),
+        "unexpected error variant: {err:?}"
     );
 }
 

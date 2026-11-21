@@ -2498,6 +2498,7 @@ impl Blockchain {
             } else {
                 block.index
             },
+            ulp_domains_root: state.settlement.ulp_domains_root(),
         }
     }
 
@@ -3008,6 +3009,7 @@ impl Blockchain {
             } else {
                 self.chain.last().map_or(0, |b| b.index)
             },
+            ulp_domains_root: self.state.settlement.ulp_domains_root(),
         }
     }
 
