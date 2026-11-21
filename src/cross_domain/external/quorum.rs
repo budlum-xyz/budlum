@@ -83,7 +83,7 @@ pub enum Answer {
 impl Answer {
     /// Whether this answer counts toward the participant total.
     #[must_use]
-    pub fn counts(&self) -> bool {
+    pub const fn counts(&self) -> bool {
         !matches!(self, Self::Infrastructure)
     }
 
@@ -144,7 +144,7 @@ impl QuorumPolicy {
     /// The policy for anything that will be committed to: refuse on dispute,
     /// refuse when too few answered, no preferences.
     #[must_use]
-    pub fn strict(agreement_threshold: usize, max_participants: usize) -> Self {
+    pub const fn strict(agreement_threshold: usize, max_participants: usize) -> Self {
         Self {
             agreement_threshold,
             max_participants,
@@ -178,7 +178,7 @@ pub enum QuorumOutcome {
 impl QuorumOutcome {
     /// Whether this outcome is a decision the caller can act on.
     #[must_use]
-    pub fn decided(&self) -> bool {
+    pub const fn decided(&self) -> bool {
         matches!(self, Self::AgreedClaim { .. } | Self::AgreedRefusal { .. })
     }
 }
@@ -282,7 +282,7 @@ pub fn decide(answers: &[Answer], policy: &QuorumPolicy) -> QuorumOutcome {
 
 /// Turns a group into an outcome.
 #[must_use]
-fn outcome_of(group: &AnswerGroup) -> QuorumOutcome {
+const fn outcome_of(group: &AnswerGroup) -> QuorumOutcome {
     match group.answer {
         Answer::Claim(claim) => QuorumOutcome::AgreedClaim {
             claim,

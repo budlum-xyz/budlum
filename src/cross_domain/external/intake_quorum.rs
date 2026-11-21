@@ -63,7 +63,9 @@ use crate::cross_domain::external::spec::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// One prover's recorded participation in one round: who answered, what the
+/// One prover's recorded participation in one round.
+///
+/// Records who answered, what the
 /// fold saw, and the digest of the evidence they carried. The digest stays
 /// so a later challenge can name the exact bytes a slashing is about. When
 /// the answer is a claim, the attestation the adapter produced travels with
@@ -441,18 +443,15 @@ impl QuorumRounds {
                 // order whose full claim digest matches the winner. Arrival
                 // order is block order behind the chain actor, so every node
                 // picks the same representative.
-                match find_attestation(&round.entries, claim) {
-                    Some(att) => RoundState::AgreedClaim {
+                // A winning claim with no stored attestation cannot happen,
+                // yet keeping the round open refuses safely without aborting.
+                find_attestation(&round.entries, claim).map_or(RoundState::Open, |attestation| {
+                    RoundState::AgreedClaim {
                         claim,
                         count,
-                        attestation: att,
-                    },
-                    // A winning claim with no stored attestation cannot
-                    // happen - a claim only enters with one - but "cannot
-                    // happen" is not a reason to abort. The round stays
-                    // open, which is the refusal that loses nothing.
-                    None => RoundState::Open,
-                }
+                        attestation,
+                    }
+                })
             }
             QuorumOutcome::AgreedRefusal { kind, count } => {
                 use subtle::ConstantTimeEq;
@@ -546,10 +545,10 @@ impl QuorumRounds {
     }
 }
 
-/// Maps an adapter error to the answer kind the quorum counts. The split the
-/// quorum module insists on: a refusal about the *claim* participates, a
-/// failure about the *prover or transport* does not.
 /// The most rounds one domain may have open at once.
+///
+/// Maps an adapter error to the answer kind the quorum counts: a refusal about
+/// the *claim* participates, while a failure about the *prover or transport* does not.
 ///
 /// Convenience: pub so the intake side can refuse against the same
 /// per-domain round cap the quorum enforces in this module.
@@ -567,7 +566,7 @@ const MAX_REFUSED_SUBSTANCES_PER_ROUND: usize = 64;
 /// not be read as evidence at all (wrong adapter, wrong version, malformed,
 /// declaration mismatch). Such a refusal is the caller's problem and is not
 /// a vote in anyone's quorum.
-fn is_not_a_vote(err: &AdapterError) -> bool {
+const fn is_not_a_vote(err: &AdapterError) -> bool {
     matches!(
         err,
         AdapterError::WrongAdapter { .. }
@@ -577,7 +576,7 @@ fn is_not_a_vote(err: &AdapterError) -> bool {
     )
 }
 
-fn answer_of_error(err: &AdapterError) -> Answer {
+const fn answer_of_error(err: &AdapterError) -> Answer {
     match err {
         // The adapter could not answer for a reason about itself. Counting
         // this as a participant would make "everybody is down" converge on
@@ -599,7 +598,7 @@ fn find_attestation(entries: &[RoundEntry], claim: [u8; 32]) -> Option<Box<Final
         .and_then(|e| e.attestation.clone())
 }
 
-fn state_name(state: &RoundState) -> &'static str {
+const fn state_name(state: &RoundState) -> &'static str {
     match state {
         RoundState::Open => "open",
         RoundState::AgreedClaim { .. } => "agreed-claim",

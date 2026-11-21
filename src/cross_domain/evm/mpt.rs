@@ -124,6 +124,7 @@ pub fn keccak256(data: &[u8]) -> [u8; 32] {
 }
 
 /// The empty trie root = `keccak256(rlp(""))` = `keccak256(0x80)`.
+///
 /// A canonical constant in Ethereum; every empty trie has this root.
 /// The value is CI proved (keccak256(0x80) could not be computed locally; the CI test
 /// `empty_trie_root_constant_correct` is the authority).
@@ -151,7 +152,7 @@ pub fn to_nibbles(bytes: &[u8]) -> Vec<u8> {
 pub fn hp_encode(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
     let flag = if is_leaf { 2u8 } else { 0u8 };
     let odd = nibbles.len() % 2 == 1;
-    let prefix_nibble = flag + if odd { 1 } else { 0 };
+    let prefix_nibble = flag + u8::from(odd);
     let mut out = Vec::new();
     if odd {
         // The first path nibble is packed into the same byte as the prefix.
@@ -432,18 +433,12 @@ mod tests {
     }
 
     /// Test helper: branch node RLP bytes (16 children + value).
-    fn branch_node_bytes(children: [Option<Vec<u8>>; 16], value: Option<Vec<u8>>) -> Vec<u8> {
+    fn branch_node_bytes(children: &[Option<Vec<u8>>; 16], value: Option<Vec<u8>>) -> Vec<u8> {
         let mut items: Vec<Item> = children
             .iter()
-            .map(|c| match c {
-                Some(b) => Item::String(b.clone()),
-                None => Item::String(vec![]),
-            })
+            .map(|c| Item::String(c.clone().unwrap_or_default()))
             .collect();
-        items.push(match value {
-            Some(v) => Item::String(v),
-            None => Item::String(vec![]),
-        });
+        items.push(Item::String(value.unwrap_or_default()));
         rlp_encode(&Item::List(items))
     }
 
@@ -554,7 +549,7 @@ mod tests {
         let nib_c = to_nibbles(absent);
         let absent_slot_empty = children[nib_c[0] as usize].is_none();
 
-        let branch_bytes = branch_node_bytes(children, None);
+        let branch_bytes = branch_node_bytes(&children, None);
         let root = keccak256(&branch_bytes);
 
         let proof = vec![branch_bytes, leaf_a_bytes, leaf_b_bytes];
@@ -586,7 +581,7 @@ mod tests {
 
         let mut children: [Option<Vec<u8>>; 16] = Default::default();
         children[9] = Some(leaf_hash.to_vec());
-        let branch_bytes = branch_node_bytes(children, None);
+        let branch_bytes = branch_node_bytes(&children, None);
         let branch_hash = keccak256(&branch_bytes);
 
         let ext_bytes = extension_node_bytes(&shared, &branch_hash);
@@ -595,9 +590,9 @@ mod tests {
         // Path = shared + [9] + leaf_nibbles; key = nibbles_to_bytes(shared+[9]+leaf)
         let full_path: Vec<u8> = shared
             .iter()
-            .cloned()
+            .copied()
             .chain(std::iter::once(9))
-            .chain(leaf_nibbles.iter().cloned())
+            .chain(leaf_nibbles.iter().copied())
             .collect();
         // Key bytes (each nibble pair of the path is a byte); here we call walk instead of
         // verify in order to test the walk directly.
@@ -632,7 +627,7 @@ mod tests {
         let mut children: [Option<Vec<u8>>; 16] = Default::default();
         children[8] = Some(keccak256(&leaf_0).to_vec());
         children[0] = Some(keccak256(&leaf_1).to_vec());
-        let branch = branch_node_bytes(children, None);
+        let branch = branch_node_bytes(&children, None);
         let root = keccak256(&branch);
         let proof = vec![branch, leaf_0, leaf_1];
 
@@ -701,8 +696,8 @@ mod tests {
 
         // Place inline leaf in branch child slot 5; path = [5, 0xa, 0xb].
         let mut children: [Option<Vec<u8>>; 16] = Default::default();
-        children[5] = Some(inline_leaf.clone());
-        let branch_bytes = branch_node_bytes(children, None);
+        children[5] = Some(inline_leaf);
+        let branch_bytes = branch_node_bytes(&children, None);
         let root = keccak256(&branch_bytes);
 
         // We test through walk directly with a synthetic short path.
@@ -778,7 +773,7 @@ mod depth_bound_locks {
 
         let mut map = BTreeMap::new();
         map.insert(a_ref, bytes_a.clone());
-        map.insert(b_ref, bytes_b.clone());
+        map.insert(b_ref, bytes_b);
 
         let path = to_nibbles(&[0x11u8; 32]);
         let root_item = rlp::decode(&bytes_a).expect("node A decodes");

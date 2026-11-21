@@ -81,7 +81,7 @@ impl ProverBond {
 
     /// The live bond: what is actually there to lose.
     #[must_use]
-    pub fn live_atoms(&self) -> u128 {
+    pub const fn live_atoms(&self) -> u128 {
         self.bond_atoms
     }
 
@@ -114,7 +114,9 @@ impl ProverBond {
     }
 }
 
-/// The bond ratio, as a pair. The denominator is a power of ten so the
+/// The bond ratio, as a pair.
+///
+/// The denominator is a power of ten so the
 /// arithmetic is exact in integers: a percentage stored as a float would make
 /// two nodes computing the same requirement disagree in the last digit, and a
 /// bond requirement that differs between nodes is a fork.
@@ -135,8 +137,9 @@ pub fn required_bond_atoms(ceiling_atoms: u128, ratio_num: u128, ratio_den: u128
         // looks plausible.
         return u128::MAX;
     }
-    match ceiling_atoms.checked_mul(ratio_num) {
-        Some(prod) => {
+    ceiling_atoms
+        .checked_mul(ratio_num)
+        .map_or(u128::MAX, |prod| {
             let q = prod / ratio_den;
             let rem = prod % ratio_den;
             // Preserve the legacy `u128::MAX` 1/10 edge while avoiding `prod + (den - 1)` truncation.
@@ -145,9 +148,7 @@ pub fn required_bond_atoms(ceiling_atoms: u128, ratio_num: u128, ratio_den: u128
             } else {
                 q.saturating_add(u128::from(rem != 0))
             }
-        }
-        None => u128::MAX,
-    }
+        })
 }
 
 /// What a prover is paid for carrying one attestation.
