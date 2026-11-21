@@ -33,7 +33,10 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Mobile Log Analyzer & Android Validator Suite
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Measured 20.2 min of real work against a 20 min budget: the job was
+    # cancelled on its final "Complete job success" step. Headroom, not a
+    # looser gate - the step set and assertions are unchanged.
+    timeout-minutes: 35
     permissions:
       contents: read
     steps:
@@ -150,8 +153,12 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             if gradle assembleDebug --no-daemon; then exit 0; fi
-            echo "gradle assembleDebug attempt ${attempt} failed; retrying" >&2
-            sleep $((attempt * 20))
+            if [ "$attempt" -lt 3 ]; then
+              echo "gradle assembleDebug attempt ${attempt} failed; backing off" >&2
+              sleep $((attempt * 45))
+            else
+              echo "gradle assembleDebug failed after ${attempt} attempts" >&2
+            fi
           done
           exit 1
       - name: Run Android unit tests
@@ -159,8 +166,12 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             if gradle testDebugUnitTest --no-daemon; then exit 0; fi
-            echo "gradle testDebugUnitTest attempt ${attempt} failed; retrying" >&2
-            sleep $((attempt * 20))
+            if [ "$attempt" -lt 3 ]; then
+              echo "gradle testDebugUnitTest attempt ${attempt} failed; backing off" >&2
+              sleep $((attempt * 45))
+            else
+              echo "gradle testDebugUnitTest failed after ${attempt} attempts" >&2
+            fi
           done
           exit 1
 
