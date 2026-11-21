@@ -6500,6 +6500,8 @@ mod tests {
         }
     }
 
+    use crate::pollen::offers;
+
     /// The content-listing deposit economy, end to end through the door.
     fn listing_tx(
         who: Address,
@@ -6630,7 +6632,7 @@ mod tests {
         state.add_balance(&newcomer, policy.deposit * 2);
         state.marketplace.offers.insert(
             5,
-            crate::pollen::offers::DataOffer {
+            offers::DataOffer {
                 id: 5,
                 seller: elder,
                 cid: crate::storage::content_id::ContentId::of(b"pre-field"),
@@ -6712,7 +6714,7 @@ mod tests {
         for id in 0..20u64 {
             state.marketplace.offers.insert(
                 id,
-                crate::pollen::offers::DataOffer {
+                offers::DataOffer {
                     id,
                     seller: elder,
                     cid: crate::storage::content_id::ContentId::of(&id.to_le_bytes()),

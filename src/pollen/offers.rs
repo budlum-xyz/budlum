@@ -268,8 +268,8 @@ pub struct MarketplaceRegistry {
     pub name_offers: BTreeMap<u64, NameOffer>,
     #[serde(default)]
     pub next_name_offer_id: u64,
-    /// Pollen: registered data buds. The asset is not sold; its
-    /// Access pollen is sold via `AccessGrant`.
+    /// Data market: registered data buds. The asset is not sold; its
+    /// Access grant is sold via `AccessGrant`.
     #[serde(default)]
     pub data_assets: BTreeMap<AssetId, DataAsset>,
     /// Pollen: owner-signed access grants. Strict AI gate consumes these.
