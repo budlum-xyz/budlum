@@ -502,13 +502,14 @@ jobs:
           cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- clippy-extra-report /tmp/clippy-extra.json
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- clippy-extra /tmp/clippy-extra.json
       - name: Format
+        id: format
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --all -- --check
       # Same reason as the build surface in rust.yml: `cargo fmt --check` prints a
       # diff to stdout, and stdout is on the log host. Here it is an annotation,
       # so the fix is mechanical even from a sandbox that cannot read logs.
       - name: Format diff surface (annotations)
-        if: failure()
+        if: failure() && steps.format.outcome == 'failure'
         run: |
           set +o pipefail
           # A check run keeps ten annotations and drops the earlier ones, so the

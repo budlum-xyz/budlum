@@ -1032,7 +1032,7 @@ mod tests {
         let (height, sub_slot, signage_index) = slot_pos;
         let (plot_k, difficulty, vdf_iterations) = plot_params;
         let farmer_pubkey_hash = [0x33; 32];
-        let plot_nonce = [height as u8 ^ 0x5A; 32];
+        let plot_nonce = [u8::try_from(height & 0xFF).unwrap_or(0) ^ 0x5A; 32];
         let plot_id = PoSpaceVdfBlock::derive_plot_id(&farmer_pubkey_hash, plot_k, &plot_nonce);
         let challenge_hash =
             PoSpaceVdfBlock::derive_challenge(parent_infusion, sub_slot, signage_index);
@@ -1104,7 +1104,7 @@ mod tests {
         for i in 0..block_count {
             let h = 100 + i as u64;
             let slot = 10 + (i as u64) / 4;
-            let sig_idx = ((i % 4) * 7 + 1) as u8;
+            let sig_idx = u8::try_from((i % 4) * 7 + 1).unwrap_or(1);
             let blk = mine_valid_block(network, &parent, (h, slot, sig_idx), (32, 4, 64), weight);
             parent = blk.infusion_block_hash;
             weight = blk.cumulative_weight;
@@ -1273,12 +1273,12 @@ mod tests {
         ));
 
         // 6. Unauthenticated base_cumulative_weight spoofing cannot bypass min_cumulative_weight.
-        let mut high_min_pinned = pinned.clone();
+        let mut high_min_pinned = pinned;
         high_min_pinned.min_cumulative_weight = 100_000;
         high_min_pinned.require_pq_attestation = false;
         high_min_pinned.pq_attestor_pubkey = None;
         let high_min_adapter = PoSpaceVdfAdapter::new("chia-pq-mainnet", Some(high_min_pinned));
-        let mut spoofed_base = ev_body.clone();
+        let mut spoofed_base = ev_body;
         let spoof_offset = 1u128 << 126;
         spoofed_base.base_cumulative_weight = spoof_offset;
         spoofed_base.pq_attestation_sig.clear();
@@ -1288,7 +1288,7 @@ mod tests {
             blk.cumulative_weight = running;
             blk.infusion_block_hash = blk.compute_infusion_hash("chia-pq-mainnet");
         }
-        let mut spoofed_raw = raw.clone();
+        let mut spoofed_raw = raw;
         spoofed_raw.payload = encode_pospace_payload(&spoofed_base).unwrap();
         assert!(matches!(
             high_min_adapter.verify(&spoofed_raw, &policy),
