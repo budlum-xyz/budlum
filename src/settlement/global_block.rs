@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Tamper-evident at the global settlement layer.
 ///
 /// **Backward compatibility:** the domain-separation tag is
-/// `BDLM_GLOBAL_BLOCK_V9`. V2 separated pre- and post-storage-root headers,
+/// `BDLM_GLOBAL_BLOCK_V10`. V2 separated pre- and post-storage-root headers,
 /// V3 added `ai_root`, V4 encodes each optional root behind a presence byte
 /// so `None` and `Some([0; 32])` hash differently, and V5 added
 /// `identity_root`. Old serialized headers (without the fields) still
@@ -127,6 +127,15 @@ pub struct GlobalBlockHeader {
     /// Highest checkpoint height with a recorded settlement proof claim (V8).
     #[serde(default)]
     pub proven_height: u64,
+
+    /// Canonical `ULP-1` binary `Poseidon` Merkle root over active finalized
+    /// external domains committed in `SettlementRegistries` (V10), presence-tagged.
+    ///
+    /// `None` when no active external domain holds a finalized commitment;
+    /// `Some(root)` anchors [`crate::light_client::LightClient::verify_multi_hop_light_route`]
+    /// directly to consensus state without requiring out-of-band root pinning.
+    #[serde(default)]
+    pub ulp_domains_root: Option<Hash32>,
 }
 
 /// How many checkpoint headers the account state keeps. Older headers stay
@@ -218,9 +227,10 @@ impl GlobalBlockHeader {
         let delegation_root_bytes = presence_tagged(self.delegation_root);
         let object_layer_root_bytes = presence_tagged(self.object_layer_root);
         let proof_root_bytes = presence_tagged(self.proof_root);
+        let ulp_domains_root_bytes = presence_tagged(self.ulp_domains_root);
 
         hash_fields_bytes(&[
-            b"BDLM_GLOBAL_BLOCK_V9",
+            b"BDLM_GLOBAL_BLOCK_V10",
             &self.version.to_le_bytes(),
             &self.global_height.to_le_bytes(),
             &self.previous_global_hash,
@@ -243,6 +253,7 @@ impl GlobalBlockHeader {
             &object_layer_root_bytes,
             &proof_root_bytes,
             &self.proven_height.to_le_bytes(),
+            &ulp_domains_root_bytes,
         ])
     }
 
@@ -292,6 +303,7 @@ mod tests {
             object_layer_root: None,
             proof_root: None,
             proven_height: 0,
+            ulp_domains_root: None,
         }
     }
 
@@ -460,6 +472,48 @@ mod tests {
         assert_ne!(
             zero_storage.calculate_hash_bytes(),
             zero_identity.calculate_hash_bytes()
+        );
+        let mut zero_ulp = sample_header();
+        zero_ulp.ulp_domains_root = Some([0u8; 32]);
+        assert_ne!(none.calculate_hash_bytes(), zero_ulp.calculate_hash_bytes());
+        assert_ne!(
+            zero_identity.calculate_hash_bytes(),
+            zero_ulp.calculate_hash_bytes()
+        );
+    }
+
+    #[test]
+    fn ulp_domains_root_none_some_and_serde_round_trip() {
+        let mut h_none = sample_header();
+        let mut h_some = sample_header();
+        h_some.ulp_domains_root = Some([0x5Au8; 32]);
+        assert_ne!(
+            h_none.calculate_hash_bytes(),
+            h_some.calculate_hash_bytes(),
+            "ulp_domains_root=None and Some(...) must produce distinct header hashes"
+        );
+        h_none.ulp_domains_root = Some([0xA5u8; 32]);
+        assert_ne!(
+            h_none.calculate_hash_bytes(),
+            h_some.calculate_hash_bytes(),
+            "distinct ulp_domains_root values must produce distinct header hashes"
+        );
+
+        let mut legacy_val: serde_json::Value =
+            serde_json::to_value(&h_some).expect("serialize header");
+        if let Some(obj) = legacy_val.as_object_mut() {
+            obj.remove("ulp_domains_root");
+        }
+        let decoded_legacy: GlobalBlockHeader =
+            serde_json::from_value(legacy_val).expect("legacy header without ulp_domains_root");
+        assert_eq!(decoded_legacy.ulp_domains_root, None);
+
+        let encoded = serde_json::to_string(&h_some).expect("encode json");
+        let decoded: GlobalBlockHeader = serde_json::from_str(&encoded).expect("decode json");
+        assert_eq!(decoded.ulp_domains_root, Some([0x5Au8; 32]));
+        assert_eq!(
+            decoded.calculate_hash_bytes(),
+            h_some.calculate_hash_bytes()
         );
     }
 }

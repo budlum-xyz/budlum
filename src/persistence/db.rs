@@ -3607,6 +3607,7 @@ mod tests {
             object_layer_root: None,
             proof_root: None,
             proven_height: 0,
+            ulp_domains_root: None,
         };
 
         let dir = tempdir().unwrap();

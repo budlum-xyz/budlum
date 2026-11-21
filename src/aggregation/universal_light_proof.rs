@@ -74,7 +74,7 @@ pub const MAX_ULP_DOMAIN_KIND_CODE: u8 = 14;
 /// Canonical 32-bit unsigned limb bitmask enforced inside `BudVM`.
 const U32_MASK: u64 = 0xFFFF_FFFF;
 /// Gas ceiling allocated to `BudVM` when proving a `ULP-1` guest trace.
-const ULP_VM_GAS_LIMIT: u64 = 200_000;
+const ULP_VM_GAS_LIMIT: u64 = 400_000;
 
 /// Consensus family attested by one external domain leaf inside `ULP-1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,25 +219,24 @@ pub struct UlpDomainSnapshot {
 }
 
 impl UlpDomainSnapshot {
-    /// Canonical domain-separated `Keccak-256` leaf digest committed inside
-    /// [`UniversalLightProofBundle::domains_merkle_root`].
+    /// Canonical domain-separated `Poseidon` leaf digest committed inside
+    /// [`UniversalLightProofBundle::domains_merkle_root`] and reproduced limb
+    /// for limb inside [`compile_ulp_program`].
     #[must_use]
     pub fn leaf_hash(&self) -> Hash32 {
-        let flags = [self.kind.code(), u8::from(self.pq_attested)];
-        let outflow = self.outflow_bps.to_be_bytes();
-        h(&[
-            TAG_ULP_LEAF,
-            &self.domain_id.to_be_bytes(),
-            &self.external_chain_id.to_be_bytes(),
-            &flags,
-            &self.prev_height.to_be_bytes(),
-            &self.finalized_height.to_be_bytes(),
-            &self.state_root,
-            &self.event_root,
-            &self.anchor_hash,
-            &self.security_weight.to_be_bytes(),
-            &outflow,
-        ])
+        let mut limbs = Vec::with_capacity(12 + 3 * DIGEST_LIMBS);
+        limbs.push(u64::from(self.domain_id));
+        limbs.push(u64::from(self.kind.code()));
+        limbs.extend_from_slice(&split_u64_limbs(self.external_chain_id));
+        limbs.extend_from_slice(&split_u64_limbs(self.prev_height));
+        limbs.extend_from_slice(&split_u64_limbs(self.finalized_height));
+        limbs.extend_from_slice(&split_u64_limbs(self.security_weight));
+        limbs.push(u64::from(self.outflow_bps));
+        limbs.push(u64::from(self.pq_attested));
+        limbs.extend_from_slice(&digest_limbs(&self.state_root));
+        limbs.extend_from_slice(&digest_limbs(&self.event_root));
+        limbs.extend_from_slice(&digest_limbs(&self.anchor_hash));
+        poseidon_sponge_256(TAG_ULP_LEAF, &limbs)
     }
 
     /// Validates local invariant bounds before proving or verification.
@@ -389,7 +388,15 @@ impl UlpDomainInclusionProof {
 
 #[must_use]
 fn ulp_node_hash(left: &Hash32, right: &Hash32) -> Hash32 {
-    h(&[TAG_ULP_NODE, left, right])
+    let mut limbs = Vec::with_capacity(2 * DIGEST_LIMBS);
+    limbs.extend_from_slice(&digest_limbs(left));
+    limbs.extend_from_slice(&digest_limbs(right));
+    poseidon_sponge_256(TAG_ULP_NODE, &limbs)
+}
+
+#[must_use]
+fn ulp_empty_root() -> Hash32 {
+    poseidon_sponge_256(TAG_ULP_EMPTY, &[])
 }
 
 /// Computes the canonical `ULP-1` binary Merkle root over domain snapshots
@@ -397,7 +404,7 @@ fn ulp_node_hash(left: &Hash32, right: &Hash32) -> Hash32 {
 #[must_use]
 pub fn ulp_domains_root(snapshots: &[UlpDomainSnapshot]) -> Hash32 {
     if snapshots.is_empty() {
-        return h(&[TAG_ULP_EMPTY]);
+        return ulp_empty_root();
     }
     let mut level: Vec<Hash32> = snapshots.iter().map(UlpDomainSnapshot::leaf_hash).collect();
     while level.len() > 1 {
@@ -411,10 +418,7 @@ pub fn ulp_domains_root(snapshots: &[UlpDomainSnapshot]) -> Hash32 {
         }
         level = next;
     }
-    level
-        .first()
-        .copied()
-        .unwrap_or_else(|| h(&[TAG_ULP_EMPTY]))
+    level.first().copied().unwrap_or_else(ulp_empty_root)
 }
 
 /// Builds an `O(log D)` [`UlpDomainInclusionProof`] for `target_domain_id`
@@ -506,59 +510,50 @@ fn poseidon_sponge_256(tag: &[u8], limbs: &[u64]) -> Hash32 {
     out
 }
 
-/// Computes the canonical in-circuit `ULP-1` `input_hash` binding the settlement
-/// hub anchor and every aggregated domain's pre-state anchor.
+/// Computes the canonical in-circuit `ULP-1` `input_hash` binding the
+/// settlement hub chain id, canonical settlement epoch, aggregated domain
+/// count, and finalized hub checkpoint root in `O(1)`.
 #[must_use]
 pub fn ulp_input_hash(
     hub_chain_id: DomainId,
     settlement_epoch: u64,
+    domain_count: u32,
     hub_checkpoint_root: &Hash32,
-    snapshots: &[UlpDomainSnapshot],
 ) -> Hash32 {
     let epoch = split_u64_limbs(settlement_epoch);
-    let mut limbs = Vec::with_capacity(4 + DIGEST_LIMBS + snapshots.len() * 5);
+    let mut limbs = Vec::with_capacity(4 + DIGEST_LIMBS);
     limbs.push(u64::from(hub_chain_id));
     limbs.extend_from_slice(&epoch);
-    limbs.push(snapshots.len() as u64);
+    limbs.push(u64::from(domain_count));
     limbs.extend_from_slice(&digest_limbs(hub_checkpoint_root));
-    for snap in snapshots {
-        limbs.push(u64::from(snap.domain_id));
-        limbs.push(u64::from(snap.kind.code()));
-        limbs.extend_from_slice(&split_u64_limbs(snap.external_chain_id));
-        limbs.extend_from_slice(&split_u64_limbs(snap.prev_height));
-    }
     poseidon_sponge_256(TAG_ULP_INPUT, &limbs)
 }
 
 /// Computes the canonical in-circuit `ULP-1` `output_hash` binding the
-/// multi-domain Merkle root, per-domain consensus families, finalized heights
-/// and roots, minimum post-quantum flag, and maximum outflow utilization.
+/// settlement hub chain id, canonical settlement epoch, aggregated domain
+/// count, in-circuit `Poseidon` `domains_merkle_root`, saturating
+/// `total_security_weight`, aggregate `all_pq_attested` flag, and exact
+/// `max_outflow_bps` in `O(1)`.
 #[must_use]
 pub fn ulp_output_hash(
     hub_chain_id: DomainId,
     settlement_epoch: u64,
+    domain_count: u32,
     domains_merkle_root: &Hash32,
+    total_security_weight: u64,
     all_pq_attested: bool,
     max_outflow_bps: u16,
-    snapshots: &[UlpDomainSnapshot],
 ) -> Hash32 {
     let epoch = split_u64_limbs(settlement_epoch);
-    let mut limbs = Vec::with_capacity(6 + DIGEST_LIMBS + snapshots.len() * (7 + DIGEST_LIMBS));
+    let weight = split_u64_limbs(total_security_weight);
+    let mut limbs = Vec::with_capacity(8 + DIGEST_LIMBS);
     limbs.push(u64::from(hub_chain_id));
     limbs.extend_from_slice(&epoch);
-    limbs.push(snapshots.len() as u64);
+    limbs.push(u64::from(domain_count));
     limbs.push(u64::from(all_pq_attested));
     limbs.push(u64::from(max_outflow_bps));
+    limbs.extend_from_slice(&weight);
     limbs.extend_from_slice(&digest_limbs(domains_merkle_root));
-    for snap in snapshots {
-        limbs.push(u64::from(snap.domain_id));
-        limbs.push(u64::from(snap.kind.code()));
-        limbs.extend_from_slice(&split_u64_limbs(snap.finalized_height));
-        limbs.extend_from_slice(&split_u64_limbs(snap.security_weight));
-        limbs.push(u64::from(snap.outflow_bps));
-        limbs.push(u64::from(snap.pq_attested));
-        limbs.extend_from_slice(&digest_limbs(&snap.state_root));
-    }
     poseidon_sponge_256(TAG_ULP_OUTPUT, &limbs)
 }
 
@@ -590,26 +585,98 @@ fn emit_load_source(a: &mut Asm, dst: Reg, src: LimbSource) {
 }
 
 fn emit_dual_poseidon_swrite(a: &mut Asm, tag: &[u8], sources: &[LimbSource], start_slot: u32) {
+    let [_, r1, r2, _, _, _, _, _, _, _, r10, r11, r12, ..] = R;
     let (seed_a, seed_b, squeeze_base) = tag_seeds(tag);
-    a.li(R[10], seed_a);
+    a.li(r10, seed_a);
     for &src in sources {
-        emit_load_source(a, R[1], src);
-        a.poseidon(R[10], R[10], R[1]);
+        emit_load_source(a, r1, src);
+        a.poseidon(r10, r10, r1);
     }
-    a.li(R[11], seed_b);
+    a.li(r11, seed_b);
     for &src in sources.iter().rev() {
-        emit_load_source(a, R[1], src);
-        a.poseidon(R[11], R[11], R[1]);
+        emit_load_source(a, r1, src);
+        a.poseidon(r11, r11, r1);
     }
-    a.li(R[12], U32_MASK);
+    a.li(r12, U32_MASK);
     for i in 0..DIGEST_LIMBS_U32 {
         let domain_i = squeeze_base.wrapping_add(u64::from(i)) % GOLDILOCKS_MODULUS;
-        a.li(R[1], domain_i);
-        a.poseidon(R[2], R[10], R[1]);
-        a.poseidon(R[2], R[2], R[11]);
-        a.and(R[2], R[2], R[12]);
-        a.swrite(start_slot + i, R[2]);
+        a.li(r1, domain_i);
+        a.poseidon(r2, r10, r1);
+        a.poseidon(r2, r2, r11);
+        a.and(r2, r2, r12);
+        a.swrite(start_slot + i, r2);
     }
+}
+
+fn emit_nonzero_digest_sub(a: &mut Asm, ptr_reg: Reg) {
+    let [_, r1, r2, r3, ..] = R;
+    a.li(r1, 0);
+    for offset in 0..DIGEST_LIMBS as u64 {
+        a.load(r2, ptr_reg, offset);
+        a.add(r1, r1, r2);
+    }
+    a.li(r2, 0);
+    a.lt(r3, r2, r1);
+    a.assert(r3);
+    a.ret();
+}
+
+fn emit_leaf_poseidon_sub(a: &mut Asm, src_ptr: Reg, dst_ptr: Reg, leaf_cells: u64) {
+    let [_, r1, r2, _, _, _, _, _, _, _, r10, r11, r12, ..] = R;
+    let (seed_a, seed_b, squeeze_base) = tag_seeds(TAG_ULP_LEAF);
+    a.li(r10, seed_a);
+    for idx in 0..leaf_cells {
+        a.load(r1, src_ptr, idx);
+        a.poseidon(r10, r10, r1);
+    }
+    a.li(r11, seed_b);
+    for idx in (0..leaf_cells).rev() {
+        a.load(r1, src_ptr, idx);
+        a.poseidon(r11, r11, r1);
+    }
+    a.li(r12, U32_MASK);
+    for i in 0..DIGEST_LIMBS_U32 {
+        let domain_i = squeeze_base.wrapping_add(u64::from(i)) % GOLDILOCKS_MODULUS;
+        a.li(r1, domain_i);
+        a.poseidon(r2, r10, r1);
+        a.poseidon(r2, r2, r11);
+        a.and(r2, r2, r12);
+        a.store(dst_ptr, u64::from(i), r2);
+    }
+    a.ret();
+}
+
+fn emit_node_poseidon_sub(a: &mut Asm, left_ptr: Reg, right_ptr: Reg, dst_ptr: Reg) {
+    let [_, r1, r2, _, _, _, _, _, _, _, r10, r11, r12, ..] = R;
+    let (seed_a, seed_b, squeeze_base) = tag_seeds(TAG_ULP_NODE);
+    a.li(r10, seed_a);
+    for idx in 0..DIGEST_LIMBS as u64 {
+        a.load(r1, left_ptr, idx);
+        a.poseidon(r10, r10, r1);
+    }
+    for idx in 0..DIGEST_LIMBS as u64 {
+        a.load(r1, right_ptr, idx);
+        a.poseidon(r10, r10, r1);
+    }
+    a.li(r11, seed_b);
+    for idx in (0..DIGEST_LIMBS as u64).rev() {
+        a.load(r1, right_ptr, idx);
+        a.poseidon(r11, r11, r1);
+    }
+    for idx in (0..DIGEST_LIMBS as u64).rev() {
+        a.load(r1, left_ptr, idx);
+        a.poseidon(r11, r11, r1);
+    }
+    a.li(r12, U32_MASK);
+    for i in 0..DIGEST_LIMBS_U32 {
+        let domain_i = squeeze_base.wrapping_add(u64::from(i)) % GOLDILOCKS_MODULUS;
+        a.li(r1, domain_i);
+        a.poseidon(r2, r10, r1);
+        a.poseidon(r2, r2, r11);
+        a.and(r2, r2, r12);
+        a.store(dst_ptr, u64::from(i), r2);
+    }
+    a.ret();
 }
 
 fn push_cells(out: &mut Vec<LimbSource>, base: u64, count: usize) {
@@ -629,6 +696,8 @@ struct DomainCells {
     outflow_bps: u64,
     pq_flag: u64,
     state_root: u64,
+    event_root: u64,
+    anchor_hash: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -638,6 +707,7 @@ struct UlpCells {
     epoch: u64,
     hub_checkpoint_root: u64,
     domains_merkle_root: u64,
+    total_security_weight: u64,
     all_pq_flag: u64,
     max_outflow_bps: u64,
     domains: Vec<DomainCells>,
@@ -673,10 +743,21 @@ pub fn compile_ulp_program(
             "domain_count must be within 1..=MAX_ULP_DOMAINS",
         ));
     }
+    let domain_count_u32 = u32::try_from(domain_count)
+        .map_err(|_| UlpError::InvalidDomainSet("domain_count overflow"))?;
+    let [_, r1, r2, r3, r4, r5, r6, r7, r8, r9, _, _, r12, r13, r14, r15, r16, _, _, _, r20, r21, r22, r23, ..] =
+        R;
+    let domain_leaf_cells = 12u64 + 3 * (DIGEST_LIMBS as u64);
+
     let mut a = Asm::new();
+    let nonzero_sub = a.label();
+    let leaf_sub = a.label();
+    let node_sub = a.label();
+
     let epoch = a.alloc(2);
     let hub_checkpoint_root = a.alloc(DIGEST_LIMBS as u64);
     let domains_merkle_root = a.alloc(DIGEST_LIMBS as u64);
+    let total_security_weight = a.alloc(2);
     let all_pq_flag = a.alloc(1);
     let max_outflow_bps = a.alloc(1);
     let mut domains = Vec::with_capacity(domain_count);
@@ -691,130 +772,208 @@ pub fn compile_ulp_program(
             outflow_bps: a.alloc(1),
             pq_flag: a.alloc(1),
             state_root: a.alloc(DIGEST_LIMBS as u64),
+            event_root: a.alloc(DIGEST_LIMBS as u64),
+            anchor_hash: a.alloc(DIGEST_LIMBS as u64),
         });
     }
     let end_cell = a.alloc(0);
     let total_cells = end_cell.saturating_sub(epoch);
 
-    // 1. Canonical 32-bit range check on every witness cell.
-    a.li(R[12], U32_MASK);
-    for offset in 0..total_cells {
-        a.load_abs(R[1], epoch + offset);
-        a.and(R[2], R[1], R[12]);
-        a.eq(R[3], R[1], R[2]);
-        a.assert(R[3]);
-    }
+    // 1. Compact pointer loop range-checking every witness cell < 2^32.
+    let range_loop = a.label();
+    a.li(r12, U32_MASK);
+    a.li(r20, Asm::address(epoch));
+    a.li(r21, total_cells);
+    a.li(r22, 8);
+    a.li(r23, 1);
+    a.bind(range_loop);
+    a.load(r1, r20, 0);
+    a.and(r2, r1, r12);
+    a.eq(r3, r1, r2);
+    a.assert(r3);
+    a.add(r20, r20, r22);
+    a.sub(r21, r21, r23);
+    a.jnz(r21, range_loop);
 
-    // 2. Per-domain invariants + aggregate all_pq_flag (R[8]) and max_outflow_bps (R[9]).
-    a.li(R[8], 1);
-    a.li(R[9], 0);
-    a.li(R[13], u64::from(MAX_ULP_OUTFLOW_BPS) + 1);
-    a.li(R[14], 1u64 << 32);
+    // 2. Non-zero hub_checkpoint_root commitment.
+    a.li(r20, Asm::address(hub_checkpoint_root));
+    a.call(nonzero_sub);
+
+    // 3. Per-domain invariants + exact aggregates:
+    //    r8 = all_pq_flag, r9 = max_outflow_bps, (r15, r16) = saturating total_security_weight.
+    a.li(r8, 1);
+    a.li(r9, 0);
+    a.li(r13, u64::from(MAX_ULP_OUTFLOW_BPS) + 1);
+    a.li(r14, 1u64 << 32);
+    a.li(r15, 0);
+    a.li(r16, 0);
     let mut prev_domain_id_reg_set = false;
     for dc in &domains {
         // Strictly ascending non-zero domain_id prevents duplicate domains in-circuit.
-        a.load_abs(R[1], dc.domain_id);
-        a.li(R[2], 0);
-        a.lt(R[3], R[2], R[1]);
-        a.assert(R[3]);
+        a.load_abs(r1, dc.domain_id);
+        a.li(r2, 0);
+        a.lt(r3, r2, r1);
+        a.assert(r3);
         if prev_domain_id_reg_set {
-            a.lt(R[3], R[7], R[1]);
-            a.assert(R[3]);
+            a.lt(r3, r7, r1);
+            a.assert(r3);
         }
-        a.mov(R[7], R[1]);
+        a.mov(r7, r1);
         prev_domain_id_reg_set = true;
 
         // Enforce registered consensus family code in 1..=MAX_ULP_DOMAIN_KIND_CODE.
-        a.load_abs(R[1], dc.kind_code);
-        a.li(R[2], 0);
-        a.lt(R[3], R[2], R[1]);
-        a.assert(R[3]);
-        a.li(R[2], u64::from(MAX_ULP_DOMAIN_KIND_CODE) + 1);
-        a.lt(R[3], R[1], R[2]);
-        a.assert(R[3]);
+        a.load_abs(r1, dc.kind_code);
+        a.li(r2, 0);
+        a.lt(r3, r2, r1);
+        a.assert(r3);
+        a.li(r2, u64::from(MAX_ULP_DOMAIN_KIND_CODE) + 1);
+        a.lt(r3, r1, r2);
+        a.assert(r3);
 
-        // Reconstruct full 64-bit prev_height < finalized_height (safe since limbs < 2^32).
-        a.load_abs(R[1], dc.prev_height);
-        a.load_abs(R[2], dc.prev_height + 1);
-        a.mul(R[2], R[2], R[14]);
-        a.add(R[1], R[1], R[2]);
+        // Exact 64-bit prev_height < finalized_height on 32-bit limbs without Goldilocks wrap:
+        // (prev_hi < fin_hi) || (prev_hi == fin_hi && prev_lo < fin_lo).
+        a.load_abs(r1, dc.prev_height);
+        a.load_abs(r2, dc.prev_height + 1);
+        a.load_abs(r3, dc.finalized_height);
+        a.load_abs(r4, dc.finalized_height + 1);
+        a.lt(r5, r2, r4);
+        a.eq(r6, r2, r4);
+        a.lt(r2, r1, r3);
+        a.mul(r6, r6, r2);
+        a.add(r5, r5, r6);
+        a.assert(r5);
 
-        a.load_abs(R[3], dc.finalized_height);
-        a.load_abs(R[4], dc.finalized_height + 1);
-        a.mul(R[4], R[4], R[14]);
-        a.add(R[3], R[3], R[4]);
+        // Non-zero state_root and anchor_hash commitments.
+        a.li(r20, Asm::address(dc.state_root));
+        a.call(nonzero_sub);
+        a.li(r20, Asm::address(dc.anchor_hash));
+        a.call(nonzero_sub);
 
-        a.lt(R[5], R[1], R[3]);
-        a.assert(R[5]);
+        // Positive 64-bit security_weight > 0 and exact saturating 64-bit accumulation.
+        a.load_abs(r1, dc.security_weight);
+        a.load_abs(r2, dc.security_weight + 1);
+        a.add(r3, r1, r2);
+        a.li(r4, 0);
+        a.lt(r5, r4, r3);
+        a.assert(r5);
 
-        // Positive 64-bit security_weight > 0 (since both limbs < 2^32, lo + hi > 0 iff weight > 0).
-        a.load_abs(R[1], dc.security_weight);
-        a.load_abs(R[2], dc.security_weight + 1);
-        a.add(R[3], R[1], R[2]);
-        a.li(R[4], 0);
-        a.lt(R[5], R[4], R[3]);
-        a.assert(R[5]);
+        a.add(r3, r15, r1);
+        a.gte(r4, r3, r14);
+        a.mul(r5, r4, r14);
+        a.sub(r3, r3, r5);
+        a.add(r5, r16, r2);
+        a.add(r5, r5, r4);
+        a.gte(r4, r5, r14);
+        a.li(r6, 1);
+        a.sub(r6, r6, r4);
+        a.mul(r3, r6, r3);
+        a.mul(r1, r4, r12);
+        a.add(r15, r3, r1);
+        a.mul(r5, r6, r5);
+        a.add(r16, r5, r1);
 
-        // Outflow ceiling: outflow_bps <= MAX_ULP_OUTFLOW_BPS (i.e. < MAX + 1).
-        a.load_abs(R[1], dc.outflow_bps);
-        a.lt(R[5], R[1], R[13]);
-        a.assert(R[5]);
-        // Update running max_outflow_bps in R[9]: assert witnessed max >= outflow_bps.
-        a.load_abs(R[2], max_outflow_bps);
-        a.li(R[4], 1);
-        a.add(R[2], R[2], R[4]);
-        a.lt(R[5], R[1], R[2]);
-        a.assert(R[5]);
+        // Outflow ceiling: outflow_bps <= MAX_ULP_OUTFLOW_BPS and exact running max in r9.
+        a.load_abs(r1, dc.outflow_bps);
+        a.lt(r5, r1, r13);
+        a.assert(r5);
+        a.gt(r2, r1, r9);
+        a.li(r3, 1);
+        a.sub(r3, r3, r2);
+        a.mul(r4, r2, r1);
+        a.mul(r5, r3, r9);
+        a.add(r9, r4, r5);
 
         // Boolean pq_flag in {0, 1} and all_pq_flag &= pq_flag.
-        a.load_abs(R[1], dc.pq_flag);
-        a.li(R[2], 2);
-        a.lt(R[5], R[1], R[2]);
-        a.assert(R[5]);
-        a.and(R[8], R[8], R[1]);
+        a.load_abs(r1, dc.pq_flag);
+        a.li(r2, 2);
+        a.lt(r5, r1, r2);
+        a.assert(r5);
+        a.and(r8, r8, r1);
     }
 
-    // Bind aggregate all_pq_flag exactly and bound max_outflow_bps <= MAX_ULP_OUTFLOW_BPS.
-    a.load_abs(R[1], all_pq_flag);
-    a.eq(R[5], R[1], R[8]);
-    a.assert(R[5]);
-    a.load_abs(R[1], max_outflow_bps);
-    a.lt(R[5], R[1], R[13]);
-    a.assert(R[5]);
+    // Bind aggregate all_pq_flag, exact max_outflow_bps, and exact total_security_weight.
+    a.load_abs(r1, all_pq_flag);
+    a.eq(r5, r1, r8);
+    a.assert(r5);
 
-    // 3. Compute and publish input_hash to SWrite[0..8].
-    let mut in_sources = Vec::with_capacity(4 + DIGEST_LIMBS + domain_count * 5);
+    a.lt(r5, r9, r13);
+    a.assert(r5);
+    a.load_abs(r1, max_outflow_bps);
+    a.eq(r5, r1, r9);
+    a.assert(r5);
+
+    a.load_abs(r1, total_security_weight);
+    a.eq(r5, r1, r15);
+    a.assert(r5);
+    a.load_abs(r1, total_security_weight + 1);
+    a.eq(r5, r1, r16);
+    a.assert(r5);
+
+    // 4. In-circuit Poseidon leaf hashing and binary Merkle fold -> assert == domains_merkle_root.
+    let mut level_bases = Vec::with_capacity(domain_count);
+    for dc in &domains {
+        let leaf_base = a.alloc(DIGEST_LIMBS as u64);
+        a.li(r20, Asm::address(dc.domain_id));
+        a.li(r22, Asm::address(leaf_base));
+        a.call(leaf_sub);
+        level_bases.push(leaf_base);
+    }
+    while level_bases.len() > 1 {
+        let mut next_bases = Vec::with_capacity(level_bases.len().div_ceil(2));
+        for pair in level_bases.chunks(2) {
+            match pair {
+                [left_base, right_base] => {
+                    let parent_base = a.alloc(DIGEST_LIMBS as u64);
+                    a.li(r20, Asm::address(*left_base));
+                    a.li(r21, Asm::address(*right_base));
+                    a.li(r22, Asm::address(parent_base));
+                    a.call(node_sub);
+                    next_bases.push(parent_base);
+                }
+                [only_base] => next_bases.push(*only_base),
+                _ => {}
+            }
+        }
+        level_bases = next_bases;
+    }
+    let computed_root_base = level_bases
+        .first()
+        .copied()
+        .ok_or(UlpError::InvalidDomainSet("empty Merkle level"))?;
+    for offset in 0..DIGEST_LIMBS as u64 {
+        a.load_abs(r1, computed_root_base + offset);
+        a.load_abs(r2, domains_merkle_root + offset);
+        a.eq(r3, r1, r2);
+        a.assert(r3);
+    }
+
+    // 5. Compute and publish O(1) input_hash to SWrite[0..8].
+    let mut in_sources = Vec::with_capacity(4 + DIGEST_LIMBS);
     in_sources.push(LimbSource::Const(u64::from(hub_chain_id)));
     push_cells(&mut in_sources, epoch, 2);
-    in_sources.push(LimbSource::Const(domain_count as u64));
+    in_sources.push(LimbSource::Const(u64::from(domain_count_u32)));
     push_cells(&mut in_sources, hub_checkpoint_root, DIGEST_LIMBS);
-    for dc in &domains {
-        in_sources.push(LimbSource::Cell(dc.domain_id));
-        in_sources.push(LimbSource::Cell(dc.kind_code));
-        push_cells(&mut in_sources, dc.ext_chain_id, 2);
-        push_cells(&mut in_sources, dc.prev_height, 2);
-    }
     emit_dual_poseidon_swrite(&mut a, TAG_ULP_INPUT, &in_sources, 0);
 
-    // 4. Compute and publish output_hash to SWrite[8..16].
-    let mut out_sources = Vec::with_capacity(6 + DIGEST_LIMBS + domain_count * (8 + DIGEST_LIMBS));
+    // 6. Compute and publish O(1) output_hash to SWrite[8..16].
+    let mut out_sources = Vec::with_capacity(8 + DIGEST_LIMBS);
     out_sources.push(LimbSource::Const(u64::from(hub_chain_id)));
     push_cells(&mut out_sources, epoch, 2);
-    out_sources.push(LimbSource::Const(domain_count as u64));
+    out_sources.push(LimbSource::Const(u64::from(domain_count_u32)));
     out_sources.push(LimbSource::Cell(all_pq_flag));
     out_sources.push(LimbSource::Cell(max_outflow_bps));
+    push_cells(&mut out_sources, total_security_weight, 2);
     push_cells(&mut out_sources, domains_merkle_root, DIGEST_LIMBS);
-    for dc in &domains {
-        out_sources.push(LimbSource::Cell(dc.domain_id));
-        out_sources.push(LimbSource::Cell(dc.kind_code));
-        push_cells(&mut out_sources, dc.finalized_height, 2);
-        push_cells(&mut out_sources, dc.security_weight, 2);
-        out_sources.push(LimbSource::Cell(dc.outflow_bps));
-        out_sources.push(LimbSource::Cell(dc.pq_flag));
-        push_cells(&mut out_sources, dc.state_root, DIGEST_LIMBS);
-    }
     emit_dual_poseidon_swrite(&mut a, TAG_ULP_OUTPUT, &out_sources, DIGEST_LIMBS_U32);
     a.halt();
+
+    // Shared helper subroutines emitted once per program after `halt`.
+    a.bind(nonzero_sub);
+    emit_nonzero_digest_sub(&mut a, r20);
+    a.bind(leaf_sub);
+    emit_leaf_poseidon_sub(&mut a, r20, r22, domain_leaf_cells);
+    a.bind(node_sub);
+    emit_node_poseidon_sub(&mut a, r20, r21, r22);
 
     let program = a
         .finish()
@@ -831,6 +990,7 @@ pub fn compile_ulp_program(
             epoch,
             hub_checkpoint_root,
             domains_merkle_root,
+            total_security_weight,
             all_pq_flag,
             max_outflow_bps,
             domains,
@@ -1008,6 +1168,8 @@ pub fn prove_universal_light_proof(
         ));
     }
 
+    let domain_count = u32::try_from(sorted.len())
+        .map_err(|_| UlpError::InvalidDomainSet("domain_count overflow"))?;
     let domains_merkle_root = ulp_domains_root(&sorted);
     let all_pq_attested = sorted.iter().all(|s| s.pq_attested);
     let max_outflow_bps = sorted.iter().map(|s| s.outflow_bps).max().unwrap_or(0);
@@ -1018,16 +1180,17 @@ pub fn prove_universal_light_proof(
     let input_hash = ulp_input_hash(
         compiled.hub_chain_id,
         settlement_epoch,
+        domain_count,
         &hub_checkpoint_root,
-        &sorted,
     );
     let output_hash = ulp_output_hash(
         compiled.hub_chain_id,
         settlement_epoch,
+        domain_count,
         &domains_merkle_root,
+        total_security_weight,
         all_pq_attested,
         max_outflow_bps,
-        &sorted,
     );
 
     // Populate witness cells and prove real 128-bit BudAir FRI-STARK.
@@ -1044,6 +1207,11 @@ pub fn prove_universal_light_proof(
         &mut vm,
         compiled.cells.domains_merkle_root,
         &domains_merkle_root,
+    );
+    write_u64_cells(
+        &mut vm,
+        compiled.cells.total_security_weight,
+        total_security_weight,
     );
     write_cell(
         &mut vm,
@@ -1065,6 +1233,8 @@ pub fn prove_universal_light_proof(
         write_cell(&mut vm, dc.outflow_bps, u64::from(snap.outflow_bps));
         write_cell(&mut vm, dc.pq_flag, u64::from(snap.pq_attested));
         write_digest_cells(&mut vm, dc.state_root, &snap.state_root);
+        write_digest_cells(&mut vm, dc.event_root, &snap.event_root);
+        write_digest_cells(&mut vm, dc.anchor_hash, &snap.anchor_hash);
     }
 
     let stark_obj = prove_vm_program(
@@ -1180,8 +1350,6 @@ pub fn prove_universal_light_proof(
     let poly_claim_inclusion = prove_claim_inclusion(&claim_digests, poly_idx)
         .map_err(|_| UlpError::InvalidInclusion("failed proving Claim::Poly inclusion"))?;
 
-    let domain_count = u32::try_from(sorted.len())
-        .map_err(|_| UlpError::InvalidDomainSet("domain_count overflow"))?;
     let prove_ms = started.elapsed().as_millis();
 
     let bundle = UniversalLightProofBundle {
@@ -1266,48 +1434,28 @@ pub fn open_universal_light_proof_with_snapshots(
     snapshots: &[UlpDomainSnapshot],
     registry: &SchemeStatusRegistry,
 ) -> Result<VerifiedUlpHeader, UlpError> {
-    if snapshots.len() != usize::try_from(bundle.domain_count).unwrap_or(usize::MAX) {
+    let sorted = canonicalize_ulp_domains(snapshots)?;
+    if sorted.len() != usize::try_from(bundle.domain_count).unwrap_or(usize::MAX) {
         return Err(UlpError::BindingMismatch(
             "snapshot count does not match bundle domain_count",
         ));
     }
-    // The declared settlement epoch must be the one the caller derived from
-    // the trusted anchor; a prover cannot move the statement to a different
-    // epoch by re-declaring it.
-    if bundle.settlement_epoch != expected_settlement_epoch {
-        return Err(UlpError::BindingMismatch(
-            "declared settlement_epoch is not the anchor-derived epoch",
-        ));
-    }
-    // The leaves must fold to the declared root: without this the witness
-    // root is free and the output statement binds a root over nothing.
-    if !bool::from(ulp_domains_root(snapshots).ct_eq(&bundle.domains_merkle_root)) {
+    if !bool::from(ulp_domains_root(&sorted).ct_eq(&bundle.domains_merkle_root)) {
         return Err(UlpError::BindingMismatch(
             "domains_merkle_root is not the root of the presented snapshots",
         ));
     }
-    let expected_input = ulp_input_hash(
-        expected_hub_chain_id,
-        bundle.settlement_epoch,
-        &bundle.hub_checkpoint_root,
-        snapshots,
-    );
-    if !bool::from(expected_input.ct_eq(&bundle.input_hash)) {
+    let expected_pq = sorted.iter().all(|s| s.pq_attested);
+    let expected_max_outflow = sorted.iter().map(|s| s.outflow_bps).max().unwrap_or(0);
+    let expected_weight = sorted
+        .iter()
+        .fold(0u64, |acc, s| acc.saturating_add(s.security_weight));
+    if bundle.all_pq_attested != expected_pq
+        || bundle.max_outflow_bps != expected_max_outflow
+        || bundle.total_security_weight != expected_weight
+    {
         return Err(UlpError::BindingMismatch(
-            "declared epoch/anchor are not the proof's input statement",
-        ));
-    }
-    let expected_output = ulp_output_hash(
-        expected_hub_chain_id,
-        bundle.settlement_epoch,
-        &bundle.domains_merkle_root,
-        bundle.all_pq_attested,
-        bundle.max_outflow_bps,
-        snapshots,
-    );
-    if !bool::from(expected_output.ct_eq(&bundle.output_hash)) {
-        return Err(UlpError::BindingMismatch(
-            "declared root/flags are not the proof's output statement",
+            "declared aggregate flags/weights do not match presented snapshots",
         ));
     }
     open_universal_light_proof(
@@ -1320,6 +1468,21 @@ pub fn open_universal_light_proof_with_snapshots(
     )
 }
 
+/// Opens and cryptographically verifies a [`UniversalLightProofBundle`] in
+/// succinct `O(1)` time against the pinned `ULP-1` program hash, settlement hub
+/// chain id, finalized hub checkpoint root, and canonical settlement epoch.
+///
+/// Re-derives both `input_hash` and `output_hash` directly from the trusted
+/// anchor and the declared [`VerifiedUlpHeader`] fields, binding every outer
+/// header field (`hub_chain_id`, `settlement_epoch`, `hub_checkpoint_root`,
+/// `domain_count`, `domains_merkle_root`, `total_security_weight`,
+/// `all_pq_attested`, `max_outflow_bps`) directly to `BudAir` `SWrite[0..16]`
+/// without requiring full snapshot leaves.
+///
+/// # Errors
+///
+/// Returns [`UlpError`] on any failed binding, STARK proof, Merkle inclusion,
+/// outflow bound, or `BudAir` algebraic constraint check.
 pub fn open_universal_light_proof(
     bundle: &UniversalLightProofBundle,
     expected_program_hash: &Hash32,
@@ -1328,12 +1491,14 @@ pub fn open_universal_light_proof(
     expected_settlement_epoch: u64,
     registry: &SchemeStatusRegistry,
 ) -> Result<VerifiedUlpHeader, UlpError> {
-    // Fail closed: the declared settlement_epoch must be the epoch the caller
-    // derived from the trusted hub anchor. Without this the prover could
-    // re-declare the epoch and move the statement off the anchored checkpoint.
     if bundle.settlement_epoch != expected_settlement_epoch {
         return Err(UlpError::BindingMismatch(
             "declared settlement_epoch is not the anchor-derived epoch",
+        ));
+    }
+    if *expected_hub_checkpoint_root == [0u8; 32] {
+        return Err(UlpError::BindingMismatch(
+            "expected_hub_checkpoint_root cannot be zero",
         ));
     }
     if bundle.domain_count == 0
@@ -1370,6 +1535,34 @@ pub fn open_universal_light_proof(
         ));
     }
 
+    // Recompute O(1) canonical statement digests from trusted anchor + header fields;
+    // any outer header mutation without re-proving fails closed before STARK opening.
+    let expected_input = ulp_input_hash(
+        expected_hub_chain_id,
+        expected_settlement_epoch,
+        bundle.domain_count,
+        expected_hub_checkpoint_root,
+    );
+    if !bool::from(expected_input.ct_eq(&bundle.input_hash)) {
+        return Err(UlpError::BindingMismatch(
+            "bundle input_hash does not match trusted hub anchor and settlement_epoch",
+        ));
+    }
+    let expected_output = ulp_output_hash(
+        expected_hub_chain_id,
+        expected_settlement_epoch,
+        bundle.domain_count,
+        &bundle.domains_merkle_root,
+        bundle.total_security_weight,
+        bundle.all_pq_attested,
+        bundle.max_outflow_bps,
+    );
+    if !bool::from(expected_output.ct_eq(&bundle.output_hash)) {
+        return Err(UlpError::BindingMismatch(
+            "bundle output_hash does not match declared header fields",
+        ));
+    }
+
     // 1. Verify the succinct StarkBackend MasterProof.
     let default_params = AggParams::default();
     let backend = StarkBackend::new(
@@ -1396,9 +1589,9 @@ pub fn open_universal_light_proof(
         ));
     }
     let expected_prog_claim = Claim::Prog {
-        program_hash: bundle.program_hash,
-        input_hash: bundle.input_hash,
-        output_hash: bundle.output_hash,
+        program_hash: *expected_program_hash,
+        input_hash: expected_input,
+        output_hash: expected_output,
     };
     let prog_digest = expected_prog_claim.digest(expected_hub_chain_id);
     if !verify_claim_inclusion(
@@ -1427,7 +1620,7 @@ pub fn open_universal_light_proof(
     }
 
     // 3. Bind BudAirAuxData inside VerifyStarkTx to exact program_hash, hub_chain_id,
-    //    exit_code == 0, and SWrite commitment to (input_hash, output_hash).
+    //    exit_code == 0, and SWrite commitment to (expected_input, expected_output).
     if bundle.pcs_bundle.statement.air_id != bud_air_id() {
         return Err(UlpError::PcsVerification(
             "VerifyStarkTx air_id is not bud_air_id".into(),
@@ -1444,7 +1637,7 @@ pub fn open_universal_light_proof(
         .deserialize(&bundle.pcs_bundle.statement.air_aux_data)
         .map_err(|e| UlpError::PcsVerification(format!("aux decode: {e}")))?;
     let aux_prog_hash = program_hash_of(&aux.program);
-    let expected_writes = published_writes_digest_many(&[&bundle.input_hash, &bundle.output_hash]);
+    let expected_writes = published_writes_digest_many(&[&expected_input, &expected_output]);
     if !bool::from(aux_prog_hash.ct_eq(expected_program_hash))
         || !bool::from(
             aux.expected_inputs
@@ -1485,9 +1678,9 @@ pub fn open_universal_light_proof(
     }
 
     Ok(VerifiedUlpHeader {
-        hub_chain_id: bundle.hub_chain_id,
-        settlement_epoch: bundle.settlement_epoch,
-        hub_checkpoint_root: bundle.hub_checkpoint_root,
+        hub_chain_id: expected_hub_chain_id,
+        settlement_epoch: expected_settlement_epoch,
+        hub_checkpoint_root: *expected_hub_checkpoint_root,
         domains_merkle_root: bundle.domains_merkle_root,
         domain_count: bundle.domain_count,
         total_security_weight: bundle.total_security_weight,
@@ -1656,19 +1849,22 @@ mod modern_domain_kind_tests {
             .collect();
 
         // Changing a domain's consensus family (e.g. AuxPowPop vs SimplexBft) mutates
-        // leaf_hash, ulp_input_hash, and ulp_output_hash even with identical roots/heights.
+        // leaf_hash, ulp_domains_root, and ulp_output_hash even with identical roots/heights.
         let mut alt_a = snapshots[0].clone();
         alt_a.kind = UlpDomainKind::AuxPowPop;
         let mut alt_b = alt_a.clone();
         alt_b.kind = UlpDomainKind::SimplexBft;
         assert_ne!(alt_a.leaf_hash(), alt_b.leaf_hash());
+        let root_a = ulp_domains_root(std::slice::from_ref(&alt_a));
+        let root_b = ulp_domains_root(std::slice::from_ref(&alt_b));
+        assert_ne!(root_a, root_b);
         assert_ne!(
-            ulp_input_hash(45_261, 77, &[0x99; 32], &[alt_a.clone()]),
-            ulp_input_hash(45_261, 77, &[0x99; 32], &[alt_b.clone()])
+            ulp_input_hash(45_261, 77, 1, &[0x99; 32]),
+            ulp_input_hash(45_261, 77, 2, &[0x99; 32])
         );
         assert_ne!(
-            ulp_output_hash(45_261, 77, &[0x88; 32], true, 400, &[alt_a]),
-            ulp_output_hash(45_261, 77, &[0x88; 32], true, 400, &[alt_b])
+            ulp_output_hash(45_261, 77, 1, &root_a, alt_a.security_weight, true, 400),
+            ulp_output_hash(45_261, 77, 1, &root_b, alt_b.security_weight, true, 400)
         );
 
         let compiled = compile_ulp_program(45_261, snapshots.len()).expect("compile ULP-1");
@@ -1723,5 +1919,202 @@ mod modern_domain_kind_tests {
         let mut spoofed = algo_snap;
         spoofed.kind = UlpDomainKind::SimplexBft;
         assert!(inc.verify(&spoofed, &verified.domains_merkle_root).is_err());
+
+        // Snapshotless `open_universal_light_proof` rejects any forged outer
+        // header field (`domains_merkle_root`, `total_security_weight`, `all_pq_attested`,
+        // `max_outflow_bps`, or `hub_checkpoint_root` + `settlement_epoch`).
+        let mut forged_root = bundle.clone();
+        forged_root.domains_merkle_root = [0xDE; 32];
+        assert!(matches!(
+            open_universal_light_proof(
+                &forged_root,
+                &compiled.program_hash,
+                45_261,
+                &hub_root,
+                77,
+                &registry,
+            ),
+            Err(UlpError::BindingMismatch(_))
+        ));
+
+        let mut forged_weight = bundle.clone();
+        forged_weight.total_security_weight = u64::MAX;
+        assert!(matches!(
+            open_universal_light_proof(
+                &forged_weight,
+                &compiled.program_hash,
+                45_261,
+                &hub_root,
+                77,
+                &registry,
+            ),
+            Err(UlpError::BindingMismatch(_))
+        ));
+
+        let mut forged_pq = bundle.clone();
+        forged_pq.all_pq_attested = false;
+        assert!(matches!(
+            open_universal_light_proof(
+                &forged_pq,
+                &compiled.program_hash,
+                45_261,
+                &hub_root,
+                77,
+                &registry,
+            ),
+            Err(UlpError::BindingMismatch(_))
+        ));
+
+        let mut forged_outflow = bundle;
+        forged_outflow.max_outflow_bps = 1;
+        assert!(matches!(
+            open_universal_light_proof(
+                &forged_outflow,
+                &compiled.program_hash,
+                45_261,
+                &hub_root,
+                77,
+                &registry,
+            ),
+            Err(UlpError::BindingMismatch(_))
+        ));
+
+        // Direct malicious witness injection (`forged domains_merkle_root`,
+        // inflated `max_outflow_bps`, forged `total_security_weight`, zero `state_root`,
+        // and Goldilocks-modulus height rollback) is rejected inside `BudVM`.
+        let compiled1 = compile_ulp_program(45_261, 1).expect("compile 1-domain circuit");
+        let single = UlpDomainSnapshot {
+            domain_id: 7,
+            external_chain_id: 700,
+            kind: UlpDomainKind::TendermintBft,
+            prev_height: 10,
+            finalized_height: 20,
+            state_root: [0x11; 32],
+            event_root: [0x22; 32],
+            anchor_hash: [0x33; 32],
+            security_weight: 1_000,
+            pq_attested: true,
+            outflow_bps: 500,
+        };
+        let single_root = ulp_domains_root(std::slice::from_ref(&single));
+        let make_vm = || {
+            let mut vm = Vm::new(usize::try_from(ULP_VM_GAS_LIMIT).unwrap_or(usize::MAX));
+            write_u64_cells(&mut vm, compiled1.cells.epoch, 77);
+            write_digest_cells(&mut vm, compiled1.cells.hub_checkpoint_root, &[0x99; 32]);
+            write_digest_cells(&mut vm, compiled1.cells.domains_merkle_root, &single_root);
+            write_u64_cells(&mut vm, compiled1.cells.total_security_weight, 1_000);
+            write_cell(&mut vm, compiled1.cells.all_pq_flag, 1);
+            write_cell(&mut vm, compiled1.cells.max_outflow_bps, 500);
+            let dc = &compiled1.cells.domains[0];
+            write_cell(&mut vm, dc.domain_id, 7);
+            write_cell(&mut vm, dc.kind_code, u64::from(single.kind.code()));
+            write_u64_cells(&mut vm, dc.ext_chain_id, single.external_chain_id);
+            write_u64_cells(&mut vm, dc.prev_height, single.prev_height);
+            write_u64_cells(&mut vm, dc.finalized_height, single.finalized_height);
+            write_u64_cells(&mut vm, dc.security_weight, single.security_weight);
+            write_cell(&mut vm, dc.outflow_bps, u64::from(single.outflow_bps));
+            write_cell(&mut vm, dc.pq_flag, u64::from(single.pq_attested));
+            write_digest_cells(&mut vm, dc.state_root, &single.state_root);
+            write_digest_cells(&mut vm, dc.event_root, &single.event_root);
+            write_digest_cells(&mut vm, dc.anchor_hash, &single.anchor_hash);
+            vm
+        };
+
+        let mut vm_bad_root = make_vm();
+        write_digest_cells(
+            &mut vm_bad_root,
+            compiled1.cells.domains_merkle_root,
+            &[0xBA; 32],
+        );
+        assert!(prove_vm_program(
+            &compiled1.program.code,
+            &mut vm_bad_root,
+            [1; 32],
+            [2; 32],
+            45_261
+        )
+        .is_err());
+
+        let mut vm_loose_outflow = make_vm();
+        write_cell(
+            &mut vm_loose_outflow,
+            compiled1.cells.max_outflow_bps,
+            2_400,
+        );
+        assert!(prove_vm_program(
+            &compiled1.program.code,
+            &mut vm_loose_outflow,
+            [1; 32],
+            [2; 32],
+            45_261
+        )
+        .is_err());
+
+        let mut vm_bad_weight = make_vm();
+        write_u64_cells(
+            &mut vm_bad_weight,
+            compiled1.cells.total_security_weight,
+            9_999,
+        );
+        assert!(prove_vm_program(
+            &compiled1.program.code,
+            &mut vm_bad_weight,
+            [1; 32],
+            [2; 32],
+            45_261
+        )
+        .is_err());
+
+        let mut zero_snap = single.clone();
+        zero_snap.state_root = [0u8; 32];
+        let zero_root = ulp_domains_root(std::slice::from_ref(&zero_snap));
+        let mut vm_zero_state = make_vm();
+        write_digest_cells(
+            &mut vm_zero_state,
+            compiled1.cells.domains[0].state_root,
+            &[0u8; 32],
+        );
+        write_digest_cells(
+            &mut vm_zero_state,
+            compiled1.cells.domains_merkle_root,
+            &zero_root,
+        );
+        assert!(prove_vm_program(
+            &compiled1.program.code,
+            &mut vm_zero_state,
+            [1; 32],
+            [2; 32],
+            45_261
+        )
+        .is_err());
+
+        let mut wrap_snap = single.clone();
+        wrap_snap.prev_height = 0xFFFF_FFFF_0000_0005;
+        wrap_snap.finalized_height = 10;
+        let wrap_root = ulp_domains_root(std::slice::from_ref(&wrap_snap));
+        let mut vm_wrap = make_vm();
+        write_u64_cells(
+            &mut vm_wrap,
+            compiled1.cells.domains[0].prev_height,
+            wrap_snap.prev_height,
+        );
+        write_u64_cells(
+            &mut vm_wrap,
+            compiled1.cells.domains[0].finalized_height,
+            wrap_snap.finalized_height,
+        );
+        write_digest_cells(
+            &mut vm_wrap,
+            compiled1.cells.domains_merkle_root,
+            &wrap_root,
+        );
+        assert!(prove_vm_program(
+            &compiled1.program.code,
+            &mut vm_wrap,
+            [1; 32],
+            [2; 32],
+            45_261
+        )
+        .is_err());
     }
 }

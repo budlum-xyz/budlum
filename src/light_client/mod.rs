@@ -58,12 +58,13 @@ pub struct UniversalRoutePolicy {
     pub crqc_alarm_active: bool,
     /// Require every traversed domain to hold post-quantum attestation under Frost Alarm.
     pub require_pq_on_crqc_alarm: bool,
-    /// Caller-pinned `ULP-1` domain-set Merkle root the bundle must match.
+    /// Optional caller-pinned `ULP-1` domain-set Merkle root.
     ///
-    /// The bundle's own `domains_merkle_root` is a free witness of the proof,
-    /// so it can never anchor itself. Until the global header carries a
-    /// domain-set root, the only honest anchor is one the caller pins here;
-    /// `None` fails every route closed.
+    /// [`LightClient::verify_multi_hop_light_route`] anchors first to the
+    /// consensus-committed [`crate::settlement::GlobalBlockHeader::ulp_domains_root`];
+    /// if both `global_header.ulp_domains_root` and `trusted_domains_root` are
+    /// `Some` and differ, verification fails closed. If both are `None`, value
+    /// routes remain fail-closed.
     pub trusted_domains_root: Option<crate::domain::types::Hash32>,
 }
 
@@ -1069,11 +1070,24 @@ impl LightClient {
                 "ULP-1 packet program hash differs from the canonical circuit".into(),
             ));
         }
-        let Some(trusted_domains_root) = policy.trusted_domains_root else {
-            return Err(LightClientError::VerificationFailed(
-                "ULP-1 route policy pins no trusted domains root; value routes stay fail-closed"
-                    .into(),
-            ));
+        let trusted_domains_root = match (
+            global_header.ulp_domains_root,
+            policy.trusted_domains_root,
+        ) {
+            (Some(header_root), Some(policy_root)) if header_root != policy_root => {
+                return Err(LightClientError::GlobalHeaderBinding(
+                    "ULP-1 policy trusted_domains_root conflicts with global_header.ulp_domains_root"
+                        .into(),
+                ));
+            }
+            (Some(header_root), _) => header_root,
+            (None, Some(policy_root)) => policy_root,
+            (None, None) => {
+                return Err(LightClientError::VerificationFailed(
+                    "ULP-1 verified global header and route policy carry no trusted domains root; value routes stay fail-closed"
+                        .into(),
+                ));
+            }
         };
         let hub_root = global_header.calculate_hash_bytes();
         // The settlement epoch the bundle must have witnessed is re-derived
@@ -2095,6 +2109,7 @@ mod tests {
             object_layer_root: None,
             proof_root: Some([7u8; 32]),
             proven_height: 10,
+            ulp_domains_root: None,
         };
         state.global_header_summary = header.calculate_hash_bytes();
         let body = state.state_root_body();
@@ -2190,6 +2205,7 @@ mod tests {
             object_layer_root: None,
             proof_root: Some([7u8; 32]),
             proven_height: 10,
+            ulp_domains_root: None,
         };
         state.global_header_summary = header.calculate_hash_bytes();
         let body = state.state_root_body();
@@ -2388,6 +2404,7 @@ mod tests {
             object_layer_root: None,
             proof_root: Some([0x80; 32]),
             proven_height: 25,
+            ulp_domains_root: None,
         };
         let hub_root = global_header.calculate_hash_bytes();
         state.global_header_summary = hub_root;
@@ -2811,8 +2828,7 @@ mod tests {
             .expect_err("a non-canonical program hash must be refused");
         assert!(program_err.to_string().contains("canonical circuit"));
 
-        // 8. Without a pinned domain-set root the route fails closed: the
-        //    bundle's own root is a free witness and cannot anchor itself.
+        // 8. Without a header or policy domain-set root the route fails closed.
         let unpinned_err = client
             .verify_multi_hop_light_route(
                 &checkpoint,
@@ -2822,10 +2838,8 @@ mod tests {
                 &UniversalRoutePolicy::strict_value(false),
                 &registry,
             )
-            .expect_err("a policy without a pinned root must fail closed");
-        assert!(unpinned_err
-            .to_string()
-            .contains("pins no trusted domains root"));
+            .expect_err("an unanchored header with unpinned policy must fail closed");
+        assert!(unpinned_err.to_string().contains("no trusted domains root"));
 
         // 9. A pinned root that differs from the bundle's domain set refuses
         //    the route even though every proof inside the bundle verifies.
@@ -2842,5 +2856,66 @@ mod tests {
             )
             .expect_err("a mismatched pinned root must refuse the route");
         assert!(wrong_root_err.to_string().contains("pinned trusted root"));
+
+        // 10. When `global_header.ulp_domains_root` commits the consensus
+        //     domain-set root, `UniversalRoutePolicy::strict_value(true)` succeeds
+        //     with zero out-of-band pinning, while a conflicting policy pin or a
+        //     bundle proven over a different domain set is refused fail-closed.
+        let mut anchored_header = global_header;
+        anchored_header.ulp_domains_root = Some(pinned_root);
+        let anchored_hub_root = anchored_header.calculate_hash_bytes();
+        let mut anchored_state = AccountState::new();
+        anchored_state.global_header_summary = anchored_hub_root;
+        let anchored_body = anchored_state.state_root_body();
+        let anchored_cp = VerifiedCheckpoint {
+            height: 25,
+            block_hash: "aa".repeat(32),
+            set_hash: "bb".repeat(32),
+            epoch: 5,
+            state_root: anchored_state.calculate_state_root(),
+        };
+        let compiled6 = compile_ulp_program(hub_chain_id, 6).unwrap();
+        let (anchored_bundle, _, _) = prove_universal_light_proof(
+            &compiled6,
+            expected_settlement_epoch,
+            anchored_hub_root,
+            &all_six,
+            &agg_seed,
+            99,
+            &registry,
+        )
+        .expect("anchored ULP-1 prove succeeds");
+        let mut anchored_pq_route = pq_route;
+        anchored_pq_route.ulp_bundle = anchored_bundle;
+
+        let verified_anchored = client
+            .verify_multi_hop_light_route(
+                &anchored_cp,
+                &anchored_body,
+                &anchored_header,
+                &anchored_pq_route,
+                &UniversalRoutePolicy::strict_value(true),
+                &registry,
+            )
+            .expect("header-anchored strict_value route succeeds under Frost Alarm");
+        assert_eq!(verified_anchored.origin_domain, 1);
+        assert_eq!(verified_anchored.terminal_domain, 3);
+        assert_eq!(verified_anchored.cumulative_outflow_bps, 2_500);
+        assert!(verified_anchored.post_quantum_clean);
+
+        let conflict_err = client
+            .verify_multi_hop_light_route(
+                &anchored_cp,
+                &anchored_body,
+                &anchored_header,
+                &anchored_pq_route,
+                &UniversalRoutePolicy::strict_value_pinned(wrong_root, false),
+                &registry,
+            )
+            .expect_err("conflicting policy pin must fail closed against header ulp_domains_root");
+        assert!(matches!(
+            conflict_err,
+            LightClientError::GlobalHeaderBinding(_)
+        ));
     }
 }

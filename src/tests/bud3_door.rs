@@ -1853,6 +1853,7 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_stays_closed() {
         object_layer_root: None,
         proof_root: Some([7u8; 32]),
         proven_height: 10,
+        ulp_domains_root: None,
     };
     acct_state.global_header_summary = header.calculate_hash_bytes();
     let checkpoint = VerifiedCheckpoint {

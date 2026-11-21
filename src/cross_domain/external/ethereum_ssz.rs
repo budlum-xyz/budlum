@@ -6,6 +6,9 @@
 //! and the `DOMAIN_SYNC_COMMITTEE` signing root. Nothing is read from the
 //! caller's description of the data; every length and offset is checked
 //! against the bytes themselves, and anything unexpected is refused.
+//!
+//! WIRING: Canonical Deneb/Electra/Fulu SSZ layout constants and header
+//! containers consumed by `ethereum.rs` sync-committee v4 verification.
 
 use crate::cross_domain::evm::sync_committee::{
     merkleize_chunks, sha256_pair, u64_chunk, walk_branch,
@@ -123,7 +126,12 @@ pub fn execution_payload_root(execution: &[u8]) -> Result<[u8; 32], AdapterError
             format!("extra_data offset is {extra_offset}, not {EXECUTION_HEADER_FIXED}"),
         ));
     }
-    let extra = &execution[EXECUTION_HEADER_FIXED..];
+    let extra = execution.get(EXECUTION_HEADER_FIXED..).ok_or_else(|| {
+        malformed(
+            execution.len(),
+            "execution payload header shorter than its fixed part",
+        )
+    })?;
     if extra.len() > 32 {
         return Err(malformed(
             EXECUTION_HEADER_FIXED,
@@ -131,7 +139,9 @@ pub fn execution_payload_root(execution: &[u8]) -> Result<[u8; 32], AdapterError
         ));
     }
     let mut extra_chunk = [0u8; 32];
-    extra_chunk[..extra.len()].copy_from_slice(extra);
+    if let Some(prefix) = extra_chunk.get_mut(..extra.len()) {
+        prefix.copy_from_slice(extra);
+    }
     let extra_root = sha256_pair(&extra_chunk, &u64_chunk(extra.len() as u64));
 
     let mut bloom_chunks = [[0u8; 32]; 8];
@@ -145,11 +155,13 @@ pub fn execution_payload_root(execution: &[u8]) -> Result<[u8; 32], AdapterError
     let bloom_root = merkleize_chunks(&bloom_chunks);
 
     let mut fee_recipient = [0u8; 32];
-    fee_recipient[..20].copy_from_slice(
-        execution
-            .get(32..52)
-            .ok_or_else(|| malformed(32, "fee_recipient past the fixed part"))?,
-    );
+    if let Some(prefix) = fee_recipient.get_mut(..20) {
+        prefix.copy_from_slice(
+            execution
+                .get(32..52)
+                .ok_or_else(|| malformed(32, "fee_recipient past the fixed part"))?,
+        );
+    }
 
     Ok(merkleize_chunks(&[
         read_32(execution, 0)?,
@@ -214,10 +226,9 @@ fn parse_light_client_header(
     offset: usize,
     end: usize,
 ) -> Result<LightClientHeader, AdapterError> {
-    if end > bytes.len() || offset > end {
-        return Err(malformed(offset, "header range outside the payload"));
-    }
-    let slice = &bytes[offset..end];
+    let slice = bytes
+        .get(offset..end)
+        .ok_or_else(|| malformed(offset, "header range outside the payload"))?;
     if slice.len() < LIGHT_CLIENT_HEADER_FIXED + EXECUTION_HEADER_FIXED {
         return Err(malformed(
             offset,
@@ -236,7 +247,10 @@ fn parse_light_client_header(
     for (i, sibling) in execution_branch.iter_mut().enumerate() {
         *sibling = read_32(slice, 116 + 32 * i)?;
     }
-    let execution = slice[LIGHT_CLIENT_HEADER_FIXED..].to_vec();
+    let execution = slice
+        .get(LIGHT_CLIENT_HEADER_FIXED..)
+        .ok_or_else(|| malformed(offset, "light client header missing execution payload"))?
+        .to_vec();
     // The execution header's own internal discipline is checked now, so a
     // malformed `extra_data` region is refused at parse time rather than
     // silently hashed later.
@@ -286,6 +300,26 @@ impl ForkSchedule {
         }
     }
 
+    /// Build a custom fork schedule (e.g. Holesky or Sepolia) after checking
+    /// that it is non-empty and strictly descending by `activation_epoch`.
+    ///
+    /// Convenience: exposed for non-mainnet `SszCommitteePin` configurations.
+    pub fn from_descending_epochs(entries: Vec<ForkEpoch>) -> Result<Self, AdapterError> {
+        if entries.is_empty() {
+            return Err(rule("fork schedule must contain at least one fork epoch"));
+        }
+        for pair in entries.windows(2) {
+            if let [newer, older] = pair {
+                if newer.activation_epoch <= older.activation_epoch {
+                    return Err(rule(
+                        "fork schedule entries must be strictly descending by activation_epoch",
+                    ));
+                }
+            }
+        }
+        Ok(Self { entries })
+    }
+
     /// The fork version active at `epoch`, if the schedule reaches that far.
     #[must_use]
     pub fn version_at(&self, epoch: u64) -> Option<[u8; 4]> {
@@ -300,14 +334,16 @@ impl ForkSchedule {
     /// change at this boundary.
     #[must_use]
     pub fn electra_shape_epoch(&self) -> Option<u64> {
-        // Descending order: the second entry is the Electra boundary on every
-        // schedule shaped like mainnet's; a one-entry schedule never leaves
-        // the Deneb shape.
-        if self.entries.len() >= 2 {
-            Some(self.entries[self.entries.len() - 2].activation_epoch)
-        } else {
-            None
-        }
+        // Descending order: the oldest entry is Deneb, and the entry right
+        // before it (`len - 2`) is the Electra shape boundary regardless of
+        // network-specific fork-version bytes (Sepolia `0x90..`, Holesky
+        // `0x06017000`, mainnet `0x05000000`). A one-entry schedule never
+        // leaves the Deneb shape.
+        self.entries
+            .len()
+            .checked_sub(2)
+            .and_then(|idx| self.entries.get(idx))
+            .map(|entry| entry.activation_epoch)
     }
 }
 
@@ -436,26 +472,30 @@ pub fn sync_committee_root(committee: &[u8]) -> Result<[u8; 32], AdapterError> {
             .try_into()
             .map_err(|_| malformed(base, "pubkey slice conversion failed"))?;
         let mut second = [0u8; 32];
-        second[..16].copy_from_slice(
-            committee
-                .get(base + 32..base + 48)
-                .ok_or_else(|| malformed(base + 32, "pubkey tail past the committee encoding"))?,
-        );
+        let member_tail = committee
+            .get(base + 32..base + 48)
+            .ok_or_else(|| malformed(base + 32, "pubkey tail past the committee encoding"))?;
+        if let Some(prefix) = second.get_mut(..16) {
+            prefix.copy_from_slice(member_tail);
+        }
         *root = sha256_pair(&first, &second);
     }
     let vector_root = merkleize_chunks(&member_roots);
-    let aggregate = &committee[SYNC_COMMITTEE_MEMBERS * 48..];
+    let aggregate = committee
+        .get(SYNC_COMMITTEE_MEMBERS * 48..)
+        .ok_or_else(|| malformed(SYNC_COMMITTEE_MEMBERS * 48, "aggregate past the encoding"))?;
     let agg_first: [u8; 32] = aggregate
         .get(..32)
         .ok_or_else(|| malformed(SYNC_COMMITTEE_MEMBERS * 48, "aggregate past the encoding"))?
         .try_into()
         .map_err(|_| malformed(0, "aggregate slice conversion failed"))?;
     let mut agg_second = [0u8; 32];
-    agg_second[..16].copy_from_slice(
-        aggregate
-            .get(32..48)
-            .ok_or_else(|| malformed(0, "aggregate tail past the encoding"))?,
-    );
+    let agg_tail = aggregate
+        .get(32..48)
+        .ok_or_else(|| malformed(0, "aggregate tail past the encoding"))?;
+    if let Some(prefix) = agg_second.get_mut(..16) {
+        prefix.copy_from_slice(agg_tail);
+    }
     Ok(sha256_pair(
         &vector_root,
         &sha256_pair(&agg_first, &agg_second),
@@ -514,11 +554,17 @@ pub fn sync_committee_signing_root(
     genesis_validators_root: &[u8; 32],
 ) -> [u8; 32] {
     let mut version_chunk = [0u8; 32];
-    version_chunk[..4].copy_from_slice(&fork_version);
+    if let Some(prefix) = version_chunk.get_mut(..4) {
+        prefix.copy_from_slice(&fork_version);
+    }
     let fork_data_root = sha256_pair(&version_chunk, genesis_validators_root);
     let mut domain = [0u8; 32];
-    domain[..4].copy_from_slice(&DOMAIN_SYNC_COMMITTEE);
-    domain[4..].copy_from_slice(&fork_data_root[..28]);
+    if let Some(prefix) = domain.get_mut(..4) {
+        prefix.copy_from_slice(&DOMAIN_SYNC_COMMITTEE);
+    }
+    if let (Some(dst), Some(src)) = (domain.get_mut(4..32), fork_data_root.get(..28)) {
+        dst.copy_from_slice(src);
+    }
     sha256_pair(&attested.hash_tree_root(), &domain)
 }
 
@@ -552,4 +598,65 @@ pub fn verify_finality_and_execution(
         ));
     }
     execution_fields(&update.finalized.execution)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_sepolia_and_holesky_schedules_preserve_electra_shape_boundary() {
+        let sepolia = ForkSchedule::from_descending_epochs(vec![
+            ForkEpoch {
+                activation_epoch: 272_640,
+                version: [0x90, 0x00, 0x00, 0x75],
+            },
+            ForkEpoch {
+                activation_epoch: 222_464,
+                version: [0x90, 0x00, 0x00, 0x74],
+            },
+            ForkEpoch {
+                activation_epoch: 132_608,
+                version: [0x90, 0x00, 0x00, 0x73],
+            },
+        ])
+        .expect("descending Sepolia schedule");
+        assert_eq!(sepolia.electra_shape_epoch(), Some(222_464));
+        assert_eq!(finality_gindex(222_463 * SLOTS_PER_EPOCH, &sepolia), 105);
+        assert_eq!(finality_gindex(222_464 * SLOTS_PER_EPOCH, &sepolia), 169);
+
+        let deneb_only = ForkSchedule::from_descending_epochs(vec![ForkEpoch {
+            activation_epoch: 132_608,
+            version: [0x90, 0x00, 0x00, 0x73],
+        }])
+        .expect("single-fork Deneb schedule");
+        assert_eq!(deneb_only.electra_shape_epoch(), None);
+        assert_eq!(finality_gindex(500_000 * SLOTS_PER_EPOCH, &deneb_only), 105);
+    }
+
+    #[test]
+    fn non_descending_or_empty_fork_schedule_is_refused() {
+        assert!(ForkSchedule::from_descending_epochs(Vec::new()).is_err());
+        assert!(ForkSchedule::from_descending_epochs(vec![
+            ForkEpoch {
+                activation_epoch: 100,
+                version: [0x05, 0, 0, 0],
+            },
+            ForkEpoch {
+                activation_epoch: 100,
+                version: [0x04, 0, 0, 0],
+            },
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn execution_payload_root_refuses_short_or_overlong_extra_data_without_panic() {
+        assert!(execution_payload_root(&[0u8; EXECUTION_HEADER_FIXED - 1]).is_err());
+
+        let mut header = vec![0u8; EXECUTION_HEADER_FIXED + 33];
+        header[436..440].copy_from_slice(&(EXECUTION_HEADER_FIXED as u32).to_le_bytes());
+        let err = execution_payload_root(&header).expect_err("33-byte extra_data must fail");
+        assert!(matches!(err, AdapterError::Malformed { offset: 584, .. }));
+    }
 }
