@@ -281,19 +281,32 @@ fn cutoff(root: &Path) -> Result<Option<i64>, String> {
 
 /// Core judgement over an already-resolved window.
 fn evaluate(root: &Path, declared_base: Option<&str>) -> Result<String, String> {
+    // A shallow checkout cannot witness a declared window at all, and the
+    // failure is worse than emptiness: the graft turns the merge head into
+    // a parentless commit, `git show` lists the whole tree as its change,
+    // and a hidden seal-alone commit reads as "seal moved with its tree".
+    // Measured live before this rule: full history RED, depth=1 GREEN,
+    // unshallowed RED again on the same head. So declared-base mode
+    // refuses shallowness outright instead of out-guessing grafts.
+    if declared_base.is_some()
+        && git(root, &["rev-parse", "--is-shallow-repository"]).is_ok_and(|s| s.trim() == "true")
+    {
+        return Err(String::from(
+            "the checkout is shallow, so the declared base window cannot be witnessed; \
+             a grafted head can dress a seal-alone commit as a joint change - \
+             fetch the full history (fetch-depth: 0)",
+        ));
+    }
     let range = window(root, declared_base)?;
     let shas = commits(root, range.as_deref())?;
     // A declared base that resolves to an empty window is not a verdict:
-    // a shallow checkout of a merge head can hide every commit from
-    // `rev-list --no-merges`, and judging nothing must never read as
-    // green. The local fallbacks keep their meaning - a repository
-    // shorter than the window genuinely has that few commits.
+    // judging nothing must never read as green. The local fallbacks keep
+    // their meaning - a repository shorter than the window genuinely has
+    // that few commits.
     if shas.is_empty() && declared_base.is_some() {
-        let shallow =
-            git(root, &["rev-parse", "--is-shallow-repository"]).is_ok_and(|s| s.trim() == "true");
-        return Err(format!(
-            "the declared base window contains no commits (shallow checkout: {shallow}); \
-             an empty declared window is not a verdict - fetch the full history (fetch-depth: 0)"
+        return Err(String::from(
+            "the declared base window contains no commits; an empty declared window \
+             is not a verdict - fetch the full history (fetch-depth: 0)",
         ));
     }
     let cutoff = cutoff(root)?;
@@ -580,6 +593,31 @@ fn canary_cutoffs(base: &Path) -> Result<(), String> {
         ));
     }
     git_in(base, &["branch", "-D", "window-base"])?;
+    // A shallow clone is refused in declared-base mode before any window
+    // arithmetic: the graft can dress a seal-alone commit as a joint
+    // change, so shallowness itself is the refusal.
+    let shallow = base.with_file_name(format!(
+        "{}-shallow",
+        base.file_name().and_then(|n| n.to_str()).unwrap_or("seal")
+    ));
+    let _ = std::fs::remove_dir_all(&shallow);
+    let url = format!("file://{}", base.display());
+    let cloned = Command::new("git")
+        .args(["clone", "--quiet", "--depth", "1", &url])
+        .arg(&shallow)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if cloned {
+        let verdict = evaluate(&shallow, Some("any-base"));
+        let _ = std::fs::remove_dir_all(&shallow);
+        if verdict.is_ok() {
+            return Err(String::from(
+                "canary `shallow-checkout` passed when it must fail closed",
+            ));
+        }
+    } else {
+        let _ = std::fs::remove_dir_all(&shallow);
+    }
     Ok(())
 }
 
@@ -607,7 +645,7 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&base);
     outcome?;
     Ok(String::from(
-        "seals-move-with-their-tree canary OK: seal-with-tree, provenance-with-tree, ratchet-with-code and seal-tree-plus-work accepted; seal-alone and provenance-seal-alone refused; a future cutoff grandfathers; unparsable cutoff, unresolvable base ref and an empty declared window fail closed",
+        "seals-move-with-their-tree canary OK: seal-with-tree, provenance-with-tree, ratchet-with-code and seal-tree-plus-work accepted; seal-alone and provenance-seal-alone refused; a future cutoff grandfathers; unparsable cutoff, unresolvable base ref, an empty declared window and a shallow checkout fail closed",
     ))
 }
 
