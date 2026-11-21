@@ -97,8 +97,9 @@ pub enum ExpectedRefusal {
     Kind(RefusalKind),
 }
 
-/// The refusal categories a probe can pin, mirrored from [`AdapterError`] but
-/// stable across message wording changes: a probe that matched on an English
+/// The refusal categories a probe can pin, mirrored from [`AdapterError`].
+///
+/// Stable across message wording changes: a probe that matched on an English
 /// sentence would break the day somebody improved the sentence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefusalKind {
@@ -171,12 +172,14 @@ pub enum ProbeOutcome {
 
 impl ProbeOutcome {
     #[must_use]
-    pub fn passed(&self) -> bool {
+    pub const fn passed(&self) -> bool {
         matches!(self, Self::Refused { .. })
     }
 }
 
-/// The whole admission run, as a record. Stored against the domain so a
+/// The whole admission run, as a record.
+///
+/// Stored against the domain so a
 /// consumer can see not just "admitted" but *what was probed* - an admission
 /// over three probes and one over thirty are not the same assurance, and a
 /// boolean would hide that.
@@ -390,8 +393,9 @@ fn first_undeclared_version(accepted: &[u32]) -> Option<u32> {
         .find(|candidate| !accepted.contains(candidate))
 }
 
-/// Full admission run returning both the report and the [`crate::crypto::facts::CryptoFacts`]
-/// observed while verifying the golden sample so registration doors can seed
+/// Full admission run returning both the report and observed [`crate::crypto::facts::CryptoFacts`].
+///
+/// Captures schemes observed while verifying the golden sample so registration doors can seed
 /// CRQC isolation class before the first post-registration submission arrives.
 #[must_use]
 pub fn admit_observed(

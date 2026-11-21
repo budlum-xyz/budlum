@@ -141,7 +141,9 @@ impl BlsVerifier for PairingBls {
     }
 }
 
-/// The adapter families this binary can construct. Data, so it can be
+/// The adapter families this binary can construct.
+///
+/// Data, so it can be
 /// persisted with the registration and reconstructed on restart: a domain
 /// whose adapter cannot be rebuilt from its stored spec is a domain the node
 /// silently stops serving, and that must be a loud error instead.
@@ -269,124 +271,89 @@ impl AdapterSpec {
         bls: Option<Box<dyn BlsVerifier>>,
         golden: Option<RawConsensusEvidence>,
     ) -> Box<dyn ExternalFinalityAdapter> {
+        use crate::cross_domain::external::{
+            bitvm_covenant::BitVmCovenantAdapter, casper_ffg::CasperFfgAdapter,
+            da_sampling::DataAvailabilityAdapter, dag_bft::BullsharkDagAdapter,
+            hotstuff::HotStuffThreeChainAdapter, mysticeti_dag::MysticetiDagAdapter,
+        };
         match self {
-            Self::EthereumSync { network, committee } => {
-                let adapter = EthereumSyncAdapter::new(network, committee.clone(), bls);
-                Box::new(if let Some(g) = golden {
-                    adapter.with_golden(g)
-                } else {
-                    adapter
-                })
-            }
+            Self::EthereumSync { network, committee } => box_with_golden(
+                || EthereumSyncAdapter::new(network, committee.clone(), bls),
+                golden,
+                EthereumSyncAdapter::with_golden,
+            ),
             Self::ZkVm {
                 network,
                 program_hash,
                 chain_id,
-            } => {
-                let adapter = ZkVmFinalityAdapter::new(network, *program_hash, *chain_id);
-                Box::new(if let Some(g) = golden {
-                    adapter.with_golden(g)
-                } else {
-                    adapter
-                })
-            }
-            Self::BitcoinSpv { network, anchor } => {
-                let adapter = BitcoinSpvAdapter::new(network, anchor.clone());
-                Box::new(if let Some(g) = golden {
-                    adapter.with_golden(g)
-                } else {
-                    adapter
-                })
-            }
+            } => box_with_golden(
+                || ZkVmFinalityAdapter::new(network, *program_hash, *chain_id),
+                golden,
+                ZkVmFinalityAdapter::with_golden,
+            ),
+            Self::BitcoinSpv { network, anchor } => box_with_golden(
+                || BitcoinSpvAdapter::new(network, anchor.clone()),
+                golden,
+                BitcoinSpvAdapter::with_golden,
+            ),
             Self::TendermintCommit {
                 network,
                 chain_id,
                 validator_set_hash,
-            } => {
-                let adapter =
-                    TendermintFinalityAdapter::new_pinned(network, chain_id, *validator_set_hash);
-                Box::new(if let Some(g) = golden {
-                    adapter.with_golden(g)
-                } else {
-                    adapter
-                })
-            }
-            Self::DataAvailability { network, committee } => {
-                let adapter =
-                    crate::cross_domain::external::da_sampling::DataAvailabilityAdapter::new(
-                        network,
-                        committee.clone(),
-                    );
-                Box::new(if let Some(g) = golden {
-                    adapter.with_golden(g)
-                } else {
-                    adapter
-                })
-            }
-            Self::HotStuffQc { network, committee } => {
-                let adapter =
-                    crate::cross_domain::external::hotstuff::HotStuffThreeChainAdapter::new(
-                        network,
-                        committee.clone(),
-                    );
-                Box::new(if let Some(g) = golden {
-                    adapter.with_golden(g)
-                } else {
-                    adapter
-                })
-            }
-            Self::DagCertificate { network, committee } => {
-                let adapter = crate::cross_domain::external::dag_bft::BullsharkDagAdapter::new(
-                    network,
-                    committee.clone(),
-                );
-                Box::new(if let Some(g) = golden {
-                    adapter.with_golden(g)
-                } else {
-                    adapter
-                })
-            }
-            Self::CasperFfg { network, committee } => {
-                let adapter =
-                    crate::cross_domain::external::casper_ffg::CasperFfgAdapter::new_optional(
-                        network,
-                        committee.clone(),
-                    );
-                Box::new(if let Some(g) = golden {
-                    adapter.with_golden(g)
-                } else {
-                    adapter
-                })
-            }
-            Self::MysticetiDag { network, committee } => {
-                let adapter =
-                    crate::cross_domain::external::mysticeti_dag::MysticetiDagAdapter::new(
-                        network,
-                        committee.clone(),
-                    );
-                Box::new(if let Some(g) = golden {
-                    adapter.with_golden(g)
-                } else {
-                    adapter
-                })
-            }
-            Self::BitVmCovenant { network, anchor } => {
-                let adapter =
-                    crate::cross_domain::external::bitvm_covenant::BitVmCovenantAdapter::new(
-                        network,
-                        anchor.clone(),
-                    );
-                Box::new(if let Some(g) = golden {
-                    adapter.with_golden(g)
-                } else {
-                    adapter
-                })
-            }
+            } => box_with_golden(
+                || TendermintFinalityAdapter::new_pinned(network, chain_id, *validator_set_hash),
+                golden,
+                TendermintFinalityAdapter::with_golden,
+            ),
+            Self::DataAvailability { network, committee } => box_with_golden(
+                || DataAvailabilityAdapter::new(network, committee.clone()),
+                golden,
+                DataAvailabilityAdapter::with_golden,
+            ),
+            Self::HotStuffQc { network, committee } => box_with_golden(
+                || HotStuffThreeChainAdapter::new(network, committee.clone()),
+                golden,
+                HotStuffThreeChainAdapter::with_golden,
+            ),
+            Self::DagCertificate { network, committee } => box_with_golden(
+                || BullsharkDagAdapter::new(network, committee.clone()),
+                golden,
+                BullsharkDagAdapter::with_golden,
+            ),
+            Self::CasperFfg { network, committee } => box_with_golden(
+                || CasperFfgAdapter::new_optional(network, committee.clone()),
+                golden,
+                CasperFfgAdapter::with_golden,
+            ),
+            Self::MysticetiDag { network, committee } => box_with_golden(
+                || MysticetiDagAdapter::new(network, committee.clone()),
+                golden,
+                MysticetiDagAdapter::with_golden,
+            ),
+            Self::BitVmCovenant { network, anchor } => box_with_golden(
+                || BitVmCovenantAdapter::new(network, anchor.clone()),
+                golden,
+                BitVmCovenantAdapter::with_golden,
+            ),
         }
     }
 }
 
-/// Everything one registration carries, as one value. A struct rather than
+fn box_with_golden<A: ExternalFinalityAdapter + 'static>(
+    make: impl FnOnce() -> A,
+    golden: Option<RawConsensusEvidence>,
+    attach: impl FnOnce(A, RawConsensusEvidence) -> A,
+) -> Box<dyn ExternalFinalityAdapter> {
+    let adapter = make();
+    Box::new(match golden {
+        Some(sample) => attach(adapter, sample),
+        None => adapter,
+    })
+}
+
+/// Everything one registration carries, as one value.
+///
+/// A struct rather than
 /// seven positional parameters, at the intake and across the actor channel
 /// alike: positional registration data is how a bond and a ceiling get
 /// swapped silently.
@@ -405,7 +372,9 @@ pub struct RegistrationRequest {
 }
 
 /// One registered intake entry: the spec to rebuild the adapter, and the
-/// policy evidence is verified under. The policy is stored, not re-derived,
+/// policy evidence is verified under.
+///
+/// The policy is stored, not re-derived,
 /// because "which policy was this attestation accepted under" is a question
 /// an auditor asks about the past, and the past must not change when the
 /// default does.
@@ -759,7 +728,7 @@ const MAX_QUORUM_PARTICIPANTS: usize = 256;
 /// Whether `challenge` proves strictly more accumulated work than the
 /// `accepted_bits` an attestation was admitted with. A tie is the external
 /// chain's own fork, and a fork alone proves no carrier false.
-fn out_works(accepted_bits: u32, challenge: &SecurityBacking) -> bool {
+const fn out_works(accepted_bits: u32, challenge: &SecurityBacking) -> bool {
     matches!(
         challenge,
         SecurityBacking::Work { difficulty_bits } if *difficulty_bits > accepted_bits
@@ -1264,14 +1233,12 @@ impl IntakeState {
                 .and_then(|reg| accepted_policy_clock_tip(reg, time_unit)),
         );
         if self.quorum.policy_of(&key).is_some() {
-            return match self.submit_to_round(key, evidence, adapter.as_ref(), &policy)? {
-                Some(attestation) => Ok(attestation),
-                // The round took the answer but has not decided. Refusing
-                // with a named state rather than inventing a partial
-                // attestation: the caller (RPC) reports the round state
-                // through `bud_getExternalQuorumRound`.
-                None => Err(IntakeError::RoundPending),
-            };
+            // When the round takes the answer without deciding yet, refuse with a
+            // named state rather than inventing a partial attestation; RPC reports
+            // the round state through `bud_getExternalQuorumRound`.
+            return self
+                .submit_to_round(key, evidence, adapter.as_ref(), &policy)?
+                .ok_or(IntakeError::RoundPending);
         }
         if self
             .guard
@@ -1707,13 +1674,11 @@ impl IntakeState {
                 // The carrier is the first prover whose full claim digest
                 // matches the winner. A missing one breaks a round invariant,
                 // so it is refused instead of crediting whoever closed the round.
-                let carrier = self
+                let Some(carrier) = self
                     .quorum
                     .round_of(&key, evidence.declared_height)
-                    .and_then(|round| first_carrier(round, &winner_claim));
-                let carrier = if let Some(carrier) = carrier {
-                    carrier
-                } else {
+                    .and_then(|round| first_carrier(round, &winner_claim))
+                else {
                     self.quorum = quorum_before;
                     return Err(IntakeError::MissingCarrier);
                 };

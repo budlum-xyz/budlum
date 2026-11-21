@@ -1,4 +1,5 @@
-//! WIRING: unwired - `verify_chain` is reached in this tree only through adapter.rs and evm/verify.rs, both of which declare themselves unwired; the relayer path wires it.
+//! WIRING: unwired - `verify_chain` is reached only through unwired `adapter.rs` and `evm/verify.rs`.
+//!
 //! Minimal Ethereum block header decode + chain-link + N-confirmation finality.
 //!
 //! Sync-committee light-client finality (`PoS`, BLS12-381 sync-aggregate).
@@ -93,9 +94,8 @@ pub const DEFAULT_CONFIRMATIONS: u32 = 64;
 /// Returns an error if the operation fails.
 pub fn decode_header(raw: &[u8]) -> Result<EthHeader, HeaderError> {
     let item = rlp::decode(raw)?;
-    let list = match item {
-        Item::List(ref l) => l,
-        _ => return Err(HeaderError::InvalidHeader),
+    let Item::List(ref list) = item else {
+        return Err(HeaderError::InvalidHeader);
     };
     if list.len() < 9 {
         return Err(HeaderError::InvalidHeader);
@@ -115,7 +115,7 @@ pub fn decode_header(raw: &[u8]) -> Result<EthHeader, HeaderError> {
 }
 
 /// Helper for a 32-byte hash field (length check).
-fn arr32(b: &[u8]) -> Result<[u8; 32], HeaderError> {
+const fn arr32(b: &[u8]) -> Result<[u8; 32], HeaderError> {
     if b.len() != 32 {
         return Err(HeaderError::InvalidHeader);
     }
@@ -267,7 +267,9 @@ pub fn decode_post_merge_execution_header(
     })
 }
 
-/// N-confirmation finality: verifies that `required` confirmation headers sit
+/// N-confirmation finality over a canonical Ethereum header chain.
+///
+/// Verifies that `required` confirmation headers sit
 /// above the target header and that their chain is canonical
 /// (`parent_hash` -> child.hash, number+1). Once the reorg window has passed, the
 /// target counts as finalized.
@@ -376,9 +378,8 @@ mod tests {
         // The EIP-1559 baseFeePerGas extra field -> a 10-item list; the
         // decoder reads the first 9.
         let parent = [3u8; 32];
-        let mut nine = match rlp::decode(&header_bytes(parent, 7, [4u8; 32])).unwrap() {
-            Item::List(l) => l,
-            _ => unreachable!(),
+        let Item::List(mut nine) = rlp::decode(&header_bytes(parent, 7, [4u8; 32])).unwrap() else {
+            unreachable!();
         };
         nine.push(Item::String(vec![0x01; 8])); // baseFeePerGas
         let bytes = encode(&Item::List(nine));

@@ -84,9 +84,8 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
     };
 
     let item = rlp::decode(payload)?;
-    let list = match item {
-        Item::List(ref l) => l,
-        _ => return Err(ReceiptError::InvalidEnvelope),
+    let Item::List(ref list) = item else {
+        return Err(ReceiptError::InvalidEnvelope);
     };
     // [status/postState, cumulativeGasUsed, logsBloom, logs [, accessList]]
     if list.len() < 4 {
@@ -120,15 +119,13 @@ fn decode_status(b: &[u8], is_typed: bool) -> Result<bool, ReceiptError> {
 
 /// Decodes the `logs` RLP list. Each log = `[address(20), topics([32]*), data]`.
 fn decode_logs(item: &Item) -> Result<Vec<EthLog>, ReceiptError> {
-    let logs = match item {
-        Item::List(l) => l,
-        _ => return Err(ReceiptError::InvalidLog),
+    let Item::List(logs) = item else {
+        return Err(ReceiptError::InvalidLog);
     };
     let mut out = Vec::with_capacity(logs.len());
     for log_item in logs {
-        let fields = match log_item {
-            Item::List(l) => l,
-            _ => return Err(ReceiptError::InvalidLog),
+        let Item::List(fields) = log_item else {
+            return Err(ReceiptError::InvalidLog);
         };
         if fields.len() != 3 {
             return Err(ReceiptError::InvalidLog);
@@ -138,22 +135,20 @@ fn decode_logs(item: &Item) -> Result<Vec<EthLog>, ReceiptError> {
             return Err(ReceiptError::InvalidLog);
         }
         let mut topics = Vec::new();
-        match &fields[1] {
-            Item::List(tl) => {
-                if tl.len() > 4 {
-                    return Err(ReceiptError::InvalidLog);
-                }
-                for t in tl {
-                    let tb = rlp::as_bytes(t)?;
-                    if tb.len() != 32 {
-                        return Err(ReceiptError::InvalidLog);
-                    }
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(tb);
-                    topics.push(arr);
-                }
+        let Item::List(tl) = &fields[1] else {
+            return Err(ReceiptError::InvalidLog);
+        };
+        if tl.len() > 4 {
+            return Err(ReceiptError::InvalidLog);
+        }
+        for t in tl {
+            let tb = rlp::as_bytes(t)?;
+            if tb.len() != 32 {
+                return Err(ReceiptError::InvalidLog);
             }
-            _ => return Err(ReceiptError::InvalidLog),
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(tb);
+            topics.push(arr);
         }
         let data = rlp::as_bytes(&fields[2])?.to_vec();
         out.push(EthLog {
