@@ -49,7 +49,6 @@ budzero/bud-state/src/lib.rs	fn	verify_account_proof
 budzero/bud-state/src/note.rs	fn	from_field_elements
 budzero/bud-state/src/note.rs	fn	spend
 budzero/bud-state/src/note.rs	struct	NoteRegistry
-budzero/bud-state/src/note.rs	struct	PrivacyNote
 budzero/bud-vm/src/lib.rs	const	POSEIDON_ALPHA
 budzero/bud-vm/src/lib.rs	const	POSEIDON_ROUNDS_IN_USE
 budzero/bud-vm/src/lib.rs	fn	consume_gas
