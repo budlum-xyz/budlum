@@ -71,11 +71,12 @@ pub struct PoolDepositPolicy {
     pub deposit: u64,
 }
 
-/// The single K/TTL table. K values price pool saturation as locked capital:
-/// an identity slot locks 10 BUD (filling all identity slots locks ~655k
-/// BUD), a privacy note locks 0.1 BUD (saturating the 65,536-row pool locks
-/// ~6,553 BUD across at least 64 addresses - the per-owner quota forces the
-/// spread). The numbers live here and nowhere else.
+/// The single K/TTL table: the numbers live here and nowhere else.
+///
+/// K values price pool saturation as locked capital: an identity slot locks
+/// 10 BUD (filling all identity slots locks ~655k BUD), a privacy note locks
+/// 0.1 BUD (saturating the 65,536-row pool locks ~6,553 BUD across at least
+/// 64 addresses - the per-owner quota forces the spread).
 #[must_use]
 pub const fn policy_of(pool: SharedPool) -> PoolDepositPolicy {
     match pool {

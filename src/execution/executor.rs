@@ -3879,14 +3879,14 @@ impl Executor {
                 // Occupying a registry row locks the single-table deposit
                 // behind that exact row; a successful revoke closes its row
                 // and refunds whoever locked it, exactly once. A row with
-                // no record (pre-deposit era) refunds nothing.
-                use crate::tokenomics::pool_deposit::{policy_of, SharedPool};
-                // The row ledger is only for owner-refundable classes: the
-                // class gates the path, so a table edit that flipped a row
-                // to shielded would refuse here instead of stranding money.
-                let owner_refundable_deposit = |pool: SharedPool| -> Result<u64, BudlumError> {
+                // no record (pre-deposit era) refunds nothing. The row
+                // ledger is only for owner-refundable classes: the class
+                // gates the path, so a table edit that flipped a row to
+                // shielded would refuse here instead of stranding money.
+                let owner_refundable_deposit = |pool: crate::tokenomics::pool_deposit::SharedPool|
+                 -> Result<u64, BudlumError> {
                     let policy: crate::tokenomics::pool_deposit::PoolDepositPolicy =
-                        policy_of(pool);
+                        crate::tokenomics::pool_deposit::policy_of(pool);
                     match policy.class {
                         crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable {
                             ..
@@ -3902,14 +3902,18 @@ impl Executor {
                 let deposit_plan: Option<(String, u64)> = match identity_tx {
                     crate::registry::identity::IdentityTx::Register { record } => Some((
                         format!("identity-record:{}", hex::encode(record.subject.as_bytes())),
-                        owner_refundable_deposit(SharedPool::IdentityRecord)?,
+                        owner_refundable_deposit(
+                            crate::tokenomics::pool_deposit::SharedPool::IdentityRecord,
+                        )?,
                     )),
                     crate::registry::identity::IdentityTx::Issue { credential, .. } => Some((
                         format!(
                             "identity-credential:{}",
                             hex::encode(crate::registry::identity::credential_id(credential))
                         ),
-                        owner_refundable_deposit(SharedPool::IssuedCredential)?,
+                        owner_refundable_deposit(
+                            crate::tokenomics::pool_deposit::SharedPool::IssuedCredential,
+                        )?,
                     )),
                     _ => None,
                 };

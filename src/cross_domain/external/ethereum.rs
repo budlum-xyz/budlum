@@ -1106,9 +1106,14 @@ impl EthereumSyncAdapter {
                 finality_kind: FinalityKind::ProtocolFinality,
                 // Two epochs of Casper FFG. Declared rather than derived from
                 // a slot count, because the depth a consumer relies on should
-                // be a number they can read.
+                // be a number they can read. The depth stays in slots - it is
+                // what `policy.min_depth` is compared against.
                 required_depth: 2 * SLOTS_PER_EPOCH,
-                time_unit: TimeUnit::Slot,
+                // The unit of the attestation's `finalized_at`, per the
+                // descriptor contract: this adapter reports the finalized
+                // EPOCH (`epoch_of_slot`), and the shape gate refuses an
+                // attestation whose clock disagrees with this declaration.
+                time_unit: TimeUnit::Epoch,
                 trust_model: TrustModel::HonestMajority {
                     set_size: SYNC_COMMITTEE_SIZE,
                 },
