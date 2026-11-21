@@ -282,18 +282,18 @@ fn cutoff(root: &Path) -> Result<Option<i64>, String> {
 /// Core judgement over an already-resolved window.
 fn evaluate(root: &Path, declared_base: Option<&str>) -> Result<String, String> {
     // A shallow checkout cannot witness a declared window at all, and the
-    // failure is worse than emptiness: the graft turns the merge head into
+    // failure is worse than emptiness: the shallow boundary turns the merge head into
     // a parentless commit, `git show` lists the whole tree as its change,
     // and a hidden seal-alone commit reads as "seal moved with its tree".
     // Measured live before this rule: full history RED, depth=1 GREEN,
     // unshallowed RED again on the same head. So declared-base mode
-    // refuses shallowness outright instead of out-guessing grafts.
+    // refuses shallowness outright instead of out-guessing boundary cuts.
     if declared_base.is_some()
         && git(root, &["rev-parse", "--is-shallow-repository"]).is_ok_and(|s| s.trim() == "true")
     {
         return Err(String::from(
             "the checkout is shallow, so the declared base window cannot be witnessed; \
-             a grafted head can dress a seal-alone commit as a joint change - \
+             a boundary-cut head can dress a seal-alone commit as a joint change - \
              fetch the full history (fetch-depth: 0)",
         ));
     }
@@ -594,8 +594,8 @@ fn canary_cutoffs(base: &Path) -> Result<(), String> {
     }
     git_in(base, &["branch", "-D", "window-base"])?;
     // A shallow clone is refused in declared-base mode before any window
-    // arithmetic: the graft can dress a seal-alone commit as a joint
-    // change, so shallowness itself is the refusal.
+    // arithmetic: the boundary-cut head can dress a seal-alone commit as
+    // a joint change, so shallowness itself is the refusal.
     let shallow = base.with_file_name(format!(
         "{}-shallow",
         base.file_name().and_then(|n| n.to_str()).unwrap_or("seal")
