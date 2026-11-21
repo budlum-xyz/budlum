@@ -80,7 +80,7 @@ fn bns_register_duplicate_live_name_rejected() {
 fn market_create_offer_table() {
     let mut r = MarketplaceRegistry::new();
     for i in 1..=10u8 {
-        let id = r.create_offer(addr(i), cid(i), u64::from(i)).unwrap();
+        let id = r.create_offer(addr(i), cid(i), u64::from(i), 7).unwrap();
         assert!(r.get_offer(id).is_some(), "created offer {id} missing");
     }
 }

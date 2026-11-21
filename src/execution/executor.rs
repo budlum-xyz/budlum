@@ -2525,10 +2525,90 @@ impl Executor {
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiOfferData { cid, price } => {
-                state
+                let current_block = state.current_block_height;
+                let policy = crate::tokenomics::pool_deposit::policy_of(
+                    crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+                );
+                let crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable {
+                    ttl_blocks,
+                } = policy.class
+                else {
+                    return Err(BudlumError::validation(
+                        "offer_pool_deposit",
+                        "a content listing is not shielded-class; refusing the wrong ledger",
+                    ));
+                };
+                // The TTL sweep: before a new listing may occupy a slot, up
+                // to 16 rows whose occupancy ended give their deposits back.
+                // A row comes back when its offer is gone or closed (the
+                // registry prunes closed offers lazily, so the refund rides
+                // the next listing), or when a live row outlived the table's
+                // TTL - and that eviction asks `ttl_sweep_permitted` first,
+                // so the day this registry's root stops being a flat row
+                // walk, the sweep stops with it. A pre-field row carries
+                // `created_at_block == 0`: its age is unknown, and a wrong
+                // eviction is not fail-closed, so it is never TTL-swept.
+                let offer_row_prefix = "content-offer:";
+                let mut reclaim: Vec<(String, Option<u64>)> = Vec::new();
+                for (key, _) in state.pool_deposit_rows.range(offer_row_prefix.to_string()..) {
+                    if !key.starts_with(offer_row_prefix) || reclaim.len() == 16 {
+                        break;
+                    }
+                    let Ok(id) = key[offer_row_prefix.len()..].parse::<u64>() else {
+                        continue;
+                    };
+                    match state.marketplace.get_offer(id) {
+                        None => reclaim.push((key.clone(), None)),
+                        Some(offer) if !offer.active => reclaim.push((key.clone(), Some(id))),
+                        Some(offer)
+                            if offer.created_at_block != 0
+                                && current_block.saturating_sub(offer.created_at_block)
+                                    > ttl_blocks
+                                && crate::tokenomics::pool_deposit::ttl_sweep_permitted(
+                                    policy.class,
+                                    crate::tokenomics::pool_deposit::RegistryRootShape::FlatRowSet,
+                                    crate::tokenomics::pool_deposit::RowLiveness::Live,
+                                ) =>
+                        {
+                            reclaim.push((key.clone(), Some(id)));
+                        }
+                        Some(_) => {}
+                    }
+                }
+                for (key, evicted_offer) in reclaim {
+                    if let Some(id) = evicted_offer {
+                        state.marketplace.offers.remove(&id);
+                    }
+                    state
+                        .release_pool_deposit_row(&key)
+                        .map_err(|e| BudlumError::validation("offer_pool_deposit", e))?;
+                }
+                let full_cost = policy.deposit.checked_add(tx.fee).ok_or_else(|| {
+                    BudlumError::validation(
+                        "offer_pool_deposit",
+                        "deposit + fee arithmetic overflow",
+                    )
+                })?;
+                if state.spendable_balance(&tx.from) < full_cost {
+                    return Err(BudlumError::validation(
+                        "offer_pool_deposit",
+                        "spendable balance cannot cover the listing deposit and the fee",
+                    ));
+                }
+                let id = state
                     .marketplace
-                    .create_offer(tx.from, *cid, *price)
+                    .create_offer(tx.from, *cid, *price, current_block)
                     .map_err(|e| BudlumError::validation("offer_invalid", e))?;
+                if let Err(e) = state.lock_pool_deposit_row(
+                    &format!("{offer_row_prefix}{id}"),
+                    &tx.from,
+                    policy.deposit,
+                ) {
+                    // Same-breath unwind: a listing that could not lock its
+                    // deposit must not stay live rent-free.
+                    state.marketplace.offers.remove(&id);
+                    return Err(BudlumError::validation("offer_pool_deposit", e));
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -6418,6 +6498,259 @@ mod tests {
                 assert_ne!(err.code(), "ai_layer_testnet_closed");
             }
         }
+    }
+
+    /// The content-listing deposit economy, end to end through the door.
+    fn listing_tx(
+        who: Address,
+        nonce: u64,
+        chain_id: u64,
+        tag: &[u8],
+    ) -> crate::core::transaction::Transaction {
+        Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            0,
+            100,
+            nonce,
+            vec![],
+            chain_id,
+            TransactionType::AiOfferData {
+                cid: crate::storage::content_id::ContentId::of(tag),
+                price: 1,
+            },
+        )
+    }
+
+    #[test]
+    fn a_listing_locks_the_table_deposit_behind_a_row() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let policy = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        );
+        let who = Address::from([31u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&who, policy.deposit * 3);
+        Executor::apply_transaction_checked(&mut state, &listing_tx(who, 0, mainnet, b"d-d"))
+            .expect("a funded listing enters");
+        assert_eq!(
+            state.pool_deposit_rows.get("content-offer:0"),
+            Some(&(who, policy.deposit)),
+            "the row records who locked exactly the table deposit"
+        );
+        assert_eq!(
+            state.get_balance(&who),
+            policy.deposit * 3 - policy.deposit - 100,
+            "the deposit left the balance alongside the fee"
+        );
+        assert_eq!(
+            state.pool_deposit_escrow.get(&who).copied(),
+            Some(policy.deposit),
+            "the deposit sits in escrow, not burned"
+        );
+        let offer = state.marketplace.get_offer(0).expect("live offer");
+        assert_eq!(offer.created_at_block, state.current_block_height);
+    }
+
+    #[test]
+    fn a_seller_who_cannot_cover_the_deposit_cannot_list() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let who = Address::from([32u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&who, 150);
+        let err =
+            Executor::apply_transaction_checked(&mut state, &listing_tx(who, 0, mainnet, b"d-d"))
+                .expect_err("fee money alone must not occupy a slot");
+        assert_eq!(err.code(), "offer_pool_deposit");
+        assert!(
+            state.marketplace.get_offer(0).is_none(),
+            "a refused listing must not stay in the registry"
+        );
+        assert!(state.pool_deposit_rows.is_empty());
+    }
+
+    #[test]
+    fn an_expired_listing_is_swept_and_refunded_by_the_next_listing() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let policy = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        );
+        let crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable { ttl_blocks } =
+            policy.class
+        else {
+            panic!("content offers are owner-refundable");
+        };
+        let squatter = Address::from([33u8; 32]);
+        let newcomer = Address::from([34u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&squatter, policy.deposit * 2);
+        state.add_balance(&newcomer, policy.deposit * 2);
+        state.current_block_height = 1;
+        Executor::apply_transaction_checked(
+            &mut state,
+            &listing_tx(squatter, 0, mainnet, b"stale"),
+        )
+        .expect("the squatter lists");
+        state.current_block_height = 1 + ttl_blocks + 1;
+        Executor::apply_transaction_checked(
+            &mut state,
+            &listing_tx(newcomer, 0, mainnet, b"fresh"),
+        )
+        .expect("the newcomer lists");
+        assert!(
+            state.marketplace.get_offer(0).is_none(),
+            "the expired listing left the pool"
+        );
+        assert!(
+            !state.pool_deposit_rows.contains_key("content-offer:0"),
+            "the swept row is gone"
+        );
+        assert_eq!(
+            state.get_balance(&squatter),
+            policy.deposit * 2 - 100,
+            "the sweep returned the deposit; only the fee was spent"
+        );
+        assert_eq!(
+            state.pool_deposit_rows.get("content-offer:1"),
+            Some(&(newcomer, policy.deposit)),
+            "the newcomer's row is live"
+        );
+    }
+
+    #[test]
+    fn a_listing_of_unknown_age_is_never_ttl_swept() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let policy = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        );
+        let elder = Address::from([35u8; 32]);
+        let newcomer = Address::from([36u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&elder, policy.deposit * 2);
+        state.add_balance(&newcomer, policy.deposit * 2);
+        state.marketplace.offers.insert(
+            5,
+            crate::pollen::offers::DataOffer {
+                id: 5,
+                seller: elder,
+                cid: crate::storage::content_id::ContentId::of(b"pre-field"),
+                price: 1,
+                active: true,
+                created_at_block: 0,
+            },
+        );
+        state.marketplace.next_offer_id = 6;
+        state
+            .lock_pool_deposit_row("content-offer:5", &elder, policy.deposit)
+            .expect("the elder row carries a deposit");
+        state.current_block_height = u64::MAX / 2;
+        Executor::apply_transaction_checked(
+            &mut state,
+            &listing_tx(newcomer, 0, mainnet, b"fresh"),
+        )
+        .expect("the newcomer lists");
+        assert!(
+            state.marketplace.get_offer(5).is_some(),
+            "age-unknown rows are never evicted: a wrong eviction is not fail-closed"
+        );
+        assert_eq!(
+            state.pool_deposit_rows.get("content-offer:5"),
+            Some(&(elder, policy.deposit)),
+        );
+    }
+
+    #[test]
+    fn a_closed_listing_returns_its_deposit_on_the_next_sweep() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let policy = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        );
+        let seller = Address::from([37u8; 32]);
+        let newcomer = Address::from([38u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&seller, policy.deposit * 2);
+        state.add_balance(&newcomer, policy.deposit * 2);
+        state.current_block_height = 1;
+        Executor::apply_transaction_checked(&mut state, &listing_tx(seller, 0, mainnet, b"sold"))
+            .expect("the seller lists");
+        state
+            .marketplace
+            .close_offer(0, &seller)
+            .expect("the seller closes");
+        state.current_block_height = 2;
+        Executor::apply_transaction_checked(
+            &mut state,
+            &listing_tx(newcomer, 0, mainnet, b"fresh"),
+        )
+        .expect("the newcomer lists");
+        assert!(
+            !state.pool_deposit_rows.contains_key("content-offer:0"),
+            "the closed row's deposit came back"
+        );
+        assert_eq!(
+            state.get_balance(&seller),
+            policy.deposit * 2 - 100,
+            "closing cost the seller only the listing fee"
+        );
+        assert!(
+            state.marketplace.get_offer(0).is_none(),
+            "the sweep finished the registry's lazy prune"
+        );
+    }
+
+    #[test]
+    fn the_sweep_reclaims_at_most_sixteen_rows_per_listing() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let policy = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        );
+        let elder = Address::from([39u8; 32]);
+        let newcomer = Address::from([40u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&elder, policy.deposit * 32);
+        state.add_balance(&newcomer, policy.deposit * 2);
+        for id in 0..20u64 {
+            state.marketplace.offers.insert(
+                id,
+                crate::pollen::offers::DataOffer {
+                    id,
+                    seller: elder,
+                    cid: crate::storage::content_id::ContentId::of(&id.to_le_bytes()),
+                    price: 1,
+                    active: true,
+                    created_at_block: 1,
+                },
+            );
+            state
+                .lock_pool_deposit_row(&format!("content-offer:{id}"), &elder, policy.deposit)
+                .expect("each row carries a deposit");
+        }
+        state.marketplace.next_offer_id = 20;
+        let crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable { ttl_blocks } =
+            policy.class
+        else {
+            panic!("content offers are owner-refundable");
+        };
+        state.current_block_height = 1 + ttl_blocks + 1;
+        Executor::apply_transaction_checked(
+            &mut state,
+            &listing_tx(newcomer, 0, mainnet, b"fresh"),
+        )
+        .expect("the newcomer lists");
+        let remaining_elder_rows = state
+            .pool_deposit_rows
+            .keys()
+            .filter(|k| k.starts_with("content-offer:") && **k != format!("content-offer:{}", 20))
+            .count();
+        assert_eq!(
+            remaining_elder_rows, 4,
+            "exactly sixteen expired rows come back per listing"
+        );
+        assert_eq!(
+            state.pool_deposit_escrow.get(&elder).copied(),
+            Some(policy.deposit * 4),
+            "sixteen deposits returned, four still occupy"
+        );
     }
 
     /// G-4 at the boundary itself: the guard runs before the liquidity probe,

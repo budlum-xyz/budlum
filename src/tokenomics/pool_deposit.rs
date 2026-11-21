@@ -62,6 +62,62 @@ pub enum PoolDepositClass {
     ShieldedBalance,
 }
 
+/// How a registry commits its rows to the state root.
+///
+/// A TTL sweep walks the flat row map and deletes entries; the moment a
+/// registry commits rows through a Merkle tree or accumulator, that same
+/// deletion silently invalidates previously issued membership witnesses,
+/// so the sweep must stop existing the day the root shape changes - not
+/// after an incident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryRootShape {
+    /// Every row folds into the root directly from a walk of the flat map;
+    /// removing a row changes the root and nothing else holds a witness
+    /// against the old set.
+    FlatRowSet,
+    /// Rows are committed through a Merkle tree or accumulator whose paths
+    /// or witnesses live outside the state. Sweeping a leaf out from under
+    /// an issued witness is an equivocation, so no sweep is permitted.
+    MerkleOrAccumulator,
+}
+
+/// Whether a row still occupies pool capacity.
+///
+/// A row that left the live set is part of a replay-protection history:
+/// spent sets and nullifier sets are append-only forever, and sweeping
+/// one would re-open a replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowLiveness {
+    /// The row occupies a slot a sweep could free.
+    Live,
+    /// The row exists only to refuse a replay; it must never be removed.
+    Spent,
+}
+
+/// The one question every production sweeper must ask before deleting a
+/// row, and the only place the answer lives.
+///
+/// Exactly one combination says yes: an owner-refundable row, in a
+/// registry whose root is a flat row set, while the row is live.
+/// Everything else is a refusal by type - shielded rows carry no TTL to
+/// expire, accumulator-rooted registries have outstanding witnesses, and
+/// spent rows are replay protection.
+#[must_use]
+pub const fn ttl_sweep_permitted(
+    class: PoolDepositClass,
+    shape: RegistryRootShape,
+    liveness: RowLiveness,
+) -> bool {
+    matches!(
+        (class, shape, liveness),
+        (
+            PoolDepositClass::OwnerRefundable { .. },
+            RegistryRootShape::FlatRowSet,
+            RowLiveness::Live,
+        )
+    )
+}
+
 /// One row of the table: what entering the pool locks, and how it returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolDepositPolicy {
@@ -144,6 +200,50 @@ mod tests {
         let per_row = policy_of(SharedPool::PrivacyNote).deposit;
         let saturation = (MAX_LIVE_COMMITMENTS as u64) * per_row;
         assert_eq!(saturation, 65_536 * 10 * POOL_DEPOSIT_ATOM);
+    }
+
+    /// The canary of decision record A'': exactly ONE combination may
+    /// sweep, and every registry evolution that breaks a sweep assumption
+    /// flips one of these three axes to a refusing value.
+    #[test]
+    fn exactly_one_combination_permits_a_ttl_sweep() {
+        let refundable = PoolDepositClass::OwnerRefundable { ttl_blocks: 1 };
+        let shielded = PoolDepositClass::ShieldedBalance;
+        let mut permitted = 0u32;
+        for class in [refundable, shielded] {
+            for shape in [
+                RegistryRootShape::FlatRowSet,
+                RegistryRootShape::MerkleOrAccumulator,
+            ] {
+                for liveness in [RowLiveness::Live, RowLiveness::Spent] {
+                    if ttl_sweep_permitted(class, shape, liveness) {
+                        permitted += 1;
+                        assert_eq!(class, refundable);
+                        assert_eq!(shape, RegistryRootShape::FlatRowSet);
+                        assert_eq!(liveness, RowLiveness::Live);
+                    }
+                }
+            }
+        }
+        assert_eq!(permitted, 1, "the sweep permission must be a single cell");
+    }
+
+    #[test]
+    fn a_merkle_rooted_registry_can_never_be_swept() {
+        assert!(!ttl_sweep_permitted(
+            PoolDepositClass::OwnerRefundable { ttl_blocks: 100_000 },
+            RegistryRootShape::MerkleOrAccumulator,
+            RowLiveness::Live,
+        ));
+    }
+
+    #[test]
+    fn a_spent_row_is_replay_protection_and_never_sweepable() {
+        assert!(!ttl_sweep_permitted(
+            PoolDepositClass::OwnerRefundable { ttl_blocks: 100_000 },
+            RegistryRootShape::FlatRowSet,
+            RowLiveness::Spent,
+        ));
     }
 
     #[test]

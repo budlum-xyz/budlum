@@ -26,6 +26,12 @@ pub struct DataOffer {
     pub cid: ContentId,
     pub price: u64, // Price in $BUD
     pub active: bool,
+    /// Block height at listing time; the TTL sweep's age reference. `0`
+    /// marks a row recorded before this field existed: its age is unknown,
+    /// so it is never TTL-swept (a wrong eviction is not fail-closed), and
+    /// it stays out of the root fold so pre-field roots stay byte-identical.
+    #[serde(default)]
+    pub created_at_block: u64,
 }
 
 /// Receipt for an authorization-backed pollen purchase. This is not a LUM/DeFi
@@ -350,6 +356,7 @@ impl MarketplaceRegistry {
         seller: Address,
         cid: ContentId,
         price: u64,
+        current_block: u64,
     ) -> Result<u64, String> {
         if price == 0 {
             return Err("Price must be greater than zero".into());
@@ -403,6 +410,7 @@ impl MarketplaceRegistry {
             cid,
             price,
             active: true,
+            created_at_block: current_block,
         };
         self.offers.insert(id, offer);
         self.next_offer_id = self.next_offer_id.saturating_add(1);
@@ -1094,6 +1102,12 @@ impl MarketplaceRegistry {
             hasher.update(offer.cid.0);
             hasher.update(offer.price.to_le_bytes());
             hasher.update([u8::from(offer.active)]);
+            // Folded only when known: a pre-field row carries 0, adds no
+            // bytes here, and keeps every pre-field root byte-identical.
+            if offer.created_at_block != 0 {
+                hasher.update(b"born");
+                hasher.update(offer.created_at_block.to_le_bytes());
+            }
         }
         for (asset_id, asset) in &self.data_assets {
             hasher.update(b"asset");
@@ -1477,6 +1491,80 @@ mod tests {
             .is_err());
     }
 
+    /// The root fold for a pre-field offer must be byte-identical to the
+    /// fold the registry used before `created_at_block` existed: this test
+    /// IS that old fold, written out by hand.
+    #[test]
+    fn a_pre_field_offer_adds_no_born_bytes_to_the_root() {
+        let mut registry = MarketplaceRegistry::new();
+        registry.offers.insert(
+            3,
+            DataOffer {
+                id: 3,
+                seller: addr(1),
+                cid: ContentId::of(b"x"),
+                price: 9,
+                active: true,
+                created_at_block: 0,
+            },
+        );
+        registry.next_offer_id = 4;
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_MARKETPLACE_REGISTRY_V2");
+        hasher.update(4u64.to_le_bytes());
+        hasher.update(b"offer");
+        hasher.update(3u64.to_le_bytes());
+        hasher.update(addr(1).0);
+        hasher.update(ContentId::of(b"x").0);
+        hasher.update(9u64.to_le_bytes());
+        hasher.update([1u8]);
+        hasher.update(b"protected_content");
+        hasher.update(registry.protected_content.root());
+        let pre_field_fold: [u8; 32] = hasher.finalize().into();
+        assert_eq!(
+            registry.root(),
+            pre_field_fold,
+            "an unknown birth block must add no bytes to the fold"
+        );
+        if let Some(offer) = registry.offers.get_mut(&3) {
+            offer.created_at_block = 7;
+        }
+        assert_ne!(
+            registry.root(),
+            pre_field_fold,
+            "a known birth block is consensus state and must move the root"
+        );
+    }
+
+    #[test]
+    fn a_legacy_offer_blob_without_the_field_reads_back_as_age_unknown() {
+        let offer = DataOffer {
+            id: 1,
+            seller: addr(1),
+            cid: ContentId::of(b"x"),
+            price: 5,
+            active: true,
+            created_at_block: 77,
+        };
+        let mut value = serde_json::to_value(&offer).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("an offer serializes as a map")
+            .remove("created_at_block");
+        let legacy: DataOffer = serde_json::from_value(value).expect("legacy blob");
+        assert_eq!(legacy.created_at_block, 0, "pre-field rows read back as 0");
+    }
+
+    #[test]
+    fn create_offer_records_the_listing_block() {
+        let mut registry = MarketplaceRegistry::new();
+        let id = registry
+            .create_offer(addr(2), ContentId::of(b"y"), 5, 42)
+            .expect("listing");
+        let offer = registry.get_offer(id).expect("live offer");
+        assert_eq!(offer.created_at_block, 42);
+    }
+
     #[test]
     fn offer_registry_is_capped_and_prunes_closed_offers() {
         let mut registry = MarketplaceRegistry::new();
@@ -1489,16 +1577,17 @@ mod tests {
                     cid: ContentId::of(b"x"),
                     price: 1,
                     active: true,
+                    created_at_block: 7,
                 },
             );
         }
         registry.next_offer_id = MAX_OFFERS as u64;
         assert!(registry
-            .create_offer(addr(2), ContentId::of(b"y"), 5)
+            .create_offer(addr(2), ContentId::of(b"y"), 5, 7)
             .is_err());
         registry.close_offer(0, &addr(1)).unwrap();
         registry
-            .create_offer(addr(2), ContentId::of(b"y"), 5)
+            .create_offer(addr(2), ContentId::of(b"y"), 5, 7)
             .unwrap();
         assert_eq!(registry.offers.len(), MAX_OFFERS);
     }
@@ -1969,14 +2058,14 @@ mod tests {
         let cid = crate::storage::content_id::ContentId([0xAB; 32]);
 
         let id = reg
-            .create_offer(first, cid, 100)
+            .create_offer(first, cid, 100, 7)
             .expect("a fresh registry has no id to collide with");
 
         // The shape a restored snapshot can carry.
         reg.next_offer_id = id;
 
         let err = reg
-            .create_offer(second, cid, 999)
+            .create_offer(second, cid, 999, 7)
             .expect_err("creating an offer on a live id must be refused");
         assert!(
             err.contains("already live"),
@@ -1995,8 +2084,8 @@ mod tests {
         let seller = Address::from([3u8; 32]);
         let cid = crate::storage::content_id::ContentId([0xCD; 32]);
 
-        let a = reg.create_offer(seller, cid, 10).expect("first offer");
-        let b = reg.create_offer(seller, cid, 20).expect("second offer");
+        let a = reg.create_offer(seller, cid, 10, 7).expect("first offer");
+        let b = reg.create_offer(seller, cid, 20, 7).expect("second offer");
         assert_ne!(a, b, "an incrementing counter must keep producing new ids");
     }
 
@@ -2046,10 +2135,10 @@ mod tests {
         let seller = addr(1);
         let cid = ContentId([0xEE; 32]);
         reg.next_offer_id = u64::MAX;
-        let id = reg.create_offer(seller, cid, 50).unwrap();
+        let id = reg.create_offer(seller, cid, 50, 7).unwrap();
         assert_eq!(id, u64::MAX);
         assert_eq!(reg.next_offer_id, u64::MAX);
-        assert!(reg.create_offer(seller, cid, 50).is_err());
+        assert!(reg.create_offer(seller, cid, 50, 7).is_err());
 
         for v in 1..=(MAX_ENCRYPTION_POLICIES as u32) {
             reg.set_encryption_policy(EncryptionPolicy::post_quantum(v, 100, None))
@@ -2072,20 +2161,20 @@ mod tests {
 
         // A stranger cannot claim the payment stream for registered content.
         assert!(reg
-            .create_offer(stranger, cid, 100)
+            .create_offer(stranger, cid, 100, 7)
             .unwrap_err()
             .contains("another account"));
         // The owner still lists it.
-        reg.create_offer(owner, cid, 100).unwrap();
+        reg.create_offer(owner, cid, 100, 7).unwrap();
 
         // Bound content follows its asset's owner the same way.
         reg.protected_content
             .bind(cid, asset_id, owner, owner)
             .unwrap();
-        assert!(reg.create_offer(stranger, cid, 100).is_err());
-        reg.create_offer(owner, cid, 150).unwrap();
+        assert!(reg.create_offer(stranger, cid, 100, 7).is_err());
+        reg.create_offer(owner, cid, 150, 7).unwrap();
         // Unregistered content stays open to anyone, exactly as before.
-        reg.create_offer(stranger, ContentId::of(b"nobody registered this"), 5)
+        reg.create_offer(stranger, ContentId::of(b"nobody registered this"), 5, 7)
             .unwrap();
     }
 
