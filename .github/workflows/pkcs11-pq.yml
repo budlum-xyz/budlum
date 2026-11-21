@@ -11,7 +11,7 @@ on:
   push:
     branches: [main]
   # Heavy battery. It runs on pull requests to `main` (the PR that merges the
-  # stack), on demand. A stacked pull request (base
+  # stack), on demand. Starting it is manual by design: a timed trigger is added only under a separate, measured fan-out decision. A stacked pull request (base
   # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
   # security-audit.yml, semgrep.yml and the other light workflows, and skips the
   # jobs of this file through the job-level condition: GitHub evaluates the
