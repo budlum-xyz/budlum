@@ -131,6 +131,7 @@ mod gates {
     pub mod lock_failures;
     pub mod logup_multipliers;
     pub mod master_derivation;
+    pub mod md_referenced_paths_exist;
     pub mod mempool_mev_free;
     pub mod mermaid;
     pub mod metrics_are_written;
@@ -408,6 +409,14 @@ const GATES: &[Gate] = &[
         run: gates::content_encryption_is_declared_and_bound::run,
         run_args: None,
         self_test: gates::content_encryption_is_declared_and_bound::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "md-referenced-paths-exist",
+        replaces: None,
+        run: gates::md_referenced_paths_exist::run,
+        run_args: None,
+        self_test: gates::md_referenced_paths_exist::self_test,
         run_log: None,
     },
     Gate {

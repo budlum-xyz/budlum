@@ -1,0 +1,47 @@
+# md-referenced-paths-exist baseline - MEASURED record, not configuration.
+# Measured on the testnet tree at 4d1c31aa + local stack (2026-11-21, Arena, GOREV-10006).
+# Every line is a known doc/path drift carried as debt; the gate fails on a
+# NEW drift and on a STALE line, so this list may only shrink - deleting a
+# line is done in the same change that fixes its drift.
+# Per-class notes:
+#   * check-*-*.sh / scripts/check-*.sh: the old shell-gate migration (B-10010 class).
+#   * tests/vectors/pq/*: ACVP/Wycheproof vectors fetched at test time, never committed.
+#   * docs/pq/{STATUS,DECISIONS,INVENTORY}.md + BUDLUM_IMPORT_BOUNDARY.md: named but never written.
+#   * regen_*.rs: renamed under src/chain/state_recovery/ (health.rs, mempool.rs, stage.rs).
+#   * relay_report.json / relayer-pending.json / validator-record.json / golden.json: run-time state.
+README.md: relay_report.json
+README.tr.md: relay_report.json
+budzero/docs/development.md: scripts/check_docs_links.py
+crates/bpqs/SECURITY-ARGUMENT.md: tools/bpqs_checksum_domination_exact.py
+crates/budlum-explorer/browser/README.md: check-patchfail.sh
+docs/ARCHITECTURE.md: budlum.toml
+docs/ARCHITECTURE.md: xtask/gates/src/gates/regeneration.rs
+docs/DOMAIN_ADAPTER_GUIDE.md: golden.json
+docs/EXECUTION.md: src/execution/coordinator/worker_manager.rs
+docs/FSF_ADAPTATION_PLAN.md: BUDLUM_IMPORT_BOUNDARY.md
+docs/FSF_ADAPTATION_PLAN.md: tools/fsf_project_fit.py
+docs/OPERATIONS.md: relayer-pending.json
+docs/SECURITY.md: scripts/check-kani.sh
+docs/STORAGE_REDUCTION.md: check-derived-content-stays-byte-exact.sh
+docs/TESTNET.md: audit/TLG_REPORT.md
+docs/VALIDATOR_GUIDE.md: validator-record.json
+docs/pq/AUDIT_SCOPE.md: regen_health.rs
+docs/pq/AUDIT_SCOPE.md: regen_mempool.rs
+docs/pq/AUDIT_SCOPE.md: regeneration_stage.rs
+docs/pq/CLAIMS.md: STATUS.md
+docs/pq/README.md: DECISIONS.md
+docs/pq/README.md: INVENTORY.md
+docs/pq/README.md: STATUS.md
+ops/BACKUP_AND_RESTORE.md: relayer-pending.json
+src/pollen/README.md: src/pollen/marketplace.rs
+src/storage/README.md: scripts/check-bud-e2e.sh
+src/storage/README.md: scripts/check-coding-audit-samples-the-relationship.sh
+src/storage/README.md: scripts/check-content-encryption-is-declared-and-bound.sh
+tests/vectors/pq/README.md: ML-DSA-keyGen-FIPS204/internalProjection.json
+tests/vectors/pq/README.md: ML-DSA-sigGen-FIPS204/internalProjection.json
+tests/vectors/pq/README.md: ML-DSA-sigVer-FIPS204/internalProjection.json
+tests/vectors/pq/README.md: SLH-DSA-keyGen-FIPS205/internalProjection.json
+tests/vectors/pq/README.md: SLH-DSA-sigGen-FIPS205/internalProjection.json
+tests/vectors/pq/README.md: SLH-DSA-sigVer-FIPS205/internalProjection.json
+tests/vectors/pq/README.md: mldsa_87_verify_test.json
+tests/vectors/pq/README.md: testvectors_v1/mldsa_65_verify_test.json
