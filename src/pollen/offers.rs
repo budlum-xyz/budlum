@@ -221,6 +221,16 @@ pub const MAX_OFFERS: usize = 100_000;
 /// and without a per-seller ceiling one funded account fills it for good.
 pub const MAX_NAME_OFFERS_PER_SELLER: usize = 64;
 
+/// Live data-offer listings one seller may hold at once, so one funded
+/// account cannot exhaust [`MAX_OFFERS`] across the shared marketplace.
+/// The row deposit prices the occupancy; this bound is the structural
+/// backstop behind it, the same pair every bounded pool carries.
+const MAX_DATA_OFFERS_PER_SELLER: usize = 256;
+
+/// Highest price a data listing may ask, bounded by total token supply so
+/// settlement arithmetic cannot overflow `u64` and pin an unbuyable slot.
+const MAX_DATA_OFFER_PRICE: u64 = crate::tokenomics::BUD_TOTAL_SUPPLY;
+
 /// How far ahead a name listing may expire. The full-table sweep reclaims
 /// only expired rows, so the expiry a seller picks is also the lifetime of
 /// the table space it occupies. The bound is the longest registration a
@@ -360,6 +370,21 @@ impl MarketplaceRegistry {
     ) -> Result<u64, String> {
         if price == 0 {
             return Err("Price must be greater than zero".into());
+        }
+        if price > MAX_DATA_OFFER_PRICE {
+            return Err(format!(
+                "Price {price} exceeds maximum supply ceiling ({MAX_DATA_OFFER_PRICE})"
+            ));
+        }
+        let seller_live = self
+            .offers
+            .values()
+            .filter(|offer| offer.active && offer.seller == seller)
+            .count();
+        if seller_live >= MAX_DATA_OFFERS_PER_SELLER {
+            return Err(format!(
+                "seller reached maximum active data offers ({MAX_DATA_OFFERS_PER_SELLER})"
+            ));
         }
         // Listing is a claim on the payment stream for these bytes: when the
         // content is already a registered asset or is bound to one, only
@@ -1563,6 +1588,32 @@ mod tests {
             .expect("listing");
         let offer = registry.get_offer(id).expect("live offer");
         assert_eq!(offer.created_at_block, 42);
+    }
+
+    #[test]
+    fn one_seller_cannot_hold_the_data_offer_table_or_ask_an_unpayable_price() {
+        let mut reg = MarketplaceRegistry::new();
+        let seller = addr(3);
+        assert!(
+            reg.create_offer(seller, ContentId::of(b"unbuyable"), u64::MAX, 7)
+                .is_err(),
+            "a u64::MAX price makes purchase arithmetic overflow and pins an unbuyable slot"
+        );
+        for n in 0..256u32 {
+            reg.create_offer(seller, ContentId::of(&n.to_le_bytes()), 100, 7)
+                .expect("a seller within the live ceiling lists freely");
+        }
+        assert!(
+            reg.create_offer(seller, ContentId::of(b"one-too-many"), 100, 7)
+                .is_err(),
+            "the live ceiling refuses the next listing"
+        );
+        reg.close_offer(0, &seller).expect("the seller closes one");
+        reg.create_offer(seller, ContentId::of(b"after-close"), 100, 8)
+            .expect("a closed listing frees its ceiling slot");
+        let other = addr(9);
+        reg.create_offer(other, ContentId::of(b"independent"), 100, 7)
+            .expect("another seller is untouched by the first one's ceiling");
     }
 
     #[test]
