@@ -189,6 +189,11 @@ impl L1NoteRegistry {
     /// per-input note ownership and 1-for-1 note count conservation (preventing
     /// unbacked note creation across active testnet and devnet privacy pools).
     ///
+    /// Returns the depositors-of-record the spent rows displaced, so the
+    /// caller can move their occupancy-deposit claims to the spender - the
+    /// rollover conserves the row count, so claims ride rows instead of
+    /// being refunded.
+    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails.
@@ -199,7 +204,7 @@ impl L1NoteRegistry {
         nullifiers: &[NoteHash],
         output_commitments: &[NoteHash],
         nullifier_proofs: &[NoteHash],
-    ) -> Result<(), String> {
+    ) -> Result<Vec<Address>, String> {
         if spent_commitments.len() != nullifier_proofs.len() {
             return Err("nullifier_proofs length mismatch (proofs are mandatory)".into());
         }
@@ -265,13 +270,21 @@ impl L1NoteRegistry {
             output_commitments,
             nullifier_proofs,
         )?;
+        // The displaced depositors-of-record, in spent order: the deposit
+        // economy moves each displaced claim to the spender, because the
+        // 1-for-1 rollover re-records every output under the spender below.
+        // A spent row with no record (a pre-deposit-era insert) displaces
+        // nobody and carries no claim.
+        let mut displaced = Vec::new();
         for commitment in spent_commitments {
-            self.note_owners.remove(&hex::encode(commitment));
+            if let Some(owner) = self.note_owners.remove(&hex::encode(commitment)) {
+                displaced.push(owner);
+            }
         }
         for out in output_commitments {
             self.note_owners.insert(hex::encode(out), *spender);
         }
-        Ok(())
+        Ok(displaced)
     }
 
     /// Apply transfer with nullifier derivation proofs.
@@ -969,6 +982,37 @@ mod h3_tests {
         r.apply_transfer_for_owner(&victim, &[note], &[nf], &[out], &[secret])
             .expect("the bound address spends through its own binding");
         assert!(!r.contains_commitment(&note));
+    }
+
+    #[test]
+    fn a_spend_reports_the_displaced_depositor_of_record() {
+        let mut r = L1NoteRegistry::new();
+        let depositor = Address::from([0x41u8; 32]);
+        let spender = Address::from([0x42u8; 32]);
+        let secret = budlum_note_packing::hash_from_field(0xD1);
+        let note = L1NoteRegistry::derive_commitment(&spender, &secret);
+        r.insert_note_for_owner(note, depositor).unwrap();
+        let nf = L1NoteRegistry::derive_nullifier(&note, &secret);
+        let out = budlum_note_packing::hash_from_field(0xD2);
+        let displaced = r
+            .apply_transfer_for_owner(&spender, &[note], &[nf], &[out], &[secret])
+            .expect("the bound spender spends");
+        assert_eq!(
+            displaced,
+            vec![depositor],
+            "the displaced depositor-of-record is reported so its claim can ride"
+        );
+
+        // A row recorded by nobody (pre-deposit era) displaces nobody.
+        let legacy_secret = budlum_note_packing::hash_from_field(0xD3);
+        let legacy = L1NoteRegistry::derive_commitment(&spender, &legacy_secret);
+        r.insert_note(legacy).unwrap();
+        let nf2 = L1NoteRegistry::derive_nullifier(&legacy, &legacy_secret);
+        let out2 = budlum_note_packing::hash_from_field(0xD4);
+        let displaced2 = r
+            .apply_transfer_for_owner(&spender, &[legacy], &[nf2], &[out2], &[legacy_secret])
+            .expect("a legacy row spends");
+        assert!(displaced2.is_empty());
     }
 
     #[test]

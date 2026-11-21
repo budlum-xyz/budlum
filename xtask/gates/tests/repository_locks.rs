@@ -282,3 +282,44 @@ fn android_compile_sdk_uses_a_compatible_toolchain() {
     assert!(workflow.contains("gradle assembleDebug --no-daemon"));
     assert!(workflow.contains("gradle testDebugUnitTest --no-daemon"));
 }
+
+/// The pool-deposit economy has exactly one table
+/// (`src/tokenomics/pool_deposit.rs`): consumers take `policy_of(...)` and
+/// never carry an inline amount, so the K/TTL numbers cannot fork silently
+/// at a call site.
+#[test]
+fn pool_deposit_amounts_come_only_from_the_single_table() {
+    let table = read("src/tokenomics/pool_deposit.rs");
+    assert!(
+        table.contains("pub const POOL_DEPOSIT_ATOM"),
+        "the single table lost its atom"
+    );
+    assert!(
+        table.contains("pub const fn policy_of"),
+        "the single table lost its lookup"
+    );
+    let module = read("src/tokenomics/mod.rs");
+    assert!(
+        module.contains("pub mod pool_deposit;"),
+        "the table module is unregistered"
+    );
+    // Every escrow call site in the consumer passes a named policy value,
+    // never a literal: a digit inside the call is a forked constant.
+    let executor = read("src/execution/executor.rs");
+    assert!(
+        executor.contains("pool_deposit::policy_of"),
+        "the consumer stopped reading the table"
+    );
+    let mut forked = Vec::new();
+    for (i, line) in executor.lines().enumerate() {
+        if (line.contains("lock_pool_deposit(") || line.contains("move_pool_deposit_claim("))
+            && line.chars().any(|c| c.is_ascii_digit())
+        {
+            forked.push(i + 1);
+        }
+    }
+    assert!(
+        forked.is_empty(),
+        "inline deposit amounts at src/execution/executor.rs lines {forked:?}: take the value from pool_deposit::policy_of"
+    );
+}

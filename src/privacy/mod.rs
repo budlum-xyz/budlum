@@ -14,7 +14,9 @@ pub use data_layering::{
     compute_layer_commitment, derive_stealth_owner_tag, layer_transition_digest, DataLayerError,
     DataLayerRegistry, DataPrivacyLayer, LayerOwnerAuth, LayeredDataRecord,
 };
-pub use note_registry::{is_note_hash, L1NoteRegistry};
+pub use note_registry::{
+    is_note_hash, L1NoteRegistry, MAX_LIVE_COMMITMENTS, MAX_LIVE_COMMITMENTS_PER_OWNER,
+};
 pub use private_transfer_v1::{
     compute_note_commitment, derive_note_nullifier, derive_output_rho, derive_owner_pk,
     prove_private_transfer_v1, verify_private_transfer_v1, MerklePathV1, NoteCommitmentTreeV1,

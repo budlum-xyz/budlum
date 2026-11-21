@@ -20,6 +20,7 @@
 //!
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
+pub mod pool_deposit;
 pub mod reward_pool;
 
 use crate::core::address::Address;

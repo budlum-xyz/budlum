@@ -831,6 +831,12 @@ pub struct AccountState {
     /// bond was "a declared number, not a signed stake transfer" and the
     /// honesty-gate economics were bookkeeping with no money behind them.
     pub external_bond_escrow: BTreeMap<Address, u64>,
+    /// The money behind shared-pool occupancy deposits (the single K/TTL
+    /// table in `tokenomics::pool_deposit`). A SEPARATE ledger from
+    /// `external_bond_escrow` on purpose: slashing reads only the bond
+    /// escrow, so a pool deposit is unslashable at the type level, and a
+    /// bond door bug can never pay out of deposits (or the reverse).
+    pub pool_deposit_escrow: BTreeMap<Address, u64>,
     /// The settlement registries (the external-domain intake first): state
     /// that used to live on `Blockchain`, outside the state root, written by
     /// operator RPCs. Written only by block execution now, and folded into
@@ -1052,6 +1058,7 @@ impl AccountState {
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
             external_bond_escrow: BTreeMap::new(),
+            pool_deposit_escrow: BTreeMap::new(),
             settlement: crate::settlement::SettlementRegistries::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
@@ -1120,6 +1127,7 @@ impl AccountState {
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
             external_bond_escrow: BTreeMap::new(),
+            pool_deposit_escrow: BTreeMap::new(),
             settlement: crate::settlement::SettlementRegistries::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
@@ -1198,6 +1206,7 @@ impl AccountState {
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
             external_bond_escrow: BTreeMap::new(),
+            pool_deposit_escrow: BTreeMap::new(),
             settlement: crate::settlement::SettlementRegistries::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
@@ -1337,6 +1346,7 @@ impl AccountState {
             governance: snapshot.governance.clone().unwrap_or_default(),
             external_roots: snapshot.external_roots.clone().unwrap_or_default(),
             external_bond_escrow: snapshot.external_bond_escrow.clone().unwrap_or_default(),
+            pool_deposit_escrow: snapshot.pool_deposit_escrow.clone().unwrap_or_default(),
             settlement: snapshot.settlement.clone().unwrap_or_default(),
             base_fee: snapshot.base_fee,
             fee_distributions: Vec::new(),
@@ -5196,6 +5206,7 @@ impl AccountState {
             .and_then(|v| v.checked_add(self.total_registry_role_bonded_supply()))
             .and_then(|v| v.checked_add(self.registry.total_delegation_unbonding_supply()))
             .and_then(|v| v.checked_add(self.total_external_bonded_supply()))
+            .and_then(|v| v.checked_add(self.total_pool_deposit_supply()))
             .and_then(|v| v.checked_add(self.proof_market.total_locked_supply()))
             .and_then(|v| v.checked_add(self.settlement.relayer_policy.total_escrowed_supply()))
             .and_then(|v| v.checked_add(self.settlement.app_binding.total_escrowed_supply()))
@@ -5334,6 +5345,92 @@ impl AccountState {
             *v = held - amount;
         }
         Ok(())
+    }
+
+    /// Sum of the shared-pool occupancy deposit escrow: these atoms left
+    /// balances but are still committed supply, so the conservation
+    /// invariant counts them.
+    #[must_use]
+    pub fn total_pool_deposit_supply(&self) -> u128 {
+        self.pool_deposit_escrow
+            .values()
+            .fold(0u128, |acc, v| acc + u128::from(*v))
+    }
+
+    /// Locks a shared-pool occupancy deposit: the amount LEAVES the owner's
+    /// balance and enters [`Self::pool_deposit_escrow`]. The amount always
+    /// comes from the single table in `tokenomics::pool_deposit` - a caller
+    /// with its own number is refused by the repository lock test.
+    ///
+    /// # Errors
+    ///
+    /// A zero deposit, or an owner whose spendable balance cannot cover it.
+    /// A depositor who cannot pay the deposit cannot occupy the pool.
+    pub fn lock_pool_deposit(&mut self, owner: &Address, amount: u64) -> Result<(), String> {
+        if amount == 0 {
+            return Err("a zero deposit occupies nothing".to_string());
+        }
+        let balance = self.get_balance(owner);
+        let spendable = self.spendable_balance(owner);
+        if spendable < amount {
+            return Err(format!(
+                "deposit of {amount} exceeds the owner's spendable balance of {spendable}"
+            ));
+        }
+        let account = self.get_or_create(owner);
+        account.balance = balance - amount;
+        self.dirty_accounts.insert(*owner);
+        *self.pool_deposit_escrow.entry(*owner).or_insert(0) += amount;
+        Ok(())
+    }
+
+    /// Releases a pool deposit back to its owner: the refund half for
+    /// owner-refundable pools, and the compensation path when a registry
+    /// refuses a row after its deposit was already locked. The escrow is
+    /// the source of truth: a release can never credit more than locked.
+    ///
+    /// # Errors
+    ///
+    /// The escrow does not hold `amount` for this owner.
+    pub fn release_pool_deposit(&mut self, owner: &Address, amount: u64) -> Result<(), String> {
+        let held = self.pool_deposit_escrow.get(owner).copied().unwrap_or(0);
+        if held < amount {
+            return Err(format!(
+                "release of {amount} exceeds the {held} deposited for this owner"
+            ));
+        }
+        self.try_add_balance(owner, amount)?;
+        if held == amount {
+            self.pool_deposit_escrow.remove(owner);
+        } else if let Some(v) = self.pool_deposit_escrow.get_mut(owner) {
+            *v = held - amount;
+        }
+        Ok(())
+    }
+
+    /// Moves a deposit claim between owners WITHOUT touching balances: the
+    /// rollover of a shielded row. A transfer conserves the row count, so
+    /// the deposit rides to the new depositor-of-record instead of being
+    /// refunded - a refund at spend would leave the freshly minted output
+    /// rows occupying the pool with nothing locked behind them. Returns the
+    /// amount actually moved: `0` when `from` holds less than `amount`,
+    /// because a legacy row recorded before the deposit era carries no
+    /// claim, and moving a partial claim would smear someone else's.
+    pub fn move_pool_deposit_claim(&mut self, from: &Address, to: &Address, amount: u64) -> u64 {
+        if from == to || amount == 0 {
+            return 0;
+        }
+        let held = self.pool_deposit_escrow.get(from).copied().unwrap_or(0);
+        if held < amount {
+            return 0;
+        }
+        if held == amount {
+            self.pool_deposit_escrow.remove(from);
+        } else if let Some(v) = self.pool_deposit_escrow.get_mut(from) {
+            *v = held - amount;
+        }
+        *self.pool_deposit_escrow.entry(*to).or_insert(0) += amount;
+        amount
     }
 
     /// Applies a slash to escrowed bond: `taken` leaves the
@@ -6222,6 +6319,13 @@ impl AccountState {
             final_hasher.update(b"external_bond_escrow_v1");
             final_hasher.update(
                 bincode::serialize(&self.external_bond_escrow)
+                    .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
+            );
+        }
+        if !self.pool_deposit_escrow.is_empty() {
+            final_hasher.update(b"pool_deposit_escrow_v1");
+            final_hasher.update(
+                bincode::serialize(&self.pool_deposit_escrow)
                     .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
@@ -7162,6 +7266,65 @@ mod tests {
         assert_eq!(state.total_staked_supply(), 2_000);
         assert_eq!(state.total_unbonding_supply(), 3_000);
         assert_eq!(state.total_bud_committed(), 6_000);
+    }
+
+    #[test]
+    fn a_pool_deposit_locks_rides_and_releases_without_minting() {
+        let depositor = test_addr_from_byte(41u8);
+        let payee = test_addr_from_byte(42u8);
+        let stranger = test_addr_from_byte(43u8);
+        let mut state = AccountState::new();
+        state.add_balance(&depositor, 1_000_000);
+        let committed_before = state.total_bud_committed();
+        let root_before = state.calculate_state_root();
+
+        // Lock: the money leaves the balance but stays committed supply.
+        state
+            .lock_pool_deposit(&depositor, 100_000)
+            .expect("a funded depositor locks");
+        assert_eq!(state.get_balance(&depositor), 900_000);
+        assert_eq!(state.total_bud_committed(), committed_before);
+        assert_ne!(
+            state.calculate_state_root(),
+            root_before,
+            "a live deposit is state"
+        );
+
+        // A zero lock and an unfunded lock are refused.
+        assert!(state.lock_pool_deposit(&depositor, 0).is_err());
+        assert!(state.lock_pool_deposit(&stranger, 1).is_err());
+
+        // Ride: the claim moves whole, without touching balances.
+        assert_eq!(
+            state.move_pool_deposit_claim(&depositor, &payee, 100_000),
+            100_000
+        );
+        assert_eq!(state.pool_deposit_escrow.get(&depositor), None);
+        assert_eq!(
+            state.pool_deposit_escrow.get(&payee).copied(),
+            Some(100_000)
+        );
+        assert_eq!(state.get_balance(&payee), 0);
+
+        // A row without a claim moves nothing, and a partial claim is
+        // never split off what someone else locked.
+        assert_eq!(state.move_pool_deposit_claim(&stranger, &payee, 100_000), 0);
+        assert_eq!(state.move_pool_deposit_claim(&payee, &stranger, 100_001), 0);
+
+        // Release refunds the claim holder; an over-release is refused.
+        assert!(state.release_pool_deposit(&payee, 100_001).is_err());
+        state
+            .release_pool_deposit(&payee, 100_000)
+            .expect("the claim refunds to its holder");
+        assert_eq!(state.get_balance(&payee), 100_000);
+        assert_eq!(state.total_bud_committed(), committed_before);
+
+        // An emptied escrow folds nothing into the root: byte-identical to
+        // a state that never locked, so replay stays stable.
+        let mut direct = AccountState::new();
+        direct.add_balance(&depositor, 900_000);
+        direct.add_balance(&payee, 100_000);
+        assert_eq!(state.calculate_state_root(), direct.calculate_state_root());
     }
 
     #[test]

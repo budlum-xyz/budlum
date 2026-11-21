@@ -626,7 +626,7 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// dropped a registered account would compute a different root, which is why
 /// the field enters the digest under the `>= 16` gate rather than being left
 /// for serde defaults to silently restore as empty.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 16;
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 17;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -813,6 +813,13 @@ pub struct StateSnapshotV2 {
     /// `>= 16` gate, so a pre-16 pinned digest stays byte-exact.
     #[serde(default)]
     pub quantum_accounts: Option<crate::account_abstraction::registry::QuantumAccountRegistry>,
+    /// The shared-pool deposit escrow (schema-17 bump): the money locked
+    /// behind occupancy rows of the `tokenomics::pool_deposit` table.
+    /// `#[serde(default)]` so pre-deposit snapshots load; the field enters
+    /// the digest under the `>= 17` gate, so a pre-17 pinned digest stays
+    /// byte-exact.
+    #[serde(default)]
+    pub pool_deposit_escrow: Option<BTreeMap<Address, u64>>,
 
     // --- C4 (P2): manifest signature (schema-4 wire). ---
     // RFC_GAP1 section 7: Ed25519 single signature + trust list + AllowUnsigned transition.
@@ -1029,6 +1036,7 @@ impl StateSnapshotV2 {
             identity: Some(account_state.identity.clone()),
             vault: Some(account_state.vault.clone()),
             quantum_accounts: Some(account_state.quantum_accounts.clone()),
+            pool_deposit_escrow: Some(account_state.pool_deposit_escrow.clone()),
             // `Registry`, `liveness`, and `invalid_votes` are no longer
             // Fields on `AccountState` (ghost-hunted). The struct fields were
             // Already removed above; the live state is recovered by routing
@@ -1239,6 +1247,14 @@ impl StateSnapshotV2 {
         //     rather than a quietly-valid snapshot. ---
         if self.schema_version >= 16 {
             hash_opt_serializable(&mut hasher, &self.quantum_accounts);
+        }
+        // --- The shared-pool deposit escrow (schema-17 bump). Same gate
+        //     logic: at 16 and below the field cannot affect the digest, so
+        //     every pre-deposit pinned hash stays byte-exact; at 17 and
+        //     above a node that dropped a locked deposit produces a
+        //     different hash rather than a quietly-valid snapshot. ---
+        if self.schema_version >= 17 {
+            hash_opt_serializable(&mut hasher, &self.pool_deposit_escrow);
         }
         // --- The PoA admission + compliance pair (schema-7 bump, /.
         // Same gate logic as identity and vault: at 6 and
@@ -2876,6 +2892,8 @@ mod tests {
     const SCHEMA14_KEYS: &[&str] = &["bud3_registry"];
     /// Quantum-account registry: the schema-16 change.
     const SCHEMA16_KEYS: &[&str] = &["quantum_accounts"];
+    /// Shared-pool deposit escrow: the schema-17 change.
+    const SCHEMA17_KEYS: &[&str] = &["pool_deposit_escrow"];
 
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
@@ -3040,6 +3058,8 @@ mod tests {
             "bud3_registry",
             // quantum-account registry (schema-16 bump: default-filled AND digested)
             "quantum_accounts",
+            // shared-pool deposit escrow (schema-17 bump: default-filled AND digested)
+            "pool_deposit_escrow",
             // identity registry (schema-5 bump: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 bump: same discipline)
@@ -3085,6 +3105,7 @@ mod tests {
                 SCHEMA13_KEYS,
                 SCHEMA14_KEYS,
                 SCHEMA16_KEYS,
+                SCHEMA17_KEYS,
             ]
             .concat(),
             2,
@@ -3105,6 +3126,7 @@ mod tests {
             SCHEMA13_KEYS,
             SCHEMA14_KEYS,
             SCHEMA16_KEYS,
+            SCHEMA17_KEYS,
         ]
         .concat()
         {
@@ -3223,6 +3245,7 @@ mod tests {
                 SCHEMA13_KEYS,
                 SCHEMA14_KEYS,
                 SCHEMA16_KEYS,
+                SCHEMA17_KEYS,
             ]
             .concat(),
             3,
@@ -3241,6 +3264,7 @@ mod tests {
             SCHEMA13_KEYS,
             SCHEMA14_KEYS,
             SCHEMA16_KEYS,
+            SCHEMA17_KEYS,
         ]
         .concat()
         {
@@ -3335,6 +3359,7 @@ mod tests {
                 SCHEMA13_KEYS,
                 SCHEMA14_KEYS,
                 SCHEMA16_KEYS,
+                SCHEMA17_KEYS,
             ]
             .concat(),
             4,
@@ -3352,6 +3377,7 @@ mod tests {
             SCHEMA13_KEYS,
             SCHEMA14_KEYS,
             SCHEMA16_KEYS,
+            SCHEMA17_KEYS,
         ]
         .concat()
         {
@@ -3446,6 +3472,34 @@ mod tests {
             digest_a,
             s8_b.calculate_digest(),
             "pre-schema-9 snapshots must ignore external_bond_escrow so stored digests remain valid"
+        );
+    }
+
+    #[test]
+    fn schema17_gates_pool_deposit_escrow_digest_without_breaking_legacy_snapshots() {
+        let state = AccountState::new();
+        let mut s17_none = StateSnapshotV2::from_state(&state, legacy_params(1));
+        s17_none.pool_deposit_escrow = None;
+        s17_none.snapshot_hash = hex::encode(s17_none.calculate_digest());
+
+        let mut escrow = BTreeMap::new();
+        escrow.insert(Address::from([6u8; 32]), 100_000);
+        let mut s17_populated = s17_none.clone();
+        s17_populated.pool_deposit_escrow = Some(escrow);
+        assert!(
+            !s17_populated.verify(),
+            "schema 17 digest must commit pool_deposit_escrow"
+        );
+
+        let mut s16_a = s17_none;
+        s16_a.schema_version = 16;
+        let digest_a = s16_a.calculate_digest();
+        let mut s16_b = s17_populated;
+        s16_b.schema_version = 16;
+        assert_eq!(
+            digest_a,
+            s16_b.calculate_digest(),
+            "pre-schema-17 snapshots must ignore pool_deposit_escrow so stored digests remain valid"
         );
     }
 

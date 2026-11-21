@@ -3317,10 +3317,41 @@ impl Executor {
                         "commitment is not a packed field element",
                     ));
                 }
+                // Occupying a slot in the shared note pool locks the
+                // single-table deposit (decision: shared-pool occupancy is
+                // priced as locked capital, never burned). The whole cost is
+                // refused up front so no partial mutation can strand money.
+                let deposit = crate::tokenomics::pool_deposit::policy_of(
+                    crate::tokenomics::pool_deposit::SharedPool::PrivacyNote,
+                )
+                .deposit;
+                let full_cost = deposit.checked_add(tx.fee).ok_or_else(|| {
+                    BudlumError::validation(
+                        "privacy_note_deposit",
+                        "deposit + fee arithmetic overflow",
+                    )
+                })?;
+                if state.spendable_balance(&tx.from) < full_cost {
+                    return Err(BudlumError::validation(
+                        "privacy_note_deposit",
+                        "spendable balance cannot cover the pool deposit and the fee",
+                    ));
+                }
                 state
+                    .lock_pool_deposit(&tx.from, deposit)
+                    .map_err(|e| BudlumError::validation("privacy_note_deposit", e))?;
+                // A registry refusal releases the deposit in the same
+                // breath: a refused row must not strand the depositor's
+                // money in escrow.
+                if let Err(e) = state
                     .note_registry
                     .insert_note_for_owner(*commitment, tx.from)
-                    .map_err(|e| BudlumError::validation("privacy_note_insert", e))?;
+                {
+                    state.release_pool_deposit(&tx.from, deposit).map_err(|r| {
+                        BudlumError::validation("privacy_note_deposit_release", r)
+                    })?;
+                    return Err(BudlumError::validation("privacy_note_insert", e));
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -3417,7 +3448,7 @@ impl Executor {
                         "authorization_sig invalid for tx.from",
                     ));
                 }
-                state
+                let displaced = state
                     .note_registry
                     .apply_transfer_for_owner(
                         &tx.from,
@@ -3427,6 +3458,19 @@ impl Executor {
                         &sub.nullifier_proofs,
                     )
                     .map_err(|e| BudlumError::validation("private_transfer_apply", e))?;
+                // The 1-for-1 rollover re-records every output under the
+                // spender, so each displaced depositor's occupancy claim
+                // rides along instead of being refunded - a refund here
+                // would leave the fresh output rows holding slots with
+                // nothing locked behind them. A row recorded before the
+                // deposit era carries no claim and moves nothing.
+                let note_deposit = crate::tokenomics::pool_deposit::policy_of(
+                    crate::tokenomics::pool_deposit::SharedPool::PrivacyNote,
+                )
+                .deposit;
+                for displaced_owner in &displaced {
+                    state.move_pool_deposit_claim(displaced_owner, &tx.from, note_deposit);
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -6065,7 +6109,11 @@ mod tests {
         let (mainnet, _, devnet) = boundary_chain_ids();
         let who = Address::from([22u8; 32]);
         let mut state = AccountState::new();
-        state.add_balance(&who, 1_000);
+        let deposit = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::PrivacyNote,
+        )
+        .deposit;
+        state.add_balance(&who, 1_000 + deposit);
         let c = budlum_note_packing::hash_from_field(42);
         let tx_devnet = Transaction::new_with_chain_id(
             who,
@@ -6080,6 +6128,11 @@ mod tests {
         Executor::apply_transaction_checked(&mut state, &tx_devnet)
             .expect("note insertion must succeed on devnet");
         assert!(state.note_registry.contains_commitment(&c));
+        assert_eq!(
+            state.pool_deposit_escrow.get(&who).copied(),
+            Some(deposit),
+            "the live row locks the table deposit"
+        );
 
         let c_main = budlum_note_packing::hash_from_field(43);
         let tx_mainnet = Transaction::new_with_chain_id(
