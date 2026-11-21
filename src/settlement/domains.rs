@@ -11,7 +11,7 @@
 //! `bud_submitZkProof`), a gossip side channel that applied commitments as
 //! they arrived, and a startup pass that rewrote bootstrap domain statuses.
 //! The node that ran them held a registry no peer could reproduce (testnet
-//!,).
+//!).
 //!
 //! This module moves them into the block. The registries live in
 //! `AccountState::settlement`; the functions below are the only writers, and
@@ -43,10 +43,14 @@
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::cross_domain::external::BlsVerifier;
+use crate::domain::finality_proof_model::{
+    BINDS_EVENT_ROOT, BINDS_PARENT_HASH, BINDS_STATE_ROOT, BINDS_TX_ROOT,
+};
 use crate::domain::{
-    hash_finality_proof, BftFinalityAdapter, ConsensusDomain, ConsensusKind, DomainCommitment,
-    DomainFinalityAdapter, DomainId, DomainStatus, FinalityProof, FinalityStatus,
-    PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
+    hash_finality_proof, BftFinalityAdapter, BitcoinSpvFinalityAdapter, ConsensusDomain,
+    ConsensusKind, DagFinalityAdapter, DomainCommitment, DomainFinalityAdapter, DomainId,
+    DomainStatus, FinalityProof, FinalityStatus, Hash32, PoAFinalityAdapter, PoSFinalityAdapter,
+    PoWHeaderChainFinalityAdapter, PohFinalityAdapter, PospaceFinalityAdapter, ZkFinalityAdapter,
     AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
 };
 use crate::domain::{SovereignDomainTemplate, VerifiedDomainCommitment};
@@ -88,9 +92,9 @@ pub enum SettlementTx {
     ProofMarket(Box<ProofMarketTx>),
     /// Open, bid on, fulfill, or expire a state-rooted relayer intent.
     RelayerIntent(Box<RelayerIntentTx>),
-    /// Register a Graft application, move value into its mirror, prove a
-    /// claim, or use the Graft relayer-intent adapter.
-    Graft(Box<crate::settlement::graft::GraftTx>),
+    /// Register an `AppBinding` application, move value into its mirror, prove a
+    /// claim, or use the `AppBinding` relayer-intent adapter.
+    AppBinding(Box<crate::settlement::app_binding::AppBindingTx>),
     /// Name a Mikoriza registrar or record a proven restaking allocation.
     SharedSecurity(Box<crate::settlement::shared_security::SharedSecurityTx>),
     /// Carry a cross-domain message one domain emitted into the settlement
@@ -99,6 +103,9 @@ pub enum SettlementTx {
     /// settlement chain, and its target domain reads it from the global
     /// header's message root.
     DeliverMessage(Box<DeliverMessage>),
+
+    /// Universal Object Layer state write (closed by `ACTIVATION` until M7).
+    ObjectLayer(Box<crate::object_layer::ObjectLayerTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -116,8 +123,8 @@ impl PartialEq for SettlementTx {
 impl Eq for SettlementTx {}
 
 /// Mainnet refuses a quorum proof that carries only classical signatures
-/// a PoS or BFT proof needs the ML-DSA QC of the same
-/// signers (`FinalityProof::PoSPq`, `FinalityProof::BftPq`), and a PoA proof
+/// a `PoS` or BFT proof needs the ML-DSA QC of the same
+/// signers (`FinalityProof::PoSPq`, `FinalityProof::BftPq`), and a `PoA` proof
 /// needs composite authority signatures (`FinalityProof::PoAPq`).
 fn refuse_classical_only_quorum_on_mainnet(
     chain_id: u64,
@@ -271,7 +278,7 @@ pub struct SettlementTxContext {
 
 /// Why a settlement transaction was refused. A refused transaction changes
 /// nothing.
-/// exposed for execute_settlement_tx: the executor's Settlement arm reports it by its message, not by name.
+/// exposed for `execute_settlement_tx`: the executor's Settlement arm reports it by its message, not by name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettlementTxError {
     #[error("the domain must name the transaction sender as its operator")]
@@ -323,11 +330,17 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     }
 
     let adapter_valid = match &domain.kind {
-        ConsensusKind::PoW => domain.finality_adapter == POW_HEADER_CHAIN_ADAPTER,
+        ConsensusKind::PoW => {
+            domain.finality_adapter == POW_HEADER_CHAIN_ADAPTER
+                || domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER
+        }
         ConsensusKind::PoS => domain.finality_adapter == "pos-qc-finality",
         ConsensusKind::PoA => domain.finality_adapter == "poa-authority-quorum",
         ConsensusKind::Bft => domain.finality_adapter == "bft-quorum-commit",
         ConsensusKind::Zk => domain.finality_adapter == "zk-proof-verification",
+        ConsensusKind::Dag => domain.finality_adapter == "dag-tip-vote-v1",
+        ConsensusKind::Poh => domain.finality_adapter == "poh-hash-chain-v1",
+        ConsensusKind::Pospace => domain.finality_adapter == "pospace-plot-v1",
         ConsensusKind::StorageAttestation(_) => domain.finality_adapter == "storage-attestation-v1",
         ConsensusKind::AiInference => domain.finality_adapter == AI_INFERENCE_ADAPTER,
         ConsensusKind::Custom(name) => {
@@ -337,7 +350,12 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
                     domain.id
                 ));
             }
-            !domain.finality_adapter.trim().is_empty()
+            // A node-local plugin cannot decide a consensus block. The only
+            // in-block verifier for Custom domains is the rebuildable external
+            // adapter; accepting another name creates a domain that can never
+            // submit a final commitment (and may mislead its operator).
+            domain.finality_adapter
+                == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER
         }
     };
 
@@ -370,11 +388,36 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     Ok(())
 }
 
+/// Ingest-only reservation check for bit-31 Garden domain identifiers.
+///
+/// Enforced on transaction admission, precheck, aggregation pool intake and
+/// block assembly rather than unconditionally inside committed-block replay, so
+/// upgrading a chain whose committed history already contains a bit-31
+/// `RegisterDomain` never rejects history or splits upgraded from un-upgraded
+/// nodes. `Blockchain::register_garden_domain` separately refuses any id
+/// already present in `state.settlement.domains`.
+pub fn check_ingest_garden_domain_reservation(
+    tx: &crate::core::transaction::Transaction,
+) -> Result<(), String> {
+    if let crate::core::transaction::TransactionType::Settlement(SettlementTx::RegisterDomain(
+        domain,
+    )) = &tx.tx_type
+    {
+        if crate::garden::is_garden_domain_id(domain.id) {
+            return Err(format!(
+                "Domain {} lies in the reserved Garden domain id range",
+                domain.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Register a consensus domain in the settlement registry.
 ///
 /// # Errors
 ///
-/// A shape rule, a PoA admission set on a non-PoA kind, or a registry
+/// A shape rule, a `PoA` admission set on a non-`PoA` kind, or a registry
 /// refusal (duplicate id, bond, lifecycle, ceiling).
 pub fn register_domain(state: &mut AccountState, domain: ConsensusDomain) -> Result<(), String> {
     validate_domain_registration(&domain)?;
@@ -445,7 +488,7 @@ fn ensure_adapter_name(domain: &ConsensusDomain, expected: &'static str) -> Resu
 }
 
 /// Apply the same registry policy to classical addresses and composite-key
-/// records. A PoAPq authority record is not itself an Address.
+/// records. A `PoAPq` authority record is not itself an Address.
 fn require_active_attester_authorities(
     state: &AccountState,
     proof: &FinalityProof,
@@ -487,6 +530,25 @@ fn require_active_attester_authorities(
             "{purpose} commitment finality requires PoA or PoAPq authority signatures that bind commitment roots"
         )),
     }
+}
+
+fn validate_external_spec_chain(
+    domain: &ConsensusDomain,
+    spec: &crate::cross_domain::external::AdapterSpec,
+) -> Result<(), String> {
+    // ZK proofs pin their source chain in the adapter spec. The consensus
+    // domain must name that same chain, or proof from one chain can be replayed
+    // as a second domain's finalized root. Ethereum-sync uses a named network
+    // instead of a numeric chain id, so no invented numeric comparison here.
+    if let crate::cross_domain::external::AdapterSpec::ZkVm { chain_id, .. } = spec {
+        if *chain_id != Some(domain.domain_chain_id) {
+            return Err(format!(
+                "Domain {} chain id {} differs from its external ZK proof network chain id {:?}",
+                domain.id, domain.domain_chain_id, chain_id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Verify that `proof` finalizes `commitment` under the domain's own
@@ -551,9 +613,21 @@ pub fn verify_commitment_finality_observed(
 
     let status = match domain.kind {
         ConsensusKind::PoW => {
-            let adapter = PoWHeaderChainFinalityAdapter;
-            ensure_adapter_name(domain, adapter.adapter_name())?;
-            adapter.verify_finality(domain, commitment, proof)
+            if domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER {
+                // Bitcoin SPV domains are judged by Bitcoin's own consensus
+                // data (SHA256d, compact bits, chainwork); every other PoW
+                // domain keeps the bounded leading-zero header chain. Each
+                // adapter refuses a proof built for the other, and
+                // `ensure_adapter_name` refuses a domain registered under a
+                // third name.
+                let adapter = BitcoinSpvFinalityAdapter;
+                ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            } else {
+                let adapter = PoWHeaderChainFinalityAdapter;
+                ensure_adapter_name(domain, adapter.adapter_name())?;
+                adapter.verify_finality(domain, commitment, proof)
+            }
         }
         ConsensusKind::PoS => {
             let adapter = PoSFinalityAdapter;
@@ -583,6 +657,39 @@ pub fn verify_commitment_finality_observed(
         }
         ConsensusKind::Bft => {
             let adapter = BftFinalityAdapter::default();
+            ensure_adapter_name(domain, adapter.adapter_name())?;
+            adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            )
+        }
+        ConsensusKind::Dag => {
+            let adapter = DagFinalityAdapter;
+            ensure_adapter_name(domain, adapter.adapter_name())?;
+            adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            )
+        }
+        ConsensusKind::Poh => {
+            let adapter = PohFinalityAdapter;
+            ensure_adapter_name(domain, adapter.adapter_name())?;
+            adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            )
+        }
+        ConsensusKind::Pospace => {
+            let adapter = PospaceFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
             adapter.verify_finality_observed_in(
                 &state.scheme_registry,
@@ -647,6 +754,7 @@ pub fn verify_commitment_finality_observed(
                     commitment.domain_id
                 ));
             };
+            validate_external_spec_chain(domain, &entry.spec)?;
             let Some(reg) = state.settlement.external_intake.registry.domain(&key) else {
                 return Err(format!(
                     "Domain {} external registration {} is missing from the framework registry",
@@ -654,6 +762,12 @@ pub fn verify_commitment_finality_observed(
                     hex::encode(key.0)
                 ));
             };
+            if !reg.record.state.serves() {
+                return Err(format!(
+                    "Domain {} external registry entry is not in a serving state",
+                    commitment.domain_id
+                ));
+            }
             let is_eth_sync = matches!(
                 entry.spec,
                 crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
@@ -719,14 +833,26 @@ pub fn verify_commitment_finality_observed(
         ConsensusKind::StorageAttestation(_) => {
             let adapter = crate::domain::StorageAttestationFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
-            let status = adapter.verify_finality(domain, commitment, proof);
+            let status = adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            );
             require_active_attester_authorities(state, proof, "Storage attestation")?;
             status
         }
         ConsensusKind::AiInference => {
             let adapter = crate::domain::AiInferenceFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
-            let status = adapter.verify_finality(domain, commitment, proof);
+            let status = adapter.verify_finality_observed_in(
+                &state.scheme_registry,
+                domain,
+                commitment,
+                proof,
+                observer,
+            );
             require_active_attester_authorities(state, proof, "AI inference")?;
             status
         }
@@ -744,6 +870,25 @@ pub fn verify_commitment_finality_observed(
             // root (`SettlementProofVerifier`, `submit_relay_proof`). See
             // [`CommitmentAttestation`] for why a PoS or BFT certificate
             // cannot make one trustworthy.
+            //
+            // The attestation table is written per domain kind and the proof
+            // shape per proof family; both encode the same fact from one side
+            // each. They are checked against each other here so a future
+            // adapter cannot anchor a root its own proof does not bind: the
+            // shape is what the signatures actually cover, and it is not
+            // trusted - it is the table this module's tests pin.
+            let attestation = CommitmentAttestation::for_domain(domain);
+            let shape = proof.shape();
+            if attestation.state_root && shape.binds & BINDS_STATE_ROOT == 0
+                || attestation.tx_root && shape.binds & BINDS_TX_ROOT == 0
+                || attestation.event_root && shape.binds & BINDS_EVENT_ROOT == 0
+                || attestation.parent && shape.binds & BINDS_PARENT_HASH == 0
+            {
+                return Err(format!(
+                    "Domain {} proof does not bind a field settlement anchors for it",
+                    commitment.domain_id
+                ));
+            }
             Ok(())
         }
         FinalityStatus::Pending {
@@ -795,20 +940,20 @@ fn validate_commitment_state_updates(
 /// Every adapter checks the checkpoint `(chain_id, epoch, height, hash)`
 /// against the commitment. What differs is the rest of the commitment:
 ///
-/// - a PoA (and the storage/AI attestation adapters that reuse it) signs
+/// - a `PoA` (and the storage/AI attestation adapters that reuse it) signs
 ///   `poa_commit_signing_message`, which covers the parent, all three roots,
 ///   the sequence, the timestamp, the producer and the nonce writes;
-/// - a PoW header carries the parent and all three roots, and the adapter
+/// - a `PoW` header carries the parent and all three roots, and the adapter
 ///   compares each one with the commitment;
 /// - a ZK claim binds the state root, through the accepted proof claim;
-/// - a PoS or BFT certificate is an aggregate of precommits over the
+/// - a `PoS` or BFT certificate is an aggregate of precommits over the
 ///   checkpoint hash alone. Nothing else in the commitment is signed, so
 ///   every other field is chosen by whoever submits it.
 ///
 /// `Custom` is treated as the weakest case (a plugin or an external-domain
 /// framework decides its own proof, so this layer cannot claim a binding it
 /// has not checked): fail-closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommitmentAttestation {
     /// The proof binds `state_root`.
     pub state_root: bool,
@@ -847,12 +992,68 @@ impl CommitmentAttestation {
                 event_root: false,
                 parent: false,
             },
-            ConsensusKind::PoS | ConsensusKind::Bft | ConsensusKind::Custom(_) => Self {
+            ConsensusKind::PoS
+            | ConsensusKind::Bft
+            | ConsensusKind::Dag
+            | ConsensusKind::Poh
+            | ConsensusKind::Pospace
+            | ConsensusKind::Custom(_) => Self {
                 state_root: false,
                 tx_root: false,
                 event_root: false,
                 parent: false,
             },
+        }
+    }
+
+    /// What the finality adapter configured for `domain` actually attests.
+    ///
+    /// A `bitcoin-spv-v1` header commits only to its `prev_hash` (`parent`) and
+    /// `merkle_root` (`tx_root`); it has no state root or event root, so settlement
+    /// advances the domain's tip and tx-root window without demanding a non-zero
+    /// `state_root` or treating an `event_root` as proven.
+    #[must_use]
+    pub fn for_domain(domain: &ConsensusDomain) -> Self {
+        if domain.kind == ConsensusKind::PoW
+            && domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER
+        {
+            Self {
+                state_root: false,
+                tx_root: true,
+                event_root: false,
+                parent: true,
+            }
+        } else {
+            Self::for_kind(&domain.kind)
+        }
+    }
+
+    /// What a specific verified `proof` binds for `domain`.
+    ///
+    /// Structural DAG-family proofs ([`FinalityProof::Dag`], [`FinalityProof::DagPq`],
+    /// [`FinalityProof::Poh`], [`FinalityProof::PohPq`], [`FinalityProof::Pospace`],
+    /// [`FinalityProof::PospacePq`]) fold [`crate::domain::finality_adapter::poa_commit_signing_message`]
+    /// into every authority signature, binding `state_root`, `tx_root`, `event_root`,
+    /// and `parent_domain_block_hash`; BFT/PoS certificates accepted by those same
+    /// domains bind `domain_block_hash` alone and remain `false`.
+    ///
+    /// Convenience: exposed for proof-level settlement inspection and universal
+    /// finality profile derivation without loosening [`Self::for_domain`].
+    #[must_use]
+    pub fn for_proof(domain: &ConsensusDomain, proof: &FinalityProof) -> Self {
+        match (&domain.kind, proof) {
+            (ConsensusKind::Dag, FinalityProof::Dag { .. } | FinalityProof::DagPq { .. })
+            | (ConsensusKind::Poh, FinalityProof::Poh { .. } | FinalityProof::PohPq { .. })
+            | (
+                ConsensusKind::Pospace,
+                FinalityProof::Pospace { .. } | FinalityProof::PospacePq { .. },
+            ) => Self {
+                state_root: true,
+                tx_root: true,
+                event_root: true,
+                parent: true,
+            },
+            _ => Self::for_domain(domain),
         }
     }
 }
@@ -884,7 +1085,7 @@ fn freeze_domain(
 /// a registry refusal, or nonce writes that break the account invariants.
 pub fn accept_commitment(
     state: &mut AccountState,
-    commitment: DomainCommitment,
+    mut commitment: DomainCommitment,
 ) -> Result<CommitmentOutcome, String> {
     let domain = validate_commitment_metadata(state, &commitment)?.clone();
 
@@ -901,10 +1102,31 @@ pub fn accept_commitment(
         .settlement
         .commitments
         .find_by_height(commitment.domain_id, commitment.domain_height);
+    let attested = CommitmentAttestation::for_domain(&domain);
+    let kind_attested = CommitmentAttestation::for_kind(&domain.kind);
+    // When an adapter narrows its ConsensusKind's attestation surface (such as
+    // `bitcoin-spv-v1` under `ConsensusKind::PoW`, whose 80-byte header binds
+    // `parent` and `tx_root` but never a `state_root` or `event_root`), scrub
+    // the unattested roots before any comparison or persistence so downstream
+    // proof verifiers consulting `for_kind` cannot accept a relayer-supplied
+    // fabricated event tree or state root.
+    if kind_attested.state_root && !attested.state_root {
+        commitment.state_root = [0u8; 32];
+    }
+    if kind_attested.event_root && !attested.event_root {
+        commitment.event_root = [0u8; 32];
+    }
+    let agrees_on_attested = |prev: &DomainCommitment, cand: &DomainCommitment| -> bool {
+        use subtle::ConstantTimeEq;
+        bool::from(prev.domain_block_hash.ct_eq(&cand.domain_block_hash))
+            && (!attested.state_root || bool::from(prev.state_root.ct_eq(&cand.state_root)))
+            && (!attested.tx_root || bool::from(prev.tx_root.ct_eq(&cand.tx_root)))
+            && (!attested.event_root || bool::from(prev.event_root.ct_eq(&cand.event_root)))
+    };
 
     if commitment.domain_height <= domain.last_committed_height {
-        if let Some(existing) = existing {
-            if existing.domain_block_hash == commitment.domain_block_hash {
+        if let Some(ref existing) = existing {
+            if agrees_on_attested(existing, &commitment) {
                 return Ok(CommitmentOutcome::Idempotent);
             }
             return Ok(freeze_domain(
@@ -927,11 +1149,12 @@ pub fn accept_commitment(
         ));
     }
 
-    if let Some(existing) = existing {
+    if let Some(ref existing) = existing {
         // The same finalized block is not an equivocation merely because a
-        // relayer changed an auxiliary sequence number. Treat it as a replay,
-        // not evidence that the domain finalized conflicting blocks.
-        if existing.domain_block_hash == commitment.domain_block_hash {
+        // relayer changed an auxiliary sequence number or an unattested root.
+        // Divergence on `domain_block_hash` or any finality-attested root
+        // (`state_root`, `tx_root`, `event_root`) is cryptographic equivocation.
+        if agrees_on_attested(existing, &commitment) {
             return Ok(CommitmentOutcome::Idempotent);
         }
         return Ok(freeze_domain(
@@ -953,7 +1176,7 @@ pub fn accept_commitment(
         // next height with any parent it likes; storing that commitment would
         // make the honest one a same-height conflict and freeze the domain.
         // Refused before the store is touched.
-        if !CommitmentAttestation::for_kind(&commitment.consensus_kind).parent
+        if !CommitmentAttestation::for_domain(&domain).parent
             && domain.last_committed_hash != [0u8; 32]
             && commitment.parent_domain_block_hash != domain.last_committed_hash
         {
@@ -982,13 +1205,17 @@ fn apply_pending_commitments(
 ) -> Result<CommitmentOutcome, String> {
     let mut advanced = false;
     loop {
-        let (last_height, last_hash) = {
+        let (last_height, last_hash, attest_parent) = {
             let domain = state
                 .settlement
                 .domains
                 .get(domain_id)
                 .ok_or_else(|| format!("Domain {domain_id} not found"))?;
-            (domain.last_committed_height, domain.last_committed_hash)
+            (
+                domain.last_committed_height,
+                domain.last_committed_hash,
+                CommitmentAttestation::for_domain(domain).parent,
+            )
         };
         let next_height = last_height.saturating_add(1);
         let Some(com) = state
@@ -1003,7 +1230,7 @@ fn apply_pending_commitments(
                 .settlement
                 .commitments
                 .remove(domain_id, next_height, com.sequence);
-            if CommitmentAttestation::for_kind(&com.consensus_kind).parent {
+            if attest_parent {
                 return Ok(freeze_domain(
                     state,
                     domain_id,
@@ -1047,7 +1274,7 @@ fn apply_pending_commitments(
 /// Accept a verified commitment and anchor its state root as the domain's
 /// external root, the value the relayer gate reads.
 ///
-/// Only a proof that binds the root can anchor one. A PoS or BFT certificate
+/// Only a proof that binds the root can anchor one. A `PoS` or BFT certificate
 /// signs the checkpoint hash and nothing else, so a commitment under it carries
 /// no root this layer could honestly anchor - the anchor stays unwritten and
 /// the commitment advances the domain's height and hash alone. A relayer that
@@ -1089,6 +1316,11 @@ pub fn anchor_recognized_chain(id: u32) -> Option<crate::core::transaction::Exte
     ANCHOR_RECOGNIZED_CHAINS.contains(&chain).then_some(chain)
 }
 
+/// Performs the requested operation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn accept_verified_commitment(
     state: &mut AccountState,
     commitment: DomainCommitment,
@@ -1096,16 +1328,21 @@ pub fn accept_verified_commitment(
     let domain_id = commitment.domain_id;
     let domain_height = commitment.domain_height;
     let state_root = commitment.state_root;
-    if !CommitmentAttestation::for_kind(&commitment.consensus_kind).state_root {
-        let outcome = accept_commitment(state, commitment)?;
-        return Ok(outcome);
-    }
-    let height_before = state
+    let (height_before, attests_state_root) = state
         .settlement
         .domains
         .get(domain_id)
-        .map(|domain| domain.last_committed_height)
+        .map(|domain| {
+            (
+                domain.last_committed_height,
+                CommitmentAttestation::for_domain(domain).state_root,
+            )
+        })
         .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+    if !attests_state_root {
+        let outcome = accept_commitment(state, commitment)?;
+        return Ok(outcome);
+    }
     // A zero state root anchors nothing; refused before anything
     // moves (fail-closed).
     if state_root == [0u8; 32] {
@@ -1125,6 +1362,9 @@ pub fn accept_verified_commitment(
     // into existence), and the domain that declares it has to declare the
     // chain's canonical id. The second alone was not a gate: registration is
     // permissionless, so a registrant supplied both sides of the comparison.
+    // Permissionless PoW domains outside the canonical set also may not write
+    // `external_roots`: a registrant chooses its own difficulty floor and could
+    // otherwise self-mine arbitrary roots to satisfy AppBinding claims.
     let may_anchor = match crate::core::transaction::ExternalChain::from_domain_id(domain_id) {
         Some(chain) => {
             anchor_recognized_chain(domain_id).is_some()
@@ -1134,7 +1374,11 @@ pub fn accept_verified_commitment(
                     .get(domain_id)
                     .is_some_and(|domain| domain.domain_chain_id == chain.canonical_chain_id())
         }
-        None => true,
+        None => state
+            .settlement
+            .domains
+            .get(domain_id)
+            .is_some_and(|domain| domain.kind != ConsensusKind::PoW),
     };
     let outcome = accept_commitment(state, commitment)?;
     // An idempotent resubmission of an old commitment must not move the
@@ -1215,6 +1459,16 @@ pub fn submit_zk_proof(
             submission.public_inputs.chain_id
         ));
     }
+    if submission.program.len() > crate::prover::MAX_ZK_PROGRAM_WORDS {
+        return Err(format!(
+            "zk program length {} exceeds limit {}",
+            submission.program.len(),
+            crate::prover::MAX_ZK_PROGRAM_WORDS
+        ));
+    }
+    if crate::prover::is_empty_or_halt_only_program(&submission.program) {
+        return Err("empty or bare Halt program cannot attest a ZK domain state root".into());
+    }
     // The program allowlist: does this program have the right to advance
     // this domain? Empty is fail-closed.
     let claimed_domain = submission.domain();
@@ -1223,6 +1477,18 @@ pub fn submit_zk_proof(
         .domains
         .get(claimed_domain)
         .ok_or_else(|| format!("unknown domain {claimed_domain}"))?;
+    if domain.kind != ConsensusKind::Zk {
+        return Err(format!(
+            "domain {claimed_domain} has consensus kind {:?}, not Zk",
+            domain.kind
+        ));
+    }
+    if domain.status == DomainStatus::Frozen {
+        return Err(format!("domain {claimed_domain} is frozen"));
+    }
+    if !domain.is_active() {
+        return Err(format!("domain {claimed_domain} is not active"));
+    }
     let program_hash = crate::prover::zk_program_hash(&submission.program);
     if !domain.zk_program_allowlist.contains(&program_hash) {
         return Err(format!(
@@ -1329,18 +1595,26 @@ pub fn submit_zk_proof(
     };
 
     let fee = state.registry.params().proof_submission_fee;
+    let needed = fee
+        .checked_add(reserve)
+        .ok_or_else(|| "proof fee plus transaction fee reserve overflows u64".to_string())?;
     let submitter = submission.submitter();
-    let balance = state.get_balance(&submitter);
-    if balance < fee.saturating_add(reserve) {
+    // Enforce spendable_balance (not raw balance) so cliff-locked vesting
+    // allocations and the burn-reserve account cannot spend locked tokens
+    // as proof fees.
+    let balance = state.spendable_balance(&submitter);
+    if balance < needed {
         return Err(format!(
-            "insufficient balance for proof fee: have {balance}, need {}",
-            fee.saturating_add(reserve)
+            "insufficient balance for proof fee: have {balance}, need {needed}"
         ));
     }
     // The proof fee leaves the submitter whatever the verdict, and no pool
     // receives it: it is burned, and recorded as burned.
     let account = state.get_or_create(&submitter);
-    account.balance -= fee;
+    account.balance = account
+        .balance
+        .checked_sub(fee)
+        .ok_or_else(|| "proof fee sender balance underflow".to_string())?;
     state.mark_dirty(&submitter);
     state.burned_total = state.burned_total.saturating_add(fee);
 
@@ -1519,11 +1793,21 @@ pub fn execute_settlement_tx(
                     domain.id, chain
                 )));
             }
-            let balance = state.get_balance(&ctx.sender);
-            let needed = domain.operator_bond.saturating_add(ctx.fee);
+            let balance = state.spendable_balance(&ctx.sender);
+            let needed = domain.operator_bond.checked_add(ctx.fee).ok_or_else(|| {
+                SettlementTxError::Refused("domain bond plus fee overflows".into())
+            })?;
             if balance < needed {
                 return Err(SettlementTxError::BondUnfunded { needed, balance });
             }
+            let held = state
+                .external_bond_escrow
+                .get(&ctx.sender)
+                .copied()
+                .unwrap_or(0);
+            held.checked_add(domain.operator_bond).ok_or_else(|| {
+                SettlementTxError::Refused("external bond escrow overflows".into())
+            })?;
             // A new domain starts at its genesis: a registration cannot
             // claim committed history it never proved.
             if domain.last_committed_height != 0 || domain.last_committed_hash != [0u8; 32] {
@@ -1608,14 +1892,274 @@ pub fn execute_settlement_tx(
         }
         SettlementTx::ProofMarket(market_tx) => execute_proof_market_tx(state, ctx, market_tx),
         SettlementTx::RelayerIntent(intent_tx) => execute_relayer_intent_tx(state, ctx, intent_tx),
-        SettlementTx::Graft(graft_tx) => {
-            crate::settlement::graft::execute_graft_tx(state, ctx, graft_tx)
+        SettlementTx::AppBinding(app_binding_tx) => {
+            crate::settlement::app_binding::execute_app_binding_tx(state, ctx, app_binding_tx)
         }
         SettlementTx::SharedSecurity(shared_tx) => {
             crate::settlement::shared_security::execute_shared_security_tx(state, ctx, shared_tx)
         }
         SettlementTx::DeliverMessage(delivery) => deliver_message(state, ctx, delivery),
+        SettlementTx::ObjectLayer(uol_tx) => execute_object_layer_tx(state, ctx, uol_tx),
     }
+}
+
+fn domain_has_bound_authority(domain: &ConsensusDomain) -> bool {
+    match domain.kind {
+        ConsensusKind::PoW => domain.pow_parameters.is_some(),
+        ConsensusKind::Zk => !domain.zk_program_allowlist.is_empty(),
+        ConsensusKind::PoA
+        | ConsensusKind::PoS
+        | ConsensusKind::Bft
+        | ConsensusKind::Dag
+        | ConsensusKind::Poh
+        | ConsensusKind::Pospace
+        | ConsensusKind::StorageAttestation(_)
+        | ConsensusKind::AiInference
+        | ConsensusKind::Custom(_) => domain.validator_set_hash != [0u8; 32],
+    }
+}
+
+fn execute_object_layer_tx(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &crate::object_layer::ObjectLayerTx,
+) -> Result<(), SettlementTxError> {
+    struct IntakeFinality<'a> {
+        domains: &'a crate::domain::ConsensusDomainRegistry,
+        commitments: &'a crate::domain::DomainCommitmentRegistry,
+    }
+    impl crate::object_layer::registry::HomeFinality for IntakeFinality<'_> {
+        fn event_is_proven(&self, proof: &crate::object_layer::registry::HomeEventProof) -> bool {
+            if proof.inclusion.is_empty() || proof.event_id.is_empty() {
+                return false;
+            }
+            // Refuse events from missing, inactive/frozen, or authority-unbound
+            // domains so an unanchored domain cannot forge arrivals or calls.
+            let Some(domain) = self.domains.get(proof.domain) else {
+                return false;
+            };
+            if !domain.is_active() || !domain_has_bound_authority(domain) {
+                return false;
+            }
+            let Ok((sequence, merkle_proof)) =
+                crate::network::bounded_bincode::decode_bounded_bincode::<(
+                    u64,
+                    crate::cross_domain::event_tree::MerkleProof,
+                )>(&proof.inclusion, 4 * 1024)
+            else {
+                return false;
+            };
+            let Some(commitment) = self
+                .commitments
+                .get(proof.domain, proof.home_height, sequence)
+            else {
+                return false;
+            };
+            if commitment.consensus_kind != domain.kind
+                || (domain.validator_set_hash != [0u8; 32]
+                    && commitment.validator_set_hash != domain.validator_set_hash)
+                || commitment.domain_block_hash != proof.home_block_hash
+                || commitment.event_root == [0u8; 32]
+                || !CommitmentAttestation::for_domain(domain).event_root
+            {
+                return false;
+            }
+            let Ok(event_bytes) = bincode::serialize(&proof.event) else {
+                return false;
+            };
+            let leaf = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_UOL_HOME_EVENT_LEAF_V1",
+                &proof.domain.to_le_bytes(),
+                &proof.home_height.to_le_bytes(),
+                &proof.home_block_hash,
+                &proof.event_id,
+                &event_bytes,
+            ]);
+            merkle_proof.leaf == leaf && merkle_proof.verify(commitment.event_root)
+        }
+    }
+    let height = state.current_block_height;
+    if let crate::object_layer::ObjectLayerTx::Charter { domain, .. } = tx {
+        let dom = state.settlement.domains.get(*domain).ok_or_else(|| {
+            SettlementTxError::Refused("object_layer_charter_domain_missing".into())
+        })?;
+        if !dom.is_active() {
+            return Err(SettlementTxError::Refused(
+                "object_layer_charter_domain_inactive".into(),
+            ));
+        }
+        if dom.operator != Some(ctx.sender) {
+            return Err(SettlementTxError::Refused(
+                "object_layer_charter_requires_domain_operator".into(),
+            ));
+        }
+        if !domain_has_bound_authority(dom) {
+            return Err(SettlementTxError::Refused(
+                "object_layer_charter_domain_authority_unbound".into(),
+            ));
+        }
+    }
+    if let crate::object_layer::ObjectLayerTx::RegisterClass(reg) = tx {
+        let dom = state
+            .settlement
+            .domains
+            .get(reg.home_domain)
+            .ok_or_else(|| {
+                SettlementTxError::Refused("object_layer_class_domain_missing".into())
+            })?;
+        if !dom.is_active() {
+            return Err(SettlementTxError::Refused(
+                "object_layer_class_domain_inactive".into(),
+            ));
+        }
+        // Registering a class chooses its `registrant` (the sole account
+        // authorized to call `RefreshClass` and freeze it on an authority
+        // mismatch) and pins the class's initial slice/rule forever, so only
+        // the home domain's operator may register classes for its domain.
+        if dom.operator != Some(ctx.sender) {
+            return Err(SettlementTxError::Refused(
+                "object_layer_class_requires_domain_operator".into(),
+            ));
+        }
+        if !domain_has_bound_authority(dom) {
+            return Err(SettlementTxError::Refused(
+                "object_layer_class_domain_authority_unbound".into(),
+            ));
+        }
+    }
+    let domain_registry = state.settlement.domains.clone();
+    let commitment_registry = state.settlement.commitments.clone();
+    let finality = IntakeFinality {
+        domains: &domain_registry,
+        commitments: &commitment_registry,
+    };
+    let domain_active = |id: DomainId| {
+        domain_registry
+            .get(id)
+            .is_some_and(|d| d.status == DomainStatus::Active && domain_has_bound_authority(d))
+    };
+    let home_state_root = |id: DomainId| -> Option<Hash32> {
+        let domain = domain_registry.get(id)?;
+        if !domain.is_active() || !domain_has_bound_authority(domain) {
+            return None;
+        }
+        // Only trust state roots attested by an accepted commitment whose
+        // consensus proof actually binds `state_root` and the domain's bound
+        // authority set, never falling back to `genesis_state_root` or
+        // `last_committed_hash` (a block hash, not a state root).
+        commitment_registry
+            .commitments_for_global_block()
+            .into_iter()
+            .filter(|c| {
+                c.domain_id == id
+                    && c.state_root != [0u8; 32]
+                    && c.consensus_kind == domain.kind
+                    && CommitmentAttestation::for_domain(domain).state_root
+                    && (domain.validator_set_hash == [0u8; 32]
+                        || c.validator_set_hash == domain.validator_set_hash)
+            })
+            .max_by_key(|c| (c.domain_height, c.sequence))
+            .map(|c| c.state_root)
+    };
+    let mut prechecked_stipend_ok = false;
+    if let crate::object_layer::ObjectLayerTx::HomeStipendCall {
+        domain,
+        auth,
+        action,
+    } = tx
+    {
+        if u128::from(ctx.fee) > auth.requested_stipend_attos {
+            return Err(SettlementTxError::Refused(
+                "home_stipend_fee_exceeds_stipend".into(),
+            ));
+        }
+        let charter = state
+            .settlement
+            .object_layer
+            .active_charter(*domain)
+            .map_err(|r| SettlementTxError::Refused(format!("object_layer_refused: {r:?}")))?;
+        if crate::object_layer::family::profile_for(charter.vm_family).home_key_scheme()
+            != auth.scheme
+        {
+            return Err(SettlementTxError::Refused(
+                "home_stipend_scheme_family_mismatch".into(),
+            ));
+        }
+        let action_digest = crate::object_layer::tx::home_stipend_action_digest(action)
+            .map_err(|r| SettlementTxError::Refused(format!("object_layer_refused: {r:?}")))?;
+        let (actor_addr, _) = crate::execution::coordinator::foreign::verify_home_key_stipend_auth(
+            auth,
+            ctx.chain_id,
+            *domain,
+            &action_digest,
+            state.execution_state.foreign_lane.quantum_alert_level,
+        )
+        .map_err(|e| SettlementTxError::Refused(format!("home_stipend_auth_refused: {e}")))?;
+        if state
+            .execution_state
+            .foreign_lane
+            .quantum_class_of(&actor_addr)
+            != crate::execution::coordinator::alias::AccountQuantumClass::Classical
+        {
+            return Err(SettlementTxError::Refused(
+                "home_stipend_pq_account_refused".into(),
+            ));
+        }
+        if state.get_attos_balance(&actor_addr)
+            > crate::execution::coordinator::foreign::MAX_HOME_KEY_STIPEND_PQ_CEILING_ATTOS
+        {
+            return Err(SettlementTxError::Refused(
+                "home_stipend_pq_ceiling_exceeded".into(),
+            ));
+        }
+        prechecked_stipend_ok = true;
+    }
+    struct PrecheckedStipendVerifier(bool);
+    impl crate::object_layer::tx::HomeStipendVerifier for PrecheckedStipendVerifier {
+        fn verify_stipend(
+            &self,
+            _domain: DomainId,
+            _auth: &crate::object_layer::tx::HomeKeyStipendAuth,
+            _action_digest: &Hash32,
+        ) -> Result<(), crate::object_layer::Refusal> {
+            if self.0 {
+                Ok(())
+            } else {
+                Err(crate::object_layer::Refusal::NotAuthorized)
+            }
+        }
+    }
+    let stipend_verifier = PrecheckedStipendVerifier(prechecked_stipend_ok);
+    let uol_ctx = crate::object_layer::tx::TxContext {
+        height,
+        signer: ctx.sender,
+        activation: if ctx.chain_id
+            == crate::core::chain_config::Network::Devnet
+                .chain_id()
+                .value()
+        {
+            crate::object_layer::ACTIVATION
+        } else {
+            crate::object_layer::ObjectLayerActivation { height: None }
+        },
+        finality: &finality,
+        domain_active: &domain_active,
+        home_state_root: Some(&home_state_root),
+        require_home_state_proofs: true,
+        home_stipend_verifier: prechecked_stipend_ok.then_some(&stipend_verifier),
+    };
+    tx.apply(&mut state.settlement.object_layer, &uol_ctx)
+        .map_err(|err| match err {
+            crate::object_layer::tx::TxRefusal::Closed => {
+                SettlementTxError::Refused("object_layer_closed".into())
+            }
+            crate::object_layer::tx::TxRefusal::StepNotOpen => {
+                SettlementTxError::Refused("object_layer_step_not_open".into())
+            }
+            crate::object_layer::tx::TxRefusal::Refused(r) => {
+                SettlementTxError::Refused(format!("object_layer_refused: {r:?}"))
+            }
+        })
 }
 
 pub(crate) fn execute_relayer_intent_tx(
@@ -1800,7 +2344,7 @@ pub(crate) fn execute_relayer_intent_tx(
                 .expire_intent(*intent_id, state.current_block_height)
                 .map_err(SettlementTxError::Refused)?;
             // An unhonoured bid held the job open: the bidder answers at the
-            // liveness rate, the same rule as an expired Graft intent.
+            // liveness rate, the same rule as an expired AppBinding intent.
             let slash_ratio = state.registry.params().liveness_slash_ratio_fixed;
             for bid in &bids {
                 // A bid that had already lapsed when the intent reached its
@@ -1817,10 +2361,21 @@ pub(crate) fn execute_relayer_intent_tx(
                     .get(&bid.relayer, crate::registry::role::roles::RELAYER)
                     .is_some_and(|registration| registration.is_slashable());
                 if should_slash {
-                    // The escrow refund is independent of the liveness
-                    // penalty. An already-slashed registration or a removed
-                    // role has no additional penalty to collect, but neither
-                    // condition can keep the owner's refund locked.
+                    // The refund and the liveness penalty are not one
+                    // decision. `is_slashable()` accepts `SlashedUnbonding`
+                    // with a positive bond, but `slash_role_only` answers that
+                    // same status with `AlreadySlashed`; propagating that error
+                    // aborted the whole `Expire`, so the owner's escrow stayed
+                    // locked while `Settle` refused the expired intent and
+                    // `prune_expired` skipped the escrowed row. One already
+                    // punished bidder turned a recoverable job into a
+                    // permanently frozen escrow, and the bidder escaped the
+                    // second penalty on top.
+                    //
+                    // A refusal here means the penalty is already on the
+                    // account (or the role row is gone), which is exactly the
+                    // case in which there is nothing left to take. Anything
+                    // else is a real halt and still stops the block.
                     match state.slash_role_destroying(
                         bid.relayer,
                         crate::registry::role::roles::RELAYER,
@@ -1856,11 +2411,10 @@ fn slash_failed_prover(
         .is_some_and(crate::registry::permissionless::Registration::is_slashable);
     if slashable {
         let ratio = state.registry.params().malicious_slash_ratio_fixed;
-        // Same class as the Graft and relayer-intent expiry paths:
-        // `is_slashable()` accepts `SlashedUnbonding` but
-        // `slash_role_only` refuses it, so a failed-proof refund must
-        // not abort when the prover was already slashed. The creator
-        // refund is independent of the penalty.
+        // Same split as `Expire`: a prover already in `SlashedUnbonding` has
+        // paid, and `slash_role_only` refuses the second attempt. The reward
+        // has already gone back to the task's creator by the time this runs, so
+        // aborting here would fail a settlement that has nothing left to undo.
         match state.slash_role_destroying(
             *prover,
             role,
@@ -1946,7 +2500,7 @@ fn execute_proof_market_tx(
             );
             state
                 .proof_market
-                .add_task(task)
+                .add_task(task, state.epoch_index)
                 .map_err(SettlementTxError::Refused)
         }
         ProofMarketTx::AssignTask { task_id } => {
@@ -2034,6 +2588,17 @@ fn execute_proof_market_tx(
             if verification_hash == [0u8; 32] {
                 return Err(SettlementTxError::Refused(
                     "proof-market ZK verification hash cannot be zero".into(),
+                ));
+            }
+            // Pre-check potential refund overflow before `submit_zk_proof`
+            // burns the submitter's proof fee, keeping refusal atomic.
+            if state
+                .get_balance(&task.creator)
+                .checked_add(task.reward)
+                .is_none()
+            {
+                return Err(SettlementTxError::Refused(
+                    "proof-market task refund would overflow creator balance".into(),
                 ));
             }
             let chain_height = state.current_block_height;
@@ -2153,7 +2718,30 @@ fn execute_proof_market_tx(
                     deal_id,
                     challenge_epoch,
                 } => {
-                    if proof.commitment.event_root != *deal_id
+                    // Bind the receipt's storage domain to either a protocol-owned
+                    // storage domain (`operator.is_none()`) or a storage domain
+                    // operated by the task creator itself. Allowing any third-party
+                    // or prover-registered storage domain lets a prover mint its own
+                    // attestation for any `deal_id` and claim the reward.
+                    let domain_authorized = state
+                        .settlement
+                        .domains
+                        .get(proof.commitment.domain_id)
+                        .is_some_and(|domain| {
+                            domain.is_active()
+                                && matches!(domain.kind, ConsensusKind::StorageAttestation(_))
+                                && (domain.operator.is_none()
+                                    || domain.operator == Some(task.creator))
+                        });
+                    let deal_domain_matches = state
+                        .storage_registry
+                        .all_deals()
+                        .iter()
+                        .find(|deal| deal.manifest_id.0 == *deal_id)
+                        .is_none_or(|deal| deal.domain_id == proof.commitment.domain_id);
+                    if !domain_authorized
+                        || !deal_domain_matches
+                        || proof.commitment.event_root != *deal_id
                         || proof.commitment.domain_height != *challenge_epoch
                         || !matches!(
                             &proof.commitment.consensus_kind,
@@ -2161,7 +2749,9 @@ fn execute_proof_market_tx(
                         )
                     {
                         return Err(SettlementTxError::Refused(
-                            "proof-market storage attestation does not match the task".into(),
+                            "proof-market storage attestation does not match an authorized \
+                             storage domain for the task"
+                                .into(),
                         ));
                     }
                 }
@@ -2294,6 +2884,31 @@ fn execute_proof_market_tx(
                 .ok_or_else(|| SettlementTxError::Refused("proof-market refund overflow".into()))?;
             Ok(())
         }
+        ProofMarketTx::WithdrawEscrow { amount } => {
+            if *amount == 0 {
+                return Err(SettlementTxError::Refused(
+                    "proof-market escrow withdrawal must be positive".into(),
+                ));
+            }
+            if state
+                .get_balance(&ctx.sender)
+                .checked_add(*amount)
+                .is_none()
+            {
+                return Err(SettlementTxError::Refused(
+                    "proof-market escrow withdrawal would overflow balance".into(),
+                ));
+            }
+            let withdrawn = state
+                .proof_market
+                .withdraw_escrow(ctx.sender, *amount)
+                .map_err(SettlementTxError::Refused)?;
+            let account = state.get_or_create(&ctx.sender);
+            account.balance = account.balance.checked_add(withdrawn).ok_or_else(|| {
+                SettlementTxError::Refused("proof-market escrow withdrawal overflow".into())
+            })?;
+            Ok(())
+        }
     }
 }
 
@@ -2322,6 +2937,71 @@ mod tests {
 
     fn operator(domain: &ConsensusDomain) -> Address {
         domain.operator.expect("default domains name an operator")
+    }
+
+    #[test]
+    fn external_zk_proof_chain_must_match_registered_domain_chain() {
+        use crate::cross_domain::external::AdapterSpec;
+        let mut domain = default_domain(
+            42,
+            ConsensusKind::Custom("external-proof".into()),
+            987,
+            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+            1,
+        );
+        domain.plugin_code_hash = Some([9; 32]);
+        let spec = AdapterSpec::ZkVm {
+            network: "foreign-network".into(),
+            program_hash: Some([3; 32]),
+            chain_id: Some(988),
+        };
+        assert!(validate_external_spec_chain(&domain, &spec).is_err());
+        let spec = AdapterSpec::ZkVm {
+            network: "foreign-network".into(),
+            program_hash: Some([3; 32]),
+            chain_id: None,
+        };
+        assert!(validate_external_spec_chain(&domain, &spec).is_err());
+        let spec = AdapterSpec::ZkVm {
+            network: "foreign-network".into(),
+            program_hash: Some([3; 32]),
+            chain_id: Some(987),
+        };
+        assert!(validate_external_spec_chain(&domain, &spec).is_ok());
+    }
+
+    #[test]
+    fn domain_registration_escrow_overflow_does_not_register_or_debit() {
+        let mut state = AccountState::new();
+        let domain = pow(41);
+        let operator = operator(&domain);
+        let funded = MIN_DOMAIN_OPERATOR_BOND + FEE;
+        state.add_balance(&operator, funded);
+        state.external_bond_escrow.insert(operator, u64::MAX);
+        let tx = SettlementTx::RegisterDomain(Box::new(domain));
+        let err = execute_settlement_tx(&mut state, &ctx(operator), &tx).unwrap_err();
+        assert!(err.to_string().contains("external bond escrow overflows"));
+        assert!(state.settlement.domains.get(41).is_none());
+        assert_eq!(state.get_balance(&operator), funded);
+        assert_eq!(state.external_bond_escrow.get(&operator), Some(&u64::MAX));
+    }
+
+    #[test]
+    fn custom_domain_registration_requires_in_block_finality_adapter() {
+        let mut domain = default_domain(
+            42,
+            ConsensusKind::Custom("external-proof".into()),
+            987,
+            "node-local-plugin",
+            1,
+        );
+        domain.plugin_code_hash = Some([9; 32]);
+        assert!(validate_domain_registration(&domain)
+            .unwrap_err()
+            .contains("incompatible finality adapter"));
+        domain.finality_adapter =
+            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER.into();
+        assert!(validate_domain_registration(&domain).is_ok());
     }
 
     fn block(height: u64, parent: &str, tag: u8) -> Block {
@@ -2514,7 +3194,7 @@ mod tests {
         }
     }
 
-    /// A PoS certificate is an aggregate of precommits over the checkpoint
+    /// A `PoS` certificate is an aggregate of precommits over the checkpoint
     /// hash; it signs no root. The commitment may therefore advance the
     /// domain's height and hash, but no external-root anchor may be written
     /// from a root the certificate never bound: that map is the value the
@@ -2548,7 +3228,7 @@ mod tests {
         );
     }
 
-    /// The parent link a PoS certificate does not sign cannot be used to freeze
+    /// The parent link a `PoS` certificate does not sign cannot be used to freeze
     /// the domain: a relayer that submits a genuine certificate for the next
     /// height with a parent of its choosing is refused, and the honest
     /// commitment for that height still advances.
@@ -2610,7 +3290,7 @@ mod tests {
         );
     }
 
-    /// The other half of the rule: a parent the proof *does* bind (the PoW
+    /// The other half of the rule: a parent the proof *does* bind (the `PoW`
     /// header chain carries it) stays equivocation evidence, and a mismatch
     /// freezes the domain exactly as before.
     #[test]
@@ -2859,6 +3539,36 @@ mod tests {
         assert_eq!(state.get_balance(&creator), FEE + 1_000);
         assert_eq!(state.proof_market.escrow_balance(&creator), 1_000);
         assert!(state.proof_market.active_tasks.is_empty());
+
+        let before = state.get_balance(&creator);
+        let overdraw =
+            SettlementTx::ProofMarket(Box::new(ProofMarketTx::WithdrawEscrow { amount: 1_001 }));
+        assert!(execute_settlement_tx(&mut state, &ctx(creator), &overdraw).is_err());
+        assert_eq!(state.get_balance(&creator), before);
+        assert_eq!(state.proof_market.escrow_balance(&creator), 1_000);
+
+        let withdraw =
+            SettlementTx::ProofMarket(Box::new(ProofMarketTx::WithdrawEscrow { amount: 1_000 }));
+        execute_settlement_tx(&mut state, &ctx(creator), &withdraw).unwrap();
+        assert_eq!(state.get_balance(&creator), before + 1_000);
+        assert_eq!(state.proof_market.escrow_balance(&creator), 0);
+    }
+
+    #[test]
+    fn proof_market_withdrawal_overflow_is_atomic() {
+        let creator = Address::from([0x36; 32]);
+        let mut state = AccountState::new();
+        state.get_or_create(&creator).balance = u64::MAX;
+        state.proof_market.fund_escrow(creator, 1).unwrap();
+        let root = state.proof_market.root();
+
+        let withdraw =
+            SettlementTx::ProofMarket(Box::new(ProofMarketTx::WithdrawEscrow { amount: 1 }));
+        let error = execute_settlement_tx(&mut state, &ctx(creator), &withdraw).unwrap_err();
+        assert!(matches!(error, SettlementTxError::Refused(reason) if reason.contains("overflow")));
+        assert_eq!(state.get_balance(&creator), u64::MAX);
+        assert_eq!(state.proof_market.escrow_balance(&creator), 1);
+        assert_eq!(state.proof_market.root(), root);
     }
 
     #[test]
@@ -3051,6 +3761,157 @@ mod tests {
                 < relayer_stake,
             "the unhonoured bid costs RELAYER bond at the liveness rate"
         );
+        assert!(matches!(
+            state
+                .settlement
+                .relayer_policy
+                .settlements
+                .get(&intent.intent_id)
+                .unwrap()
+                .status,
+            crate::relayer::IntentSettlementStatus::Expired
+        ));
+    }
+
+    /// An earlier liveness fault does not release a bidder from a *different*
+    /// accepted job: a liveness slash keeps the role Active, so expiry charges
+    /// the unhonoured award again while still refunding the owner's escrow.
+    /// The distinct `SlashedUnbonding` case below checks the `AlreadySlashed`
+    /// refusal and verifies that its refund succeeds without a second charge.
+    #[test]
+    fn relayer_intent_expiry_refunds_owner_and_charges_a_second_liveness_fault() {
+        let owner = Address::from([0x61; 32]);
+        let relayer = Address::from([0x62; 32]);
+        let mut state = AccountState::new();
+        state.current_block_height = 10;
+        state.add_balance(&owner, 50 + FEE);
+        let relayer_stake = state.registry.params().min_stake;
+        state
+            .registry
+            .register(
+                relayer,
+                crate::registry::role::roles::RELAYER,
+                relayer_stake,
+                0,
+            )
+            .unwrap();
+        let policy = crate::relayer::PolicyEnvelope {
+            owner,
+            session_key: None,
+            spending_cap: 50,
+            allowed_domains: vec![1, 2],
+            requires_multisig: false,
+            requires_hsm: false,
+            expires_at_block: 100,
+        };
+        let intent = crate::relayer::UserIntent::new(
+            owner,
+            1,
+            2,
+            crate::relayer::RelayerActionKind::ExternalTransaction {
+                chain: crate::core::transaction::ExternalChain::Ethereum,
+                target_address: "0x00000000000000000000000000000000000000B2".into(),
+                payload_hash: [0x51; 32],
+            },
+            50,
+            20,
+            1,
+            policy.policy_hash(),
+            relayer,
+        );
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Open {
+                intent: Box::new(intent.clone()),
+                policy: Box::new(policy),
+            })),
+        )
+        .unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(relayer),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Bid(Box::new(
+                crate::relayer::SolverBid {
+                    intent_id: intent.intent_id,
+                    relayer,
+                    quoted_fee: 40,
+                    proof_commitment: [0x43; 32],
+                    bond: 10,
+                    expires_at_block: 21,
+                },
+            )))),
+        )
+        .unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
+                intent_id: intent.intent_id,
+                solver: relayer,
+            })),
+        )
+        .unwrap();
+
+        // The bidder paid for a previous liveness fault elsewhere. Its role
+        // remains Active, so this separate unhonoured award remains slashable.
+        state
+            .registry
+            .slash_role_only(
+                relayer,
+                crate::registry::role::roles::RELAYER,
+                crate::registry::permissionless::SlashingCondition::LivenessFault,
+                state.registry.params().liveness_slash_ratio_fixed / 2,
+            )
+            .unwrap();
+        let registration = state
+            .registry
+            .get(&relayer, crate::registry::role::roles::RELAYER)
+            .unwrap()
+            .clone();
+        assert!(
+            registration.is_slashable(),
+            "the fixture needs a slashable bidder"
+        );
+        let stake_after_first_slash = registration.stake;
+
+        state.current_block_height = 20;
+        execute_settlement_tx(
+            &mut state,
+            &ctx(relayer),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Expire {
+                intent_id: intent.intent_id,
+            })),
+        )
+        .expect("an already slashed bidder must not freeze the owner's escrow");
+
+        assert_eq!(
+            state.get_balance(&owner),
+            50 + FEE,
+            "the owner is made whole"
+        );
+        let stake_after_expiry = state
+            .registry
+            .get(&relayer, crate::registry::role::roles::RELAYER)
+            .unwrap()
+            .stake;
+        assert!(
+            stake_after_expiry < stake_after_first_slash,
+            "the unhonoured award is a separate liveness fault"
+        );
+        assert_eq!(
+            stake_after_first_slash - stake_after_expiry,
+            crate::core::chain_config::slash_penalty(
+                stake_after_first_slash,
+                state.registry.params().liveness_slash_ratio_fixed,
+            ),
+            "charge only the configured liveness penalty for this job"
+        );
+        assert!(!state
+            .settlement
+            .relayer_policy
+            .intents
+            .contains_key(&intent.intent_id));
         assert!(matches!(
             state
                 .settlement
@@ -3612,35 +4473,42 @@ mod tests {
                 }
                 Ok(())
             }
+
+            fn sync_committee_closed(&self) -> bool {
+                false
+            }
         }
         fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
             Box::new(AcceptTestBls)
         }
 
         let mut state = AccountState::new();
+        let committee = crate::cross_domain::external::ethereum::PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        };
+        state
+            .settlement
+            .external_intake
+            .pin_ethereum_committee("testnet", committee.clone());
         let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
-            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
-                period: 0,
-                aggregate_pubkey: vec![0x11; 96],
-                next_committee_root: [0xbb; 32],
-            }),
+            committee: Some(committee.clone()),
         };
         let adapter = spec.build(Some(test_bls()), None);
         let adapter_id = adapter.descriptor().id;
 
         let build_eth_evidence = |height: u64, root: [u8; 32]| {
-            use crate::cross_domain::external::ethereum::layout;
-            let mut payload = vec![0u8; layout::LEN];
-            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
-            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-            payload[layout::STATE_ROOT].copy_from_slice(&root);
+            let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+                height,
+                height + 64,
+                0,
+                &committee,
+                &[0x22; 96],
+                &[0xff; 64],
+                root,
+            );
             crate::cross_domain::external::RawConsensusEvidence {
                 adapter: adapter_id,
                 evidence_version: 2,
@@ -3739,35 +4607,42 @@ mod tests {
                 }
                 Ok(())
             }
+
+            fn sync_committee_closed(&self) -> bool {
+                false
+            }
         }
         fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
             Box::new(AcceptTestBls)
         }
 
         let mut state = AccountState::new();
+        let committee = crate::cross_domain::external::ethereum::PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        };
+        state
+            .settlement
+            .external_intake
+            .pin_ethereum_committee("testnet", committee.clone());
         let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
-            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
-                period: 0,
-                aggregate_pubkey: vec![0x11; 96],
-                next_committee_root: [0xbb; 32],
-            }),
+            committee: Some(committee.clone()),
         };
         let adapter = spec.build(Some(test_bls()), None);
         let adapter_id = adapter.descriptor().id;
         let prover = Address::from([0x41; 32]);
         let build_eth_evidence = |height: u64, root: [u8; 32]| {
-            use crate::cross_domain::external::ethereum::layout;
-            let mut payload = vec![0u8; layout::LEN];
-            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
-            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-            payload[layout::STATE_ROOT].copy_from_slice(&root);
+            let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+                height,
+                height + 64,
+                0,
+                &committee,
+                &[0x22; 96],
+                &[0xff; 64],
+                root,
+            );
             crate::cross_domain::external::RawConsensusEvidence {
                 adapter: adapter_id,
                 evidence_version: 2,
@@ -3829,7 +4704,12 @@ mod tests {
         blk.state_root = hex::encode([0xdd; 32]);
         blk.hash = blk.calculate_hash();
         let mut com = commitment(&domain, &blk, 0);
-        com.domain_block_hash = [0xaa; 32];
+        // A live attestation must bind the commitment's block hash. Do not
+        // make this a quorum test of an unauthenticated [0xaa; 32] hash.
+        com.domain_block_hash =
+            crate::cross_domain::external::ethereum::parse_update(&next_evidence.payload)
+                .unwrap()
+                .finalized_root;
         com.tx_root = [0u8; 32];
         com.event_root = [0u8; 32];
         com.validator_set_hash = [0u8; 32];
@@ -3861,36 +4741,43 @@ mod tests {
                 }
                 Ok(())
             }
+
+            fn sync_committee_closed(&self) -> bool {
+                false
+            }
         }
         fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
             Box::new(AcceptTestBls)
         }
 
         let mut state = AccountState::new();
+        let committee = crate::cross_domain::external::ethereum::PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        };
+        state
+            .settlement
+            .external_intake
+            .pin_ethereum_committee("testnet", committee.clone());
         let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
-            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
-                period: 0,
-                aggregate_pubkey: vec![0x11; 96],
-                next_committee_root: [0xbb; 32],
-            }),
+            committee: Some(committee.clone()),
         };
         let adapter = spec.build(Some(test_bls()), None);
         let adapter_id = adapter.descriptor().id;
         let p1 = Address::from([0x51; 32]);
         let p2 = Address::from([0x52; 32]);
         let build_eth_evidence = |height: u64, root: [u8; 32], submitter: Address| {
-            use crate::cross_domain::external::ethereum::layout;
-            let mut payload = vec![0u8; layout::LEN];
-            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
-            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-            payload[layout::STATE_ROOT].copy_from_slice(&root);
+            let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+                height,
+                height + 64,
+                0,
+                &committee,
+                &[0x22; 96],
+                &[0xff; 64],
+                root,
+            );
             crate::cross_domain::external::RawConsensusEvidence {
                 adapter: adapter_id,
                 evidence_version: 2,
@@ -3966,7 +4853,13 @@ mod tests {
         blk.state_root = hex::encode([0xdd; 32]);
         blk.hash = blk.calculate_hash();
         let mut com = commitment(&domain, &blk, 0);
-        com.domain_block_hash = [0xaa; 32];
+        // Keep the commitment's hash authenticated in both the pre-policy
+        // rejection and the post-quorum acceptance; otherwise the test is
+        // rejected by the block-hash binding before it tests quorum.
+        com.domain_block_hash =
+            crate::cross_domain::external::ethereum::parse_update(&pre_ev.payload)
+                .unwrap()
+                .finalized_root;
         com.tx_root = [0u8; 32];
         com.event_root = [0u8; 32];
         com.validator_set_hash = [0u8; 32];
@@ -4520,5 +5413,457 @@ mod tests {
             .withdraw_role_bond(&prover, role)
             .expect("prover bond withdraws once no assigned task remains");
         assert_eq!(returned, bond);
+    }
+
+    #[test]
+    fn object_layer_refuses_charter_on_domain_with_unbound_authority() {
+        use crate::domain::plugin::default_domain;
+        use crate::object_layer::charter::{CharterStatus, CodeProof, DataPolicy, DomainCharter};
+        use crate::object_layer::family::HomeVmFamily;
+        use crate::object_layer::tx::ObjectLayerTx;
+
+        let mut state = AccountState::new();
+        let mut dom = default_domain(77, ConsensusKind::PoA, 45262, "poa-multisig-v1", 1);
+        dom.validator_set_hash = [0u8; 32];
+        let operator = dom.operator.expect("operator set");
+        state.settlement.domains.register(dom).unwrap();
+
+        let ctx = SettlementTxContext {
+            sender: operator,
+            chain_id: crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value(),
+            fee: 0,
+            bls: || Box::new(crate::cross_domain::external::intake::PairingBls),
+        };
+        let tx = SettlementTx::ObjectLayer(Box::new(ObjectLayerTx::Charter {
+            domain: 77,
+            charter: DomainCharter {
+                vm_family: HomeVmFamily::Evm,
+                chain_reference: "1".into(),
+                address_prefix: String::new(),
+                endpoint: vec![0x11; 20],
+                endpoint_code_hash: [0x33; 32],
+                verifier: vec![0x22; 20],
+                verifier_code_hash: [0x44; 32],
+                upgrade_notice: 100,
+                silence_window: 100,
+                data_policy: DataPolicy::Public,
+                status: CharterStatus::Active,
+                operator: None,
+            },
+            proof: CodeProof {
+                endpoint_code_hash: [0x33; 32],
+                verifier_code_hash: [0x44; 32],
+                home_proof: None,
+            },
+        }));
+        let err = execute_settlement_tx(&mut state, &ctx, &tx).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("authority_unbound"),
+            "expected authority_unbound refusal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn storage_attestation_task_rejects_prover_operated_storage_domain() {
+        use crate::domain::storage_params::StorageDomainParams;
+        use crate::settlement::proof_market::{ProofMarketTx, ProofTaskKind};
+
+        let mut state = AccountState::new();
+        let creator = Address::from([0x91; 32]);
+        let prover = Address::from([0x92; 32]);
+        state.add_balance(&creator, 100_000);
+        state.add_balance(&prover, 100_000);
+        state.add_validator(prover, 50_000);
+
+        // Prover registers its own permissionless StorageAttestation domain.
+        let mut prover_domain = crate::domain::plugin::default_domain(
+            77,
+            ConsensusKind::StorageAttestation(StorageDomainParams::default()),
+            45262,
+            "storage-attestation-v1",
+            1,
+        );
+        prover_domain.operator = Some(prover);
+        prover_domain.operator_bond = 1_000_000;
+        state.add_balance(&prover, prover_domain.operator_bond + FEE * 10);
+        register_domain(&mut state, prover_domain).expect("register prover storage domain");
+
+        // Creator funds escrow and opens a StorageAttestation task.
+        let deal_id = [0xAB; 32];
+        execute_settlement_tx(
+            &mut state,
+            &ctx(creator),
+            &SettlementTx::ProofMarket(Box::new(ProofMarketTx::FundEscrow { amount: 1_000 })),
+        )
+        .unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(creator),
+            &SettlementTx::ProofMarket(Box::new(ProofMarketTx::CreateTask {
+                kind: ProofTaskKind::StorageAttestation {
+                    deal_id,
+                    challenge_epoch: 5,
+                },
+                deadline_epoch: 20,
+                reward: 500,
+                slash_condition_hash: [0xC2; 32],
+                min_prover_stake: 0,
+            })),
+        )
+        .unwrap();
+        let task_id = state.proof_market.active_tasks.first().unwrap().task_id;
+        let prover_bond = state.registry.params().min_stake;
+        state.add_balance(&prover, prover_bond);
+        state.bond_prover(&prover, prover_bond).unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(prover),
+            &SettlementTx::ProofMarket(Box::new(ProofMarketTx::AssignTask { task_id })),
+        )
+        .unwrap();
+
+        let forged_commitment = DomainCommitment {
+            domain_id: 77,
+            domain_height: 5,
+            domain_block_hash: [0x10; 32],
+            parent_domain_block_hash: [0u8; 32],
+            state_root: [0x11; 32],
+            tx_root: [0x12; 32],
+            event_root: deal_id,
+            finality_proof_hash: [0x13; 32],
+            consensus_kind: ConsensusKind::StorageAttestation(StorageDomainParams::default()),
+            validator_set_hash: [0x14; 32],
+            timestamp_ms: 100,
+            sequence: 1,
+            producer: Some(prover),
+            state_updates: std::collections::BTreeMap::new(),
+        };
+        let err = execute_settlement_tx(
+            &mut state,
+            &ctx(prover),
+            &SettlementTx::ProofMarket(Box::new(ProofMarketTx::SubmitReceipt {
+                task_id,
+                proof: Box::new(crate::domain::VerifiedDomainCommitment {
+                    commitment: forged_commitment,
+                    proof: FinalityProof::Raw(vec![0xAA]),
+                }),
+            })),
+        )
+        .expect_err("prover-operated storage domain must never satisfy creator's task");
+        assert!(
+            format!("{err:?}").contains("authorized storage domain"),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn object_layer_register_class_requires_bound_domain_operator() {
+        use crate::object_layer::registry::ClassRegistration;
+        let mut state = AccountState::new();
+        let op = Address([0x51; 32]);
+        let squatter = Address([0x52; 32]);
+        let mut dom = default_domain(91, ConsensusKind::PoA, 45262, "poa-authority-quorum", 1);
+        dom.operator = Some(op);
+        dom.validator_set_hash = [0xAA; 32];
+        state.add_balance(&op, dom.operator_bond + FEE);
+        state.add_balance(&squatter, 10_000_000);
+        register_domain(&mut state, dom).unwrap();
+
+        let reg = ClassRegistration {
+            home_domain: 91,
+            kind: crate::object_layer::AssetKind::Fungible,
+            contract: vec![0x11; 20],
+            rule: crate::object_layer::ClassRule::Template {
+                id: crate::object_layer::TemplateId::FungibleV1,
+                params: crate::object_layer::rule::TemplateParams::default(),
+            },
+            slice: crate::object_layer::rule::ClassSlice::default(),
+            slice_source: crate::object_layer::family::SliceSource::AccountAndStorageProof,
+            samples: Vec::new(),
+            bond: 1_000_000,
+            state_proof: None,
+        };
+        let err = execute_settlement_tx(
+            &mut state,
+            &ctx(squatter),
+            &SettlementTx::ObjectLayer(Box::new(
+                crate::object_layer::ObjectLayerTx::RegisterClass(reg),
+            )),
+        )
+        .expect_err("non-operator must not register object class on another operator's domain");
+        assert!(
+            format!("{err:?}").contains("object_layer_class_requires_domain_operator"),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn permissionless_register_domain_refuses_reserved_garden_domain_ids_at_ingest_without_breaking_replay(
+    ) {
+        let garden_id = crate::garden::garden_domain_id(42);
+        let mut domain = pow(garden_id);
+        domain.domain_chain_id = 9_999;
+        let op = operator(&domain);
+        let ingest_tx = crate::core::transaction::Transaction::new_with_chain_id(
+            op,
+            Address::zero(),
+            0,
+            FEE,
+            0,
+            Vec::new(),
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            crate::core::transaction::TransactionType::Settlement(SettlementTx::RegisterDomain(
+                Box::new(domain.clone()),
+            )),
+        );
+        let ingest_err = check_ingest_garden_domain_reservation(&ingest_tx).unwrap_err();
+        assert!(
+            ingest_err.contains("reserved Garden domain id"),
+            "{ingest_err}"
+        );
+
+        // Historical block replay must still apply a pre-upgrade committed
+        // bit-31 registration cleanly, and local Garden registration refuses
+        // the colliding slot instead of corrupting it.
+        let mut chain = crate::chain::blockchain::Blockchain::new(
+            std::sync::Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            None,
+        );
+        chain
+            .state
+            .add_balance(&op, MIN_DOMAIN_OPERATOR_BOND + FEE * 2);
+        execute_settlement_tx(
+            &mut chain.state,
+            &ctx(op),
+            &SettlementTx::RegisterDomain(Box::new(domain)),
+        )
+        .expect("committed pre-upgrade registration replays cleanly");
+        assert!(chain.state.settlement.domains.get(garden_id).is_some());
+
+        let mut local_garden = crate::domain::plugin::default_domain(
+            garden_id,
+            ConsensusKind::PoA,
+            42,
+            "poa-authority-quorum",
+            1,
+        );
+        local_garden.bridge_enabled = false;
+        local_garden.operator = Some(op);
+        local_garden.operator_bond = 0;
+        local_garden.validator_set_hash = [7u8; 32];
+        assert!(
+            chain.register_garden_domain(local_garden).is_err(),
+            "local Garden registration must refuse an already-occupied settlement domain id"
+        );
+    }
+
+    #[test]
+    fn forged_length_prefix_home_event_proof_is_rejected_without_allocating() {
+        // `sequence: u64` + `MerkleProof.siblings: Vec<[u8; 32]>` with a forged
+        // count claiming billions of sibling hashes inside a 24-byte buffer.
+        let mut forged = Vec::with_capacity(24);
+        forged.extend_from_slice(&1u64.to_le_bytes());
+        forged.extend_from_slice(&0x0000_FFFF_FFFF_FFFFu64.to_le_bytes());
+        forged.extend_from_slice(&[0u8; 8]);
+        assert!(crate::network::bounded_bincode::decode_bounded_bincode::<(
+            u64,
+            crate::cross_domain::event_tree::MerkleProof,
+        )>(&forged, 4 * 1024)
+        .is_err());
+    }
+
+    #[test]
+    fn bitcoin_spv_commitment_scrubs_unattested_event_and_state_roots() {
+        use crate::cross_domain::event_tree::{DomainEvent, DomainEventTree};
+        use crate::cross_domain::DomainEventKind;
+        use crate::domain::plugin::default_domain;
+        use crate::domain::types::BITCOIN_SPV_ADAPTER;
+        use crate::settlement::proof_verifier::{ProofVerificationError, SettlementProofVerifier};
+
+        let mut state = AccountState::new();
+        let btc_dom = default_domain(709, ConsensusKind::PoW, 70_900, BITCOIN_SPV_ADAPTER, 6);
+        state
+            .settlement
+            .domains
+            .register(btc_dom)
+            .expect("register bitcoin-spv domain");
+
+        let forged_event = DomainEvent {
+            domain_id: 709,
+            domain_height: 1,
+            event_index: 0,
+            kind: DomainEventKind::Custom(b"forged-lock".to_vec()),
+            emitter: Address::from([0x33; 32]),
+            message: None,
+            payload_hash: [0xEE; 32],
+        };
+        let mut fake_tree = DomainEventTree::new();
+        fake_tree.push(forged_event.clone());
+        let fake_event_root = fake_tree.root();
+        let merkle_proof = fake_tree.proof(0).expect("merkle proof");
+
+        let commitment = DomainCommitment {
+            domain_id: 709,
+            domain_height: 1,
+            domain_block_hash: [0x11; 32],
+            parent_domain_block_hash: [0u8; 32],
+            state_root: [0xAA; 32],
+            tx_root: [0x22; 32],
+            event_root: fake_event_root,
+            finality_proof_hash: [0x44; 32],
+            consensus_kind: ConsensusKind::PoW,
+            validator_set_hash: [0u8; 32],
+            producer: Some(Address::from([0x55; 32])),
+            timestamp_ms: 1_000,
+            sequence: 1,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+        let out = accept_commitment(&mut state, commitment).expect("accept bitcoin-spv commitment");
+        assert!(matches!(out, CommitmentOutcome::Advanced));
+
+        let stored = state
+            .settlement
+            .commitments
+            .find_by_height(709, 1)
+            .expect("stored commitment");
+        assert_eq!(stored.tx_root, [0x22; 32]);
+        assert_eq!(stored.state_root, [0u8; 32]);
+        assert_eq!(stored.event_root, [0u8; 32]);
+
+        let err = SettlementProofVerifier::verify_event_against_commitment(
+            &stored,
+            forged_event,
+            &merkle_proof,
+        )
+        .expect_err("bitcoin-spv commitment must never attest event_root");
+        assert_eq!(err, ProofVerificationError::UnattestedEventRoot);
+    }
+
+    #[test]
+    fn submit_zk_proof_refuses_vesting_locked_fee_and_frozen_or_non_zk_domain() {
+        use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams};
+        use crate::cross_domain::MessageKind;
+        use crate::domain::plugin::default_domain;
+        use crate::execution::zkvm::{prove_bytecode, DEFAULT_CONTRACT_GAS_LIMIT};
+        use crate::prover::{zk_program_hash, ZkProofSubmission};
+        use crate::tokenomics::VestingSchedule;
+        use bud_isa::{Instruction, Opcode};
+
+        let bytecode: Vec<u8> = [
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 7,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        ]
+        .into_iter()
+        .flat_map(u64::to_le_bytes)
+        .collect();
+        let (proof, pi, program) =
+            prove_bytecode(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).expect("prove");
+        let allow_hash = zk_program_hash(&program);
+
+        let mk_sub = |sender: Address, domain_id: u32, h: u64| -> ZkProofSubmission {
+            let payload_hash =
+                ZkProofSubmission::payload_binding_hash(&proof, &pi, &program, domain_id, h);
+            ZkProofSubmission {
+                message: CrossDomainMessage::new(CrossDomainMessageParams {
+                    source_domain: domain_id,
+                    target_domain: domain_id,
+                    source_height: h,
+                    event_index: 0,
+                    nonce: h,
+                    sender,
+                    recipient: Address::zero(),
+                    payload_hash,
+                    kind: MessageKind::Custom(b"zk-proof".to_vec()),
+                    expiry_height: 1_000,
+                }),
+                proof: proof.clone(),
+                public_inputs: pi.clone(),
+                program: program.clone(),
+            }
+        };
+
+        let mut state = AccountState::new();
+        state.current_block_height = 10;
+        let fee = state.registry.params().proof_submission_fee;
+
+        // 1. Active ZK domain, but submitter's full balance is cliff-locked in team_vesting.
+        let mut zk_dom = default_domain(701, ConsensusKind::Zk, 70_100, "budzero-stark-v1", 1);
+        zk_dom.zk_program_allowlist = vec![allow_hash];
+        state
+            .settlement
+            .domains
+            .register(zk_dom)
+            .expect("register zk");
+
+        let vested = Address::from([0x71; 32]);
+        let locked = fee.saturating_mul(4);
+        state.add_balance(&vested, locked);
+        state.team_vesting = Some((
+            vested,
+            VestingSchedule {
+                total: locked,
+                start_epoch: 0,
+                cliff_epochs: 500,
+                duration_epochs: 1_000,
+            },
+        ));
+        assert_eq!(state.spendable_balance(&vested), 0);
+        let sub_v = mk_sub(vested, 701, 1);
+        let err = submit_zk_proof(&mut state, &sub_v, 45_262, 10, 0)
+            .expect_err("cliff-locked vesting balance must never pay proof fee");
+        assert!(
+            err.contains("insufficient balance"),
+            "unexpected err: {err}"
+        );
+        assert_eq!(state.get_balance(&vested), locked);
+        assert_eq!(state.burned_total, 0);
+
+        // 2. Funded submitter, but target domain is non-ZK (Bft) -> refused.
+        let funded = Address::from([0x72; 32]);
+        state.add_balance(&funded, locked);
+        let mut bft_dom = default_domain(702, ConsensusKind::Bft, 70_200, "bft-v1", 1);
+        bft_dom.zk_program_allowlist = vec![allow_hash];
+        state
+            .settlement
+            .domains
+            .register(bft_dom)
+            .expect("register bft");
+        let sub_bft = mk_sub(funded, 702, 1);
+        let err = submit_zk_proof(&mut state, &sub_bft, 45_262, 10, 0)
+            .expect_err("non-ZK domain must refuse submit_zk_proof");
+        assert!(err.contains("not Zk"), "unexpected err: {err}");
+
+        // 3. Frozen ZK domain -> refused before burning fee.
+        state
+            .settlement
+            .domains
+            .set_status(701, DomainStatus::Frozen)
+            .expect("freeze");
+        let sub_frz = mk_sub(funded, 701, 1);
+        let err = submit_zk_proof(&mut state, &sub_frz, 45_262, 10, 0)
+            .expect_err("frozen ZK domain must refuse submit_zk_proof");
+        assert!(
+            err.contains("not active") || err.contains("frozen"),
+            "unexpected err: {err}"
+        );
+        assert_eq!(state.get_balance(&funded), locked);
     }
 }

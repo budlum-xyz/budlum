@@ -112,6 +112,10 @@ impl ColdWalletPolicy {
     /// backwards compatibility, so `check` calls this guard before it accepts
     /// any request; an invalid policy therefore fails closed rather than
     /// becoming a zero-quorum wallet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.chain_id == 0 {
             return Err("chain-id-zero");
@@ -441,6 +445,10 @@ impl ColdWalletState {
     /// but deserialization is not authentication. This guard prevents a
     /// tampered snapshot from smuggling in counters, a budget, or an unbounded
     /// audit log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), &'static str> {
         self.policy.validate()?;
         if self.key_epoch == 0 {
@@ -471,9 +479,13 @@ impl ColdWalletState {
             }
         }
         let mut previous = 0u32;
+        let mut previous_height: Option<u64> = None;
         for rotation in &self.rotations {
             if rotation.key_epoch <= previous || rotation.key_epoch > self.key_epoch {
                 return Err("rotation-epochs-not-monotonic");
+            }
+            if previous_height.is_some_and(|h| rotation.at_height < h) {
+                return Err("rotation-heights-not-monotonic");
             }
             if rotation.reason.is_empty() {
                 return Err("empty-rotation-reason");
@@ -482,13 +494,16 @@ impl ColdWalletState {
                 return Err("rotation-reason-too-long");
             }
             previous = rotation.key_epoch;
+            previous_height = Some(rotation.at_height);
         }
-        // An empty rotation history is valid at epoch one. If a history is
-        // present, its newest entry must explain the current epoch.
+        // An empty rotation history is valid only at epoch one. If a history
+        // is present, its newest entry must explain the current epoch.
         if let Some(last) = self.rotations.last() {
             if last.key_epoch != self.key_epoch {
                 return Err("current-key-epoch-not-recorded");
             }
+        } else if self.key_epoch != 1 {
+            return Err("current-key-epoch-not-recorded");
         }
         Ok(())
     }
@@ -557,28 +572,26 @@ impl ColdWalletState {
                 let next_spent = if self.signed_count == 0 {
                     request.value_atoms
                 } else {
-                    match self.epoch_spent_atoms.checked_add(request.value_atoms) {
-                        Some(total) => total,
-                        None => {
-                            let err = ColdRefusal::EpochBudgetExceeded {
-                                spent: self.epoch_spent_atoms,
-                                requested: request.value_atoms,
-                                budget: self.policy.max_value_per_epoch_atoms,
-                            };
-                            self.record_refusal(request, &err);
-                            return Err(err);
-                        }
-                    }
-                };
-                let next_count = match self.signed_count.checked_add(1) {
-                    Some(count) => count,
-                    None => {
-                        let err = ColdRefusal::InvalidState {
-                            rule: "signed-count-exhausted".to_string(),
+                    if let Some(total) = self.epoch_spent_atoms.checked_add(request.value_atoms) {
+                        total
+                    } else {
+                        let err = ColdRefusal::EpochBudgetExceeded {
+                            spent: self.epoch_spent_atoms,
+                            requested: request.value_atoms,
+                            budget: self.policy.max_value_per_epoch_atoms,
                         };
                         self.record_refusal(request, &err);
                         return Err(err);
                     }
+                };
+                let next_count = if let Some(count) = self.signed_count.checked_add(1) {
+                    count
+                } else {
+                    let err = ColdRefusal::InvalidState {
+                        rule: "signed-count-exhausted".to_string(),
+                    };
+                    self.record_refusal(request, &err);
+                    return Err(err);
                 };
                 self.last_signed_height = request.height;
                 self.last_signed_nonce = request.nonce;
@@ -1461,6 +1474,32 @@ mod tests {
                 .sign_with_quorum(&req, cold.key_epoch, &sigs)
                 .expect("fresh-epoch signatures pass");
             assert_eq!(out.key_epoch, 2);
+        }
+
+        #[test]
+        fn validate_refuses_epoch_above_one_without_rotation_and_regressing_heights() {
+            let mut tampered = ColdWalletState::new(quorum_policy());
+            tampered.key_epoch = 3;
+            tampered.rotations.clear();
+            let err = tampered
+                .validate()
+                .expect_err("key_epoch > 1 with empty rotation history must be refused");
+            assert_eq!(err, "current-key-epoch-not-recorded");
+
+            let mut regressing = ColdWalletState::new(quorum_policy());
+            regressing.rotate_key(200, "first rotation").unwrap();
+            regressing
+                .rotations
+                .push(crate::settlement::cold_wallet::KeyRotation {
+                    key_epoch: 3,
+                    at_height: 150,
+                    reason: "tampered snapshot regression".into(),
+                });
+            regressing.key_epoch = 3;
+            let herr = regressing
+                .validate()
+                .expect_err("regressing rotation heights must be refused");
+            assert_eq!(herr, "rotation-heights-not-monotonic");
         }
     }
 }

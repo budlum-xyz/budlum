@@ -23,11 +23,13 @@
 //!   registration, decided by the bond that backs it; no other key holds
 //!   them, and there is no network-wide key at all.
 //!
-//! Slashing a prover is not a door here. The registry's `slash` takes the
-//! challenger's word that an accepted attestation was wrong; there is no
-//! contradiction proof format yet, and a door that slashes on a claim would
-//! let anyone take any carrier's bond. `bud_slashExternalProver` stays
-//! refused until a proof that an attestation was false is defined.
+//! - contradiction challenge: any non-self challenger supplying a second
+//!   cryptographically verified finality proof at the same external
+//!   `(height, evidence_version)` and distinct `state_root`; atomically
+//!   withdraws the false attestation, freezes the domain, slashes the
+//!   carrier's escrowed bond at the routing ceiling, and pays the challenger
+//!   reward (`bud_slashExternalProver` RPC stays refused in favor of this
+//!   signed in-block transaction).
 
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -72,6 +74,48 @@ pub enum ExternalDomainTx {
         domain: DomainKey,
         policy: QuorumPolicy,
     },
+    /// Prove an accepted external finality attestation false by supplying a
+    /// cryptographically verified conflicting proof for the same external
+    /// `(height, evidence_version)` and distinct `state_root`. Atomically
+    /// withdraws the false attestation, freezes the domain (`Faulted`),
+    /// slashes the carrier's escrowed bond, and pays the challenger reward.
+    /// APPENDED (tag `6`).
+    ChallengeContradiction(Box<RawConsensusEvidence>),
+    /// Refute an accepted attestation whose slot the external chain has moved
+    /// past, by supplying the successor proof that descends from a different
+    /// parent. The successor's own adapter verifies it; the predecessor it
+    /// contradicts is found from the accepted book at `height - 1`.
+    /// APPENDED (tag `7`).
+    ChallengeAncestry(Box<RawConsensusEvidence>),
+    /// Submit an objective cryptographic protocol equivocation or `BitVM2`
+    /// single-step `DisproveScript` fraud proof against a serving external
+    /// domain (`HotStuffQc`, `CasperFfg`, `MysticetiDag`, or `BitVmCovenant`),
+    /// atomically recording an adverse round and freezing the domain
+    /// (`DomainState::Faulted`). APPENDED LAST (tag `8`).
+    SubmitFaultProof {
+        domain: DomainKey,
+        proof: ObjectiveFaultProof,
+    },
+}
+
+/// Objective protocol-level cryptographic equivocation or single-step fraud
+/// proof carried by [`ExternalDomainTx::SubmitFaultProof`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObjectiveFaultProof {
+    /// Double-vote equivocation in the same `(epoch, view)` for an
+    /// `AdapterSpec::HotStuffQc` domain.
+    HotStuffEquivocation(Box<crate::cross_domain::external::hotstuff::HotStuffEquivocationProof>),
+    /// Rule-1 (double-vote) or Rule-2 (surround-vote) equivocation for an
+    /// `AdapterSpec::CasperFfg` domain.
+    CasperFfgEquivocation(Box<crate::cross_domain::external::casper_ffg::FfgEquivocationProof>),
+    /// Same-round conflicting vertex equivocation for an
+    /// `AdapterSpec::MysticetiDag` domain.
+    MysticetiEquivocation(
+        Box<crate::cross_domain::external::mysticeti_dag::MysticetiEquivocationProof>,
+    ),
+    /// Single-step `DisproveScript` execution fraud proof for an
+    /// `AdapterSpec::BitVmCovenant` domain.
+    BitVmDisprove(Box<crate::cross_domain::external::bitvm_covenant::DisproveScriptProof>),
 }
 
 /// What the executor hands the door: the signer, the chain, the fee the
@@ -88,11 +132,13 @@ pub struct ExternalDomainTxContext {
 /// Why an external-domain transaction was refused. A refused transaction
 /// changes nothing; a submission the registry refused but recorded is not an
 /// error (see [`execute_external_domain_tx`]).
-/// exposed for execute_external_domain_tx: the executor's ExternalDomain arm reports it by its message, not by name.
+/// exposed for `execute_external_domain_tx`: reported via `Display` in executor.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExternalDomainTxError {
     #[error("external domains are not enabled on mainnet")]
     MainnetDisabled,
+    #[error("ethereum sync committee finality is closed on testnet")]
+    TestnetSyncCommitteeDisabled,
     #[error("the registration poster must be the transaction sender")]
     PosterIsNotSender,
     #[error("the evidence submitter must be the transaction sender")]
@@ -126,6 +172,43 @@ fn is_mainnet(chain_id: u64) -> bool {
             .value()
 }
 
+fn is_testnet(chain_id: u64) -> bool {
+    chain_id
+        == crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value()
+}
+
+/// Whether this transaction operates on an Ethereum sync-committee adapter.
+///
+/// The public testnet gate covers the complete lifecycle, not only
+/// registration. This keeps restored pre-activation state fail-closed too.
+fn uses_ethereum_sync(state: &AccountState, tx: &ExternalDomainTx) -> bool {
+    let entry_is_sync = |domain: &DomainKey| {
+        state
+            .settlement
+            .external_intake
+            .entries
+            .get(domain)
+            .is_some_and(|entry| matches!(&entry.spec, AdapterSpec::EthereumSync { .. }))
+    };
+    match tx {
+        ExternalDomainTx::Register(request) => {
+            matches!(&request.spec, AdapterSpec::EthereumSync { .. })
+        }
+        ExternalDomainTx::SubmitEvidence(evidence)
+        | ExternalDomainTx::ChallengeContradiction(evidence)
+        | ExternalDomainTx::ChallengeAncestry(evidence) => {
+            entry_is_sync(&DomainKey::from_parts(&evidence.adapter, &evidence.network))
+        }
+        ExternalDomainTx::BondProver { domain, .. }
+        | ExternalDomainTx::Readmit { domain, .. }
+        | ExternalDomainTx::ScheduleFork { domain, .. }
+        | ExternalDomainTx::SetQuorumPolicy { domain, .. }
+        | ExternalDomainTx::SubmitFaultProof { domain, .. } => entry_is_sync(domain),
+    }
+}
+
 /// Apply one external-domain write to `state`.
 ///
 /// Every variant decides its refusals before it writes, and a refusal leaves
@@ -146,6 +229,9 @@ pub fn execute_external_domain_tx(
 ) -> Result<(), ExternalDomainTxError> {
     if is_mainnet(ctx.chain_id) {
         return Err(ExternalDomainTxError::MainnetDisabled);
+    }
+    if is_testnet(ctx.chain_id) && uses_ethereum_sync(state, tx) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
     }
     match tx {
         ExternalDomainTx::Register(request) => register(state, ctx, request),
@@ -172,11 +258,19 @@ pub fn execute_external_domain_tx(
         }
         ExternalDomainTx::SetQuorumPolicy { domain, policy } => {
             require_registrant(state, ctx, domain)?;
+            require_domain_mutable(state, domain)?;
             state
                 .settlement
                 .external_intake
                 .set_quorum_policy(domain, *policy)
                 .map_err(ExternalDomainTxError::from)
+        }
+        ExternalDomainTx::ChallengeContradiction(evidence) => {
+            challenge_contradiction(state, ctx, evidence)
+        }
+        ExternalDomainTx::ChallengeAncestry(evidence) => challenge_ancestry(state, ctx, evidence),
+        ExternalDomainTx::SubmitFaultProof { domain, proof } => {
+            submit_fault_proof(state, domain, proof)
         }
     }
 }
@@ -196,8 +290,12 @@ fn fundable_bond(
 ) -> Result<u64, ExternalDomainTxError> {
     let bond =
         u64::try_from(bond_atoms).map_err(|_| ExternalDomainTxError::BondTooLarge(bond_atoms))?;
-    let balance = state.get_balance(&ctx.sender);
-    let needed = bond.saturating_add(ctx.fee);
+    // The spendable balance, not the raw one: a bond is a spend, and the
+    // locked part of a vesting account does not fund collateral.
+    let balance = state.spendable_balance(&ctx.sender);
+    let needed = bond
+        .checked_add(ctx.fee)
+        .ok_or(ExternalDomainTxError::BondTooLarge(bond_atoms))?;
     if balance < needed {
         return Err(ExternalDomainTxError::BondUnfunded { needed, balance });
     }
@@ -221,31 +319,69 @@ fn require_registrant(
     Ok(())
 }
 
+fn require_domain_mutable(
+    state: &AccountState,
+    domain: &DomainKey,
+) -> Result<(), ExternalDomainTxError> {
+    use crate::cross_domain::external::profile::DomainState;
+    let reg = state
+        .settlement
+        .external_intake
+        .registry
+        .domain(domain)
+        .ok_or(ExternalDomainTxError::UnknownDomain)?;
+    if matches!(
+        reg.record.state,
+        DomainState::QuantumIsolated | DomainState::Retired
+    ) {
+        return Err(ExternalDomainTxError::Intake(
+            "domain is quantum-isolated or retired and cannot mutate rules or readmit".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn register(
     state: &mut AccountState,
     ctx: &ExternalDomainTxContext,
     request: &RegistrationRequest,
 ) -> Result<(), ExternalDomainTxError> {
+    if is_testnet(ctx.chain_id) && matches!(request.spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
     if request.poster != ctx.sender {
         return Err(ExternalDomainTxError::PosterIsNotSender);
     }
     let bond = fundable_bond(state, ctx, request.bond_atoms)?;
     let bls = bls_for(&request.spec, ctx);
+    let observer_adapter = request
+        .spec
+        .build(bls_for(&request.spec, ctx), Some(request.golden.clone()));
+    let (_, observed_crypto) =
+        crate::cross_domain::external::admit_observed(observer_adapter.as_ref(), &request.policy);
     // The bond is locked first, from a balance already checked to hold it
     // and the fee, and handed back if the intake refuses: a registration
     // never stands without the bond behind it.
     state
         .lock_external_bond(&ctx.sender, bond)
         .map_err(ExternalDomainTxError::Intake)?;
-    if let Err(e) = state
+    let key = match state
         .settlement
         .external_intake
         .register_domain(request.clone(), bls)
     {
-        state
-            .release_external_bond(&ctx.sender, bond)
-            .map_err(ExternalDomainTxError::Intake)?;
-        return Err(e.into());
+        Ok(k) => k,
+        Err(e) => {
+            state
+                .release_external_bond(&ctx.sender, bond)
+                .map_err(ExternalDomainTxError::Intake)?;
+            return Err(e.into());
+        }
+    };
+    if !observed_crypto.is_empty() {
+        if let Some(reg) = state.settlement.external_intake.registry.domain_mut(&key) {
+            reg.record.crypto_facts.merge(&observed_crypto);
+        }
     }
     Ok(())
 }
@@ -263,6 +399,9 @@ fn submit_evidence(
     let Some(entry) = intake.entries.get(&key) else {
         return Err(ExternalDomainTxError::UnknownDomain);
     };
+    if is_testnet(ctx.chain_id) && matches!(entry.spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
     let bls = bls_for(&entry.spec, ctx);
     let before = intake.clone();
     match intake.submit_evidence(evidence, bls) {
@@ -273,6 +412,120 @@ fn submit_evidence(
         Err(_) if *intake != before => Ok(()),
         Err(e) => Err(e.into()),
     }
+}
+
+fn challenge_contradiction(
+    state: &mut AccountState,
+    ctx: &ExternalDomainTxContext,
+    evidence: &RawConsensusEvidence,
+) -> Result<(), ExternalDomainTxError> {
+    if evidence.submitter != ctx.sender {
+        return Err(ExternalDomainTxError::SubmitterIsNotSender);
+    }
+    let key = DomainKey::from_parts(&evidence.adapter, &evidence.network);
+    let Some(spec) = state
+        .settlement
+        .external_intake
+        .entries
+        .get(&key)
+        .map(|entry| entry.spec.clone())
+    else {
+        return Err(ExternalDomainTxError::UnknownDomain);
+    };
+    if is_testnet(ctx.chain_id) && matches!(spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
+    let bls = bls_for(&spec, ctx);
+    let intake_before = state.settlement.external_intake.clone();
+    let outcome: crate::cross_domain::external::intake::ContradictionSlashOutcome = state
+        .settlement
+        .external_intake
+        .slash_on_contradiction(evidence, ctx.sender, bls)?;
+    let slashed = match u64::try_from(outcome.slashed_atoms) {
+        Ok(v) => v,
+        Err(_) => {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::BondTooLarge(outcome.slashed_atoms));
+        }
+    };
+    let reward = match u64::try_from(outcome.challenger_reward_atoms) {
+        Ok(v) => v,
+        Err(_) => {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::BondTooLarge(
+                outcome.challenger_reward_atoms,
+            ));
+        }
+    };
+    if slashed > 0 {
+        if let Err(err) =
+            state.slash_external_bond(&outcome.slashed_prover, slashed, reward, &ctx.sender)
+        {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::Intake(err));
+        }
+    }
+    Ok(())
+}
+
+/// The cross-slot door: a successor proof refutes the slot it descends past.
+///
+/// The money half is identical to [`challenge_contradiction`]: the intake
+/// decides, then `slash_external_bond` moves the atoms, and any refusal on the
+/// way restores the intake snapshot so a failed challenge changes nothing.
+fn challenge_ancestry(
+    state: &mut AccountState,
+    ctx: &ExternalDomainTxContext,
+    evidence: &RawConsensusEvidence,
+) -> Result<(), ExternalDomainTxError> {
+    if evidence.submitter != ctx.sender {
+        return Err(ExternalDomainTxError::SubmitterIsNotSender);
+    }
+    let key = DomainKey::from_parts(&evidence.adapter, &evidence.network);
+    let Some(spec) = state
+        .settlement
+        .external_intake
+        .entries
+        .get(&key)
+        .map(|entry| entry.spec.clone())
+    else {
+        return Err(ExternalDomainTxError::UnknownDomain);
+    };
+    if is_testnet(ctx.chain_id) && matches!(spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
+    let bls = bls_for(&spec, ctx);
+    let intake_before = state.settlement.external_intake.clone();
+    let outcome = state
+        .settlement
+        .external_intake
+        .adjudicate_ancestry(evidence, ctx.sender, bls)?;
+    let refuted = outcome;
+    let slashed = match u64::try_from(refuted.slashed_atoms) {
+        Ok(v) => v,
+        Err(_) => {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::BondTooLarge(refuted.slashed_atoms));
+        }
+    };
+    let reward = match u64::try_from(refuted.challenger_reward_atoms) {
+        Ok(v) => v,
+        Err(_) => {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::BondTooLarge(
+                refuted.challenger_reward_atoms,
+            ));
+        }
+    };
+    if slashed > 0 {
+        if let Err(err) =
+            state.slash_external_bond(&refuted.slashed_prover, slashed, reward, &ctx.sender)
+        {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::Intake(err));
+        }
+    }
+    Ok(())
 }
 
 fn bond_prover(
@@ -304,6 +557,11 @@ fn readmit(
     domain: &DomainKey,
     reason: &str,
 ) -> Result<(), ExternalDomainTxError> {
+    if reason.trim().is_empty() {
+        return Err(ExternalDomainTxError::Intake(
+            "readmission reason cannot be empty or whitespace".into(),
+        ));
+    }
     if reason.len() > MAX_READMIT_REASON_BYTES {
         return Err(ExternalDomainTxError::ReasonTooLong {
             len: reason.len(),
@@ -311,6 +569,25 @@ fn readmit(
         });
     }
     require_registrant(state, ctx, domain)?;
+    require_domain_mutable(state, domain)?;
+    {
+        let reg = state
+            .settlement
+            .external_intake
+            .registry
+            .domain(domain)
+            .ok_or(ExternalDomainTxError::UnknownDomain)?;
+        let required = reg.economics.required_bond_atoms();
+        let live_total = reg
+            .provers
+            .values()
+            .fold(0u128, |acc, bond| acc.saturating_add(bond.live_atoms()));
+        if live_total < required {
+            return Err(ExternalDomainTxError::Intake(format!(
+                "cannot readmit with live prover collateral {live_total} below required floor {required}"
+            )));
+        }
+    }
     let intake = &mut state.settlement.external_intake;
     let Some(entry) = intake.entries.get(domain) else {
         return Err(ExternalDomainTxError::UnknownDomain);
@@ -321,11 +598,17 @@ fn readmit(
     let adapter = entry
         .spec
         .build(bls_for(&entry.spec, ctx), Some(entry.golden.clone()));
-    let admission = crate::cross_domain::external::admit(adapter.as_ref(), &entry.policy);
+    let (admission, observed_crypto) =
+        crate::cross_domain::external::admit_observed(adapter.as_ref(), &entry.policy);
     intake
         .registry
         .readmit(domain, &admission, reason)
         .map_err(|e| ExternalDomainTxError::Intake(e.to_string()))?;
+    if !observed_crypto.is_empty() {
+        if let Some(reg) = intake.registry.domain_mut(domain) {
+            reg.record.crypto_facts.merge(&observed_crypto);
+        }
+    }
     if let Some(entry) = intake.entries.get_mut(domain) {
         entry.admission = admission;
     }
@@ -339,6 +622,7 @@ fn schedule_fork(
     fork_height: u64,
     grace_heights: u64,
 ) -> Result<(), ExternalDomainTxError> {
+    require_domain_mutable(state, domain)?;
     let intake = &mut state.settlement.external_intake;
     let Some(reg) = intake.registry.domain(domain) else {
         return Err(ExternalDomainTxError::UnknownDomain);
@@ -361,6 +645,29 @@ fn schedule_fork(
         .map_err(ExternalDomainTxError::Fork)
 }
 
+fn submit_fault_proof(
+    state: &mut AccountState,
+    domain: &DomainKey,
+    proof: &ObjectiveFaultProof,
+) -> Result<(), ExternalDomainTxError> {
+    let intake = &mut state.settlement.external_intake;
+    match proof {
+        ObjectiveFaultProof::HotStuffEquivocation(hs) => intake
+            .adjudicate_hotstuff_equivocation(domain, hs)
+            .map(|_| ()),
+        ObjectiveFaultProof::CasperFfgEquivocation(ffg) => intake
+            .adjudicate_casper_ffg_equivocation(domain, ffg)
+            .map(|_| ()),
+        ObjectiveFaultProof::MysticetiEquivocation(my) => intake
+            .adjudicate_mysticeti_equivocation(domain, my)
+            .map(|_| ()),
+        ObjectiveFaultProof::BitVmDisprove(bv) => {
+            intake.adjudicate_bitvm_disprove(domain, bv).map(|_| ())
+        }
+    }
+    .map_err(ExternalDomainTxError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,7 +677,7 @@ mod tests {
     use crate::cross_domain::external::versioning::VersionPolicy;
     use crate::cross_domain::external::DomainState;
 
-    const TESTNET: u64 = 45261;
+    const DEVNET: u64 = 45262;
 
     /// The intake tests' strict fixture verifier: it refuses the corruptions
     /// the admission probes inject, without pairing arithmetic.
@@ -395,6 +702,10 @@ mod tests {
             }
             Ok(())
         }
+
+        fn sync_committee_closed(&self) -> bool {
+            false
+        }
     }
 
     fn test_bls() -> Box<dyn BlsVerifier> {
@@ -408,7 +719,7 @@ mod tests {
     fn ctx(sender: Address) -> ExternalDomainTxContext {
         ExternalDomainTxContext {
             sender,
-            chain_id: TESTNET,
+            chain_id: DEVNET,
             fee: 10,
             bls: test_bls,
         }
@@ -426,16 +737,20 @@ mod tests {
     }
 
     fn evidence(submitter: Address, height: u64, root: [u8; 32]) -> RawConsensusEvidence {
-        let mut payload = vec![0u8; layout::LEN];
-        payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-        payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-        payload[layout::ATTESTED_SLOT].copy_from_slice(&(height * 2).to_le_bytes());
-        payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-        payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-        payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-        payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-        payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-        payload[layout::STATE_ROOT].copy_from_slice(&root);
+        let committee = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        };
+        let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+            height,
+            height * 2,
+            0,
+            &committee,
+            &[0x22; 96],
+            &[0xff; 64],
+            root,
+        );
         let adapter = spec().build(Some(test_bls()), None);
         RawConsensusEvidence {
             adapter: adapter.descriptor().id,
@@ -472,6 +787,16 @@ mod tests {
         let mut state = AccountState::new();
         let poster = addr(9);
         state.add_balance(&poster, bond() * 4);
+        if let AdapterSpec::EthereumSync {
+            network,
+            committee: Some(committee),
+        } = spec()
+        {
+            state
+                .settlement
+                .external_intake
+                .pin_ethereum_committee(network, committee);
+        }
         let tx = ExternalDomainTx::Register(Box::new(request(poster)));
         execute_external_domain_tx(&mut state, &ctx(poster), &tx).expect("registers");
         let key = *state
@@ -500,6 +825,39 @@ mod tests {
             .expect("entry");
         assert_eq!(entry.registrant, poster);
         assert!(!state.settlement.is_empty());
+    }
+
+    /// The bond is collateral moved out of the
+    /// sender's balance, so it is a spend. The vesting lock of the team
+    /// account holds against it: locked funds cannot be escrowed as a bond.
+    #[test]
+    fn vesting_gate_covers_external_collateral() {
+        let mut state = AccountState::new();
+        let poster = addr(9);
+        state.add_balance(&poster, bond() * 4);
+        state.team_vesting = Some((
+            poster,
+            crate::tokenomics::VestingSchedule {
+                total: bond() * 4,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        assert_eq!(
+            state.spendable_balance(&poster),
+            0,
+            "pre-cliff: nothing is spendable"
+        );
+        let tx = ExternalDomainTx::Register(Box::new(request(poster)));
+        let err = execute_external_domain_tx(&mut state, &ctx(poster), &tx).unwrap_err();
+        assert!(
+            matches!(err, ExternalDomainTxError::BondUnfunded { .. }),
+            "unexpected refusal: {err:?}"
+        );
+        assert_eq!(state.get_balance(&poster), bond() * 4);
+        assert!(!state.external_bond_escrow.contains_key(&poster));
+        assert!(state.settlement.is_empty());
     }
 
     #[test]
@@ -535,13 +893,26 @@ mod tests {
         let mut state = AccountState::new();
         let poster = addr(9);
         state.add_balance(&poster, bond() * 4);
+        if let AdapterSpec::EthereumSync {
+            network,
+            committee: Some(committee),
+        } = spec()
+        {
+            state
+                .settlement
+                .external_intake
+                .pin_ethereum_committee(network, committee);
+        }
+        let root_before = state.settlement.root();
         let mut bad = request(poster);
         // A golden sample with no signers cannot verify: admission refuses.
         bad.golden.payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0x00; 64]);
         let tx = ExternalDomainTx::Register(Box::new(bad));
         let err = execute_external_domain_tx(&mut state, &ctx(poster), &tx).unwrap_err();
         assert!(matches!(err, ExternalDomainTxError::Intake(_)), "{err}");
-        assert!(state.settlement.is_empty());
+        assert!(state.settlement.external_intake.registry.is_empty());
+        assert!(state.external_bond_escrow.is_empty());
+        assert_eq!(state.settlement.root(), root_before);
         assert_eq!(state.get_balance(&poster), bond() * 4);
     }
 
@@ -719,5 +1090,802 @@ mod tests {
         let err = execute_external_domain_tx(&mut state, &ctx(poster), &tx).unwrap_err();
         assert!(matches!(err, ExternalDomainTxError::Fork(_)), "{err}");
         assert_eq!(state.settlement.root(), before);
+    }
+
+    #[test]
+    fn challenge_contradiction_slashes_carrier_freezes_domain_and_refuses_self_or_forged() {
+        use crate::cross_domain::external::profile::DomainState;
+
+        let (mut state, key, poster) = registered();
+        let challenger = addr(42);
+        state.add_balance(&challenger, 10_000);
+
+        // 1. Accept initial attestation at height 200 for state_root [0xAA; 32].
+        let accepted = evidence(poster, 200, [0xAA; 32]);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(accepted)),
+        )
+        .expect("initial evidence accepted");
+
+        let pre_root = state.settlement.root();
+        let pre_escrow = state
+            .external_bond_escrow
+            .get(&poster)
+            .copied()
+            .expect("poster escrowed bond");
+        let pre_challenger_bal = state.get_balance(&challenger);
+
+        // 2. Self-challenge MUST be refused with zero state change.
+        let self_ev = evidence(poster, 200, [0xBB; 32]);
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(self_ev)),
+        )
+        .is_err());
+        assert_eq!(state.settlement.root(), pre_root);
+
+        // 3. Same state_root "contradiction" MUST be refused with zero state change.
+        let same_root_ev = evidence(challenger, 200, [0xAA; 32]);
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(same_root_ev)),
+        )
+        .is_err());
+        assert_eq!(state.settlement.root(), pre_root);
+
+        // 4. Forged/corrupted proof (zeroed BLS signature) MUST be refused with zero state change.
+        let mut forged = evidence(challenger, 200, [0xBB; 32]);
+        forged.payload[crate::cross_domain::external::ethereum::layout::SIGNATURE].fill(0);
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(forged)),
+        )
+        .is_err());
+        assert_eq!(state.settlement.root(), pre_root);
+        assert_eq!(state.external_bond_escrow.get(&poster), Some(&pre_escrow));
+
+        // 5. Valid conflicting proof for the same (height=200, version=2) and root [0xBB; 32]
+        // withdraws the false attestation, freezes the domain, slashes poster's escrow,
+        // and rewards challenger without minting net supply.
+        let valid_contradiction = evidence(challenger, 200, [0xBB; 32]);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(valid_contradiction.clone())),
+        )
+        .expect("verified contradiction slashes carrier and freezes domain");
+
+        let post_escrow = state
+            .external_bond_escrow
+            .get(&poster)
+            .copied()
+            .unwrap_or(0);
+        let post_challenger_bal = state.get_balance(&challenger);
+        assert!(post_escrow < pre_escrow, "carrier bond must be slashed");
+        assert!(
+            post_challenger_bal > pre_challenger_bal,
+            "challenger must receive slash reward"
+        );
+        let slashed_delta = pre_escrow - post_escrow;
+        let reward_delta = post_challenger_bal - pre_challenger_bal;
+        assert!(
+            reward_delta <= slashed_delta,
+            "challenger reward must never exceed slashed bond (conservation)"
+        );
+
+        let reg = state
+            .settlement
+            .external_intake
+            .registry
+            .domain(&key)
+            .expect("domain registered");
+        assert_eq!(reg.record.state, DomainState::Faulted);
+        assert!(!reg.attestations.contains_key(&(200, 2)));
+
+        // 6. Replaying the same contradiction after slashing MUST fail cleanly.
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(valid_contradiction)),
+        )
+        .is_err());
+    }
+
+    /// The ancestry door must fail closed on an adapter that binds no parent
+    /// digest: the default is "cannot answer", never "assume the parent".
+    #[test]
+    fn challenge_ancestry_is_refused_when_the_adapter_binds_no_parent() {
+        let (mut state, _key, poster) = registered();
+        let challenger = addr(42);
+        state.add_balance(&challenger, 10_000);
+        let accepted = evidence(poster, 200, [0xAA; 32]);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(accepted)),
+        )
+        .expect("initial evidence accepted");
+        let pre_root = state.settlement.root();
+        let pre_escrow = state.external_bond_escrow.get(&poster).copied();
+
+        let successor = evidence(challenger, 201, [0xBB; 32]);
+        assert!(
+            execute_external_domain_tx(
+                &mut state,
+                &ctx(challenger),
+                &ExternalDomainTx::ChallengeAncestry(Box::new(successor)),
+            )
+            .is_err(),
+            "an unbound parent cannot refute anything"
+        );
+        assert_eq!(
+            state.settlement.root(),
+            pre_root,
+            "a refusal writes nothing"
+        );
+        assert_eq!(state.external_bond_escrow.get(&poster).copied(), pre_escrow);
+    }
+
+    #[test]
+    fn register_seeds_crqc_isolation_and_readmit_blocks_isolated_or_underbonded() {
+        let (mut state, key, poster) = registered();
+        let challenger = addr(42);
+
+        // Freshly registered classical EthereumSync domain is already visible to
+        // CRQC isolation before any attestation lands, and Readmit cannot undo it.
+        let mut crqc_state = state.clone();
+        assert_eq!(
+            crqc_state
+                .settlement
+                .external_intake
+                .registry
+                .isolate_classical_domains(),
+            1
+        );
+        assert!(execute_external_domain_tx(
+            &mut crqc_state,
+            &ctx(poster),
+            &ExternalDomainTx::Readmit {
+                domain: key,
+                reason: "attempting to bypass CRQC quarantine".into(),
+            },
+        )
+        .is_err());
+        assert!(execute_external_domain_tx(
+            &mut crqc_state,
+            &ctx(poster),
+            &ExternalDomainTx::SetQuorumPolicy {
+                domain: key,
+                policy: QuorumPolicy::strict(2, 3),
+            },
+        )
+        .is_err());
+
+        // After slashing drains live collateral below the required floor, neither
+        // blank reasons nor unreplenished collateral may readmit.
+        let ev_a = evidence(poster, 210, [0xA1; 32]);
+        let ev_digest = ev_a.digest();
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(ev_a)),
+        )
+        .unwrap();
+        state
+            .settlement
+            .external_intake
+            .registry
+            .mark_faulted(&key, "contradicted height 210")
+            .unwrap();
+        state
+            .settlement
+            .external_intake
+            .registry
+            .slash(&key, poster, ev_digest, 1_000, challenger)
+            .unwrap();
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::Readmit {
+                domain: key,
+                reason: "   ".into(),
+            },
+        )
+        .is_err());
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::Readmit {
+                domain: key,
+                reason: "operator audited after slash".into(),
+            },
+        )
+        .is_err());
+
+        // Replenishing bond up to required floor restores honest readmission.
+        // Bonding a fresh prover at the required floor restores honest readmission.
+        let backup_prover = Address([11; 32]);
+        state.get_or_create(&backup_prover).balance = 5_000_000;
+        let required_bond = state
+            .settlement
+            .external_intake
+            .registry
+            .domain(&key)
+            .expect("domain stays registered while quarantined")
+            .economics
+            .required_bond_atoms();
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(backup_prover),
+            &ExternalDomainTx::BondProver {
+                domain: key,
+                bond_atoms: required_bond,
+            },
+        )
+        .unwrap();
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::Readmit {
+                domain: key,
+                reason: "bond replenished and adapter verified".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn submit_fault_proof_freezes_hotstuff_casper_mysticeti_bitvm_and_rejects_replay() {
+        use crate::crypto::primitives::{KeyPair, PqKeyPair};
+
+        let mut state = AccountState::new();
+        state.settlement.external_intake.on_block_committed(50);
+        let poster = addr(21);
+        state.add_balance(&poster, 50_000_000);
+        let challenger = addr(22);
+
+        let mut non_slash = VerificationPolicy::strict(0);
+        non_slash.require_slashable = false;
+        let econ = IntakeState::conservative_economics(1_000);
+        let ed = KeyPair::from_seed(&[0x51; 32]).expect("ed");
+        let pq = PqKeyPair::generate();
+
+        let (hs_key, hs_proof) =
+            check_hotstuff_fault_tx(&mut state, poster, challenger, &non_slash, econ);
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: hs_key,
+                proof: ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_proof.clone())),
+            },
+        )
+        .is_err());
+        check_casper_fault_tx(
+            &mut state,
+            (poster, challenger),
+            &non_slash,
+            econ,
+            &ed,
+            &pq,
+            hs_proof,
+        );
+        check_mysticeti_fault_tx(&mut state, (poster, challenger), &non_slash, econ, &ed, &pq);
+        check_bitvm_fault_tx(&mut state, (poster, challenger), &non_slash, econ, &ed, &pq);
+    }
+
+    fn check_hotstuff_fault_tx(
+        state: &mut AccountState,
+        poster: Address,
+        challenger: Address,
+        non_slash: &VerificationPolicy,
+        econ: crate::cross_domain::external::DomainEconomics,
+    ) -> (
+        DomainKey,
+        crate::cross_domain::external::hotstuff::HotStuffEquivocationProof,
+    ) {
+        use crate::cross_domain::external::hotstuff::{
+            hotstuff_fault_test_fixture, sign_hotstuff_equivocation_proof,
+        };
+
+        let hs_net = "aptos-hotstuff-tx";
+        let (hs_committee, hs_keys, hs_golden) = hotstuff_fault_test_fixture(hs_net, 7, poster);
+        state
+            .settlement
+            .external_intake
+            .pin_hotstuff_committee(hs_net, hs_committee.clone());
+        let hs_spec = AdapterSpec::HotStuffQc {
+            network: hs_net.to_string(),
+            committee: Some(hs_committee),
+        };
+        let hs_adapter = hs_spec.build(None, None);
+        let ver = hs_adapter
+            .descriptor()
+            .accepted_evidence_versions
+            .first()
+            .copied()
+            .unwrap_or(1);
+        execute_external_domain_tx(
+            state,
+            &ctx(poster),
+            &ExternalDomainTx::Register(Box::new(RegistrationRequest {
+                spec: hs_spec,
+                policy: non_slash.clone(),
+                economics: econ,
+                versions: VersionPolicy::single(hs_adapter.descriptor().id, ver, 0),
+                golden: hs_golden,
+                bond_atoms: econ.required_bond_atoms(),
+                poster,
+            })),
+        )
+        .expect("register hotstuff");
+        let hs_key = DomainKey::from_parts(&hs_adapter.descriptor().id, hs_net);
+
+        let Some((hs_ed, hs_pq)) = hs_keys.first() else {
+            panic!("missing hotstuff fixture key");
+        };
+        let hs_proof =
+            sign_hotstuff_equivocation_proof(hs_net, 7, 45, [0xA1; 32], [0xB2; 32], hs_ed, hs_pq);
+        let mut mainnet_ctx = ctx(challenger);
+        mainnet_ctx.chain_id = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let bad_tx = |proof| ExternalDomainTx::SubmitFaultProof {
+            domain: hs_key,
+            proof: ObjectiveFaultProof::HotStuffEquivocation(Box::new(proof)),
+        };
+        assert!(matches!(
+            execute_external_domain_tx(state, &mainnet_ctx, &bad_tx(hs_proof.clone())),
+            Err(ExternalDomainTxError::MainnetDisabled)
+        ));
+        let mut forged_hs = hs_proof.clone();
+        forged_hs.vote_a.pq_sig.clear();
+        assert!(execute_external_domain_tx(state, &ctx(challenger), &bad_tx(forged_hs)).is_err());
+        assert_eq!(
+            state
+                .settlement
+                .external_intake
+                .registry
+                .domain(&hs_key)
+                .expect("hs")
+                .record
+                .state,
+            DomainState::Admitted
+        );
+        execute_external_domain_tx(state, &ctx(challenger), &bad_tx(hs_proof.clone()))
+            .expect("hotstuff SubmitFaultProof");
+        assert_eq!(
+            state
+                .settlement
+                .external_intake
+                .registry
+                .domain(&hs_key)
+                .expect("hs")
+                .record
+                .state,
+            DomainState::Faulted
+        );
+        assert!(
+            execute_external_domain_tx(state, &ctx(challenger), &bad_tx(hs_proof.clone())).is_err()
+        );
+        (hs_key, hs_proof)
+    }
+
+    fn register_fault_test_domain(
+        state: &mut AccountState,
+        spec: AdapterSpec,
+        policy: &VerificationPolicy,
+        econ: crate::cross_domain::external::DomainEconomics,
+        golden: RawConsensusEvidence,
+        poster: Address,
+    ) -> DomainKey {
+        let adapter_id = golden.adapter;
+        let ver = golden.evidence_version;
+        let net = golden.network.clone();
+        let req = RegistrationRequest {
+            spec,
+            policy: policy.clone(),
+            economics: econ,
+            versions: VersionPolicy::single(adapter_id, ver, 0),
+            golden,
+            bond_atoms: econ.required_bond_atoms(),
+            poster,
+        };
+        execute_external_domain_tx(
+            state,
+            &ctx(poster),
+            &ExternalDomainTx::Register(Box::new(req)),
+        )
+        .expect("register fault test domain");
+        DomainKey::from_parts(&adapter_id, &net)
+    }
+
+    fn assert_fault_domain_state(state: &AccountState, key: &DomainKey, expected: DomainState) {
+        assert_eq!(
+            state
+                .settlement
+                .external_intake
+                .registry
+                .domain(key)
+                .expect("domain")
+                .record
+                .state,
+            expected
+        );
+    }
+
+    fn check_casper_fault_tx(
+        state: &mut AccountState,
+        (poster, challenger): (Address, Address),
+        non_slash: &VerificationPolicy,
+        econ: crate::cross_domain::external::DomainEconomics,
+        ed: &crate::crypto::primitives::KeyPair,
+        pq: &crate::crypto::primitives::PqKeyPair,
+        hs_proof: crate::cross_domain::external::hotstuff::HotStuffEquivocationProof,
+    ) {
+        use crate::cross_domain::external::casper_ffg::{
+            encode_ffg_payload, FfgEquivocationProof, FfgValidator, FfgVote, PinnedFfgCommittee,
+            CASPER_FFG_ADAPTER_NAME, FFG_EVIDENCE_VERSION,
+        };
+        use crate::cross_domain::external::spec::AdapterId;
+        use crate::crypto::ctx;
+
+        let pub_ed = ed.public_key_bytes();
+        let ffg_net = "eth-ffg-tx";
+        let ffg_committee = PinnedFfgCommittee::new(
+            10,
+            vec![FfgValidator {
+                pubkey: pub_ed,
+                stake: 1_000,
+                pq_pubkey: pq.public_key_bytes().to_vec(),
+            }],
+        )
+        .expect("ffg committee");
+        state
+            .settlement
+            .external_intake
+            .pin_casper_ffg_committee(ffg_net, ffg_committee.clone());
+        let sign_ffg = |se: u64, sr: [u8; 32], te: u64, tr: [u8; 32]| -> FfgVote {
+            let mut v = FfgVote {
+                signer: pub_ed,
+                source_epoch: se,
+                source_root: sr,
+                target_epoch: te,
+                target_root: tr,
+                signature: Vec::new(),
+                pq_signature: Vec::new(),
+            };
+            let d = v.digest(ffg_net);
+            v.signature = ed.sign(&d).to_vec();
+            v.pq_signature = pq.sign(ctx::CROSS_DOMAIN_V1, &d).expect("pq");
+            v
+        };
+        let fv1 = sign_ffg(8, [0x11; 32], 9, [0x21; 32]);
+        let fv2 = sign_ffg(9, [0x21; 32], 10, [0x31; 32]);
+        let ffg_id = AdapterId::from_name(CASPER_FFG_ADAPTER_NAME);
+        let payload = encode_ffg_payload(
+            9,
+            [0x21; 32],
+            [0x11; 32],
+            10,
+            [0x31; 32],
+            std::slice::from_ref(&fv1),
+            &[fv2],
+        );
+        let ffg_key = register_fault_test_domain(
+            state,
+            AdapterSpec::CasperFfg {
+                network: ffg_net.to_string(),
+                committee: Some(ffg_committee),
+            },
+            non_slash,
+            econ,
+            RawConsensusEvidence {
+                adapter: ffg_id,
+                evidence_version: FFG_EVIDENCE_VERSION,
+                network: ffg_net.to_string(),
+                payload,
+                declared_height: 10,
+                declared_root: [0x31; 32],
+                submitter: poster,
+            },
+            poster,
+        );
+        let wrong = ExternalDomainTx::SubmitFaultProof {
+            domain: ffg_key,
+            proof: ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_proof)),
+        };
+        assert!(execute_external_domain_tx(state, &ctx(challenger), &wrong).is_err());
+        assert_fault_domain_state(state, &ffg_key, DomainState::Admitted);
+        let ffg_proof = FfgEquivocationProof {
+            vote_a: sign_ffg(7, [0x17; 32], 10, [0x98; 32]),
+            vote_b: fv1,
+        };
+        let ok_tx = ExternalDomainTx::SubmitFaultProof {
+            domain: ffg_key,
+            proof: ObjectiveFaultProof::CasperFfgEquivocation(Box::new(ffg_proof)),
+        };
+        execute_external_domain_tx(state, &ctx(challenger), &ok_tx)
+            .expect("casper SubmitFaultProof");
+        assert_fault_domain_state(state, &ffg_key, DomainState::Faulted);
+    }
+
+    fn check_mysticeti_fault_tx(
+        state: &mut AccountState,
+        (poster, challenger): (Address, Address),
+        non_slash: &VerificationPolicy,
+        econ: crate::cross_domain::external::DomainEconomics,
+        ed: &crate::crypto::primitives::KeyPair,
+        pq: &crate::crypto::primitives::PqKeyPair,
+    ) {
+        use crate::cross_domain::external::mysticeti_dag::{
+            encode_mysticeti_evidence, MysticetiAnchorCommitment, MysticetiEquivocationProof,
+            MysticetiMember, MysticetiVertex, MysticetiWaveEvidence, PinnedMysticetiCommittee,
+            MYSTICETI_DAG_ADAPTER_NAME, MYSTICETI_EVIDENCE_VERSION,
+        };
+        use crate::cross_domain::external::spec::AdapterId;
+        use crate::crypto::ctx;
+
+        let pub_ed = ed.public_key_bytes();
+        let my_net = "sui-mysticeti-tx";
+        let my_committee = PinnedMysticetiCommittee::new(
+            4,
+            vec![MysticetiMember {
+                ed25519_pubkey: pub_ed,
+                voting_weight: 100,
+                pq_pubkey: pq.public_key_bytes().to_vec(),
+            }],
+        )
+        .expect("mysticeti committee");
+        state
+            .settlement
+            .external_intake
+            .pin_mysticeti_committee(my_net, my_committee.clone());
+        let sign_my = |round: u64, payload_digest: [u8; 32], parents: Vec<[u8; 32]>| {
+            let mut v = MysticetiVertex {
+                author: pub_ed,
+                epoch: 4,
+                round,
+                payload_digest,
+                parents,
+                ed25519_sig: Vec::new(),
+                pq_sig: Vec::new(),
+            };
+            let d = v.digest(my_net);
+            v.ed25519_sig = ed.sign(&d).to_vec();
+            v.pq_sig = pq.sign(ctx::CROSS_DOMAIN_V1, &d).expect("pq");
+            v
+        };
+        let commit = MysticetiAnchorCommitment {
+            state_root: [0x61; 32],
+            tx_root: [0x62; 32],
+            event_root: [0x63; 32],
+            block_hash: [0x44; 32],
+            parent_anchor_digest: [0x31; 32],
+        };
+        let anchor_v = sign_my(10, commit.digest(), vec![commit.parent_anchor_digest]);
+        let wave1_v = sign_my(11, [0x42; 32], vec![anchor_v.digest(my_net)]);
+        let wave2_v = sign_my(12, [0x43; 32], vec![wave1_v.digest(my_net)]);
+        let my_id = AdapterId::from_name(MYSTICETI_DAG_ADAPTER_NAME);
+        let payload = encode_mysticeti_evidence(&MysticetiWaveEvidence {
+            commitment: commit.clone(),
+            anchor: anchor_v.clone(),
+            voting_vertices: vec![wave1_v],
+            decision_vertices: vec![wave2_v],
+        });
+        let my_key = register_fault_test_domain(
+            state,
+            AdapterSpec::MysticetiDag {
+                network: my_net.to_string(),
+                committee: Some(my_committee),
+            },
+            non_slash,
+            econ,
+            RawConsensusEvidence {
+                adapter: my_id,
+                evidence_version: MYSTICETI_EVIDENCE_VERSION,
+                network: my_net.to_string(),
+                payload,
+                declared_height: 10,
+                declared_root: commit.state_root,
+                submitter: poster,
+            },
+            poster,
+        );
+        let my_fork = sign_my(10, [0xEE; 32], vec![commit.parent_anchor_digest]);
+        let proof =
+            ObjectiveFaultProof::MysticetiEquivocation(Box::new(MysticetiEquivocationProof {
+                vertex_a: anchor_v,
+                vertex_b: my_fork,
+            }));
+        let tx = ExternalDomainTx::SubmitFaultProof {
+            domain: my_key,
+            proof,
+        };
+        execute_external_domain_tx(state, &ctx(challenger), &tx)
+            .expect("mysticeti SubmitFaultProof");
+        assert_fault_domain_state(state, &my_key, DomainState::Faulted);
+    }
+
+    fn build_bitvm_disprove_proof(
+        bv_net: &str,
+        claim: crate::cross_domain::external::bitvm_covenant::BitVmPegClaim,
+        chunk: crate::cross_domain::external::bitvm_covenant::TraceChunkStep,
+        sib: [u8; 32],
+        ed: &crate::crypto::primitives::KeyPair,
+        pq: &crate::crypto::primitives::PqKeyPair,
+    ) -> ObjectiveFaultProof {
+        use crate::cross_domain::external::bitvm_covenant::{
+            hash_trace_merkle_node, BitVmPegClaim, DisproveScriptProof, MerkleStep, TraceChunkStep,
+        };
+        use crate::crypto::ctx;
+
+        let bad_chunk = TraceChunkStep {
+            claimed_post_state: [0xFE; 32],
+            ..chunk
+        };
+        let mut bad_claim = BitVmPegClaim {
+            state_root: [0xFE; 32],
+            trace_merkle_root: hash_trace_merkle_node(&bad_chunk.leaf_digest(), &sib),
+            ..claim
+        };
+        let bad_digest = bad_claim.signing_digest(bv_net);
+        bad_claim.operator_ed25519_sig = ed.sign(&bad_digest).to_vec();
+        bad_claim.operator_pq_sig = pq.sign(ctx::CROSS_DOMAIN_V1, &bad_digest).expect("pq");
+        ObjectiveFaultProof::BitVmDisprove(Box::new(DisproveScriptProof {
+            claim: bad_claim,
+            disputed_chunk: bad_chunk,
+            trace_merkle_proof: vec![MerkleStep {
+                sibling: sib,
+                sibling_is_left: false,
+            }],
+        }))
+    }
+
+    fn check_bitvm_fault_tx(
+        state: &mut AccountState,
+        (poster, challenger): (Address, Address),
+        non_slash: &VerificationPolicy,
+        econ: crate::cross_domain::external::DomainEconomics,
+        ed: &crate::crypto::primitives::KeyPair,
+        pq: &crate::crypto::primitives::PqKeyPair,
+    ) {
+        use crate::cross_domain::external::bitvm_covenant::{
+            encode_bitvm_evidence, evaluate_chunk_transition, hash_trace_merkle_node,
+            BitVmCovenantEvidence, BitVmPegClaim, PinnedBitVmAnchor, TraceChunkStep,
+            BITVM_COVENANT_ADAPTER_NAME, BITVM_EVIDENCE_VERSION,
+        };
+        use crate::cross_domain::external::spec::AdapterId;
+        use crate::crypto::ctx;
+
+        let bv_net = "btc-bitvm2-tx";
+        let (bits, prog) = (0x207f_ffffu32, [0x77; 32]);
+        let bv_anchor = PinnedBitVmAnchor {
+            height: 50,
+            block_hash: [0x12; 32],
+            bits,
+            program_hash: prog,
+            min_pow_confirmations: 6,
+            challenge_blocks: 4,
+            operator_ed25519_pubkey: ed.public_key_bytes(),
+            operator_pq_pubkey: pq.public_key_bytes().to_vec(),
+        };
+        state
+            .settlement
+            .external_intake
+            .pin_bitvm_anchor(bv_net, bv_anchor.clone());
+        let (pre, wit, sib) = ([0x81; 32], [0x82; 32], [0x83; 32]);
+        let post = evaluate_chunk_transition(&prog, 0, &pre, 3, &wit);
+        let chunk = TraceChunkStep {
+            chunk_index: 0,
+            pre_state: pre,
+            claimed_post_state: post,
+            step_opcode: 3,
+            step_witness: wit,
+        };
+        let mut claim = BitVmPegClaim {
+            state_root: post,
+            tx_root: [0x84; 32],
+            event_root: [0x85; 32],
+            program_hash: prog,
+            trace_merkle_root: hash_trace_merkle_node(&chunk.leaf_digest(), &sib),
+            trace_chunk_count: 2,
+            claim_pow_height: 51,
+            operator_ed25519_sig: Vec::new(),
+            operator_pq_sig: Vec::new(),
+        };
+        let claim_digest = claim.signing_digest(bv_net);
+        claim.operator_ed25519_sig = ed.sign(&claim_digest).to_vec();
+        claim.operator_pq_sig = pq.sign(ctx::CROSS_DOMAIN_V1, &claim_digest).expect("pq");
+        let headers = mine_bitvm_headers(bv_anchor.block_hash, bits, &claim, bv_net);
+        let bv_id = AdapterId::from_name(BITVM_COVENANT_ADAPTER_NAME);
+        let payload = encode_bitvm_evidence(&BitVmCovenantEvidence {
+            headers,
+            claim_header_index: 0,
+            spv_merkle_proof: Vec::new(),
+            claim: claim.clone(),
+        });
+        let bv_key = register_fault_test_domain(
+            state,
+            AdapterSpec::BitVmCovenant {
+                network: bv_net.to_string(),
+                anchor: Some(bv_anchor),
+            },
+            non_slash,
+            econ,
+            RawConsensusEvidence {
+                adapter: bv_id,
+                evidence_version: BITVM_EVIDENCE_VERSION,
+                network: bv_net.to_string(),
+                payload,
+                declared_height: 51,
+                declared_root: post,
+                submitter: poster,
+            },
+            poster,
+        );
+        let proof = build_bitvm_disprove_proof(bv_net, claim, chunk, sib, ed, pq);
+        execute_external_domain_tx(
+            state,
+            &ctx(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: bv_key,
+                proof,
+            },
+        )
+        .expect("bitvm SubmitFaultProof");
+        assert_fault_domain_state(state, &bv_key, DomainState::Faulted);
+    }
+
+    fn mine_bitvm_headers(
+        anchor_hash: [u8; 32],
+        bits: u32,
+        claim: &crate::cross_domain::external::bitvm_covenant::BitVmPegClaim,
+        bv_net: &str,
+    ) -> Vec<[u8; crate::cross_domain::external::bitvm_covenant::POW_HEADER_LEN]> {
+        use crate::cross_domain::external::bitcoin_spv::sha256d;
+        use crate::cross_domain::external::bitvm_covenant::{expand_compact_bits, POW_HEADER_LEN};
+        let txid = sha256d(&claim.covenant_tx_bytes(bv_net));
+        let target = expand_compact_bits(bits).expect("target");
+        let mine = |prev: [u8; 32], mr: [u8; 32], ts: u32| -> [u8; POW_HEADER_LEN] {
+            for nonce in 0u32..50_000 {
+                let mut hdr = [0u8; POW_HEADER_LEN];
+                let (ver_slot, rem1) = hdr.split_at_mut(4);
+                ver_slot.copy_from_slice(&0x2000_0000u32.to_le_bytes());
+                let (prev_slot, rem2) = rem1.split_at_mut(32);
+                prev_slot.copy_from_slice(&prev);
+                let (mr_slot, rem3) = rem2.split_at_mut(32);
+                mr_slot.copy_from_slice(&mr);
+                let (time_slot, rem4) = rem3.split_at_mut(4);
+                time_slot.copy_from_slice(&ts.to_le_bytes());
+                let (bits_slot, nonce_slot) = rem4.split_at_mut(4);
+                bits_slot.copy_from_slice(&bits.to_le_bytes());
+                nonce_slot.copy_from_slice(&nonce.to_le_bytes());
+                let mut be = sha256d(&hdr);
+                be.reverse();
+                if be <= target {
+                    return hdr;
+                }
+            }
+            panic!("mine failed");
+        };
+        let mut headers = Vec::new();
+        let mut prev = anchor_hash;
+        for idx in 0u32..6 {
+            let mr = if idx == 0 {
+                txid
+            } else {
+                [0x90u8.saturating_add(u8::try_from(idx).unwrap_or(0)); 32]
+            };
+            let hdr = mine(prev, mr, 1_700_000_000 + idx * 600);
+            prev = sha256d(&hdr);
+            headers.push(hdr);
+        }
+        headers
     }
 }

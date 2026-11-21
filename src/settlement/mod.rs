@@ -1,11 +1,12 @@
 pub mod anchor_ledger;
 pub mod anchor_production;
+pub mod app_binding;
 pub mod cold_quorum;
 pub mod cold_wallet;
 pub mod commitment_tree;
 pub mod domains;
 pub mod global_block;
-pub mod graft;
+pub mod liquidation_proof;
 pub mod pq_anchor;
 pub mod pq_anchor_verify;
 pub mod proof_market;
@@ -14,6 +15,7 @@ pub mod registries;
 pub mod reseal;
 pub mod root_seal;
 pub mod shared_security;
+pub mod universal_finality;
 
 #[cfg(test)]
 pub use cold_quorum::dev_fixture_device_signers;
@@ -44,12 +46,19 @@ pub use anchor_production::{
 };
 #[cfg(feature = "bpqs-research")]
 pub use budlum_bpqs as bpqs_research;
+pub use liquidation_proof::{
+    execute_liquidation, AmmReserveSnapshot, LiquidationError, LiquidationOutcome,
+    LiquidationPosition, LIQUIDATION_PENALTY_BPS, MAX_BATCH_SIZE, MAX_OBSERVATIONS,
+    MAX_TWAP_EPOCHS, MIN_TWAP_EPOCHS,
+};
 pub use pq_anchor::{
     aggregate_finality_roots, anchor_due, anchor_leaf_digest, anchor_payload_for, assemble_anchor,
-    build_anchor_for_height, emit_anchor_node_local, enforce_anchor_mode,
-    rotate_anchor_key_with_committee, verify_anchor_full, verify_anchor_light, AnchorError,
-    AnchorLeaf, AnchorMode, AnchorSignature, AnchorSignatureAlgorithm, AnchorSigner,
-    EmissionOutcome, EmissionRequest, HsmSignerStub, PqAnchor, SignerBackend, ANCHOR_INTERVAL,
+    build_anchor_for_height, build_anchor_inclusion_proof, emit_anchor_node_local,
+    enforce_anchor_mode, rotate_anchor_key_with_committee, verify_anchor_full,
+    verify_anchor_leaf_light, verify_anchor_light, AnchorError, AnchorInclusionProof, AnchorLeaf,
+    AnchorMode, AnchorSignature, AnchorSignatureAlgorithm, AnchorSigner, EmissionOutcome,
+    EmissionRequest, HsmSignerStub, PqAnchor, SignerBackend, ANCHOR_INTERVAL,
+    MAX_ANCHOR_MERKLE_DEPTH, MAX_ANCHOR_SIGNATURES,
 };
 pub use proof_market::{
     ProofMarketState, ProofMarketTx, ProofReceipt, ProofTask, ProofTaskKind, ProofTaskStatus,
@@ -59,4 +68,8 @@ pub use proof_verifier::{ProofVerificationError, SettlementProofVerifier, Verifi
 pub use registries::SettlementRegistries;
 pub use root_seal::{
     seal_due, RootSeal, RootSealLog, SealError, SealKeys, SoftwareSealSigner, ROOT_SEAL_INTERVAL,
+};
+pub use universal_finality::{
+    compose_cross_domain_route, EconomicSecurityBound, FinalityGuarantee, FinalityReversibility,
+    RouteFinalityBound,
 };

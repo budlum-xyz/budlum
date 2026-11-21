@@ -1,5 +1,5 @@
-//! WIRING: unwired - verify_evm_receipt's production caller is adapter.rs, which declares itself unwired in this tree; the observed relayer path that wires it is not in this tree yet.
-//! F10.2 security core: `verify_evm_receipt`, the deterministic orchestrator.
+//! WIRING: unwired - `verify_evm_receipt`'s production caller is adapter.rs, which declares itself unwired in this tree; the observed relayer path that wires it is not in this tree yet.
+//! EVM receipt verification core: `verify_evm_receipt`, the deterministic orchestrator.
 //!
 //! Combines the steps of RFC section 4.1 (the ETH -> Budlum mint flow) into a
 //! single verification surface. It runs on-chain, inside Budlum consensus,
@@ -15,7 +15,7 @@
 //!    neither (RFC Q2, N-conf).
 //! 2. `proof_nodes` plus `target_header.receipts_root`: MPT verify yields the
 //!    receipt bytes.
-//! 3. `receipt` RLP decode (F10.2 `receipt.rs`) yields `{status, logs}`.
+//! 3. `receipt` RLP decode (`receipt.rs`) yields `{status, logs}`.
 //! 4. `status == true`, meaning the transaction succeeded.
 //! 5. Deposit log match: `find_log(emitter, topic0)` against the expected
 //!    payload.
@@ -37,8 +37,8 @@ use crate::cross_domain::evm::header::{verify_chain, EthHeader};
 use crate::cross_domain::evm::mpt::{self, MptError};
 use crate::cross_domain::evm::receipt::{self, EthReceipt, ReceiptError};
 use crate::cross_domain::evm::sync_committee::{
-    verify_execution_block_finality, BeaconBinding, BeaconChainParams, SyncAggregate,
-    SyncCommitteeError, SyncCommitteeState,
+    verify_execution_block_finality, BeaconBinding, BeaconChainParams, FinalityUpdate,
+    SyncAggregate, SyncCommitteeError, SyncCommitteeState,
 };
 use serde::{Deserialize, Serialize};
 /// A `verify_evm_receipt` failure; every sub-step's error is wrapped here.
@@ -72,16 +72,16 @@ pub enum VerifyError {
 impl std::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VerifyError::Header(m) => write!(f, "evm verify: header chain: {m}"),
-            VerifyError::Mpt(e) => write!(f, "evm verify: mpt: {e}"),
-            VerifyError::Receipt(e) => write!(f, "evm verify: receipt: {e}"),
-            VerifyError::TxFailed => write!(f, "evm verify: transaction status=false"),
-            VerifyError::EmptyTransactionHash => {
+            Self::Header(m) => write!(f, "evm verify: header chain: {m}"),
+            Self::Mpt(e) => write!(f, "evm verify: mpt: {e}"),
+            Self::Receipt(e) => write!(f, "evm verify: receipt: {e}"),
+            Self::TxFailed => write!(f, "evm verify: transaction status=false"),
+            Self::EmptyTransactionHash => {
                 write!(f, "evm verify: transaction hash is empty")
             }
-            VerifyError::LogNotFound => write!(f, "evm verify: deposit log not found"),
-            VerifyError::PayloadMismatch => write!(f, "evm verify: deposit payload mismatch"),
-            VerifyError::SyncCommittee(e) => write!(f, "evm verify: sync-committee: {e}"),
+            Self::LogNotFound => write!(f, "evm verify: deposit log not found"),
+            Self::PayloadMismatch => write!(f, "evm verify: deposit payload mismatch"),
+            Self::SyncCommittee(e) => write!(f, "evm verify: sync-committee: {e}"),
         }
     }
 }
@@ -90,17 +90,17 @@ impl std::error::Error for VerifyError {}
 
 impl From<MptError> for VerifyError {
     fn from(e: MptError) -> Self {
-        VerifyError::Mpt(e)
+        Self::Mpt(e)
     }
 }
 impl From<ReceiptError> for VerifyError {
     fn from(e: ReceiptError) -> Self {
-        VerifyError::Receipt(e)
+        Self::Receipt(e)
     }
 }
 impl From<SyncCommitteeError> for VerifyError {
     fn from(e: SyncCommitteeError) -> Self {
-        VerifyError::SyncCommittee(e)
+        Self::SyncCommittee(e)
     }
 }
 
@@ -163,7 +163,7 @@ pub struct EvmDepositProof<'a> {
     pub emitter_address: &'a [u8],
     /// Deposit event signature: `topic0 = keccak256("Deposit(...)")`.
     pub deposit_topic0: &'a [u8; 32],
-    /// Ethereum PoS attestation over the target header, when the relayer has
+    /// Ethereum `PoS` attestation over the target header, when the relayer has
     /// one.
     ///
     /// `None` keeps the previous behaviour exactly: finality rests on
@@ -172,10 +172,10 @@ pub struct EvmDepositProof<'a> {
     /// `None`, so nothing that verified before stops verifying now.
     ///
     /// `Some` is the stronger claim, and it is checked. This module's header
-    /// and `adapter.rs` have both said "F10.3 (sync-committee) is used"
+    /// and `adapter.rs` have both said "sync-committee verification is used"
     /// since they were written, and neither did: `verify_sync_aggregate`
     /// existed, was tested six ways, and no production path reached it. A
-    /// bridge whose documentation claims PoS finality and whose code counts
+    /// bridge whose documentation claims `PoS` finality and whose code counts
     /// confirmations is claiming a guarantee it does not have.
     ///
     /// The signed message is not the caller's. It is rebuilt from the beacon
@@ -236,9 +236,13 @@ pub struct SyncAttestation<'a> {
     pub state: &'a SyncCommitteeState,
     /// The bitmap and aggregate signature the relayer observed.
     pub aggregate: &'a SyncAggregate,
-    /// The beacon header the committee signed and the branch that places
-    /// the target execution block inside it.
+    /// The finalized beacon header and the branch that places the target
+    /// execution block inside it.
     pub beacon: &'a BeaconBinding,
+    /// The header the committee signed and the branch proving `beacon` is
+    /// its finalized checkpoint. A signed head alone is not
+    /// finality.
+    pub finality: &'a FinalityUpdate,
     /// Fork version and genesis validators root. The adapter's, never the
     /// proof's: a proof choosing its own domain chooses which chain it is
     /// finalized on.
@@ -250,6 +254,10 @@ pub struct SyncAttestation<'a> {
 /// On success the caller gets a `VerifiedDeposit` holding every proven field
 /// the mint needs. On failure it gets a `VerifyError` naming the step at which
 /// the proof turned out to be invalid.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_evm_receipt(
     proof: &EvmDepositProof<'_>,
     trusted_checkpoint: Option<&(u64, [u8; 32])>,
@@ -278,8 +286,9 @@ pub fn verify_evm_receipt(
     )
     .map_err(|e| VerifyError::Header(e.to_string()))?;
 
-    // 2. MPT verify: receiptsRoot → receipt bytes.
-    let receipt_bytes = mpt::verify(proof.proof_nodes, &target.receipts_root, proof.receipt_key)?;
+    // 2. Strict Yellow Paper MPT verify: receiptsRoot -> receipt bytes.
+    let receipt_bytes =
+        mpt::verify_yellow_paper(proof.proof_nodes, &target.receipts_root, proof.receipt_key)?;
 
     // 3. Receipt RLP decode.
     let receipt: EthReceipt = receipt::decode_receipt(&receipt_bytes)?;
@@ -308,7 +317,7 @@ pub fn verify_evm_receipt(
     // indistinguishable from one that is switched off. What it does buy is
     // that a proof which *claims* PoS finality has that claim checked rather
     // than trusted.
-    // (karar B with A interim): finality evidence is
+    // (decision B with A interim): finality evidence is
     // MANDATORY in one of two forms. B is the standing rule - a sync
     // committee attestation is verified rather than trusted. A is the
     // interim form - the chain must touch the operator's trusted
@@ -321,6 +330,7 @@ pub fn verify_evm_receipt(
                 attestation.state,
                 attestation.aggregate,
                 attestation.beacon,
+                attestation.finality,
                 attestation.chain,
                 &target.hash,
             )?;
@@ -747,12 +757,14 @@ mod tests {
     };
 
     use crate::cross_domain::evm::sync_committee::fixtures::{
-        binding_committing_to as beacon_for, first_slot_of_period,
+        binding_committing_to as beacon_for, finality_for, first_slot_of_period,
     };
 
     const TEST_CHAIN: BeaconChainParams = BeaconChainParams {
         fork_version: [0x04, 0, 0, 0],
         genesis_validators_root: [0x42; 32],
+        finalized_root_gindex:
+            crate::cross_domain::evm::sync_committee::FINALIZED_ROOT_GINDEX_DENEB,
     };
 
     fn empty_committee() -> SyncCommitteeState {
@@ -814,10 +826,10 @@ mod tests {
         );
     }
 
-    /// A proof that claims PoS finality has the claim checked.
+    /// A proof that claims `PoS` finality has the claim checked.
     ///
     /// This is the defect. `sync_committee.rs` implements Altair verification
-    /// and is tested six ways; `adapter.rs` said "F10.3 (sync-committee)
+    /// and is tested six ways; `adapter.rs` said "sync-committee verification
     /// is used" in two places, and no production path called
     /// `verify_sync_aggregate`. A bridge whose documentation claims proof of
     /// stake finality and whose code counts confirmations is claiming a
@@ -836,6 +848,7 @@ mod tests {
             crate::cross_domain::evm::mpt::keccak256(&f.target_header),
             0,
         );
+        let beacon_finality = finality_for(&beacon, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -845,6 +858,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &beacon,
+                finality: &beacon_finality,
                 chain: &TEST_CHAIN,
             }),
         );
@@ -887,6 +901,7 @@ mod tests {
             crate::cross_domain::evm::mpt::keccak256(&f.target_header),
             0,
         );
+        let beacon_finality = finality_for(&beacon, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -896,6 +911,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &beacon,
+                finality: &beacon_finality,
                 chain: &TEST_CHAIN,
             }),
         );
@@ -929,6 +945,7 @@ mod tests {
             crate::cross_domain::evm::mpt::keccak256(&f.target_header),
             0,
         );
+        let beacon_finality = finality_for(&beacon, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -938,6 +955,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &beacon,
+                finality: &beacon_finality,
                 chain: &TEST_CHAIN,
             }),
         );
@@ -969,6 +987,7 @@ mod tests {
         let aggregate = aggregate_with_participation(true);
 
         let other_block = beacon_for([0xEE; 32], 0);
+        let other_block_finality = finality_for(&other_block, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -978,6 +997,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &other_block,
+                finality: &other_block_finality,
                 chain: &TEST_CHAIN,
             }),
         );
@@ -990,6 +1010,8 @@ mod tests {
 
         let target_hash = crate::cross_domain::evm::mpt::keccak256(&f.target_header);
         let wrong_period = beacon_for(target_hash, first_slot_of_period(3));
+        let wrong_period_finality =
+            finality_for(&wrong_period, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -999,6 +1021,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &wrong_period,
+                finality: &wrong_period_finality,
                 chain: &TEST_CHAIN,
             }),
         );
@@ -1012,6 +1035,7 @@ mod tests {
         );
 
         let bound = beacon_for(target_hash, 0);
+        let bound_finality = finality_for(&bound, TEST_CHAIN.finalized_root_gindex, 64);
         let proof = proof_with_attestation(
             &f,
             &confs,
@@ -1021,6 +1045,7 @@ mod tests {
                 state: &state,
                 aggregate: &aggregate,
                 beacon: &bound,
+                finality: &bound_finality,
                 chain: &TEST_CHAIN,
             }),
         );

@@ -1,27 +1,27 @@
-//! The chain-level seal for hard pruning (F1 - a report finding, sealed by test
+//! The chain-level seal for hard pruning (sealed by deterministic test
 //! on 2026-07-17).
 //!
 //! Constitution section 1: when an NFT is burned, the B.U.D. content bound to it
 //! has to be deleted.
 //! The canonical mechanism (b65f058; reduced to a single mechanism in 62c7509):
-//! after a block commit, collect_nft_burn_cids plus
-//! process_nft_burn_storage_pruning call prune_content, which expires the active
+//! after a block commit, `collect_nft_burn_cids` plus
+//! `process_nft_burn_storage_pruning` call `prune_content`, which expires the active
 //! deals and removes the manifest from the registry. This test locks the
-//! chain-level effect on the produce_block path.
-//! Physically deleting the chunks (the NodeCommand::StoragePrune worker) is a
-//! separate verification matter (see the STATUS_ONLINE finding R1: the sender
+//! chain-level effect on the `produce_block` path.
+//! Physically deleting the chunks (the `NodeCommand::StoragePrune` worker) is a
+//! separate verification matter (status online validation: the sender
 //! wiring is missing).
 //!
 //! NOTE (proved in CI): mempool transaction validation requires a signature, so
-//! the transactions are signed with a real KeyPair, the nonce is read from the
-//! chain and the nft_id is read from the registry.
+//! the transactions are signed with a real `KeyPair`, the nonce is read from the
+//! chain and the `nft_id` is read from the registry.
 
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::crypto::primitives::KeyPair;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use crate::storage::manifest::ContentManifest;
 use std::sync::Arc;
 use tempfile::tempdir;

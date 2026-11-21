@@ -1,24 +1,18 @@
 //! Storage layer.
 //!
-//! Two intentionally separate namespaces live in `src/storage/`:
+//! The node-local key-value store, its traits, the proof-bearing state
+//! trie, pruning and witness retention live in `crate::persistence`: they
+//! hold the node's own chain state, not content.
 //!
-//! * [`db`] / [`traits`] - the *node-local* key-value store (sled) that
-//!   Holds chain state, accounts, blocks, etc. Pre-existing, not touched
-//!   By the storage layer.
-//!
-//! * [`content_id`] / [`manifest`] - the *B.U.D. on-chain content-addressing
-//!   Primitives* introduced. These are
-//!   Pure data shapes - no I/O, no admin hooks, no team-server dependency.
-//!
-//! The domain-level deal / challenge accounting lives in
-//! `crate::domain::storage_deal::StorageRegistry` (kept under
-//! `domain/` because the data shapes it owns are consensus types, not
-//! Transport types).
+//! * [`content_id`] / [`bud3`] - the B.U.D. 3.0 on-chain content-addressing
+//!   and fountain-coded storage object surface.
 
 pub mod assignment;
+/// B.U.D. 3.0: content id, BOF-1 object, segments and the RFC 6330 code.
+pub mod bud3;
 pub mod column_commitment;
+pub mod content_gateway;
 pub mod content_id;
-pub mod db;
 pub mod derived;
 pub mod dictionary;
 pub mod emit;
@@ -29,16 +23,10 @@ pub mod generated;
 pub mod key_package;
 pub mod lifecycle;
 pub mod living_threshold;
-pub mod lrc;
 pub mod manifest;
-pub mod merkle_trie;
 pub mod mobile_self;
-pub mod msr;
-pub mod one_share;
-pub mod one_view;
 pub mod payload_crypt;
 pub mod provider;
-pub mod pruning;
 pub mod qr_carousel;
 pub mod qr_codec;
 pub mod qr_encode;
@@ -54,7 +42,6 @@ pub mod qr_verify_indep;
 pub mod qr_video;
 pub mod render;
 pub mod reveal_gateway;
-pub mod server_admission;
 pub mod social_delete;
 pub mod three_gate;
 pub mod three_hooks;
@@ -62,14 +49,11 @@ pub mod three_meter;
 pub mod three_nft;
 pub mod three_pipe;
 pub mod three_recipe;
-pub mod three_regime;
 pub mod three_reveal;
 pub mod three_rpc;
 pub mod three_visibility;
-pub mod traits;
 pub mod transformed;
 pub mod view_grant;
-pub mod witness_retention;
 
 pub use assignment::{
     assign_object, assign_shard, displaced_shards, AssignmentError, ShardCandidate,
@@ -101,29 +85,16 @@ pub use living_threshold::{
     OperatorRates, ThresholdError, ACCESS_HALF_LIFE_EPOCHS, ACCESS_SCALE, HYSTERESIS_SIXTEENTHS,
     MAX_CPU_NANOS_PER_BYTE, MAX_OBJECT_BYTES, NANOS_PER_SECOND,
 };
-pub use lrc::{LrcError, LrcLayout, MAX_GROUP_SHARDS};
 pub use manifest::{
     manifest_id_from_parts_stored, manifest_id_from_shards, ContentCipher, ContentEncryption,
     ContentManifest, ErasureScheme, ShardKind, ShardRef, MIN_AEAD_CIPHERTEXT_BYTES,
 };
-pub use mobile_self::{
-    decide_custody, decide_upload_custody, CustodyDecision, CustodyLedger, CustodyMode,
-    MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile, ReplicaRecommendation,
-    UploadCustodyRefusal,
-};
-pub use msr::{
-    lrc_repair_traffic_scaled, msr_repair_traffic_scaled, msr_speedup_over_lrc_scaled, MsrError,
-    TRAFFIC_SCALE,
-};
-pub use one_share::{OneShareRegistry, Share, ShareRefusal};
-pub use one_view::{EndpointRef, ScreenItem, SingleScreenView};
+pub use mobile_self::{MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile};
 pub use provider::{
     provider_challenge_id, ChallengeId, DealId, InMemoryStorageProvider, ProviderChallengeResult,
     PutReceipt, StorageProof, StorageProvider, StorageProviderError,
 };
-pub use pruning::{NodeMode, PruningPolicy};
 pub use render::{render, render_and_verify, RenderError, RenderFormat};
-pub use server_admission::{admit_device_as_server, ServerAdmission, ServerAdmissionRefusal};
 
 pub mod pact_binding;
 pub use view_grant::{
@@ -177,10 +148,6 @@ pub use three_nft::{
 pub use three_recipe::{
     recipe_class, RecipeTransform, VideoRecipe, VideoRecipeError, VideoRecipeSealed,
     RECIPE_VIDEO_MAGIC,
-};
-pub use three_regime::{
-    admits_body as three_regime_admits_body, held_bytes_for, refuse_rent_without_held_bytes,
-    regime_of, rent_basis_for, AccountingRefusal, ContentRegime, RentBasis,
 };
 pub use three_reveal::{RevealError, RevealSession};
 pub use three_rpc::{

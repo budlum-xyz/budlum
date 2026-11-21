@@ -1,10 +1,15 @@
-8513
+5858
 # ---------------------------------------------------------------------------
 # G2 pedantic/nursery ratchet baseline.
 # The FIRST bare-number line of this file is the baseline
 # (scripts/check-clippy-extra.sh reads it with `grep -E '^[0-9]+$' | head -1`);
 # below it is the justification.
 #
+# 2026-11-20 - 7223 -> 5858. Measured 5858 on CI run for 324b652e
+#   ("Budlum Core quality" job 135995918619: `clippy-extra: 5858 |
+#   baseline: 7223`) after the machine-applied pedantic/nursery sweep;
+#   the gate itself demanded the descent (stall rule: base more than 10%
+#   above the measured count). Lowered to the CI-measured number, no margin.
 # 2026-10-20 - 7048 -> 7684 (PR #95 "Consensus Of Consensuses" consensus
 #   rework measured 7318 on the CI run for 8723664; base = 7318 + 5%
 #   concurrency margin, same formula as the 2026-09-13 entry)
@@ -51,6 +56,14 @@
 # 2026-10-29: 8056 -> 8513 (measured 8108 on the CI run for a27a913, "Budlum
 #   Core quality": `clippy-extra: 8108 | baseline: 8056`; base = 8108 + 5%
 #   concurrency margin, the same formula as the 2026-10-20 and 2026-09-13
-#   entries). The testnet branch carries the quantum canary, the graft and
+#   entries). The testnet branch carries the quantum canary, the app_binding and
 #   domain modules, the settlement doors and the testnet daemons the consensus
 #   branch does not, and their doc/`must_use` surface is what the +52 is.
+# 2026-11-18: 8513 -> 7223. Measured 7223 on CI run 44292586425,
+# job 134761302116, source df970fc98402e0d025b7832ebada47581f8174f6
+# ("Budlum Core quality": `clippy-extra: 7223 | baseline: 8513`). The gate's
+# own stale-baseline rule failed the job: the base was more than 10% above the
+# measured count. The ratchet itself is unchanged; the base only descends to a
+# CI-measured count, as the 2026-10-29 entry records. No other branch inherits
+# this number; Garden, main and the aggregation heads keep their own baselines
+# until each has its own complete CI measurement.

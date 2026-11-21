@@ -9,7 +9,7 @@
 //!    adapter name `"ai-inference-threshold"`; the runtime arm constructed the
 //!    storage adapter, whose name is `"storage-attestation-v1"`, and then
 //!    compared the two. Dead wiring: registrable, never finalizable.
-//! 2. **PoA authority sets were unbound.** Both count-weighted branches took
+//! 2. **`PoA` authority sets were unbound.** Both count-weighted branches took
 //!    the authority list from inside the proof and sized the quorum from it,
 //!    while every stake-weighted branch bound its set to
 //!    `domain.validator_set_hash`.
@@ -156,7 +156,7 @@ mod poa_authority_binding {
         }
     }
 
-    /// Sign the PoA commitment binding message with each key.
+    /// Sign the `PoA` commitment binding message with each key.
     fn poa_proof(
         domain: &ConsensusDomain,
         commitment: &DomainCommitment,
@@ -350,6 +350,7 @@ mod poa_authority_binding {
             agg_sig_bls: vec![],
             bitmap: vec![],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         match crate::domain::finality_adapter::PoSFinalityAdapter
             .verify_finality(

@@ -7,7 +7,7 @@
 //! The signing preimage is domain-separated (`BDLM_TX_V4` plus the chain id),
 //! so a Budlum signature was never replayable onto Ethereum. The damage was to
 //! users: every EVM wallet resolves a chain id through that registry, so an
-//! RPC announcing `1` presents itself to MetaMask as Ethereum Mainnet and the
+//! RPC announcing `1` presents itself to `MetaMask` as Ethereum Mainnet and the
 //! user approves what looks like an Ethereum transaction.
 //!
 //! These tests are offline on purpose. A gate that reaches the network is a
@@ -249,16 +249,48 @@ fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
             let auth = rpc
                 .and_then(|r| r.get("auth_required"))
                 .and_then(toml::Value::as_bool);
+            let op_auth = rpc
+                .and_then(|r| r.get("operator_auth_required"))
+                .and_then(toml::Value::as_bool);
             let key_env = rpc
                 .and_then(|r| r.get("api_key_env"))
                 .and_then(toml::Value::as_str)
                 .unwrap_or("");
-            assert_eq!(
-                auth,
-                Some(true),
-                "{file} is a {profile} profile and must say auth_required = true; TLS \
-                 names the server, the key names the caller"
-            );
+            // A shielded validator runs on a private host behind its
+            // sentries (`p2p.sentry_peers` confines its peering) and a sentry
+            // is the public proxy that fronts one (`role = "sentry"`). Neither
+            // serves keyless reads, so both keep the RPC authenticated on a
+            // testnet chain. Folding them into the public-testnet arm below
+            // would demand that a private host answer anonymous reads.
+            let role = parsed
+                .get("node")
+                .and_then(|n| n.get("role"))
+                .and_then(toml::Value::as_str)
+                .unwrap_or("");
+            let shielded = role == "sentry"
+                || parsed
+                    .get("p2p")
+                    .and_then(|p| p.get("sentry_peers"))
+                    .is_some();
+            if profile == "mainnet" || shielded {
+                assert_eq!(
+                    auth,
+                    Some(true),
+                    "{file} is a {profile} profile on a private host and must say \
+                     auth_required = true; a shielded validator serves no keyless reads"
+                );
+            } else {
+                assert_eq!(
+                    auth,
+                    Some(false),
+                    "{file} is a testnet profile and exposes keyless public reads + signed-tx submission"
+                );
+                assert_eq!(
+                    op_auth,
+                    Some(true),
+                    "{file} is a testnet profile and must require API-key authentication on operator_listener"
+                );
+            }
             assert!(
                 !key_env.trim().is_empty(),
                 "{file} is a {profile} profile and must name api_key_env"

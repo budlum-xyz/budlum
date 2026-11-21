@@ -1,12 +1,11 @@
-# The EVM ChainAdapter (module README): closing F10 H4
+# The EVM ChainAdapter (module README)
 
 **Under the module separation rule, this is the EVM adapter's own README.** The
 root `README.md` is only a dashboard; the maturity and risk warnings live here.
 
 ## Status
 
-- **Maturity:** F10.1 and F10.2 shipped, closing the H4 spoofed-authorization
-  finding. F10.3, the sync committee light client, is implemented and reachable
+- **Maturity:** RLP/MPT verification and receipt proof checking are live, enforcing strict deposit authorization. The sync committee light client is implemented and reachable
   from the production verification path; see the warnings below for what it does
   and does not cover.
 - **Where the code is:** `src/cross_domain/evm/`, holding `rlp.rs` (an in-tree
@@ -14,12 +13,12 @@ root `README.md` is only a dashboard; the maturity and risk warnings live here.
   receipt decoding), `header.rs` (the header chain and N-confirmation finality),
   `sync_committee.rs` (the Altair sync committee light client), `verify.rs` (the
   `verify_evm_receipt` orchestrator), `adapter.rs` (the `EvmChainAdapter`
-  implementation) and `bud_to_eth.rs` (the Budlum side of the F10.5 direction).
+  implementation) and `bud_to_eth.rs` (the Budlum-to-Ethereum burn proof builder).
 - **Test count:** 90 `#[test]` functions, made up of RLP 19, MPT 17, receipt 10,
   header 7, verify 12, sync committee 9, adapter 12 and bud-to-eth 4.
 - **Wired to:** `src/cross_domain/chain_adapter.rs`, which holds the
   `ChainAdapter` trait, the `AdapterRegistry` and the `StubAdapter`. The
-  `EvmChainAdapter` implementation is F10.2, verifying the receipt proof on
+  `EvmChainAdapter` implementation verifies the receipt proof on
   chain.
 
 ## Design decisions
@@ -42,14 +41,14 @@ root `README.md` is only a dashboard; the maturity and risk warnings live here.
   must therefore require the attestation itself; the verifier cannot infer the
   requirement from a proof that omits it.
 - **`EvmChainAdapter::generate`, `submit` and `wait` are off-chain stubs.** The
-  production relayer binary, F10.4, comes after mainnet.
+  standalone relayer binary handles off-chain submission.
   `verify_receipt_proof` is on chain and deterministic.
-- **The Bud to Ethereum direction, F10.5, is only half here.** `bud_to_eth.rs`
+- **The Bud-to-Ethereum direction covers the Budlum burn proof side.** `bud_to_eth.rs`
   builds the Budlum-side payload; the smart contract on Ethereum that verifies
   Budlum finality, a Solidity light client, is a large separate piece of work
   under its own RFC.
 
-## Security invariants (F10.1 and F10.2)
+## Security invariants
 
 - **Deterministic and network-free.** No function connects to an Ethereum RPC.
   The relayer produces the proof and it is verified inside Budlum consensus,
@@ -67,12 +66,12 @@ root `README.md` is only a dashboard; the maturity and risk warnings live here.
 
 H4 in `SECURITY_AUDIT_HACKER`, rated critical: "a UniversalRelay transaction
 only emits a log, with no cryptographic binding to the target chain's format,
-which allows spoofed authorization". F10.1 and F10.2 closed it: Budlum verifies
+which allows spoofed authorization". Budlum enforces this directly: the adapter verifies
 Ethereum deposits cryptographically, with its own MPT and header chain, so the
 relayer cannot invent a proof.
 
 ## What comes next
 
-F10.4, the relayer binary, after mainnet, and F10.5's Ethereum side, the
+the off-chain relayer binary and the Ethereum-side
 Solidity light client, under a separate RFC. The fuzz targets `evm_rlp_decode`
 and `evm_mpt_verify` shipped with this work.

@@ -73,9 +73,17 @@ mod tests {
         let params = BeaconChainParams {
             fork_version: [0x04, 0, 0, 0],
             genesis_validators_root: [0x42; 32],
+            finalized_root_gindex:
+                crate::cross_domain::evm::sync_committee::FINALIZED_ROOT_GINDEX_DENEB,
         };
-        let err = verify_execution_block_finality(&state, &agg, &binding, &params, &block)
-            .expect_err("low-participation aggregate must be rejected");
+        let finality = crate::cross_domain::evm::sync_committee::fixtures::finality_for(
+            &binding,
+            params.finalized_root_gindex,
+            64,
+        );
+        let err =
+            verify_execution_block_finality(&state, &agg, &binding, &finality, &params, &block)
+                .expect_err("low-participation aggregate must be rejected");
         match err {
             SyncCommitteeError::InsufficientParticipation {
                 participating,
@@ -89,9 +97,9 @@ mod tests {
         }
     }
 
-    /// REGRESSION: AiAgentPayment round-trips through proto encode/decode
-    /// As AiAgentPayment (not AiFeeReclaim). Previously 4 tx types collided on
-    /// The AiFeeReclaim proto enum, making AiAgentPayment undecodable remotely.
+    /// REGRESSION: `AiAgentPayment` round-trips through proto encode/decode
+    /// As `AiAgentPayment` (not `AiFeeReclaim`). Previously 4 tx types collided on
+    /// The `AiFeeReclaim` proto enum, making `AiAgentPayment` undecodable remotely.
     #[test]
     fn ai_agent_payment_proto_roundtrip_preserves_type() {
         use crate::network::proto_conversions::pb::ProtoTransaction;
@@ -109,7 +117,7 @@ mod tests {
         );
     }
 
-    /// REGRESSION: non-escrowed settle keeps audit receipt; payment_id not reusable.
+    /// REGRESSION: non-escrowed settle keeps audit receipt; `payment_id` not reusable.
     #[test]
     fn non_escrowed_settlement_retains_receipt_and_blocks_reuse() {
         let mut registry = AiRegistry::new();
@@ -278,7 +286,7 @@ mod tests {
         assert!(err.is_err(), "duplicate payment_id must fail");
     }
 
-    /// REGRESSION: from_agent spoof rejected at executor.
+    /// REGRESSION: `from_agent` spoof rejected at executor.
     #[test]
     fn from_agent_spoof_rejected() {
         let mut state = AccountState::new();

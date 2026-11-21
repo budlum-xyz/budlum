@@ -4,7 +4,7 @@
 //! representative, both required. The validator address stays its Ed25519 public key, so a block
 //! signature is accepted only when the Ed25519 half of the signing key is the producer's
 //! address: a valid composite signature by some other key never stands in for the producer.
-//! PoA and evidence signatures use the same suite and the same address rule under their own
+//! `PoA` and evidence signatures use the same suite and the same address rule under their own
 //! contexts (`BDLM/POA/V2`, `BDLM/EVIDENCE/V2`), so a signature made for one purpose is no
 //! signature for another.
 
@@ -47,6 +47,12 @@ pub fn sign_with_context(
     message: &[u8],
     rnd: &[u8; 32],
 ) -> Result<Vec<u8>, CompositeError> {
+    if context.is_empty() {
+        return Err(CompositeError::BadContext);
+    }
+    if keypair.public_key()?.suite != SuiteId::VALIDATOR {
+        return Err(CompositeError::SuiteMismatch);
+    }
     Ok(keypair.sign(context, message, rnd)?.encode())
 }
 
@@ -63,7 +69,7 @@ pub fn sign_block(
     sign_with_context(keypair, ctx::BLOCK_V6, block_hash, rnd)
 }
 
-/// Signs a PoA proposal digest under the PoA context.
+/// Signs a `PoA` proposal digest under the `PoA` context.
 ///
 /// # Errors
 ///
@@ -112,7 +118,7 @@ pub fn verify_block(
     )
 }
 
-/// Verifies a PoA signature. A block signature does not verify here: the contexts differ.
+/// Verifies a `PoA` signature. A block signature does not verify here: the contexts differ.
 ///
 /// # Errors
 ///
@@ -164,10 +170,11 @@ pub fn sign_snapshot(
     sign_with_context(keypair, ctx::SNAPSHOT_V2, manifest_digest, rnd)
 }
 
-/// Verifies a snapshot manifest signature against a trusted signer address, context
-/// `BDLM/SNAPSHOT/V2`. The trust list stays a list of Ed25519 addresses: the address of a
-/// signer is the Ed25519 half of its composite key, so a snapshot is accepted only when that
-/// address is trusted and both components verify.
+/// Verifies a snapshot manifest signature against a trusted signer address (`BDLM/SNAPSHOT/V2`).
+///
+/// The trust list stays a list of Ed25519 addresses: the address of a signer is the Ed25519 half
+/// of its composite key, so a snapshot is accepted only when that address is trusted and both
+/// components verify.
 ///
 /// # Errors
 ///
@@ -203,6 +210,11 @@ pub fn verify_with_context(
     block_hash: &[u8; 32],
     signature: &[u8],
 ) -> Result<(), BlockSignatureError> {
+    if context.is_empty() {
+        return Err(BlockSignatureError::Malformed(
+            "signature context must be non-empty".into(),
+        ));
+    }
     let public = CompositePublicKey::decode(public_key)
         .map_err(|e| BlockSignatureError::Malformed(e.to_string()))?;
     if public.suite != SuiteId::VALIDATOR {
@@ -314,5 +326,35 @@ mod tests {
             ),
             Err(BlockSignatureError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn empty_context_or_non_validator_suite_signing_is_refused() {
+        let kp = keypair(7);
+        let public = kp.public_key().expect("public");
+        assert!(
+            sign_with_context(&kp, b"", &[9u8; 32], &[0u8; 32]).is_err(),
+            "empty FIPS 204 context must be refused when signing"
+        );
+        let valid_sig = sign_block(&kp, &[9u8; 32], &[0u8; 32]).expect("block sig");
+        assert!(
+            verify_with_context(
+                &SchemeStatusRegistry::genesis(),
+                &public.ed,
+                &public.encode(),
+                b"",
+                &[9u8; 32],
+                &valid_sig,
+            )
+            .is_err(),
+            "empty FIPS 204 context must be refused when verifying"
+        );
+        let user_kp =
+            CompositeKeypair::from_seeds(SuiteId::USER, &[3u8; ML_DSA_SEED_LEN], &[4u8; 32])
+                .expect("user keypair");
+        assert!(
+            sign_block(&user_kp, &[9u8; 32], &[0u8; 32]).is_err(),
+            "non-validator composite suite must be refused by sign_block"
+        );
     }
 }

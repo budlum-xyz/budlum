@@ -23,7 +23,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use super::regeneration::{hex32, keccak256};
+use super::canonical_programs_reproduce::{hex32, keccak256};
 
 /// The one licence expression every manifest must resolve to.
 const SPDX: &str = "LicenseRef-PolyForm-Shield-1.0.0";
@@ -147,9 +147,13 @@ fn collect_manifests(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn check_licence_texts(root: &Path, problems: &mut Vec<String>) -> Result<(), String> {
-    // Both copies carry the canonical PolyForm Shield 1.0.0 text first, and both
-    // are pinned by hash. A body edit in either one fails.
-    for rel in ["LICENSE.md", "budzero/LICENSE"] {
+    // Every copy carries the canonical PolyForm Shield 1.0.0 text first, and
+    // each is pinned by hash. A body edit in any copy fails.
+    for rel in [
+        "LICENSE.md",
+        "budzero/LICENSE",
+        "crates/ai-inference/LICENSE.md",
+    ] {
         let lic_path = root.join(rel);
         let lic = std::fs::read(&lic_path)
             .map_err(|e| format!("cannot read {}: {e}", lic_path.display()))?;
@@ -161,7 +165,11 @@ fn check_licence_texts(root: &Path, problems: &mut Vec<String>) -> Result<(), St
             ));
         }
     }
-    for rel in ["LICENSE.md", "budzero/LICENSE"] {
+    for rel in [
+        "LICENSE.md",
+        "budzero/LICENSE",
+        "crates/ai-inference/LICENSE.md",
+    ] {
         let path = root.join(rel);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -332,8 +340,10 @@ fn consistent_fixture(dir: &Path) -> Result<Vec<u8>, String> {
     let real_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let lic = std::fs::read(real_root.join("LICENSE.md")).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir.join("budzero")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir.join("crates/ai-inference")).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("LICENSE.md"), &lic).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("budzero/LICENSE"), &lic).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("crates/ai-inference/LICENSE.md"), &lic).map_err(|e| e.to_string())?;
     write(
         dir,
         "README.md",
@@ -431,12 +441,20 @@ fn self_test_in(dir: &Path) -> Result<String, String> {
         &format!("[package]\nname = \"kani\"\nlicense = \"{SPDX}\"\n"),
     )?;
 
-    // 4. The old licence text coming back in the budzero copy.
+    // 4. The old licence text coming back in the budzero or ai-inference copy.
     write(dir, "budzero/LICENSE", "MIT License\n")?;
     if run(dir).is_ok() {
         return Err(String::from("canary: an MIT budzero/LICENSE passed"));
     }
     std::fs::write(dir.join("budzero/LICENSE"), &lic).map_err(|e| e.to_string())?;
+
+    write(dir, "crates/ai-inference/LICENSE.md", "MIT License\n")?;
+    if run(dir).is_ok() {
+        return Err(String::from(
+            "canary: an MIT crates/ai-inference/LICENSE.md passed",
+        ));
+    }
+    std::fs::write(dir.join("crates/ai-inference/LICENSE.md"), &lic).map_err(|e| e.to_string())?;
 
     // 5. The Plonky3 attribution dropped from NOTICE.
     write(dir, "docs/NOTICE", "PolyForm Shield License 1.0.0\n")?;
@@ -459,5 +477,17 @@ mod tests {
         let t = "[package] # the crate\nname = \"x\"\n";
         assert!(t.lines().any(is_package_header));
         assert!(!"[package.metadata]".lines().any(is_package_header));
+    }
+
+    #[test]
+    fn ai_inference_license_matches_polyform_shield() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root_lic = std::fs::read(root.join("LICENSE.md")).expect("LICENSE.md");
+        let ai_lic = std::fs::read(root.join("crates/ai-inference/LICENSE.md"))
+            .expect("crates/ai-inference/LICENSE.md");
+        assert_eq!(
+            ai_lic, root_lic,
+            "crates/ai-inference/LICENSE.md must match root PolyForm Shield 1.0.0 LICENSE.md"
+        );
     }
 }

@@ -1,4 +1,3 @@
-//! WIRING: unwired - verify_execution_proof_stark is blocked on the same MainnetActivation zkVM audit as its structural sibling; the audit moves the whole family at once.
 //! The STARK half of execution-proof verification.
 //!
 //! This sits beside [`verify_execution_proof_full`] rather than inside it on
@@ -18,11 +17,16 @@ use bud_proof::{DefaultAdapter as Prover, ExecutionPublicInputs, ProofEnvelope, 
 /// Every refusal is a bound the caller cannot negotiate: the envelope has to fit
 /// [`MAX_PROOF_BYTES`] before it is decoded, its `public_inputs_hash` has to be
 /// the hash of the inputs the caller derived rather than the ones the prover
-/// claims, its `program_hash` has to be the registered program, and the STARK
+/// claims, its `program_hash` has to be the registered program, `initial_state_root`
+/// and `event_digest` must be non-zero guest commitments, and the STARK
 /// has to verify. The size bound is first because decoding is the work a hostile
 /// envelope exists to make the node pay for.
 ///
 /// [`MAX_PROOF_BYTES`]: crate::execution::proof_verifier::MAX_PROOF_BYTES
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_execution_proof_stark(
     proof: &AiExecutionProof,
     program: &[u64],
@@ -31,13 +35,45 @@ pub fn verify_execution_proof_stark(
     if proof.proof_bytes.len() > crate::execution::proof_verifier::MAX_PROOF_BYTES {
         return Err("execution proof_bytes exceed MAX_PROOF_BYTES".into());
     }
-    let envelope: ProofEnvelope = postcard::from_bytes(&proof.proof_bytes)
-        .map_err(|e| format!("execution proof deserialize: {e}"))?;
+    if program.is_empty() {
+        return Err("execution proof guest program cannot be empty".into());
+    }
+    let (envelope, trailing): (ProofEnvelope, &[u8]) =
+        postcard::take_from_bytes(&proof.proof_bytes)
+            .map_err(|e| format!("execution proof deserialize: {e}"))?;
+    if !trailing.is_empty() {
+        return Err(format!(
+            "execution proof carries {} unexpected trailing byte(s)",
+            trailing.len()
+        ));
+    }
+    let recomputed_program_hash =
+        crate::ai::execution::guest::stark_program_hash_from_words(program);
+    if recomputed_program_hash != expected_inputs.program_hash {
+        return Err(
+            "execution proof guest bytecode does not match public_inputs.program_hash".into(),
+        );
+    }
     if envelope.public_inputs_hash != expected_inputs.hash() {
         return Err("execution proof public_inputs_hash mismatch".into());
     }
     if expected_inputs.program_hash != proof.program_hash {
         return Err("execution proof program_hash != public_inputs.program_hash".into());
+    }
+    if expected_inputs.initial_state_root == [0u8; 32] {
+        return Err("execution proof initial_state_root cannot be zero".into());
+    }
+    if expected_inputs.event_digest == [0u8; 32] {
+        return Err("execution proof event_digest cannot be zero".into());
+    }
+    if expected_inputs.exit_code != 0 {
+        return Err("execution proof attests non-zero exit_code".into());
+    }
+    if expected_inputs.gas_used != proof.gas_used {
+        return Err("execution proof gas_used != public_inputs.gas_used".into());
+    }
+    if expected_inputs.trace_len != proof.steps || proof.steps == 0 {
+        return Err("execution proof steps != public_inputs.trace_len".into());
     }
     Prover::verify(&envelope, expected_inputs, program)
         .map_err(|e| format!("execution STARK verify failed: {e:?}"))?;

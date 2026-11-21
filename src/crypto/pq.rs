@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_ml_dsa_single is reached only from the PQ vector tests in this tree; the production path verifies through the batched backend dispatch.
+//! WIRING: unwired - `verify_ml_dsa_single` is reached only from the PQ vector tests in this tree; the production path verifies through the batched backend dispatch.
 //! Post-quantum verification facade.
 //!
 //! One entry point, [`verify`], for every ML-DSA and SLH-DSA signature the node
@@ -11,7 +11,7 @@
 //! # ML-DSA is verified twice
 //!
 //! Consensus verification of an ML-DSA signature needs the acceptance of two
-//! independent implementations: RustCrypto `ml-dsa` and `libcrux-ml-dsa` (the
+//! independent implementations: `RustCrypto` `ml-dsa` and `libcrux-ml-dsa` (the
 //! portable backend only; the SIMD features are off, so the AVX2 advisories
 //! RUSTSEC-2026-0125 and RUSTSEC-2026-0126 have no code path here). Both
 //! libraries shipped a bug in 2026 that accepted an invalid signature
@@ -24,7 +24,7 @@
 //!
 //! # SLH-DSA has one library
 //!
-//! RustCrypto `slh-dsa` is the only implementation. The NIST ACVP vectors in
+//! `RustCrypto` `slh-dsa` is the only implementation. The NIST ACVP vectors in
 //! `tests/vectors/pq` are therefore mandatory (`pq_vectors_*` tests).
 //!
 //! This file has no dependency on the rest of the node. `crates/wallet-core`
@@ -95,6 +95,9 @@ pub enum PqError {
     VerifierDisagreement,
     /// The signer refused (context too long, or a library failure).
     Signing,
+    /// The context string is not in the registered FIPS 204 / 205 context
+    /// table (`crypto::ctx::TABLE` and `EXTRAS`).
+    UnregisteredContext,
 }
 
 impl std::fmt::Display for PqError {
@@ -110,6 +113,9 @@ impl std::fmt::Display for PqError {
             }
             Self::Unsupported(id) => write!(f, "scheme 0x{:04x} has no implementation here", id.0),
             Self::EmptyContext => write!(f, "an empty context string is refused"),
+            Self::UnregisteredContext => {
+                write!(f, "the context string is not a registered Budlum context")
+            }
             Self::ContextTooLong(n) => write!(f, "context string of {n} bytes exceeds 255"),
             Self::PublicKeyLength {
                 scheme,
@@ -156,6 +162,12 @@ fn check_context(ctx: &[u8]) -> Result<(), PqError> {
     }
     if ctx.len() > MAX_CONTEXT_LEN {
         return Err(PqError::ContextTooLong(ctx.len()));
+    }
+    // Only a registered context is accepted. A free-form context
+    // lets a signature made for one purpose verify under a name nobody
+    // reviewed, which is the separation the context exists to give.
+    if !super::ctx::is_registered(ctx) {
+        return Err(PqError::UnregisteredContext);
     }
     Ok(())
 }
@@ -352,7 +364,7 @@ pub fn verify_ml_dsa_single(
 /// One of the two ML-DSA implementations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MlDsaBackend {
-    /// RustCrypto `ml-dsa`.
+    /// `RustCrypto` `ml-dsa`.
     RustCrypto,
     /// `libcrux-ml-dsa`, portable backend.
     Libcrux,
@@ -733,6 +745,39 @@ mod tests {
         }
     }
 
+    ///  lock: the facade takes the context and the scheme as arguments
+    /// and refuses before it decodes anything. An empty context, an over-long
+    /// context, a context nobody registered and a scheme this facade does not
+    /// verify are each refused with their own error, so a caller cannot invent a
+    /// context string or let the key length choose the scheme.
+    #[test]
+    fn an_unregistered_context_or_scheme_is_refused_before_the_keys() {
+        let scheme = SchemeId::ML_DSA_65;
+        assert_eq!(
+            verify(scheme, &[], &[], b"", &[]),
+            Err(PqError::EmptyContext)
+        );
+        let too_long = vec![b'C'; MAX_CONTEXT_LEN + 1];
+        assert!(matches!(
+            verify(scheme, &[], &[], &too_long, &[]),
+            Err(PqError::ContextTooLong(n)) if n == too_long.len()
+        ));
+        assert_eq!(
+            verify(scheme, &[], &[], b"BDLM/MADE_UP_BY_A_CALLER", &[]),
+            Err(PqError::UnregisteredContext)
+        );
+        assert_eq!(
+            verify(SchemeId(0x7FFF), &[], &[], ctx::TX_V7, &[]),
+            Err(PqError::UnknownScheme(SchemeId(0x7FFF)))
+        );
+        // A registered context and a known scheme pass both checks, so the
+        // refusal above is the guard and not the only reachable path.
+        assert!(matches!(
+            verify(scheme, &[], &[], ctx::TX_V7, &[]),
+            Err(PqError::PublicKeyLength { .. })
+        ));
+    }
+
     #[test]
     fn a_wrong_context_message_or_key_is_rejected() {
         let scheme = SchemeId::ML_DSA_65;
@@ -771,9 +816,28 @@ mod tests {
             ml_dsa_sign(scheme, &seed(1), MSG, b"", &[0u8; 32]),
             Err(PqError::EmptyContext)
         );
+        // A context of legal length that is not registered is
+        // refused on both sides.
         let max = [b'a'; 255];
-        let sig = ml_dsa_sign(scheme, &seed(1), MSG, &max, &[0u8; 32]).unwrap();
-        assert_eq!(verify(scheme, &pk, MSG, &max, &sig), Ok(()));
+        assert_eq!(
+            ml_dsa_sign(scheme, &seed(1), MSG, &max, &[0u8; 32]),
+            Err(PqError::UnregisteredContext)
+        );
+    }
+
+    #[test]
+    fn only_registered_contexts_sign_and_verify() {
+        let scheme = SchemeId::ML_DSA_65;
+        let registered = ctx::TABLE[0];
+        let sig = ml_dsa_sign(scheme, &seed(2), MSG, registered, &[0u8; 32]).unwrap();
+        let pk = ml_dsa_public_key(scheme, &seed(2)).unwrap();
+        assert_eq!(verify(scheme, &pk, MSG, registered, &sig), Ok(()));
+        // The same signature under a free-form context name nobody reviewed
+        // is refused before any key is decoded.
+        assert_eq!(
+            verify(scheme, &pk, MSG, b"UNREGISTERED_TEST_CTX_V1", &sig),
+            Err(PqError::UnregisteredContext)
+        );
     }
 
     #[test]
@@ -887,6 +951,33 @@ mod tests {
         ));
         assert_eq!(slh_dsa_seed_len(SchemeId::SLH_DSA_SHAKE_256S), Ok(96));
         assert_eq!(slh_dsa_seed_len(SchemeId::SLH_DSA_SHAKE_128S), Ok(48));
+    }
+
+    #[test]
+    fn pq_verify_requires_registered_context_and_explicit_scheme() {
+        let pk65 = ml_dsa_public_key(SchemeId::ML_DSA_65, &seed(11)).unwrap();
+        let sig65 =
+            ml_dsa_sign(SchemeId::ML_DSA_65, &seed(11), MSG, ctx::TX_V7, &[0u8; 32]).unwrap();
+        assert_eq!(
+            verify(SchemeId::ML_DSA_65, &pk65, MSG, b"", &sig65),
+            Err(PqError::EmptyContext)
+        );
+        let oversized_ctx = [b'x'; MAX_CONTEXT_LEN + 1];
+        assert_eq!(
+            verify(SchemeId::ML_DSA_65, &pk65, MSG, &oversized_ctx, &sig65),
+            Err(PqError::ContextTooLong(MAX_CONTEXT_LEN + 1))
+        );
+        assert!(matches!(
+            verify(SchemeId::ML_DSA_87, &pk65, MSG, ctx::TX_V7, &sig65),
+            Err(PqError::PublicKeyLength {
+                scheme: SchemeId::ML_DSA_87,
+                ..
+            })
+        ));
+        assert_eq!(
+            verify(SchemeId(0xFFFF), &pk65, MSG, ctx::TX_V7, &sig65),
+            Err(PqError::UnknownScheme(SchemeId(0xFFFF)))
+        );
     }
 }
 

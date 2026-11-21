@@ -110,14 +110,14 @@ pub struct PoWConfig {
     /// search starves RPC, validation and sync for as long as a hard nonce
     /// takes. The budget caps one attempt: the search gives up with an error,
     /// the actor drains its queue, and the producer loop retries on the
-    /// current tip - which also bounds how stale the discarded work can get
-    /// (P01-F16b). Defaults to 30 seconds: far beyond any difficulty this
+    /// current tip, which also bounds how stale discarded work can get. The
+    /// budget defaults to 30 seconds: far beyond any difficulty this
     /// chain retargets to, far below "the node is gone".
     pub mine_time_budget_ms: u64,
 }
 impl Default for PoWConfig {
     fn default() -> Self {
-        PoWConfig {
+        Self {
             difficulty: 2,
             target_block_time: 10,
             adjustment_interval: 100,
@@ -130,8 +130,9 @@ pub struct PoWEngine {
     current_difficulty: RwLock<usize>,
 }
 impl PoWEngine {
+    #[must_use]
     pub fn new(difficulty: usize) -> Self {
-        PoWEngine {
+        Self {
             config: PoWConfig {
                 difficulty,
                 ..Default::default()
@@ -173,18 +174,20 @@ impl PoWEngine {
     ///
     /// This constructor equates the target with the production rate, so the
     /// retarget measures real drift rather than a fixed calibration error.
+    #[must_use]
     pub fn calibrated(difficulty: usize, slot_ms: u64) -> Self {
         let target_block_time = (slot_ms / 1000).max(1);
-        PoWEngine::with_config(PoWConfig {
+        Self::with_config(PoWConfig {
             difficulty,
             target_block_time,
             ..Default::default()
         })
     }
 
+    #[must_use]
     pub fn with_config(config: PoWConfig) -> Self {
         let d = config.difficulty;
-        PoWEngine {
+        Self {
             config,
             current_difficulty: RwLock::new(d),
         }
@@ -310,7 +313,7 @@ impl PoWEngine {
     /// Returns `true` when solved. The search is bounded: every
     /// [`MINE_CHUNK`] nonces it checks the wall-clock budget and, in the
     /// chain-aware entry points, that the block is still built on the tip it
-    /// was prepared for (P01-F16b). Stale or unsolved work is discarded and
+    /// was prepared for. Stale or unsolved work is discarded and
     /// re-prepared rather than mined forever on a tip the network has left.
     fn mine_at_difficulty(&self, block: &mut Block, difficulty: usize) -> bool {
         self.mine_at_difficulty_on(block, difficulty, || false)
@@ -450,7 +453,7 @@ impl ConsensusEngine for PoWEngine {
         let tip_hash = chain.last().map(|b| b.hash.clone());
         let prev_hash = block.previous_hash.clone();
         block.hash = block.calculate_hash();
-        // P01-F16b: work on a block that is no longer anchored to the tip the
+        // Work on a block that is no longer anchored to the tip the
         // chain slice carries is abandoned instead of mined to completion and
         // then rejected.
         if self.mine_at_difficulty_on(block, difficulty, || {
@@ -508,7 +511,7 @@ impl ConsensusEngine for PoWEngine {
     fn record_block(
         &self,
         _block: &Block,
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         // (security audit) the trait `record_block` hook is
         // Intentionally a no-op for PoW. The actual difficulty
@@ -526,7 +529,7 @@ impl ConsensusEngine for PoWEngine {
         &self,
         block: &Block,
         chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
         // See `record_block_with_chain` in `consensus/mod.rs` for the
         // Contract. The difficulty adjustment fires here, exactly
@@ -580,7 +583,9 @@ impl ConsensusEngine for PoWEngine {
         // then block hash, then proposer, so every node that sees the same
         // two tips picks the same one regardless of arrival order. Work
         // that saturates U256 still compares equal here, and the
-        // low-128-bit score must never decide this branch.
+        // low-128-bit score must never decide this branch. The u128 score
+        // is informational here. U256 equality already decided this branch,
+        // so a saturated score does not order the tips.
         resolve_split_tie(
             &SplitCandidate::from_chain_tip(current, current_work.saturating_to_u128()),
             &SplitCandidate::from_chain_tip(candidate, candidate_work.saturating_to_u128()),
@@ -608,6 +613,23 @@ mod tests {
         let mut tampered = block.clone();
         tampered.hash = "invalid_hash".to_string();
         assert!(engine.validate_block(&tampered, &[], &state).is_err());
+    }
+    #[test]
+    fn saturated_work_tie_falls_through_to_height() {
+        assert_eq!(U256::MAX.saturating_to_u128(), u128::MAX);
+        let left = SplitCandidate {
+            block_hash: [1; 32],
+            proposer: [0; 32],
+            height: 10,
+            weight: u128::MAX,
+        };
+        let right = SplitCandidate {
+            block_hash: [2; 32],
+            proposer: [0; 32],
+            height: 11,
+            weight: u128::MAX,
+        };
+        assert_eq!(resolve_split_tie(&left, &right), SplitDecision::RightWins);
     }
     #[test]
     fn test_difficulty_levels() {
@@ -829,15 +851,10 @@ mod tests {
         // Invalid hex should return false, not panic
         assert!(!engine.meets_difficulty("not-a-hex-string"));
     }
-    /// FINDING: the producer's tick interval (`slot_ms`) and the PoW retarget
-    /// target (`target_block_time`) are set up in ignorance of each other.
-    /// `PoWEngine::new` always takes `PoWConfig::default()` (10 seconds) while
-    /// the devnet slot is 1 second. Measured: a live devnet node jumped the
-    /// difficulty from 2 to 8 (32 zero bits) at block 100, found no block in
-    /// 285 million iterations and the chain stopped. Because the retarget can
-    /// rise at most 4x every 100 blocks, the climb goes 2 -> 8 -> 32 (the
-    /// ceiling); that is a lock with no way back. The existing tests only
-    /// verified the [1,32] clamp, not the proportionality.
+    /// The mining tick interval and retarget target must describe the same
+    /// production rate. A mismatch can raise difficulty faster than the
+    /// producer can solve blocks, stalling the chain. This test pins the
+    /// proportionality between the target and the slot interval.
     #[test]
     fn the_retarget_has_to_be_calibrated_to_the_producer_rate() {
         // The rate the chain really produces at: 1 s per block (devnet

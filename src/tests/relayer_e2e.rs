@@ -1,7 +1,7 @@
 //! E2E test for Universal Relayer integration with Blockchain.
 //!
 //! Tests the full cross-domain relay lifecycle at the blockchain level:
-//! Register_asset → lock → enqueue relay → submit proof → bridge mint.
+//! `Register_asset` → lock → enqueue relay → submit proof → bridge mint.
 
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
@@ -12,7 +12,7 @@ use crate::cross_domain::event_tree::{DomainEvent, DomainEventKind, DomainEventT
 use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams, MessageKind};
 use crate::cross_domain::AssetId;
 use crate::domain::types::{DomainId, Hash32};
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use std::sync::Arc;
 use tempfile::tempdir;
 

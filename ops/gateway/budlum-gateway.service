@@ -1,0 +1,43 @@
+# budlum-gateway under systemd.
+#
+# The unit runs the process as an unprivileged user with a read-only system and
+# a writable cache directory. It binds 127.0.0.1:8080; the terminator in front
+# holds the certificate and the 443 socket, so this unit never needs
+# CAP_NET_BIND_SERVICE and never reads a private key.
+[Unit]
+Description=Budlum .bud name gateway (budlum.xyz)
+Documentation=https://github.com/budlum-xyz/budlum
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=budlum-gateway
+Group=budlum-gateway
+ExecStart=/usr/local/bin/budlum-gateway /etc/budlum-gateway/gateway.toml
+Restart=always
+RestartSec=2
+
+# The process reads one configuration file, one block list and the object
+# directory. Nothing it reads may change under it.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/budlum-gateway
+
+# A leaked process should not be able to send mail, become another user or
+# change its own limits.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

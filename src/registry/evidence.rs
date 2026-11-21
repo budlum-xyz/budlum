@@ -123,7 +123,7 @@ pub enum SlashingProof {
 /// independently checkable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DoubleSignKind {
-    /// Two conflicting block headers at one height (PoS block equivocation).
+    /// Two conflicting block headers at one height (`PoS` block equivocation).
     BlockHeader,
     /// Two conflicting BLS prevotes at one checkpoint.
     Prevote,
@@ -410,8 +410,8 @@ impl SlashingReport {
     }
 
     /// A relayer invalid proof - griefing, fronting or a wrong relay.
-    /// Uses `Other` with tag `relayer_invalid_proof` and maps to MaliciousBehaviour (100% slash in default params).
-    /// Per decision reuse_malicious to avoid semver break.
+    /// Uses `Other` with tag `relayer_invalid_proof` and maps to `MaliciousBehaviour` (100% slash in default params).
+    /// Per decision `reuse_malicious` to avoid semver break.
     #[cfg(test)]
     pub fn consensus_invalid_relay_proof(
         offender: Address,
@@ -511,7 +511,7 @@ impl SlashingReport {
         )
     }
 
-    /// Content validator invalid validation - SocialFi content forgery.
+    /// Content validator invalid validation - `SocialFi` content forgery.
     pub fn consensus_invalid_content_validation(
         offender: Address,
         reason: String,
@@ -529,11 +529,18 @@ impl SlashingReport {
     }
 
     /// The condition this report attests to.
+    #[must_use]
     pub fn condition(&self) -> SlashingCondition {
         self.proof.condition()
     }
 
     /// Domain-agnostic structural validation. Always safe to run anywhere.
+    /// # Errors
+    ///
+    /// Returns [`EvidenceError::ZeroOffender`] when the offender is the zero
+    /// address, [`EvidenceError::FieldTooLarge`] when the proof payload exceeds the
+    /// evidence data limit, and [`EvidenceError::InsufficientInvalidVoteCount`] when
+    /// an invalid-signature spam proof does not cross its own threshold.
     pub fn validate_shape(&self) -> Result<(), EvidenceError> {
         if self.offender == Address::zero() {
             return Err(EvidenceError::ZeroOffender);
@@ -579,7 +586,15 @@ impl SlashingReport {
                         max: MAX_SIGNATURE_LEN,
                     });
                 }
-                if block_hash_1 == block_hash_2 {
+                let norm = |s: &str| -> String {
+                    let trimmed = s.trim();
+                    let body = trimmed
+                        .strip_prefix("0x")
+                        .or_else(|| trimmed.strip_prefix("0X"))
+                        .unwrap_or(trimmed);
+                    body.to_ascii_lowercase()
+                };
+                if norm(block_hash_1) == norm(block_hash_2) {
                     return Err(EvidenceError::NonConflictingHashes);
                 }
                 if signature_1.is_empty() || signature_2.is_empty() {
@@ -587,9 +602,16 @@ impl SlashingReport {
                 }
             }
             SlashingProof::Liveness {
-                missed, expected, ..
+                window_start_epoch,
+                window_end_epoch,
+                missed,
+                expected,
             } => {
-                if missed > expected {
+                if window_start_epoch > window_end_epoch
+                    || missed > expected
+                    || *missed == 0
+                    || *expected == 0
+                {
                     return Err(EvidenceError::ImpossibleLivenessWindow);
                 }
             }
@@ -630,6 +652,10 @@ impl SlashingReport {
     /// (`Unverified`) reports pass structural checks but are not actioned until
     /// The consensus layer confirms them - this is what keeps the permissionless
     /// `slash-evidence-submit` endpoint safe without a whitelist.
+    /// # Errors
+    ///
+    /// Returns any [`EvidenceError`] that [`Self::validate_shape`] produces, or
+    /// [`EvidenceError::Unverified`] when the provenance is not consensus-verified.
     pub fn is_actionable(&self) -> Result<(), EvidenceError> {
         self.validate_shape()?;
         match self.provenance {
@@ -818,9 +844,9 @@ mod tests {
     /// The two helpers (`consensus_double_sign`,
     /// `consensus_liveness`) never cross-wire the proof kind and
     /// The condition label. A regression in either direction
-    /// Would either under-slash (DoubleSign labeled as
-    /// LivenessFault would slash 1% instead of 50%) or over-slash
-    /// (Liveness labeled as DoubleSign would slash 50% instead of
+    /// Would either under-slash (`DoubleSign` labeled as
+    /// `LivenessFault` would slash 1% instead of 50%) or over-slash
+    /// (Liveness labeled as `DoubleSign` would slash 50% instead of
     /// 1%).
     #[test]
     fn slashing_proof_condition_invariant_double_sign_vs_liveness() {
@@ -1021,7 +1047,10 @@ mod tests {
         *block_hash_1 = block_hash_1.to_lowercase();
         *block_hash_2 = block_hash_2.to_uppercase();
         assert_ne!(block_hash_1, block_hash_2, "the strings differ");
-        assert!(r.validate_shape().is_ok(), "so the shape check lets it by");
+        assert!(
+            r.validate_shape().is_err(),
+            "case-insensitive shape check already catches equal hex hashes"
+        );
 
         assert_eq!(
             r.verify_double_sign(),
@@ -1123,7 +1152,7 @@ mod tests {
     }
 
     /// The promotion flow is real - a report only earns
-    /// ConsensusVerified by opening its own double-sign signatures. Junk
+    /// `ConsensusVerified` by opening its own double-sign signatures. Junk
     /// signatures refuse and the report stays Unverified.
     #[test]
     fn promotion_needs_a_self_contained_proof() {
@@ -1185,5 +1214,45 @@ mod tests {
         );
         assert_eq!(r.promote_self_proven(), Err(EvidenceError::Unverified));
         assert_eq!(r.provenance(), ProofProvenance::Unverified);
+    }
+
+    #[test]
+    fn case_aliased_double_sign_and_invalid_liveness_windows_rejected() {
+        let same_block = SlashingReport::new(
+            Address::from([3u8; 32]),
+            roles::VALIDATOR,
+            SlashingProof::DoubleSign {
+                height: 10,
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "0xAA".into(),
+                block_hash_2: "aa".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
+        assert_eq!(
+            same_block.validate_shape(),
+            Err(EvidenceError::NonConflictingHashes)
+        );
+
+        for (start, end, missed, expected) in [(10, 5, 3, 10), (0, 10, 0, 10), (0, 10, 0, 0)] {
+            let bad_liv = SlashingReport::new(
+                Address::from([3u8; 32]),
+                roles::VALIDATOR,
+                SlashingProof::Liveness {
+                    window_start_epoch: start,
+                    window_end_epoch: end,
+                    missed,
+                    expected,
+                },
+                None,
+            );
+            assert_eq!(
+                bad_liv.validate_shape(),
+                Err(EvidenceError::ImpossibleLivenessWindow)
+            );
+        }
     }
 }

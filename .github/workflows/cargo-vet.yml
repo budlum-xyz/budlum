@@ -26,11 +26,11 @@ name: Cargo Vet
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
   push:
     branches: [main]
   schedule:
-    - cron: "0 5 * * 2" # weekly: the imported audit sources are refreshed
+    - cron: "0 6 * * 3" # Wednesday 06:00 UTC: refresh imported audit sources
   workflow_dispatch:
 
 permissions:

@@ -36,7 +36,7 @@ double_vote_wad = "100000000000000000"
 [addresses]
 # Written by `contracts deploy`. Mirrored in docs/TESTNET.md.
 budlum_finality_verifier = ""
-graft_executor = ""
+app_binding_executor = ""
 budlum_remote_account_factory = ""
 budlum_registrar = ""
 budlum_slasher = ""

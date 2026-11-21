@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 
 use super::{AssetId, GrantId, Signature64};
 
-/// The AI input_ref prefix. A payload starting with it counts as a Pollen
-/// data-ref and has to pass the strict AccessGrant check.
+/// The AI `input_ref` prefix. A payload starting with it counts as a Pollen
+/// data-ref and has to pass the strict `AccessGrant` check.
 pub const POLLEN_AI_INPUT_REF_PREFIX: &[u8] = b"BDLM_POLLEN_AI_INPUT_REF_V1";
 
 /// HPKE KEM 0x647a, MLKEM768-X25519. The only
@@ -51,6 +51,11 @@ pub struct EncryptionPolicy {
 }
 
 impl EncryptionPolicy {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.version == 0 {
             return Err("EncryptionPolicy version must be >= 1".into());
@@ -81,6 +86,7 @@ impl EncryptionPolicy {
 
     /// The post-quantum default: KEM 0x647a with the full public key size.
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn post_quantum(
         version: u32,
         max_grant_duration_blocks: u64,
@@ -177,6 +183,7 @@ impl EncryptionPolicy {
         }
         Ok(())
     }
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_POLLEN_ENCRYPTION_POLICY_V1");
@@ -196,13 +203,13 @@ impl EncryptionPolicy {
     }
 }
 
-/// The SaleAuthorization identity = the canonical seller authorization hash.
+/// The `SaleAuthorization` identity = the canonical seller authorization hash.
 pub type SaleAuthorizationId = AssetId;
 
-/// Owner/seller signed authorization to sell pollen for a DataAsset.
+/// Owner/seller signed authorization to sell pollen for a `DataAsset`.
 ///
 /// This is the bridge between "the bud is mine" and "I am selling my pollen":
-/// The DataAsset remains owned by `seller`, while grants may be issued under
+/// The `DataAsset` remains owned by `seller`, while grants may be issued under
 /// This bounded authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaleAuthorization {
@@ -221,6 +228,7 @@ pub struct SaleAuthorization {
 
 impl SaleAuthorization {
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new_unsigned(
         asset_id: AssetId,
         seller: Address,
@@ -253,6 +261,7 @@ impl SaleAuthorization {
         }
     }
 
+    #[must_use]
     pub fn derive_id(
         asset_id: &AssetId,
         seller: &Address,
@@ -276,6 +285,7 @@ impl SaleAuthorization {
 
     /// Signing hash for wallets. This deliberately excludes `seller_signature`
     /// And mutable `grants_issued`.
+    #[must_use]
     pub fn signing_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_POLLEN_SALE_AUTHORIZATION_SIGNING_V1");
@@ -290,6 +300,11 @@ impl SaleAuthorization {
         hasher.finalize().into()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.authorization_id == SaleAuthorizationId::zero() {
             return Err("SaleAuthorization authorization_id cannot be zero".into());
@@ -330,12 +345,18 @@ impl SaleAuthorization {
         Ok(())
     }
 
+    #[must_use]
     pub fn can_issue(&self, current_block: u64) -> bool {
         current_block >= self.valid_from_block
             && current_block <= self.expires_at_block
             && self.grants_issued < self.max_grants
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_issued_grant(&mut self) -> Result<(), String> {
         if self.grants_issued >= self.max_grants {
             return Err("SaleAuthorization grant limit exhausted".into());
@@ -344,6 +365,7 @@ impl SaleAuthorization {
         Ok(())
     }
 
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_POLLEN_SALE_AUTHORIZATION_LEAF_V1");
@@ -361,7 +383,7 @@ impl SaleAuthorization {
     }
 }
 
-/// DataAsset lifecycle state.
+/// `DataAsset` lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DataAssetStatus {
     #[default]
@@ -370,7 +392,7 @@ pub enum DataAssetStatus {
 }
 
 /// The user's sellable data asset. The asset itself is not sold; the access
-/// pollen is sold through an AccessGrant.
+/// pollen is sold through an `AccessGrant`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataAsset {
     pub asset_id: AssetId,
@@ -383,6 +405,7 @@ pub struct DataAsset {
 }
 
 impl DataAsset {
+    #[must_use]
     pub fn new(
         owner: Address,
         manifest_id: ContentId,
@@ -400,6 +423,7 @@ impl DataAsset {
         }
     }
 
+    #[must_use]
     pub fn derive_id(
         owner: &Address,
         manifest_id: &ContentId,
@@ -413,6 +437,11 @@ impl DataAsset {
         AssetId(hasher.finalize().into())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.asset_id == AssetId::zero() {
             return Err("DataAsset asset_id cannot be zero".into());
@@ -427,10 +456,12 @@ impl DataAsset {
         Ok(())
     }
 
+    #[must_use]
     pub fn is_active(&self) -> bool {
         self.status == DataAssetStatus::Active
     }
 
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_POLLEN_DATA_ASSET_LEAF_V1");
@@ -447,7 +478,7 @@ impl DataAsset {
     }
 }
 
-/// AccessGrant lifecycle state.
+/// `AccessGrant` lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AccessGrantStatus {
     #[default]
@@ -479,6 +510,7 @@ pub struct AccessGrant {
 
 impl AccessGrant {
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new_unsigned(
         asset_id: AssetId,
         owner: Address,
@@ -519,6 +551,7 @@ impl AccessGrant {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn derive_id(
         asset_id: &AssetId,
         owner: &Address,
@@ -546,6 +579,7 @@ impl AccessGrant {
 
     /// Signing hash for wallets. Deliberately excludes `owner_signature`,
     /// `reads_used` and `status` (mutable consumption/state fields).
+    #[must_use]
     pub fn signing_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_POLLEN_ACCESS_GRANT_SIGNING_V1");
@@ -562,6 +596,11 @@ impl AccessGrant {
         hasher.finalize().into()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.grant_id == GrantId::zero() {
             return Err("AccessGrant grant_id cannot be zero".into());
@@ -601,6 +640,7 @@ impl AccessGrant {
         Ok(())
     }
 
+    #[must_use]
     pub fn is_active_for(&self, grantee: &Address, current_block: u64) -> bool {
         self.status == AccessGrantStatus::Active
             && &self.grantee == grantee
@@ -609,6 +649,11 @@ impl AccessGrant {
             && self.reads_used < self.max_reads
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_read(&mut self) -> Result<(), String> {
         if self.reads_used >= self.max_reads {
             return Err("AccessGrant read limit exhausted".into());
@@ -617,6 +662,7 @@ impl AccessGrant {
         Ok(())
     }
 
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_POLLEN_ACCESS_GRANT_LEAF_V1");
@@ -641,7 +687,7 @@ impl AccessGrant {
 }
 
 /// Canonical reference embedded in `AiInferenceRequest.input_ref` when the
-/// Request wants to read a Pollen/B.U.D. DataAsset.
+/// Request wants to read a Pollen/B.U.D. `DataAsset`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AiDataInputRef {
     pub asset_id: AssetId,
@@ -651,6 +697,7 @@ pub struct AiDataInputRef {
 impl AiDataInputRef {
     pub const ENCODED_LEN: usize = POLLEN_AI_INPUT_REF_PREFIX.len() + 32 + 32;
 
+    #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(Self::ENCODED_LEN);
         out.extend_from_slice(POLLEN_AI_INPUT_REF_PREFIX);
@@ -659,6 +706,11 @@ impl AiDataInputRef {
         out
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn decode(bytes: &[u8]) -> Result<Option<Self>, String> {
         if !bytes.starts_with(POLLEN_AI_INPUT_REF_PREFIX) {
             return Ok(None);

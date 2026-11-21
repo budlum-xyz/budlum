@@ -1,4 +1,4 @@
-//! PoA participant onboarding - the full KYC-gated admission lifecycle.
+//! `PoA` participant onboarding - the full KYC-gated admission lifecycle.
 //!
 //! Layered on [`PoaMembershipRegistry`], this module adds the production
 //! Compliance concerns that a bare status enum cannot express. The underlying
@@ -16,7 +16,7 @@
 //!    (`crate::ai::registry`).
 //! 3. **Whitelist enforcement view** - [`PoAWhitelist`] is the single object
 //!    Consensus code should query to answer *"is this account authorized to act
-//!    In the PoA domain **right now**"*, accounting for both status **and**
+//!    In the `PoA` domain **right now**"*, accounting for both status **and**
 //!    Expiry.
 //!
 //! ## Isolation (no change to the master-context invariant)
@@ -69,11 +69,18 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Forever, defeating the re-KYC discipline.
 pub const DEFAULT_KYC_HORIZON: u64 = 100_000;
 
-/// The validity horizon had no upper bound, so an admin
-/// could stamp an effectively permanent dossier and the re-KYC discipline
-/// would never bite. A finite ceiling in blocks; even at a one-second block
-/// this is years of run time, and it can only be reached deliberately.
+/// Finite upper bound (in blocks) for any single KYC validity horizon.
+///
+/// Without a ceiling, an admin could stamp an effectively permanent dossier so
+/// the re-KYC discipline never bites. Even at a one-second block this allows
+/// years of runtime and can only be reached deliberately.
 pub const MAX_KYC_VALIDITY_HORIZON: u64 = 2 * 365 * 24 * 60 * 60 * 5;
+
+/// Maximum onboarding audit trail entries retained in consensus memory.
+pub const MAX_POA_ONBOARDING_AUDIT_EVENTS: usize = 10_000;
+
+/// Maximum UTF-8 byte length of a rejection or revocation reason recorded on chain.
+pub const MAX_POA_DECISION_REASON_BYTES: usize = 512;
 
 /// What an authorized admin decided about an applicant, the audit vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,7 +121,7 @@ pub struct OnboardingEvent {
 }
 
 /// A point-in-time, expiry-aware snapshot of the accounts authorized to act in
-/// One PoA domain. This is the **enforcement object** consensus should consult.
+/// One `PoA` domain. This is the **enforcement object** consensus should consult.
 ///
 /// It is deliberately a *value* (snapshot), not a live view, so the answer
 /// Cannot change under the caller between construction and the gating check.
@@ -126,7 +133,7 @@ pub struct PoAWhitelist {
 
 impl PoAWhitelist {
     /// The single enforcement predicate. `true` ⇒ the account may produce
-    /// Blocks / validate in the PoA domain at the snapshot block.
+    /// Blocks / validate in the `PoA` domain at the snapshot block.
     #[must_use]
     pub fn contains(&self, account: &Address) -> bool {
         self.members.contains_key(account)
@@ -161,7 +168,7 @@ impl PoAWhitelist {
     }
 }
 
-/// The onboarding lifecycle manager for a set of PoA domains. Owns the
+/// The onboarding lifecycle manager for a set of `PoA` domains. Owns the
 /// Underlying [`PoaMembershipRegistry`] plus the compliance layer
 /// (audit trail + KYC expiry tracking).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -185,13 +192,13 @@ impl PoAOnboarding {
 
     /// Borrow the underlying registry (e.g. for `is_admin`, `get`).
     #[must_use]
-    pub fn registry(&self) -> &PoaMembershipRegistry {
+    pub const fn registry(&self) -> &PoaMembershipRegistry {
         &self.registry
     }
 
     /// Mutable access to the underlying registry (e.g. to bootstrap admins).
     #[must_use]
-    pub fn registry_mut(&mut self) -> &mut PoaMembershipRegistry {
+    pub const fn registry_mut(&mut self) -> &mut PoaMembershipRegistry {
         &mut self.registry
     }
 
@@ -202,7 +209,7 @@ impl PoAOnboarding {
     }
 
     #[must_use]
-    pub fn audit_event_count(&self) -> usize {
+    pub const fn audit_event_count(&self) -> usize {
         self.audit.len()
     }
 
@@ -218,9 +225,36 @@ impl PoAOnboarding {
 
     // ---- lifecycle -------------------------------------------------------
 
+    fn push_audit(&mut self, event: OnboardingEvent) {
+        if self.audit.len() >= MAX_POA_ONBOARDING_AUDIT_EVENTS {
+            self.audit.remove(0);
+        }
+        self.audit.push(event);
+    }
+
+    fn compute_expiry(at_block: u64, validity_horizon: u64) -> Result<u64, PoaMembershipError> {
+        if validity_horizon == 0 || validity_horizon > MAX_KYC_VALIDITY_HORIZON {
+            return Err(PoaMembershipError::InvalidValidityHorizon {
+                requested: validity_horizon,
+                max: MAX_KYC_VALIDITY_HORIZON,
+            });
+        }
+        at_block
+            .checked_add(validity_horizon)
+            .filter(|&expiry| expiry < u64::MAX)
+            .ok_or(PoaMembershipError::InvalidValidityHorizon {
+                requested: validity_horizon,
+                max: MAX_KYC_VALIDITY_HORIZON,
+            })
+    }
+
     /// Bootstrap an admin for a domain (trust root of the permissioned
-    /// Sub-domain; in production wired through governance).
+    /// Sub-domain; in production wired through governance). Zero addresses are
+    /// ignored so the unspendable zero identity can never hold admin authority.
     pub fn add_admin(&mut self, domain: DomainId, admin: Address) {
+        if admin == Address::zero() {
+            return;
+        }
         self.registry.add_admin(domain, admin);
     }
 
@@ -237,9 +271,17 @@ impl PoAOnboarding {
         kyc_commitment: KycCommitment,
         at_block: u64,
     ) -> Result<(), PoaMembershipError> {
+        if applicant == Address::zero() {
+            return Err(PoaMembershipError::NotFound {
+                account: applicant,
+                domain,
+            });
+        }
         self.registry
             .submit_application(domain, applicant, kyc_commitment)?;
-        self.audit.push(OnboardingEvent {
+        self.kyc_expiry.remove(&(domain, applicant));
+        self.logged_expiry.remove(&(domain, applicant));
+        self.push_audit(OnboardingEvent {
             domain,
             at_block,
             actor: applicant,
@@ -265,16 +307,11 @@ impl PoAOnboarding {
         at_block: u64,
         validity_horizon: u64,
     ) -> Result<(), PoaMembershipError> {
-        if validity_horizon > MAX_KYC_VALIDITY_HORIZON {
-            return Err(PoaMembershipError::InvalidValidityHorizon {
-                requested: validity_horizon,
-                max: MAX_KYC_VALIDITY_HORIZON,
-            });
-        }
-        let expiry = at_block.saturating_add(validity_horizon);
+        let expiry = Self::compute_expiry(at_block, validity_horizon)?;
         self.registry.approve(domain, admin, applicant)?;
         self.kyc_expiry.insert((domain, applicant), expiry);
-        self.audit.push(OnboardingEvent {
+        self.logged_expiry.remove(&(domain, applicant));
+        self.push_audit(OnboardingEvent {
             domain,
             at_block,
             actor: admin,
@@ -290,7 +327,8 @@ impl PoAOnboarding {
     ///
     /// # Errors
     /// `NotAnAdmin` if the caller is not an admin; `NotFound` if no application
-    /// Exists; `InvalidTransition` if the member is not `Pending`.
+    /// Exists; `InvalidTransition` if the member is not `Pending` or `reason`
+    /// is empty or exceeds [`MAX_POA_DECISION_REASON_BYTES`].
     pub fn reject(
         &mut self,
         domain: DomainId,
@@ -300,8 +338,13 @@ impl PoAOnboarding {
         reason: impl Into<String>,
     ) -> Result<(), PoaMembershipError> {
         let reason = reason.into();
+        if reason.trim().is_empty() || reason.len() > MAX_POA_DECISION_REASON_BYTES {
+            return Err(PoaMembershipError::InvalidTransition {
+                from: MembershipStatus::Pending,
+            });
+        }
         self.registry.reject(domain, admin, applicant)?;
-        self.audit.push(OnboardingEvent {
+        self.push_audit(OnboardingEvent {
             domain,
             at_block,
             actor: admin,
@@ -315,7 +358,8 @@ impl PoAOnboarding {
     ///
     /// # Errors
     /// `NotAnAdmin` if the caller is not an admin; `NotFound` if no membership
-    /// Exists; `InvalidTransition` if the member is not `Approved`.
+    /// Exists; `InvalidTransition` if the member is not `Approved` or `reason`
+    /// is empty or exceeds [`MAX_POA_DECISION_REASON_BYTES`].
     pub fn revoke(
         &mut self,
         domain: DomainId,
@@ -325,9 +369,14 @@ impl PoAOnboarding {
         reason: impl Into<String>,
     ) -> Result<(), PoaMembershipError> {
         let reason = reason.into();
+        if reason.trim().is_empty() || reason.len() > MAX_POA_DECISION_REASON_BYTES {
+            return Err(PoaMembershipError::InvalidTransition {
+                from: MembershipStatus::Approved,
+            });
+        }
         self.registry.revoke(domain, admin, applicant)?;
         self.kyc_expiry.remove(&(domain, applicant));
-        self.audit.push(OnboardingEvent {
+        self.push_audit(OnboardingEvent {
             domain,
             at_block,
             actor: admin,
@@ -355,12 +404,7 @@ impl PoAOnboarding {
         if new_kyc_commitment == [0u8; 32] {
             return Err(PoaMembershipError::MissingKyc);
         }
-        if validity_horizon > MAX_KYC_VALIDITY_HORIZON {
-            return Err(PoaMembershipError::InvalidValidityHorizon {
-                requested: validity_horizon,
-                max: MAX_KYC_VALIDITY_HORIZON,
-            });
-        }
+        let expiry = Self::compute_expiry(at_block, validity_horizon)?;
         // Must currently be a member in Approved state. A revoked member may
         // Re-KYC by going through approve again; renew is for active ones.
         let member = self
@@ -383,18 +427,25 @@ impl PoAOnboarding {
                 domain,
             });
         }
+        if let Some(&current_expiry) = self.kyc_expiry.get(&(domain, applicant)) {
+            if expiry < current_expiry {
+                return Err(PoaMembershipError::InvalidValidityHorizon {
+                    requested: validity_horizon,
+                    max: MAX_KYC_VALIDITY_HORIZON,
+                });
+            }
+        }
         // The refreshed dossier is WRITTEN to the member
         // record - renewing used to move the expiry horizon and leave the
         // commitment naming the original submission forever.
         self.registry
             .update_kyc_commitment(domain, applicant, new_kyc_commitment)?;
-        let expiry = at_block.saturating_add(validity_horizon);
         self.kyc_expiry.insert((domain, applicant), expiry);
         // Clear the one-shot expiry log entry so the
         // expiry after THIS renewal is recorded again instead of being
         // swallowed by the stale mark.
         self.logged_expiry.remove(&(domain, applicant));
-        self.audit.push(OnboardingEvent {
+        self.push_audit(OnboardingEvent {
             domain,
             at_block,
             actor: admin,
@@ -408,6 +459,10 @@ impl PoAOnboarding {
 
     /// Remove an admin from a domain (see
     /// [`PoaMembershipRegistry::remove_admin`] for the last-admin rule).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn remove_admin(
         &mut self,
         domain: DomainId,
@@ -423,8 +478,71 @@ impl PoAOnboarding {
     /// enters the state root and the snapshot digest, so a snapshot that
     /// drops an admission record diverges instead of quietly unpermissioning
     /// a domain.
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
-        self.registry.root_with_expiry(&self.kyc_expiry)
+        use sha3::{Digest, Sha3_256};
+        let base = self.registry.root_with_expiry(&self.kyc_expiry);
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"budlum/poa/onboarding-root/v2");
+        hasher.update(base);
+        hasher.update((self.audit.len() as u64).to_le_bytes());
+        for ev in &self.audit {
+            hasher.update(ev.domain.to_le_bytes());
+            hasher.update(ev.at_block.to_le_bytes());
+            hasher.update(ev.actor.as_bytes());
+            match &ev.decision {
+                OnboardingDecision::Submitted {
+                    applicant,
+                    kyc_commitment,
+                } => {
+                    hasher.update([1u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update(kyc_commitment);
+                }
+                OnboardingDecision::Approved {
+                    applicant,
+                    kyc_expiry_block,
+                } => {
+                    hasher.update([2u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update(kyc_expiry_block.to_le_bytes());
+                }
+                OnboardingDecision::Rejected { applicant, reason } => {
+                    hasher.update([3u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update((reason.len() as u64).to_le_bytes());
+                    hasher.update(reason.as_bytes());
+                }
+                OnboardingDecision::Revoked { applicant, reason } => {
+                    hasher.update([4u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update((reason.len() as u64).to_le_bytes());
+                    hasher.update(reason.as_bytes());
+                }
+                OnboardingDecision::RenewedKyc {
+                    applicant,
+                    new_expiry_block,
+                } => {
+                    hasher.update([5u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update(new_expiry_block.to_le_bytes());
+                }
+                OnboardingDecision::KycExpired {
+                    applicant,
+                    at_block,
+                } => {
+                    hasher.update([6u8]);
+                    hasher.update(applicant.as_bytes());
+                    hasher.update(at_block.to_le_bytes());
+                }
+            }
+        }
+        hasher.update((self.logged_expiry.len() as u64).to_le_bytes());
+        for (domain, account) in &self.logged_expiry {
+            hasher.update(domain.to_le_bytes());
+            hasher.update(account.as_bytes());
+        }
+        hasher.finalize().into()
     }
 
     /// Is `domain` a permissioned domain at all?
@@ -463,28 +581,34 @@ impl PoAOnboarding {
     #[must_use]
     pub fn whitelist(&mut self, domain: DomainId, now_block: u64) -> PoAWhitelist {
         let mut members = BTreeMap::new();
-        for m in self.registry.authorized_members(domain) {
-            let expiry = self
-                .kyc_expiry
-                .get(&(domain, m.account))
-                .copied()
-                .unwrap_or(u64::MAX);
+        let accounts: Vec<Address> = self
+            .registry
+            .authorized_members(domain)
+            .into_iter()
+            .map(|m| m.account)
+            .collect();
+        for account in accounts {
+            // Fail closed: an Approved record with no recorded KYC expiry horizon
+            // is never admitted (never defaulted to u64::MAX).
+            let Some(&expiry) = self.kyc_expiry.get(&(domain, account)) else {
+                continue;
+            };
             if now_block > expiry {
                 // Lazily record the expiry observation exactly once.
-                if self.logged_expiry.insert((domain, m.account)) {
-                    self.audit.push(OnboardingEvent {
+                if self.logged_expiry.insert((domain, account)) {
+                    self.push_audit(OnboardingEvent {
                         domain,
                         at_block: now_block,
-                        actor: m.account,
+                        actor: account,
                         decision: OnboardingDecision::KycExpired {
-                            applicant: m.account,
+                            applicant: account,
                             at_block: now_block,
                         },
                     });
                 }
                 continue;
             }
-            members.insert(m.account, expiry);
+            members.insert(account, expiry);
         }
         PoAWhitelist { domain, members }
     }
@@ -511,18 +635,14 @@ impl PoAOnboarding {
             .authorized_members(domain)
             .into_iter()
             .filter_map(|member| {
-                let expiry = self
-                    .kyc_expiry
-                    .get(&(domain, member.account))
-                    .copied()
-                    .unwrap_or(u64::MAX);
+                let expiry = self.kyc_expiry.get(&(domain, member.account)).copied()?;
                 (now_block <= expiry).then_some(member.account)
             })
             .collect()
     }
 }
 
-/// The PoA admission door at the transaction layer.
+/// The `PoA` admission door at the transaction layer.
 ///
 /// Carries the registry's own operations and nothing else - the shape and
 /// its semantics cannot drift from the one body
@@ -567,7 +687,7 @@ pub enum PoAOnboardingTx {
     },
 }
 
-/// Run one PoA admission operation with the authority the SENDER actually
+/// Run one `PoA` admission operation with the authority the SENDER actually
 /// has.
 ///
 /// Two doors and only two: a candidate applies for themselves, and an admin
@@ -575,6 +695,10 @@ pub enum PoAOnboardingTx {
 /// governance (`GovernanceAction::PoaAddAdmin`), never through this door -
 /// an open first-admin slot would let anyone appoint themselves to any
 /// domain.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn execute_poa_onboarding_tx(
     state: &mut PoAOnboarding,
     sender: &Address,
@@ -586,6 +710,12 @@ pub fn execute_poa_onboarding_tx(
             if !state.registry.is_admin(domain, sender) {
                 return Err(PoaMembershipError::NotAnAdmin {
                     caller: *sender,
+                    domain,
+                });
+            }
+            if admin == Address::zero() {
+                return Err(PoaMembershipError::NotFound {
+                    account: admin,
                     domain,
                 });
             }
@@ -747,7 +877,7 @@ mod tests {
         assert!(onboarding.is_authorized_now(0, &applicant, 50));
     }
 
-    /// +(F12): renewal writes the new dossier
+    /// Renewal writes the new dossier
     /// and reopens the expiry log for the NEXT expiry.
     #[test]
     fn renew_kyc_writes_the_dossier_and_reopens_the_expiry_log() {
@@ -805,7 +935,7 @@ mod tests {
     }
 
     /// Admins may remove admins but never the last one;
-    /// governance can (force_remove_admin).
+    /// governance can (`force_remove_admin`).
     #[test]
     fn the_last_admin_refuses_removal_through_the_door() {
         let mut onboarding = PoAOnboarding::new();
@@ -816,5 +946,72 @@ mod tests {
         assert!(onboarding.remove_admin(0, addr(8)).is_ok());
         onboarding.registry_mut().force_remove_admin(0, addr(9));
         assert!(!onboarding.is_permissioned(0));
+    }
+
+    #[test]
+    fn zero_horizon_rejected_reapplication_allowed_and_audit_root_bound() {
+        let mut onboarding = PoAOnboarding::new();
+        onboarding.add_admin(0, addr(9));
+        onboarding
+            .submit_application(0, addr(3), kyc(1), 0)
+            .unwrap();
+        assert!(matches!(
+            onboarding.approve(0, addr(9), addr(3), 1, 0),
+            Err(PoaMembershipError::InvalidValidityHorizon { .. })
+        ));
+        onboarding.reject(0, addr(9), addr(3), 2, "typo").unwrap();
+        let before_reapply = onboarding.root();
+        onboarding
+            .submit_application(0, addr(3), kyc(2), 3)
+            .unwrap();
+        assert_ne!(before_reapply, onboarding.root());
+        onboarding.approve(0, addr(9), addr(3), 4, 100).unwrap();
+        assert!(onboarding.is_authorized_now(0, &addr(3), 50));
+    }
+
+    #[test]
+    fn onboarding_fails_closed_on_missing_expiry_u64_max_overflow_shortened_renewal_and_oversized_reason(
+    ) {
+        let admin = addr(0xA1);
+        let member = addr(0xB2);
+        let mut poa = PoAOnboarding::new();
+        poa.add_admin(7, admin);
+
+        // Bypassing PoAOnboarding::approve via registry_mut leaves no kyc_expiry entry;
+        // both whitelist and live_admitted_members must fail closed (never unwrap_or(u64::MAX)).
+        poa.registry_mut()
+            .submit_application(7, member, kyc(1))
+            .unwrap();
+        poa.registry_mut().approve(7, admin, member).unwrap();
+        assert!(!poa.whitelist(7, 1).contains(&member));
+        assert!(!poa.live_admitted_members(7, 1).contains(&member));
+
+        // Zero admin appointment via tx door is refused.
+        assert!(execute_poa_onboarding_tx(
+            &mut poa,
+            &admin,
+            PoAOnboardingTx::AddAdmin {
+                domain: 7,
+                admin: Address::zero(),
+            },
+            1,
+        )
+        .is_err());
+
+        // Saturating at_block + horizon to u64::MAX would create a non-expiring member; refuse it.
+        let m2 = addr(0xC3);
+        poa.submit_application(7, m2, kyc(2), 1).unwrap();
+        assert!(poa.approve(7, admin, m2, u64::MAX - 5, 10).is_err());
+
+        // Oversized rejection/revocation reason strings are refused before mutating state.
+        let huge = "x".repeat(4_096);
+        assert!(poa.reject(7, admin, m2, 2, huge.clone()).is_err());
+        poa.approve(7, admin, m2, 10, 500).unwrap();
+        assert!(poa.revoke(7, admin, m2, 11, huge).is_err());
+        assert!(poa.whitelist(7, 12).contains(&m2));
+
+        // renew_kyc must not stealth-shorten an active member's existing horizon (510 -> 110).
+        assert!(poa.renew_kyc(7, admin, m2, kyc(3), 10, 100).is_err());
+        assert_eq!(poa.whitelist(7, 12).kyc_expiry_of(&m2), Some(510));
     }
 }

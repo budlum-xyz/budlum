@@ -1,5 +1,7 @@
-//! WIRING: unwired - verify_deposit_observed is reached only from the adapter fixture tests in this tree; the live relayer observation runs the adapter's verify_observation instead.
-//! F10.4 EvmChainAdapter - the ChainAdapter impl for the EVM leg. NOT a
+//! WIRING: unwired - `verify_deposit_observed` is reached only from the adapter fixture tests in this tree.
+//!
+//! The live relayer observation runs the adapter's `verify_observation` instead.
+//! `EvmChainAdapter` implements `ChainAdapter` for the EVM leg. It is NOT a
 //! fully live path: the off-chain half is a stub that
 //! refuses at broadcast, so the Ethereum-to-Budlum leg has no live end-to-end
 //! route. The on-chain verification below is real and deterministic; what it
@@ -7,9 +9,9 @@
 //!
 //! Two sides:
 //!
-//! - On-chain (verify_receipt_proof): deterministic in Budlum consensus.
-//!   It uses F10.1 (MPT) + F10.2 (receipt/header/verify). The sync committee
-//!   (F10.3) runs only if `EvmDepositProof.sync_attestation` is populated;
+//! - On-chain (`verify_receipt_proof`): deterministic in Budlum consensus.
+//!   It combines MPT proof verification with receipt and header validation. The sync committee
+//!   verifier runs only if `EvmDepositProof.sync_attestation` is populated;
 //!   this line said "uses" for a long time while no path called it.
 //!   Network-free - the relayer produces the proof, Budlum verifies it.
 //!
@@ -19,14 +21,14 @@
 //!
 //! Security invariant: `verify_receipt_proof` NEVER connects to the network.
 //!
-//! ## The cryptographic binding between receipt and tx_hash
+//! ## The cryptographic binding between receipt and `tx_hash`
 //!
 //! `proof.leaf` must now be derived with the formula
 //! `hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address)`. An attacker
-//! cannot copy the same Merkle proof and present it with a different tx_hash:
+//! cannot copy the same Merkle proof and present it with a different `tx_hash`:
 //! the leaf is recomputed and a mismatch ends in `ProofVerificationFailed`. The
 //! same binding also prevents cross-bridge proof reuse (the leaf is bound to
-//! bridge_address).
+//! `bridge_address`).
 //!
 //! Security boundary: the wire format changed - the off-chain relayer tool
 //! must produce the leaf with the same formula. `verify_deposit` does MPT +
@@ -51,16 +53,17 @@ use bincode::Options;
 /// small fraction of this; an observation larger than it is not a proof.
 const MAX_DEPOSIT_PACKAGE_BYTES: u64 = 1024 * 1024;
 
-/// The Ethereum bridge contract deposit event signature (topic0).
-/// Keccak256("Deposit(address,uint256,bytes32,uint256)") - the real value is
-/// set with the chain config during the ceremony. A placeholder here (CI test).
+/// The Ethereum bridge contract deposit event signature (`topic0`).
+///
+/// `Keccak256("Deposit(address,uint256,bytes32,uint256)")` - the real value is
+/// set with the chain config during the ceremony; zero is the CI test sentinel.
 pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 
-/// EvmChainAdapter - the ChainAdapter for Ethereum.
+/// `EvmChainAdapter` - the `ChainAdapter` for Ethereum.
 ///
 /// `verify_receipt_proof` is deterministic in Budlum consensus. The off-chain
 /// methods (`generate_receipt_proof`/`submit_transaction`/
-/// `wait_for_confirmation`) are an offline-test stub (the StubAdapter
+/// `wait_for_confirmation`) are an offline-test stub (the `StubAdapter`
 /// pattern) that REFUSES at broadcast - there is no live Ethereum RPC route.
 ///
 /// `Debug` so a caller can `expect` on a `Result` carrying one. All three
@@ -86,7 +89,8 @@ pub struct EvmChainAdapter {
 }
 
 impl EvmChainAdapter {
-    pub fn new(bridge_address: Vec<u8>, deposit_topic0: [u8; 32]) -> Self {
+    #[must_use]
+    pub const fn new(bridge_address: Vec<u8>, deposit_topic0: [u8; 32]) -> Self {
         Self {
             bridge_address,
             deposit_topic0,
@@ -104,7 +108,7 @@ impl EvmChainAdapter {
     /// WIRING: the operator configuration for the interim finality rule
     /// above; it is set when an operator actually registers this
     /// adapter, which no production relayer does yet.
-    pub fn with_trusted_checkpoint(mut self, number: u64, hash: [u8; 32]) -> Self {
+    pub const fn with_trusted_checkpoint(mut self, number: u64, hash: [u8; 32]) -> Self {
         self.trusted_checkpoint = Some((number, hash));
         self
     }
@@ -135,10 +139,17 @@ impl EvmChainAdapter {
         // refuse at verify time anyway - say it once, at setup. Form B
         // (sync-committee attestation) supersedes the anchor when relayers
         // ship it.
-        if self.trusted_checkpoint.is_none() {
+        let Some((_, checkpoint_hash)) = self.trusted_checkpoint else {
             return Err(
                 "EVM adapter has no trusted checkpoint: deposits need finality \
                  evidence (a sync-committee attestation or the interim anchor)"
+                    .to_string(),
+            );
+        };
+        if checkpoint_hash == [0u8; 32] {
+            return Err(
+                "EVM adapter has a zero trusted checkpoint hash: placeholder checkpoints \
+                 cannot anchor finality"
                     .to_string(),
             );
         }
@@ -174,6 +185,7 @@ impl EvmChainAdapter {
     }
 
     /// Default (test/devnet) - placeholder bridge address + topic0.
+    #[must_use]
     pub fn test_default() -> Self {
         Self::new(vec![0u8; 20], DEFAULT_DEPOSIT_TOPIC0)
     }
@@ -187,7 +199,7 @@ impl ChainAdapter for EvmChainAdapter {
 
     /// Off-chain (the relayer binary): produce a receipt + MPT proof from Ethereum RPC.
     ///
-    /// This impl is an offline-test stub (the StubAdapter pattern) and
+    /// This impl is an offline-test stub (the `StubAdapter` pattern) and
     /// REFUSES - there is no live Ethereum RPC route.
     /// A production RPC client does not exist in this tree.
     async fn generate_receipt_proof(
@@ -213,14 +225,14 @@ impl ChainAdapter for EvmChainAdapter {
 
     /// ON-CHAIN (Budlum consensus): verify an EVM receipt proof.
     ///
-    /// Deterministic + network-free. F10.1 (MPT) + F10.2 (receipt/header). The
+    /// Deterministic + network-free. Runs MPT inclusion plus receipt and header checks. The
     /// relayer produces the proof. The sync committee never runs on this trait
     /// path: this method only checks the Merkle proof + leaf binding, while the
     /// full package (`EvmDepositProof`) goes to `verify_deposit`.
     ///
     /// Wire format: `proof.leaf` =
     /// `hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address)`;
-    /// `external_state_root` = header.receiptsRoot; `expected_tx_hash` = tx_hash.
+    /// `external_state_root` = header.receiptsRoot; `expected_tx_hash` = `tx_hash`.
     /// Header chain + sync-committee verification is NOT in this method, it is
     /// inside `verify_evm_receipt`, and only `verify_deposit` goes there.
     ///
@@ -229,14 +241,14 @@ impl ChainAdapter for EvmChainAdapter {
     /// 1) `proof.verify(external_state_root)` - Merkle self-consistency.
     /// 2) `proof.leaf == derive_receipt_leaf(tx_hash, bridge_address)` -
     ///    The cryptographic leaf binding. An attacker cannot present the same
-    ///    proof with a different tx_hash; a cross-bridge proof is rejected too.
+    ///    proof with a different `tx_hash`; a cross-bridge proof is rejected too.
     ///
     /// Refuse registration for an adapter that cannot bind a receipt.
     ///
     /// Delegates to the inherent check so there is one definition of "fit",
     /// not two that can drift.
     fn check_fit_for_relay(&self) -> Result<(), AdapterError> {
-        EvmChainAdapter::check_fit_for_relay(self).map_err(AdapterError::ProofVerificationFailed)
+        Self::check_fit_for_relay(self).map_err(AdapterError::ProofVerificationFailed)
     }
 
     /// The observation the relayer signs must carry the full deposit
@@ -342,6 +354,16 @@ impl ChainAdapter for EvmChainAdapter {
         //
         // The check is here, before `verify`. Placed after, the call would already
         // have passed.
+        if self.bridge_address.len() != 20 || self.bridge_address.iter().all(|b| *b == 0) {
+            return Err(AdapterError::ProofVerificationFailed(
+                "EVM receipt proof requires a non-zero 20-byte bridge address".into(),
+            ));
+        }
+        if *external_state_root == [0u8; 32] {
+            return Err(AdapterError::ProofVerificationFailed(
+                "EVM receipt proof requires a non-zero declared receipts root".into(),
+            ));
+        }
         if proof.siblings.is_empty() {
             return Err(AdapterError::ProofVerificationFailed(
                 "EVM receipt proof has no sibling path: a single-leaf tree proves only that \
@@ -392,7 +414,7 @@ impl ChainAdapter for EvmChainAdapter {
 
     /// Off-chain (relayer binary): k confirmation poll → receipt proof.
     ///
-    /// Offline-test stub. Production: eth_getTransactionReceipt + block header
+    /// Offline-test stub. Production: `eth_getTransactionReceipt` + block header
     /// Chain + MPT proof assemble.
     async fn wait_for_confirmation(
         &self,
@@ -413,7 +435,7 @@ impl ChainAdapter for EvmChainAdapter {
 }
 
 impl EvmChainAdapter {
-    /// Full on-chain EVM deposit verification (the F10.2 `verify.rs` orchestrator).
+    /// Full on-chain EVM deposit verification (the `verify.rs` orchestrator).
     ///
     /// This is the enriched form of `ChainAdapter::verify_receipt_proof`: the
     /// relayer supplies the full proof package (header chain + MPT nodes +
@@ -499,7 +521,7 @@ fn deposit_schemes(attested: bool) -> Vec<ObservedScheme> {
 /// Derives the receipt proof leaf from `tx_hash + bridge_address`.
 /// Domain-tagged (collision-resistant, length-prefixed) SHA-256.
 /// An attacker cannot copy a proof valid for another tx and present it with a
-/// different tx_hash: the leaf is recomputed independently and a mismatch ends
+/// different `tx_hash`: the leaf is recomputed independently and a mismatch ends
 /// in `ProofVerificationFailed`. The same binding also prevents cross-bridge
 /// proof reuse.
 fn derive_receipt_leaf(tx_hash: &str, bridge_address: &[u8]) -> Hash32 {
@@ -792,8 +814,8 @@ mod tests {
 
     #[test]
     fn verify_receipt_proof_minimal_ok() {
-        // Tam fix: leaf = hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address).
-        let adapter = EvmChainAdapter::test_default();
+        // Full fix: leaf = hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address).
+        let adapter = EvmChainAdapter::new(vec![0x11; 20], TEST_DEPOSIT_TOPIC0);
         let tx_hash = "0xabc";
         let leaf = derive_receipt_leaf(tx_hash, &adapter.bridge_address);
         let (proof, root) = proof_with_sibling(leaf);
@@ -808,7 +830,7 @@ mod tests {
     fn verify_receipt_proof_v30_tx_hash_forgery_rejected() {
         // Presenting the same Merkle proof with a different tx_hash is rejected
         // because of the cryptographic leaf binding.
-        let adapter = EvmChainAdapter::test_default();
+        let adapter = EvmChainAdapter::new(vec![0x11; 20], TEST_DEPOSIT_TOPIC0);
         let real_tx = "0xabc";
         let forged_tx = "0xdeadbeef";
         let leaf = derive_receipt_leaf(real_tx, &adapter.bridge_address);
@@ -826,7 +848,7 @@ mod tests {
     #[test]
     fn verify_receipt_proof_v30_empty_tx_hash_rejected() {
         // An empty tx_hash is not accepted (the binding would be meaningless).
-        let adapter = EvmChainAdapter::test_default();
+        let adapter = EvmChainAdapter::new(vec![0x11; 20], TEST_DEPOSIT_TOPIC0);
         let leaf = derive_receipt_leaf("0xabc", &adapter.bridge_address);
         let (proof, root) = proof_with_sibling(leaf);
         let err = adapter
@@ -1107,5 +1129,32 @@ mod tests {
             .verify_observation(&observation)
             .expect_err("success=false over a status=true receipt");
         assert!(format!("{err}").contains("reports failure"), "got: {err}");
+    }
+
+    #[test]
+    fn zero_checkpoint_hash_and_unconfigured_receipt_proof_bridge_are_refused() {
+        let zero_ckpt = EvmChainAdapter::new(vec![7u8; 20], TEST_DEPOSIT_TOPIC0)
+            .with_trusted_checkpoint(10, [0u8; 32]);
+        assert!(
+            EvmChainAdapter::check_fit_for_relay(&zero_ckpt).is_err(),
+            "all-zero trusted checkpoint hash must be refused"
+        );
+
+        let zero_bridge = EvmChainAdapter::test_default();
+        let tx = "0xdeadbeef";
+        let leaf = derive_receipt_leaf(tx, &zero_bridge.bridge_address);
+        let (proof, root) = proof_with_sibling(leaf);
+        assert!(
+            zero_bridge.verify_receipt_proof(&proof, &root, tx).is_err(),
+            "verify_receipt_proof must refuse zero bridge address"
+        );
+
+        let bad_len = EvmChainAdapter::new(vec![7u8; 19], TEST_DEPOSIT_TOPIC0);
+        let leaf2 = derive_receipt_leaf(tx, &bad_len.bridge_address);
+        let (proof2, root2) = proof_with_sibling(leaf2);
+        assert!(
+            bad_len.verify_receipt_proof(&proof2, &root2, tx).is_err(),
+            "verify_receipt_proof must refuse non-20-byte bridge address"
+        );
     }
 }

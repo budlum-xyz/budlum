@@ -1,10 +1,19 @@
 name: Benchmark
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
+  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
+  # stack), on the schedule and on demand. A stacked pull request (base
+  # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
+  # security-audit.yml, semgrep.yml and the other light workflows, and skips the
+  # jobs of this file through the job-level condition: GitHub evaluates the
+  # `branches` filter of a stacked pull request against the root of the stack,
+  # so the filter alone does not keep it out. This keeps one push from queueing
+  # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses]
 
 concurrency:
   group: benchmark-${{ github.ref }}
@@ -15,6 +24,9 @@ permissions:
 
 jobs:
   benchmark:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     # CI Expansion item 10: performance regression tracking.
     # It runs the Criterion benchmarks and stores the results as an artifact.
     name: Benchmark Regression (item 10)
@@ -88,18 +100,18 @@ jobs:
       # needs recorded baseline history and lands when there is a baseline to
       # compare against; until then a run that produces no numbers is itself a
       # failure, never a silent green.
-      - name: Fail on a vacuous benchmark run (BLG-1049 interim)
+      - name: Fail on a vacuous benchmark run
         run: |
           set -euo pipefail
           for f in /tmp/bench-micro.txt /tmp/bench-single.txt; do
             if ! grep -qE 'Throughput:|Avg per' "$f"; then
-              echo "::error file=$f::no benchmark metric in $f - a vacuous run must fail (BLG-1049)"
+              echo "::error file=$f::no benchmark metric in $f - a vacuous run must fail"
               exit 1
             fi
           done
           for f in /tmp/bench-budzero-canonical.txt /tmp/bench-budzero-baseline.txt; do
             if [ ! -s "$f" ]; then
-              echo "::error file=$f::empty BudZero bench output - a vacuous run must fail (BLG-1049)"
+              echo "::error file=$f::empty BudZero bench output - a vacuous run must fail"
               exit 1
             fi
           done

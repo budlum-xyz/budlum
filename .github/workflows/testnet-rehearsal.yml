@@ -10,10 +10,18 @@ name: Testnet Rehearsal
 on:
   push:
     branches: [ main ]
+  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
+  # stack), on the schedule and on demand. A stacked pull request (base
+  # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
+  # security-audit.yml, semgrep.yml and the other light workflows, and skips the
+  # jobs of this file through the job-level condition: GitHub evaluates the
+  # `branches` filter of a stacked pull request against the root of the stack,
+  # so the filter alone does not keep it out. This keeps one push from queueing
+  # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses]
   schedule:
-    - cron: "17 2 * * *"
+    - cron: "17 8 * * *" # daily 08:17 UTC, outside the long heavy windows
   workflow_dispatch:
 
 concurrency:
@@ -25,6 +33,9 @@ permissions:
 
 jobs:
   testnet-native-e2e:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Testnet Native E2E (chain 45261)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -90,6 +101,9 @@ jobs:
           if-no-files-found: warn
 
   rehearsal:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -110,6 +124,21 @@ jobs:
             if ! docker compose -f ops/testnet-local.yml logs --tail=200; then
               echo "::error::\`docker compose logs\` also failed."
             fi
+            # The tail above starts long after a stall began. The whole log of
+            # every container is kept as an artifact, and the lines that tell
+            # what the finality rounds and the fork choice did are printed
+            # here, so a failed scenario can be read from its first second.
+            mkdir -p target
+            if docker compose -f ops/testnet-local.yml logs --no-color --timestamps > target/testnet-rehearsal-containers.log 2>&1; then
+              if grep -E 'Started prevote task|prevote quorum|precommit quorum|Finalized|finalized checkpoint|displaced an active round|Reorg|reorg|Refusing to start finality' target/testnet-rehearsal-containers.log > target/testnet-rehearsal-finality.log; then
+                echo "finality and fork choice, all containers, in time order:"
+                sort -k3,3 target/testnet-rehearsal-finality.log | tail -n 600
+              else
+                echo "no finality or fork choice line in the container logs"
+              fi
+            else
+              echo "::error::the full container log could not be written."
+            fi
             exit 1
           fi
       - name: Keep the report
@@ -117,7 +146,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: testnet-rehearsal-report
-          path: target/testnet-rehearsal.md
+          path: |
+            target/testnet-rehearsal.md
+            target/testnet-rehearsal-containers.log
           if-no-files-found: warn
       - name: Teardown (always)
         if: always()

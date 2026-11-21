@@ -14,7 +14,7 @@ use ai_core::model::{FineTuneSource, ModelId, ModelLicense, ModelSpec};
 use ai_core::tier::ModelTier;
 use ai_serve::config::ServeConfig;
 use ai_tune::eval::{
-    run_eval, CaseReport, CheckOutcome, EvalCase, EvalDataSet, EvalGate, EvalReport,
+    run_eval, CaseReport, Check, CheckOutcome, EvalCase, EvalDataSet, EvalGate, EvalReport,
 };
 use ai_tune::plan::TunePlan;
 use cli::{parse, Command, HELP};
@@ -184,7 +184,7 @@ fn main() {
             let vacuous: Vec<&EvalCase> = set
                 .cases
                 .iter()
-                .filter(|c| matches!(c.check.apply(""), CheckOutcome::Pass))
+                .filter(|c| matches!(Check::apply(&c.check, ""), CheckOutcome::Pass))
                 .collect();
             if !vacuous.is_empty() {
                 for c in &vacuous {
@@ -295,6 +295,10 @@ fn main() {
             },
         },
         Command::Help => print!("{HELP}"),
+        Command::Invalid(msg) => {
+            eprintln!("error: {msg}\n\n{HELP}");
+            std::process::exit(2);
+        }
     }
 }
 

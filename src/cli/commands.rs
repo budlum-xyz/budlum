@@ -106,6 +106,12 @@ pub struct NodeConfig {
     #[arg(long)]
     pub validator_key_file: Option<String>,
 
+    /// Path to an owner-only (0600) file holding the 64-hex-character (32-byte)
+    /// FIPS 204 ML-DSA-87 seed used to attest claim-aggregation segments.
+    /// Disallowed on mainnet.
+    #[arg(long)]
+    pub aggregator_key_file: Option<String>,
+
     #[arg(long)]
     pub gen_key: Option<String>,
 
@@ -126,6 +132,9 @@ pub struct NodeConfig {
 
     #[arg(skip)]
     pub rpc_auth_required: bool,
+
+    #[arg(skip)]
+    pub rpc_operator_auth_required: bool,
 
     #[arg(skip)]
     pub rpc_api_key_env: Option<String>,
@@ -214,7 +223,7 @@ pub struct NodeConfig {
     #[arg(long)]
     pub restore_backup: Option<String>,
 
-    /// Migrate an existing database at path to ConsensusStateV2 schema (requires atomic backup first) and exit.
+    /// Migrate an existing database at path to `ConsensusStateV2` schema (requires atomic backup first) and exit.
     #[arg(long)]
     pub migrate_v2: Option<String>,
 
@@ -223,6 +232,17 @@ pub struct NodeConfig {
 
     #[arg(long)]
     pub dns_seeds: Vec<String>,
+
+    /// Sentry shield endpoints (`<Multiaddr>/p2p/<PeerId>`) for a shielded
+    /// `validator` node. When set, the validator connects exclusively to these
+    /// sentry peers and blocks all direct public inbound and outbound P2P links.
+    #[arg(long, value_delimiter = ',')]
+    pub sentry_peers: Vec<String>,
+
+    /// Protected upstream validator identities (`<PeerId>` or
+    /// `<Multiaddr>/p2p/<PeerId>`) shielded by a `sentry` node.
+    #[arg(long, value_delimiter = ',')]
+    pub validator_peers: Vec<String>,
 
     #[arg(long)]
     pub max_peers: Option<usize>,
@@ -240,6 +260,40 @@ pub struct NodeConfig {
 
     #[arg(long)]
     pub mdns_enabled: Option<bool>,
+
+    /// Optional IP address to bind the P2P listener to instead of `0.0.0.0`
+    /// (for example a private VPC IP like `10.10.0.5` on a shielded validator).
+    #[arg(long)]
+    pub p2p_listen_addr: Option<String>,
+
+    /// Optional additional private VPC multiaddr for a sentry node's shielded
+    /// validator link (for example `/ip4/10.10.0.11/tcp/30334`).
+    #[arg(long)]
+    pub p2p_private_listen_addr: Option<String>,
+
+    /// `PeerId`s of private validators shielded behind this sentry node (never
+    /// entered into Kademlia/PEX and protected from eviction).
+    #[arg(long)]
+    pub private_peers: Vec<String>,
+
+    /// `PeerId`s exempt from `max_peers` eviction and `/24` subnet caps.
+    #[arg(long)]
+    pub unconditional_peers: Vec<String>,
+
+    /// Allowed private VPC/VPN CIDRs (e.g. `10.10.0.0/16`, `100.64.0.0/10`)
+    /// enforced on validator <-> sentry links.
+    #[arg(long)]
+    pub allowed_private_cidrs: Vec<String>,
+
+    /// Disable Kademlia/mDNS/DNS/bootnode peer discovery. Always forced `true`
+    /// for shielded validators.
+    #[arg(long)]
+    pub disable_peer_discovery: Option<bool>,
+
+    /// Require validator <-> sentry links to use private/VPN IPs or
+    /// `allowed_private_cidrs` (defaults to `true` for shielded validators).
+    #[arg(long)]
+    pub strict_private_network: Option<bool>,
 
     #[arg(long)]
     pub rpc_public_listener: Option<String>,
@@ -292,6 +346,10 @@ pub struct NodeConfig {
     #[arg(long, default_value = "./data/hsm/socket.sock")]
     pub hsm_socket_path: String,
 
+    /// Label of the token object the vendor-native BLS mechanism signs
+    /// through (). Defaults to the compiled-in `BUD_BLS_KEY`.
+    #[arg(long)]
+    pub pkcs11_bls_key_label: Option<String>,
     /// Vendor-native BLS mechanism ID for PKCS#11.
     #[arg(long)]
     pub pkcs11_bls_mechanism: Option<String>,
@@ -299,7 +357,7 @@ pub struct NodeConfig {
     #[arg(long)]
     pub pkcs11_pq_mechanism: Option<String>,
     /// Operator-configured BLS public key (hex), cross-checked against the
-    /// HSM-held PUBLIC_KEY object at startup.
+    /// HSM-held `PUBLIC_KEY` object at startup.
     #[arg(long)]
     pub pkcs11_bls_public_key: Option<String>,
     /// Operator-configured PQ public key (hex), cross-checked the same way.
@@ -349,8 +407,8 @@ pub struct NodeConfig {
     // The `--evm-bridge-address` registration
     // is REMOVED. The EVM bridge leg has no live end-to-end route (the
     // off-chain half is a stub that refuses at broadcast), and a registration
-    // surface that reads as "production" while the leg cannot operate was the
-    // finding. Outbound EVM relay stays off until the real receipt flow
+    // surface that reads as "production" while the leg cannot operate is prevented.
+    // Outbound EVM relay stays off until the real receipt flow
     // lands; there is nothing safe to point the adapter at.
 }
 
@@ -373,6 +431,7 @@ impl Default for NodeConfig {
             dial: None,
             chain_id: None,
             validator_key_file: None,
+            aggregator_key_file: None,
             gen_key: None,
             rpc_host: "127.0.0.1".to_string(),
             rpc_port: 8545,
@@ -389,6 +448,7 @@ impl Default for NodeConfig {
             // Setting `BUDLUM_RPC_AUTH_REQUIRED=0` in env), but a
             // Forgetful operator no longer ships an open node.
             rpc_auth_required: true,
+            rpc_operator_auth_required: false,
             rpc_api_key_env: None,
             // Same reasoning: empty `allowed_ips` means "allow all" in
             // The runtime check, so we now default to localhost-only and
@@ -418,10 +478,19 @@ impl Default for NodeConfig {
             migrate_v2: None,
             p2p_identity_file: None,
             dns_seeds: Vec::new(),
+            sentry_peers: Vec::new(),
+            validator_peers: Vec::new(),
             max_peers: None,
             banned_peer_db: None,
             vote_history_db: None,
             mdns_enabled: None,
+            p2p_listen_addr: None,
+            p2p_private_listen_addr: None,
+            private_peers: Vec::new(),
+            unconditional_peers: Vec::new(),
+            allowed_private_cidrs: Vec::new(),
+            disable_peer_discovery: None,
+            strict_private_network: None,
             rpc_public_listener: None,
             rpc_operator_listener: None,
             rpc_trusted_proxies: Vec::new(),
@@ -434,6 +503,7 @@ impl Default for NodeConfig {
             pkcs11_slot_id: None,
             pkcs11_token_pin_env: None,
             pkcs11_key_label: None,
+            pkcs11_bls_key_label: None,
             hsm_socket_path: "./data/hsm/socket.sock".to_string(),
             pkcs11_bls_mechanism: None,
             pkcs11_pq_mechanism: None,
@@ -466,6 +536,42 @@ pub struct FileConfig {
     pub features: Option<FeaturesSection>,
     pub consensus: Option<ConsensusSection>, // for integration of other sections
     pub anchor: Option<AnchorSection>,
+    pub compat: Option<CompatSection>,
+}
+
+/// Ecosystem compatibility RPC gateway sections (`[compat.*]`, `Section 8.11.1`).
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+/// Convenience: CLI config deserialization surface for compatibility RPC gateways.
+pub struct CompatSection {
+    pub ethereum: Option<CompatEthereumSection>,
+    pub solana: Option<CompatGatewayListenerSection>,
+    pub aptos: Option<CompatGatewayListenerSection>,
+    pub cosmos: Option<CompatGatewayListenerSection>,
+}
+
+/// `[compat.ethereum]` TOML configuration (`127.0.0.1:18547`).
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+/// Convenience: parsed by `FileConfig` and consumed by `EthRpcConfig::from_section`.
+pub struct CompatEthereumSection {
+    pub enabled: Option<bool>,
+    pub listener: Option<String>,
+    pub operator_listener: Option<String>,
+    pub max_filters: Option<usize>,
+    pub max_filters_per_peer: Option<usize>,
+    pub filter_ttl_secs: Option<u64>,
+    pub max_subscriptions: Option<usize>,
+}
+
+/// Listener configuration for `[compat.solana]`, `[compat.aptos]`, and `[compat.cosmos]`.
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+/// Convenience: CLI config deserialization surface for Solana, Aptos, and Cosmos gateways.
+pub struct CompatGatewayListenerSection {
+    pub enabled: Option<bool>,
+    pub listener: Option<String>,
+    pub rest_listener: Option<String>,
 }
 
 /// The `[anchor]` section: how this node emits PQ anchors.
@@ -553,10 +659,21 @@ pub struct P2pSection {
     /// Archive bootnodes that serve witnesses (`/budlum/witness/1.0.0`).
     pub archive_bootnodes: Option<Vec<String>>,
     pub dns_seeds: Option<Vec<String>>,
+    /// Sentry node multiaddrs (`/ip4/.../tcp/.../p2p/<PeerId>`) shielding a validator.
+    pub sentry_peers: Option<Vec<String>>,
+    /// Upstream validator `PeerId`s or private multiaddrs protected by a sentry node.
+    pub validator_peers: Option<Vec<String>>,
     pub max_peers: Option<usize>,
     pub banned_peer_db: Option<String>,
     pub vote_history_db: Option<String>,
     pub mdns_enabled: Option<bool>,
+    pub listen_addr: Option<String>,
+    pub private_listen_addr: Option<String>,
+    pub private_peers: Option<Vec<String>>,
+    pub unconditional_peers: Option<Vec<String>>,
+    pub allowed_private_cidrs: Option<Vec<String>>,
+    pub disable_peer_discovery: Option<bool>,
+    pub strict_private_network: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, Default, Clone)]
@@ -572,6 +689,7 @@ pub struct RpcSection {
     pub host: Option<String>, // backwards-compatibility
     pub port: Option<u16>,    // backwards-compatibility
     pub auth_required: Option<bool>,
+    pub operator_auth_required: Option<bool>,
     pub allowed_ips: Option<Vec<String>>,
     pub cors_origins: Option<Vec<String>>,
     pub rate_limit_per_minute: Option<u64>,
@@ -591,6 +709,7 @@ pub struct ValidatorSection {
     pub key_file: Option<String>, // backwards-compatibility
     pub backend: Option<String>,  // backwards-compatibility
     pub address: Option<String>,  // backwards-compatibility
+    pub aggregator_key_file: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, Default, Clone)]
@@ -617,6 +736,10 @@ pub struct Pkcs11Section {
     pub pq_public_key: Option<String>,
     /// Label of the ML-DSA-65 key pair signed with through PKCS#11 3.2.
     pub pq_key_label: Option<String>,
+    /// Label of the token object the vendor-native BLS mechanism signs
+    /// through (). Absent means the compiled-in `BUD_BLS_KEY`, which is
+    /// what every existing deployment uses.
+    pub bls_key_label: Option<String>,
     /// Vendor-native PQ/Dilithium mechanism ID.
     pub pq_mechanism: Option<String>,
 }
@@ -625,9 +748,8 @@ pub struct Pkcs11Section {
 #[serde(deny_unknown_fields)]
 pub struct FeaturesSection {
     pub pruning: Option<bool>,
-    /// F2 config-driven: VerifyMerkle staged rollout gate controlled via config
-    /// True = gate open (MainnetActivation::full), false = gate closed (default reject)
-    /// Default: true (gate opened, 4e2b920)
+    /// Legacy configuration field. Testnet keeps `VerifyMerkle` closed until
+    /// its opening gate passes; this value does not activate the opcode.
     pub verify_merkle: Option<bool>,
     /// Mobile mode (lightweight P2P/sharding)
     pub mobile_mode: Option<bool>,
@@ -813,6 +935,16 @@ impl NodeConfig {
                     self.dns_seeds = seeds;
                 }
             }
+            if self.sentry_peers.is_empty() {
+                if let Some(peers) = p2p.sentry_peers {
+                    self.sentry_peers = peers;
+                }
+            }
+            if self.validator_peers.is_empty() {
+                if let Some(peers) = p2p.validator_peers {
+                    self.validator_peers = peers;
+                }
+            }
             if self.max_peers.is_none() {
                 self.max_peers = p2p.max_peers;
             }
@@ -824,6 +956,33 @@ impl NodeConfig {
             }
             if self.mdns_enabled.is_none() {
                 self.mdns_enabled = p2p.mdns_enabled;
+            }
+            if self.p2p_listen_addr.is_none() {
+                self.p2p_listen_addr = p2p.listen_addr;
+            }
+            if self.p2p_private_listen_addr.is_none() {
+                self.p2p_private_listen_addr = p2p.private_listen_addr;
+            }
+            if self.private_peers.is_empty() {
+                if let Some(peers) = p2p.private_peers {
+                    self.private_peers = peers;
+                }
+            }
+            if self.unconditional_peers.is_empty() {
+                if let Some(peers) = p2p.unconditional_peers {
+                    self.unconditional_peers = peers;
+                }
+            }
+            if self.allowed_private_cidrs.is_empty() {
+                if let Some(cidrs) = p2p.allowed_private_cidrs {
+                    self.allowed_private_cidrs = cidrs;
+                }
+            }
+            if self.disable_peer_discovery.is_none() {
+                self.disable_peer_discovery = p2p.disable_peer_discovery;
+            }
+            if self.strict_private_network.is_none() {
+                self.strict_private_network = p2p.strict_private_network;
             }
             if self.bootstrap.is_none() {
                 self.bootstrap = self.bootnodes.first().cloned();
@@ -877,6 +1036,9 @@ impl NodeConfig {
             }
             if let Some(auth) = rpc.auth_required {
                 self.rpc_auth_required = auth;
+            }
+            if let Some(op_auth) = rpc.operator_auth_required {
+                self.rpc_operator_auth_required = op_auth;
             }
         }
 
@@ -961,6 +1123,9 @@ impl NodeConfig {
                     if self.pkcs11_pq_key_label.is_none() {
                         self.pkcs11_pq_key_label = pkcs11.pq_key_label;
                     }
+                    if self.pkcs11_bls_key_label.is_none() {
+                        self.pkcs11_bls_key_label = pkcs11.bls_key_label;
+                    }
                 }
                 if let Some(socket) = signer.hsm_socket_path {
                     self.hsm_socket_path = socket;
@@ -971,6 +1136,9 @@ impl NodeConfig {
             }
             if self.validator_address.is_none() {
                 self.validator_address = validator.address;
+            }
+            if self.aggregator_key_file.is_none() {
+                self.aggregator_key_file = validator.aggregator_key_file;
             }
         }
 
@@ -1033,13 +1201,17 @@ impl NodeConfig {
         if let Some(ref name) = legacy.network {
             self.network = network_named("the legacy config file", name);
         }
-        if self.consensus.is_none() {
-            self.consensus = legacy.consensus.as_deref().and_then(|s| match s {
-                "pow" => Some(ConsensusType::PoW),
-                "pos" => Some(ConsensusType::PoS),
-                "poa" => Some(ConsensusType::PoA),
-                _ => None,
-            });
+        if let Some(raw_type) = legacy.consensus.as_deref() {
+            let parsed = match parse_legacy_consensus_type(raw_type) {
+                Ok(kind) => kind,
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    std::process::exit(1);
+                }
+            };
+            if self.consensus.is_none() {
+                self.consensus = Some(parsed);
+            }
         }
         if let Some(diff) = legacy.difficulty {
             self.difficulty = diff;
@@ -1102,6 +1274,13 @@ impl NodeConfig {
                 std::process::exit(1);
             });
         }
+        if let Ok(op_auth_required) = std::env::var("BUDLUM_RPC_OPERATOR_AUTH_REQUIRED") {
+            self.rpc_operator_auth_required =
+                parse_env_bool(&op_auth_required).unwrap_or_else(|error| {
+                    eprintln!("CRITICAL: invalid BUDLUM_RPC_OPERATOR_AUTH_REQUIRED: {error}");
+                    std::process::exit(1);
+                });
+        }
         if let Ok(api_key_env) = std::env::var("BUDLUM_RPC_API_KEY_ENV") {
             if !api_key_env.trim().is_empty() {
                 self.rpc_api_key_env = Some(api_key_env);
@@ -1129,6 +1308,22 @@ impl NodeConfig {
         if let Ok(mobile) = std::env::var("BUDLUM_MOBILE_MODE") {
             self.mobile_mode = mobile.to_lowercase() == "true" || mobile == "1";
         }
+        if let Ok(sentries) = std::env::var("BUDLUM_SENTRY_PEERS") {
+            self.sentry_peers = sentries
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+        }
+        if let Ok(validators) = std::env::var("BUDLUM_VALIDATOR_PEERS") {
+            self.validator_peers = validators
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+        }
     }
 
     /// Effective P2P connection ceiling. Explicit configuration may reduce the
@@ -1139,10 +1334,15 @@ impl NodeConfig {
         self.max_peers.unwrap_or(profile_cap).clamp(1, profile_cap)
     }
 
-    pub fn pruning_policy(&self) -> Result<crate::storage::PruningPolicy, String> {
-        let mode = crate::storage::NodeMode::from_role(&self.role)
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn pruning_policy(&self) -> Result<crate::persistence::PruningPolicy, String> {
+        let mode = crate::persistence::NodeMode::from_role(&self.role)
             .ok_or_else(|| format!("unknown node role '{}'", self.role))?;
-        Ok(crate::storage::PruningPolicy {
+        Ok(crate::persistence::PruningPolicy {
             mode,
             pruning_enabled: self.features_pruning,
             finalized_snapshot_retention: self.snapshot_dir.is_some(),
@@ -1154,6 +1354,48 @@ impl NodeConfig {
             backups_enabled: self.backups_enabled == Some(true),
             backup_dir_configured: self.backup_dir.is_some(),
         })
+    }
+
+    /// Builds and validates the active [`crate::network::sentry::SentryPolicy`]
+    /// from CLI flags and TOML `[p2p]` settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::network::sentry::SentryConfigError`] if any multiaddr,
+    /// peer ID, CIDR, or shielded-validator safety invariant is invalid.
+    pub fn sentry_policy(
+        &self,
+    ) -> Result<crate::network::sentry::SentryPolicy, crate::network::sentry::SentryConfigError>
+    {
+        let mut combined_private_peers = self.private_peers.clone();
+        for entry in &self.validator_peers {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let peer_str = if trimmed.contains('/') {
+                trimmed
+                    .parse::<libp2p::Multiaddr>()
+                    .ok()
+                    .and_then(|ma| crate::network::sentry::peer_id_from_multiaddr(&ma))
+                    .map_or_else(|| trimmed.to_string(), |id| id.to_string())
+            } else {
+                trimmed.to_string()
+            };
+            if !combined_private_peers.contains(&peer_str) {
+                combined_private_peers.push(peer_str);
+            }
+        }
+        let cfg = crate::network::sentry::SentryConfig {
+            role: self.role.clone(),
+            sentry_peers: self.sentry_peers.clone(),
+            private_peers: combined_private_peers,
+            unconditional_peers: self.unconditional_peers.clone(),
+            allowed_private_cidrs: self.allowed_private_cidrs.clone(),
+            disable_peer_discovery: self.disable_peer_discovery,
+            strict_private_network: self.strict_private_network,
+        };
+        crate::network::sentry::SentryPolicy::from_config(&cfg)
     }
 
     // Strict validation rules for production environments (especially Mainnet profile)
@@ -1178,12 +1420,52 @@ impl NodeConfig {
             std::process::exit(1);
         }
 
+        if let Err(e) = crate::network::sentry::SentryShieldConfig::from_role_and_peers(
+            &self.role,
+            &self.sentry_peers,
+            &self.validator_peers,
+            None,
+        ) {
+            eprintln!("CRITICAL CONFIGURATION ERROR: {e}.");
+            std::process::exit(1);
+        }
+
         if let Some(chain_id) = self.chain_id {
             let expected_chain_id = self.network.chain_id().value();
             if chain_id != expected_chain_id {
                 eprintln!(
                     "CRITICAL CONFIGURATION ERROR: Network profile '{}' requires chain ID {}, got {}.",
                     self.network, expected_chain_id, chain_id
+                );
+                std::process::exit(1);
+            }
+        }
+
+        // Sentry node architecture policy check (fails closed on malformed
+        // multiaddrs, invalid CIDRs, conflicting roles, or shielded validators
+        // attempting to re-enable discovery).
+        let sentry_policy = self.sentry_policy().unwrap_or_else(|e| {
+            eprintln!("CRITICAL SECURITY FAILURE: {e}");
+            std::process::exit(1);
+        });
+        if sentry_policy.is_discovery_disabled() && self.mdns_enabled == Some(true) {
+            eprintln!(
+                "CRITICAL SECURITY FAILURE: mDNS discovery cannot be enabled when peer discovery is disabled (shielded validator)!"
+            );
+            std::process::exit(1);
+        }
+        if let Some(ref listen_ip) = self.p2p_listen_addr {
+            if listen_ip.trim().parse::<std::net::IpAddr>().is_err() {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: invalid p2p.listen_addr '{listen_ip}' (expected IPv4 or IPv6 address)"
+                );
+                std::process::exit(1);
+            }
+        }
+        if let Some(ref priv_addr) = self.p2p_private_listen_addr {
+            if priv_addr.trim().parse::<libp2p::Multiaddr>().is_err() {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: invalid p2p.private_listen_addr '{priv_addr}' (expected libp2p multiaddr)"
                 );
                 std::process::exit(1);
             }
@@ -1219,6 +1501,16 @@ impl NodeConfig {
                 );
                 std::process::exit(1);
             }
+            if self
+                .aggregator_key_file
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+            {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: mainnet refuses an aggregation seed file on disk (aggregator_key_file); use an HSM-backed signer"
+                );
+                std::process::exit(1);
+            }
             // Rule 1 / H4.1: mainnet validators - pure policy (crypto::mainnet_policy).
             if self.role == "validator" {
                 use crate::crypto::mainnet_policy::{
@@ -1247,9 +1539,26 @@ impl NodeConfig {
                 );
             }
 
-            // Rule 2: No empty bootnodes on mainnet!
-            if self.bootnodes.is_empty() && self.bootstrap.is_none() {
+            // Rule 2: No empty bootnodes on mainnet unless this validator is
+            // explicitly shielded behind sentry_peers!
+            let shielded_validator = self.role == "validator" && !self.sentry_peers.is_empty();
+            if !shielded_validator && self.bootnodes.is_empty() && self.bootstrap.is_none() {
                 eprintln!("CRITICAL SECURITY FAILURE: Mainnet profile cannot start without explicit seed/bootnodes!");
+                std::process::exit(1);
+            }
+            if let Some(bad) = crate::core::chain_config::first_placeholder_peer(&self.sentry_peers)
+            {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: mainnet sentry_peers entry is still a ceremony placeholder: {bad}"
+                );
+                std::process::exit(1);
+            }
+            if let Some(bad) =
+                crate::core::chain_config::first_placeholder_peer(&self.validator_peers)
+            {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: mainnet validator_peers entry is still a ceremony placeholder: {bad}"
+                );
                 std::process::exit(1);
             }
 
@@ -1350,6 +1659,14 @@ impl NodeConfig {
         if self.role == "archive" {
             return None;
         }
+        // A sentry-shielded validator communicates exclusively through its
+        // sentry nodes and never dials external archive bootnodes directly.
+        if self.role == "validator"
+            && !self.sentry_peers.is_empty()
+            && self.archive_bootnodes.is_empty()
+        {
+            return None;
+        }
         let distinct: std::collections::BTreeSet<&str> = self
             .archive_bootnodes
             .iter()
@@ -1412,7 +1729,11 @@ impl NodeConfig {
 
     /// Reads the validators file. A missing file is an empty list (the
     /// default path is optional); an unreadable, oversized or malformed file
-    /// is an error, so a PoA node never starts on a silently empty set.
+    /// is an error, so a `PoA` node never starts on a silently empty set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn load_validators(&self) -> Result<Vec<String>, String> {
         let path = Path::new(&self.validators_file);
         if !path.exists() {
@@ -1740,7 +2061,7 @@ mod tests {
         assert_eq!(cfg.role, "archive");
         assert_eq!(
             cfg.pruning_policy().unwrap().mode,
-            crate::storage::NodeMode::Archive
+            crate::persistence::NodeMode::Archive
         );
     }
 
@@ -1758,7 +2079,7 @@ mod tests {
         assert_eq!(cfg.role, "validator");
         assert_eq!(
             cfg.pruning_policy().unwrap().mode,
-            crate::storage::NodeMode::Full
+            crate::persistence::NodeMode::Full
         );
     }
 
@@ -1872,11 +2193,60 @@ mod tests {
         });
         assert_eq!(cfg.signer_backend.as_deref(), Some("pkcs11"));
     }
+
+    #[test]
+    fn clap_parse_restores_secure_rpc_auth_and_allowlist_defaults() {
+        use clap::Parser;
+        let mut parsed = NodeConfig::try_parse_from(["budlum-node", "--role", "validator"])
+            .expect("CLI flags must parse");
+        // Clap's `#[arg(skip)]` initializes skipped fields with type defaults
+        // (`false` / empty Vec); `apply_secure_rpc_defaults` must restore the
+        // hardened `NodeConfig::default()` posture before file/env overlays.
+        parsed.apply_secure_rpc_defaults();
+        let expected = NodeConfig::default();
+        assert_eq!(parsed.rpc_auth_required, expected.rpc_auth_required);
+        assert!(parsed.rpc_auth_required);
+        assert_eq!(parsed.rpc_allowed_ips, expected.rpc_allowed_ips);
+        assert!(!parsed.rpc_allowed_ips.is_empty());
+    }
+
+    #[test]
+    fn sentry_and_validator_peers_parse_from_cli_and_strict_v2_toml() {
+        use clap::Parser;
+        let s1 = format!(
+            "/ip4/203.0.113.10/tcp/26656/p2p/{}",
+            libp2p::PeerId::random()
+        );
+        let s2 = format!(
+            "/ip4/203.0.113.11/tcp/26656/p2p/{}",
+            libp2p::PeerId::random()
+        );
+        let cli = NodeConfig::try_parse_from([
+            "budlum-node",
+            "--role",
+            "validator",
+            "--sentry-peers",
+            &format!("{s1},{s2}"),
+        ])
+        .expect("CLI sentry-peers must parse");
+        assert_eq!(cli.sentry_peers, vec![s1.clone(), s2.clone()]);
+        assert_eq!(cli.mainnet_archive_bootnode_violation(), None);
+
+        let v1 = libp2p::PeerId::random().to_string();
+        let toml_doc =
+            format!("[node]\nrole = \"sentry\"\n\n[p2p]\nvalidator_peers = [\"{v1}\"]\n");
+        let fc: FileConfig = toml::from_str(&toml_doc).expect("TOML validator_peers must parse");
+        let mut cfg = NodeConfig::default();
+        cfg.apply_file_config(fc);
+        assert_eq!(cfg.role, "sentry");
+        assert_eq!(cfg.validator_peers, vec![v1]);
+    }
 }
 
 #[cfg(test)]
 mod persona_config_tests {
-    use super::FileConfig;
+    use super::{FileConfig, NodeConfig};
+    use clap::Parser as _;
 
     #[test]
     fn persona_configs_parse_as_strict_v2() {
@@ -1896,6 +2266,26 @@ mod persona_config_tests {
     }
 
     #[test]
+    fn sentry_and_shielded_validator_templates_parse_and_build_policy() {
+        for rel in ["config/sentry.toml", "config/validator-shielded.toml"] {
+            let content =
+                std::fs::read_to_string(rel).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            let fc: FileConfig =
+                toml::from_str(&content).unwrap_or_else(|e| panic!("parse {rel}: {e}"));
+            let mut cfg = NodeConfig::default();
+            cfg.apply_file_config(fc);
+            let policy = cfg
+                .sentry_policy()
+                .unwrap_or_else(|e| panic!("sentry_policy failed for {rel}: {e}"));
+            if rel.contains("sentry.toml") {
+                assert_eq!(policy.role(), crate::network::sentry::SentryRole::Sentry);
+            } else {
+                assert!(policy.is_discovery_disabled());
+            }
+        }
+    }
+
+    #[test]
     fn removed_feature_keys_are_rejected_by_strict_schema() {
         for key in ["governance", "zkvm_contracts"] {
             let config = format!("[features]\n{key} = false\n");
@@ -1903,5 +2293,51 @@ mod persona_config_tests {
                 .expect_err("removed feature keys must not parse");
             assert!(error.to_string().contains(key), "unexpected error: {error}");
         }
+    }
+
+    #[test]
+    fn cli_metrics_listener_overrides_config_file() {
+        let mut cfg = NodeConfig::parse_from([
+            "budlum-core",
+            "--network=testnet",
+            "--metrics-listener=127.0.0.1:29093",
+        ]);
+        let fc: FileConfig = toml::from_str("[metrics]\nlistener = \"0.0.0.0:9090\"\n")
+            .expect("parse metrics config");
+        cfg.apply_file_config(fc);
+        assert_eq!(cfg.metrics_listener.as_deref(), Some("127.0.0.1:29093"));
+    }
+
+    #[test]
+    fn legacy_config_rejects_unknown_consensus_type() {
+        assert_eq!(
+            super::parse_legacy_consensus_type("pow"),
+            Ok(super::ConsensusType::PoW)
+        );
+        assert_eq!(
+            super::parse_legacy_consensus_type("pos"),
+            Ok(super::ConsensusType::PoS)
+        );
+        assert_eq!(
+            super::parse_legacy_consensus_type("poa"),
+            Ok(super::ConsensusType::PoA)
+        );
+        let err = super::parse_legacy_consensus_type("poss")
+            .expect_err("legacy config with invalid consensus must fail closed");
+        assert!(
+            err.contains("CRITICAL: Invalid consensus 'poss'"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+fn parse_legacy_consensus_type(raw: &str) -> Result<ConsensusType, String> {
+    match raw {
+        "pow" => Ok(ConsensusType::PoW),
+        "pos" => Ok(ConsensusType::PoS),
+        "poa" => Ok(ConsensusType::PoA),
+        other => Err(format!(
+            "CRITICAL: Invalid consensus '{other}' in legacy config file"
+        )),
     }
 }

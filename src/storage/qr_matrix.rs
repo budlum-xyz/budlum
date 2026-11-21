@@ -114,7 +114,7 @@ impl QrMatrix {
             });
         }
         Self::from_encoded(
-            qr_encode::encode(payload).map_err(QrMatrixError::Encode)?,
+            &qr_encode::encode(payload).map_err(QrMatrixError::Encode)?,
             ec,
         )
     }
@@ -141,15 +141,16 @@ impl QrMatrix {
     /// # Errors
     ///
     /// [`QrMatrixError::Geometry`] when the grid is empty.
-    fn from_encoded(m: EncodedMatrix, ec: EcLevel) -> Result<Self, QrMatrixError> {
+    fn from_encoded(m: &EncodedMatrix, ec: EcLevel) -> Result<Self, QrMatrixError> {
         let side = m.side_len();
         if side == 0 {
             return Err(QrMatrixError::Geometry);
         }
+        let width = u32::try_from(side).map_err(|_| QrMatrixError::Geometry)?;
         Ok(Self {
             version: i16::from(m.version()),
-            width: side as u32,
-            dark: Self::rows_of(&m),
+            width,
+            dark: Self::rows_of(m),
             ec,
             mask: m.mask(),
         })

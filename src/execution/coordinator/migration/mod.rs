@@ -1,0 +1,1886 @@
+//! EVM Migration Kit verification core and state-installing door (directive 8.12).
+//!
+//! 1. **Authorization (`8.12.2 item 2`):** Proven deployment transaction and receipt
+//!    (direct `CREATE`; factory calls fail closed) plus EIP-712 `MigrationAuthorization`.
+//! 2. **Account proof (`8.12.2 item 3`):** MPT state proof at finalized `source_block`.
+//! 3. **Storage chunks (`8.12.2 item 4`):** `MigrationTx::ImportEvmStorageChunk`
+//!    proving slots against `storageRoot` atomically (`G-4`).
+//! 4. **Finalization (`8.12.2 items 5-9`):** `MigrationTx::FinalizeEvmImport` rebuilds
+//!    the complete storage trie, refuses occupied targets, charges the migration fee to
+//!    the migrator, leaves native ETH balance at `0`, and installs the contract at its
+//!    exact 20-byte address into `ee/evm/{account,code,storage}` with `imported_from`.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
+use std::collections::BTreeMap;
+
+use crate::core::account::{AccountState, BudEnvUnit};
+use crate::core::address::Address;
+use crate::cross_domain::evm::account_proof::{self, AccountProofError, EvmAccount};
+use crate::cross_domain::evm::mpt;
+use crate::crypto::secp256k1_recover::{recover_address, RecoverError};
+use crate::execution::coordinator::alias::derive_contract_account;
+use crate::execution::coordinator::evm_ee::EvmAccountRecord;
+use crate::execution::coordinator::state::{
+    ExecutionState, NS_EVM_ACCOUNT, NS_EVM_CODE, NS_EVM_STORAGE,
+};
+use crate::execution::coordinator::universal_call::EVM_UNIVERSAL_PRECOMPILE;
+use crate::tokenomics::reward_pool::reward_pool_account;
+use budlum_uel_abi::EeId;
+use serde::{Deserialize, Serialize};
+
+pub mod dependencies;
+pub mod deployment;
+pub mod fee;
+pub mod non_evm;
+pub mod storage_root;
+
+pub use dependencies::{dependency_report, DependencyReport};
+pub use deployment::{create_address, verify_deployment, DeploymentProof, DeploymentProofError};
+pub use fee::{
+    quote_migration_fee, MigrationFeeOverflow, MigrationFeeQuote, MigrationFeeSchedule,
+    MigrationUsage,
+};
+pub use non_evm::{
+    compute_ics23_leaf_hash, fold_sha256_merkle, fold_sha3_merkle, move_entries_hash,
+    move_migration_digest, move_state_leaf, svm_account_leaf, svm_migration_digest,
+    verify_ics23_existence, wasm_contract_info_proof_key, wasm_migration_digest,
+    wasm_storage_entries_hash, wasm_storage_proof_key, Ics23ExistenceProof, Ics23InnerOp,
+    MoveMigrationEntryKind, MoveMigrationRequest, MoveStateProofEntry, SvmMigrationRequest,
+    WasmMigrationRequest, MAX_ICS23_KEY_BYTES, MAX_ICS23_PREFIX_BYTES, MAX_ICS23_VALUE_BYTES,
+    MAX_MOVE_IDENT_BYTES, MAX_MOVE_RESOURCE_BYTES, WASM_CONTRACT_INFO_PREFIX,
+    WASM_CONTRACT_STORE_PREFIX,
+};
+
+const DOMAIN_NAME: &str = "Budlum Migration";
+const DOMAIN_VERSION: &str = "1";
+const DOMAIN_TYPE: &str =
+    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
+const AUTHORIZATION_TYPE: &str = "MigrationAuthorization(address contract,uint256 budlumChainId,uint256 sourceBlock,bytes32 stateRoot,bytes32 codeHash)";
+/// Maximum proven storage slots carried in one `ImportEvmStorageChunk`.
+pub const MAX_CHUNK_SLOTS: usize = 4096;
+/// Maximum total proven storage slots that may be staged in one pending EVM migration.
+pub const MAX_STAGED_SLOTS: usize = 65_536;
+/// Maximum concurrent pending EVM migrations staged in consensus state.
+pub const MAX_PENDING_MIGRATIONS: usize = 256;
+/// Maximum concurrent pending EVM migrations staged by any single migrator.
+pub const MAX_PENDING_MIGRATIONS_PER_MIGRATOR: usize = 8;
+/// Epoch TTL for an unfinalized pending EVM migration before automatic eviction.
+pub const PENDING_MIGRATION_TTL_EPOCHS: u64 = 16;
+
+/// EIP-712 `MigrationAuthorization` signed by the account with deployment authority.
+///
+/// The signature covers the payload it admits: the source `stateRoot` the
+/// account proof must open under and the runtime `codeHash` the proven account
+/// must hold. A signature that named only the contract would let whoever
+/// submits it choose the code and the state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationAuthorization {
+    pub contract: [u8; 20],
+    pub budlum_chain_id: u64,
+    pub source_block: u64,
+    /// Source `stateRoot` the deployer signed for.
+    pub state_root: [u8; 32],
+    /// Runtime code hash the deployer signed for.
+    pub code_hash: [u8; 32],
+    pub signature: Vec<u8>,
+}
+
+impl MigrationAuthorization {
+    fn type_hash() -> [u8; 32] {
+        mpt::keccak256(AUTHORIZATION_TYPE.as_bytes())
+    }
+
+    fn domain_separator(contract: &[u8; 20], chain_id: u64) -> [u8; 32] {
+        let mut encoded = Vec::with_capacity(160);
+        encoded.extend_from_slice(&mpt::keccak256(DOMAIN_TYPE.as_bytes()));
+        encoded.extend_from_slice(&mpt::keccak256(DOMAIN_NAME.as_bytes()));
+        encoded.extend_from_slice(&mpt::keccak256(DOMAIN_VERSION.as_bytes()));
+        encoded.extend_from_slice(&word_from_u64(chain_id));
+        encoded.extend_from_slice(&word_from_address(contract));
+        mpt::keccak256(&encoded)
+    }
+
+    fn struct_hash(&self) -> [u8; 32] {
+        let mut encoded = Vec::with_capacity(192);
+        encoded.extend_from_slice(&Self::type_hash());
+        encoded.extend_from_slice(&word_from_address(&self.contract));
+        encoded.extend_from_slice(&word_from_u64(self.budlum_chain_id));
+        encoded.extend_from_slice(&word_from_u64(self.source_block));
+        encoded.extend_from_slice(&self.state_root);
+        encoded.extend_from_slice(&self.code_hash);
+        mpt::keccak256(&encoded)
+    }
+
+    /// EIP-712 signing digest `keccak256(0x1901 || domainSeparator || structHash)`.
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        let mut encoded = Vec::with_capacity(66);
+        encoded.extend_from_slice(&[0x19, 0x01]);
+        encoded.extend_from_slice(&Self::domain_separator(
+            &self.contract,
+            self.budlum_chain_id,
+        ));
+        encoded.extend_from_slice(&self.struct_hash());
+        mpt::keccak256(&encoded)
+    }
+}
+
+/// Verified deployment authority record from finalized source-chain proofs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeploymentEvidence {
+    pub contract: [u8; 20],
+    pub deployer: [u8; 20],
+    pub deployment_block: u64,
+}
+
+/// Deterministic migration refusal reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportError {
+    ChainMismatch {
+        signed: u64,
+        expected: u64,
+    },
+    ContractMismatch,
+    SourceBlockMismatch,
+    /// The deployer signed for another state root or code than the request carries.
+    PayloadMismatch,
+    /// The request's source root is not one this chain anchored for the source domain.
+    SourceNotAttested {
+        domain: u32,
+    },
+    /// No registered domain of the source chain anchored the request's state root.
+    SourceChainNotAttested {
+        chain_id: u64,
+    },
+    DeploymentAfterSource {
+        deployment_block: u64,
+        source_block: u64,
+    },
+    Signature(RecoverError),
+    NotTheDeployer {
+        signed: [u8; 20],
+        deployer: [u8; 20],
+    },
+    Deployment(DeploymentProofError),
+    Proof(AccountProofError),
+    CodeHashMismatch,
+    AddressOccupied,
+    MigrationAlreadyPending,
+    NoPendingMigration,
+    ChunkContractMismatch,
+    ChunkBlockMismatch,
+    ChunkTooLarge {
+        slots: usize,
+        max: usize,
+    },
+    TooManyStagedSlots {
+        slots: usize,
+        max: usize,
+    },
+    TooManyPendingMigrations {
+        pending: usize,
+        max: usize,
+    },
+    NotAuthorizedMigrator,
+    SlotAbsent([u8; 32]),
+    SlotValueMismatch {
+        slot: [u8; 32],
+        claimed: [u8; 32],
+        proven: [u8; 32],
+    },
+    SlotConflicts {
+        slot: [u8; 32],
+    },
+    StorageRootMismatch {
+        expected: [u8; 32],
+        computed: [u8; 32],
+    },
+    Fee(MigrationFeeOverflow),
+    InsufficientMigratorBalance(String),
+    StateError(String),
+}
+
+impl std::fmt::Display for ImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChainMismatch { signed, expected } => {
+                write!(
+                    f,
+                    "migration: signed for chain {signed}, running {expected}"
+                )
+            }
+            Self::ContractMismatch => write!(f, "migration: contract mismatch"),
+            Self::SourceBlockMismatch => write!(f, "migration: source block mismatch"),
+            Self::PayloadMismatch => write!(
+                f,
+                "migration: authorization does not cover the supplied state root and code"
+            ),
+            Self::SourceNotAttested { domain } => write!(
+                f,
+                "migration: source root is not anchored for domain {domain}"
+            ),
+            Self::SourceChainNotAttested { chain_id } => write!(
+                f,
+                "migration: source root is not anchored by a domain of chain {chain_id}"
+            ),
+            Self::DeploymentAfterSource {
+                deployment_block,
+                source_block,
+            } => write!(
+                f,
+                "migration: deployment block {deployment_block} > state block {source_block}"
+            ),
+            Self::Signature(e) => write!(f, "migration: signature: {e}"),
+            Self::NotTheDeployer { signed, deployer } => write!(
+                f,
+                "migration: 0x{} signed, 0x{} deployed",
+                hex::encode(signed),
+                hex::encode(deployer)
+            ),
+            Self::Deployment(e) => write!(f, "migration: {e}"),
+            Self::Proof(e) => write!(f, "migration: {e}"),
+            Self::CodeHashMismatch => write!(f, "migration: bytecode mismatches proven hash"),
+            Self::AddressOccupied => write!(f, "migration: target address already occupied"),
+            Self::MigrationAlreadyPending => write!(f, "migration: import already pending"),
+            Self::NoPendingMigration => write!(f, "migration: no pending import for contract"),
+            Self::ChunkContractMismatch => write!(f, "migration: chunk contract mismatch"),
+            Self::ChunkBlockMismatch => write!(f, "migration: chunk block mismatch"),
+            Self::ChunkTooLarge { slots, max } => {
+                write!(f, "migration: {slots} slots exceeds bound {max}")
+            }
+            Self::TooManyStagedSlots { slots, max } => {
+                write!(f, "migration: staged slots {slots} exceeds cap {max}")
+            }
+            Self::TooManyPendingMigrations { pending, max } => {
+                write!(
+                    f,
+                    "migration: {pending} pending migrations reached cap {max}"
+                )
+            }
+            Self::NotAuthorizedMigrator => {
+                write!(
+                    f,
+                    "migration: sender is not the migrator that opened this staged plan"
+                )
+            }
+            Self::SlotAbsent(slot) => write!(f, "migration: absent slot 0x{}", hex::encode(slot)),
+            Self::SlotValueMismatch {
+                slot,
+                claimed,
+                proven,
+            } => write!(
+                f,
+                "migration: slot 0x{} claimed 0x{} != proven 0x{}",
+                hex::encode(slot),
+                hex::encode(claimed),
+                hex::encode(proven)
+            ),
+            Self::SlotConflicts { slot } => {
+                write!(
+                    f,
+                    "migration: conflicting values for slot 0x{}",
+                    hex::encode(slot)
+                )
+            }
+            Self::StorageRootMismatch { expected, computed } => write!(
+                f,
+                "migration: storage root 0x{} != proven 0x{}",
+                hex::encode(computed),
+                hex::encode(expected)
+            ),
+            Self::Fee(e) => write!(f, "migration: {e}"),
+            Self::InsufficientMigratorBalance(m) => write!(f, "migration fee: {m}"),
+            Self::StateError(m) => write!(f, "migration state: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for ImportError {}
+
+impl From<DeploymentProofError> for ImportError {
+    fn from(error: DeploymentProofError) -> Self {
+        Self::Deployment(error)
+    }
+}
+
+impl From<AccountProofError> for ImportError {
+    fn from(e: AccountProofError) -> Self {
+        Self::Proof(e)
+    }
+}
+
+impl From<MigrationFeeOverflow> for ImportError {
+    fn from(error: MigrationFeeOverflow) -> Self {
+        Self::Fee(error)
+    }
+}
+
+/// One proven storage slot in a chunk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageEntry {
+    pub slot: [u8; 32],
+    pub value: [u8; 32],
+    pub proof_nodes: Vec<Vec<u8>>,
+}
+
+/// Payload of `MigrationTx::ImportEvmStorageChunk` (8.12.2 item 4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportEvmStorageChunk {
+    pub contract: [u8; 20],
+    pub source_block: u64,
+    pub slots: Vec<StorageEntry>,
+}
+
+/// Inputs starting a verified EVM contract migration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationRequest {
+    pub source_chain_id: u64,
+    pub source_domain: String,
+    pub source_block: u64,
+    pub deployment: DeploymentProof,
+    pub authorization: MigrationAuthorization,
+    pub state_root: [u8; 32],
+    pub account_proof: Vec<Vec<u8>>,
+    pub code: Vec<u8>,
+    pub occupied: bool,
+}
+
+/// Proven provenance recorded on the migrated EVM account (`imported_from`, 8.12.2 item 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportSource {
+    pub domain: String,
+    pub block: u64,
+    pub address: [u8; 20],
+}
+
+/// Completed migration output installed by `FinalizeEvmImport`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationRecord {
+    pub address: [u8; 20],
+    pub nonce: u64,
+    pub code: Vec<u8>,
+    pub code_hash: [u8; 32],
+    pub storage_root: [u8; 32],
+    pub storage: Vec<([u8; 32], [u8; 32])>,
+    pub imported_from: ImportSource,
+    pub usage: MigrationUsage,
+    pub fee: MigrationFeeQuote,
+}
+
+/// In-progress verified EVM migration staged in `ExecutionState`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationPlan {
+    source: ImportSource,
+    /// Canonical domain id whose anchored root admitted this plan, re-checked at finalization.
+    #[serde(default)]
+    source_domain_id: u32,
+    /// Source chain id whose anchored root admitted this plan, re-checked at finalization.
+    #[serde(default)]
+    source_chain_id: u64,
+    /// Anchored state root the staged proofs were opened against, re-checked at finalization.
+    #[serde(default)]
+    source_root: [u8; 32],
+    account: EvmAccount,
+    code: Vec<u8>,
+    #[serde(with = "crate::core::map_keys")]
+    storage: BTreeMap<[u8; 32], [u8; 32]>,
+    proof_nodes: u64,
+    #[serde(default)]
+    migrator: Option<Address>,
+    #[serde(default)]
+    created_epoch: u64,
+}
+
+/// Consensus-level EVM & non-EVM migration transaction variants (`8.12.2` & `8.12.3`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MigrationTx {
+    /// Verifies deployment authority + account proof and stages a [`MigrationPlan`].
+    BeginEvmImport(Box<MigrationRequest>),
+    /// Proves and stages a batch of storage slots into a pending [`MigrationPlan`].
+    ImportEvmStorageChunk(ImportEvmStorageChunk),
+    /// Verifies complete `storage_root`, charges migration fee, and installs EVM state.
+    FinalizeEvmImport { contract: [u8; 20] },
+    /// Verifies `CosmWasm` bytecode, Cosmos creator signature, and ICS-23 proofs, and installs WASM state (`8.12.3`).
+    ImportWasmContract(Box<WasmMigrationRequest>),
+    /// Verifies Solana account Merkle proof and Ed25519 authority signature, and installs SVM state (`8.12.3`).
+    ImportSvmAccount(Box<SvmMigrationRequest>),
+    /// Verifies Aptos Move module/resource proofs and Ed25519 signature, and installs Move state (`8.12.3`).
+    ImportMoveResource(Box<MoveMigrationRequest>),
+}
+
+/// Outcome returned when applying a [`MigrationTx`] in a block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrationTxOutcome {
+    Started {
+        contract: [u8; 20],
+        source_block: u64,
+    },
+    ChunkImported {
+        contract: [u8; 20],
+        slots: usize,
+    },
+    Finalized(Box<MigrationRecord>),
+    WasmImported {
+        contract: Vec<u8>,
+        code_hash: [u8; 32],
+        keys: usize,
+        fee: MigrationFeeQuote,
+    },
+    SvmImported {
+        pubkey: [u8; 32],
+        data_len: usize,
+        fee: MigrationFeeQuote,
+    },
+    MoveImported {
+        account: [u8; 32],
+        entries: usize,
+        fee: MigrationFeeQuote,
+    },
+}
+
+/// Verifies deployment authority and the finalized source account proof.
+///
+/// `chain_id` is the chain the node is running. It never comes from the
+/// request: a request that names its own chain would let one deployer
+/// signature replay on every Budlum chain.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
+pub fn begin_import(
+    request: MigrationRequest,
+    chain_id: u64,
+) -> Result<MigrationPlan, ImportError> {
+    if request.authorization.budlum_chain_id != chain_id {
+        return Err(ImportError::ChainMismatch {
+            signed: request.authorization.budlum_chain_id,
+            expected: chain_id,
+        });
+    }
+    if request.authorization.source_block != request.source_block {
+        return Err(ImportError::SourceBlockMismatch);
+    }
+    // The deployer signed for one state root. A request that opens its account
+    // under another root is not what was authorized.
+    if request.authorization.state_root != request.state_root {
+        return Err(ImportError::PayloadMismatch);
+    }
+    if request.deployment.deployment_block > request.source_block {
+        return Err(ImportError::DeploymentAfterSource {
+            deployment_block: request.deployment.deployment_block,
+            source_block: request.source_block,
+        });
+    }
+    if request.occupied {
+        return Err(ImportError::AddressOccupied);
+    }
+    let evidence = verify_deployment(&request.deployment, request.source_chain_id)?;
+    if request.authorization.contract != evidence.contract {
+        return Err(ImportError::ContractMismatch);
+    }
+    let signer = recover_address(
+        &request.authorization.digest(),
+        &request.authorization.signature,
+    )
+    .map_err(ImportError::Signature)?;
+    if signer != evidence.deployer {
+        return Err(ImportError::NotTheDeployer {
+            signed: signer,
+            deployer: evidence.deployer,
+        });
+    }
+    let account = account_proof::verify_account(
+        &request.account_proof,
+        &request.state_root,
+        &evidence.contract,
+    )?;
+    if request.code.is_empty() {
+        return Err(ImportError::PayloadMismatch);
+    }
+    if account.code_hash != request.authorization.code_hash {
+        return Err(ImportError::PayloadMismatch);
+    }
+    account_proof::check_code(&request.code, &account.code_hash)?;
+    let proof_nodes = request
+        .deployment
+        .proof_node_count()
+        .checked_add(request.account_proof.len())
+        .and_then(|count| u64::try_from(count).ok())
+        .ok_or(MigrationFeeOverflow)?;
+    Ok(MigrationPlan {
+        source: ImportSource {
+            domain: request.source_domain,
+            block: request.source_block,
+            address: evidence.contract,
+        },
+        source_domain_id: 0,
+        source_chain_id: request.source_chain_id,
+        source_root: request.state_root,
+        account,
+        code: request.code,
+        storage: BTreeMap::new(),
+        proof_nodes,
+        migrator: None,
+        created_epoch: 0,
+    })
+}
+
+impl MigrationPlan {
+    /// Returns `true` when this staged migration has outlived [`PENDING_MIGRATION_TTL_EPOCHS`].
+    #[must_use]
+    pub const fn is_expired(&self, current_epoch: u64) -> bool {
+        current_epoch
+            > self
+                .created_epoch
+                .saturating_add(PENDING_MIGRATION_TTL_EPOCHS)
+    }
+
+    /// Epoch at which this migration was staged.
+    #[must_use]
+    pub const fn created_epoch(&self) -> u64 {
+        self.created_epoch
+    }
+
+    /// Canonical cryptographic commitment covering every staged field so
+    /// pending migrations enter the consensus `execution_root()`.
+    #[must_use]
+    pub fn commitment(&self) -> [u8; 32] {
+        let mut h = sha2::Sha256::new();
+        use sha2::Digest;
+        h.update(b"BDLM_UEL_MIGRATIONS_V1");
+        h.update((self.source.domain.len() as u64).to_le_bytes());
+        h.update(self.source.domain.as_bytes());
+        h.update(self.source.block.to_le_bytes());
+        h.update(self.source.address);
+        h.update(self.source_domain_id.to_le_bytes());
+        h.update(self.source_chain_id.to_le_bytes());
+        h.update(self.source_root);
+        h.update(self.account.nonce.to_le_bytes());
+        h.update(self.account.storage_root);
+        h.update(self.account.code_hash);
+        h.update((self.code.len() as u64).to_le_bytes());
+        h.update(&self.code);
+        h.update(self.proof_nodes.to_le_bytes());
+        h.update(self.created_epoch.to_le_bytes());
+        if let Some(m) = &self.migrator {
+            h.update([1u8]);
+            h.update(m.as_bytes());
+        } else {
+            h.update([0u8]);
+        }
+        h.update((self.storage.len() as u64).to_le_bytes());
+        for (slot, val) in &self.storage {
+            h.update(slot);
+            h.update(val);
+        }
+        h.finalize().into()
+    }
+    /// Proven source account metadata.
+    #[must_use]
+    pub fn account(&self) -> &EvmAccount {
+        &self.account
+    }
+
+    /// Source provenance metadata.
+    #[must_use]
+    pub fn source(&self) -> &ImportSource {
+        &self.source
+    }
+
+    /// Atomically verifies and imports one chunk of storage slots (`G-4`: all or nothing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn import_chunk(&mut self, chunk: &ImportEvmStorageChunk) -> Result<usize, ImportError> {
+        if chunk.contract != self.source.address {
+            return Err(ImportError::ChunkContractMismatch);
+        }
+        if chunk.source_block != self.source.block {
+            return Err(ImportError::ChunkBlockMismatch);
+        }
+        if chunk.slots.len() > MAX_CHUNK_SLOTS {
+            return Err(ImportError::ChunkTooLarge {
+                slots: chunk.slots.len(),
+                max: MAX_CHUNK_SLOTS,
+            });
+        }
+        let mut staged = self.storage.clone();
+        let mut next_nodes = self.proof_nodes;
+        for entry in &chunk.slots {
+            let proven = account_proof::verify_storage(
+                &entry.proof_nodes,
+                &self.account.storage_root,
+                &entry.slot,
+            )?;
+            let Some(proven) = proven else {
+                return Err(ImportError::SlotAbsent(entry.slot));
+            };
+            if proven != entry.value {
+                return Err(ImportError::SlotValueMismatch {
+                    slot: entry.slot,
+                    claimed: entry.value,
+                    proven,
+                });
+            }
+            if let Some(existing) = staged.get(&entry.slot) {
+                if *existing != entry.value {
+                    return Err(ImportError::SlotConflicts { slot: entry.slot });
+                }
+            }
+            staged.insert(entry.slot, entry.value);
+            if staged.len() > MAX_STAGED_SLOTS {
+                return Err(ImportError::TooManyStagedSlots {
+                    slots: staged.len(),
+                    max: MAX_STAGED_SLOTS,
+                });
+            }
+            let entry_nodes =
+                u64::try_from(entry.proof_nodes.len()).map_err(|_| MigrationFeeOverflow)?;
+            next_nodes = next_nodes
+                .checked_add(entry_nodes)
+                .ok_or(MigrationFeeOverflow)?;
+        }
+        self.storage = staged;
+        self.proof_nodes = next_nodes;
+        Ok(chunk.slots.len())
+    }
+
+    /// Finalizes the staged migration into a complete [`MigrationRecord`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn finalize(
+        self,
+        fee_schedule: &MigrationFeeSchedule,
+    ) -> Result<MigrationRecord, ImportError> {
+        let Self {
+            source,
+            source_domain_id: _,
+            source_chain_id: _,
+            source_root: _,
+            account,
+            code,
+            storage,
+            proof_nodes,
+            migrator: _,
+            created_epoch: _,
+        } = self;
+        let proven_code_hash = account_proof::code_hash(&code);
+        if proven_code_hash != account.code_hash {
+            return Err(ImportError::CodeHashMismatch);
+        }
+        let computed_storage_root = storage_root::compute_storage_root(&storage);
+        if computed_storage_root != account.storage_root {
+            return Err(ImportError::StorageRootMismatch {
+                expected: account.storage_root,
+                computed: computed_storage_root,
+            });
+        }
+        let usage = MigrationUsage {
+            proof_nodes,
+            code_bytes: u64::try_from(code.len()).map_err(|_| MigrationFeeOverflow)?,
+            storage_slots: u64::try_from(storage.len()).map_err(|_| MigrationFeeOverflow)?,
+        };
+        let fee = quote_migration_fee(usage, fee_schedule)?;
+        let storage_vec = storage.into_iter().collect();
+        Ok(MigrationRecord {
+            address: source.address,
+            nonce: account.nonce.max(1),
+            code,
+            code_hash: proven_code_hash,
+            storage_root: account.storage_root,
+            storage: storage_vec,
+            imported_from: source,
+            usage,
+            fee,
+        })
+    }
+}
+
+/// Returns `true` when the derived native account has recorded active chain
+/// ownership (a non-zero nonce or a validator registration). Passive native
+/// dust transfers from third parties do not occupy a migration target.
+pub(crate) fn is_native_contract_account_occupied(
+    account_state: &AccountState,
+    bud_addr: &Address,
+) -> bool {
+    account_state.get_nonce(bud_addr) > 0
+        || account_state.validators.contains_key(bud_addr)
+        || account_state.validator_directory.get(bud_addr).is_some()
+}
+
+/// Returns `true` when `addr20` is occupied in UEL EVM state, collides with a native alias
+/// or precompile, or its derived native account has active chain state (`8.12.2 item 6`).
+///
+/// Unsolicited native dust balance parked on the derived contract account does
+/// not count as occupancy, so a third party cannot permanently grief a contract's
+/// migration by sending 1 attoBUD to its deterministic address beforehand.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
+pub fn is_evm_address_occupied(
+    account_state: &AccountState,
+    exec_state: &ExecutionState,
+    addr20: &[u8; 20],
+) -> Result<bool, ImportError> {
+    if addr20 == &EVM_UNIVERSAL_PRECOMPILE {
+        return Ok(true);
+    }
+    if exec_state.check_evm_alias_collision(addr20).is_err() {
+        return Ok(true);
+    }
+    if exec_state
+        .read(NS_EVM_ACCOUNT, addr20)
+        .map_err(ImportError::StateError)?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    let bud_addr = derive_contract_account(EeId::EVM, addr20);
+    Ok(is_native_contract_account_occupied(
+        account_state,
+        &bud_addr,
+    ))
+}
+
+fn evm_storage_key(addr: &[u8; 20], slot: &[u8; 32]) -> [u8; 52] {
+    let mut k = [0u8; 52];
+    if let Some(a) = k.get_mut(..20) {
+        a.copy_from_slice(addr);
+    }
+    if let Some(s) = k.get_mut(20..52) {
+        s.copy_from_slice(slot);
+    }
+    k
+}
+
+/// The EVM source root must be one this chain anchored for a domain of the source chain.
+///
+/// The request carries its own state root, and the deployment proof carries its own
+/// transaction and receipt roots. Checked only against themselves they show a request that
+/// agrees with itself, so a migrator could install any code at an address it derives from
+/// its own key and have the record name a source chain that never held it. The anchor is
+/// written by consensus from a finality fact of the domain, so it is the one root the
+/// migrator cannot choose. The account at the contract address is opened under that root,
+/// and a contract address is a function of its deployer and nonce, so the anchored state
+/// also settles who deployed it.
+/// Verify that `state_root` is currently anchored by an active canonical
+/// recognized chain domain whose chain id matches `source_chain_id`,
+/// returning `(domain_id, anchored_height)` so provenance is bound to consensus
+/// state rather than caller-supplied free text.
+///
+/// Mainnet only accepts each recognized chain's canonical chain id; non-mainnet
+/// networks also permit Sepolia (`11_155_111`) on the canonical Ethereum domain.
+fn require_attested_evm_source(
+    state: &AccountState,
+    budlum_chain_id: u64,
+    source_chain_id: u64,
+    state_root: &[u8; 32],
+    source_block: u64,
+) -> Result<(u32, u64), ImportError> {
+    let is_mainnet = budlum_chain_id
+        == crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+    let matched = state.settlement.domains.active_domains().find(|domain| {
+        let Some(chain) = crate::settlement::domains::anchor_recognized_chain(domain.id) else {
+            return false;
+        };
+        let chain_id_recognized = domain.domain_chain_id == chain.canonical_chain_id()
+            || (!is_mainnet
+                && chain == crate::core::transaction::ExternalChain::Ethereum
+                && domain.domain_chain_id == 11_155_111);
+        chain_id_recognized
+            && domain.domain_chain_id == source_chain_id
+            && state.external_roots.get(&domain.id) == Some(state_root)
+            && (domain.last_committed_height == 0 || domain.last_committed_height == source_block)
+    });
+    match matched {
+        Some(domain) => {
+            let block = if domain.last_committed_height > 0 {
+                domain.last_committed_height
+            } else {
+                source_block
+            };
+            Ok((domain.id, block))
+        }
+        None => Err(ImportError::SourceChainNotAttested {
+            chain_id: source_chain_id,
+        }),
+    }
+}
+
+/// Applies one [`MigrationTx`] atomically against `state` ( 2/3 installation door).
+///
+/// Charges the verified migration fee from `migrator` to `reward_pool_account()` on
+/// `FinalizeEvmImport`, installs code and storage at `record.address`, records
+/// `imported_from`, and leaves the contract's native balance at `0`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
+pub fn apply_migration_tx(
+    state: &mut AccountState,
+    migrator: &Address,
+    tx: MigrationTx,
+    fee_schedule: &MigrationFeeSchedule,
+    chain_id: u64,
+) -> Result<MigrationTxOutcome, ImportError> {
+    match tx {
+        MigrationTx::BeginEvmImport(mut req) => {
+            let current_epoch = state.epoch_index;
+            let live_pending = state
+                .execution_state
+                .pending_evm_migrations
+                .values()
+                .filter(|p| !p.is_expired(current_epoch))
+                .count();
+            if live_pending >= MAX_PENDING_MIGRATIONS {
+                return Err(ImportError::TooManyPendingMigrations {
+                    pending: live_pending,
+                    max: MAX_PENDING_MIGRATIONS,
+                });
+            }
+            let migrator_pending = state
+                .execution_state
+                .pending_evm_migrations
+                .values()
+                .filter(|p| !p.is_expired(current_epoch) && p.migrator == Some(*migrator))
+                .count();
+            if migrator_pending >= MAX_PENDING_MIGRATIONS_PER_MIGRATOR {
+                return Err(ImportError::TooManyPendingMigrations {
+                    pending: migrator_pending,
+                    max: MAX_PENDING_MIGRATIONS_PER_MIGRATOR,
+                });
+            }
+            let target = req.authorization.contract;
+            let hex_addr = hex::encode(target);
+            if state
+                .execution_state
+                .pending_evm_migrations
+                .get(&hex_addr)
+                .is_some_and(|p| !p.is_expired(current_epoch))
+            {
+                return Err(ImportError::MigrationAlreadyPending);
+            }
+            let live_occupied = is_evm_address_occupied(state, &state.execution_state, &target)?;
+            req.occupied = req.occupied || live_occupied;
+            let source_chain_id = req.source_chain_id;
+            let source_root = req.state_root;
+            let signed_source_block = req.source_block;
+            let mut plan = begin_import(*req, chain_id)?;
+            let (attested_domain, anchored_height) = require_attested_evm_source(
+                state,
+                chain_id,
+                source_chain_id,
+                &source_root,
+                signed_source_block,
+            )?;
+            // Bind provenance to the verified canonical domain id and anchored
+            // height rather than trusting the caller's free-form domain label.
+            let address = plan.source.address;
+            plan.source = ImportSource {
+                domain: format!("domain:{attested_domain}"),
+                block: anchored_height,
+                address,
+            };
+            plan.source_domain_id = attested_domain;
+            plan.source_chain_id = source_chain_id;
+            plan.source_root = source_root;
+            plan.migrator = Some(*migrator);
+            plan.created_epoch = current_epoch;
+            let actual = plan.source().address;
+            let actual_hex = hex::encode(actual);
+            if state
+                .execution_state
+                .pending_evm_migrations
+                .get(&actual_hex)
+                .is_some_and(|p| !p.is_expired(current_epoch))
+            {
+                return Err(ImportError::MigrationAlreadyPending);
+            }
+            if is_evm_address_occupied(state, &state.execution_state, &actual)? {
+                return Err(ImportError::AddressOccupied);
+            }
+            let source_block = plan.source().block;
+            state
+                .execution_state
+                .prune_expired_pending_evm_migrations(current_epoch);
+            state
+                .execution_state
+                .pending_evm_migrations
+                .insert(actual_hex, plan);
+            Ok(MigrationTxOutcome::Started {
+                contract: actual,
+                source_block,
+            })
+        }
+        MigrationTx::ImportEvmStorageChunk(chunk) => {
+            let current_epoch = state.epoch_index;
+            let hex_addr = hex::encode(chunk.contract);
+            let plan = state
+                .execution_state
+                .pending_evm_migrations
+                .get_mut(&hex_addr)
+                .ok_or(ImportError::NoPendingMigration)?;
+            if plan.is_expired(current_epoch) {
+                return Err(ImportError::NoPendingMigration);
+            }
+            if plan.migrator.is_some_and(|m| m != *migrator) {
+                return Err(ImportError::NotAuthorizedMigrator);
+            }
+            let count = plan.import_chunk(&chunk)?;
+            Ok(MigrationTxOutcome::ChunkImported {
+                contract: chunk.contract,
+                slots: count,
+            })
+        }
+        MigrationTx::FinalizeEvmImport { contract } => {
+            let current_epoch = state.epoch_index;
+            if is_evm_address_occupied(state, &state.execution_state, &contract)? {
+                return Err(ImportError::AddressOccupied);
+            }
+            let hex_addr = hex::encode(contract);
+            let plan = state
+                .execution_state
+                .pending_evm_migrations
+                .get(&hex_addr)
+                .cloned()
+                .ok_or(ImportError::NoPendingMigration)?;
+            if plan.is_expired(current_epoch) {
+                return Err(ImportError::NoPendingMigration);
+            }
+            if plan.migrator.is_some_and(|m| m != *migrator) {
+                return Err(ImportError::NotAuthorizedMigrator);
+            }
+            // Re-verify the source domain's active status and anchored root at
+            // finalization so a domain frozen or superseded after staging
+            // cannot still install migrated state.
+            let (attested_domain, _) = require_attested_evm_source(
+                state,
+                chain_id,
+                plan.source_chain_id,
+                &plan.source_root,
+                plan.source.block,
+            )?;
+            if plan.source_domain_id != 0 && attested_domain != plan.source_domain_id {
+                return Err(ImportError::SourceChainNotAttested {
+                    chain_id: plan.source_chain_id,
+                });
+            }
+            let record = plan.finalize(fee_schedule)?;
+
+            let acct_rec = EvmAccountRecord {
+                nonce: record.nonce,
+                code_hash: Some(hex::encode(record.code_hash)),
+                imported_from: Some(record.imported_from.clone()),
+            };
+            let acct_bytes = serde_json::to_vec(&acct_rec)
+                .map_err(|e| ImportError::StateError(e.to_string()))?;
+
+            // Charge migrator BEFORE mutating execution namespaces (`G-4` atomicity).
+            if record.fee.total_attos > 0 {
+                let pool = reward_pool_account();
+                state
+                    .transfer_attos_in_unit(
+                        migrator,
+                        &pool,
+                        record.fee.total_attos,
+                        BudEnvUnit::EvmWei,
+                    )
+                    .map_err(ImportError::InsufficientMigratorBalance)?;
+            }
+
+            state
+                .execution_state
+                .write(NS_EVM_CODE, &record.code_hash, Some(&record.code))
+                .map_err(ImportError::StateError)?;
+            state
+                .execution_state
+                .write(NS_EVM_ACCOUNT, &record.address, Some(&acct_bytes))
+                .map_err(ImportError::StateError)?;
+            for (slot, val) in &record.storage {
+                if *val != [0u8; 32] {
+                    let sk = evm_storage_key(&record.address, slot);
+                    state
+                        .execution_state
+                        .write(NS_EVM_STORAGE, &sk, Some(val))
+                        .map_err(ImportError::StateError)?;
+                }
+            }
+            state
+                .execution_state
+                .pending_evm_migrations
+                .remove(&hex_addr);
+
+            Ok(MigrationTxOutcome::Finalized(Box::new(record)))
+        }
+        MigrationTx::ImportWasmContract(req) => {
+            let (code_hash, contract, keys, fee) =
+                non_evm::apply_wasm_migration(state, migrator, *req, fee_schedule, chain_id)?;
+            Ok(MigrationTxOutcome::WasmImported {
+                contract,
+                code_hash,
+                keys,
+                fee,
+            })
+        }
+        MigrationTx::ImportSvmAccount(req) => {
+            let (pubkey, data_len, fee) =
+                non_evm::apply_svm_migration(state, migrator, *req, fee_schedule, chain_id)?;
+            Ok(MigrationTxOutcome::SvmImported {
+                pubkey,
+                data_len,
+                fee,
+            })
+        }
+        MigrationTx::ImportMoveResource(req) => {
+            let (account, entries, fee) =
+                non_evm::apply_move_migration(state, migrator, *req, fee_schedule, chain_id)?;
+            Ok(MigrationTxOutcome::MoveImported {
+                account,
+                entries,
+                fee,
+            })
+        }
+    }
+}
+
+fn word_from_u64(value: u64) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    if let Some(dst) = word.get_mut(24..32) {
+        dst.copy_from_slice(&value.to_be_bytes());
+    }
+    word
+}
+
+fn word_from_address(address: &[u8; 20]) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    if let Some(dst) = word.get_mut(12..32) {
+        dst.copy_from_slice(address);
+    }
+    word
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::account::ATTOS_PER_ATOM;
+    use crate::cross_domain::evm::rlp::{self, Item};
+    use crate::execution::coordinator::gas::MIN_UEL_BASE_FEE_ATTOS;
+    use crate::execution::coordinator::{ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx};
+    use crate::rpc::compat::ethereum::handle_eth_jsonrpc;
+    use budlum_uel_abi::BlockContext;
+
+    const CONTRACT: &str = "a3183498b579bd228aa2b62101c40cc1da978f24";
+    const SOURCE_CHAIN_ID: u64 = 11_155_111;
+    const DEPLOYMENT_TX_PARTS: &[&str] = &[
+        "f85807843b9aca00830f4240808084600060008401546d72a02f6a69a52fb40df1378d854d",
+        "62a2c0d6cc6757bad78f8f2f85b1626815ce4fa8a01752541e338fd7331899b91e94dc7f9c",
+        "f88f6ba8abc872ab59aaf63369d4e6c9",
+    ];
+    const CHAIN_ID: u64 = 45_261;
+    const SOURCE_BLOCK: u64 = 19_000_000;
+    /// The deployer of the fixture transaction signs with secp256k1 secret key
+    /// `1`, whose address is `0x7e5f4552091a69125d5dfcb7b8c2659029395bdf`.
+    const DEPLOYER_SECRET: u8 = 1;
+    /// Any other key: it signs, but it did not deploy.
+    const OTHER_SECRET: u8 = 2;
+    /// EIP-712 digest of `known_answer_authorization`, computed outside this
+    /// crate from the type string and the domain, so a drift in the encoding
+    /// fails here and not only in a wallet.
+    const KNOWN_ANSWER_DIGEST: &str =
+        "a270d0a4b367237f543fc31799b0483e5739224c286716cecdfe7acc14da9df8";
+
+    fn decode_joined(parts: &[&str]) -> Vec<u8> {
+        let s: String = parts.iter().copied().collect();
+        hex::decode(s).expect("hex")
+    }
+
+    fn address_of(text: &str) -> [u8; 20] {
+        hex::decode(text)
+            .expect("hex")
+            .try_into()
+            .expect("20 bytes")
+    }
+
+    /// The digest of a fixed authorization, for the known-answer test.
+    fn known_answer_authorization() -> MigrationAuthorization {
+        MigrationAuthorization {
+            contract: address_of(CONTRACT),
+            budlum_chain_id: CHAIN_ID,
+            source_block: SOURCE_BLOCK,
+            state_root: [0x11; 32],
+            code_hash: [0x22; 32],
+            signature: Vec::new(),
+        }
+    }
+
+    /// `r || s || v` over the authorization digest, with `v` in `{27, 28}`.
+    fn sign_authorization(auth: &MigrationAuthorization, secret_byte: u8) -> Vec<u8> {
+        use k256::ecdsa::SigningKey;
+        let mut secret = [0u8; 32];
+        secret[31] = secret_byte;
+        let key = SigningKey::from_bytes((&secret).into()).expect("secp256k1 key");
+        let (sig, rec_id) = key.sign_prehash_recoverable(&auth.digest());
+        let mut out = sig.to_bytes().to_vec();
+        out.push(27 + rec_id.to_byte());
+        out
+    }
+
+    /// An authorization the deployer signs for exactly this root and code.
+    fn authorization_for(state_root: [u8; 32], code: &[u8]) -> MigrationAuthorization {
+        let mut auth = MigrationAuthorization {
+            contract: address_of(CONTRACT),
+            budlum_chain_id: CHAIN_ID,
+            source_block: SOURCE_BLOCK,
+            state_root,
+            code_hash: account_proof::code_hash(code),
+            signature: Vec::new(),
+        };
+        auth.signature = sign_authorization(&auth, DEPLOYER_SECRET);
+        auth
+    }
+
+    fn uint_bytes(value: u128) -> Vec<u8> {
+        let bytes = value.to_be_bytes();
+        let first = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len());
+        bytes[first..].to_vec()
+    }
+
+    fn leaf(key: &[u8], value: Vec<u8>) -> Vec<u8> {
+        let path = mpt::hp_encode(&mpt::to_nibbles(key), true);
+        rlp::encode(&Item::List(vec![Item::String(path), Item::String(value)]))
+    }
+
+    fn deployment_proof() -> DeploymentProof {
+        let transaction = decode_joined(DEPLOYMENT_TX_PARTS);
+        let receipt = rlp::encode(&Item::List(vec![
+            Item::String(vec![1]),
+            Item::String(uint_bytes(21_000)),
+            Item::String(vec![0; 256]),
+            Item::List(Vec::new()),
+        ]));
+        let key = rlp::encode(&Item::String(Vec::new()));
+        let path = mpt::hp_encode(&mpt::to_nibbles(&key), true);
+        let tx_node = rlp::encode(&Item::List(vec![
+            Item::String(path.clone()),
+            Item::String(transaction.clone()),
+        ]));
+        let rec_node = rlp::encode(&Item::List(vec![Item::String(path), Item::String(receipt)]));
+        DeploymentProof {
+            deployment_block: SOURCE_BLOCK - 1_000,
+            transaction_index: 0,
+            transaction,
+            transaction_proof: vec![tx_node.clone()],
+            transactions_root: mpt::keccak256(&tx_node),
+            receipt_proof: vec![rec_node.clone()],
+            receipts_root: mpt::keccak256(&rec_node),
+        }
+    }
+
+    fn fee_schedule() -> MigrationFeeSchedule {
+        MigrationFeeSchedule {
+            bgu_per_proof_node: 10,
+            bgu_per_code_byte: 2,
+            bgu_per_storage_slot: 100,
+            attos_per_bgu: 3,
+            attos_per_storage_byte: 5,
+        }
+    }
+
+    fn slot_fixture(slot: &[u8; 32], value: u128) -> (Vec<u8>, [u8; 32]) {
+        let node = leaf(
+            &mpt::keccak256(slot),
+            rlp::encode(&Item::String(uint_bytes(value))),
+        );
+        let root = mpt::keccak256(&node);
+        (node, root)
+    }
+
+    fn sample_code() -> Vec<u8> {
+        // Runtime EVM code: `PUSH0 SLOAD PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN`
+        // Returns the 32-byte word stored at slot 0x00!
+        vec![0x5f, 0x54, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3]
+    }
+
+    fn request_with_code(code: Vec<u8>, slot: [u8; 32], val: u128) -> (MigrationRequest, [u8; 32]) {
+        let (_, storage_root) = slot_fixture(&slot, val);
+        let account_node = leaf(
+            &mpt::keccak256(&address_of(CONTRACT)),
+            rlp::encode(&Item::List(vec![
+                Item::String(uint_bytes(1)),
+                Item::String(uint_bytes(99_000_000_000_000_000_000)),
+                Item::String(storage_root.to_vec()),
+                Item::String(account_proof::code_hash(&code).to_vec()),
+            ])),
+        );
+        let state_root = mpt::keccak256(&account_node);
+        let req = MigrationRequest {
+            source_chain_id: SOURCE_CHAIN_ID,
+            source_domain: String::from("sepolia"),
+            source_block: SOURCE_BLOCK,
+            deployment: deployment_proof(),
+            authorization: authorization_for(state_root, &code),
+            state_root,
+            account_proof: vec![account_node],
+            code,
+            occupied: false,
+        };
+        (req, storage_root)
+    }
+
+    #[test]
+    fn the_authorization_digest_matches_the_known_answer() {
+        assert_eq!(
+            hex::encode(known_answer_authorization().digest()),
+            KNOWN_ANSWER_DIGEST
+        );
+        // Every field of the struct is in the digest.
+        let base = known_answer_authorization().digest();
+        let mut other = known_answer_authorization();
+        other.state_root = [0x12; 32];
+        assert_ne!(other.digest(), base);
+        let mut other = known_answer_authorization();
+        other.code_hash = [0x23; 32];
+        assert_ne!(other.digest(), base);
+    }
+
+    #[test]
+    fn uel_migration_requires_deployer_authorization() {
+        let (req, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        assert!(begin_import(req.clone(), CHAIN_ID).is_ok());
+
+        let mut other = req.clone();
+        other.authorization.signature = sign_authorization(&other.authorization, OTHER_SECRET);
+        assert!(matches!(
+            begin_import(other, CHAIN_ID),
+            Err(ImportError::NotTheDeployer { .. })
+        ));
+
+        let mut other_chain = req.clone();
+        other_chain.authorization.budlum_chain_id = CHAIN_ID + 1;
+        assert_eq!(
+            begin_import(other_chain, CHAIN_ID),
+            Err(ImportError::ChainMismatch {
+                signed: CHAIN_ID + 1,
+                expected: CHAIN_ID,
+            })
+        );
+
+        let mut truncated = req;
+        truncated.authorization.signature.truncate(64);
+        assert!(matches!(
+            begin_import(truncated, CHAIN_ID),
+            Err(ImportError::Signature(RecoverError::Length))
+        ));
+    }
+
+    /// The chain id is the node's. A deployer who signed for another Budlum
+    /// chain, with a request that is consistent about it, is still refused.
+    #[test]
+    fn a_signature_for_another_chain_is_refused_whatever_the_request_says() {
+        let other_chain = CHAIN_ID + 1;
+        let (mut req, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        req.authorization.budlum_chain_id = other_chain;
+        req.authorization.signature = sign_authorization(&req.authorization, DEPLOYER_SECRET);
+        // The request is valid for `other_chain` ...
+        assert!(begin_import(req.clone(), other_chain).is_ok());
+        // ... and refused by a node running `CHAIN_ID`.
+        assert_eq!(
+            begin_import(req, CHAIN_ID),
+            Err(ImportError::ChainMismatch {
+                signed: other_chain,
+                expected: CHAIN_ID,
+            })
+        );
+    }
+
+    /// One deployer signature authorizes one state root and one code hash. The
+    /// submitter cannot swap in another account that the proof also opens.
+    #[test]
+    fn a_signature_does_not_authorize_another_state_root() {
+        let (signed_for, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        // Another state: same contract and code, different storage root.
+        let (mut swapped, _) = request_with_code(sample_code(), [0u8; 32], 43);
+        assert_ne!(swapped.state_root, signed_for.state_root);
+        swapped.authorization = signed_for.authorization;
+        assert_eq!(
+            begin_import(swapped, CHAIN_ID),
+            Err(ImportError::PayloadMismatch)
+        );
+    }
+
+    #[test]
+    fn a_signature_does_not_authorize_other_code() {
+        let (mut req, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        // The deployer signs the right root for different code.
+        req.authorization = authorization_for(req.state_root, b"contract Other {}");
+        assert_eq!(
+            begin_import(req, CHAIN_ID),
+            Err(ImportError::PayloadMismatch)
+        );
+    }
+
+    #[test]
+    fn migration_refuses_code_the_account_does_not_hold() {
+        let (mut request, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        request.code = b"contract Other {}".to_vec();
+        assert_eq!(
+            begin_import(request, CHAIN_ID),
+            Err(ImportError::Proof(AccountProofError::CodeHashMismatch))
+        );
+    }
+
+    const SOURCE_DOMAIN_ID: u32 = 1;
+
+    fn anchor_source_root(state: &mut AccountState, domain: u32, chain_id: u64, root: [u8; 32]) {
+        state
+            .settlement
+            .domains
+            .register(crate::domain::plugin::default_domain(
+                domain,
+                crate::domain::types::ConsensusKind::PoS,
+                chain_id,
+                "pos-qc-finality",
+                1,
+            ))
+            .expect("register the source domain");
+        assert!(state.anchor_external_root(domain, root));
+    }
+
+    fn begin_evm_import(state: &mut AccountState) -> Result<MigrationTxOutcome, ImportError> {
+        let migrator = Address::from([0x71u8; 32]);
+        state.credit_account(&migrator, 100);
+        let (req, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        apply_migration_tx(
+            state,
+            &migrator,
+            MigrationTx::BeginEvmImport(Box::new(req)),
+            &fee_schedule(),
+            CHAIN_ID,
+        )
+    }
+
+    #[test]
+    fn an_evm_migration_needs_a_source_root_this_chain_anchored() {
+        let (req, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        let refused = Err(ImportError::SourceChainNotAttested {
+            chain_id: SOURCE_CHAIN_ID,
+        });
+
+        // Nothing anchored: the request only agrees with itself.
+        let mut state = AccountState::new();
+        assert_eq!(begin_evm_import(&mut state), refused);
+        assert!(state.execution_state.pending_evm_migrations.is_empty());
+
+        // A permissionless domain declaring the same chain id cannot attest an
+        // EVM source root even when active and anchored.
+        let mut state = AccountState::new();
+        anchor_source_root(&mut state, 101, SOURCE_CHAIN_ID, req.state_root);
+        assert_eq!(begin_evm_import(&mut state), refused);
+
+        // The source domain anchored another root.
+        let mut state = AccountState::new();
+        anchor_source_root(&mut state, SOURCE_DOMAIN_ID, SOURCE_CHAIN_ID, [0x5A; 32]);
+        assert_eq!(begin_evm_import(&mut state), refused);
+
+        // The root is anchored, but by a domain of another chain.
+        let mut state = AccountState::new();
+        anchor_source_root(
+            &mut state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID + 1,
+            req.state_root,
+        );
+        assert_eq!(begin_evm_import(&mut state), refused);
+
+        // A domain that is no longer active does not vouch for its last root.
+        let mut state = AccountState::new();
+        anchor_source_root(
+            &mut state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID,
+            req.state_root,
+        );
+        state
+            .settlement
+            .domains
+            .set_status(SOURCE_DOMAIN_ID, crate::domain::types::DomainStatus::Frozen)
+            .expect("freeze the source domain");
+        assert_eq!(begin_evm_import(&mut state), refused);
+
+        // The canonical source domain anchored exactly this root.
+        let mut state = AccountState::new();
+        anchor_source_root(
+            &mut state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID,
+            req.state_root,
+        );
+        assert!(begin_evm_import(&mut state).is_ok());
+        assert_eq!(state.execution_state.pending_evm_migrations.len(), 1);
+        let staged = state
+            .execution_state
+            .pending_evm_migrations
+            .values()
+            .next()
+            .expect("staged plan");
+        assert_eq!(
+            staged.source().domain,
+            format!("domain:{SOURCE_DOMAIN_ID}"),
+            "provenance must bind to the verified canonical domain id, not caller free text"
+        );
+
+        // Freezing the source domain after staging must prevent finalization.
+        let migrator = Address::from([0x71u8; 32]);
+        state
+            .settlement
+            .domains
+            .set_status(SOURCE_DOMAIN_ID, crate::domain::types::DomainStatus::Frozen)
+            .expect("freeze after staging");
+        assert_eq!(
+            apply_migration_tx(
+                &mut state,
+                &migrator,
+                MigrationTx::FinalizeEvmImport {
+                    contract: req.authorization.contract,
+                },
+                &fee_schedule(),
+                CHAIN_ID,
+            ),
+            refused
+        );
+    }
+
+    #[test]
+    fn migration_refuses_occupied_address() {
+        let (mut req, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        req.occupied = true;
+        assert_eq!(
+            begin_import(req, CHAIN_ID),
+            Err(ImportError::AddressOccupied)
+        );
+
+        // Live coordinator check: pre-existing EVM account at target refuses BeginEvmImport.
+        let mut state = AccountState::new();
+        let migrator = Address::from([0x71u8; 32]);
+        state.credit_account(&migrator, 100);
+        state
+            .execution_state
+            .write(NS_EVM_ACCOUNT, &address_of(CONTRACT), Some(b"{}"))
+            .expect("occupy target");
+        let (live_req, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        assert_eq!(
+            apply_migration_tx(
+                &mut state,
+                &migrator,
+                MigrationTx::BeginEvmImport(Box::new(live_req)),
+                &fee_schedule(),
+                CHAIN_ID,
+            ),
+            Err(ImportError::AddressOccupied)
+        );
+    }
+
+    #[test]
+    fn migration_deployment_precedes_the_migrated_state() {
+        let (mut request, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        request.deployment.deployment_block = SOURCE_BLOCK + 1;
+        assert_eq!(
+            begin_import(request, CHAIN_ID),
+            Err(ImportError::DeploymentAfterSource {
+                deployment_block: SOURCE_BLOCK + 1,
+                source_block: SOURCE_BLOCK,
+            })
+        );
+    }
+
+    #[test]
+    fn migration_finalize_refuses_incomplete_storage() {
+        let slot = [0x42u8; 32];
+        let (request, expected) = request_with_code(sample_code(), slot, 42);
+        let plan = begin_import(request, CHAIN_ID).expect("authorized and proven");
+        let computed = storage_root::compute_storage_root(&BTreeMap::new());
+        assert_eq!(
+            plan.finalize(&fee_schedule()),
+            Err(ImportError::StorageRootMismatch { expected, computed })
+        );
+    }
+
+    #[test]
+    fn migration_preserves_address_code_and_storage_root() {
+        let code = b"contract Token {}".to_vec();
+        let slot = [0x42u8; 32];
+        let (req, storage_root) = request_with_code(code.clone(), slot, 42);
+        let mut plan = begin_import(req, CHAIN_ID).expect("authorized and proven");
+
+        let (storage_node, _) = slot_fixture(&slot, 42);
+        let mut value = [0u8; 32];
+        value[31] = 42;
+        let chunk = ImportEvmStorageChunk {
+            contract: address_of(CONTRACT),
+            source_block: SOURCE_BLOCK,
+            slots: vec![StorageEntry {
+                slot,
+                value,
+                proof_nodes: vec![storage_node],
+            }],
+        };
+        assert_eq!(plan.import_chunk(&chunk).expect("chunk verifies"), 1);
+
+        let record = plan.finalize(&fee_schedule()).expect("finalizes");
+        assert_eq!(record.address, address_of(CONTRACT));
+        assert_eq!(record.code, code);
+        assert_eq!(record.code_hash, account_proof::code_hash(&record.code));
+        assert_eq!(record.storage_root, storage_root);
+        assert_eq!(record.storage, vec![(slot, value)]);
+        assert_eq!(record.imported_from.domain, "sepolia");
+        assert_eq!(record.imported_from.block, SOURCE_BLOCK);
+        assert_eq!(record.imported_from.address, address_of(CONTRACT));
+        assert_eq!(record.usage.proof_nodes, 4);
+        assert_eq!(record.usage.code_bytes, 17);
+        assert_eq!(record.usage.storage_slots, 1);
+        assert_eq!(record.fee.verification_bgu, 174);
+        assert_eq!(record.fee.storage_bytes, 81);
+        assert_eq!(record.fee.verification_attos, 522);
+        assert_eq!(record.fee.storage_deposit_attos, 405);
+        assert_eq!(record.fee.total_attos, 927);
+    }
+
+    #[test]
+    fn migration_import_chunk_failure_is_atomic_g4() {
+        let slot = [0x42u8; 32];
+        let (req, _) = request_with_code(sample_code(), slot, 42);
+        let mut plan = begin_import(req, CHAIN_ID).expect("plan");
+        let before = plan.clone();
+
+        let (storage_node, _) = slot_fixture(&slot, 42);
+        let mut good_val = [0u8; 32];
+        good_val[31] = 42;
+        let mut bad_val = [0u8; 32];
+        bad_val[31] = 99;
+
+        // Entry 0 passes, entry 1 fails -> plan must remain completely unchanged!
+        let mixed = ImportEvmStorageChunk {
+            contract: address_of(CONTRACT),
+            source_block: SOURCE_BLOCK,
+            slots: vec![
+                StorageEntry {
+                    slot,
+                    value: good_val,
+                    proof_nodes: vec![storage_node.clone()],
+                },
+                StorageEntry {
+                    slot,
+                    value: bad_val,
+                    proof_nodes: vec![storage_node],
+                },
+            ],
+        };
+        assert!(plan.import_chunk(&mixed).is_err());
+        assert_eq!(plan, before);
+    }
+
+    #[test]
+    fn migration_tx_installs_sepolia_erc20_and_executes_live_in_evm_ee() {
+        let mut state = AccountState::new();
+        let mut coord = ExecutionCoordinator::new();
+        let migrator = Address::from([0x81u8; 32]);
+        let (caller_seed, caller) = crate::execution::coordinator::test_uel_signer(0x82);
+        let proposer = Address::from([0x83u8; 32]);
+        state.credit_account(&migrator, 100);
+        state.credit_account(&caller, 100);
+        let initial_supply = state.total_bud_committed_attos();
+
+        let slot0 = [0u8; 32];
+        let code = sample_code();
+        let (req, _) = request_with_code(code.clone(), slot0, 0xBEEF);
+        let sched = MigrationFeeSchedule::TESTNET_DEFAULT;
+        anchor_source_root(
+            &mut state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID,
+            req.state_root,
+        );
+
+        coord
+            .apply_evm_migration(
+                &mut state,
+                &migrator,
+                MigrationTx::BeginEvmImport(Box::new(req)),
+                &sched,
+                CHAIN_ID,
+            )
+            .expect("BeginEvmImport");
+
+        let (storage_node, _) = slot_fixture(&slot0, 0xBEEF);
+        let mut val_word = [0u8; 32];
+        val_word[30] = 0xBE;
+        val_word[31] = 0xEF;
+        coord
+            .apply_evm_migration(
+                &mut state,
+                &migrator,
+                MigrationTx::ImportEvmStorageChunk(ImportEvmStorageChunk {
+                    contract: address_of(CONTRACT),
+                    source_block: SOURCE_BLOCK,
+                    slots: vec![StorageEntry {
+                        slot: slot0,
+                        value: val_word,
+                        proof_nodes: vec![storage_node],
+                    }],
+                }),
+                &sched,
+                CHAIN_ID,
+            )
+            .expect("ImportEvmStorageChunk");
+
+        let out = coord
+            .apply_evm_migration(
+                &mut state,
+                &migrator,
+                MigrationTx::FinalizeEvmImport {
+                    contract: address_of(CONTRACT),
+                },
+                &sched,
+                CHAIN_ID,
+            )
+            .expect("FinalizeEvmImport");
+        let MigrationTxOutcome::Finalized(rec) = out else {
+            panic!("expected Finalized");
+        };
+        assert!(rec.fee.total_attos > 0);
+        assert_eq!(state.total_bud_committed_attos(), initial_supply);
+
+        // Source ETH balance (99 ETH) did NOT travel: contract native balance is 0!
+        let contract_bud = derive_contract_account(EeId::EVM, &address_of(CONTRACT));
+        assert_eq!(state.get_attos_balance(&contract_bud), 0);
+
+        // Live call in `EvmEe` at the exact Sepolia address returns imported slot 0 (`0xBEEF`)!
+        let recs = state
+            .execute_uel_block(
+                &mut coord,
+                BlockContext {
+                    height: 1,
+                    timestamp_ms: 1_762_000_000_000,
+                    chain_id: CHAIN_ID,
+                },
+                proposer,
+                &[UelTx {
+                    tx_hash: [0x99u8; 32],
+                    sender: caller,
+                    nonce: 0,
+                    ee: EeId::EVM,
+                    action: UelAction::Call {
+                        target: address_of(CONTRACT).to_vec(),
+                        input: Vec::new(),
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 200_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 0,
+                    auth: crate::execution::coordinator::UelTxAuth::default(),
+                }
+                .signed(CHAIN_ID, &caller_seed)],
+            )
+            .expect("execute migrated contract in EvmEe");
+        assert_eq!(recs[0].status, UelReceiptStatus::Success);
+        assert_eq!(recs[0].output.as_slice(), &val_word);
+        assert_eq!(
+            state.total_bud_committed_attos()
+                + u128::from(state.burned_total) * u128::from(ATTOS_PER_ATOM),
+            initial_supply
+        );
+
+        // Ethereum RPC `eth_getCode` and `bud_getImportedContract` see the migrated contract!
+        let get_code_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getCode",
+            "params": [format!("0x{CONTRACT}"), "latest"]
+        })
+        .to_string();
+        let get_code_resp: serde_json::Value =
+            serde_json::from_str(&handle_eth_jsonrpc(&state, "127.0.0.1", &get_code_req))
+                .expect("json");
+        assert_eq!(
+            get_code_resp["result"].as_str(),
+            Some(format!("0x{}", hex::encode(&code)).as_str())
+        );
+
+        let get_imp_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "bud_getImportedContract",
+            "params": [format!("0x{CONTRACT}")]
+        })
+        .to_string();
+        let get_imp_resp: serde_json::Value =
+            serde_json::from_str(&handle_eth_jsonrpc(&state, "127.0.0.1", &get_imp_req))
+                .expect("json");
+        assert_eq!(get_imp_resp["result"]["domain"].as_str(), Some("domain:1"));
+        assert_eq!(get_imp_resp["result"]["block"].as_u64(), Some(SOURCE_BLOCK));
+    }
+
+    #[test]
+    fn staged_evm_migration_enters_execution_root_and_rejects_other_migrator() {
+        let mut state = AccountState::new();
+        let empty_root = state.execution_state.execution_root();
+        let migrator_a = Address::from([0x11; 32]);
+        let migrator_b = Address::from([0x22; 32]);
+        let contract = [0xABu8; 20];
+        let plan = MigrationPlan {
+            source: ImportSource {
+                domain: "domain:1".to_string(),
+                block: 100,
+                address: contract,
+            },
+            source_domain_id: 1,
+            source_chain_id: 1,
+            source_root: [0x55; 32],
+            account: EvmAccount {
+                nonce: 1,
+                balance_be: [0u8; 32],
+                storage_root: [0x33; 32],
+                code_hash: [0x44; 32],
+            },
+            code: vec![0x60, 0x00],
+            storage: BTreeMap::new(),
+            proof_nodes: 2,
+            migrator: Some(migrator_a),
+            created_epoch: 0,
+        };
+        state
+            .execution_state
+            .pending_evm_migrations
+            .insert(hex::encode(contract), plan);
+        let staged_root = state.execution_state.execution_root();
+        assert_ne!(
+            staged_root, empty_root,
+            "staged EVM migration plans must enter execution_root()"
+        );
+
+        let chunk = ImportEvmStorageChunk {
+            contract,
+            source_block: 100,
+            slots: Vec::new(),
+        };
+        let err = apply_migration_tx(
+            &mut state,
+            &migrator_b,
+            MigrationTx::ImportEvmStorageChunk(chunk),
+            &MigrationFeeSchedule::TESTNET_DEFAULT,
+            45261,
+        )
+        .unwrap_err();
+        assert_eq!(err, ImportError::NotAuthorizedMigrator);
+
+        let fin_err = apply_migration_tx(
+            &mut state,
+            &migrator_b,
+            MigrationTx::FinalizeEvmImport { contract },
+            &MigrationFeeSchedule::TESTNET_DEFAULT,
+            45261,
+        )
+        .unwrap_err();
+        assert_eq!(fin_err, ImportError::NotAuthorizedMigrator);
+
+        // UEL-4 regression: once PENDING_MIGRATION_TTL_EPOCHS has elapsed, an
+        // abandoned or front-run staged plan expires so it cannot deadlock the
+        // contract forever.
+        state.epoch_index = state
+            .epoch_index
+            .saturating_add(PENDING_MIGRATION_TTL_EPOCHS + 1);
+        let expired_err = apply_migration_tx(
+            &mut state,
+            &migrator_a,
+            MigrationTx::FinalizeEvmImport { contract },
+            &MigrationFeeSchedule::TESTNET_DEFAULT,
+            45261,
+        )
+        .unwrap_err();
+        assert_eq!(expired_err, ImportError::NoPendingMigration);
+        let pruned = state
+            .execution_state
+            .prune_expired_pending_evm_migrations(state.epoch_index);
+        assert_eq!(pruned, 1);
+        assert!(state.execution_state.pending_evm_migrations.is_empty());
+    }
+
+    #[test]
+    fn dust_native_balance_does_not_block_migration_while_real_occupancy_does() {
+        let mut state = AccountState::new();
+        let mut coord = ExecutionCoordinator::new();
+        let migrator = Address::from([0x85u8; 32]);
+        state.credit_account(&migrator, 100);
+
+        let slot0 = [0u8; 32];
+        let code = sample_code();
+        let (req, _) = request_with_code(code, slot0, 0xCAFE);
+        let contract = req.authorization.contract;
+        let derived_evm_bud =
+            crate::execution::coordinator::alias::derive_contract_account(EeId::EVM, &contract);
+
+        // Unsolicited dust on the derived Budlum address must NOT count as native occupancy.
+        state.credit_account(&derived_evm_bud, 1);
+        assert!(state.get_attos_balance(&derived_evm_bud) > 0);
+        assert!(
+            !is_native_contract_account_occupied(&state, &derived_evm_bud),
+            "unsolicited dust balance alone must not mark a derived contract address occupied"
+        );
+
+        anchor_source_root(
+            &mut state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID,
+            req.state_root,
+        );
+        coord
+            .apply_evm_migration(
+                &mut state,
+                &migrator,
+                MigrationTx::BeginEvmImport(Box::new(req.clone())),
+                &MigrationFeeSchedule::TESTNET_DEFAULT,
+                CHAIN_ID,
+            )
+            .expect("dust balance must not grief EVM BeginEvmImport");
+
+        // Now verify real native occupancy (nonce > 0) DOES block migration on a fresh state.
+        let mut occupied_state = AccountState::new();
+        occupied_state.credit_account(&migrator, 100);
+        occupied_state.accounts.insert(
+            derived_evm_bud,
+            crate::core::account::Account {
+                public_key: derived_evm_bud,
+                balance: 0,
+                nonce: 1,
+                frac_attos: 0,
+                auth_program_hash: None,
+            },
+        );
+        assert!(is_native_contract_account_occupied(
+            &occupied_state,
+            &derived_evm_bud
+        ));
+        anchor_source_root(
+            &mut occupied_state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID,
+            req.state_root,
+        );
+        let err = apply_migration_tx(
+            &mut occupied_state,
+            &migrator,
+            MigrationTx::BeginEvmImport(Box::new(req)),
+            &MigrationFeeSchedule::TESTNET_DEFAULT,
+            CHAIN_ID,
+        )
+        .expect_err("account with nonzero nonce must still refuse migration");
+        assert_eq!(err, ImportError::AddressOccupied);
+    }
+}

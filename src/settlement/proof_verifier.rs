@@ -23,7 +23,7 @@ pub enum ProofVerificationError {
     EventMessageIdMismatch,
     InvalidMerkleProof,
     CommitmentBlockHashMismatch,
-    /// The commitment's finality proof does not bind its event root (a PoS or
+    /// The commitment's finality proof does not bind its event root (a `PoS` or
     /// BFT certificate signs the checkpoint hash alone), so the root is the
     /// submitter's claim and no event may be proven against it.
     UnattestedEventRoot,
@@ -32,7 +32,7 @@ pub enum ProofVerificationError {
 impl std::fmt::Display for ProofVerificationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProofVerificationError::MissingCommitment {
+            Self::MissingCommitment {
                 domain_id,
                 domain_height,
                 sequence,
@@ -40,31 +40,31 @@ impl std::fmt::Display for ProofVerificationError {
                 f,
                 "Missing commitment for domain={domain_id}, height={domain_height}, sequence={sequence}"
             ),
-            ProofVerificationError::EventDomainMismatch => {
+            Self::EventDomainMismatch => {
                 write!(f, "Event domain does not match commitment domain")
             }
-            ProofVerificationError::EventHeightMismatch => {
+            Self::EventHeightMismatch => {
                 write!(f, "Event height does not match commitment height")
             }
-            ProofVerificationError::EventIndexMismatch => {
+            Self::EventIndexMismatch => {
                 write!(f, "Event index does not match Merkle proof index")
             }
-            ProofVerificationError::EventMessageIdMismatch => {
+            Self::EventMessageIdMismatch => {
                 write!(f, "cross-domain message body does not match its id")
             }
-            ProofVerificationError::EventLeafMismatch => {
+            Self::EventLeafMismatch => {
                 write!(f, "Event leaf hash does not match Merkle proof leaf")
             }
-            ProofVerificationError::InvalidMerkleProof => {
+            Self::InvalidMerkleProof => {
                 write!(f, "Invalid event Merkle proof")
             }
-            ProofVerificationError::CommitmentBlockHashMismatch => {
+            Self::CommitmentBlockHashMismatch => {
                 write!(
                     f,
                     "Commitment block hash does not match expected block hash"
                 )
             }
-            ProofVerificationError::UnattestedEventRoot => write!(
+            Self::UnattestedEventRoot => write!(
                 f,
                 "Commitment event root is not bound by its finality proof"
             ),
@@ -77,6 +77,11 @@ impl std::error::Error for ProofVerificationError {}
 pub struct SettlementProofVerifier;
 
 impl SettlementProofVerifier {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_event_against_commitment(
         commitment: &DomainCommitment,
         event: DomainEvent,
@@ -90,6 +95,7 @@ impl SettlementProofVerifier {
         // delivered into the registry its target domain reads.
         if !crate::settlement::domains::CommitmentAttestation::for_kind(&commitment.consensus_kind)
             .event_root
+            || commitment.event_root == [0u8; 32]
         {
             return Err(ProofVerificationError::UnattestedEventRoot);
         }
@@ -99,10 +105,13 @@ impl SettlementProofVerifier {
         if event.domain_height != commitment.domain_height {
             return Err(ProofVerificationError::EventHeightMismatch);
         }
-        if event.event_index as usize != proof.index {
+        if usize::try_from(event.event_index).ok() != Some(proof.index) {
             return Err(ProofVerificationError::EventIndexMismatch);
         }
-        if event.leaf_hash() != proof.leaf {
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            event.leaf_hash().as_slice(),
+            proof.leaf.as_slice(),
+        )) {
             return Err(ProofVerificationError::EventLeafMismatch);
         }
         // A carried cross-domain message must be
@@ -124,6 +133,11 @@ impl SettlementProofVerifier {
         })
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_event_from_registry(
         registry: &DomainCommitmentRegistry,
         domain_id: DomainId,
@@ -144,7 +158,10 @@ impl SettlementProofVerifier {
         // The block hash check is not optional. It used to be a
         // `None`-skippable Option; every caller knew the hash, and the skip
         // path was pure bypass surface.
-        if commitment.domain_block_hash != expected_block_hash {
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            commitment.domain_block_hash.as_slice(),
+            expected_block_hash.as_slice(),
+        )) {
             return Err(ProofVerificationError::CommitmentBlockHashMismatch);
         }
 
@@ -257,7 +274,7 @@ mod tests {
         );
     }
 
-    /// A PoS or BFT certificate signs the checkpoint hash and nothing else, so
+    /// A `PoS` or BFT certificate signs the checkpoint hash and nothing else, so
     /// the event root in such a commitment is whatever its submitter chose. A
     /// relayer that carries a genuine certificate can build a tree of its own
     /// and deliver a message the domain never emitted; the verifier refuses the

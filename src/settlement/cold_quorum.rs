@@ -279,6 +279,8 @@ pub enum QuorumError {
     DuplicateSigner { device_id: u32 },
     /// The identity set is not the full committee.
     IdentitySetSizeMismatch { device_count: u32, presented: usize },
+    /// Two identities claim the same committee device id.
+    DuplicateDeviceId { device_id: u32 },
     /// Two device ids present the same verifying key.
     DuplicateVerifyingKey { device_id: u32 },
     /// a device key that is not 64 bytes of SLH-DSA-SHAKE-256s, an
@@ -310,6 +312,7 @@ impl QuorumError {
             Self::SignerOutOfRange { .. } => "quorum-signer-out-of-range",
             Self::DuplicateSigner { .. } => "quorum-duplicate-signer",
             Self::IdentitySetSizeMismatch { .. } => "quorum-identity-set-size-mismatch",
+            Self::DuplicateDeviceId { .. } => "quorum-duplicate-device-id",
             Self::DuplicateVerifyingKey { .. } => "quorum-duplicate-verifying-key",
             Self::BadKeyLength { .. } => "quorum-bad-key-length",
             Self::FixtureIdentity { .. } => "quorum-fixture-identity",
@@ -352,6 +355,12 @@ impl std::fmt::Display for QuorumError {
                 f,
                 "cold quorum needs identities for all {device_count} devices, got {presented}"
             ),
+            Self::DuplicateDeviceId { device_id } => {
+                write!(
+                    f,
+                    "cold quorum device id {device_id} appears more than once in identity set"
+                )
+            }
             Self::DuplicateVerifyingKey { device_id } => {
                 write!(
                     f,
@@ -444,9 +453,15 @@ pub fn verify_quorum(
             });
         }
     }
-    // Two device ids sharing one verifying key are one device.
+    // Two identities sharing one device id shadow a committee seat, and two
+    // device ids sharing one verifying key are a single device.
     for (i, a) in identities.iter().enumerate() {
         for b in identities.iter().skip(i + 1) {
+            if a.device_id == b.device_id {
+                return Err(QuorumError::DuplicateDeviceId {
+                    device_id: a.device_id,
+                });
+            }
             if a.verifying_key == b.verifying_key {
                 return Err(QuorumError::DuplicateVerifyingKey {
                     device_id: a.device_id,
@@ -816,5 +831,22 @@ mod tests {
         assert_ne!(a, b);
         // Renewed: no byte of the old 32-byte Ed25519 fixture seed leads.
         assert_ne!(a[0], 0xC0 ^ 1);
+    }
+
+    #[test]
+    fn verify_quorum_refuses_duplicate_identity_device_ids() {
+        let payload = payload();
+        let signers = dev_fixture_device_signers();
+        let mut identities: Vec<SignerIdentity> =
+            signers.iter().map(|s| s.identity.clone()).collect();
+        // Shadow device 2 by relabelling its distinct verifying key under device_id 1.
+        identities[1].device_id = 1;
+        let sigs: Vec<DeviceSignature> = [0usize, 2, 3]
+            .into_iter()
+            .map(|idx| signers[idx].sign_payload(&payload, 1))
+            .collect();
+        let err = verify_quorum(&policy(), &identities, &payload, 1, &sigs)
+            .expect_err("duplicate device_id in committee identity set must be refused");
+        assert_eq!(err.kind(), "quorum-duplicate-device-id");
     }
 }

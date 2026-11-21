@@ -2,7 +2,7 @@
 //!
 //! The end-to-end flow of an AI inference layer query through the real budlum-core AI layer:
 //! model registration -> operator compute bond -> building the request with a
-//! closed-circuit input_ref (canonical request_id) -> `submit_request` ->
+//! closed-circuit `input_ref` (canonical `request_id`) -> `submit_request` ->
 //! `AiInferenceResult` -> `submit_result`.
 //! No mocks; real types and real registry methods.
 
@@ -12,9 +12,13 @@ use crate::ai::types::{
 };
 use crate::ai::AiRegistry;
 use crate::core::address::Address;
-use crate::pollen::data_rights::AccessGrant;
+use crate::pollen::data_rights::{AccessGrant, AiDataInputRef};
 
-/// Register an AI inference layer model on chain (AiModelSpec + register_model).
+/// Register an AI inference layer model on chain (`AiModelSpec` + `register_model`).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn register_ai_model(
     registry: &mut AiRegistry,
     owner: Address,
@@ -42,9 +46,9 @@ pub fn register_ai_model(
     registry.register_model(spec)
 }
 
-/// Build a closed-circuit AI inference layer inference request (with a canonical request_id).
+/// Build a closed-circuit AI inference layer inference request (with a canonical `request_id`).
 ///
-/// `input_ref` = the reference to the data used (an AiDataInputRef encoding or
+/// `input_ref` = the reference to the data used (an `AiDataInputRef` encoding or
 /// an opaque value).
 ///
 /// `grant` = the requester's authority to read that data. It is a mandatory
@@ -74,6 +78,22 @@ pub fn build_ai_request(
     // permission learning why their request was rejected must not reveal
     // information about the shape of the request.
     crate::ai_inference::validate_inference_grant(grant, &requester, submitted_at_block)?;
+
+    if let Some(ref decl) = perception {
+        if decl.asset_id != grant.asset_id {
+            return Err(
+                "AI inference layer: perception declaration asset_id does not match grant asset_id"
+                    .into(),
+            );
+        }
+    }
+    if let Some(data_ref) = AiDataInputRef::decode(&input_ref)? {
+        if data_ref.asset_id != grant.asset_id {
+            return Err(
+                "AI inference layer: input_ref asset_id does not match grant asset_id".into(),
+            );
+        }
+    }
     let bounded = BoundedBytes::try_new(input_ref.clone())?;
     // The canonical commitment: the admission gate verifies with the same
     // function (see crate::ai::types::canonical_input_commitment).
@@ -97,6 +117,10 @@ pub fn build_ai_request(
 }
 
 /// Build an AI inference layer inference result (the operator's answer).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn build_ai_result(
     request_id: AiRequestId,
     verifier: Address,
@@ -124,12 +148,13 @@ pub fn build_ai_result(
 mod tests {
     use super::super::{operator_bond, operator_eligible, register_operator, MIN_OPERATOR_BOND};
     use super::*;
+    use crate::pollen::AssetId;
 
     fn addr(b: u8) -> Address {
         Address([b; 32])
     }
 
-    /// The end-to-end AI inference layer inference flow over the real AiRegistry.
+    /// The end-to-end AI inference layer inference flow over the real `AiRegistry`.
     #[test]
     fn ai_full_inference_flow_on_real_registry() {
         let mut registry = AiRegistry::new();
@@ -157,7 +182,7 @@ mod tests {
             1000,
             &grant,
             Some(crate::ai_inference::perception::PerceptionRequest {
-                asset_id: crate::pollen::AssetId([9; 32]),
+                asset_id: AssetId([9; 32]),
                 content_id: crate::storage::content_id::ContentId([7; 32]),
                 kind: crate::ai_inference::perception::PerceptionKind::Text,
                 declared_units: 18,
@@ -165,7 +190,7 @@ mod tests {
         )
         .expect("build request");
         assert!(req.verify_id(), "canonical request_id must verify");
-        // (after finding #359 the verifier stake is mandatory)
+        // A verifier must have locked its stake before a request is admissible.
         let _ = registry.lock_verifier_stake(&operator, crate::ai::registry::MIN_VERIFIER_STAKE);
         let req_id = registry.submit_request(req, 1).expect("submit request");
 
@@ -182,7 +207,7 @@ mod tests {
     /// A grant that is live for `consumer` at `block`.
     fn test_grant(consumer: Address, block: u64) -> AccessGrant {
         AccessGrant::new_unsigned(
-            crate::pollen::AssetId([9; 32]),
+            AssetId([9; 32]),
             Address([8; 32]),
             consumer,
             consumer,
@@ -266,5 +291,26 @@ mod tests {
             None,
         )
         .expect("a live grant must still build a request");
+
+        // Cross-asset substitution: a valid grant for asset [9; 32] must not
+        // build a request whose perception declaration or input_ref reads asset [0xEE; 32].
+        let mismatched_decl = crate::ai_inference::perception::PerceptionRequest {
+            asset_id: AssetId([0xEE; 32]),
+            content_id: crate::storage::content_id::ContentId([7; 32]),
+            kind: crate::ai_inference::perception::PerceptionKind::Text,
+            declared_units: 18,
+        };
+        let cross_err = build_ai_request(
+            requester,
+            model_id,
+            b"input".to_vec(),
+            1,
+            1,
+            1000,
+            &live,
+            Some(mismatched_decl),
+        )
+        .expect_err("grant for asset A must not build a request reading asset B");
+        assert!(cross_err.contains("asset_id"), "got: {cross_err}");
     }
 }

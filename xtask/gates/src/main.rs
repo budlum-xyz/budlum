@@ -39,13 +39,17 @@
 
 use std::path::{Path, PathBuf};
 
+mod sha256;
+
 mod gates {
     pub mod accumulators_pinned;
     pub mod actionlint;
+    pub mod agg_native_backend;
     pub mod ai_inference_prompt_is_true;
     pub mod ai_inference_reads;
     pub mod ai_inference_zk;
     pub mod air_selectors;
+    pub mod app_binding_guard;
     pub mod ast_security_gates;
     pub mod badges_current;
     pub mod binding_claims;
@@ -53,16 +57,32 @@ mod gates {
     pub mod bns_gate;
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
+    pub mod bud3_codec_and_replace;
+    pub mod bud3_custody_proofs;
+    pub mod bud3_custody_rewards;
+    pub mod bud3_dependent_modules;
+    pub mod bud3_fee_uses_physical_bytes;
+    pub mod bud3_forbidden_phrases;
+    pub mod bud3_module_claims;
+    pub mod bud3_object_is_universal;
+    pub mod bud3_paid_view;
+    pub mod bud3_placement;
+    pub mod bud3_proto_is_total;
+    pub mod bud3_qr_is_presentation;
+    pub mod bud3_repair_fires;
+    pub mod bud3_sealed_and_deletion;
     pub mod bud_e2e;
-    pub mod budscan_parity;
-    pub mod budscan_patchset;
+    pub mod canonical_programs_reproduce;
     pub mod capability_modules_are_wired;
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
+    pub mod ci_fanout_budget;
+    pub mod ci_jobs_end_on_cancel;
     pub mod ci_workflow_guards;
     pub mod classical_crypto_is_paired;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
+    pub mod concept_names;
     pub mod consensus_maps_ordered;
     pub mod consensus_state_only_changes_in_blocks;
     pub mod containment_defaults;
@@ -74,18 +94,26 @@ mod gates {
     pub mod docker_toolchain;
     pub mod domain_tags;
     pub mod economy_invariants;
+    pub mod ee_workers_build_with_unwind;
     pub mod every_fuzz_target_is_run;
     pub mod every_opcode_forgery;
     pub mod evidence_provenance;
     pub mod exact_named_tests;
+    pub mod explorer_parity;
+    pub mod explorer_patchset;
     pub mod fixture_integrity;
     pub mod forgery_tests;
     pub mod fork_choice_gate;
     pub mod fsf_import_boundaries;
     pub mod fuzz_targets_wired;
+    pub mod garden_nat;
+    pub mod garden_scenario;
     pub mod gas_calibration;
+    pub mod gate_references_are_real;
+    pub mod gate_source_provenance;
     pub mod gates_are_wired;
     pub mod gates_do_not_panic;
+    pub mod gateway_gate;
     pub mod gating_flags;
     pub mod geiger;
     pub mod generated_content;
@@ -94,9 +122,11 @@ mod gates {
     pub mod gov_slash_evidence_is_validator_only;
     pub mod governance_invariants;
     pub mod guards_reachable;
+    pub mod handover_and_recovery;
     pub mod hash_inputs_are_length_prefixed;
     pub mod indexing_is_not_new;
     pub mod kani;
+    pub mod launch_matrix_tests_exist;
     pub mod license_consistency;
     pub mod lock_failures;
     pub mod logup_multipliers;
@@ -105,13 +135,19 @@ mod gates {
     pub mod mermaid;
     pub mod metrics_are_written;
     pub mod minting_paths_are_counted;
+    pub mod mobile_validator_apps;
     pub mod module_coverage;
     pub mod multi_ratio_consensus;
     pub mod named_tests;
+    pub mod native_security_review;
     pub mod network_hardening_gate;
+    pub mod nightly_workflows_are_required;
     pub mod no_conflict_markers;
     pub mod no_constant_security_verdicts;
+    pub mod no_float_in_consensus_paths;
     pub mod no_idle_code;
+    pub mod no_internal_ids;
+    pub mod no_legacy_storage;
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
     pub mod no_out_of_block_consensus_writes;
@@ -119,6 +155,7 @@ mod gates {
     pub mod no_unicode_dashes;
     pub mod no_upstream_brands;
     pub mod node_classification_gate;
+    pub mod offline_never_slashes;
     pub mod one_house_guards;
     pub mod ownerless_dependencies;
     pub mod paid_content;
@@ -132,27 +169,34 @@ mod gates {
     pub mod proof_deps_are_exactly_pinned;
     pub mod qr_is_derivative_only;
     pub mod quantum_account;
+    pub mod readme_claims_are_wired;
+    pub mod readme_definition_block_is_verbatim;
+    pub mod readme_has_no_placeholders;
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
-    pub mod regen_health_door;
-    pub mod regeneration;
+    pub mod rehearsal_and_field_matrix;
     pub mod rejection_tests;
     pub mod relay;
     pub mod release_profile_pins;
     pub mod repair_fires;
     pub mod required_tests;
     pub mod rust_literals;
+    pub mod rust_syntax_is_parseable;
     pub mod scheme_is_never_inferred;
+    pub mod seals_move_with_their_tree;
     pub mod security_parameters;
     pub mod security_quality_wired;
     pub mod security_scans_can_fail;
     pub mod self_derived_ids_cover_every_field;
+    pub mod self_interrogation;
     pub mod semver;
     pub mod serialize_map_keys_are_strings;
     pub mod shard_placement;
     pub mod slash_expression;
     pub mod source_reading;
+    pub mod sources_are_whole;
+    pub mod state_recovery_door;
     pub mod storage_penalties;
     pub mod storage_priced;
     pub mod storage_proof_boundary;
@@ -172,16 +216,19 @@ mod gates {
     pub mod udeps;
     pub mod uncheckable_proof;
     pub mod untrusted_manifests;
+    pub mod unwired_code_is_ratcheted;
     pub mod value_transfers;
     pub mod wallet_core_gate;
     pub mod wallet_node_address_agree;
     pub mod wire_fields_are_signed;
+    pub mod workflow_red_keeps_its_words;
+    pub mod workflows_cover_every_workspace;
     pub mod workflows_produce_jobs;
     pub mod zero_address_sender_is_verified;
     pub mod zero_storage_frozen;
     pub mod zero_tests_witness;
     pub mod zizmor;
-    pub mod zkvm_immune_regeneration;
+    pub mod zkvm_refuses_untrusted_proofs;
 }
 
 /// A gate's plain run: inspect the repo root, return a verdict.
@@ -195,8 +242,9 @@ type RunArgs = fn(&Path, &[&str]) -> Result<String, String>;
 struct Gate {
     /// Name used on the command line and in CI job names.
     name: &'static str,
-    /// The shell script this replaced, so the two can be compared during the
-    /// migration and the old one deleted with evidence rather than hope.
+    /// The shell script or gate entry this replaced, so the two can be
+    /// compared during a migration and the old one deleted with evidence
+    /// rather than hope.
     replaces: Option<&'static str>,
     run: Run,
     /// Gates that read a cargo test log take the log path as a second
@@ -211,12 +259,12 @@ struct Gate {
 
 const GATES: &[Gate] = &[
     Gate {
-        name: "zkvm-immune-regeneration",
+        name: "zkvm-refuses-untrusted-proofs",
         replaces: None,
-        run: gates::zkvm_immune_regeneration::run,
+        run: gates::zkvm_refuses_untrusted_proofs::run,
         run_log: None,
         run_args: None,
-        self_test: gates::zkvm_immune_regeneration::self_test,
+        self_test: gates::zkvm_refuses_untrusted_proofs::self_test,
     },
     Gate {
         name: "security-quality-tools-are-wired",
@@ -273,6 +321,22 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::bridge_dual_tree::self_test,
+    },
+    Gate {
+        name: "bud3-dependent-modules",
+        replaces: None,
+        run: gates::bud3_dependent_modules::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_dependent_modules::self_test,
+    },
+    Gate {
+        name: "rehearsal-and-field-matrix",
+        replaces: None,
+        run: gates::rehearsal_and_field_matrix::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::rehearsal_and_field_matrix::self_test,
     },
     Gate {
         name: "minting-paths-are-counted",
@@ -355,19 +419,19 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
-        name: "budscan-name-rule-parity",
+        name: "explorer-name-rule-parity",
         replaces: None,
-        run: gates::budscan_parity::run,
+        run: gates::explorer_parity::run,
         run_args: None,
-        self_test: gates::budscan_parity::self_test,
+        self_test: gates::explorer_parity::self_test,
         run_log: None,
     },
     Gate {
-        name: "budscan-patchset",
+        name: "explorer-patchset",
         replaces: None,
-        run: gates::budscan_patchset::run,
+        run: gates::explorer_patchset::run,
         run_args: None,
-        self_test: gates::budscan_patchset::self_test,
+        self_test: gates::explorer_patchset::self_test,
         run_log: None,
     },
     Gate {
@@ -403,6 +467,14 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
+        name: "self-interrogation-invariants",
+        replaces: None,
+        run: gates::self_interrogation::run,
+        run_args: None,
+        self_test: gates::self_interrogation::self_test,
+        run_log: None,
+    },
+    Gate {
         name: "shard-placement-is-sticky-and-staked",
         replaces: Some("check-shard-placement-is-sticky-and-staked.sh"),
         run: gates::shard_placement::run,
@@ -432,6 +504,22 @@ const GATES: &[Gate] = &[
         run: gates::workflows_produce_jobs::run,
         run_args: None,
         self_test: gates::workflows_produce_jobs::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "ci-pull-request-fanout-is-budgeted",
+        replaces: None,
+        run: gates::ci_fanout_budget::run,
+        run_args: Some(gates::ci_fanout_budget::run_args),
+        self_test: gates::ci_fanout_budget::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "ci-jobs-end-on-cancel",
+        replaces: None,
+        run: gates::ci_jobs_end_on_cancel::run,
+        run_args: None,
+        self_test: gates::ci_jobs_end_on_cancel::self_test,
         run_log: None,
     },
     Gate {
@@ -515,6 +603,14 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
+        name: "no-legacy-storage",
+        replaces: None,
+        run: gates::no_legacy_storage::run,
+        run_args: None,
+        self_test: gates::no_legacy_storage::self_test,
+        run_log: None,
+    },
+    Gate {
         name: "metrics-are-written",
         replaces: None,
         run: gates::metrics_are_written::run,
@@ -552,6 +648,30 @@ const GATES: &[Gate] = &[
         run: gates::tree_is_english::run,
         run_args: None,
         self_test: gates::tree_is_english::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-forbidden-phrases",
+        replaces: None,
+        run: gates::bud3_forbidden_phrases::run,
+        run_args: None,
+        self_test: gates::bud3_forbidden_phrases::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "bud3-module-claims-do-not-collide",
+        replaces: None,
+        run: gates::bud3_module_claims::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_module_claims::self_test,
+    },
+    Gate {
+        name: "bud3-proto-is-total",
+        replaces: None,
+        run: gates::bud3_proto_is_total::run,
+        run_args: None,
+        self_test: gates::bud3_proto_is_total::self_test,
         run_log: None,
     },
     Gate {
@@ -651,14 +771,6 @@ const GATES: &[Gate] = &[
         self_test: gates::network_hardening_gate::self_test,
     },
     Gate {
-        name: "testnet-runtime-hardening",
-        replaces: None,
-        run: gates::testnet_runtime_hardening::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::testnet_runtime_hardening::self_test,
-    },
-    Gate {
         name: "economy-invariants",
         replaces: Some("check-economy-invariants.sh"),
         run: |_| {
@@ -695,20 +807,20 @@ const GATES: &[Gate] = &[
         self_test: gates::domain_tags::self_test,
     },
     Gate {
-        name: "regeneration",
+        name: "canonical-programs-reproduce",
         replaces: None,
-        run: gates::regeneration::run,
+        run: gates::canonical_programs_reproduce::run,
         run_log: None,
         run_args: None,
-        self_test: gates::regeneration::self_test,
+        self_test: gates::canonical_programs_reproduce::self_test,
     },
     Gate {
-        name: "regen-health-door",
+        name: "state-recovery-door",
         replaces: None,
-        run: gates::regen_health_door::run,
+        run: gates::state_recovery_door::run,
         run_log: None,
         run_args: None,
-        self_test: gates::regen_health_door::self_test,
+        self_test: gates::state_recovery_door::self_test,
     },
     Gate {
         name: "relay",
@@ -879,6 +991,14 @@ const GATES: &[Gate] = &[
         self_test: gates::zizmor::self_test,
     },
     Gate {
+        name: "agg-native-backend-is-devnet-only",
+        replaces: None,
+        run: gates::agg_native_backend::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::agg_native_backend::self_test,
+    },
+    Gate {
         name: "docker-toolchain-matches-pin",
         replaces: Some("check-docker-toolchain-matches-pin.sh"),
         run: gates::docker_toolchain::run,
@@ -897,6 +1017,18 @@ const GATES: &[Gate] = &[
         run_log: Some(gates::bns_gate::run),
         run_args: None,
         self_test: gates::bns_gate::self_test,
+    },
+    Gate {
+        name: "gateway-gate",
+        replaces: Some("check-gateway-gate.sh"),
+        run: |_| {
+            Err(String::from(
+                "gateway-gate reads a cargo test log; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::gateway_gate::run),
+        run_args: None,
+        self_test: gates::gateway_gate::self_test,
     },
     Gate {
         name: "bud-e2e",
@@ -965,6 +1097,14 @@ const GATES: &[Gate] = &[
         run_log: Some(gates::badges_current::run),
         run_args: None,
         self_test: gates::badges_current::self_test,
+    },
+    Gate {
+        name: "concept-names",
+        replaces: None,
+        run: gates::concept_names::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::concept_names::self_test,
     },
     Gate {
         name: "containment-defaults",
@@ -1143,6 +1283,14 @@ const GATES: &[Gate] = &[
         self_test: gates::gas_calibration::self_test,
     },
     Gate {
+        name: "gate-references-are-real",
+        replaces: None,
+        run: gates::gate_references_are_real::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::gate_references_are_real::self_test,
+    },
+    Gate {
         name: "gates-are-wired",
         replaces: Some("check-gates-are-wired.sh"),
         run: gates::gates_are_wired::run,
@@ -1247,6 +1395,38 @@ const GATES: &[Gate] = &[
         self_test: gates::lock_failures::self_test,
     },
     Gate {
+        name: "seals-move-with-their-tree",
+        replaces: Some("re-pin-commits-are-inert"),
+        run: gates::seals_move_with_their_tree::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::seals_move_with_their_tree::self_test,
+    },
+    Gate {
+        name: "sources-are-whole",
+        replaces: None,
+        run: gates::sources_are_whole::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::sources_are_whole::self_test,
+    },
+    Gate {
+        name: "workflow-red-keeps-its-words",
+        replaces: None,
+        run: gates::workflow_red_keeps_its_words::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::workflow_red_keeps_its_words::self_test,
+    },
+    Gate {
+        name: "unwired-code-is-ratcheted",
+        replaces: None,
+        run: gates::unwired_code_is_ratcheted::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::unwired_code_is_ratcheted::self_test,
+    },
+    Gate {
         name: "source-reading-tests-are-narrowed",
         replaces: Some("check-source-reading-tests-are-narrowed.sh"),
         run: gates::source_reading::run,
@@ -1345,6 +1525,14 @@ const GATES: &[Gate] = &[
         self_test: gates::no_out_of_block_consensus_writes::self_test,
     },
     Gate {
+        name: "rust-syntax-is-parseable",
+        replaces: None,
+        run: gates::rust_syntax_is_parseable::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::rust_syntax_is_parseable::self_test,
+    },
+    Gate {
         name: "release-profile-pins",
         replaces: None,
         run: gates::release_profile_pins::run,
@@ -1396,7 +1584,261 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::pq_core_gate::self_test,
     },
+    Gate {
+        name: "bud3-fee-uses-physical-bytes",
+        replaces: None,
+        run: gates::bud3_fee_uses_physical_bytes::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_fee_uses_physical_bytes::self_test,
+    },
+    Gate {
+        name: "bud3-custody-rewards",
+        replaces: None,
+        run: gates::bud3_custody_rewards::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_custody_rewards::self_test,
+    },
+    Gate {
+        name: "bud3-object-is-universal",
+        replaces: None,
+        run: gates::bud3_object_is_universal::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_object_is_universal::self_test,
+    },
+    Gate {
+        name: "bud3-qr-is-presentation",
+        replaces: None,
+        run: gates::bud3_qr_is_presentation::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_qr_is_presentation::self_test,
+    },
+    Gate {
+        name: "bud3-sealed-and-deletion",
+        replaces: None,
+        run: gates::bud3_sealed_and_deletion::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_sealed_and_deletion::self_test,
+    },
+    Gate {
+        name: "bud3-placement",
+        replaces: None,
+        run: gates::bud3_placement::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_placement::self_test,
+    },
+    Gate {
+        name: "bud3-repair-fires",
+        replaces: None,
+        run: gates::bud3_repair_fires::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_repair_fires::self_test,
+    },
+    Gate {
+        name: "bud3-custody-proofs",
+        replaces: None,
+        run: gates::bud3_custody_proofs::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_custody_proofs::self_test,
+    },
+    Gate {
+        name: "bud3-paid-view",
+        replaces: None,
+        run: gates::bud3_paid_view::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_paid_view::self_test,
+    },
+    Gate {
+        name: "offline-never-slashes",
+        replaces: None,
+        run: gates::offline_never_slashes::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::offline_never_slashes::self_test,
+    },
+    Gate {
+        name: "handover-and-recovery",
+        replaces: None,
+        run: gates::handover_and_recovery::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::handover_and_recovery::self_test,
+    },
+    Gate {
+        name: "bud3-codec-and-replace",
+        replaces: None,
+        run: gates::bud3_codec_and_replace::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::bud3_codec_and_replace::self_test,
+    },
+    Gate {
+        name: "mobile-validator-apps",
+        replaces: None,
+        run: gates::mobile_validator_apps::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::mobile_validator_apps::self_test,
+    },
+    Gate {
+        name: "readme-definition-block-is-verbatim",
+        replaces: None,
+        run: gates::readme_definition_block_is_verbatim::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_definition_block_is_verbatim::self_test,
+    },
+    Gate {
+        name: "readme-has-no-placeholders",
+        replaces: None,
+        run: gates::readme_has_no_placeholders::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_has_no_placeholders::self_test,
+    },
+    Gate {
+        name: "readme-claims-are-wired",
+        replaces: None,
+        run: gates::readme_claims_are_wired::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::readme_claims_are_wired::self_test,
+    },
+    Gate {
+        name: "ee-workers-build-with-unwind",
+        replaces: None,
+        run: gates::ee_workers_build_with_unwind::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::ee_workers_build_with_unwind::self_test,
+    },
+    Gate {
+        name: "nightly-workflows-are-required",
+        replaces: None,
+        run: gates::nightly_workflows_are_required::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::nightly_workflows_are_required::self_test,
+    },
+    Gate {
+        name: "native-security-review",
+        replaces: None,
+        run: gates::native_security_review::run,
+        run_log: None,
+        run_args: Some(gates::native_security_review::run_args),
+        self_test: gates::native_security_review::self_test,
+    },
+    Gate {
+        name: "gate-source-provenance",
+        replaces: None,
+        run: gates::gate_source_provenance::run,
+        run_log: None,
+        run_args: Some(gates::gate_source_provenance::run_args),
+        self_test: gates::gate_source_provenance::self_test,
+    },
+    Gate {
+        name: "app-binding-guard",
+        replaces: Some("launch-evidence"),
+        run: gates::app_binding_guard::run,
+        run_log: None,
+        run_args: Some(gates::app_binding_guard::run_args),
+        self_test: gates::app_binding_guard::self_test,
+    },
+    Gate {
+        name: "no-float-in-consensus-paths",
+        replaces: None,
+        run: gates::no_float_in_consensus_paths::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_float_in_consensus_paths::self_test,
+    },
+    Gate {
+        name: "workflows-cover-every-workspace",
+        replaces: None,
+        run: gates::workflows_cover_every_workspace::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::workflows_cover_every_workspace::self_test,
+    },
+    Gate {
+        name: "testnet-runtime-hardening",
+        replaces: None,
+        run: gates::testnet_runtime_hardening::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::testnet_runtime_hardening::self_test,
+    },
+    Gate {
+        name: "launch-matrix-tests-exist",
+        replaces: None,
+        run: gates::launch_matrix_tests_exist::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::launch_matrix_tests_exist::self_test,
+    },
+    Gate {
+        name: "garden-scenario",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "garden-scenario reads a cargo test log; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::garden_scenario::run),
+        run_args: None,
+        self_test: gates::garden_scenario::self_test,
+    },
+    Gate {
+        name: "garden-nat",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "garden-nat reads a cargo test log; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::garden_nat::run),
+        run_args: None,
+        self_test: gates::garden_nat::self_test,
+    },
+    Gate {
+        name: "no-internal-ids",
+        replaces: None,
+        run: gates::no_internal_ids::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_internal_ids::self_test,
+    },
 ];
+
+/// Gates that take extra arguments but whose plain run (no arguments) is a
+/// complete verification. `--all` runs them: leaving `tree-pin` out meant the
+/// aggregate run, the one CI relies on, never checked the budzero tree pins.
+const RUNS_WITHOUT_ARGUMENTS: &[&str] =
+    &["tree-pin", "app-binding-guard", "gate-source-provenance"];
+
+/// The gates `--all` runs.
+///
+/// On the run path the gates that take a log path or positional roots are left
+/// out: they cannot run without their argument, and their CI steps call them
+/// directly. A canary takes no argument, so the self-test path keeps them all.
+fn all_selection(self_test: bool) -> Vec<&'static Gate> {
+    GATES
+        .iter()
+        .filter(|g| {
+            self_test
+                || RUNS_WITHOUT_ARGUMENTS.contains(&g.name)
+                || (g.run_log.is_none() && g.run_args.is_none())
+        })
+        .collect()
+}
 
 fn usage() -> String {
     let mut s = String::from(
@@ -1466,10 +1908,7 @@ fn main() {
         // directly. A canary takes no argument, so the self-test path keeps
         // them; filtered there too, `--all --self-test` reported success
         // while about twenty gates had proven nothing.
-        Some(&"--all" | &"--self-test") => GATES
-            .iter()
-            .filter(|g| self_test || (g.run_log.is_none() && g.run_args.is_none()))
-            .collect(),
+        Some(&"--all" | &"--self-test") => all_selection(self_test),
         Some(name) => {
             if let Some(g) = GATES.iter().find(|g| g.name == *name) {
                 vec![g]
@@ -1511,5 +1950,121 @@ fn main() {
             failed.join(", ")
         );
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod all_selection_tests {
+    use super::*;
+
+    /// `budlum-gates --all` must run `tree-pin`, whose plain run
+    /// (no `--pin`) is a verification that needs no argument.
+    #[test]
+    fn all_runs_tree_pin() {
+        let names: Vec<&str> = all_selection(false).iter().map(|g| g.name).collect();
+        assert!(names.contains(&"tree-pin"), "`--all` skips tree-pin");
+        assert!(
+            names.contains(&"gate-source-provenance"),
+            "`--all` skips gate-source-provenance"
+        );
+        let canaries: Vec<&str> = all_selection(true).iter().map(|g| g.name).collect();
+        assert!(canaries.contains(&"tree-pin"));
+        assert_eq!(canaries.len(), GATES.len(), "every canary runs");
+    }
+
+    /// Names the gates that neither `--all` runs nor any workflow step calls.
+    ///
+    /// Kept apart from the assertions so the judgement can be canaried with a
+    /// synthetic roster: the real tree has no orphan today, and a test that
+    /// only ever sees the passing shape proves nothing about the check.
+    fn orphans<'a>(gates: &[&'a str], all: &[&str], workflow_text: &str) -> Vec<&'a str> {
+        gates
+            .iter()
+            .copied()
+            .filter(|g| {
+                if all.contains(g) {
+                    return false;
+                }
+                // A workflow step calls a gate as `-- <name>`; require the
+                // name to end there, so `bns-names` does not satisfy a step
+                // that only mentions `bns-names-are-safe-in-an-address-bar`.
+                let mut hit = false;
+                for m in workflow_text.match_indices(&format!("-- {g}")) {
+                    let end = m.0 + 3 + g.len();
+                    match workflow_text[end..].chars().next() {
+                        None => hit = true,
+                        Some(c) if !c.is_ascii_alphanumeric() && c != '-' && c != '_' => hit = true,
+                        Some(_) => {}
+                    }
+                }
+                !hit
+            })
+            .collect()
+    }
+
+    #[test]
+    fn orphan_check_canary() {
+        // A gate outside `--all` that no step names is an orphan.
+        let found = orphans(
+            &["runs-in-all", "named-by-a-step", "abandoned"],
+            &["runs-in-all"],
+            "run: cargo run --release -- gates -- named-by-a-step --self-test",
+        );
+        assert_eq!(found, vec!["abandoned"]);
+        // A prefix of a longer gate name does not count as a step.
+        let prefix = orphans(
+            &["bns-names"],
+            &[],
+            "gates -- bns-names-are-safe-in-an-address-bar",
+        );
+        assert_eq!(prefix, vec!["bns-names"]);
+        // Every gate selected by `--all` is covered whatever the text says.
+        assert!(orphans(&["x"], &["x"], "").is_empty());
+    }
+
+    /// Every registered gate is reached: `--all` selects it, or a workflow
+    /// step calls it by name.
+    ///
+    /// This is the check that a hand count got wrong once: reading the gate
+    /// registry and concluding that a gate marked `run_args: Some` never runs
+    /// in CI, when an allow-list above `all_selection` already carried it.
+    /// Measured on the tree at the time of writing the answer is 158 gates in
+    /// `--all` and 24 named by a step, no orphan. The number is not asserted;
+    /// the absence of an orphan is.
+    #[test]
+    fn every_gate_is_reached() {
+        let root = repo_root();
+        let dir = root.join(".github/workflows");
+        let mut text = String::new();
+        let mut files = 0_usize;
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                let is_yml = p.extension().is_some_and(|x| x == "yml" || x == "yaml");
+                if !is_yml {
+                    continue;
+                }
+                if let Ok(t) = std::fs::read_to_string(&p) {
+                    files += 1;
+                    text.push_str(&t);
+                    text.push('\n');
+                }
+            }
+        }
+        assert!(
+            files > 0,
+            "no workflow file read under {}; the check would pass over nothing",
+            dir.display()
+        );
+        let all: Vec<&str> = all_selection(false).iter().map(|g| g.name).collect();
+        let names: Vec<&str> = GATES.iter().map(|g| g.name).collect();
+        let found = orphans(&names, &all, &text);
+        assert!(
+            found.is_empty(),
+            "{} gate(s) are never reached: neither `--all` nor a workflow step runs {:?} of {} registered across {files} workflow file(s)",
+            found.len(),
+            found,
+            names.len()
+        );
     }
 }

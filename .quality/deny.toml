@@ -77,8 +77,6 @@ skip = [
     { crate = "crypto-common@0.1.7", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "curve25519-dalek@4.1.3", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "digest@0.10.7", reason = "transitive major-semver split across pinned upstream ecosystems" },
-    { crate = "ed25519@2.2.3", reason = "transitive major-semver split across pinned upstream ecosystems" },
-    { crate = "ed25519-dalek@2.2.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "fiat-crypto@0.2.9", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "foldhash@0.1.5", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "getrandom@0.2.17", reason = "transitive major-semver split across pinned upstream ecosystems" },
@@ -87,7 +85,6 @@ skip = [
     { crate = "hax-lib@0.3.7", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "hax-lib-macros@0.3.7", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "hax-lib-macros-types@0.3.7", reason = "transitive major-semver split across pinned upstream ecosystems" },
-    { crate = "hkdf@0.12.4", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "hmac@0.12.1", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "inout@0.1.4", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "itertools@0.13.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
@@ -106,7 +103,6 @@ skip = [
     { crate = "sha2@0.10.9", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "sha3@0.11.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "shlex@1.3.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
-    { crate = "signature@2.2.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "spin@0.9.9", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "syn@2.0.117", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "thiserror@1.0.69", reason = "transitive major-semver split across pinned upstream ecosystems" },
@@ -114,7 +110,6 @@ skip = [
     { crate = "universal-hash@0.5.1", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "windows-sys@0.52.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "wit-bindgen@0.51.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
-    { crate = "x25519-dalek@2.0.1", reason = "transitive major-semver split across pinned upstream ecosystems" },
     { crate = "yasna@0.5.2", reason = "transitive major-semver split across pinned upstream ecosystems" },
 ]
 skip-tree = []
@@ -137,7 +132,7 @@ allow-git = []
 # as an artifact. The job came back green and not a single advisory name appeared
 # in the log.
 #
-# Somut bedeli: RUSTSEC-2024-0380 (`pqcrypto-dilithium` - `pqcrypto-mldsa`
+# Concrete cost: RUSTSEC-2024-0380 (`pqcrypto-dilithium` - `pqcrypto-mldsa`
 # was superseded by) sits on the mainnet default PQ signature path. The decision
 # was made and is recorded with its reason in `osv-scanner.toml`; even so
 # it never appeared on the cargo audit side in any run. Of the two tools scanning the

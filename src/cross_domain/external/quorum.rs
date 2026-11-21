@@ -83,7 +83,7 @@ pub enum Answer {
 impl Answer {
     /// Whether this answer counts toward the participant total.
     #[must_use]
-    pub fn counts(&self) -> bool {
+    pub const fn counts(&self) -> bool {
         !matches!(self, Self::Infrastructure)
     }
 
@@ -144,7 +144,7 @@ impl QuorumPolicy {
     /// The policy for anything that will be committed to: refuse on dispute,
     /// refuse when too few answered, no preferences.
     #[must_use]
-    pub fn strict(agreement_threshold: usize, max_participants: usize) -> Self {
+    pub const fn strict(agreement_threshold: usize, max_participants: usize) -> Self {
         Self {
             agreement_threshold,
             max_participants,
@@ -178,7 +178,7 @@ pub enum QuorumOutcome {
 impl QuorumOutcome {
     /// Whether this outcome is a decision the caller can act on.
     #[must_use]
-    pub fn decided(&self) -> bool {
+    pub const fn decided(&self) -> bool {
         matches!(self, Self::AgreedClaim { .. } | Self::AgreedRefusal { .. })
     }
 }
@@ -198,20 +198,17 @@ pub fn group_answers(answers: &[Answer]) -> (Vec<AnswerGroup>, usize) {
             continue;
         }
         let key = answer.group_key();
-        match keys.iter().position(|k| *k == key) {
-            Some(at) => {
-                if let Some(group) = groups.get_mut(at) {
-                    group.count = group.count.saturating_add(1);
-                }
+        if let Some(at) = keys.iter().position(|k| *k == key) {
+            if let Some(group) = groups.get_mut(at) {
+                group.count = group.count.saturating_add(1);
             }
-            None => {
-                keys.push(key.clone());
-                groups.push(AnswerGroup {
-                    key,
-                    count: 1,
-                    answer: *answer,
-                });
-            }
+        } else {
+            keys.push(key.clone());
+            groups.push(AnswerGroup {
+                key,
+                count: 1,
+                answer: *answer,
+            });
         }
     }
     // Deterministic order: largest group first, then by key. Without this the
@@ -236,6 +233,11 @@ pub fn decide(answers: &[Answer], policy: &QuorumPolicy) -> QuorumOutcome {
         return QuorumOutcome::NoValidParticipants {
             infrastructure_failures: infrastructure,
         };
+    }
+
+    // A zero threshold is a misconfiguration, never unilateral agreement.
+    if policy.agreement_threshold == 0 {
+        return QuorumOutcome::LowParticipants { valid, required: 1 };
     }
 
     // Not enough participants is its own state, checked before any winner is
@@ -264,13 +266,10 @@ pub fn decide(answers: &[Answer], policy: &QuorumPolicy) -> QuorumOutcome {
             DisputeBehavior::ReturnError => QuorumOutcome::Dispute { groups },
             DisputeBehavior::AcceptMostCommon => winner_of(&groups),
         },
-        1 => match winners.first() {
-            // `first` rather than `[0]`: the length was just checked, but an
-            // index that is merely *probably* in range is an abort waiting for
-            // an edit, and the gate that says so is right.
-            Some(only) => outcome_of(only),
-            None => QuorumOutcome::Dispute { groups },
-        },
+        1 => winners
+            .first()
+            .map(|only| outcome_of(only))
+            .unwrap_or(QuorumOutcome::Dispute { groups }),
         _ => {
             // Two or more groups at the threshold. That is a tie, and a tie is
             // a dispute: picking one would be a choice the evidence did not
@@ -283,7 +282,7 @@ pub fn decide(answers: &[Answer], policy: &QuorumPolicy) -> QuorumOutcome {
 
 /// Turns a group into an outcome.
 #[must_use]
-fn outcome_of(group: &AnswerGroup) -> QuorumOutcome {
+const fn outcome_of(group: &AnswerGroup) -> QuorumOutcome {
     match group.answer {
         Answer::Claim(claim) => QuorumOutcome::AgreedClaim {
             claim,
@@ -303,14 +302,27 @@ fn outcome_of(group: &AnswerGroup) -> QuorumOutcome {
 }
 
 /// The most common group. Only called when a policy explicitly allows it.
+/// Exact ties at the top remain a [`QuorumOutcome::Dispute`] so group sort
+/// order can never act as a coin flip.
 #[must_use]
 fn winner_of(groups: &[AnswerGroup]) -> QuorumOutcome {
-    match groups.first() {
-        Some(group) => outcome_of(group),
-        None => QuorumOutcome::NoValidParticipants {
+    let Some(group) = groups.first() else {
+        return QuorumOutcome::NoValidParticipants {
             infrastructure_failures: 0,
-        },
+        };
+    };
+    if groups
+        .get(1)
+        .is_some_and(|second| second.count == group.count)
+    {
+        let tied: Vec<AnswerGroup> = groups
+            .iter()
+            .take_while(|g| g.count == group.count)
+            .cloned()
+            .collect();
+        return QuorumOutcome::Dispute { groups: tied };
     }
+    outcome_of(group)
 }
 
 /// Whether the leading group can still be overtaken by the participants that
@@ -324,6 +336,9 @@ fn winner_of(groups: &[AnswerGroup]) -> QuorumOutcome {
 /// `remaining` is how many participants have been asked but not yet answered.
 #[must_use]
 pub fn lead_is_unassailable(answers: &[Answer], policy: &QuorumPolicy, remaining: usize) -> bool {
+    if policy.agreement_threshold == 0 {
+        return false;
+    }
     let (groups, _) = group_answers(answers);
     let Some(leader) = groups.first() else {
         return false;
@@ -339,10 +354,9 @@ pub fn lead_is_unassailable(answers: &[Answer], policy: &QuorumPolicy, remaining
     // form one rival group from nothing. Counting that as zero would report an
     // unassailable lead whenever only one claim had arrived so far, which is
     // exactly the case where waiting is most informative.
-    let best_rival = match groups.get(1) {
-        Some(second) => second.count.saturating_add(remaining),
-        None => remaining,
-    };
+    let best_rival = groups
+        .get(1)
+        .map_or(remaining, |second| second.count.saturating_add(remaining));
     // A tie is a dispute, so the rival must fall strictly short - reaching the
     // leader's count would produce a tie, which is not a win.
     best_rival < leader.count
@@ -555,5 +569,34 @@ mod tests {
             "refusal:crypto"
         );
         assert_eq!(Answer::Infrastructure.group_key(), "infrastructure");
+    }
+
+    #[test]
+    fn zero_threshold_refuses_and_accept_most_common_never_coin_flips_a_tie() {
+        let zero = QuorumPolicy::strict(0, 4);
+        assert_eq!(
+            decide(&[claim(0xaa)], &zero),
+            QuorumOutcome::LowParticipants {
+                valid: 1,
+                required: 1
+            },
+            "agreement_threshold == 0 must never admit a single-prover claim"
+        );
+        assert!(!lead_is_unassailable(&[claim(0xaa)], &zero, 0));
+
+        let permissive_dispute = QuorumPolicy {
+            agreement_threshold: 3,
+            max_participants: 4,
+            dispute: DisputeBehavior::AcceptMostCommon,
+            low_participants: LowParticipantsBehavior::AcceptMostCommon,
+        };
+        let tied = [claim(0xbb), claim(0xaa), claim(0xbb), claim(0xaa)];
+        assert!(
+            matches!(
+                decide(&tied, &permissive_dispute),
+                QuorumOutcome::Dispute { ref groups } if groups.len() == 2
+            ),
+            "AcceptMostCommon must report an exact 2-2 tie as a Dispute, not pick by hash order"
+        );
     }
 }

@@ -125,7 +125,7 @@ mod hardening_tests {
     #[test]
     fn test_db_repair_index() {
         use crate::core::block::Block;
-        use crate::storage::db::Storage;
+        use crate::persistence::db::Storage;
 
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test_repair.db");
@@ -162,12 +162,12 @@ mod hardening_tests {
 
     // === SECURITY TESTS (security review, item 3) ===
 
-    /// The production call of the BLS PoP.
+    /// The production call of the BLS `PoP`.
     ///
     /// Security review, section 3: `verify_pop` used to be called only from a
     /// unit test and from nowhere in production, which left the rogue-key attack
     /// open. This test verifies that the public `verify_pop` function still
-    /// accepts valid PoPs and refuses invalid ones, so the
+    /// accepts valid `PoPs` and refuses invalid ones, so the
     /// `build_validator_snapshot_from_state` filter in `blockchain.rs` can rely
     /// on it. The filter itself cannot be called directly from a unit test
     /// because it is private; this test guarantees the contract of the public
@@ -239,7 +239,7 @@ mod hardening_tests {
         assert!(config.allowed_ips.contains(&"127.0.0.1".to_string()));
     }
 
-    /// When `from_env` is passed `auth_required=true` with an empty api_key
+    /// When `from_env` is passed `auth_required=true` with an empty `api_key`
     /// (the env var is not set) it returns an error, which stops an operator from
     /// starting a public RPC with an empty key.
     #[test]

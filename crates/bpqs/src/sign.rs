@@ -85,7 +85,7 @@ pub struct BpqsSignature<P: BpqsParams> {
 /// Held by cold devices between ceremonies.
 pub struct BpqsSigner<P: BpqsParams, H: BpqsHash> {
     levels: merkle::Levels,
-    /// Zeroed on drop (F11): the root seed is the master secret of every
+    /// Zeroed on drop: the root seed is the master secret of every
     /// epoch key this device will ever mint.
     root_seed: [u8; 32],
     public: BpqsPublicKey<P>,
@@ -130,6 +130,7 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
     /// through [`BpqsSigner::resume`] (or declares a never-minted device with
     /// [`BpqsSigner::fresh_device`]).
     pub fn ceremonial_keygen(root_seed: [u8; 32], window: EpochWindow) -> Result<Self, BpqsError> {
+        crate::params::ensure_valid_params::<P>()?;
         let mut vks = Vec::with_capacity(1usize << P::T_LOG2);
         for epoch in 0..(1u32 << P::T_LOG2) {
             let seed = prf_epoch_seed::<H>(&root_seed, epoch);
@@ -182,7 +183,13 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
         counts: impl IntoIterator<Item = (u32, u32)>,
     ) -> Result<Self, BpqsError> {
         let mut signer = Self::ceremonial_keygen(root_seed, window)?;
+        let mut seen_epochs = alloc::collections::BTreeSet::new();
         for (epoch, used) in counts {
+            if !seen_epochs.insert(epoch) {
+                return Err(BpqsError::Malformed(
+                    "duplicate epoch entry in resumed quota state",
+                ));
+            }
             if epoch >= (1u32 << P::T_LOG2) {
                 return Err(BpqsError::Malformed(
                     "resumed quota names an epoch beyond the tree's headroom",
@@ -274,9 +281,9 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
                 "epoch beyond the tree's headroom; committee renewal ceremony required",
             ));
         }
-        let epoch_seed = prf_epoch_seed::<H>(&self.root_seed, epoch);
-        let chains = wots::epoch_secret_chains::<H, P>(&epoch_seed);
-        let r_wide = H::digest32(
+        let mut epoch_seed = prf_epoch_seed::<H>(&self.root_seed, epoch);
+        let mut chains = wots::epoch_secret_chains::<H, P>(&epoch_seed);
+        let mut r_wide = H::digest32(
             domains::RANDOMIZER,
             &[
                 &self.root_seed,
@@ -288,11 +295,21 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
         let mut randomizer = [0u8; 16];
         randomizer.copy_from_slice(&r_wide[..16]);
         let bound = H::digest32(domains::MESSAGE_BIND_V1, &[&randomizer, msg]);
+        let path_res = merkle::auth_path::<P>(&self.levels, epoch as usize);
+        let signed_chains = wots::sign_chains::<H, P>(&chains, &bound);
+        epoch_seed.fill(0);
+        core::hint::black_box(&mut epoch_seed);
+        for lane in &mut chains {
+            lane.fill(0);
+        }
+        core::hint::black_box(&mut chains);
+        r_wide.fill(0);
+        core::hint::black_box(&mut r_wide);
         let mut signature = BpqsSignature {
             epoch,
             randomizer,
-            chains: wots::sign_chains::<H, P>(&chains, &bound),
-            path: merkle::auth_path::<P>(&self.levels, epoch as usize)?,
+            chains: signed_chains,
+            path: path_res?,
             _private: core::marker::PhantomData,
         };
         for lane in signature.chains.iter_mut().skip(P::LEN) {
@@ -359,10 +376,17 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
     msg: &[u8],
     sig: &BpqsSignature<P>,
 ) -> Result<(), BpqsError> {
+    crate::params::ensure_valid_params::<P>()?;
     if public.params_name != P::NAME {
         return Err(BpqsError::Malformed(
             "keybook entry and signature are from different parameter rows",
         ));
+    }
+    if public.root.iter().skip(P::N).any(|b| *b != 0) {
+        return Err(BpqsError::Malformed("non-zero padding in public key root"));
+    }
+    if public.root.iter().take(P::N).all(|b| *b == 0) {
+        return Err(BpqsError::Malformed("all-zero public key root"));
     }
     let expected_epoch = epoch_of(height, public.window)?;
     if sig.epoch != expected_epoch {
@@ -378,6 +402,73 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
     let bound = H::digest32(domains::MESSAGE_BIND_V1, &[&sig.randomizer, msg]);
     let rebuilt = wots::verify_chains::<H, P>(&sig.chains, &bound);
     merkle::verify_path::<H, P>(&rebuilt, sig.epoch as usize, &sig.path, &public.root)
+}
+
+/// Stateful verifier-side ceremony log enforcing one-time epoch consumption
+/// (`Q_MAX = 1`) and refusing non-production parameter rows unless
+/// explicitly constructed for tests.
+///
+/// WIRING: anchor family verifier log for research line F2.
+#[derive(Clone, Debug, Default)]
+pub struct BpqsVerifierLog {
+    seen_epochs: alloc::collections::BTreeSet<([u8; 32], &'static str, u64, u32)>,
+    allow_test_params: bool,
+}
+
+impl BpqsVerifierLog {
+    /// Create a production verifier log that refuses non-production parameter
+    /// rows (`ParamsTestFast`, benchmark rows) and records spent epochs.
+    ///
+    /// WIRING: cold-committee anchor verification state.
+    #[must_use]
+    pub const fn new_production() -> Self {
+        Self {
+            seen_epochs: alloc::collections::BTreeSet::new(),
+            allow_test_params: false,
+        }
+    }
+
+    /// Create a test-capable verifier log that still enforces one-time epoch
+    /// consumption while permitting small-tree test parameter rows.
+    ///
+    /// WIRING: exposed for small-tree unit and integration batteries.
+    #[must_use]
+    pub const fn new_allow_test_params() -> Self {
+        Self {
+            seen_epochs: alloc::collections::BTreeSet::new(),
+            allow_test_params: true,
+        }
+    }
+
+    /// Verify `sig` at `height` and atomically record `(public.root, sig.epoch)`
+    /// as spent so any second signature under the same key and epoch is refused.
+    ///
+    /// WIRING: stateful verifier entry point pairing `verify_at_height` with
+    /// one-time epoch tracking.
+    pub fn accept_at_height<H: BpqsHash, P: BpqsParams>(
+        &mut self,
+        public: &BpqsPublicKey<P>,
+        height: u64,
+        msg: &[u8],
+        sig: &BpqsSignature<P>,
+    ) -> Result<(), BpqsError> {
+        if !self.allow_test_params && !P::IS_PRODUCTION {
+            return Err(BpqsError::Malformed(
+                "non-production BPQS parameter row refused by production verifier",
+            ));
+        }
+        verify_at_height::<H, P>(public, height, msg, sig)?;
+        if !self
+            .seen_epochs
+            .insert((public.root, P::NAME, public.window.0, sig.epoch))
+        {
+            return Err(BpqsError::QuotaExceeded {
+                epoch: sig.epoch,
+                attempted: 2,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -645,12 +736,11 @@ mod sign_tests {
     }
 }
 
-/// F11: zero the root seed when the signer is dropped.
+/// Zero the root seed when the signer is dropped.
 impl<P: BpqsParams, H: BpqsHash> Drop for BpqsSigner<P, H> {
     fn drop(&mut self) {
-        for b in &mut self.root_seed {
-            *b = 0;
-        }
+        self.root_seed.fill(0);
+        core::hint::black_box(&mut self.root_seed);
     }
 }
 
@@ -723,6 +813,25 @@ mod tests {
         sig.path[ParamsTestFast::T_LOG2][0] = 1;
         assert!(matches!(
             check_canonical(&sig),
+            Err(BpqsError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn resume_refuses_duplicate_epoch_entries_and_verifier_refuses_zero_root() {
+        let window = EpochWindow(4);
+        assert!(matches!(
+            BpqsSigner::<ParamsTestFast, H>::resume([7u8; 32], window, [(2, 1), (2, 1)]),
+            Err(BpqsError::Malformed(_))
+        ));
+        assert!(matches!(
+            BpqsSigner::<ParamsTestFast, H>::resume([7u8; 32], window, [(2, 1), (2, 0)]),
+            Err(BpqsError::Malformed(_))
+        ));
+        let zero_pk =
+            BpqsPublicKey::<ParamsTestFast>::from_parts([0u8; 32], window, ParamsTestFast::NAME);
+        assert!(matches!(
+            verify_at_height::<H, ParamsTestFast>(&zero_pk, 0, b"m", &signed_fast()),
             Err(BpqsError::Malformed(_))
         ));
     }

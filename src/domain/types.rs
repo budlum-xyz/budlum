@@ -10,10 +10,24 @@ pub type Hash32 = [u8; 32];
 
 pub const POW_HEADER_CHAIN_ADAPTER: &str = "pow-header-chain-v1";
 
+/// Canonical name of the Bitcoin SPV finality adapter.
+///
+/// Set as the `ConsensusDomain::finality_adapter` value when registering a
+/// `PoW` domain whose headers are Bitcoin headers (80-byte serialization,
+/// double-SHA256, compact `bits` targets, Bitcoin-style chainwork). It is a
+/// separate name from `POW_HEADER_CHAIN_ADAPTER` because the two adapters
+/// hash different header preimages and accumulate work under different
+/// rules; a proof for one must never be judged by the other. Registration
+/// accepts `pow_parameters` for this adapter exactly as for
+/// `POW_HEADER_CHAIN_ADAPTER` (difficulty bounds, chainwork floor, header
+/// ceiling), and `min_confirmations` is read the same way: the window starts
+/// at the committed header and must be at least that deep.
+pub const BITCOIN_SPV_ADAPTER: &str = "bitcoin-spv-v1";
+
 /// Canonical name of the storage-attestation domain finality adapter.
 ///
 /// Set as the `ConsensusDomain::finality_adapter` value when registering a
-/// `StorageAttestation` domain. Distinct from the PoW header-chain adapter
+/// `StorageAttestation` domain. Distinct from the `PoW` header-chain adapter
 /// (`POW_HEADER_CHAIN_ADAPTER`) because storage finality is **not** the same
 /// Shape as bounded-PoW header finality (will introduce
 /// `StorageFinalityAdapter`, vision +).
@@ -36,7 +50,7 @@ pub enum ConsensusKind {
     Bft,
     Zk,
     Custom(String),
-    /// B.U.D. Storage ConsensusDomain.
+    /// B.U.D. Storage `ConsensusDomain`.
     ///
     /// Carries the bounded `StorageDomainParams` so the type system forces
     /// Every consumer to handle the storage-specific limits. We use a new
@@ -57,6 +71,9 @@ pub enum ConsensusKind {
     /// Within Budlum's multi-consensus architecture, analogous to
     /// `StorageAttestation` for B.U.D. but for AI verification.
     AiInference,
+    Dag,
+    Poh,
+    Pospace,
 }
 
 impl ConsensusKind {
@@ -67,11 +84,6 @@ impl ConsensusKind {
             ConsensusKind::PoA => b"poa".to_vec(),
             ConsensusKind::Bft => b"bft".to_vec(),
             ConsensusKind::Zk => b"zk".to_vec(),
-            ConsensusKind::Custom(name) => {
-                let mut out = b"custom:".to_vec();
-                out.extend_from_slice(name.as_bytes());
-                out
-            }
             ConsensusKind::StorageAttestation(params) => {
                 // Tag + parameters: distinct from any `Custom(...)` string so
                 // Downstream code that already pattern-matches on `as_bytes`
@@ -81,6 +93,10 @@ impl ConsensusKind {
                 out
             }
             ConsensusKind::AiInference => b"ai_inference".to_vec(),
+            ConsensusKind::Dag => b"dag".to_vec(),
+            ConsensusKind::Poh => b"poh".to_vec(),
+            ConsensusKind::Pospace => b"pospace".to_vec(),
+            ConsensusKind::Custom(name) => format!("custom:{name}").into_bytes(),
         }
     }
 
@@ -92,6 +108,21 @@ impl ConsensusKind {
     /// Convenience: is this an AI Inference domain?
     pub fn is_ai(&self) -> bool {
         matches!(self, ConsensusKind::AiInference)
+    }
+
+    /// Convenience: is this a DAG domain?
+    pub fn is_dag(&self) -> bool {
+        matches!(self, ConsensusKind::Dag)
+    }
+
+    /// Convenience: is this a `PoH` domain?
+    pub fn is_poh(&self) -> bool {
+        matches!(self, ConsensusKind::Poh)
+    }
+
+    /// Convenience: is this a `PoSpace` domain?
+    pub fn is_pospace(&self) -> bool {
+        matches!(self, ConsensusKind::Pospace)
     }
 }
 
@@ -133,7 +164,7 @@ fn default_domain_operator_bond() -> u64 {
     crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND
 }
 
-/// Consensus-critical limits for the bounded PoW header-chain verifier.
+/// Consensus-critical limits for the bounded `PoW` header-chain verifier.
 ///
 /// These parameters are fixed when a domain is registered. In particular,
 /// Difficulty is never accepted from a relayer without checking it against
@@ -147,6 +178,11 @@ pub struct PoWDomainParameters {
 }
 
 impl PoWDomainParameters {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self, min_confirmations: u64) -> Result<(), String> {
         if self.min_difficulty_bits == 0 || self.max_difficulty_bits > 120 {
             return Err("PoW difficulty range must be within 1..=120 bits".into());
@@ -187,7 +223,8 @@ pub struct ConsensusDomain {
     pub tx_root_scheme: RootScheme,
     pub last_committed_height: u64,
     pub last_committed_hash: Hash32,
-    /// Required when `finality_adapter == "pow-header-chain-v1"`.
+    /// Required when `finality_adapter == "pow-header-chain-v1"` or
+    /// `finality_adapter == "bitcoin-spv-v1"`; rejected otherwise.
     /// Appended for bincode field-order stability; legacy records are migrated
     /// By the storage loader and remain bridge-gated.
     #[serde(default)]
@@ -292,6 +329,11 @@ pub struct DomainCommitment {
 }
 
 impl DomainCommitment {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_block(
         domain: &ConsensusDomain,
         block: &Block,
@@ -429,6 +471,10 @@ pub fn validator_set_commitment(
 /// That pass-through means `tag`, `domain_id` and `scheme` only take effect
 /// for inputs that are *not* 32 bytes. Do not use this to commit to something
 /// that must be unique per domain - see [`validator_set_commitment`].
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn normalize_hash32(
     tag: &[u8],
     domain_id: DomainId,

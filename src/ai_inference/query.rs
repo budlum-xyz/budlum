@@ -23,6 +23,7 @@ pub struct AiQueryResponse {
 
 /// Prepares the summary of the AI inference layer, for the `bud_aiInferenceStats` RPC.
 /// The caller (RPC or CLI) supplies the model list and the operator count.
+#[must_use]
 pub fn prepare_ai_overview(
     active_models: Vec<AiModelInfo>,
     eligible_operators: u32,

@@ -97,8 +97,9 @@ pub enum ExpectedRefusal {
     Kind(RefusalKind),
 }
 
-/// The refusal categories a probe can pin, mirrored from [`AdapterError`] but
-/// stable across message wording changes: a probe that matched on an English
+/// The refusal categories a probe can pin, mirrored from [`AdapterError`].
+///
+/// Stable across message wording changes: a probe that matched on an English
 /// sentence would break the day somebody improved the sentence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefusalKind {
@@ -116,7 +117,7 @@ pub enum RefusalKind {
 
 impl RefusalKind {
     #[must_use]
-    pub fn of(err: &AdapterError) -> Self {
+    pub const fn of(err: &AdapterError) -> Self {
         match err {
             AdapterError::WrongAdapter { .. } => Self::WrongAdapter,
             AdapterError::UnsupportedEvidenceVersion { .. } => Self::UnsupportedEvidenceVersion,
@@ -132,7 +133,7 @@ impl RefusalKind {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::WrongAdapter => "wrong-adapter",
             Self::UnsupportedEvidenceVersion => "unsupported-evidence-version",
@@ -171,12 +172,14 @@ pub enum ProbeOutcome {
 
 impl ProbeOutcome {
     #[must_use]
-    pub fn passed(&self) -> bool {
+    pub const fn passed(&self) -> bool {
         matches!(self, Self::Refused { .. })
     }
 }
 
-/// The whole admission run, as a record. Stored against the domain so a
+/// The whole admission run, as a record.
+///
+/// Stored against the domain so a
 /// consumer can see not just "admitted" but *what was probed* - an admission
 /// over three probes and one over thirty are not the same assurance, and a
 /// boolean would hide that.
@@ -250,6 +253,10 @@ fn outcome_label(outcome: &ProbeOutcome) -> String {
 /// Returns the sample or a reason it could not be applied. Never panics and
 /// never silently does nothing: a patch that cannot be applied is reported so the
 /// harness can record it.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn apply_patch(
     evidence: &RawConsensusEvidence,
     patch: &BytePatch,
@@ -257,6 +264,9 @@ pub fn apply_patch(
     let mut out = evidence.clone();
     match patch {
         BytePatch::InPayload { offset, bytes } => {
+            if bytes.is_empty() {
+                return Err("in-payload patch must overwrite at least one byte".to_string());
+            }
             let end = offset.saturating_add(bytes.len());
             if end > out.payload.len() {
                 return Err(format!(
@@ -267,11 +277,19 @@ pub fn apply_patch(
             let Some(window) = out.payload.get_mut(*offset..end) else {
                 return Err("payload window is not in range".to_string());
             };
+            if window == bytes.as_slice() {
+                return Err(
+                    "in-payload patch is a no-op: window already equals patch bytes".to_string(),
+                );
+            }
             window.copy_from_slice(bytes);
         }
         BytePatch::TruncatePayload { keep } => {
-            if *keep > out.payload.len() {
-                return Err(format!("cannot keep {keep} of {} bytes", out.payload.len()));
+            if *keep >= out.payload.len() {
+                return Err(format!(
+                    "truncate keep {keep} must be strictly less than payload's {} bytes",
+                    out.payload.len()
+                ));
             }
             out.payload.truncate(*keep);
         }
@@ -279,7 +297,7 @@ pub fn apply_patch(
         BytePatch::DeclaredRoot { value } => out.declared_root = *value,
         BytePatch::EvidenceVersion { value } => out.evidence_version = *value,
         BytePatch::Submitter { value } => out.submitter = *value,
-        BytePatch::Network { value } => out.network = value.clone(),
+        BytePatch::Network { value } => out.network.clone_from(value),
     }
     Ok(out)
 }
@@ -369,6 +387,91 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
+fn first_undeclared_version(accepted: &[u32]) -> Option<u32> {
+    (0..=u32::MAX)
+        .rev()
+        .find(|candidate| !accepted.contains(candidate))
+}
+
+/// Full admission run returning both the report and observed [`crate::crypto::facts::CryptoFacts`].
+///
+/// Captures schemes observed while verifying the golden sample so registration doors can seed
+/// CRQC isolation class before the first post-registration submission arrives.
+#[must_use]
+pub fn admit_observed(
+    adapter: &dyn ExternalFinalityAdapter,
+    policy: &VerificationPolicy,
+) -> (AdmissionReport, crate::crypto::facts::CryptoFacts) {
+    let descriptor = adapter.descriptor();
+    let default_version = descriptor
+        .accepted_evidence_versions
+        .first()
+        .copied()
+        .unwrap_or(0);
+    let mut observed = crate::crypto::facts::CryptoFacts::new();
+
+    let fault_probes = adapter.fault_probes();
+    let probe_commitment = probe_commitment(&fault_probes);
+    let Some(golden) = adapter.golden_evidence() else {
+        return (
+            AdmissionReport {
+                adapter_version: descriptor.adapter_version,
+                evidence_version: default_version,
+                golden_verified: false,
+                probes: Vec::new(),
+                probe_commitment,
+                admitted: false,
+            },
+            observed,
+        );
+    };
+
+    let accepted = &descriptor.accepted_evidence_versions;
+    let evidence_version = golden.evidence_version;
+    let version_declared = !accepted.is_empty() && accepted.contains(&evidence_version);
+
+    // Verify through `verify_observed` and ensure any declared security scheme
+    // is faithfully reported to the crypto observer (no silent CRQC omission).
+    let golden_verified = if version_declared {
+        if let Ok(att) = adapter.verify_observed(&golden, policy, &mut observed) {
+            if let Some(declared) = att.security.observed_scheme() {
+                if observed.count(declared) == 0 {
+                    observed.record(declared);
+                }
+            }
+            true
+        } else {
+            observed = crate::crypto::facts::CryptoFacts::new();
+            false
+        }
+    } else {
+        false
+    };
+    let bad_version = first_undeclared_version(accepted);
+    let refuses_undeclared_version = bad_version.is_some_and(|bad_ver| {
+        let mut wrong_ver = golden.clone();
+        wrong_ver.evidence_version = bad_ver;
+        adapter.verify(&wrong_ver, policy).is_err()
+    });
+
+    let mut probes = Vec::with_capacity(fault_probes.len());
+    for probe in fault_probes {
+        let outcome = run_probe(adapter, &golden, &probe, policy);
+        probes.push((probe.name.clone(), outcome));
+    }
+
+    let all_passed = probes.iter().all(|(_, o)| o.passed());
+    let report = AdmissionReport {
+        adapter_version: descriptor.adapter_version,
+        evidence_version,
+        golden_verified,
+        admitted: golden_verified && refuses_undeclared_version && all_passed && !probes.is_empty(),
+        probes,
+        probe_commitment,
+    };
+    (report, observed)
+}
+
 /// The full admission run.
 ///
 /// The golden check comes first and gates everything: without it, an adapter
@@ -378,43 +481,44 @@ pub fn admit(
     adapter: &dyn ExternalFinalityAdapter,
     policy: &VerificationPolicy,
 ) -> AdmissionReport {
-    let descriptor = adapter.descriptor();
-    let evidence_version = descriptor
-        .accepted_evidence_versions
-        .first()
-        .copied()
-        .unwrap_or(0);
+    admit_observed(adapter, policy).0
+}
 
-    let fault_probes = adapter.fault_probes();
-    let probe_commitment = probe_commitment(&fault_probes);
-    let Some(golden) = adapter.golden_evidence() else {
-        return AdmissionReport {
-            adapter_version: descriptor.adapter_version,
-            evidence_version,
-            golden_verified: false,
-            probes: Vec::new(),
-            probe_commitment,
-            admitted: false,
+#[cfg(test)]
+mod noop_patch_tests {
+    use super::*;
+    use crate::core::address::Address;
+    use crate::cross_domain::external::spec::AdapterId;
+
+    #[test]
+    fn apply_patch_rejects_noop_mutations() {
+        let sample = RawConsensusEvidence {
+            adapter: AdapterId::from_name("noop-check"),
+            evidence_version: 2,
+            network: "devnet".to_string(),
+            payload: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            declared_height: 42,
+            declared_root: [0x77; 32],
+            submitter: Address::from([0x01; 32]),
         };
-    };
 
-    // The golden sample must verify. This is the check that makes the probe
-    // results mean anything.
-    let golden_verified = adapter.verify(&golden, policy).is_ok();
-
-    let mut probes = Vec::with_capacity(fault_probes.len());
-    for probe in fault_probes {
-        let outcome = run_probe(adapter, &golden, &probe, policy);
-        probes.push((probe.name.clone(), outcome));
-    }
-
-    let all_passed = probes.iter().all(|(_, o)| o.passed());
-    AdmissionReport {
-        adapter_version: descriptor.adapter_version,
-        evidence_version,
-        golden_verified,
-        admitted: golden_verified && all_passed && !probes.is_empty(),
-        probes,
-        probe_commitment,
+        assert!(apply_patch(
+            &sample,
+            &BytePatch::InPayload {
+                offset: 0,
+                bytes: Vec::new(),
+            }
+        )
+        .is_err());
+        assert!(apply_patch(
+            &sample,
+            &BytePatch::InPayload {
+                offset: 1,
+                bytes: vec![0xBB, 0xCC],
+            }
+        )
+        .is_err());
+        assert!(apply_patch(&sample, &BytePatch::TruncatePayload { keep: 4 }).is_err());
+        assert!(apply_patch(&sample, &BytePatch::TruncatePayload { keep: 9 }).is_err());
     }
 }

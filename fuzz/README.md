@@ -13,8 +13,9 @@
 | `snapshot_deserialize` | `StateSnapshot` + `StateSnapshotV2::from_bytes` parse/migration hook fuzz | Present |
 | `consensus_validate` | `BlockHeader` serialize safety over random header fields | Present |
 | `fuzz_blockchain_serialize` | A minimal byte-slice harness; a placeholder for a future roundtrip extension | Present |
-| `evm_rlp_decode` | F10.1 RLP decoder: random relayer bytes -> canonical decode/error, no panic | Present |
-| `evm_mpt_verify` | F10.1 MPT verifier: bounded key/proof pieces -> verify/error, no panic | Present |
+| `evm_rlp_decode` | EVM RLP decoder: random relayer bytes -> canonical decode/error, no panic | Present |
+| `evm_mpt_verify` | EVM MPT verifier: bounded key/proof pieces -> verify/error, no panic | Present |
+| `evm_deployment_proof` | Signed deployment transaction and receipt proof -> evidence/refusal, no panic | Present |
 | `consensus_state_transition` | produce_block + try_reorg panic freedom / MAX_REORG_DEPTH | Present |
 | `relayer_escrow` | bridge lock -> mint -> burn -> unlock plus the UniversalRelayer proof path | Present |
 | `zk_verifier` | ProofEnvelope bincode + DefaultAdapter::verify fail-closed | Present |
@@ -38,6 +39,7 @@ cargo +nightly fuzz run consensus_validate
 cargo +nightly fuzz run fuzz_blockchain_serialize
 cargo +nightly fuzz run evm_rlp_decode
 cargo +nightly fuzz run evm_mpt_verify
+cargo +nightly fuzz run evm_deployment_proof
 ```
 
 A short smoke run example:
@@ -53,7 +55,7 @@ cargo +nightly fuzz run evm_mpt_verify -- -max_total_time=300
 The ZKVM oriented seed corpus files live under `fuzz/corpus/zkvm/`. The EVM
 target seeds are under `fuzz/corpus/evm_rlp_decode/` and
 `fuzz/corpus/evm_mpt_verify/`; these are the canonical empty RLP and empty trie
-starting inputs of the in-tree F10 tests, not the official Ethereum fixture
+starting inputs of the in-tree EVM bridge tests, not the official Ethereum fixture
 package. To produce new seeds:
 
 ```bash
@@ -71,9 +73,9 @@ exactly that agreement.
 ## Acceptance criteria
 
 - [x] `fuzz/Cargo.toml` exists.
-- [x] 14 targets exist under `fuzz/fuzz_targets/`.
+- [x] 16 targets exist under `fuzz/fuzz_targets/`.
 - [x] Every target is registered as an explicit `[[bin]]` in `Cargo.toml`.
-- [x] The F10.1 RLP and MPT panic/DoS targets are registered; the MPT input is
+- [x] The EVM RLP and MPT panic/DoS targets are registered; the MPT input is
       bounded to 64 nodes and 128 bytes per node.
 - [x] The deserialization targets consume a `Result` instead of panicking.
 - [ ] `cargo +nightly fuzz check` is clean in an authorised environment.

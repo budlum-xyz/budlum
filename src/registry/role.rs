@@ -19,14 +19,17 @@ use serde::{Deserialize, Serialize};
 pub struct RoleId(pub u32);
 
 impl RoleId {
+    #[must_use]
     pub const fn new(id: u32) -> Self {
-        RoleId(id)
+        Self(id)
     }
 
+    #[must_use]
     pub const fn value(&self) -> u32 {
         self.0
     }
 
+    #[must_use]
     pub fn as_bytes(&self) -> [u8; 4] {
         self.0.to_le_bytes()
     }
@@ -46,7 +49,7 @@ impl std::fmt::Display for RoleId {
             roles::ATTESTER => write!(f, "attester"),
             roles::AI_OPERATOR => write!(f, "ai_operator"),
             roles::CONTENT_VALIDATOR => write!(f, "content_validator"),
-            RoleId(id) => write!(f, "role#{id}"),
+            Self(id) => write!(f, "role#{id}"),
         }
     }
 }
@@ -54,10 +57,10 @@ impl std::fmt::Display for RoleId {
 /// Well-known protocol-level roles. These are *conveniences*, not an exhaustive
 /// List - the registry never checks membership against this set.
 ///
-/// Unified stake-based registry for v1 - master verifiers (DeEd),
-/// SocialFi content validator, relayer, supply-chain attester all share the
-/// Same primitive. RoleIds 1-8 are pinned from budzero/verifier-registry crate
-/// For consistency; 9 is new for SocialFi content validator.
+/// Unified stake-based registry for v1 - master verifiers (`DeEd`),
+/// `SocialFi` content validator, relayer, supply-chain attester all share the
+/// Same primitive. `RoleIds` 1-8 are pinned from budzero/verifier-registry crate
+/// For consistency; 9 is new for `SocialFi` content validator.
 pub mod roles {
     use super::RoleId;
 
@@ -65,20 +68,20 @@ pub mod roles {
     pub const VALIDATOR: RoleId = RoleId(1);
     /// Settlement / proof verifier (generic).
     pub const VERIFIER: RoleId = RoleId(2);
-    /// DeEd master verifier - alias to VERIFIER (RoleId 2), same primitive,
-    /// Distinct semantic label matrix. Preserves AI_OPERATOR=8.
+    /// `DeEd` master verifier - alias to VERIFIER (`RoleId` 2), same primitive,
+    /// Distinct semantic label matrix. Preserves `AI_OPERATOR`=8.
     pub const MASTER_VERIFIER: RoleId = RoleId(2);
     /// Cross-domain message relayer (permissionless).
     pub const RELAYER: RoleId = RoleId(3);
-    /// ZK proof producer (BudZKVM prover). Registration is OPTIONAL, proof
+    /// ZK proof producer (`BudZKVM` prover). Registration is OPTIONAL, proof
     /// Submission is fully permissionless (STARK proofs are self-verifying);
     /// Registering as a PROVER is only required to be eligible for rewards.
     pub const PROVER: RoleId = RoleId(4);
     /// B.U.D. storage operator.
     ///
     /// Registration is OPTIONAL - opening a `StorageDeal` is itself
-    /// Permissionless (the deal's `operator_bond` is the only gate, see
-    /// `domain::storage_deal::StorageRegistry::open_deal`). Registering as
+    /// Permissionless (the deal's `operator_bond` is the only gate on
+    /// `open_deal`). Registering as
     /// `STORAGE_OPERATOR` is only required to be eligible for the
     /// Per-deal reward stream.
     ///
@@ -102,16 +105,16 @@ pub mod roles {
     pub const AI_VERIFIER: RoleId = RoleId(6);
 
     /// Supply-chain attester - submits finality / checkpoint attestations
-    /// For Budlum Go supply-chain and StorageAttestation domains.
-    /// Unified under PermissionlessRegistry.
+    /// For Budlum Go supply-chain and `StorageAttestation` domains.
+    /// Unified under `PermissionlessRegistry`.
     pub const ATTESTER: RoleId = RoleId(7);
 
-    /// An AI inference layer decentralized AI operator: a compute bond, independent of PoS.
-    /// Must be preserved acceptance (RoleId 8).
+    /// An AI inference layer decentralized AI operator: a compute bond, independent of `PoS`.
+    /// Must be preserved acceptance (`RoleId` 8).
     pub const AI_OPERATOR: RoleId = RoleId(8);
 
-    /// SocialFi content validator - validates D-Web content authenticity
-    /// For SocialFi NFT registry. New (RoleId 9).
+    /// `SocialFi` content validator - validates D-Web content authenticity
+    /// For `SocialFi` NFT registry. New (`RoleId` 9).
     pub const CONTENT_VALIDATOR: RoleId = RoleId(9);
 }
 

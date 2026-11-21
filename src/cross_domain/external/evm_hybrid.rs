@@ -55,7 +55,7 @@ impl PrecompileObservation {
     /// requested ABI. Both checks are needed: success with garbage is not a
     /// cryptographic capability.
     #[must_use]
-    pub fn recognised(&self) -> bool {
+    pub const fn recognised(&self) -> bool {
         self.call_succeeded && self.returned_expected_shape
     }
 }
@@ -94,7 +94,7 @@ impl EvmPrecompiles {
     }
 
     #[must_use]
-    pub fn has_ml_dsa(&self) -> bool {
+    pub const fn has_ml_dsa(&self) -> bool {
         self.ml_dsa_fips || self.ml_dsa_eth
     }
 
@@ -102,7 +102,7 @@ impl EvmPrecompiles {
     /// variant is a deliberate wire-format decision, not a compatibility
     /// guess: the two variants do not accept the same keys.
     #[must_use]
-    pub fn ml_dsa_variant(&self) -> Option<MlDsaVariant> {
+    pub const fn ml_dsa_variant(&self) -> Option<MlDsaVariant> {
         if self.ml_dsa_fips {
             Some(MlDsaVariant::Fips204)
         } else if self.ml_dsa_eth {
@@ -229,6 +229,10 @@ impl EvmHybridProof {
     }
 
     /// Performs shape and resource checks before selecting a verification mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), EvmPlanError> {
         let points = [
             ("g1_hashed_message", self.g1_hashed_message.len(), 128usize),
@@ -319,6 +323,12 @@ pub enum EvmEncodingError {
         expected: usize,
         actual: usize,
     },
+    #[error("an identity BLS point cannot carry a finality attestation")]
+    IdentityPoint,
+    #[error("zero state root cannot be attested on the EVM verifier")]
+    ZeroStateRoot,
+    #[error("the Budlum chain id is zero")]
+    ZeroChainId,
 }
 
 impl EvmFinalityAttestation {
@@ -343,7 +353,7 @@ impl EvmFinalityAttestation {
             let hash: [u8; 32] = Keccak256::digest(bytes).into();
             encoded.extend_from_slice(&hash);
         }
-        encoded.extend_from_slice(&u256_word(if self.ml_dsa_eth_variant { 1 } else { 0 }));
+        encoded.extend_from_slice(&u256_word(u64::from(self.ml_dsa_eth_variant)));
         encoded.extend_from_slice(&u256_word(domain.len() as u64));
         encoded.extend_from_slice(domain);
         encoded.resize(encoded.len() + padded_len(domain.len()) - domain.len(), 0);
@@ -365,43 +375,59 @@ impl EvmFinalityAttestation {
     /// ABI encodes the call data for `verify(Attestation)` exactly as Solidity
     /// `abi.encodeWithSelector` does. The selector is included so the output
     /// can be sent directly to an EVM transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn encode_verify_calldata(&self, evm_chain_id: u64) -> Result<Vec<u8>, EvmEncodingError> {
-        for (field, actual, expected) in [
-            (
-                "g2_aggregate_pubkey",
-                self.g2_aggregate_pubkey.len(),
-                256usize,
-            ),
-            ("g2_generator", self.g2_generator.len(), 256usize),
-            ("g1_neg_signature", self.g1_neg_signature.len(), 128usize),
+        if self.budlum_chain_id == 0 {
+            return Err(EvmEncodingError::ZeroChainId);
+        }
+        if self.state_root == [0u8; 32] {
+            return Err(EvmEncodingError::ZeroStateRoot);
+        }
+        for (field, bytes, expected) in [
+            ("g2_aggregate_pubkey", &self.g2_aggregate_pubkey, 256usize),
+            ("g2_generator", &self.g2_generator, 256usize),
+            ("g1_neg_signature", &self.g1_neg_signature, 128usize),
         ] {
-            if actual != expected {
+            if bytes.len() != expected {
                 return Err(EvmEncodingError::WrongLength {
                     field,
                     expected,
+                    actual: bytes.len(),
+                });
+            }
+            if bytes.iter().all(|b| *b == 0) {
+                return Err(EvmEncodingError::IdentityPoint);
+            }
+        }
+        for (field, actual) in [
+            ("ml_dsa_signature", self.ml_dsa_signature.len()),
+            ("ml_dsa_pubkey", self.ml_dsa_pubkey.len()),
+        ] {
+            if actual == 0 {
+                return Err(EvmEncodingError::WrongLength {
+                    field,
+                    expected: 1,
+                    actual: 0,
+                });
+            }
+            if actual > MAX_ML_DSA_FIELD_BYTES {
+                return Err(EvmEncodingError::WrongLength {
+                    field,
+                    expected: MAX_ML_DSA_FIELD_BYTES,
                     actual,
                 });
             }
         }
-        if self.ml_dsa_signature.is_empty() {
-            return Err(EvmEncodingError::WrongLength {
-                field: "ml_dsa_signature",
-                expected: 1,
-                actual: 0,
-            });
-        }
-        if self.ml_dsa_pubkey.is_empty() {
-            return Err(EvmEncodingError::WrongLength {
-                field: "ml_dsa_pubkey",
-                expected: 1,
-                actual: 0,
-            });
-        }
 
-        let selector = Keccak256::digest(
-            b"verify((uint64,bytes32,uint64,uint64,bytes,bytes,bytes,bytes,bytes,bool)",
-        );
-        let mut out = selector[..4].to_vec();
+        let selector: [u8; 32] = Keccak256::digest(
+            b"verify((uint64,bytes32,uint64,uint64,bytes,bytes,bytes,bytes,bytes,bool))",
+        )
+        .into();
+        let [s0, s1, s2, s3, ..] = selector;
+        let mut out = vec![s0, s1, s2, s3];
         // One dynamic tuple argument: the first word points past the outer
         // head, and all offsets inside the tuple are relative to its start.
         out.extend_from_slice(&u256_word(32));
@@ -422,7 +448,7 @@ impl EvmFinalityAttestation {
             out.extend_from_slice(&u256_word(offset as u64));
             offset = offset.saturating_add(32 + padded_len(bytes.len()));
         }
-        out.extend_from_slice(&u256_word(if self.ml_dsa_eth_variant { 1 } else { 0 }));
+        out.extend_from_slice(&u256_word(u64::from(self.ml_dsa_eth_variant)));
         for bytes in dynamic_fields {
             out.extend_from_slice(&u256_word(bytes.len() as u64));
             out.extend_from_slice(bytes);
@@ -435,7 +461,7 @@ impl EvmFinalityAttestation {
     }
 }
 
-fn padded_len(length: usize) -> usize {
+const fn padded_len(length: usize) -> usize {
     length.saturating_add(31) / 32 * 32
 }
 
@@ -718,5 +744,50 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, EvmPlanError::WrongPointLength { .. }));
+    }
+
+    #[test]
+    fn encode_verify_calldata_uses_canonical_tuple_selector_and_caps_ml_dsa() {
+        let valid = EvmFinalityAttestation {
+            height: 42,
+            state_root: [7; 32],
+            epoch: 3,
+            budlum_chain_id: 45_261,
+            g2_aggregate_pubkey: vec![2; 256],
+            g2_generator: vec![3; 256],
+            g1_neg_signature: vec![4; 128],
+            ml_dsa_signature: vec![5; 3_293],
+            ml_dsa_pubkey: vec![6; 1_952],
+            ml_dsa_eth_variant: false,
+        };
+        let calldata = valid.encode_verify_calldata(11_155_111).unwrap();
+        let expected_sig =
+            b"verify((uint64,bytes32,uint64,uint64,bytes,bytes,bytes,bytes,bytes,bool))";
+        let expected_hash: [u8; 32] = Keccak256::digest(expected_sig).into();
+        assert_eq!(
+            calldata.get(..4),
+            expected_hash.get(..4),
+            "verify(Attestation) selector must close both the tuple and outer call"
+        );
+
+        let mut oversized_sig = valid.clone();
+        oversized_sig.ml_dsa_signature = vec![5; MAX_ML_DSA_FIELD_BYTES + 1];
+        assert!(oversized_sig.encode_verify_calldata(11_155_111).is_err());
+
+        let mut oversized_pk = valid.clone();
+        oversized_pk.ml_dsa_pubkey = vec![6; MAX_ML_DSA_FIELD_BYTES + 1];
+        assert!(oversized_pk.encode_verify_calldata(11_155_111).is_err());
+
+        let mut identity_g2 = valid.clone();
+        identity_g2.g2_aggregate_pubkey = vec![0; 256];
+        assert!(identity_g2.encode_verify_calldata(11_155_111).is_err());
+
+        let mut zero_root = valid.clone();
+        zero_root.state_root = [0; 32];
+        assert!(zero_root.encode_verify_calldata(11_155_111).is_err());
+
+        let mut zero_chain = valid;
+        zero_chain.budlum_chain_id = 0;
+        assert!(zero_chain.encode_verify_calldata(11_155_111).is_err());
     }
 }

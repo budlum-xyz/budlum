@@ -247,10 +247,10 @@ fn judge(src: &str) -> Vec<String> {
         // (`if tx.verify() { Ok(()) }`), is an unguarded success
         // (CWE-697).
         // Success is any `Ok` expression whose payload is the unit type:
-        // `Ok(())`, `Ok::<(), String>(())`, `Ok::<_, _>(())`, etc. A literal
+        // `Ok(())`, `Ok::<, String>(())`, `Ok::<_, _>(())`, etc. A literal
         // `Ok(())` match misses the typed forms (CWE-697).
         // Whitespace-compact unit-success detection covers `Ok(())`,
-        // `Ok :: <(), String> (())`, `::Ok(())` etc. (CWE-697).
+        // `Ok:: <, String> (())`, `::Ok(())` etc. (CWE-697).
         let has_ok_success = ok_success_in(block);
         let guarded_success = block.find("if tx.verify").is_some_and(|verify_start| {
             let verify_rest = &block[verify_start..];

@@ -8,11 +8,19 @@ on:
   # unmergeable, so this has to fire on PRs too. The path filter is gone for
   # the same reason: a filtered-out run reports nothing rather than success,
   # which branch protection reads as still-waiting.
+  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
+  # stack), on the schedule and on demand. A stacked pull request (base
+  # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
+  # security-audit.yml, semgrep.yml and the other light workflows, and skips the
+  # jobs of this file through the job-level condition: GitHub evaluates the
+  # `branches` filter of a stacked pull request against the root of the stack,
+  # so the filter alone does not keep it out. This keeps one push from queueing
+  # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses]
   schedule:
     # Weekly hygiene scan (effects of cargo update + new deps)
-    - cron: '17 4 * * 1'
+    - cron: '17 3 * * 3' # Wednesday 03:17 UTC
   workflow_dispatch:
 
 # Read-only.
@@ -25,6 +33,9 @@ permissions:
 
 jobs:
   udeps:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: "Udeps: the unused dependency gate"
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -101,6 +112,9 @@ jobs:
           cargo run --release --manifest-path ../xtask/gates/Cargo.toml -- udeps /tmp/udeps2.txt
 
   geiger:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: "Geiger: unsafe visibility (the first-party 0 evidence layer)"
     runs-on: ubuntu-latest
     permissions:
@@ -184,7 +198,7 @@ jobs:
 
           # budzero is a separate workspace and its root is a VIRTUAL manifest (only
           # [workspace], no package). cargo-geiger refuses to run at such a root:
-          # reddediyor: "is a virtual manifest, but this command requires
+          # "is a virtual manifest, but this command requires
           # "running against an actual package". So until now this step had not
           # scanned a single crate of budzero - during the `|| true` era this passed
           # silently, and it surfaced once the gate became fail-closed.
@@ -222,7 +236,7 @@ jobs:
             sarif cargo-geiger /tmp/geiger-all.txt cargo-geiger.sarif
       - name: Upload cargo-geiger SARIF (Security tab)
         if: always()
-        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: cargo-geiger.sarif
           category: cargo-geiger

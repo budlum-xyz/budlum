@@ -1,14 +1,12 @@
 pub mod commitment_registry;
 pub mod deal_open;
 pub mod finality_adapter;
+pub mod finality_proof_model;
 pub mod fork_choice;
 pub mod plugin;
 pub mod plugin_registry;
 pub mod pq_canonical;
 pub mod producer;
-pub mod regen_health;
-pub mod regen_mempool;
-pub mod regeneration_stage;
 pub mod registry;
 pub mod sovereign;
 pub mod storage_deal;
@@ -19,22 +17,22 @@ pub mod types;
 pub use commitment_registry::DomainCommitmentRegistry;
 pub use finality_adapter::{
     hash_finality_proof, hash_pow_header, poa_authority_set_hash, AiInferenceFinalityAdapter,
-    BftFinalityAdapter, DomainFinalityAdapter, FinalityError, FinalityProof, FinalityStatus,
-    PoAFinalityAdapter, PoSFinalityAdapter, PoWHeader, PoWHeaderChainFinalityAdapter,
-    StorageAttestationFinalityAdapter, ZkFinalityAdapter,
+    BftFinalityAdapter, BitcoinHeader, BitcoinSpvFinalityAdapter, DagFinalityAdapter,
+    DomainFinalityAdapter, FinalityError, FinalityProof, FinalityStatus, PoAFinalityAdapter,
+    PoSFinalityAdapter, PoWHeader, PoWHeaderChainFinalityAdapter, PohFinalityAdapter,
+    PospaceFinalityAdapter, StorageAttestationFinalityAdapter, ZkFinalityAdapter,
 };
 pub use fork_choice::{
     ConsensusDomainForkChoice, DomainFinalityStatus, DomainForkChoice, DomainLifecycleStatus,
     ForkCandidate, ForkChoiceError, ForkChoiceReason, ResolvedHead,
 };
 pub use plugin::{
-    default_domain, BftDomainPlugin, ConsensusDomainPlugin, DomainContext, DomainError,
-    PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin, ZkDomainPlugin,
+    default_domain, BftDomainPlugin, ConsensusDomainPlugin, DagDomainPlugin, DomainContext,
+    DomainError, PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin, PohDomainPlugin,
+    PospaceDomainPlugin, ZkDomainPlugin,
 };
 pub use plugin_registry::DomainPluginRegistry;
 pub use pq_canonical::{PqCanonicalSource, SealId, SealKind, SourceError};
-pub use regen_health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
-pub use regen_mempool::RegenMempool;
 pub use registry::ConsensusDomainRegistry;
 pub use sovereign::{
     AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,
@@ -56,5 +54,6 @@ pub use types::expected_initial_root;
 pub use types::{
     normalize_hash32, validator_set_commitment, ConsensusDomain, ConsensusKind, DomainCommitment,
     DomainId, DomainStatus, Hash32, PoWDomainParameters, RootScheme, VerifiedDomainCommitment,
-    AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER, STORAGE_ATTESTATION_ADAPTER,
+    AI_INFERENCE_ADAPTER, BITCOIN_SPV_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
+    STORAGE_ATTESTATION_ADAPTER,
 };

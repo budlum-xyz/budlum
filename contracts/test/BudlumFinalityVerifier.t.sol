@@ -5,8 +5,77 @@ import {Harness} from "./Harness.sol";
 import {
     Attestation,
     BudlumFinalityVerifier,
+    FinalityMode,
     IExternalFraudProofVerifier
 } from "../external-domain/BudlumFinalityVerifier.sol";
+import {BudlumHash} from "../lib/BudlumHash.sol";
+import {BudlumObjectLayerFinality, IBudlumHeaderFinality} from "../object-layer/BudlumFinalityVerifier.sol";
+import {BudlumSettlementEndpoint, IBudlumObjectLayerFinality} from "../object-layer/BudlumSettlementEndpoint.sol";
+
+/// Test tokens: both mutations must roll back when the endpoint refuses custody.
+contract CustodyErc20 {
+    mapping(address => uint256) public balanceOf;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(balanceOf[from] >= amount, "balance");
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+contract CustodyErc721 {
+    mapping(uint256 => address) public ownerOf;
+
+    function mint(address to, uint256 id) external {
+        ownerOf[id] = to;
+    }
+
+    function safeTransferFrom(address from, address to, uint256 id) external {
+        require(ownerOf[id] == from, "owner");
+        ownerOf[id] = to;
+        bytes4 received = BudlumSettlementEndpoint(to).onERC721Received(msg.sender, from, id, "");
+        require(received == BudlumSettlementEndpoint.onERC721Received.selector, "receiver");
+    }
+}
+
+/// A finality boolean alone is not a usable header opening.
+contract BooleanOnlyFinality is IBudlumObjectLayerFinality {
+    function heightFinal(uint64) external pure returns (bool) {
+        return true;
+    }
+
+    function headerAt(uint64) external pure returns (bytes32) {
+        return bytes32(0);
+    }
+
+    function finalityModeAt(uint64) external pure returns (FinalityMode) {
+        return FinalityMode.Hybrid;
+    }
+}
+
+/// Only the test fixture may install a finalized root without BLS/ML-DSA.
+contract SeededFinalityVerifier is BudlumFinalityVerifier {
+    constructor(address fraud)
+        BudlumFinalityVerifier(45_261, 10, fraud, bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)))
+    {}
+
+    function seedFinalized(uint64 height, bytes32 stateRoot) external {
+        heightFinal[height] = true;
+        rootAtHeight[height] = stateRoot;
+        finalityModeAtHeight[height] = FinalityMode.Hybrid;
+    }
+
+    function seedWithMode(uint64 height, bytes32 stateRoot, FinalityMode mode) external {
+        heightFinal[height] = mode != FinalityMode.None;
+        rootAtHeight[height] = stateRoot;
+        finalityModeAtHeight[height] = mode;
+    }
+}
 
 /// A fraud verifier whose answer the test sets.
 contract FraudVerifierStub is IExternalFraudProofVerifier {
@@ -55,7 +124,7 @@ contract InspectingFraudVerifier is IExternalFraudProofVerifier {
         if (shouldRevert) {
             revert("boom");
         }
-        (, address challenger, uint64 openedAt, bool resolved, uint64 h, bytes32 root) = target.challenges(digest);
+        (, address challenger, uint64 openedAt, bool resolved, uint64 h, bytes32 root,) = target.challenges(digest);
         require(openedAt != 0, "challenge missing");
         require(challenger == address(0), "challenger mutated before verifyFraud");
         require(!resolved, "resolved mutated before verifyFraud");
@@ -76,8 +145,8 @@ contract InspectingFraudVerifier is IExternalFraudProofVerifier {
 
 /// negative tests. The default profile runs on Cancun, which has
 /// neither the BLS nor the ML-DSA precompile: an attestation with no
-/// verification path at all is refused. The window tests (F02 pending, F05,
-/// F06) run under the `prague` profile, where the real EIP-2537 pairing
+/// verification path at all is refused. The pending-window, terminal-fraud, and single-pending-claim tests
+/// run under the `prague` profile, where the real EIP-2537 pairing
 /// precompile answers and ML-DSA is still absent - the BLS-only regime the
 /// challenge window exists for. Their BLS material is a valid fixture
 /// generated from the Rust side (chain::finality::sign_bls under the Budlum
@@ -106,6 +175,122 @@ contract BudlumFinalityVerifierTest is Harness {
         );
     }
 
+    function test_object_layer_header_requires_finalized_state_root_opening() public {
+        SeededFinalityVerifier seeded = new SeededFinalityVerifier(address(fraud));
+        BudlumObjectLayerFinality objectLayer = new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(seeded)));
+        BudlumSettlementEndpoint endpoint =
+            new BudlumSettlementEndpoint(IBudlumObjectLayerFinality(address(objectLayer)), 100);
+        uint64 height = 45;
+        bytes32 body = bytes32(uint256(11));
+        bytes32 header = bytes32(uint256(22));
+        bytes[] memory fields = new bytes[](3);
+        fields[0] = "BDLM_STATE_ROOT_GLOBAL_HEADER_V1";
+        fields[1] = abi.encodePacked(body);
+        fields[2] = abi.encodePacked(header);
+        bytes32 stateRoot = BudlumHash.hashFields(fields);
+
+        // Neither a fabricated checkpoint digest nor an unfinalized root can
+        // mark a height final. The old synthetic digest was never accepted by
+        // the attestation verifier and did not bind this header to its root.
+        bytes32 oldDigest = keccak256(abi.encode("BDLM_OBJECT_LAYER_CHECKPOINT_V1", height, header));
+        assertTrue(!seeded.isAccepted(oldDigest), "synthetic digest is not an attestation");
+        vm.expectPartialRevert(BudlumObjectLayerFinality.NotAccepted.selector);
+        objectLayer.record(height, header, body);
+        seeded.seedFinalized(height, stateRoot);
+
+        assertTrue(seeded.isFinalizedHeader(height, header, body), "canonical opening accepted");
+        assertTrue(!seeded.isFinalizedHeader(height + 1, header, body), "height must be final");
+        assertTrue(!seeded.isFinalizedHeader(height, header, bytes32(uint256(12))), "wrong body refused");
+        assertTrue(!seeded.isFinalizedHeader(height, bytes32(uint256(23)), body), "wrong header refused");
+        assertTrue(!seeded.isFinalizedHeader(height, bytes32(0), body), "zero header refused");
+        vm.expectPartialRevert(BudlumObjectLayerFinality.NotAccepted.selector);
+        objectLayer.record(height, bytes32(uint256(23)), body);
+        vm.expectPartialRevert(BudlumObjectLayerFinality.NotAccepted.selector);
+        objectLayer.record(height, header, bytes32(uint256(12)));
+        assertTrue(!objectLayer.heightFinal(height), "failed openings cannot record a height");
+        vm.expectPartialRevert(BudlumSettlementEndpoint.NotFinal.selector);
+        endpoint.acceptHeader(height);
+        assertEq(endpoint.lastAcceptedHeaderHash(), bytes32(0), "unrecorded header cannot reset clock");
+
+        objectLayer.record(height, header, body);
+        assertEq(objectLayer.headerAt(height), header, "only finalized header recorded");
+        assertTrue(objectLayer.heightFinal(height), "authenticated header available");
+        endpoint.acceptHeader(height);
+        assertEq(endpoint.lastAcceptedHeaderHash(), header, "endpoint pins exact finalized header");
+        assertEq(endpoint.lastAcceptedHeight(), height, "checkpoint height pinned with its hash");
+        vm.expectPartialRevert(BudlumSettlementEndpoint.NotNewer.selector);
+        endpoint.acceptHeader(height);
+    }
+
+    function test_closed_endpoint_derives_home_nft_identity_without_wrapping() public {
+        BudlumObjectLayerFinality objectLayer =
+            new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(verifier)));
+        BudlumSettlementEndpoint endpoint =
+            new BudlumSettlementEndpoint(IBudlumObjectLayerFinality(address(objectLayer)), 100);
+        address homeToken = address(0x1234);
+        bytes32 classId = endpoint.assetClassId(7, 1, homeToken);
+        bytes32 nft = endpoint.assetId(7, 1, homeToken, 42);
+        // Independently computed from Rust's length-prefixed SHA-256 fields
+        // (class kind 1 + 20-byte address, 32-byte big-endian token id).
+        assertEq(classId, hex"576171f96ac9ae7b964102b486f5c4f88dfe7e7392c724fabd947d8185c6d35a", "class vector");
+        assertEq(nft, hex"5d3daa94a35f601a36f79a53870d2245dc536e6efd31488a02a03c813cdb6a1e", "NFT vector");
+        assertEq(endpoint.assetId(7, 1, homeToken, 42), nft, "round trip must retain home id");
+        assertTrue(endpoint.assetId(8, 1, homeToken, 42) != nft, "home domain changes identity");
+        assertTrue(endpoint.assetId(7, 1, homeToken, 43) != nft, "native token id changes identity");
+        assertTrue(endpoint.assetId(7, 1, address(0x1235), 42) != nft, "class changes identity");
+        assertTrue(endpoint.assetId(7, 0, homeToken, 0) != nft, "fungible identity differs");
+        vm.expectPartialRevert(BudlumSettlementEndpoint.InvalidAssetClass.selector);
+        endpoint.assetId(7, 0, homeToken, 42);
+        vm.expectPartialRevert(BudlumSettlementEndpoint.InvalidAssetClass.selector);
+        endpoint.assetClassId(7, 2, homeToken); // RecordV1 not active
+        vm.expectPartialRevert(BudlumSettlementEndpoint.InvalidAssetClass.selector);
+        endpoint.assetClassId(7, 1, address(0));
+        vm.expectPartialRevert(BudlumSettlementEndpoint.NotOpen.selector);
+        endpoint.release(abi.encode(classId, nft, address(this)));
+        vm.expectPartialRevert(BudlumSettlementEndpoint.NotOpen.selector);
+        endpoint.escape(abi.encode(classId, nft, address(this)));
+    }
+
+    function test_endpoint_rejects_finality_boolean_without_header_hash() public {
+        BooleanOnlyFinality booleanOnly = new BooleanOnlyFinality();
+        BudlumSettlementEndpoint endpoint =
+            new BudlumSettlementEndpoint(IBudlumObjectLayerFinality(address(booleanOnly)), 100);
+        vm.expectPartialRevert(BudlumSettlementEndpoint.NotFinal.selector);
+        endpoint.acceptHeader(1);
+        assertEq(endpoint.lastAcceptedHeight(), 0, "boolean cannot advance checkpoint");
+        assertEq(endpoint.lastAcceptedHeaderHash(), bytes32(0), "no header was pinned");
+    }
+
+    function test_object_layer_ingress_is_closed_until_release_and_escape_work() public {
+        BudlumObjectLayerFinality objectLayer =
+            new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(verifier)));
+        BudlumSettlementEndpoint endpoint =
+            new BudlumSettlementEndpoint(IBudlumObjectLayerFinality(address(objectLayer)), 100);
+        address owner = address(this);
+        CustodyErc20 erc20 = new CustodyErc20();
+        erc20.mint(owner, 100);
+        vm.expectPartialRevert(BudlumSettlementEndpoint.NotOpen.selector);
+        endpoint.deposit20(address(erc20), 50, bytes32(uint256(1)));
+        assertEq(erc20.balanceOf(owner), 100, "deposit must not debit ERC-20 owner");
+        assertEq(erc20.balanceOf(address(endpoint)), 0, "no ERC-20 custody");
+
+        CustodyErc721 erc721 = new CustodyErc721();
+        erc721.mint(owner, 77);
+        vm.expectPartialRevert(BudlumSettlementEndpoint.NotOpen.selector);
+        erc721.safeTransferFrom(owner, address(endpoint), 77);
+        assertTrue(erc721.ownerOf(77) == owner, "safe transfer must roll back NFT ownership");
+        vm.expectPartialRevert(BudlumSettlementEndpoint.NotOpen.selector);
+        endpoint.onERC721Received(owner, owner, 77, "");
+
+        vm.expectPartialRevert(BudlumSettlementEndpoint.NotOpen.selector);
+        endpoint.homeCall(hex"abcd");
+        assertEq(endpoint.homeNonce(owner), 0, "closed home calls cannot advance nonce");
+        vm.expectPartialRevert(BudlumSettlementEndpoint.NotOpen.selector);
+        endpoint.release("");
+        vm.expectPartialRevert(BudlumSettlementEndpoint.NotOpen.selector);
+        endpoint.escape("");
+    }
+
     function _filled(uint256 len, uint8 value) internal pure returns (bytes memory out) {
         out = new bytes(len);
         for (uint256 i = 0; i < len; i++) {
@@ -128,7 +313,7 @@ contract BudlumFinalityVerifierTest is Harness {
         });
     }
 
-    // F01: the trust anchor is the constructor; zero hashes and an EOA fraud
+    // Trust anchor: the trust anchor is the constructor; zero hashes and an EOA fraud
     // verifier are refused.
     function test_F01_constructor_refuses_zero_key_hashes() public {
         vm.expectPartialRevert(BudlumFinalityVerifier.UntrustedKey.selector);
@@ -142,9 +327,9 @@ contract BudlumFinalityVerifierTest is Harness {
         );
     }
 
-    // F02: a missing precompile leaves the attestation pending, never accepted,
+    // Missing precompile: a missing precompile leaves the attestation pending, never accepted,
     // until the window closes.
-    // F02: a chain with no verification precompile for either half refuses
+    // Missing precompile: a chain with no verification precompile for either half refuses
     // the attestation outright; it does not open a window nothing could
     // ever have checked.
     function test_F02_an_attestation_with_no_verification_path_is_refused() public {
@@ -152,7 +337,7 @@ contract BudlumFinalityVerifierTest is Harness {
         verifier.verify(_attestation(42, bytes32(uint256(7))));
     }
 
-    // F02 (BLS-only regime): with the classical half verified and ML-DSA
+    // BLS-only regime: with the classical half verified and ML-DSA
     // still absent, the post-quantum half takes the window and settles after
     // it, the event's weaker guarantee made explicit by the pending state.
     function test_F02_a_chain_without_ml_dsa_keeps_the_attestation_pending() public {
@@ -167,13 +352,13 @@ contract BudlumFinalityVerifierTest is Harness {
         assertTrue(bls.heightFinal(42), "height final");
     }
 
-    // F03: the probes do not mistake an empty address for a precompile.
+    // Empty-address probe: the probes do not mistake an empty address for a precompile.
     function test_F03_probes_report_no_precompile_on_cancun() public view {
         assertTrue(!verifier.hasBlsPrecompile(), "no BLS precompile");
         assertTrue(!verifier.hasMlDsaPrecompile(), "no ML-DSA precompile");
     }
 
-    // F04: the attestation binds the chain and the pinned keys.
+    // Domain binding: the attestation binds the chain and the pinned keys.
     function test_F04_wrong_chain_is_refused() public {
         Attestation memory a = _attestation(42, bytes32(uint256(7)));
         a.chainId = CHAIN + 1;
@@ -188,7 +373,7 @@ contract BudlumFinalityVerifierTest is Harness {
         verifier.verify(a);
     }
 
-    // F05: a proven fraud is terminal: no settle, no re-verify.
+    // Terminal fraud: a proven fraud is terminal: no settle, no re-verify.
     function test_F05_a_proven_fraud_is_terminal() public {
         BudlumFinalityVerifier bls = verifier;
         Attestation memory a = _attestation(42, bytes32(uint256(7)));
@@ -209,7 +394,7 @@ contract BudlumFinalityVerifierTest is Harness {
         bls.challenge(digest, hex"01");
     }
 
-    // F06: one pending claim per height.
+    // Height uniqueness: one pending claim per height.
     function test_F06_a_second_root_for_a_pending_height_is_refused() public {
         BudlumFinalityVerifier bls = verifier;
         bls.verify(_attestation(42, bytes32(uint256(7))));
@@ -229,6 +414,11 @@ contract BudlumFinalityVerifierTest is Harness {
         duplicateAfterFinal.mlDsaSignature = _filled(3309, 0xCC);
         vm.expectPartialRevert(BudlumFinalityVerifier.AlreadyAccepted.selector);
         bls.verify(duplicateAfterFinal);
+    }
+
+    function test_zero_state_root_is_refused() public {
+        vm.expectPartialRevert(BudlumFinalityVerifier.SignatureInvalid.selector);
+        verifier.verify(_attestation(42, bytes32(0)));
     }
 
     function test_F06_a_mutated_ml_dsa_blob_cannot_shadow_the_committee_attestation() public {
@@ -315,6 +505,13 @@ contract BudlumFinalityVerifierTest is Harness {
         inspected.challenge(digest, hex"01");
         assertTrue(inspected.fraudulent(digest), "marked fraudulent after verification");
         assertTrue(inspected.fraudulentRoot(42, bytes32(uint256(7))), "marked substance fraudulent after verification");
+
+        // Re-challenging or settling an already challenged/fraudulent attestation must fail.
+        vm.expectPartialRevert(BudlumFinalityVerifier.ChallengeResolved.selector);
+        inspected.challenge(digest, hex"01");
+        vm.roll(block.number + WINDOW);
+        vm.expectPartialRevert(BudlumFinalityVerifier.ChallengeResolved.selector);
+        inspected.settle(digest);
     }
 
     function test_F05_a_disproved_substance_cannot_be_represented_with_mutated_blob() public {
@@ -343,5 +540,71 @@ contract BudlumFinalityVerifierTest is Harness {
         vm.roll(block.number + WINDOW);
         vm.expectPartialRevert(BudlumFinalityVerifier.AlreadyFraudulent.selector);
         bls.settle(siblingDigest);
+    }
+
+    function test_F06_classical_only_settlement_records_classical_mode_not_hybrid() public {
+        BudlumFinalityVerifier bls = verifier;
+        bytes32 body = bytes32(uint256(11));
+        bytes32 header = bytes32(uint256(22));
+        bytes[] memory fields = new bytes[](3);
+        fields[0] = "BDLM_STATE_ROOT_GLOBAL_HEADER_V1";
+        fields[1] = abi.encodePacked(body);
+        fields[2] = abi.encodePacked(header);
+        bytes32 stateRoot = BudlumHash.hashFields(fields);
+
+        // Under prague only BLS verifies; ML-DSA is absent so settlement must
+        // record ClassicalOnly rather than impersonating full hybrid finality.
+        Attestation memory a = _attestation(42, bytes32(uint256(7)));
+        bytes32 digest = bls.verify(a);
+        assertTrue(bls.finalityModeAtHeight(42) == FinalityMode.None, "pending has no finality mode");
+        vm.roll(block.number + WINDOW);
+        bls.settle(digest);
+        assertTrue(bls.heightFinal(42), "height final after window");
+        assertTrue(bls.finalityModeAtHeight(42) == FinalityMode.ClassicalOnly, "BLS-only settle records ClassicalOnly");
+        assertTrue(bls.finalityModeAtHeight(42) != FinalityMode.Hybrid, "BLS-only settle is never Hybrid");
+
+        // A classical-only root opening records ClassicalOnly on the object-layer
+        // view and is refused by the settlement endpoint, which requires Hybrid.
+        SeededFinalityVerifier seeded = new SeededFinalityVerifier(address(fraud));
+        seeded.seedWithMode(45, stateRoot, FinalityMode.ClassicalOnly);
+        BudlumObjectLayerFinality objectLayer = new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(seeded)));
+        BudlumSettlementEndpoint endpoint =
+            new BudlumSettlementEndpoint(IBudlumObjectLayerFinality(address(objectLayer)), 100);
+        objectLayer.record(45, header, body);
+        assertTrue(objectLayer.finalityModeAt(45) == FinalityMode.ClassicalOnly, "object layer preserves ClassicalOnly");
+        vm.expectPartialRevert(BudlumSettlementEndpoint.HybridFinalityRequired.selector);
+        endpoint.acceptHeader(45);
+        assertEq(endpoint.lastAcceptedHeight(), 0, "classical-only checkpoint cannot advance endpoint");
+    }
+
+    function test_object_layer_endpoint_distinguishes_classical_only_from_hybrid() public {
+        SeededFinalityVerifier seeded = new SeededFinalityVerifier(address(fraud));
+        BudlumObjectLayerFinality objectLayer = new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(seeded)));
+        BudlumSettlementEndpoint endpoint =
+            new BudlumSettlementEndpoint(IBudlumObjectLayerFinality(address(objectLayer)), 100);
+        bytes32 body = bytes32(uint256(11));
+        bytes32 headerA = bytes32(uint256(22));
+        bytes32 headerB = bytes32(uint256(23));
+        bytes[] memory fields = new bytes[](3);
+        fields[0] = "BDLM_STATE_ROOT_GLOBAL_HEADER_V1";
+        fields[1] = abi.encodePacked(body);
+        fields[2] = abi.encodePacked(headerA);
+        bytes32 rootA = BudlumHash.hashFields(fields);
+        fields[2] = abi.encodePacked(headerB);
+        bytes32 rootB = BudlumHash.hashFields(fields);
+
+        seeded.seedWithMode(45, rootA, FinalityMode.ClassicalOnly);
+        objectLayer.record(45, headerA, body);
+        assertTrue(objectLayer.finalityModeAt(45) == FinalityMode.ClassicalOnly, "recorded as ClassicalOnly");
+        vm.expectPartialRevert(BudlumSettlementEndpoint.HybridFinalityRequired.selector);
+        endpoint.acceptHeader(45);
+        assertEq(endpoint.lastAcceptedHeight(), 0, "ClassicalOnly refused by settlement endpoint");
+
+        seeded.seedWithMode(46, rootB, FinalityMode.Hybrid);
+        objectLayer.record(46, headerB, body);
+        assertTrue(objectLayer.finalityModeAt(46) == FinalityMode.Hybrid, "recorded as Hybrid");
+        endpoint.acceptHeader(46);
+        assertEq(endpoint.lastAcceptedHeight(), 46, "Hybrid accepted by settlement endpoint");
+        assertTrue(endpoint.lastAcceptedFinalityMode() == FinalityMode.Hybrid, "endpoint records Hybrid mode");
     }
 }

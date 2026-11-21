@@ -1,6 +1,6 @@
-//! PoA domain membership - the *deliberate, isolated permissioned exception*.
+//! `PoA` domain membership - the *deliberate, isolated permissioned exception*.
 //!
-//! Master-context rule: the PoA domain exists only for institutional / regulated
+//! Master-context rule: the `PoA` domain exists only for institutional / regulated
 //! Parties (banks, participation-bank pilot, ...). Entry is by **KYC / identity
 //! Verification + approval**, NOT by staking. This is a conscious permissioned
 //! Sub-domain that does not break the network-wide permissionless proposition
@@ -11,12 +11,12 @@
 //!   [`crate::registry::permissionless::PermissionlessRegistry`]. They share no
 //!   Storage, no keys and no code path.
 //! - There is **no `stake`-based entry** here at all - the only way in is
-//!   `submit_application` → `approve` by an authorized PoA admin.
+//!   `submit_application` → `approve` by an authorized `PoA` admin.
 //! - The permissionless registry has **no approval gate**; this one has **no
 //!   Stake gate**. Neither type can be used where the other is expected, so the
 //!   Two models cannot leak into each other.
-//! - Cross-domain messaging (via `CrossDomainMessage`) between PoA and other
-//!   Domains is still possible, but PoA's admission rules never travel with the
+//! - Cross-domain messaging (via `CrossDomainMessage`) between `PoA` and other
+//!   Domains is still possible, but `PoA`'s admission rules never travel with the
 //!   Message - messaging is orthogonal to membership.
 
 use crate::core::address::Address;
@@ -33,7 +33,7 @@ pub type KycCommitment = [u8; 32];
 pub enum MembershipStatus {
     /// KYC submitted, awaiting an authorized admin decision.
     Pending,
-    /// Approved and currently authorized to act in the PoA domain.
+    /// Approved and currently authorized to act in the `PoA` domain.
     Approved,
     /// Approval revoked (compliance action, offboarding, ...).
     Revoked,
@@ -41,7 +41,7 @@ pub enum MembershipStatus {
     Rejected,
 }
 
-/// A KYC-gated membership record for one authorized party in one PoA domain.
+/// A KYC-gated membership record for one authorized party in one `PoA` domain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoaMember {
     pub account: Address,
@@ -53,18 +53,19 @@ pub struct PoaMember {
 }
 
 impl PoaMember {
+    #[must_use]
     pub fn is_authorized(&self) -> bool {
         matches!(self.status, MembershipStatus::Approved)
     }
 }
 
-/// Errors specific to the permissioned PoA flow.
+/// Errors specific to the permissioned `PoA` flow.
 ///
 /// Note the deliberate absence of any stake-related variant: staking is simply
 /// Not a concept in this module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoaMembershipError {
-    /// The caller is not an authorized PoA admin for this domain.
+    /// The caller is not an authorized `PoA` admin for this domain.
     NotAnAdmin { caller: Address, domain: DomainId },
     /// No application/membership exists for this account+domain.
     NotFound { account: Address, domain: DomainId },
@@ -87,32 +88,32 @@ pub enum PoaMembershipError {
 impl std::fmt::Display for PoaMembershipError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PoaMembershipError::NotAnAdmin { caller, domain } => {
+            Self::NotAnAdmin { caller, domain } => {
                 write!(f, "{caller} is not an admin of PoA domain {domain}")
             }
-            PoaMembershipError::NotFound { account, domain } => {
+            Self::NotFound { account, domain } => {
                 write!(f, "no PoA membership for {account} in domain {domain}")
             }
-            PoaMembershipError::AlreadyApplied { account, domain } => {
+            Self::AlreadyApplied { account, domain } => {
                 write!(f, "{account} already applied to PoA domain {domain}")
             }
-            PoaMembershipError::InvalidTransition { from } => {
+            Self::InvalidTransition { from } => {
                 write!(f, "invalid membership transition from {from:?}")
             }
-            PoaMembershipError::MissingKyc => write!(f, "missing KYC commitment"),
-            PoaMembershipError::LastAdmin => {
+            Self::MissingKyc => write!(f, "missing KYC commitment"),
+            Self::LastAdmin => {
                 write!(
                     f,
                     "the last admin of a PoA domain cannot be removed by admins"
                 )
             }
-            PoaMembershipError::InvalidValidityHorizon { requested, max } => {
+            Self::InvalidValidityHorizon { requested, max } => {
                 write!(
                     f,
                     "KYC validity horizon {requested} exceeds the bound {max}"
                 )
             }
-            PoaMembershipError::NotPermissioned { domain } => {
+            Self::NotPermissioned { domain } => {
                 write!(
                     f,
                     "PoA domain {domain} runs no admission control, so there is no one to decide an application"
@@ -124,10 +125,10 @@ impl std::fmt::Display for PoaMembershipError {
 
 impl std::error::Error for PoaMembershipError {}
 
-/// The isolated permissioned registry for a set of PoA domains.
+/// The isolated permissioned registry for a set of `PoA` domains.
 ///
 /// Admins are the compliance-authorized approvers; members are KYC'd parties.
-/// Both are keyed by `(domain, account)` so PoA domains are independent.
+/// Both are keyed by `(domain, account)` so `PoA` domains are independent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PoaMembershipRegistry {
     #[serde(with = "crate::core::map_keys")]
@@ -137,6 +138,7 @@ pub struct PoaMembershipRegistry {
 }
 
 impl PoaMembershipRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             admins: BTreeMap::new(),
@@ -154,7 +156,7 @@ impl PoaMembershipRegistry {
         self.members.len()
     }
 
-    /// Bootstrap an admin for a PoA domain. In production this is expected to be
+    /// Bootstrap an admin for a `PoA` domain. In production this is expected to be
     /// Wired through governance; here it is the trust root of the permissioned
     /// Sub-domain.
     pub fn add_admin(&mut self, domain: DomainId, admin: Address) {
@@ -167,7 +169,7 @@ impl PoaMembershipRegistry {
     /// still take the last seat away through its own action, where the
     /// decision is recorded as such.
     ///
-    /// WIRING: the admin-seat half of PoA membership governance; the
+    /// WIRING: the admin-seat half of `PoA` membership governance; the
     /// membership door that calls it lands with the admin-action
     /// transaction path, and the refusal rules are pinned by tests.
     pub fn remove_admin(
@@ -204,6 +206,10 @@ impl PoaMembershipRegistry {
     /// member record. `renew_kyc` used to push the expiry horizon forward
     /// and leave the commitment itself untouched, so the record kept naming
     /// the original dossier forever.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn update_kyc_commitment(
         &mut self,
         domain: DomainId,
@@ -241,6 +247,7 @@ impl PoaMembershipRegistry {
             .is_some_and(|((d, _), ())| *d == domain)
     }
 
+    #[must_use]
     pub fn is_admin(&self, domain: DomainId, account: &Address) -> bool {
         self.admins.contains_key(&(domain, *account))
     }
@@ -249,14 +256,18 @@ impl PoaMembershipRegistry {
     /// with the onboarding layer's KYC expiry map - one digest over the
     /// whole admission state, computed by
     /// [`crate::registry::poa_onboarding::PoAOnboarding::root`].
+    #[must_use]
     pub fn root_with_expiry(&self, kyc_expiry: &BTreeMap<(DomainId, Address), u64>) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         hasher.update(b"BDLM_POA_ADMISSION_ROOT_V1");
+        hasher.update([2u8]);
+        hasher.update((self.admins.len() as u64).to_le_bytes());
         for ((domain, admin), ()) in &self.admins {
             hasher.update(domain.to_le_bytes());
             hasher.update(admin.as_bytes());
         }
+        hasher.update((self.members.len() as u64).to_le_bytes());
         for ((domain, account), member) in &self.members {
             hasher.update(domain.to_le_bytes());
             hasher.update(account.as_bytes());
@@ -269,6 +280,7 @@ impl PoaMembershipRegistry {
                 hasher.update([0u8]);
             }
         }
+        hasher.update((kyc_expiry.len() as u64).to_le_bytes());
         for ((domain, account), expiry) in kyc_expiry {
             hasher.update(domain.to_le_bytes());
             hasher.update(account.as_bytes());
@@ -279,6 +291,10 @@ impl PoaMembershipRegistry {
 
     /// Step 1 of admission: a candidate submits a KYC commitment. This does NOT
     /// Grant any authority - it only creates a `Pending` record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_application(
         &mut self,
         domain: DomainId,
@@ -288,8 +304,27 @@ impl PoaMembershipRegistry {
         if kyc_commitment == [0u8; 32] {
             return Err(PoaMembershipError::MissingKyc);
         }
-        if self.members.contains_key(&(domain, account)) {
-            return Err(PoaMembershipError::AlreadyApplied { account, domain });
+        if let Some(existing) = self.members.get(&(domain, account)) {
+            if matches!(
+                existing.status,
+                MembershipStatus::Pending | MembershipStatus::Approved
+            ) {
+                return Err(PoaMembershipError::AlreadyApplied { account, domain });
+            }
+        } else {
+            const MAX_POA_MEMBERS_PER_DOMAIN: usize = 4_096;
+            const MAX_POA_MEMBERS_TOTAL: usize = 65_536;
+            if self.members.len() >= MAX_POA_MEMBERS_TOTAL {
+                return Err(PoaMembershipError::InvalidTransition {
+                    from: MembershipStatus::Pending,
+                });
+            }
+            let domain_count = self.members.keys().filter(|(d, _)| *d == domain).count();
+            if domain_count >= MAX_POA_MEMBERS_PER_DOMAIN {
+                return Err(PoaMembershipError::InvalidTransition {
+                    from: MembershipStatus::Pending,
+                });
+            }
         }
         self.members.insert(
             (domain, account),
@@ -306,6 +341,10 @@ impl PoaMembershipRegistry {
 
     /// Step 2: an authorized admin approves a pending application. This is the
     /// Permission gate that has NO analogue in the permissionless registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn approve(
         &mut self,
         domain: DomainId,
@@ -328,6 +367,10 @@ impl PoaMembershipRegistry {
     }
 
     /// Reject a pending application (admin only).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn reject(
         &mut self,
         domain: DomainId,
@@ -350,6 +393,10 @@ impl PoaMembershipRegistry {
     }
 
     /// Revoke an approved member (admin only; e.g. compliance offboarding).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn revoke(
         &mut self,
         domain: DomainId,
@@ -371,7 +418,7 @@ impl PoaMembershipRegistry {
         }
     }
 
-    /// The authorization check the PoA domain should use. True ONLY for
+    /// The authorization check the `PoA` domain should use. True ONLY for
     /// KYC-approved members - never as a function of stake.
     pub fn is_authorized(&self, domain: DomainId, account: &Address) -> bool {
         self.members
@@ -379,10 +426,12 @@ impl PoaMembershipRegistry {
             .is_some_and(PoaMember::is_authorized)
     }
 
+    #[must_use]
     pub fn get(&self, domain: DomainId, account: &Address) -> Option<&PoaMember> {
         self.members.get(&(domain, *account))
     }
 
+    #[must_use]
     pub fn authorized_members(&self, domain: DomainId) -> Vec<&PoaMember> {
         self.members
             .values()
@@ -453,5 +502,28 @@ mod tests {
         reg.approve(DOMAIN, addr(1), addr(2)).unwrap();
         reg.revoke(DOMAIN, addr(1), addr(2)).unwrap();
         assert!(!reg.is_authorized(DOMAIN, &addr(2)));
+    }
+
+    #[test]
+    fn submit_application_caps_distinct_applicants_per_domain() {
+        let mut reg = PoaMembershipRegistry::new();
+        let admin = Address::from([0xFFu8; 32]);
+        reg.add_admin(DOMAIN, admin);
+        for idx in 0u32..4_096 {
+            let mut raw = [0u8; 32];
+            raw[..4].copy_from_slice(&idx.to_le_bytes());
+            reg.submit_application(DOMAIN, Address::from(raw), kyc(7))
+                .expect("within per-domain ceiling");
+        }
+        let overflow = Address::from([0xEEu8; 32]);
+        assert!(matches!(
+            reg.submit_application(DOMAIN, overflow, kyc(7)),
+            Err(PoaMembershipError::InvalidTransition {
+                from: MembershipStatus::Pending
+            })
+        ));
+        // Another PoA domain retains its own independent admission capacity.
+        reg.submit_application(DOMAIN + 1, overflow, kyc(7))
+            .expect("other domain unaffected");
     }
 }

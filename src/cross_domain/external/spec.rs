@@ -88,7 +88,7 @@ impl DomainKey {
     }
 }
 
-/// String map-key form, so `BTreeMap<DomainKey, _>` survives serde_json.
+/// String map-key form, so `BTreeMap<DomainKey, _>` survives `serde_json`.
 /// A named key type carries its own impl next to its definition (the same
 /// convention `ContentId` and `AiRequestId` follow); the 64-hex form matches
 /// the bare `[u8; 32]` impl in `core::map_keys`.
@@ -147,6 +147,24 @@ impl RawConsensusEvidence {
         ]);
         acc = crate::core::hash::hash_fields_bytes(&[&acc, &self.payload]);
         acc
+    }
+
+    /// Submitter-independent digest of the consensus claim bytes carried by
+    /// this envelope. Two bonded provers carrying the identical adapter,
+    /// version, network, declared height, declared root, and payload derive
+    /// the same substance digest even though their `submitter` addresses (and
+    /// therefore [`Self::digest`]) differ.
+    #[must_use]
+    pub fn substance_digest(&self) -> [u8; 32] {
+        let head = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_EXT_EVIDENCE_SUBSTANCE_V1",
+            self.adapter.as_bytes(),
+            &self.evidence_version.to_le_bytes(),
+            self.network.as_bytes(),
+            &self.declared_height.to_le_bytes(),
+            &self.declared_root,
+        ]);
+        crate::core::hash::hash_fields_bytes(&[&head, &self.payload])
     }
 }
 
@@ -271,6 +289,73 @@ pub struct FinalityAttestation {
     /// evidence has one.
     #[serde(default)]
     pub attested_tx_root: Option<Hash32>,
+}
+
+fn encode_optional_root(root: Option<&Hash32>) -> [u8; 33] {
+    let mut out = [0u8; 33];
+    if let Some(bytes) = root {
+        if let Some((tag, body)) = out.split_first_mut() {
+            *tag = 1;
+            body.copy_from_slice(bytes);
+        }
+    }
+    out
+}
+
+fn optional_root_ct_eq(left: Option<&Hash32>, right: Option<&Hash32>) -> subtle::Choice {
+    use subtle::ConstantTimeEq;
+    let a = encode_optional_root(left);
+    let b = encode_optional_root(right);
+    a.ct_eq(&b)
+}
+
+impl FinalityAttestation {
+    /// Canonical commitment over every consensus-binding field of this
+    /// attestation (`domain`, `adapter`, `height`, `evidence_version`,
+    /// `state_root`, and the presence-tagged block, event, and transaction
+    /// sub-roots). Quorum agreement and contradiction tracking key on this
+    /// digest so two provers that agree on `state_root` while diverging on any
+    /// attested sub-root never coalesce into the same claim.
+    #[must_use]
+    pub fn claim_digest(&self) -> [u8; 32] {
+        let block = encode_optional_root(self.attested_block_hash.as_ref());
+        let event = encode_optional_root(self.attested_event_root.as_ref());
+        let tx = encode_optional_root(self.attested_tx_root.as_ref());
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_EXT_CLAIM_DIGEST_V1",
+            self.domain.as_bytes(),
+            self.adapter.as_bytes(),
+            &self.height.to_le_bytes(),
+            &self.evidence_version.to_le_bytes(),
+            &self.state_root,
+            &block,
+            &event,
+            &tx,
+        ])
+    }
+
+    /// Constant-time equality over `state_root` and all three optional
+    /// sub-roots (`attested_block_hash`, `attested_event_root`,
+    /// `attested_tx_root`). Returns `false` if any root or presence flag
+    /// diverges.
+    #[must_use]
+    pub fn commits_same_roots(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        let same_state = self.state_root.ct_eq(&other.state_root);
+        let same_block = optional_root_ct_eq(
+            self.attested_block_hash.as_ref(),
+            other.attested_block_hash.as_ref(),
+        );
+        let same_event = optional_root_ct_eq(
+            self.attested_event_root.as_ref(),
+            other.attested_event_root.as_ref(),
+        );
+        let same_tx = optional_root_ct_eq(
+            self.attested_tx_root.as_ref(),
+            other.attested_tx_root.as_ref(),
+        );
+        bool::from(same_state & same_block & same_event & same_tx)
+    }
 }
 
 /// Named so a reader can tell "slot 4" from "epoch 4" from "round 4".
@@ -508,6 +593,28 @@ pub trait ExternalFinalityAdapter: Send + Sync {
     /// so a probe suite that refuses everything is caught as the failure it
     /// is rather than passing by refusing.
     fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
+        None
+    }
+
+    /// The parent block digest this evidence binds, when the adapter's own
+    /// verification checks one.
+    ///
+    /// This is the witness
+    /// [`crate::cross_domain::external::falsity`] uses to refute an accepted
+    /// attestation whose slot can no longer be re-proved - the abandoned-branch
+    /// case. It is `None` by default, which is the honest default: an adapter
+    /// that cannot bind a parent cannot answer an ancestry challenge, and
+    /// guessing one would turn a slash into an unprovable claim.
+    ///
+    /// # Contract
+    ///
+    /// Callers invoke this only on evidence that [`Self::verify`] has already
+    /// accepted, and an implementation must derive the digest from the same
+    /// bytes `verify` checked - never from a caller-supplied field, and never
+    /// from a value it did not authenticate. Returning `Some` claims "the proof
+    /// I just verified binds this parent"; returning `None` claims nothing.
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        let _ = evidence;
         None
     }
 }

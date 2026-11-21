@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Tamper-evident at the global settlement layer.
 ///
 /// **Backward compatibility:** the domain-separation tag is
-/// `BDLM_GLOBAL_BLOCK_V7`. V2 separated pre- and post-storage-root headers,
+/// `BDLM_GLOBAL_BLOCK_V10`. V2 separated pre- and post-storage-root headers,
 /// V3 added `ai_root`, V4 encodes each optional root behind a presence byte
 /// so `None` and `Some([0; 32])` hash differently, and V5 added
 /// `identity_root`. Old serialized headers (without the fields) still
@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 /// finality certificate of the checkpoint covers the block that commits the
 /// state root. V6 adds the checkpoint height and the external intake root.
 ///
-/// V7: the Graft registry root
+/// V7: the `AppBinding` registry root
 /// and the delegation root join the header, each presence-tagged. The
 /// testnet starts from a new genesis, so the bump is the activation; the
 /// mainnet activation-height scheme is 's.
@@ -105,16 +105,37 @@ pub struct GlobalBlockHeader {
     #[serde(default)]
     pub external_intake_root: Option<Hash32>,
 
-    /// The Graft registry root (V7), when the registry holds any row:
+    /// The `AppBinding` registry root (V7), when the registry holds any row:
     /// applications, the payment window, open intents. A payment proof opens
-    /// it ([`crate::settlement::graft::GraftRootOpening`]).
+    /// it ([`crate::settlement::app_binding::AppBindingRootOpening`]).
     #[serde(default)]
-    pub graft_root: Option<Hash32>,
+    pub app_binding_root: Option<Hash32>,
 
     /// The delegation root (V7), when any delegation, exit or commission
     /// exists: [`crate::registry::PermissionlessRegistry::delegation_root`].
     #[serde(default)]
     pub delegation_root: Option<Hash32>,
+
+    /// Object Layer commitment root (V8), presence-tagged.
+    #[serde(default)]
+    pub object_layer_root: Option<Hash32>,
+
+    /// Proof-claim registry root (V8), presence-tagged.
+    #[serde(default)]
+    pub proof_root: Option<Hash32>,
+
+    /// Highest checkpoint height with a recorded settlement proof claim (V8).
+    #[serde(default)]
+    pub proven_height: u64,
+
+    /// Canonical `ULP-1` binary `Poseidon` Merkle root over active finalized
+    /// external domains committed in `SettlementRegistries` (V10), presence-tagged.
+    ///
+    /// `None` when no active external domain holds a finalized commitment;
+    /// `Some(root)` anchors [`crate::light_client::LightClient::verify_multi_hop_light_route`]
+    /// directly to consensus state without requiring out-of-band root pinning.
+    #[serde(default)]
+    pub ulp_domains_root: Option<Hash32>,
 }
 
 /// How many checkpoint headers the account state keeps. Older headers stay
@@ -179,6 +200,7 @@ impl GlobalHeaderWindow {
 }
 
 impl GlobalBlockHeader {
+    #[must_use]
     pub fn calculate_hash_bytes(&self) -> Hash32 {
         let proposer = self
             .proposer
@@ -201,11 +223,14 @@ impl GlobalBlockHeader {
         let ai_root_bytes = presence_tagged(self.ai_root);
         let identity_root_bytes = presence_tagged(self.identity_root);
         let external_intake_root_bytes = presence_tagged(self.external_intake_root);
-        let graft_root_bytes = presence_tagged(self.graft_root);
+        let app_binding_root_bytes = presence_tagged(self.app_binding_root);
         let delegation_root_bytes = presence_tagged(self.delegation_root);
+        let object_layer_root_bytes = presence_tagged(self.object_layer_root);
+        let proof_root_bytes = presence_tagged(self.proof_root);
+        let ulp_domains_root_bytes = presence_tagged(self.ulp_domains_root);
 
         hash_fields_bytes(&[
-            b"BDLM_GLOBAL_BLOCK_V7",
+            b"BDLM_GLOBAL_BLOCK_V10",
             &self.version.to_le_bytes(),
             &self.global_height.to_le_bytes(),
             &self.previous_global_hash,
@@ -223,13 +248,30 @@ impl GlobalBlockHeader {
             &identity_root_bytes,
             &self.checkpoint_height.to_le_bytes(),
             &external_intake_root_bytes,
-            &graft_root_bytes,
+            &app_binding_root_bytes,
             &delegation_root_bytes,
+            &object_layer_root_bytes,
+            &proof_root_bytes,
+            &self.proven_height.to_le_bytes(),
+            &ulp_domains_root_bytes,
         ])
     }
 
+    #[must_use]
     pub fn calculate_hash(&self) -> String {
         hex::encode(self.calculate_hash_bytes())
+    }
+
+    /// Classify the Phase-A proof status (`Proven`, `PendingProof`, or
+    /// `DelayExceeded` beyond `D = 8` blocks) of this global block header.
+    ///
+    /// Convenience: exposed for header proof-lag inspection callers.
+    #[must_use]
+    pub fn proof_status(&self) -> crate::cross_domain::external::phase_a_dual::RootProofStatus {
+        crate::cross_domain::external::phase_a_dual::classify_root_proof_status(
+            self.global_height,
+            self.proven_height,
+        )
     }
 }
 
@@ -256,8 +298,12 @@ mod tests {
             identity_root: None,
             checkpoint_height: 0,
             external_intake_root: None,
-            graft_root: None,
+            app_binding_root: None,
             delegation_root: None,
+            object_layer_root: None,
+            proof_root: None,
+            proven_height: 0,
+            ulp_domains_root: None,
         }
     }
 
@@ -426,6 +472,48 @@ mod tests {
         assert_ne!(
             zero_storage.calculate_hash_bytes(),
             zero_identity.calculate_hash_bytes()
+        );
+        let mut zero_ulp = sample_header();
+        zero_ulp.ulp_domains_root = Some([0u8; 32]);
+        assert_ne!(none.calculate_hash_bytes(), zero_ulp.calculate_hash_bytes());
+        assert_ne!(
+            zero_identity.calculate_hash_bytes(),
+            zero_ulp.calculate_hash_bytes()
+        );
+    }
+
+    #[test]
+    fn ulp_domains_root_none_some_and_serde_round_trip() {
+        let mut h_none = sample_header();
+        let mut h_some = sample_header();
+        h_some.ulp_domains_root = Some([0x5Au8; 32]);
+        assert_ne!(
+            h_none.calculate_hash_bytes(),
+            h_some.calculate_hash_bytes(),
+            "ulp_domains_root=None and Some(...) must produce distinct header hashes"
+        );
+        h_none.ulp_domains_root = Some([0xA5u8; 32]);
+        assert_ne!(
+            h_none.calculate_hash_bytes(),
+            h_some.calculate_hash_bytes(),
+            "distinct ulp_domains_root values must produce distinct header hashes"
+        );
+
+        let mut legacy_val: serde_json::Value =
+            serde_json::to_value(&h_some).expect("serialize header");
+        if let Some(obj) = legacy_val.as_object_mut() {
+            obj.remove("ulp_domains_root");
+        }
+        let decoded_legacy: GlobalBlockHeader =
+            serde_json::from_value(legacy_val).expect("legacy header without ulp_domains_root");
+        assert_eq!(decoded_legacy.ulp_domains_root, None);
+
+        let encoded = serde_json::to_string(&h_some).expect("encode json");
+        let decoded: GlobalBlockHeader = serde_json::from_str(&encoded).expect("decode json");
+        assert_eq!(decoded.ulp_domains_root, Some([0x5Au8; 32]));
+        assert_eq!(
+            decoded.calculate_hash_bytes(),
+            h_some.calculate_hash_bytes()
         );
     }
 }

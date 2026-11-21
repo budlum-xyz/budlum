@@ -1,15 +1,18 @@
-name: Fuzz Nightly
+name: Fuzz Weekly Full Sweep
 
-# Long fuzz runs. Every night at 03:17 UTC each target is fuzzed for 4 hours;
+# Long fuzz runs. Every Sunday at 00:17 UTC each target is fuzzed for 4 hours;
 # each target runs in its own matrix job (the GitHub job ceiling is 6 hours, so
 # 5x4h in a single job is impossible and the matrix is mandatory).
 # The corpus is cached on every run and restored on the next (a growing corpus =
 # deepening coverage). If a crash is found it is uploaded as an artifact and the
-# job FAILS.
+# job FAILS. The former daily matrix consumed roughly 50 runner-hours per run
+# before the last target expansion and held four of the shared runners nearly
+# continuously. Weekly keeps every target and the full four-hour budget while
+# leaving capacity for pull-request gates.
 
 on:
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "17 0 * * 0"
   workflow_dispatch:
 
 concurrency:
@@ -26,6 +29,9 @@ jobs:
     timeout-minutes: 330
     strategy:
       fail-fast: false
+      # Twelve four-hour jobs at once took the whole shared runner pool and left
+      # pull request checks queued for hours. Same coverage, four at a time.
+      max-parallel: 4
       matrix:
         target:
           - block_deserialize
@@ -48,10 +54,30 @@ jobs:
 # the part of the bridge fed from outside.
           #
           - evm_rlp_decode
+          # The worker-socket frame codec reads bytes from a peer process.
+          - uel_abi_frame
+          # B.U.D. 3.0 parsers: the BOF-1 object and the RFC 6330 symbol
+          # decoder both read bytes from untrusted holders.
+          - bud3_bof1_decode
+          - bud3_symbol_decode
+          # The optical frame is the third parser on that path and the only
+          # one a camera feeds: a declared drop length, a digest and a nested
+          # decoder, all over untrusted bytes.
+          - bud3_qr_frame_decode
+          # The aggregation layer: a claim frame arrives from any peer and in
+          # every block body, an envelope from any peer. Both parsers read
+          # lengths from a header before anything else.
+          - agg_claim_frame_decode
+          - agg_envelope_decode
+          # The header segment check decides which headers a finality
+          # certificate may name, and a peer supplies the segment.
+          - light_client_header_chain
           # BPQS WOTS chain-walk refusal safety (crates/bpqs). Runs the
           # quick gate too; here it gets the deep budget.
           - bpqs_wots_reject
           - evm_mpt_verify
+          - evm_deployment_proof
+          - uel_foreign_envelopes
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

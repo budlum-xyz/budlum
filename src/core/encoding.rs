@@ -17,6 +17,7 @@ pub enum EncodingError {
     DeserializationFailed(String),
 }
 
+#[must_use]
 pub fn encode_transaction(tx: &Transaction) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(256);
 
@@ -48,6 +49,7 @@ pub fn encode_transaction(tx: &Transaction) -> Vec<u8> {
     bytes
 }
 
+#[must_use]
 pub fn encode_block_header(header: &BlockHeader) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(256);
 
@@ -76,6 +78,7 @@ pub fn encode_block_header(header: &BlockHeader) -> Vec<u8> {
     bytes
 }
 
+#[must_use]
 pub fn encode_block_summary(block: &Block) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(512);
 
@@ -96,6 +99,7 @@ pub fn encode_block_summary(block: &Block) -> Vec<u8> {
 }
 
 #[allow(clippy::absurd_extreme_comparisons)]
+#[must_use]
 pub fn is_compatible_version(remote_major: u32, remote_minor: u32) -> bool {
     if remote_major != PROTOCOL_VERSION_MAJOR {
         return false;
@@ -104,6 +108,7 @@ pub fn is_compatible_version(remote_major: u32, remote_minor: u32) -> bool {
     remote_minor <= PROTOCOL_VERSION_MINOR
 }
 
+#[must_use]
 pub fn create_version_message() -> Vec<u8> {
     let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(&NETWORK_MAGIC);
@@ -173,6 +178,8 @@ mod tests {
             storage_root: None,
             shards_root: None,
             witness_root: None,
+            seat_participation: None,
+            frame_hash: None,
         };
         let enc = encode_block_header(&header);
         assert!(!enc.is_empty());

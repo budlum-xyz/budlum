@@ -9,10 +9,18 @@
 
 name: Diff surface
 
+# Diagnostic-only manual runner. Disabled on PR push so stacked branches
+# do not run a redundant 120m uncached cargo test --lib alongside ci.yml.
 on:
-  pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
-    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+# One run per pull request. Without this a push did not cancel the run of the
+# commit before it, so every push of a busy stacked branch left another copy of
+# `cargo fmt`, `cargo clippy --all-targets` and `cargo test --lib` running for
+# commits nobody reads any more, and five of them held a quarter of the runner pool.
+concurrency:
+  group: diff-surface-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -22,6 +30,9 @@ jobs:
     name: Report fmt, clippy and test failures as PR comments
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

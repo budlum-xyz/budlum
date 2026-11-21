@@ -8,7 +8,7 @@
 //! tests.
 //!
 //! A regenerating node holds blocks without their witnesses (a normal node
-//! prunes them,). To validate the blocks it grows back through it asks an
+//! prunes them). To validate the blocks it grows back through it asks an
 //! archive node for the witnesses of one block. A witness is not trusted
 //! because a peer sent it: the set must hash to the `witness_root` of the
 //! block, so a peer that withholds, swaps or adds a witness is caught and
@@ -69,10 +69,7 @@ impl WitnessRequest {
         if count > MAX_WITNESS_REQUEST_IDS || bytes.len() != 12 + count * 32 {
             return None;
         }
-        let tx_ids = bytes[12..]
-            .chunks_exact(32)
-            .map(|chunk| <[u8; 32]>::try_from(chunk).ok())
-            .collect::<Option<Vec<_>>>()?;
+        let tx_ids = bytes[12..].as_chunks::<32>().0.to_vec();
         Some(Self {
             block_height,
             tx_ids,

@@ -10,7 +10,7 @@
 //!
 //! - **DID parsing.** The parse is the wire boundary: a spelling it accepts
 //!   but the registry stores differently is a duplicated identity.
-//! - **The PoA write gate.** The master registry has exactly one writable
+//! - **The `PoA` write gate.** The master registry has exactly one writable
 //!   domain. Every other domain must be refused *before* anything is read.
 //! - **Sender binding.** `from` must BE the subject, the issuer, or the
 //!   rotating DID. Naming somebody else in the payload is the shape every
@@ -188,6 +188,8 @@ fn the_write_gate_answers_before_the_payload_is_read() {
         credential_roots: Default::default(),
         guardians: vec![],
         recovery_threshold: 0,
+        issued_credentials: 0,
+        recovery_nonce: 0,
     };
     let err = registry
         .apply(

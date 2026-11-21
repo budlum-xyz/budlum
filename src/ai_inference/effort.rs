@@ -80,18 +80,23 @@ pub struct EffortTier(u16);
 
 impl EffortTier {
     /// The `0.5x` floor - fast and rough.
-    pub const FASTEST: EffortTier = EffortTier(TIER_MIN_TENTHS);
+    pub const FASTEST: Self = Self(TIER_MIN_TENTHS);
     /// The `1.0x` reference point.
-    pub const BASELINE: EffortTier = EffortTier(TIER_BASELINE_TENTHS);
+    pub const BASELINE: Self = Self(TIER_BASELINE_TENTHS);
     /// The `10.0x` ceiling - dedicated hardware only.
-    pub const DEEPEST: EffortTier = EffortTier(TIER_MAX_TENTHS);
+    pub const DEEPEST: Self = Self(TIER_MAX_TENTHS);
 
     /// Build a tier from tenths of the baseline (`5` = 0.5x, `10` = 1.0x,
     /// `100` = 10.0x).
     ///
-    /// Values outside `0.5x..=10.0x` are rejected rather than clamped: a
-    /// request asking for `20x` is a mistake the caller should see, not a
-    /// request that quietly becomes `10x`.
+    /// Values outside the documented ladder (`0.5x` or `1.0x..=10.0x`) are
+    /// rejected rather than clamped, including the undocumented `0.6x..0.9x`
+    /// gap (`6..10` tenths): a request asking for `20x` or `0.7x` is a mistake
+    /// the caller should see, not one silently coerced to another tier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_tenths(tenths: u16) -> Result<Self, String> {
         if tenths < TIER_MIN_TENTHS {
             return Err(format!(
@@ -100,6 +105,13 @@ impl EffortTier {
                 tenths % TIER_SCALE,
                 TIER_MIN_TENTHS / TIER_SCALE,
                 TIER_MIN_TENTHS % TIER_SCALE
+            ));
+        }
+        if tenths > TIER_MIN_TENTHS && tenths < TIER_BASELINE_TENTHS {
+            return Err(format!(
+                "effort tier {}.{}x falls in the undocumented sub-baseline gap (0.6x..0.9x)",
+                tenths / TIER_SCALE,
+                tenths % TIER_SCALE,
             ));
         }
         if tenths > TIER_MAX_TENTHS {
@@ -111,7 +123,7 @@ impl EffortTier {
                 TIER_MAX_TENTHS % TIER_SCALE
             ));
         }
-        Ok(EffortTier(tenths))
+        Ok(Self(tenths))
     }
 
     /// The raw tenths value, for hashing and storage.
@@ -137,7 +149,7 @@ impl EffortTier {
 
     /// Whether an operator advertising `ceiling` can serve this tier.
     #[must_use]
-    pub const fn servable_by(&self, ceiling: EffortTier) -> bool {
+    pub const fn servable_by(&self, ceiling: Self) -> bool {
         self.0 <= ceiling.0
     }
 }
@@ -161,7 +173,7 @@ impl<'de> serde::Deserialize<'de> for EffortTier {
 impl Default for EffortTier {
     /// `1.0x` - a request that does not say otherwise gets baseline work.
     fn default() -> Self {
-        EffortTier::BASELINE
+        Self::BASELINE
     }
 }
 
@@ -220,6 +232,16 @@ mod tests {
             EffortTier::from_tenths(u16::MAX).is_err(),
             "a huge tier must not wrap or clamp"
         );
+    }
+
+    #[test]
+    fn undocumented_sub_baseline_tenths_are_rejected() {
+        for tenths in 6..TIER_BASELINE_TENTHS {
+            assert!(
+                EffortTier::from_tenths(tenths).is_err(),
+                "undocumented tier 0.{tenths}x must be rejected"
+            );
+        }
     }
 
     #[test]

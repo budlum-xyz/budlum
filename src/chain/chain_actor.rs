@@ -1,10 +1,11 @@
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
 use crate::chain::blockchain::Blockchain;
 use crate::chain::finality::{FinalityCert, Precommit, Prevote};
 use crate::consensus::qc::{QcBlob, QcFaultProof};
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
-use crate::storage::merkle_trie::AccountProofBundle;
 use tokio::sync::{mpsc, oneshot};
 
 /// Direction filter for agent payment queries.
@@ -32,6 +33,38 @@ pub struct StorageRepairBand {
     pub unrecoverable: Vec<(crate::storage::ContentId, u32, u32)>,
 }
 
+/// What a name serves: the reference its record holds, and the bytes the
+/// B.U.D. 3.0 view rebuilt from it, or the reason it could not.
+pub type BnsContentView = (
+    crate::storage::bud3::content_ref::ContentRef,
+    Result<Vec<u8>, String>,
+);
+
+/// Verified B.U.D. 3.0 symbol range plus segment root metadata returned to RPC callers.
+#[derive(Debug, Clone)]
+pub struct Bud3SymbolPage {
+    pub symbol_size: u16,
+    pub roots: Vec<crate::storage::bud3::registry::SymbolRoot>,
+    pub items: Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>,
+}
+
+/// A name proof and the block it was read at.
+#[derive(Debug, Clone)]
+pub struct BnsAnchoredProof {
+    pub proof: crate::bns::types::BnsStateProof,
+    /// The height of the tip block the registry state belongs to.
+    pub height: u64,
+    /// The state root in that block's header.
+    pub state_root: String,
+}
+
+/// Committed account Merkle proof, state-root opening, and block height.
+pub type AccountProofReply = (
+    crate::core::account::ConsensusAccountProof,
+    crate::core::account::StateRootAccountsOpening,
+    u64,
+);
+
 #[derive(Debug)]
 pub enum ChainCommand {
     GetHeight(oneshot::Sender<u64>),
@@ -48,15 +81,27 @@ pub enum ChainCommand {
     GetBlockByHash(String, oneshot::Sender<Option<Block>>),
     GetBalance(Address, oneshot::Sender<u64>),
     GetNonce(Address, oneshot::Sender<u64>),
-    /// Account inclusion/absence proof against the proof-bearing state root.
+    /// Account inclusion/absence proof against the consensus accounts root,
+    /// with the height the proof was drawn at.
     ///
     /// Distinct from [`Self::GetBalance`]: that answers what the node says a
     /// balance is, this answers what the node can *prove* about it.
-    GetAccountProof(
-        Address,
-        oneshot::Sender<Option<crate::storage::merkle_trie::AccountProofBundle>>,
-    ),
+    GetAccountProof(Address, oneshot::Sender<Option<AccountProofReply>>),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
+    /// Run the aggregation side of the node with this ML-DSA-87 seed; the
+    /// answer is the tick interval in milliseconds when the chain has the
+    /// layer on.
+    EnableAggregator(zeroize::Zeroizing<[u8; 32]>, oneshot::Sender<Option<u64>>),
+    /// An object from `agg/object` with the transaction it authorizes.
+    AggObject(
+        Vec<u8>,
+        Transaction,
+        oneshot::Sender<Result<bool, crate::aggregation::node::ObjectRefusal>>,
+    ),
+    /// A frame from `agg/frame`.
+    AggFrame(Vec<u8>, oneshot::Sender<Result<bool, String>>),
+    /// One tick of the aggregator; the answer is the frames to publish.
+    AggTick(oneshot::Sender<Vec<Vec<u8>>>),
     AddTransactionBundle(
         Vec<Transaction>,
         oneshot::Sender<Result<(), crate::mempool::pool::BundleRefusal>>,
@@ -68,8 +113,8 @@ pub enum ChainCommand {
     TxPrecheck(Transaction, oneshot::Sender<serde_json::Value>),
     GetChainId(oneshot::Sender<u64>),
     GetBaseFee(oneshot::Sender<u64>),
-    /// Quote the same governed fee floor that admission uses, in one actor turn.
-    GetRequiredTransactionFee(Box<Transaction>, oneshot::Sender<u64>),
+    /// The fee floor one transaction must clear.
+    GetRequiredFee(Box<Transaction>, oneshot::Sender<u64>),
     GetValidatorSetHash(oneshot::Sender<String>),
     GetMempoolSize(oneshot::Sender<usize>),
     /// Whether the mempool still holds the transaction with this hash.
@@ -141,12 +186,44 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::chain::finality::FinalityCert>>,
     ),
     GetPqStageObservation(
-        crate::domain::regeneration_stage::Stage,
+        crate::chain::state_recovery::stage::Stage,
         u64,
         oneshot::Sender<crate::chain::blockchain::PqStageObservation>,
     ),
     GetPqSealedHeights(u64, oneshot::Sender<(Option<u64>, Option<u64>)>),
     GetQuantumView(oneshot::Sender<serde_json::Value>),
+    GetValidatorDirectory(
+        crate::validators::DirectoryQuery,
+        oneshot::Sender<Result<serde_json::Value, String>>,
+    ),
+    GetBud3(
+        crate::storage::bud3::registry::Bud3Query,
+        oneshot::Sender<serde_json::Value>,
+    ),
+    GetBud3Nfts(
+        Vec<crate::storage::bud3::registry::NftId>,
+        oneshot::Sender<Vec<serde_json::Value>>,
+    ),
+    Bud3StoreVerifiedSymbols {
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        items: Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>,
+        reply: oneshot::Sender<Result<usize, String>>,
+    },
+    Bud3GetSymbols {
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+        reply: oneshot::Sender<Result<Bud3SymbolPage, String>>,
+    },
+    Bud3GetContent {
+        receipt: crate::storage::bud3::view::PaidViewReceipt,
+        reply: oneshot::Sender<Result<Vec<u8>, crate::storage::bud3::view::ViewBud3Error>>,
+    },
+    ValidatorPeerId([u8; 32], oneshot::Sender<Option<[u8; 32]>>),
     GetValidatorAddress(oneshot::Sender<Option<Address>>),
     GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
@@ -166,10 +243,32 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::settlement::GlobalBlockHeader>>,
     ),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
+    GetDomainCommitmentsWithGarden(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
-    GetGraftApplication(
+    GetConsensusDomainsWithGarden(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
+    RegisterGardenDomain(
+        Box<crate::domain::ConsensusDomain>,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    SubmitVerifiedGardenCommitment(
+        Box<crate::domain::VerifiedDomainCommitment>,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    RotateBridgelessPoaAuthoritySet {
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        validator_set_hash: crate::domain::Hash32,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    TransitionBridgelessPoaDomainStatus {
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        next: crate::domain::DomainStatus,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    GetAppBindingApplication(
         [u8; 32],
-        oneshot::Sender<Option<crate::settlement::graft::GraftApp>>,
+        oneshot::Sender<Option<crate::settlement::app_binding::AppBindingApp>>,
     ),
     GetRestakedValidators(
         oneshot::Sender<(
@@ -177,9 +276,9 @@ pub enum ChainCommand {
             std::collections::BTreeMap<crate::core::address::Address, u64>,
         )>,
     ),
-    GetGraftPaymentProof(
+    GetAppBindingPaymentProof(
         [u8; 32],
-        oneshot::Sender<Option<crate::settlement::graft::GraftPaymentProof>>,
+        oneshot::Sender<Option<crate::settlement::app_binding::AppBindingPaymentProof>>,
     ),
     GetCrossDomainMessage(
         [u8; 32],
@@ -240,6 +339,12 @@ pub enum ChainCommand {
         crate::cross_domain::external::DomainKey,
         oneshot::Sender<Option<(crate::cross_domain::external::DomainRegistration, u64)>>,
     ),
+    ValidateDomainBlock(
+        crate::domain::DomainId,
+        Box<Block>,
+        u64,
+        oneshot::Sender<Result<crate::domain::DomainCommitment, String>>,
+    ),
     GetAiModel(
         crate::ai::types::AiModelId,
         oneshot::Sender<Option<crate::ai::types::AiModelSpec>>,
@@ -287,7 +392,7 @@ pub enum ChainCommand {
         verifier: crate::core::address::Address,
         response: oneshot::Sender<Option<crate::ai::types::AiExecutionProof>>,
     },
-    /// Get QoS metrics for a verifier.
+    /// Get `QoS` metrics for a verifier.
     GetAiVerifierQos {
         verifier: crate::core::address::Address,
         response: oneshot::Sender<Option<crate::ai::types::AiVerifierQos>>,
@@ -474,12 +579,43 @@ pub enum ChainCommand {
     },
     BnsResolveContent {
         name: String,
-        response: oneshot::Sender<Option<crate::storage::content_id::ContentId>>,
+        response: oneshot::Sender<Option<BnsContentView>>,
     },
     BnsResolveSubdomain {
         parent: String,
         label: String,
         response: oneshot::Sender<Option<Address>>,
+    },
+    BnsResolveSubdomainContent {
+        parent: String,
+        label: String,
+        response: oneshot::Sender<Option<crate::storage::bud3::content_ref::ContentRef>>,
+    },
+    BnsReverseResolve {
+        address: Address,
+        response: oneshot::Sender<Option<String>>,
+    },
+    BnsGetRecords {
+        name: String,
+        response: oneshot::Sender<Option<std::collections::BTreeMap<String, String>>>,
+    },
+    BnsListSubdomains {
+        parent_name: String,
+        response: oneshot::Sender<
+            Option<std::collections::BTreeMap<String, crate::bns::types::SubdomainRecord>>,
+        >,
+    },
+    BnsListNamesByOwner {
+        owner: Address,
+        response: oneshot::Sender<Vec<crate::bns::types::BnsResolved>>,
+    },
+    BnsProveName {
+        name: String,
+        response: oneshot::Sender<crate::bns::types::BnsStateProof>,
+    },
+    BnsProveNameAtTip {
+        name: String,
+        response: oneshot::Sender<BnsAnchoredProof>,
     },
     IdentityResolve {
         subject: Address,
@@ -496,10 +632,30 @@ pub enum ChainCommand {
         document: String,
         response: oneshot::Sender<Result<(), String>>,
     },
+    ObjectLayerCharter {
+        domain_id: u32,
+        response: oneshot::Sender<Option<crate::object_layer::DomainCharter>>,
+    },
+    ObjectLayerAssetClass {
+        class_id: crate::object_layer::AssetClassId,
+        response: oneshot::Sender<Option<(crate::object_layer::registry::AssetClass, u128)>>,
+    },
+    ObjectLayerAsset {
+        asset_id: crate::object_layer::AssetId,
+        response: oneshot::Sender<Option<crate::object_layer::registry::UniqueAsset>>,
+    },
     BnsCalculateCost {
         name: String,
         duration: u64,
         response: oneshot::Sender<u64>,
+    },
+    BnsGetOffer {
+        offer_id: u64,
+        response: oneshot::Sender<(Option<crate::bns::NameOffer>, u64)>,
+    },
+    BnsListOffers {
+        kind: Option<crate::bns::OfferKind>,
+        response: oneshot::Sender<Vec<crate::bns::NameOffer>>,
     },
     NftGet {
         id: u64,
@@ -544,9 +700,9 @@ pub enum ChainCommand {
     HubGetApps {
         response: oneshot::Sender<Vec<crate::budlumxyz::types::AppRecord>>,
     },
-    /// The Graft applications, listed beside the native apps.
-    HubGetGraftApps {
-        response: oneshot::Sender<Vec<crate::settlement::graft::GraftApp>>,
+    /// The `AppBinding` applications, listed beside the native apps.
+    HubGetAppBindingApps {
+        response: oneshot::Sender<Vec<crate::settlement::app_binding::AppBindingApp>>,
     },
 }
 
@@ -556,6 +712,7 @@ pub struct ChainHandle {
 }
 
 impl ChainHandle {
+    #[must_use]
     pub fn new(tx: mpsc::Sender<ChainCommand>) -> Self {
         Self { tx }
     }
@@ -617,10 +774,66 @@ impl ChainHandle {
     /// `None` means the node could not answer, which is not the same as the
     /// account being absent: absence is itself a proof and comes back as
     /// `Some` with `present: false`.
-    pub async fn get_account_proof(&self, addr: &Address) -> Option<AccountProofBundle> {
+    pub async fn get_account_proof(&self, addr: &Address) -> Option<AccountProofReply> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetAccountProof(*addr, tx)).await;
         rx.await.unwrap_or(None)
+    }
+
+    /// Run the aggregation side of the node, proving with `signer_seed`.
+    /// Returns the tick interval in milliseconds when the chain has the
+    /// layer on, `None` otherwise.
+    pub async fn enable_aggregator(
+        &self,
+        signer_seed: zeroize::Zeroizing<[u8; 32]>,
+    ) -> Option<u64> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::EnableAggregator(signer_seed, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Hand an object from `agg/object` to the aggregation side, with the
+    /// transaction it authorizes. Returns whether the pair is new.
+    ///
+    /// # Errors
+    ///
+    /// The refusal, which also says whether the sender is to blame.
+    pub async fn submit_agg_object(
+        &self,
+        envelope: Vec<u8>,
+        transaction: Transaction,
+    ) -> Result<bool, crate::aggregation::node::ObjectRefusal> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::AggObject(envelope, transaction, tx))
+            .await;
+        rx.await
+            .unwrap_or(Err(crate::aggregation::node::ObjectRefusal::NoAggregator))
+    }
+
+    /// Hand a frame from `agg/frame` to the aggregation side. Returns
+    /// whether the frame is new.
+    ///
+    /// # Errors
+    ///
+    /// Why the frame was dropped.
+    pub async fn submit_agg_frame(&self, frame: Vec<u8>) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::AggFrame(frame, tx)).await;
+        rx.await
+            .unwrap_or_else(|_| Err("chain actor is not running".into()))
+    }
+
+    /// One tick of the aggregator: the encoded frames to publish on
+    /// `agg/frame`.
+    pub async fn aggregation_tick(&self) -> Vec<Vec<u8>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::AggTick(tx)).await;
+        rx.await.unwrap_or_default()
     }
 
     pub async fn add_transaction(&self, tx: Transaction) -> Result<(), String> {
@@ -739,25 +952,15 @@ impl ChainHandle {
         rx.await.unwrap_or(1)
     }
 
-    /// Ask the consensus state for its current admission floor. An unavailable
-    /// actor is an error, never a cheap quote a wallet might sign and submit.
-    ///
-    /// # Errors
-    /// The actor is unreachable or did not answer.
-    pub async fn get_required_transaction_fee(
-        &self,
-        candidate: Transaction,
-    ) -> Result<u64, String> {
+    /// The fee floor `candidate` must clear under the current state. `None`
+    /// when the chain actor did not answer.
+    pub async fn get_required_fee(&self, candidate: Transaction) -> Option<u64> {
         let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(ChainCommand::GetRequiredTransactionFee(
-                Box::new(candidate),
-                tx,
-            ))
-            .await
-            .map_err(|_| String::from("chain actor unavailable for fee estimate"))?;
-        rx.await
-            .map_err(|_| String::from("chain actor dropped fee estimate"))
+        let _ = self
+            .tx
+            .send(ChainCommand::GetRequiredFee(Box::new(candidate), tx))
+            .await;
+        rx.await.ok()
     }
 
     pub async fn get_validator_set_hash(&self) -> String {
@@ -1275,6 +1478,7 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// Convenience: exposed for RPC manifest deal query surface.
     pub async fn get_storage_deals_by_manifest(
         &self,
         manifest_id: crate::storage::ContentId,
@@ -1290,6 +1494,7 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// Convenience: exposed for RPC shard deal query surface.
     pub async fn get_storage_deals_by_shard(
         &self,
         manifest_id: crate::storage::ContentId,
@@ -1309,6 +1514,7 @@ impl ChainHandle {
 
     /// Objects within `margin` shards of unrecoverable, and those already past
     /// it, measured at the caller's margin.
+    /// Convenience: exposed for RPC storage repair band query.
     pub async fn get_storage_repair_band(&self, margin: u32) -> StorageRepairBand {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -1321,6 +1527,7 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// Convenience: exposed for RPC storage challenge outcome query.
     pub async fn get_storage_outcome(
         &self,
         challenge_id: u64,
@@ -1370,10 +1577,10 @@ impl ChainHandle {
     }
 
     /// The commitment this node holds and the post-quantum canonical
-    /// commitment with its seal, for one regeneration stage and height.
+    /// commitment with its seal, for one recovery stage and height.
     pub async fn pq_stage_observation(
         &self,
-        stage: crate::domain::regeneration_stage::Stage,
+        stage: crate::chain::state_recovery::stage::Stage,
         height: u64,
     ) -> crate::chain::blockchain::PqStageObservation {
         let (tx, rx) = oneshot::channel();
@@ -1387,6 +1594,129 @@ impl ChainHandle {
                 canonical: None,
                 seal: None,
             })
+    }
+
+    /// A read of the validator directory: one validator, the relays or the
+    /// gateways.
+    pub async fn validator_directory(
+        &self,
+        query: crate::validators::DirectoryQuery,
+    ) -> Result<serde_json::Value, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::GetValidatorDirectory(query, tx))
+            .await
+            .map_err(|_| "validator directory actor is unavailable".to_string())?;
+        rx.await
+            .map_err(|_| "validator directory reply was lost".to_string())?
+    }
+
+    /// A read of the B.U.D. 3.0 registry: one object or one validator's shares.
+    pub async fn bud3(
+        &self,
+        query: crate::storage::bud3::registry::Bud3Query,
+    ) -> Result<serde_json::Value, &'static str> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::GetBud3(query, tx))
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// Resolve a batch of B.U.D. 3.0 NFT bindings (`NftId`) in a single actor turn.
+    pub async fn bud3_nfts(
+        &self,
+        nfts: Vec<crate::storage::bud3::registry::NftId>,
+    ) -> Result<Vec<serde_json::Value>, &'static str> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::GetBud3Nfts(nfts, tx))
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// Verify and store node-local B.U.D. 3.0 custody symbols against live consensus roots.
+    pub async fn bud3_store_verified_symbols(
+        &self,
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        items: Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>,
+    ) -> Result<Result<usize, String>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::Bud3StoreVerifiedSymbols {
+                holder,
+                object,
+                segment,
+                items,
+                reply,
+            })
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// Read verified B.U.D. 3.0 symbol items and segment roots for `(holder, object, segment)`.
+    pub async fn bud3_get_symbols(
+        &self,
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<Result<Bud3SymbolPage, String>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::Bud3GetSymbols {
+                holder,
+                object,
+                segment,
+                first_esi,
+                count,
+                reply,
+            })
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// G8 paid public fallback decode via the chain actor's verified symbol store.
+    pub async fn bud3_get_content(
+        &self,
+        receipt: crate::storage::bud3::view::PaidViewReceipt,
+    ) -> Result<Result<Vec<u8>, crate::storage::bud3::view::ViewBud3Error>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::Bud3GetContent { receipt, reply })
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// Resolve a registered validator's 32-byte Ed25519 transport peer key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the chain actor channel is closed or the reply is dropped.
+    pub async fn validator_peer_id(
+        &self,
+        owner: [u8; 32],
+    ) -> Result<Option<[u8; 32]>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::ValidatorPeerId(owner, reply))
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
     }
 
     /// The quantum alarm and the observed crypto facts of the native domains.
@@ -1526,6 +1856,23 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// Canonical in-block domain commitments merged with this node's local
+    /// Garden commitments. Served only on the operator RPC listener so
+    /// public RPC callers never observe node-local Gardens.
+    pub async fn get_domain_commitments_with_garden(&self) -> Vec<crate::domain::DomainCommitment> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetDomainCommitmentsWithGarden(tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// Query the latest committed height of `domain_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the chain actor stopped or the domain is unknown.
     pub async fn get_domain_height(
         &self,
         domain_id: crate::domain::DomainId,
@@ -1539,6 +1886,11 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    /// Build the current global settlement header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the chain actor stopped or header construction fails.
     pub async fn build_global_header(
         &self,
         _dummy: Option<()>,
@@ -1555,26 +1907,134 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
-    pub async fn get_graft_payment_proof(
-        &self,
-        payment_id: [u8; 32],
-    ) -> Option<crate::settlement::graft::GraftPaymentProof> {
+    /// Canonical in-block domains merged with this node's local Garden
+    /// domains. Operator-only callers such as `GardenBudlumLink::view` use
+    /// this instead of `get_consensus_domains`, which serves public RPC.
+    pub async fn get_consensus_domains_with_garden(&self) -> Vec<crate::domain::ConsensusDomain> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(ChainCommand::GetGraftPaymentProof(payment_id, tx))
+            .send(ChainCommand::GetConsensusDomainsWithGarden(tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// Register a sovereign, bridgeless `PoA` Garden domain in this node's
+    /// local Garden registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the domain record is invalid or already registered,
+    /// or if the chain actor stopped.
+    pub async fn register_garden_domain(
+        &self,
+        domain: crate::domain::ConsensusDomain,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterGardenDomain(Box::new(domain), tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Verify and record one Garden domain commitment in this node's local
+    /// Garden registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if verification fails, the domain is not active, or the
+    /// chain actor stopped.
+    pub async fn submit_verified_garden_commitment(
+        &self,
+        verified: crate::domain::VerifiedDomainCommitment,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitVerifiedGardenCommitment(
+                Box::new(verified),
+                tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Replace the registered authority set of a bridgeless `PoA` Garden domain
+    /// the caller operates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the caller does not operate the domain, the domain
+    /// is retired, the hash is zero, or the chain actor stopped.
+    pub async fn rotate_bridgeless_poa_authority_set(
+        &self,
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        validator_set_hash: crate::domain::Hash32,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RotateBridgelessPoaAuthoritySet {
+                domain_id,
+                operator,
+                validator_set_hash,
+                reply,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Move a bridgeless `PoA` Garden domain the caller operates to `next`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transition is illegal, the domain is
+    /// quarantined, the caller is not the operator, or the chain actor stopped.
+    pub async fn transition_bridgeless_poa_domain_status(
+        &self,
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        next: crate::domain::DomainStatus,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::TransitionBridgelessPoaDomainStatus {
+                domain_id,
+                operator,
+                next,
+                reply,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn get_app_binding_payment_proof(
+        &self,
+        payment_id: [u8; 32],
+    ) -> Option<crate::settlement::app_binding::AppBindingPaymentProof> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetAppBindingPaymentProof(payment_id, tx))
             .await;
         rx.await.unwrap_or(None)
     }
 
-    pub async fn get_graft_application(
+    pub async fn get_app_binding_application(
         &self,
-        graft_id: [u8; 32],
-    ) -> Option<crate::settlement::graft::GraftApp> {
+        app_binding_id: [u8; 32],
+    ) -> Option<crate::settlement::app_binding::AppBindingApp> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(ChainCommand::GetGraftApplication(graft_id, tx))
+            .send(ChainCommand::GetAppBindingApplication(app_binding_id, tx))
             .await;
         rx.await.unwrap_or(None)
     }
@@ -1762,6 +2222,34 @@ impl ChainHandle {
             .send(ChainCommand::GetExternalDomainRegistration(key, tx))
             .await;
         rx.await.unwrap_or(None)
+    }
+
+    /// Fail-closed consensus-plugin block validation and commitment extraction
+    /// through `Blockchain::validate_and_extract_domain_block`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown/inactive domains, unregistered plugins, and invalid blocks.
+    ///
+    /// WIRING: Actor handle for domain-local block intake (`plugin_registry`).
+    pub async fn import_domain_block(
+        &self,
+        domain_id: crate::domain::DomainId,
+        block: Block,
+        sequence: u64,
+    ) -> Result<crate::domain::DomainCommitment, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::ValidateDomainBlock(
+                domain_id,
+                Box::new(block),
+                sequence,
+                tx,
+            ))
+            .await
+            .map_err(|_| "Chain actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Chain actor dropped response".to_string())?
     }
 
     pub async fn get_ai_model(
@@ -1974,7 +2462,7 @@ impl ChainHandle {
         rx.await.ok().flatten()
     }
 
-    /// Get QoS metrics for a verifier.
+    /// Get `QoS` metrics for a verifier.
     pub async fn get_ai_verifier_qos(
         &self,
         verifier: crate::core::address::Address,
@@ -2144,6 +2632,7 @@ impl ChainHandle {
     }
 
     /// Query all storage challenges.
+    /// Convenience: exposed for RPC storage challenge query surface.
     pub async fn get_storage_challenges(
         &self,
     ) -> Result<Vec<crate::domain::storage_deal::RetrievalChallenge>, String> {
@@ -2165,6 +2654,7 @@ impl ChainHandle {
     }
 
     /// Query aggregate storage economics accounting.
+    /// Convenience: exposed for RPC storage economics summary.
     pub async fn get_storage_economics_summary(&self) -> Result<serde_json::Value, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2209,10 +2699,8 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
-    pub async fn bns_resolve_content(
-        &self,
-        name: String,
-    ) -> Option<crate::storage::content_id::ContentId> {
+    /// The content of a live `.bud` name, read through the B.U.D. 3.0 view.
+    pub async fn bns_resolve_content(&self, name: String) -> Option<BnsContentView> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -2232,6 +2720,99 @@ impl ChainHandle {
             })
             .await;
         rx.await.unwrap_or(None)
+    }
+
+    /// The content a subdomain of a live `.bud` name serves.
+    pub async fn bns_resolve_subdomain_content(
+        &self,
+        parent: String,
+        label: String,
+    ) -> Option<crate::storage::bud3::content_ref::ContentRef> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsResolveSubdomainContent {
+                parent,
+                label,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn bns_reverse_resolve(&self, address: Address) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsReverseResolve {
+                address,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn bns_get_records(
+        &self,
+        name: String,
+    ) -> Option<std::collections::BTreeMap<String, String>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsGetRecords { name, response: tx })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn bns_list_subdomains(
+        &self,
+        parent_name: String,
+    ) -> Option<std::collections::BTreeMap<String, crate::bns::types::SubdomainRecord>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsListSubdomains {
+                parent_name,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn bns_list_names_by_owner(
+        &self,
+        owner: Address,
+    ) -> Vec<crate::bns::types::BnsResolved> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsListNamesByOwner {
+                owner,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// The proof of `name` together with the block it was read at: the
+    /// height and the state root of the tip. A light client checks the
+    /// header at that height before it trusts the root the proof folds to.
+    pub async fn bns_prove_name_at_tip(&self, name: String) -> Option<BnsAnchoredProof> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsProveNameAtTip { name, response: tx })
+            .await;
+        rx.await.ok()
+    }
+
+    pub async fn bns_prove_name(&self, name: String) -> Option<crate::bns::types::BnsStateProof> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsProveName { name, response: tx })
+            .await;
+        rx.await.ok()
     }
 
     pub async fn identity_resolve(
@@ -2287,6 +2868,51 @@ impl ChainHandle {
         rx.await.map_err(|_| "chain actor closed".to_string())?
     }
 
+    pub async fn object_layer_charter(
+        &self,
+        domain_id: u32,
+    ) -> Option<crate::object_layer::DomainCharter> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerCharter {
+                domain_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn object_layer_asset_class(
+        &self,
+        class_id: crate::object_layer::AssetClassId,
+    ) -> Option<(crate::object_layer::registry::AssetClass, u128)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerAssetClass {
+                class_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn object_layer_asset(
+        &self,
+        asset_id: crate::object_layer::AssetId,
+    ) -> Option<crate::object_layer::registry::UniqueAsset> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ObjectLayerAsset {
+                asset_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn bns_calculate_cost(&self, name: String, duration: u64) -> u64 {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2298,6 +2924,30 @@ impl ChainHandle {
             })
             .await;
         rx.await.unwrap_or(0)
+    }
+
+    pub async fn bns_get_offer(&self, offer_id: u64) -> (Option<crate::bns::NameOffer>, u64) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsGetOffer {
+                offer_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or((None, 0))
+    }
+
+    pub async fn bns_list_offers(
+        &self,
+        kind: Option<crate::bns::OfferKind>,
+    ) -> Vec<crate::bns::NameOffer> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsListOffers { kind, response: tx })
+            .await;
+        rx.await.unwrap_or_default()
     }
 
     pub async fn nft_get(&self, id: u64) -> Option<crate::socialfi::types::Nft> {
@@ -2409,11 +3059,13 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
-    pub async fn budlumxyz_get_graft_apps(&self) -> Vec<crate::settlement::graft::GraftApp> {
+    pub async fn budlumxyz_get_app_binding_apps(
+        &self,
+    ) -> Vec<crate::settlement::app_binding::AppBindingApp> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(ChainCommand::HubGetGraftApps { response: tx })
+            .send(ChainCommand::HubGetAppBindingApps { response: tx })
             .await;
         rx.await.unwrap_or_default()
     }
@@ -2440,29 +3092,18 @@ impl ChainHandle {
 /// block pays; every later request at that height is a tree walk.
 ///
 /// `leaves` is what makes the cache honest. Balances change outside blocks
-/// (faucet, bond debit and refund) and an equal length reorg swaps state at
-/// the same chain length, so the chain length cannot tag the trie. The trie
-/// keeps the exact (address, balance, nonce) list it was built from. A hit
-/// needs the live accounts to match that list, so a stale trie is never used.
-/// The compare is one pass over the accounts and is far cheaper than a build.
-struct ProofTrieCache {
-    leaves: Vec<([u8; 32], u64, u64)>,
-    trie: crate::storage::merkle_trie::MerkleTrie,
-}
-
 pub struct ChainActor {
     blockchain: Blockchain,
     rx: mpsc::Receiver<ChainCommand>,
-    proof_trie: Option<ProofTrieCache>,
 }
 
 impl ChainActor {
     /// After a successful reorg the old tip's finality
     /// round is dead (0186 invalidated it), but nobody restarted voting - the
     /// node just sat there and the post-fork chain finalized nothing until the
-    /// NEXT checkpoint block happened to arrive through AddBlock. Resume the
+    /// NEXT checkpoint block happened to arrive through `AddBlock`. Resume the
     /// prevote task on the new tip when it is itself a checkpoint height,
-    /// mirroring ValidateAndAddBlock. Shared by both reorg entry points.
+    /// mirroring `ValidateAndAddBlock`. Shared by both reorg entry points.
     fn resume_finality_after_reorg(&mut self, outcome: &Result<bool, String>) {
         if !matches!(outcome, Ok(true)) {
             return;
@@ -2475,58 +3116,21 @@ impl ChainActor {
 
     pub fn new(blockchain: Blockchain) -> (Self, ChainHandle) {
         let (tx, rx) = mpsc::channel(1000);
-        (
-            Self {
-                blockchain,
-                rx,
-                proof_trie: None,
-            },
-            ChainHandle { tx },
-        )
+        (Self { blockchain, rx }, ChainHandle { tx })
     }
 
-    /// Proof for one account, reusing the trie when the accounts did not change.
+    /// Proof for one account, drawn from the consensus accounts tree the
+    /// state root is folded from, with the height it was drawn at.
     ///
-    /// The cache is keyed by the account contents and rebuilt when they do not
-    /// match, so a proof is always drawn against the state the node holds. A
-    /// stale trie would produce a proof that verifies against its own root and
-    /// describes state that no longer exists - worse than no proof, because it
-    /// is a correct-looking answer to the wrong question.
-    fn account_proof(&mut self, addr: &Address) -> crate::storage::merkle_trie::AccountProofBundle {
-        let accounts = &self.blockchain.state.accounts;
-        let fresh = self.proof_trie.as_ref().is_some_and(|cached| {
-            cached.leaves.len() == accounts.len()
-                && cached
-                    .leaves
-                    .iter()
-                    .zip(accounts.iter())
-                    .all(|(l, (a, acct))| l.0 == a.0 && l.1 == acct.balance && l.2 == acct.nonce)
-        });
-        if !fresh {
-            let leaves: Vec<([u8; 32], u64, u64)> = accounts
-                .iter()
-                .map(|(a, acct)| (a.0, acct.balance, acct.nonce))
-                .collect();
-            let mut trie = crate::storage::merkle_trie::MerkleTrie::new();
-            for (a, balance, nonce) in &leaves {
-                trie.insert(a, *balance, *nonce);
-            }
-            self.proof_trie = Some(ProofTrieCache { leaves, trie });
-        }
-        match self.proof_trie.as_ref() {
-            Some(cached) => crate::storage::merkle_trie::prove_from_trie(&cached.trie, &addr.0),
-            // Unreachable: the branch above assigns it. Written as a fallback
-            // rather than an unwrap so a future edit that breaks the
-            // invariant costs one rebuild instead of stopping the node.
-            None => crate::storage::merkle_trie::prove_account(
-                self.blockchain
-                    .state
-                    .accounts
-                    .iter()
-                    .map(|(a, acct)| (a.0, acct.balance, acct.nonce)),
-                &addr.0,
-            ),
-        }
+    /// The proof verifies against the accounts root a block header commits
+    /// to, so a light client can anchor the claim to a finalized block. There
+    /// is no separate proof cache: the tree is maintained incrementally by
+    /// the state itself, so a stale proof cannot be served.
+    fn account_proof(&mut self, addr: &Address) -> AccountProofReply {
+        let proof = self.blockchain.state.get_account_proof(addr);
+        let opening = self.blockchain.state.get_state_root_accounts_opening();
+        let height = self.blockchain.state.current_block_height;
+        (proof, opening, height)
     }
 
     /// Height the AI read queries judge deadlines at. It is the height the
@@ -2610,8 +3214,20 @@ impl ChainActor {
                     let _ = res_tx.send(
                         self.blockchain
                             .add_transaction(tx_obj)
-                            .map_err(|e| e.to_string()),
+                            .map_err(|e| e.clone()),
                     );
+                }
+                ChainCommand::EnableAggregator(signer_seed, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.enable_aggregator(signer_seed));
+                }
+                ChainCommand::AggObject(envelope, transaction, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.receive_object(&envelope, transaction));
+                }
+                ChainCommand::AggFrame(frame, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.receive_frame(&frame));
+                }
+                ChainCommand::AggTick(res_tx) => {
+                    let _ = res_tx.send(self.blockchain.aggregation_tick());
                 }
                 ChainCommand::AddTransactionBundle(txs, res_tx) => {
                     let _ = res_tx.send(self.blockchain.add_transaction_bundle(txs));
@@ -2656,9 +3272,8 @@ impl ChainActor {
                 ChainCommand::GetBaseFee(tx) => {
                     let _ = tx.send(self.blockchain.state.base_fee);
                 }
-                ChainCommand::GetRequiredTransactionFee(candidate, tx) => {
-                    let fee = self.blockchain.state.required_transaction_fee(&candidate);
-                    let _ = tx.send(fee);
+                ChainCommand::GetRequiredFee(candidate, tx) => {
+                    let _ = tx.send(self.blockchain.state.required_fee(&candidate));
                 }
                 ChainCommand::GetValidatorSetHash(tx) => {
                     let _ = tx.send(self.blockchain.get_validator_set_hash());
@@ -2704,7 +3319,7 @@ impl ChainActor {
                     let res = self
                         .blockchain
                         .handle_finality_cert(cert)
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| e.clone());
                     if res.is_ok() {
                         self.blockchain.start_pending_finality_round();
                     }
@@ -2766,10 +3381,7 @@ impl ChainActor {
                     let _ = response.send(result);
                 }
                 ChainCommand::ImportQcBlob(blob, res_tx) => {
-                    let res = self
-                        .blockchain
-                        .import_qc_blob(blob)
-                        .map_err(|e| e.to_string());
+                    let res = self.blockchain.import_qc_blob(blob).map_err(|e| e.clone());
                     if res.is_ok() {
                         self.blockchain.start_pending_finality_round();
                     }
@@ -2779,7 +3391,7 @@ impl ChainActor {
                     let _ = res_tx.send(
                         self.blockchain
                             .handle_qc_fault_proof(proof)
-                            .map_err(|e| e.to_string()),
+                            .map_err(|e| e.clone()),
                     );
                 }
                 ChainCommand::SubmitSlashingEvidence(evidence, res_tx) => {
@@ -2834,7 +3446,7 @@ impl ChainActor {
                     let _ = tx.send(removed);
                 }
                 ChainCommand::TryReorg(fork, res_tx) => {
-                    let outcome = self.blockchain.try_reorg(fork).map_err(|e| e.to_string());
+                    let outcome = self.blockchain.try_reorg(fork).map_err(|e| e.clone());
                     // After a successful reorg the old tip's
                     // finality round is dead (0186 invalidated it), but nobody
                     // restarted voting - the node just sat there and the post-
@@ -2851,7 +3463,7 @@ impl ChainActor {
                     let outcome = self
                         .blockchain
                         .try_reorg_suffix(suffix)
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| e.clone());
                     self.resume_finality_after_reorg(&outcome);
                     let _ = res_tx.send(outcome);
                 }
@@ -2889,6 +3501,90 @@ impl ChainActor {
                 ChainCommand::GetQuantumView(tx) => {
                     let _ = tx.send(self.blockchain.quantum_view());
                 }
+                ChainCommand::GetBud3(query, tx) => {
+                    let query = match query {
+                        crate::storage::bud3::registry::Bud3Query::Grant(tag) => {
+                            crate::storage::bud3::registry::Bud3Query::GrantAt(
+                                tag,
+                                self.blockchain.state.epoch_index,
+                            )
+                        }
+                        other => other,
+                    };
+                    let _ = tx.send(self.blockchain.state.bud3_registry.query_json(&query));
+                }
+                ChainCommand::GetBud3Nfts(nfts, tx) => {
+                    let values =
+                        nfts.into_iter()
+                            .map(|nft| {
+                                self.blockchain.state.bud3_registry.query_json(
+                                    &crate::storage::bud3::registry::Bud3Query::Nft(nft),
+                                )
+                            })
+                            .collect();
+                    let _ = tx.send(values);
+                }
+                ChainCommand::Bud3StoreVerifiedSymbols {
+                    holder,
+                    object,
+                    segment,
+                    items,
+                    reply,
+                } => {
+                    let res = self
+                        .blockchain
+                        .store_verified_bud3_symbols(&holder, &object, segment, &items);
+                    let _ = reply.send(res);
+                }
+                ChainCommand::Bud3GetSymbols {
+                    holder,
+                    object,
+                    segment,
+                    first_esi,
+                    count,
+                    reply,
+                } => {
+                    let res = self
+                        .blockchain
+                        .fetch_verified_bud3_symbol_page(
+                            &holder, &object, segment, first_esi, count,
+                        )
+                        .map(|(symbol_size, roots, items)| Bud3SymbolPage {
+                            symbol_size,
+                            roots,
+                            items,
+                        });
+                    let _ = reply.send(res);
+                }
+                ChainCommand::Bud3GetContent { receipt, reply } => {
+                    let res = self.blockchain.decode_bud3_paid_content(&receipt);
+                    let _ = reply.send(res);
+                }
+                ChainCommand::ValidatorPeerId(owner, reply) => {
+                    let record = self
+                        .blockchain
+                        .state
+                        .validator_directory
+                        .get(&Address(owner));
+                    let _ = reply.send(record.map(|r| r.peer_id));
+                }
+                ChainCommand::GetValidatorDirectory(query, tx) => {
+                    let state = &self.blockchain.state;
+                    let result = if matches!(
+                        query,
+                        crate::validators::DirectoryQuery::One(owner)
+                            if state.validators.contains_key(&owner)
+                                && state.validator_directory.get(&owner).is_none()
+                    ) {
+                        Err(
+                            "validator directory has not been populated for existing validators"
+                                .into(),
+                        )
+                    } else {
+                        Ok(state.validator_directory.query_json(query))
+                    };
+                    let _ = tx.send(result);
+                }
                 ChainCommand::GetPqSealedHeights(live, tx) => {
                     let res = self.blockchain.pq_sealed_heights(live);
                     let _ = tx.send(res);
@@ -2911,7 +3607,7 @@ impl ChainActor {
                 }
                 ChainCommand::ApplySnapshot(snapshot, res_tx) => {
                     let res = self.blockchain.apply_state_snapshot(snapshot);
-                    let _ = res_tx.send(res.map_err(|e: String| e.to_string()));
+                    let _ = res_tx.send(res.map_err(|e: String| e.clone()));
                 }
                 ChainCommand::GetSettlementInfo(tx) => {
                     let header = self.blockchain.build_global_header(None);
@@ -2945,14 +3641,14 @@ impl ChainActor {
                         "proofMarketActiveTasks": self.blockchain.state.proof_market.active_tasks.len(),
                         "proofMarketPendingReceipts": self.blockchain.state.proof_market.pending_receipts.len(),
                         "proofMarketEscrowedCreators": self.blockchain.state.proof_market.escrowed.len(),
-                        "graftRoot": format!(
+                        "appBindingRoot": format!(
                             "0x{}",
-                            hex::encode(self.blockchain.state.settlement.graft.root())
+                            hex::encode(self.blockchain.state.settlement.app_binding.root())
                         ),
-                        "graftApplications": self.blockchain.state.settlement.graft.apps.len(),
-                        "graftPayments": self.blockchain.state.settlement.graft.payments.len(),
-                        "graftIntents": self.blockchain.state.settlement.graft.intents.len(),
-                        "graftClaims": self.blockchain.state.settlement.graft.used_messages.len(),
+                        "appBindingApplications": self.blockchain.state.settlement.app_binding.apps.len(),
+                        "appBindingPayments": self.blockchain.state.settlement.app_binding.payments.len(),
+                        "appBindingIntents": self.blockchain.state.settlement.app_binding.intents.len(),
+                        "appBindingClaims": self.blockchain.state.settlement.app_binding.used_messages.len(),
                     });
                     let _ = tx.send(info);
                 }
@@ -2961,19 +3657,63 @@ impl ChainActor {
                     let _ = tx.send(header);
                 }
                 ChainCommand::GetDomainCommitments(tx) => {
-                    let commitments = self
-                        .blockchain
-                        .state
-                        .settlement
-                        .commitments
-                        .commitments_for_global_block();
-                    let _ = tx.send(commitments);
+                    // Public RPC (`bud_getDomainCommitments`) reads canonical
+                    // in-block settlement commitments only; node-local Gardens
+                    // stay private to the node operator.
+                    let _ = tx.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .commitments
+                            .commitments_for_global_block(),
+                    );
+                }
+                ChainCommand::GetDomainCommitmentsWithGarden(tx) => {
+                    let _ = tx.send(self.blockchain.domain_commitments_with_garden());
                 }
                 ChainCommand::GetConsensusDomains(tx) => {
+                    // Public RPC (`bud_getConsensusDomains`) reads canonical
+                    // in-block domains only.
                     let _ = tx.send(self.blockchain.state.settlement.domains.domains());
                 }
-                ChainCommand::GetGraftPaymentProof(payment_id, tx) => {
-                    let _ = tx.send(self.blockchain.graft_payment_proof(&payment_id));
+                ChainCommand::GetConsensusDomainsWithGarden(tx) => {
+                    let _ = tx.send(self.blockchain.consensus_domains_with_garden());
+                }
+                ChainCommand::RegisterGardenDomain(domain, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.register_garden_domain(*domain));
+                }
+                ChainCommand::SubmitVerifiedGardenCommitment(verified, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .submit_verified_garden_commitment(verified.commitment, verified.proof),
+                    );
+                }
+                ChainCommand::RotateBridgelessPoaAuthoritySet {
+                    domain_id,
+                    operator,
+                    validator_set_hash,
+                    reply,
+                } => {
+                    let _ = reply.send(self.blockchain.rotate_bridgeless_poa_authority_set(
+                        domain_id,
+                        operator,
+                        validator_set_hash,
+                    ));
+                }
+                ChainCommand::TransitionBridgelessPoaDomainStatus {
+                    domain_id,
+                    operator,
+                    next,
+                    reply,
+                } => {
+                    let _ =
+                        reply
+                            .send(self.blockchain.transition_bridgeless_poa_domain_status(
+                                domain_id, operator, next,
+                            ));
+                }
+                ChainCommand::GetAppBindingPaymentProof(payment_id, tx) => {
+                    let _ = tx.send(self.blockchain.app_binding_payment_proof(&payment_id));
                 }
                 ChainCommand::GetRestakedValidators(tx) => {
                     let state = &self.blockchain.state;
@@ -2992,13 +3732,13 @@ impl ChainActor {
                         .collect();
                     let _ = tx.send((rows, weights));
                 }
-                ChainCommand::GetGraftApplication(graft_id, tx) => {
+                ChainCommand::GetAppBindingApplication(app_binding_id, tx) => {
                     let _ = tx.send(
                         self.blockchain
                             .state
                             .settlement
-                            .graft
-                            .get(&graft_id)
+                            .app_binding
+                            .get(&app_binding_id)
                             .cloned(),
                     );
                 }
@@ -3088,6 +3828,14 @@ impl ChainActor {
                 }
                 ChainCommand::GetExternalDomainRegistration(key, res_tx) => {
                     let _ = res_tx.send(self.blockchain.external_domain_registration(&key));
+                }
+                ChainCommand::ValidateDomainBlock(domain_id, block, seq, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.validate_and_extract_domain_block(
+                        domain_id,
+                        &block,
+                        &[],
+                        seq,
+                    ));
                 }
                 ChainCommand::GetAiModel(id, res_tx) => {
                     let res = self.blockchain.state.ai_registry.models.get(&id).cloned();
@@ -3704,12 +4452,25 @@ impl ChainActor {
                     );
                 }
                 ChainCommand::BnsResolveContent { name, response } => {
-                    let _ = response.send(
-                        self.blockchain
-                            .state
-                            .bns_registry
-                            .resolve_content(&name, self.blockchain.state.epoch_index),
-                    );
+                    let state = &self.blockchain.state;
+                    let epoch = state.epoch_index;
+                    let source = self.blockchain.bud3_symbol_source();
+                    let view =
+                        crate::bns::Bud3BnsResolver::binding(&state.bns_registry, &name, epoch)
+                            .map(|binding| {
+                                let content = binding.content_ref;
+                                let bytes = crate::bns::Bud3BnsResolver::resolve_via_bud3_view(
+                                    &state.bns_registry,
+                                    &state.bud3_registry,
+                                    &source,
+                                    &name,
+                                    epoch,
+                                    &crate::bns::bud3::BnsViewAccess::default(),
+                                )
+                                .map_err(|e| e.to_string());
+                                (content, bytes)
+                            });
+                    let _ = response.send(view);
                 }
                 ChainCommand::BnsResolveSubdomain {
                     parent,
@@ -3721,6 +4482,77 @@ impl ChainActor {
                         &label,
                         self.blockchain.state.epoch_index,
                     ));
+                }
+                ChainCommand::BnsResolveSubdomainContent {
+                    parent,
+                    label,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .resolve_subdomain_content(
+                                &parent,
+                                &label,
+                                self.blockchain.state.epoch_index,
+                            ),
+                    );
+                }
+                ChainCommand::BnsReverseResolve { address, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .reverse_resolve(&address, self.blockchain.state.epoch_index),
+                    );
+                }
+                ChainCommand::BnsGetRecords { name, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .get_records(&name, self.blockchain.state.epoch_index),
+                    );
+                }
+                ChainCommand::BnsListSubdomains {
+                    parent_name,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .list_subdomains(&parent_name, self.blockchain.state.epoch_index),
+                    );
+                }
+                ChainCommand::BnsListNamesByOwner { owner, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .list_names_by_owner(&owner, self.blockchain.state.epoch_index),
+                    );
+                }
+                ChainCommand::BnsProveNameAtTip { name, response } => {
+                    let tip = self.blockchain.last_block();
+                    let _ = response.send(BnsAnchoredProof {
+                        proof: self
+                            .blockchain
+                            .state
+                            .bns_registry
+                            .prove_name(&name, self.blockchain.state.epoch_index),
+                        height: tip.index,
+                        state_root: tip.state_root.clone(),
+                    });
+                }
+                ChainCommand::BnsProveName { name, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .prove_name(&name, self.blockchain.state.epoch_index),
+                    );
                 }
                 ChainCommand::IdentityResolve { subject, response } => {
                     // The epoch travels with the record so liveness is
@@ -3766,13 +4598,48 @@ impl ChainActor {
                     response,
                 } => {
                     let _ = response.send(
-                        crate::registry::check_receipt(
+                        crate::registry::check_receipt_at(
                             &self.blockchain.state.identity,
                             &receipt,
                             &requester,
                             &document,
+                            self.blockchain.state.epoch_index,
                         )
                         .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::ObjectLayerCharter {
+                    domain_id,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .object_layer
+                            .charters
+                            .get(&domain_id)
+                            .cloned(),
+                    );
+                }
+                ChainCommand::ObjectLayerAssetClass { class_id, response } => {
+                    let uol = &self.blockchain.state.settlement.object_layer;
+                    let out = uol
+                        .classes
+                        .get(&class_id)
+                        .cloned()
+                        .map(|cl| (cl, uol.recorded_custody(&class_id)));
+                    let _ = response.send(out);
+                }
+                ChainCommand::ObjectLayerAsset { asset_id, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .object_layer
+                            .unique
+                            .get(&asset_id)
+                            .cloned(),
                     );
                 }
                 ChainCommand::BnsCalculateCost {
@@ -3786,6 +4653,35 @@ impl ChainActor {
                             .bns_registry
                             .calculate_cost(&name, duration),
                     );
+                }
+                ChainCommand::BnsGetOffer { offer_id, response } => {
+                    let offer = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .get_name_offer(offer_id)
+                        .cloned();
+                    let _ = response.send((offer, self.blockchain.state.epoch_index));
+                }
+                ChainCommand::BnsListOffers { kind, response } => {
+                    let epoch = self.blockchain.state.epoch_index;
+                    let bns = &self.blockchain.state.bns_registry;
+                    let offers = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .list_active_name_offers(epoch, kind)
+                        .into_iter()
+                        .filter(|o| match o.kind {
+                            crate::bns::OfferKind::Primary => {
+                                bns.is_available_for_primary(&o.name, epoch)
+                            }
+                            crate::bns::OfferKind::Resale => {
+                                bns.is_live_owned_by(&o.name, &o.seller, epoch)
+                            }
+                        })
+                        .collect();
+                    let _ = response.send(offers);
                 }
                 ChainCommand::NftGet { id, response } => {
                     let _ = response.send(self.blockchain.state.nft_registry.get_nft(id).cloned());
@@ -3897,20 +4793,26 @@ impl ChainActor {
                         .collect();
                     let _ = response.send(receipts);
                 }
-                ChainCommand::HubGetGraftApps { response } => {
-                    let apps = self
+                ChainCommand::HubGetAppBindingApps { response } => {
+                    let mut apps: Vec<_> = self
                         .blockchain
                         .state
                         .settlement
-                        .graft
+                        .app_binding
                         .apps
                         .values()
                         .cloned()
                         .collect();
+                    apps.sort_by_key(|app| {
+                        (
+                            std::cmp::Reverse(app.registered_at_block),
+                            app.app_binding_id,
+                        )
+                    });
                     let _ = response.send(apps);
                 }
                 ChainCommand::HubGetApps { response } => {
-                    let apps: Vec<_> = self
+                    let mut apps: Vec<_> = self
                         .blockchain
                         .state
                         .budlumxyz
@@ -3918,6 +4820,7 @@ impl ChainActor {
                         .values()
                         .cloned()
                         .collect();
+                    apps.sort_by_key(|app| (std::cmp::Reverse(app.registered_at_epoch), app.id));
                     let _ = response.send(apps);
                 }
             }
@@ -3937,13 +4840,16 @@ mod proof_cache_tests {
         let (mut actor, _handle) = ChainActor::new(bc);
         let who = Address([7u8; 32]);
         actor.blockchain.state.add_balance(&who, 100);
-        let before = actor.account_proof(&who);
+        let (before, before_opening, _) = actor.account_proof(&who);
         assert_eq!(before.balance, 100);
+        assert!(before.verify_against_state_root(&before_opening, &before_opening.state_root));
         // No block is added: the chain length stays the same.
         actor.blockchain.state.add_balance(&who, 50);
-        let after = actor.account_proof(&who);
+        let (after, after_opening, _) = actor.account_proof(&who);
         assert_eq!(after.balance, 150);
+        assert!(after.verify_against_state_root(&after_opening, &after_opening.state_root));
         assert_ne!(before.root, after.root);
+        assert_ne!(before_opening.state_root, after_opening.state_root);
     }
 
     #[test]

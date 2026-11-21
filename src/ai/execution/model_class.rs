@@ -22,11 +22,12 @@ pub const MAX_MLP_PARAMS: usize = 4096;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum AiExecutionModelClass {
-    /// Integer fixed-point MLP, ReLU, bit-exact Goldilocks-friendly arithmetic.
+    /// Integer fixed-point MLP, `ReLU`, bit-exact Goldilocks-friendly arithmetic.
     FixedPointMlpV1 = 1,
 }
 
 impl AiExecutionModelClass {
+    #[must_use]
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             1 => Some(Self::FixedPointMlpV1),
@@ -34,6 +35,7 @@ impl AiExecutionModelClass {
         }
     }
 
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::FixedPointMlpV1 => "fixed_point_mlp_v1",
@@ -52,6 +54,7 @@ pub struct ModelClassLimits {
 }
 
 impl AiExecutionModelClass {
+    #[must_use]
     pub fn limits(self) -> ModelClassLimits {
         match self {
             Self::FixedPointMlpV1 => ModelClassLimits {

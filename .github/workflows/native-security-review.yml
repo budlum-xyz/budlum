@@ -1,0 +1,97 @@
+# The required check for `main` branch protection is the job below.
+#
+# Branch protection used to require a single status context published by an
+# external review application. When that application's free review quota ran
+# out, the context stopped reporting entirely and every pull request stayed
+# at `mergeable_state=blocked` forever: no repair could land on `main`, and
+# the repository could not open that lock from the inside.
+#
+# This workflow makes the review native and deterministic:
+#   1. attack surface: binaries, workflows and crate manifests are
+#      enumerated from the tree and pinned by digest in
+#      `.github/native-review-surface-baseline.txt`; growth and silent
+#      removal both fail;
+#   2. hardening: every workflow keeps a deny-by-default `permissions:`
+#      block; `write-all` and `pull_request_target` fail outright;
+#   3. proven claims: each pinned security gate runs its self-test canary
+#      first and then the plain gate (red before green), verified
+#      statically by the `native-security-review` gate itself;
+#   4. provenance: the gate binary is compiled from the same gate sources
+#      it scans, so a cross-tree binary cannot publish verdicts that belong
+#      to neither tree.
+#
+# The external review application may return as an additional layer when
+# its quota allows; it must never again be the single required check, and
+# nothing in this repository publishes a status on its behalf.
+
+name: Native Security Review
+
+on:
+  push:
+    # Only branches that are not event heads belong here.
+    # `garden` and `budlum-stack` are retired staging heads (closed per the
+    # repository constitution); their pull_request events already cover the
+    # open testnet -> main flow, so they are removed from the push trigger
+    # to stop double-running on every forward-merge.
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-security-review-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  native-security-review:
+    name: Native Security Review
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - name: Canary for native-security-review
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- native-security-review --self-test
+      - name: Native security review (attack surface, workflow hardening, evidence)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- native-security-review
+      - name: Canary for ast-security-gates
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ast-security-gates --self-test
+      - name: ast-security-gates
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ast-security-gates
+      - name: Canary for no-constant-security-verdicts
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-constant-security-verdicts --self-test
+      - name: no-constant-security-verdicts
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-constant-security-verdicts
+      - name: Canary for classical-crypto-is-paired
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- classical-crypto-is-paired --self-test
+      - name: classical-crypto-is-paired
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- classical-crypto-is-paired
+      - name: Canary for suppressions-are-justified
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- suppressions-are-justified --self-test
+      - name: suppressions-are-justified
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- suppressions-are-justified
+      - name: Canary for gate-source-provenance
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --self-test
+      - name: gate-source-provenance
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance

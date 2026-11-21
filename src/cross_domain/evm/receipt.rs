@@ -47,9 +47,9 @@ pub enum ReceiptError {
 impl std::fmt::Display for ReceiptError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReceiptError::Rlp(e) => write!(f, "receipt rlp error: {e}"),
-            ReceiptError::InvalidEnvelope => write!(f, "receipt: invalid envelope"),
-            ReceiptError::InvalidLog => write!(f, "receipt: invalid log"),
+            Self::Rlp(e) => write!(f, "receipt rlp error: {e}"),
+            Self::InvalidEnvelope => write!(f, "receipt: invalid envelope"),
+            Self::InvalidLog => write!(f, "receipt: invalid log"),
         }
     }
 }
@@ -58,91 +58,97 @@ impl std::error::Error for ReceiptError {}
 
 impl From<RlpError> for ReceiptError {
     fn from(e: RlpError) -> Self {
-        ReceiptError::Rlp(e)
+        Self::Rlp(e)
     }
 }
 
 /// Decodes raw envelope bytes into a receipt (both typed and legacy).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
     if envelope.is_empty() {
         return Err(ReceiptError::InvalidEnvelope);
     }
     let first = envelope[0];
-    // Legacy receipt: first byte >= 0xc0 (RLP list prefix). Typed: 0x01/0x02/0x03.
-    // The typed envelope type byte is CHECKED - any other
-    // nonzero prefix used to be accepted and its payload decoded as a receipt.
-    let payload = if first >= 0xc0 {
-        envelope
-    } else if (0x01..=0x03).contains(&first) {
-        &envelope[1..]
+    // Legacy receipt: first byte >= 0xc0 (RLP list prefix).
+    // EIP-2718 typed receipts: 0x01 (EIP-2930), 0x02 (EIP-1559),
+    // 0x03 (EIP-4844 Deneb blob), 0x04 (EIP-7702 Electra/Pectra SetCode).
+    let (is_typed, payload) = if first >= 0xc0 {
+        (false, envelope)
+    } else if (0x01..=0x04).contains(&first) {
+        (true, &envelope[1..])
     } else {
         return Err(ReceiptError::InvalidEnvelope);
     };
 
     let item = rlp::decode(payload)?;
-    let list = match item {
-        Item::List(ref l) => l,
-        _ => return Err(ReceiptError::InvalidEnvelope),
+    let Item::List(ref list) = item else {
+        return Err(ReceiptError::InvalidEnvelope);
     };
     // [status/postState, cumulativeGasUsed, logsBloom, logs [, accessList]]
     if list.len() < 4 {
         return Err(ReceiptError::InvalidEnvelope);
     }
 
-    let status = decode_status(rlp::as_bytes(&list[0])?)?;
+    let status = decode_status(rlp::as_bytes(&list[0])?, is_typed)?;
+    let _cumulative_gas_used = rlp::decode_uint(&list[1])?;
+    let bloom = rlp::as_bytes(&list[2])?;
+    if bloom.len() != 256 {
+        return Err(ReceiptError::InvalidEnvelope);
+    }
     let logs = decode_logs(&list[3])?;
 
     Ok(EthReceipt { status, logs })
 }
 
-/// Interprets the status field: empty means failure (post-Byzantium 0x00),
-/// [0x01] means success, and 32 bytes are a pre-Byzantium postState root,
-/// which defaults to success.
-fn decode_status(b: &[u8]) -> Result<bool, ReceiptError> {
+/// Interprets the status field: empty byte string (`0x80`) means failure
+/// (canonical post-Byzantium RLP integer `0`), `[0x01]` means success, and
+/// 32 bytes are a pre-Byzantium postState root (valid only on legacy receipts,
+/// never on EIP-2718 typed receipts). Single-byte `[0x00]` is non-canonical
+/// RLP for integer zero and is rejected.
+fn decode_status(b: &[u8], is_typed: bool) -> Result<bool, ReceiptError> {
     match b.len() {
-        0 => Ok(false), // status 0 (fail)
-        32 => Ok(true), // pre-Byzantium postState root
-        // The status byte is EXACTLY 0 or 1. Any other
-        // nonzero value (0x02, 0xff) used to read as "success".
-        1 => match b[0] {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(ReceiptError::InvalidEnvelope),
-        },
+        0 => Ok(false),
+        32 if !is_typed => Ok(true),
+        1 if b[0] == 1 => Ok(true),
         _ => Err(ReceiptError::InvalidEnvelope),
     }
 }
 
 /// Decodes the `logs` RLP list. Each log = `[address(20), topics([32]*), data]`.
 fn decode_logs(item: &Item) -> Result<Vec<EthLog>, ReceiptError> {
-    let logs = match item {
-        Item::List(l) => l,
-        _ => return Err(ReceiptError::InvalidLog),
+    let Item::List(logs) = item else {
+        return Err(ReceiptError::InvalidLog);
     };
     let mut out = Vec::with_capacity(logs.len());
     for log_item in logs {
-        let fields = match log_item {
-            Item::List(l) => l,
-            _ => return Err(ReceiptError::InvalidLog),
+        let Item::List(fields) = log_item else {
+            return Err(ReceiptError::InvalidLog);
         };
         if fields.len() != 3 {
             return Err(ReceiptError::InvalidLog);
         }
         let address = rlp::as_bytes(&fields[0])?.to_vec();
+        if address.len() != 20 {
+            return Err(ReceiptError::InvalidLog);
+        }
         let mut topics = Vec::new();
-        match &fields[1] {
-            Item::List(tl) => {
-                for t in tl {
-                    let tb = rlp::as_bytes(t)?;
-                    if tb.len() != 32 {
-                        return Err(ReceiptError::InvalidLog);
-                    }
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(tb);
-                    topics.push(arr);
-                }
+        let Item::List(tl) = &fields[1] else {
+            return Err(ReceiptError::InvalidLog);
+        };
+        if tl.len() > 4 {
+            return Err(ReceiptError::InvalidLog);
+        }
+        for t in tl {
+            let tb = rlp::as_bytes(t)?;
+            if tb.len() != 32 {
+                return Err(ReceiptError::InvalidLog);
             }
-            _ => return Err(ReceiptError::InvalidLog),
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(tb);
+            topics.push(arr);
         }
         let data = rlp::as_bytes(&fields[2])?.to_vec();
         out.push(EthLog {
@@ -161,6 +167,7 @@ impl EthReceipt {
     ///
     /// Convenience: the receipt lookup the EVM adapter's deposit scan
     /// is built on, pub with the rest of this receipt reader.
+    #[must_use]
     pub fn find_log<'a>(&'a self, emitter: &[u8], topic0: &[u8; 32]) -> Option<&'a EthLog> {
         self.logs
             .iter()
@@ -171,6 +178,7 @@ impl EthReceipt {
     /// receipt: `(log_index, log)`. The pair
     /// `(tx, log_index)` is the deposit id a bridge can bind; the bare log
     /// cannot be told apart from a same-shaped sibling later in the list.
+    #[must_use]
     pub fn find_log_indexed<'a>(
         &'a self,
         emitter: &[u8],
@@ -386,16 +394,19 @@ mod tests {
     /// An unknown typed-envelope type byte is refused.
     #[test]
     fn neg_bad_type_byte_rejected() {
-        let mut env = build_typed_receipt(0x04, true, Vec::new());
-        // 0x04 is not a receipt type; also try 0x00 which is not either.
+        let mut env = build_typed_receipt(0x05, true, Vec::new());
+        // 0x05 is above EIP-7702 (0x04); 0x00 and 0x7f are also unassigned.
         assert_eq!(decode_receipt(&env), Err(ReceiptError::InvalidEnvelope));
         env[0] = 0x00;
         assert_eq!(decode_receipt(&env), Err(ReceiptError::InvalidEnvelope));
-        // The accepted range still works.
+        env[0] = 0x7f;
+        assert_eq!(decode_receipt(&env), Err(ReceiptError::InvalidEnvelope));
+        // Accepted EIP-2718 types 0x01..=0x04 work.
         assert!(decode_receipt(&build_typed_receipt(0x02, true, Vec::new())).is_ok());
+        assert!(decode_receipt(&build_typed_receipt(0x04, true, Vec::new())).is_ok());
     }
 
-    /// Find_log_indexed binds (tx, log index) - two
+    /// `Find_log_indexed` binds (tx, log index) - two
     /// same-shaped logs are told apart by position.
     #[test]
     fn find_log_indexed_binds_the_position() {
@@ -415,5 +426,79 @@ mod tests {
             }
         }
         assert_eq!(second, 1);
+    }
+
+    #[test]
+    fn receipt_refuses_typed_poststate_bad_bloom_and_invalid_log_shape() {
+        // Typed EIP-1559 receipt cannot carry a 32-byte pre-Byzantium postState root.
+        let bloom = Item::String(vec![0u8; 256]);
+        let typed_poststate = Item::List(vec![
+            Item::String(vec![0x77; 32]),
+            Item::String(vec![]),
+            bloom,
+            Item::List(vec![]),
+        ]);
+        let mut typed_bytes = vec![0x02];
+        typed_bytes.extend_from_slice(&encode(&typed_poststate));
+        assert_eq!(
+            decode_receipt(&typed_bytes),
+            Err(ReceiptError::InvalidEnvelope)
+        );
+
+        // logsBloom must be 256 bytes.
+        let bad_bloom = Item::List(vec![
+            rlp_status(true),
+            Item::String(vec![]),
+            Item::String(vec![0u8; 255]),
+            Item::List(vec![]),
+        ]);
+        assert_eq!(
+            decode_receipt(&encode(&bad_bloom)),
+            Err(ReceiptError::InvalidEnvelope)
+        );
+
+        // Log emitter must be 20 bytes and topics <= 4.
+        let short_addr = rlp_log(&[0xaa; 19], &[], b"");
+        assert_eq!(
+            decode_receipt(&build_legacy_receipt(true, vec![short_addr])),
+            Err(ReceiptError::InvalidLog)
+        );
+        let five_topics = rlp_log(&[0xaa; 20], &[[1u8; 32]; 5], b"");
+        assert_eq!(
+            decode_receipt(&build_legacy_receipt(true, vec![five_topics])),
+            Err(ReceiptError::InvalidLog)
+        );
+    }
+
+    #[test]
+    fn receipt_accepts_eip7702_type4_and_refuses_non_canonical_zero_status_or_gas() {
+        // Electra / Pectra EIP-7702 SetCode receipt (type 0x04) must verify.
+        let log = rlp_log(&[0xbb; 20], &[[0x77; 32]], b"pectra-event");
+        let eip7702 = build_typed_receipt(0x04, true, vec![log]);
+        let decoded = decode_receipt(&eip7702).expect("EIP-7702 receipt type 0x04 must decode");
+        assert!(decoded.status);
+        assert_eq!(decoded.logs.len(), 1);
+
+        // Non-canonical single-byte status [0x00] (Yellow Paper encodes 0 as empty 0x80)
+        // must be refused.
+        let non_canonical_zero_status = Item::List(vec![
+            Item::String(vec![0x00]),
+            Item::String(vec![]),
+            Item::String(vec![0u8; 256]),
+            Item::List(vec![]),
+        ]);
+        assert_eq!(
+            decode_receipt(&encode(&non_canonical_zero_status)),
+            Err(ReceiptError::InvalidEnvelope),
+        );
+
+        // Non-canonical cumulativeGasUsed with leading zero byte must be refused.
+        let bad_gas = Item::List(vec![
+            rlp_status(true),
+            Item::String(vec![0x00, 0x52, 0x08]),
+            Item::String(vec![0u8; 256]),
+            Item::List(vec![]),
+        ]);
+        assert!(decode_receipt(&encode(&bad_gas)).is_err());
     }
 }

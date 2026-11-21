@@ -123,7 +123,7 @@ mod current {
 /// measurably leaky on this host (see the verdict text): `__umodti3` is called,
 /// but for a divisor that fits in 64 bits its iteration count does not vary
 /// enough with the operand to show above the noise at this sample size. That
-/// is a finding about the old code, not a licence to trust a harness that has
+/// is an empirical measurement on previous code, not a licence to trust a harness that has
 /// never seen a positive. So the harness is validated against a leak nobody
 /// can argue with: a multiply whose work depends on the low bits of its input.
 mod leaky {
@@ -508,8 +508,12 @@ fn measure(
     // any real leak. The cut is taken on the COMBINED population so the crop
     // cannot itself introduce a class bias.
     let mut all: Vec<f64> = raw.iter().map(|(_, t)| *t).collect();
-    all.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let cut = all[(all.len() as f64 * 0.90) as usize];
+    if all.len() < 4 {
+        return 0.0;
+    }
+    all.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((all.len() as f64 * 0.90) as usize).min(all.len() - 1);
+    let cut = all[idx];
 
     let mut c0 = Welch::default();
     let mut c1 = Welch::default();
@@ -772,6 +776,12 @@ fn main() {
     };
     let measurements = arg("--measurements", 200_000);
     let batch = arg("--batch", 24);
+    if measurements < 20 || batch == 0 {
+        eprintln!(
+            "ABORT: --measurements >= 20 (got {measurements}) and --batch >= 1 (got {batch})"
+        );
+        std::process::exit(2);
+    }
 
     println!("dudect timing measurement, Poseidon2 field arithmetic");
     println!(
@@ -851,7 +861,7 @@ fn main() {
     // The distinction is not a matter of opinion - a value-dependent operation
     // reproduces, drift does not. Each flagged pair is therefore re-measured
     // in an independent run, and only a SECOND crossing counts. Reporting the
-    // first crossing as a finding would cry wolf; dropping it silently would
+    // first crossing would report false positives; dropping it silently would
     // be worse, so both numbers are printed either way.
     let mut confirmed: Vec<(u64, f64, f64)> = Vec::new();
     if !flagged.is_empty() {
@@ -930,7 +940,7 @@ fn main() {
     if !confirmed.is_empty() {
         for (seed, first, second) in &confirmed {
             println!(
-                "FINDING: seed {seed:#x} separated TWICE ({first:.2}, then {second:.2}), both > {THRESHOLD:.1}."
+                "seed {seed:#x} separated twice ({first:.2}, then {second:.2}), both > {THRESHOLD:.1}."
             );
         }
         println!("The field operations spend measurably different time on different values.");

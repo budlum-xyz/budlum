@@ -1,4 +1,4 @@
-//! F10.4 plus the Budlum relayer binary: the permissionless cross-chain relay
+//! Budlum relayer binary: the permissionless cross-chain relay
 //! service.
 //!
 //! ## Design, permissionless
@@ -13,7 +13,7 @@
 //!   `MaliciousBehaviour` and a 100 percent slash.
 //!   - The report is produced by the `consensus_invalid_relay_proof` helper.
 //!   - The bridge keeps an open relayer set plus a challenge window; see RFC
-//!     F10, sections 4 and 5.
+//!     the EVM bridge specification.
 //!
 //! ## Flows
 //!
@@ -195,8 +195,16 @@ pub struct BudlumClient {
 impl BudlumClient {
     #[must_use]
     pub fn new(url: String) -> Self {
+        // reqwest is built with the provider-less rustls feature, so it uses the
+        // process-wide provider. `main` installs Budlum's TLS 1.3 hybrid-only
+        // provider before anything runs; doing it here too keeps a client built
+        // anywhere else - a test, a future subcommand - from panicking with "No
+        // provider set". The install is idempotent and the first caller wins.
+        budlum_core::crypto::tls::install_default_provider();
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { url, client }
@@ -292,8 +300,16 @@ pub struct EthClient {
 impl EthClient {
     #[must_use]
     pub fn new(url: String, bridge_address: String) -> Self {
+        // reqwest is built with the provider-less rustls feature, so it uses the
+        // process-wide provider. `main` installs Budlum's TLS 1.3 hybrid-only
+        // provider before anything runs; doing it here too keeps a client built
+        // anywhere else - a test, a future subcommand - from panicking with "No
+        // provider set". The install is idempotent and the first caller wins.
+        budlum_core::crypto::tls::install_default_provider();
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -421,7 +437,7 @@ impl EthClient {
         Ok(events)
     }
 
-    /// Builds the F10.1 and F10.2 proof package: the MPT proof, the header chain
+    /// Builds the EVM deposit proof package: the MPT proof, the header chain
     /// and the receipt.
     ///
     /// A real implementation would use `eth_getTransactionReceipt`,
@@ -544,7 +560,7 @@ const STATUS_NOTICE: &str = "STATUS: not mainnet ready. No direction relays yet:
 cannot build deposit proofs, bud-to-eth only reports burns. Nothing is submitted.";
 
 fn print_usage() {
-    eprintln!("budlum-relayer - F10 Universal Relayer (D1 permissionless + D4 unified registry)");
+    eprintln!("budlum-relayer - Universal Relayer (permissionless + unified registry)");
     eprintln!("{STATUS_NOTICE}");
     eprintln!();
     eprintln!("Usage:");
@@ -559,7 +575,7 @@ fn print_usage() {
     eprintln!("  --budlum-rpc <URL>         Budlum RPC endpoint");
     eprintln!("  --bridge-address <ADDR>    Ethereum bridge contract address");
     eprintln!("  --relayer-address <ADDR>   Relayer's Budlum address (hex, for registry check)");
-    eprintln!("  --direction <DIR>          eth-to-bud (F10.2) | bud-to-eth (F10.5)");
+    eprintln!("  --direction <DIR>          eth-to-bud | bud-to-eth");
     eprintln!("  --confirmations <N>        N-confirmation threshold (default: 64)");
     eprintln!("  --poll-interval <S>        Poll interval seconds (default: 10)");
     eprintln!(
@@ -601,6 +617,21 @@ pub fn run_relayer(config: &RelayerConfig) -> Result<(), String> {
         return Err(
             "bridge-address is placeholder (0x0); set real Ethereum bridge contract".into(),
         );
+    }
+    // reject zero poll interval (infinite tight-spin DoS).
+    if config.poll_interval_secs == 0 {
+        return Err("poll-interval must be at least 1 second; 0 would spin in a tight loop".into());
+    }
+    // reject non-http(s) RPC URLs.
+    for (name, url) in [
+        ("eth-rpc", &config.eth_rpc_url),
+        ("budlum-rpc", &config.budlum_rpc_url),
+    ] {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(format!(
+                "{name} URL must start with http:// or https://, got: {url}"
+            ));
+        }
     }
     if let Err(e) = validate_relayer_address(&config.relayer_address) {
         // The submitting direction must name a real relayer. BudToEth submits
@@ -912,7 +943,7 @@ const fn advance_cursor(
 ///
 /// It does not submit to Ethereum. The claim needs a Budlum finality proof
 /// (BLS aggregate / QC) and an Ethereum bridge contract to verify it; the
-/// Solidity side does not exist yet (RFC F10.5b). So a discovered burn is
+/// Solidity side does not exist yet (settlement contract pending). So a discovered burn is
 /// reported and counted, and the submit step **refuses loudly** instead of
 /// sending a placeholder. That is the same contract the `EthToBud` direction
 /// keeps: refuse, do not pretend.
@@ -935,7 +966,7 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
 
     eprintln!(
         "BudToEth: scanning for burn events. Submission to Ethereum is NOT available \
-         (no bridge contract, RFC F10.5b) - discovered burns are reported, never \
+         (no bridge contract deployed yet) - discovered burns are reported, never \
          submitted with a placeholder proof."
     );
 
@@ -974,7 +1005,7 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
                         eprintln!(
                             "BudToEth: burn found at height {height} (tx {tx_hash}) - \
                              NOT submitted: finality proof + Ethereum bridge contract \
-                             missing (RFC F10.5b). Total seen: {total_burns}"
+                             missing (settlement contract pending). Total seen: {total_burns}"
                         );
                     }
                     next_height = Some(height + 1);
@@ -1023,7 +1054,7 @@ fn block_by_number_params(height: u64) -> serde_json::Value {
 }
 
 /// How a block payload renders a bridge burn transaction (`{:?}` of
-/// `TransactionType::Bridge(BridgeTx::BurnWithEvent(..))`,).
+/// `TransactionType::Bridge(BridgeTx::BurnWithEvent(..))`).
 const BURN_TX_TYPE_PREFIX: &str = "Bridge(BurnWithEvent(";
 
 /// Burn transaction hashes in a block payload.
@@ -1385,5 +1416,40 @@ mod tests {
         };
         let err = client.build_deposit_proof(&event).unwrap_err();
         assert!(err.contains("not implemented"));
+    }
+
+    #[test]
+    fn run_relayer_rejects_zero_poll_interval() {
+        let config = RelayerConfig {
+            poll_interval_secs: 0,
+            bridge_address: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            ..RelayerConfig::default()
+        };
+        let err = run_relayer(&config).unwrap_err();
+        assert!(err.contains("poll-interval"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn run_relayer_rejects_non_http_rpc_url() {
+        let config = RelayerConfig {
+            poll_interval_secs: 10,
+            bridge_address: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            eth_rpc_url: "ftp://not-http".into(),
+            ..RelayerConfig::default()
+        };
+        let err = run_relayer(&config).unwrap_err();
+        assert!(err.contains("http"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn run_relayer_rejects_file_url() {
+        let config = RelayerConfig {
+            poll_interval_secs: 10,
+            bridge_address: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            budlum_rpc_url: "file:///tmp/x".into(),
+            ..RelayerConfig::default()
+        };
+        let err = run_relayer(&config).unwrap_err();
+        assert!(err.contains("http"), "unexpected: {err}");
     }
 }

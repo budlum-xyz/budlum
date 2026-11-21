@@ -43,6 +43,7 @@ fn domain_params() -> StorageDomainParams {
         max_committed_chunks: 1_000_000,
         challenge_interval: 10,
         min_operator_bond: 1_000_000,
+        require_merkle_proof: false,
     }
 }
 
@@ -62,7 +63,7 @@ fn good_econ() -> StorageEconomicsParams {
 }
 
 /// A format-VALID test envelope (an honest marker -
-/// not a REAL STARK proof; a minimal ProofEnvelope that bincode can deserialize).
+/// not a REAL STARK proof; a minimal `ProofEnvelope` that bincode can deserialize).
 fn valid_merkle_proof() -> Vec<u8> {
     let envelope = bud_proof::ProofEnvelope {
         proof_format_version: 1,
@@ -501,7 +502,7 @@ fn invariant_4_any_account_meeting_bond_can_open_deal() {
     assert_eq!(reg.all_deals().len(), usize::from(replicas));
 }
 
-/// Invariant 5: a challenge opener_bond must be > 0, otherwise anyone could
+/// Invariant 5: a challenge `opener_bond` must be > 0, otherwise anyone could
 /// open free spam challenges. This is the data-sovereignty section 0.5
 /// formula: no privileged anti-spam role, only an economic incentive.
 #[test]
@@ -630,7 +631,7 @@ fn invariant_7_slashed_deal_rejects_new_challenges() {
     assert!(matches!(err, StorageError::DealNotActive(_)));
 }
 
-/// Invariant 8: a storage deal is bound to the `manifest`; if the shard_id
+/// Invariant 8: a storage deal is bound to the `manifest`; if the `shard_id`
 /// is not in the manifest no deal can be opened. This prevents random/spoofed
 /// `(manifest_id, shard_id)` pairs from creating deals.
 #[test]

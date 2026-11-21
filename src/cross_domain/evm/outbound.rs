@@ -1,6 +1,5 @@
 //! The one EVM log shape a contract uses to speak to Budlum, and its
-//! translation into a cross-domain message (,,
-//!).
+//! translation into a cross-domain message.
 //!
 //! `contracts/lib/BudlumOutbound.sol` declares
 //!
@@ -9,11 +8,11 @@
 //!                      bytes32 indexed correlationId, bytes32 payloadHash)
 //! ```
 //!
-//! and `GraftExecutor`, `BudlumGraftClaimer` and `BudlumRegistrar` emit it.
+//! and `AppBindingExecutor`, `BudlumAppBindingClaimer` and `BudlumRegistrar` emit it.
 //! A domain reporter puts the message built here into the domain's event
 //! tree; Budlum accepts it only once that tree's root reaches the external
 //! root it anchored for the domain. The emitter becomes the message sender,
-//! right-aligned in a 32-byte word (`settlement::graft::origin_emitter`), so
+//! right-aligned in a 32-byte word (`settlement::app_binding::origin_emitter`), so
 //! a contract can only ever speak as itself.
 
 use crate::core::address::Address;
@@ -96,11 +95,26 @@ pub fn message_from_log(
     if log.topics.len() != 3 || log.topics[0] != outbound_topic0() {
         return Err(OutboundError::NotOutbound);
     }
+    if position.source_domain == 0
+        || position.target_domain == 0
+        || position.source_domain == position.target_domain
+    {
+        return Err(OutboundError::Data("domain routing"));
+    }
+    if position.expiry_height != 0 && position.expiry_height <= position.source_height {
+        return Err(OutboundError::Data("expiry height"));
+    }
     let emitter: [u8; 20] = log
         .address
         .as_slice()
         .try_into()
         .map_err(|_| OutboundError::Emitter)?;
+    if emitter == [0u8; 20] {
+        return Err(OutboundError::Emitter);
+    }
+    if log.topics[1] == [0u8; 32] {
+        return Err(OutboundError::Data("zero recipient"));
+    }
     // abi.encode(bytes kind, bytes32 payloadHash): head [offset, hash],
     // tail [len, kind padded to 32].
     let data = &log.data;
@@ -128,7 +142,7 @@ pub fn message_from_log(
         source_height: position.source_height,
         event_index: position.event_index,
         nonce: position.nonce,
-        sender: crate::settlement::graft::origin_emitter(&emitter),
+        sender: crate::settlement::app_binding::origin_emitter(&emitter),
         recipient: Address::from(log.topics[1]),
         payload_hash,
         kind: MessageKind::Custom(kind),
@@ -183,7 +197,7 @@ mod tests {
             message_from_log(&log(b"budlum/mikoriza/allocation/v1"), position()).expect("decodes");
         assert_eq!(
             message.sender,
-            crate::settlement::graft::origin_emitter(&[0xEE; 20])
+            crate::settlement::app_binding::origin_emitter(&[0xEE; 20])
         );
         assert_eq!(message.recipient, Address::from([0x02; 32]));
         assert_eq!(message.correlation_id, Some([0x03; 32]));
@@ -210,5 +224,31 @@ mod tests {
         let last = dirty.data.len() - 1;
         dirty.data[last] = 1;
         assert!(message_from_log(&dirty, position()).is_err());
+    }
+
+    #[test]
+    fn outbound_log_refuses_zero_emitter_zero_recipient_bad_domains_and_pre_expired_position() {
+        let mut zero_emitter = log(b"budlum/test/v1");
+        zero_emitter.address = vec![0u8; 20];
+        assert_eq!(
+            message_from_log(&zero_emitter, position()),
+            Err(OutboundError::Emitter)
+        );
+
+        let mut zero_recipient = log(b"budlum/test/v1");
+        zero_recipient.topics[1] = [0u8; 32];
+        assert!(message_from_log(&zero_recipient, position()).is_err());
+
+        let mut self_loop = position();
+        self_loop.target_domain = self_loop.source_domain;
+        assert!(message_from_log(&log(b"budlum/test/v1"), self_loop).is_err());
+
+        let mut zero_src = position();
+        zero_src.source_domain = 0;
+        assert!(message_from_log(&log(b"budlum/test/v1"), zero_src).is_err());
+
+        let mut pre_expired = position();
+        pre_expired.expiry_height = pre_expired.source_height;
+        assert!(message_from_log(&log(b"budlum/test/v1"), pre_expired).is_err());
     }
 }

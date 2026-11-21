@@ -212,6 +212,7 @@ impl DerivedTransform {
     /// The two kinds validate against different fields, and a caller that
     /// cannot tell them apart ends up bounds checking a byte length against
     /// a block grid.
+    #[must_use]
     pub const fn is_byte_range(self) -> bool {
         matches!(self, Self::Prefix)
     }
@@ -544,6 +545,7 @@ impl DerivedSpec {
     /// `None` for a region transform, whose byte count is not knowable from
     /// the spec: a crop's size depends on the master's coefficients, and
     /// claiming a number here would be inventing one.
+    #[must_use]
     pub const fn prefix_bytes(&self) -> Option<u64> {
         match self.prefix {
             Some(span) => Some(span.kept_bytes),
@@ -573,11 +575,13 @@ impl DerivedSpec {
     }
 
     /// Region width in pixels.
+    #[must_use]
     pub const fn pixel_width(&self) -> u32 {
         self.block_w.saturating_mul(DERIVED_BLOCK_PIXELS)
     }
 
     /// Region height in pixels.
+    #[must_use]
     pub const fn pixel_height(&self) -> u32 {
         self.block_h.saturating_mul(DERIVED_BLOCK_PIXELS)
     }
@@ -601,6 +605,7 @@ impl DerivedSpec {
     /// Every field is hashed, including the master's declared dimensions.
     /// Leaving those out would let two specs with different bounds share a
     /// commitment, and the bounds are what a verifier checks the box against.
+    #[must_use]
     pub fn derivation_commitment_tag(&self) -> [u8; 32] {
         let (present, kept, total) = self.prefix_commitment_fields();
         hash_fields_bytes(&[
@@ -625,6 +630,7 @@ impl DerivedSpec {
     /// numbers. A ratio alone is the shape of claim this project keeps having
     /// to correct: 40% of objects and 0.1% of bytes are the same measurement,
     /// and either one on its own misleads.
+    #[must_use]
     pub const fn stored_versus_independent(&self, independent_bytes: u64) -> (u64, u64) {
         // A prefix carries its span, so it is the larger record; quoting the
         // plain spec size for it understated the stored cost by the span.

@@ -43,8 +43,8 @@
 //! path exists for it. What this module adds is the reference and the rules
 //! that keep the reference honest.
 //!
-//! WIRING: wired - `ContentManifest.dictionary_id` names the dictionary and
-//! `StorageRegistry::register_manifest_with_source` takes the reference
+//! WIRING: wired - an object manifest `dictionary_id` names the dictionary and
+//! `register_manifest_with_source` takes the reference
 //! through `acquire_dictionary`, which refuses an unknown dictionary, a
 //! retiring one, and a dictionary that itself names a dictionary.
 //!

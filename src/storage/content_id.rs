@@ -25,8 +25,7 @@ use crate::domain::Hash32;
 use serde::{Deserialize, Serialize};
 
 /// Default chunk size, mirrored from `domain::storage_params::DEFAULT_CHUNK_SIZE`
-/// For ergonomics. Tests and the `ContentManifest::from_chunks` helper use
-/// This when the caller does not pin an explicit size.
+/// for ergonomics when a caller does not pin an explicit chunk size.
 pub const DEFAULT_CHUNK_SIZE_BYTES: u32 = 262_144; // 256 KiB
 
 /// A canonical content identifier.
@@ -41,6 +40,7 @@ pub struct ContentId(pub Hash32);
 
 impl ContentId {
     /// Compute the `ContentId` of a chunk.
+    #[must_use]
     pub fn of(chunk: &[u8]) -> Self {
         Self(hash_fields_bytes(&[b"BDLM_CONTENT_V1", chunk]))
     }
@@ -56,6 +56,7 @@ impl ContentId {
     /// "interim retrieval challenge" limitation, see
     /// `crate::domain::storage_deal::RetrievalChallenge` for the long
     /// Warning comment and the README cross-link.
+    #[must_use]
     pub fn of_subrange(chunk: &[u8], start: u64, end: u64) -> Self {
         if start > end || end > chunk.len() as u64 {
             // Out-of-range requests still get a deterministic hash (so the
@@ -100,7 +101,8 @@ impl ContentId {
     /// operator writes to disk; this is a change to what a challenge accepts,
     /// and it removes the free version of the attack: colluding operators now
     /// have to relay each other's live challenges rather than precompute one
-    /// answer set. See `docs/BUD_STORAGE_ROADMAP.md` Gap 2.
+    /// answer set. See `docs/STORAGE.md` (in construction).
+    #[must_use]
     pub fn of_subrange_for_deal(
         chunk: &[u8],
         start: u64,
@@ -119,6 +121,7 @@ impl ContentId {
         ]))
     }
 
+    #[must_use]
     pub const fn as_bytes(&self) -> &Hash32 {
         &self.0
     }

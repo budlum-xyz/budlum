@@ -15,10 +15,10 @@ pub enum DomainEventKind {
 impl DomainEventKind {
     fn as_bytes(&self) -> Vec<u8> {
         match self {
-            DomainEventKind::BridgeLocked => b"bridge-locked".to_vec(),
-            DomainEventKind::BridgeMinted => b"bridge-minted".to_vec(),
-            DomainEventKind::BridgeBurned => b"bridge-burned".to_vec(),
-            DomainEventKind::Custom(bytes) => {
+            Self::BridgeLocked => b"bridge-locked".to_vec(),
+            Self::BridgeMinted => b"bridge-minted".to_vec(),
+            Self::BridgeBurned => b"bridge-burned".to_vec(),
+            Self::Custom(bytes) => {
                 let mut out = b"custom:".to_vec();
                 out.extend_from_slice(bytes);
                 out
@@ -39,6 +39,7 @@ pub struct DomainEvent {
 }
 
 impl DomainEvent {
+    #[must_use]
     pub fn leaf_hash(&self) -> Hash32 {
         let kind = self.kind.as_bytes();
         let message_id = self
@@ -72,6 +73,7 @@ pub struct DomainEventTree {
 }
 
 impl DomainEventTree {
+    #[must_use]
     pub fn new() -> Self {
         Self { events: Vec::new() }
     }
@@ -80,6 +82,7 @@ impl DomainEventTree {
         self.events.push(event);
     }
 
+    #[must_use]
     pub fn events(&self) -> &[DomainEvent] {
         &self.events
     }
@@ -112,8 +115,13 @@ impl DomainEventTree {
     }
 }
 
+const MAX_EVENT_MERKLE_DEPTH: usize = 64;
+
 impl MerkleProof {
     pub fn verify(&self, expected_root: Hash32) -> bool {
+        if self.siblings.len() > MAX_EVENT_MERKLE_DEPTH {
+            return false;
+        }
         // The verifying half of the same shared walk: the sentinel marks a
         // promoted step, everything else is a pair ordered by position.
         crate::consensus::merkle_tree::merkle_root_from_proof(
@@ -229,5 +237,28 @@ mod tests {
         let proof = tree.proof(0).expect("proof should exist");
         assert!(proof.siblings.is_empty());
         assert!(proof.verify(root));
+    }
+
+    #[test]
+    fn merkle_proof_verify_refuses_path_above_max_depth() {
+        let leaf = hash(b"overdeep-event-leaf");
+        let siblings = vec![[0x5Au8; 32]; 65];
+        let forged_root = crate::consensus::merkle_tree::merkle_root_from_proof(
+            &leaf,
+            0,
+            &siblings,
+            crate::settlement::commitment_tree::merkle_node_hash,
+            crate::settlement::commitment_tree::merkle_odd_promote_hash,
+        )
+        .expect("raw helper walks 65 levels when index is zero");
+        let overdeep = MerkleProof {
+            leaf,
+            index: 0,
+            siblings,
+        };
+        assert!(
+            !overdeep.verify(forged_root),
+            "MerkleProof::verify must refuse paths deeper than 64 levels"
+        );
     }
 }

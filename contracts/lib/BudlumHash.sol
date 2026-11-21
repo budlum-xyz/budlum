@@ -6,7 +6,7 @@ pragma solidity 0.8.26;
 /// @title BudlumHash
 /// @notice Exact Solidity counterpart of Budlum's length-prefixed SHA-256 and
 ///         settlement Merkle root (`hash_fields_bytes` in src/crypto/hash.rs
-///         and `merkle_root_from_proof` in src/settlement/graft.rs).
+///         and `merkle_root_from_proof` in src/settlement/app_binding.rs).
 library BudlumHash {
     uint256 private constant U64_BYTE_LEN = 8;
     uint256 private constant BITS_PER_BYTE = 8;
@@ -14,6 +14,7 @@ library BudlumHash {
     uint256 private constant MERKLE_PROMOTE_FIELDS = 2;
     uint256 private constant MERKLE_NODE_FIELDS = 3;
     uint256 private constant SENTINEL_FIELDS = 1;
+    uint256 internal constant MAX_MERKLE_DEPTH = 64;
 
     /// 8-byte little-endian encoding of `value`.
     function le64(uint64 value) internal pure returns (bytes memory out) {
@@ -50,6 +51,9 @@ library BudlumHash {
         pure
         returns (bool ok, bytes32 root)
     {
+        if (siblings.length > MAX_MERKLE_DEPTH) {
+            return (false, bytes32(0));
+        }
         bytes32 cur = leaf;
         uint256 idx = index;
         bytes[] memory sentinelFields = new bytes[](SENTINEL_FIELDS);
@@ -57,6 +61,9 @@ library BudlumHash {
         bytes32 sentinel = hashFields(sentinelFields);
         for (uint256 i = 0; i < siblings.length; i++) {
             if (siblings[i] == sentinel) {
+                if (idx % MERKLE_PAIR_ARITY != 0) {
+                    return (false, bytes32(0));
+                }
                 bytes[] memory promoteFields = new bytes[](MERKLE_PROMOTE_FIELDS);
                 promoteFields[0] = "BDLM_MERKLE_ODD_PROMOTE_V1";
                 promoteFields[1] = bytes.concat(cur);

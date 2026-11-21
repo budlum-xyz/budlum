@@ -36,9 +36,11 @@ use sha3::{Digest, Sha3_256};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// The domain tag at the front of every message representative.
+///
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const COMPOSITE_TAG: &[u8] = b"BDLM_COMPOSITE_SIG_V1";
 /// The version byte of the key and signature encodings.
+///
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const ENCODING_VERSION: u8 = 1;
 /// Ed25519 public key length.

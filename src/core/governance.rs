@@ -25,6 +25,16 @@ pub const GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS: u64 = 20;
 /// which the decision can be seen and contested.
 pub const GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS: u64 = 5;
 
+/// The longest external network name an anchor vote may install.
+///
+/// The name is a key in a consensus map, so it is bounded at proposal time.
+///
+/// WIRING: pub so a `PinExternalAnchor` proposer and this file's own proposal
+/// validation (and its tests) share one declared limit instead of each
+/// hand-copying the same magic number; the production check is the
+/// `network.len()` comparison a few lines below, in this file.
+pub const MAX_PINNED_NETWORK_BYTES: usize = 64;
+
 /// A zero activation delay is not a timelock.
 ///
 /// Enforced at compile time rather than in a test: a test asserting on
@@ -54,6 +64,7 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         // Tunable numbers and parameter strings.
         ProposalType::ChangeBaseFee(_)
         | ProposalType::ChangeBlockReward(_)
+        | ProposalType::BnsSetBaseCost { .. }
         | ProposalType::ParameterUpdate(_, _) => GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS,
 
         // Rules the rest of the system is written against.
@@ -62,7 +73,9 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         | ProposalType::SetConstitutionParameter(_)
         | ProposalType::UnfreezeConsensusDomain { .. }
         | ProposalType::ResetConsensusDomainTip { .. }
-        | ProposalType::PoaAddAdmin { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
+        | ProposalType::PoaAddAdmin { .. }
+        | ProposalType::PinExternalAnchor { .. }
+        | ProposalType::BnsSetPrimarySellers { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
 
         // Actions aimed at one account.
         ProposalType::SlashValidator { .. }
@@ -92,10 +105,16 @@ pub const GOVERNANCE_PARAMETER_WHITELIST: &[&str] = &[
     "liveness_slashing_enabled",
 ];
 
+#[must_use]
 pub fn is_governance_parameter_whitelisted(key: &str) -> bool {
     GOVERNANCE_PARAMETER_WHITELIST.contains(&key)
 }
 
+/// Performs the requested operation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<(), String> {
     if !is_governance_parameter_whitelisted(key) {
         return Err(format!("governance parameter is not whitelisted: {key}"));
@@ -182,6 +201,10 @@ pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<()
 /// Governance parameter values travel as strings; a switch accepts exactly
 /// `true` or `false`. Any other spelling is refused rather than being read as
 /// off, so a mistyped activation cannot pass a vote as a no-op.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn parse_governance_bool(key: &str, value: &str) -> Result<bool, String> {
     match value {
         "true" => Ok(true),
@@ -219,9 +242,9 @@ pub enum ProposalType {
     /// Validated fail-closed and cannot be weakened by governance.
     SetConstitutionParameter(ConstitutionParameter),
     /// Governance-controlled domain unfreeze
-    /// - domain_id: target consensus domain to unfreeze
-    /// - expected_validator_set_hash: 32-byte hash that must match current domain's validator_set_hash (anti-grind / anti-replay binding)
-    /// - justification_hash: hash of frozen reason / evidence reference (e.g., hash of audit report / governance forum post)
+    /// - `domain_id`: target consensus domain to unfreeze
+    /// - `expected_validator_set_hash`: 32-byte hash that must match current domain's `validator_set_hash` (anti-grind / anti-replay binding)
+    /// - `justification_hash`: hash of frozen reason / evidence reference (e.g., hash of audit report / governance forum post)
     ///
     /// Anti-replay: proposal id itself is unique and executed only once (Passed->Executed).
     /// Award the governance verification badge to a `budlum.xyz` app.
@@ -235,8 +258,7 @@ pub enum ProposalType {
     /// no path could set it, so it was permanently false. This is the path.
     /// The proposal binds the reviewed snapshot: the developer address, the
     /// manifest id and the website-url hash that voters evaluated. A passed
-    /// vote may not be retargeted to different content (HIGH, CWE-345;
-    /// BUDLUM finding #173).
+    /// vote may not be retargeted to different content (CWE-345).
     VerifyHubApp {
         app_id: u64,
         developer: crate::core::address::Address,
@@ -248,21 +270,48 @@ pub enum ProposalType {
         expected_validator_set_hash: [u8; 32],
         justification_hash: [u8; 32],
     },
-    /// Bootstrap or extend a PoA domain's admin set.
+    /// Install or replace the trust anchor an external-domain adapter family
+    /// verifies against, for one external network.
+    ///
+    /// The adapters that check another chain's finality cannot take the
+    /// validator set, sync committee or checkpoint from the evidence: a
+    /// submitter that supplies its own anchor has signed nothing but its own
+    /// claim. The anchor is therefore consensus state - it is inside
+    /// `external_intake_root` - and a block is the only thing that may move it.
+    /// Before this variant existed, the four anchor maps had no writer outside
+    /// the crate's tests, so every anchored adapter was closed forever and
+    /// "governance pins the committee" named a vote nobody could cast.
+    ///
+    /// `expected_previous` is the digest of the anchor the vote replaces
+    /// (`None` for a slot that must be empty), the same anti-retargeting shape
+    /// as [`Self::UnfreezeConsensusDomain`]: a vote taken against one
+    /// checkpoint cannot activate onto its successor.
+    ///
+    /// `justification_hash` names the audit trail - the ceremony transcript,
+    /// the checkpoint's explorer URL, the pinned set's height - because an
+    /// anchor is the one value in this system that is trusted rather than
+    /// proved, and a trusted value needs a published reason.
+    PinExternalAnchor {
+        network: String,
+        anchor: crate::cross_domain::external::intake::PinnedExternalAnchor,
+        expected_previous: Option<[u8; 32]>,
+        justification_hash: [u8; 32],
+    },
+    /// Bootstrap or extend a `PoA` domain's admin set.
     /// Governance is the trust root: the first admin of a domain arrives
     /// here, never through a transaction that appoints itself.
     PoaAddAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Remove a PoA domain's admin by governance decision. This
+    /// Remove a `PoA` domain's admin by governance decision. This
     /// is the only path that may take the last admin - the admin door
     /// refuses it, because unpermissioning a domain is a governance act.
     PoaRemoveAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Freeze an account on a PoA domain's compliance ledger (
+    /// Freeze an account on a `PoA` domain's compliance ledger (
     ///). Replaces the bare `bool` authority: the vote IS the
     /// authority, the named admin is the audit trail, and the domain kind
     /// is read from the domain record at application.
@@ -287,6 +336,20 @@ pub enum ProposalType {
         target_height: u64,
         target_hash: [u8; 32],
         justification_hash: [u8; 32],
+    },
+    /// Replace the authorized primary-seller address set for `.bud` marketplace
+    /// `Primary` listings.
+    BnsSetPrimarySellers {
+        sellers: Vec<Address>,
+    },
+    /// Replace the `.bud` renewal base cost (`BnsRegistry::base_cost`).
+    ///
+    /// B12: there is no other door to this number. A sale price that only the
+    /// genesis file can set is a price nobody can correct, and one that any
+    /// account can set is no price at all. The action changes one field and
+    /// touches no record: an existing registration keeps the term it paid for.
+    BnsSetBaseCost {
+        base_cost: u64,
     },
 }
 
@@ -327,6 +390,7 @@ pub struct Proposal {
 const GOVERNANCE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/governance";
 
 impl Proposal {
+    #[must_use]
     pub fn new(
         id: u64,
         proposer: Address,
@@ -334,7 +398,7 @@ impl Proposal {
         start_epoch: u64,
         duration: u64,
     ) -> Self {
-        Proposal {
+        Self {
             id,
             proposer,
             p_type,
@@ -349,14 +413,21 @@ impl Proposal {
         }
     }
 
+    #[must_use]
     pub fn activation_epoch(&self) -> u64 {
         self.activation_epoch.unwrap_or(self.end_epoch)
     }
 
+    #[must_use]
     pub fn activation_ready(&self, current_epoch: u64) -> bool {
         current_epoch >= self.activation_epoch()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_vote(
         &mut self,
         voter: Address,
@@ -385,6 +456,7 @@ impl Proposal {
         Ok(())
     }
 
+    #[must_use]
     pub fn vote_weight_of(&self, voter: &Address) -> u64 {
         self.voter_weights.get(voter).copied().unwrap_or(0)
     }
@@ -409,7 +481,7 @@ impl Proposal {
             .insert(*voter, current.saturating_sub(applied));
     }
 
-    /// Finalize proposal - now requires current_epoch >= end_epoch.
+    /// Finalize proposal - now requires `current_epoch` >= `end_epoch`.
     /// Previously, finalize could be called at any time, allowing early-finalize
     /// Attacks where a proposal with sufficient votes could be forced through
     /// Before the voting period ended.
@@ -440,7 +512,7 @@ pub struct GovernanceState {
     #[serde(default)]
     pub constitution: ConstitutionRegistry,
     /// Per-proposer current-epoch proposal count.
-    /// Key: (proposer_address, epoch). Value: accepted proposals submitted.
+    /// Key: (`proposer_address`, epoch). Value: accepted proposals submitted.
     /// The next proposal costs `2^count` times base fee; old epochs are pruned.
     #[serde(default, with = "proposer_epoch_count_as_seq")]
     pub proposer_epoch_count: std::collections::BTreeMap<(Address, u64), u64>,
@@ -512,6 +584,7 @@ impl GovernanceState {
             .count()
     }
 
+    #[must_use]
     pub fn has_non_default_state(&self) -> bool {
         !self.proposals.is_empty()
             || self.next_proposal_id != 0
@@ -521,6 +594,7 @@ impl GovernanceState {
             || !self.consumed_slash_evidence.is_empty()
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -551,6 +625,11 @@ impl GovernanceState {
         hasher.finalize().into()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn create_proposal(
         &mut self,
         proposer: Address,
@@ -633,6 +712,41 @@ impl GovernanceState {
                         "ResetConsensusDomainTip justification_hash must be non-zero".into(),
                     );
                 }
+            }
+            ProposalType::PinExternalAnchor {
+                network,
+                anchor,
+                justification_hash,
+                ..
+            } => {
+                // A network name is a consensus map key, so it is bounded here
+                // rather than at execution: an unbounded string in state is
+                // storage anyone can buy with a proposal fee.
+                if network.is_empty() {
+                    return Err("PinExternalAnchor network must not be empty".into());
+                }
+                if network.len() > MAX_PINNED_NETWORK_BYTES {
+                    return Err(format!(
+                        "PinExternalAnchor network is {} bytes; the limit is {MAX_PINNED_NETWORK_BYTES}",
+                        network.len()
+                    ));
+                }
+                if justification_hash == &[0u8; 32] {
+                    return Err("PinExternalAnchor justification_hash must be non-zero".into());
+                }
+                // The anchor is trusted rather than proved, which is why the
+                // justification is mandatory; a family with an all-zero anchor
+                // is the shape of a placeholder that would verify nothing.
+                anchor.validate()?;
+            }
+            ProposalType::BnsSetPrimarySellers { sellers } => {
+                let mut reg = crate::bns::BnsRegistry::new();
+                reg.set_primary_sellers(sellers.iter().copied())?;
+            }
+            ProposalType::BnsSetBaseCost { base_cost } => {
+                // The absolute bounds only: the tenfold step is relative to the
+                // live price, which the proposal cannot know at submission.
+                crate::bns::BnsRegistry::check_base_cost_bounds(*base_cost)?;
             }
             _ => {}
         }
@@ -731,6 +845,7 @@ impl GovernanceState {
         self.proposals.iter_mut().find(|p| p.id == id)
     }
 
+    #[must_use]
     pub fn active_proposals(&self) -> Vec<&Proposal> {
         self.proposals
             .iter()
@@ -743,6 +858,7 @@ impl GovernanceState {
     /// Fee multiplier for the proposer's next submission in this epoch.
     /// With `count` already accepted proposals, next cost is `2^count`:
     /// First = 1x, second = 2x, third = 4x. Overflow saturates fail-closed.
+    #[must_use]
     pub fn proposal_fee_multiplier(&self, proposer: &Address, current_epoch: u64) -> u64 {
         let count = self
             .proposer_epoch_count
@@ -755,6 +871,11 @@ impl GovernanceState {
             .unwrap_or(u64::MAX)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn cancel_proposal(&mut self, proposal_id: u64, caller: &Address) -> Result<(), String> {
         let proposal = self
             .proposals
@@ -828,6 +949,27 @@ impl GovernanceState {
                     target_hash: *target_hash,
                     justification_hash: *justification_hash,
                 }),
+                ProposalType::PinExternalAnchor {
+                    network,
+                    anchor,
+                    expected_previous,
+                    justification_hash,
+                } => Some(GovernanceAction::PinExternalAnchor {
+                    network: network.clone(),
+                    anchor: anchor.clone(),
+                    expected_previous: *expected_previous,
+                    justification_hash: *justification_hash,
+                }),
+                ProposalType::BnsSetPrimarySellers { sellers } => {
+                    Some(GovernanceAction::BnsSetPrimarySellers {
+                        sellers: sellers.clone(),
+                    })
+                }
+                ProposalType::BnsSetBaseCost { base_cost } => {
+                    Some(GovernanceAction::BnsSetBaseCost {
+                        base_cost: *base_cost,
+                    })
+                }
                 // Applied (and marked Executed) by the account state at the
                 // epoch boundary, see the doc comment.
                 ProposalType::ChangeBaseFee(_)
@@ -860,26 +1002,35 @@ pub enum GovernanceAction {
     VerifyHubApp {
         app_id: u64,
     },
+    /// Install or replace an external-domain trust anchor. Applied in block
+    /// execution by `execution::executor`, which refuses the block when the
+    /// slot does not hold the anchor the vote expected.
+    PinExternalAnchor {
+        network: String,
+        anchor: crate::cross_domain::external::intake::PinnedExternalAnchor,
+        expected_previous: Option<[u8; 32]>,
+        justification_hash: [u8; 32],
+    },
     UnfreezeConsensusDomain {
         domain_id: u32,
         expected_validator_set_hash: [u8; 32],
         justification_hash: [u8; 32],
     },
-    /// Bootstrap or extend a PoA domain's admin set.
+    /// Bootstrap or extend a `PoA` domain's admin set.
     /// Governance is the trust root: the first admin of a domain arrives
     /// here, never through a transaction that appoints itself.
     PoaAddAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Remove a PoA domain's admin by governance decision. This
+    /// Remove a `PoA` domain's admin by governance decision. This
     /// is the only path that may take the last admin - the admin door
     /// refuses it, because unpermissioning a domain is a governance act.
     PoaRemoveAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Freeze an account on a PoA domain's compliance ledger (
+    /// Freeze an account on a `PoA` domain's compliance ledger (
     ///). Replaces the bare `bool` authority: the vote IS the
     /// authority, the named admin is the audit trail, and the domain kind
     /// is read from the domain record at application.
@@ -902,6 +1053,13 @@ pub enum GovernanceAction {
         target_height: u64,
         target_hash: [u8; 32],
         justification_hash: [u8; 32],
+    },
+    BnsSetPrimarySellers {
+        sellers: Vec<Address>,
+    },
+    /// Replace the `.bud` renewal base cost. Only the price moves.
+    BnsSetBaseCost {
+        base_cost: u64,
     },
 }
 
@@ -1224,10 +1382,10 @@ mod tests {
         );
     }
 
-    /// The constitution's MinConstitutionProposalEpochs binds
+    /// The constitution's `MinConstitutionProposalEpochs` binds
     /// constitution amendments instead of the hard coded 10.
     #[test]
-    fn p20_f05_amendment_respects_min_constitution_proposal_epochs() {
+    fn amendment_respects_min_constitution_proposal_epochs() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
         gov.constitution
@@ -1256,7 +1414,7 @@ mod tests {
 
     /// Proposals that execution would drop are refused up front.
     #[test]
-    fn p20_f07_unexecutable_proposals_are_refused_at_creation() {
+    fn unexecutable_proposals_are_refused_at_creation() {
         use crate::core::account::MAX_BASE_FEE;
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
@@ -1478,7 +1636,7 @@ mod l4_tests {
     /// One proposer cannot fill the Active slots by using one
     /// proposal per epoch, which keeps the per-epoch fee multiplier at 1x.
     #[test]
-    fn p20_f01_one_proposer_cannot_exhaust_active_slots() {
+    fn one_proposer_cannot_exhaust_active_slots() {
         let mut gov = GovernanceState::default();
         let attacker = Address::from([0xA1; 32]);
         let mut accepted = 0u64;
@@ -1499,7 +1657,7 @@ mod l4_tests {
 
     /// Closed proposals leave state after the retention window.
     #[test]
-    fn p20_f02_closed_proposals_are_pruned() {
+    fn closed_proposals_are_pruned() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0xB1; 32]);
         let closed = gov
@@ -1630,5 +1788,111 @@ mod l4_tests {
             }),
             GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS
         );
+    }
+
+    /// An anchor vote changes what the chain enforces about another chain, so
+    /// it waits the policy delay, and it installs the anchor when it activates.
+    #[test]
+    fn a_passed_anchor_vote_installs_the_anchor_after_the_policy_delay() {
+        use crate::cross_domain::external::intake::PinnedExternalAnchor;
+        use crate::cross_domain::external::tendermint::PinnedTendermintAnchor;
+
+        let mut gov = GovernanceState::default();
+        let proposer = Address::from([0x01; 32]);
+        let anchor = PinnedExternalAnchor::Tendermint(PinnedTendermintAnchor {
+            chain_id: "noble-1".to_string(),
+            validator_set_hash: [0x11; 32],
+        });
+        let p_type = ProposalType::PinExternalAnchor {
+            network: "noble-mainnet".to_string(),
+            anchor: anchor.clone(),
+            expected_previous: None,
+            justification_hash: [0x42; 32],
+        };
+        assert_eq!(
+            activation_delay_epochs(&p_type),
+            GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS
+        );
+        gov.create_proposal(proposer, p_type, 0, 10)
+            .expect("proposal");
+        let proposal = gov.find_proposal_mut(0).expect("stored");
+        proposal.add_vote(proposer, 100_000, true, 0).expect("vote");
+        proposal.status = ProposalStatus::Passed;
+
+        // Nothing happens before the vote is ready.
+        assert!(gov.execute_passed_proposals(0).is_empty());
+        let actions = gov.execute_passed_proposals(u64::MAX);
+        assert_eq!(
+            actions,
+            vec![GovernanceAction::PinExternalAnchor {
+                network: "noble-mainnet".to_string(),
+                anchor,
+                expected_previous: None,
+                justification_hash: [0x42; 32],
+            }]
+        );
+    }
+
+    /// A vote that would install a placeholder is refused before it takes a
+    /// slot: an anchor nobody had to justify is an anchor nobody can check.
+    #[test]
+    fn an_anchor_vote_without_a_justification_or_a_real_anchor_is_refused() {
+        use crate::cross_domain::external::intake::PinnedExternalAnchor;
+        use crate::cross_domain::external::tendermint::PinnedTendermintAnchor;
+
+        let mut gov = GovernanceState::default();
+        let proposer = Address::from([0x01; 32]);
+        let real = PinnedExternalAnchor::Tendermint(PinnedTendermintAnchor {
+            chain_id: "noble-1".to_string(),
+            validator_set_hash: [0x11; 32],
+        });
+        let placeholder = PinnedExternalAnchor::Tendermint(PinnedTendermintAnchor {
+            chain_id: "noble-1".to_string(),
+            validator_set_hash: [0u8; 32],
+        });
+        let vote = |network: &str, anchor: PinnedExternalAnchor, justification: [u8; 32]| {
+            ProposalType::PinExternalAnchor {
+                network: network.to_string(),
+                anchor,
+                expected_previous: None,
+                justification_hash: justification,
+            }
+        };
+
+        assert!(gov
+            .create_proposal(proposer, vote("", real.clone(), [0x42; 32]), 0, 10)
+            .is_err());
+        assert!(gov
+            .create_proposal(
+                proposer,
+                vote(
+                    &"n".repeat(MAX_PINNED_NETWORK_BYTES + 1),
+                    real.clone(),
+                    [0x42; 32]
+                ),
+                0,
+                10
+            )
+            .is_err());
+        assert!(gov
+            .create_proposal(
+                proposer,
+                vote("noble-mainnet", real.clone(), [0u8; 32]),
+                0,
+                10
+            )
+            .is_err());
+        assert!(gov
+            .create_proposal(
+                proposer,
+                vote("noble-mainnet", placeholder, [0x42; 32]),
+                0,
+                10
+            )
+            .is_err());
+        assert!(gov.proposals.is_empty());
+        assert!(gov
+            .create_proposal(proposer, vote("noble-mainnet", real, [0x42; 32]), 0, 10)
+            .is_ok());
     }
 }

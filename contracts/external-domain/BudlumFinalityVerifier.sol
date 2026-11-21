@@ -3,12 +3,23 @@
 // aderyn-fp-next-line(push-zero-opcode)
 pragma solidity 0.8.26;
 
-/// @notice Minimal finality read surface consumed by downstream Graft receivers.
+/// @notice Verification mode recorded when a Budlum height becomes final.
+enum FinalityMode {
+    None,
+    ClassicalOnly,
+    PostQuantumOnly,
+    Hybrid
+}
+
+/// @notice Minimal finality read surface consumed by downstream AppBinding receivers.
 interface IBudlumFinality {
     function rootAtHeight(uint64 height) external view returns (bytes32);
     function heightFinal(uint64 height) external view returns (bool);
     function latestFinalHeight() external view returns (uint64);
+    function finalityModeAtHeight(uint64 height) external view returns (FinalityMode);
 }
+
+import {BudlumHash} from "../lib/BudlumHash.sol";
 
 /// @title BudlumFinalityVerifier
 /// @notice Verifies Budlum's hybrid finality proof (BLS12-381 aggregate +
@@ -33,13 +44,11 @@ struct Challenge {
     bool resolved;
     uint64 height;
     bytes32 stateRoot;
+    FinalityMode mode;
 }
 
 interface IExternalFraudProofVerifier {
-    function verifyFraud(bytes32 attestationDigest, bytes calldata proof)
-        external
-        view
-        returns (bool);
+    function verifyFraud(bytes32 attestationDigest, bytes calldata proof) external view returns (bool);
 
     /// @notice Whether `proof` shows the `(height, stateRoot)` pair itself is
     ///         wrong, rather than one envelope's post-quantum half. A verifier
@@ -66,11 +75,17 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     uint256 internal constant GAS_BLS_PAIRING_VERIFY = 4e5;
     uint256 internal constant GAS_MLDSA_VERIFY = 6e4;
     uint256 internal constant GAS_MALFORMED_PROBE = 5_000;
+    uint256 internal constant GAS_SUBSTANCE_RESERVE = 100_000;
+    uint256 internal constant MAX_CHALLENGE_WINDOW = 2_628_000;
+    uint256 internal constant MAX_PENDING_ENVELOPES = 16;
+    uint256 internal constant MAX_MLDSA_PUBKEY_LEN = 2_592;
+    uint256 internal constant MAX_MLDSA_SIG_LEN = 4_627;
 
     uint256 internal constant PAIRING_PROBE_BYTES = 384;
     uint256 internal constant G2_UNCOMPRESSED_LEN = 256;
     uint256 internal constant G1_UNCOMPRESSED_LEN = 128;
     uint256 internal constant WORD_LEN = 32;
+    uint256 internal constant HEADER_OPENING_FIELDS = 3;
     uint256 internal constant FP_PADDED_LEN = 64;
     uint256 internal constant FP_BYTE_LEN = 48;
     uint256 internal constant MODEXP_EXP_LEN = 1;
@@ -93,6 +108,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     mapping(uint64 => bytes32) public pendingRootAtHeight;
     mapping(uint64 => bytes32) public pendingAttestationAtHeight;
     mapping(uint64 => bool) public override heightFinal;
+    mapping(uint64 => FinalityMode) public override finalityModeAtHeight;
     uint64 public override latestFinalHeight;
     mapping(bytes32 => Challenge) public challenges;
     mapping(bytes32 => bool) public fraudulent;
@@ -108,6 +124,8 @@ contract BudlumFinalityVerifier is IBudlumFinality {
 
     bool public immutable hasBlsPrecompile;
     bool public immutable hasMlDsaPrecompile;
+    bool public immutable hasMlDsaStdPrecompile;
+    bool public immutable hasMlDsaEthPrecompile;
 
     event AttestationVerified(bytes32 indexed digest, uint64 height, bytes32 stateRoot);
     event AttestationOptimistic(bytes32 indexed digest, uint64 height, string reason);
@@ -131,7 +149,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     error FraudProofVerifierNotContract(address verifier);
     error FraudProofRejected(bytes32 digest);
     error PendingAttestation(uint64 height, bytes32 digest);
+    error PendingEnvelopeLimitReached(bytes32 identity);
     error NoChallengeWindow();
+    error InsufficientChallengeGas();
     error SignatureInvalid(string what);
     error ConflictingRoot(uint64 height, bytes32 held, bytes32 got);
 
@@ -143,18 +163,19 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         bytes32 g2GeneratorHash_,
         bytes32 mlDsaPubkeyHash_
     ) {
+        if (budlumChainId_ == 0) {
+            revert WrongChainId(1, 0);
+        }
         if (fraudProofVerifier_ == address(0)) {
             revert NoFraudProofVerifier();
         }
         if (fraudProofVerifier_.code.length == 0) {
             revert FraudProofVerifierNotContract(fraudProofVerifier_);
         }
-        if (committeePubkeyHash_ == bytes32(0)
-            || g2GeneratorHash_ == bytes32(0)
-            || mlDsaPubkeyHash_ == bytes32(0)) {
+        if (committeePubkeyHash_ == bytes32(0) || g2GeneratorHash_ == bytes32(0) || mlDsaPubkeyHash_ == bytes32(0)) {
             revert UntrustedKey("constructor key hashes must be non-zero");
         }
-        if (challengeWindow_ == 0) {
+        if (challengeWindow_ == 0 || challengeWindow_ > MAX_CHALLENGE_WINDOW) {
             revert NoChallengeWindow();
         }
         budlumChainId = budlumChainId_;
@@ -165,9 +186,11 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         mlDsaPubkeyHash = mlDsaPubkeyHash_;
         _reentrancyLock = _NOT_ENTERED;
         hasBlsPrecompile = _probeBlsPairing(new bytes(PAIRING_PROBE_BYTES));
-        hasMlDsaPrecompile =
-            _probeRejectsMalformed(PRECOMPILE_MLDSA)
-                || _probeRejectsMalformed(PRECOMPILE_MLDSA_ETH);
+        bool stdOk = _probeRejectsMalformed(PRECOMPILE_MLDSA);
+        bool ethOk = _probeRejectsMalformed(PRECOMPILE_MLDSA_ETH);
+        hasMlDsaStdPrecompile = stdOk;
+        hasMlDsaEthPrecompile = ethOk;
+        hasMlDsaPrecompile = stdOk || ethOk;
     }
 
     modifier nonReentrant() {
@@ -217,6 +240,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     function verify(Attestation calldata a) external nonReentrant returns (bytes32 digest) {
         if (a.chainId != budlumChainId) {
             revert WrongChainId(budlumChainId, a.chainId);
+        }
+        if (a.stateRoot == bytes32(0)) {
+            revert SignatureInvalid("zero state root cannot be attested");
         }
         digest = attestationDigest(a);
         if (accepted[digest]) {
@@ -280,6 +306,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             accepted[identity] = true;
             rootAtHeight[a.height] = a.stateRoot;
             heightFinal[a.height] = true;
+            finalityModeAtHeight[a.height] = FinalityMode.Hybrid;
             if (a.height > latestFinalHeight) {
                 latestFinalHeight = a.height;
             }
@@ -301,6 +328,10 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         // marked accepted here; it is marked accepted only when the window
         // closes, via `settle`. A caller that treats an open window as
         // accepted is reading the wrong function.
+        if (pendingEnvelopeCount[identity] >= MAX_PENDING_ENVELOPES) {
+            revert PendingEnvelopeLimitReached(identity);
+        }
+        FinalityMode pendingMode = blsOk ? FinalityMode.ClassicalOnly : FinalityMode.PostQuantumOnly;
         string memory reason = blsOk ? "post-quantum half unverified" : "classical half unverified";
         challenges[digest] = Challenge({
             attestationDigest: digest,
@@ -308,7 +339,8 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             openedAt: uint64(block.number),
             resolved: false,
             height: a.height,
-            stateRoot: a.stateRoot
+            stateRoot: a.stateRoot,
+            mode: pendingMode
         });
         pendingRootAtHeight[a.height] = a.stateRoot;
         pendingAttestationAtHeight[a.height] = identity;
@@ -316,6 +348,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         emit AttestationOptimistic(digest, a.height, reason);
     }
 
+    // aderyn-fp-next-line(reentrancy-state-change)
     function challenge(bytes32 digest, bytes calldata fraudProof) external nonReentrant {
         Challenge storage c = challenges[digest];
         if (c.openedAt == 0) {
@@ -340,12 +373,16 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (!fraud) {
             revert FraudProofRejected(digest);
         }
+        if (gasleft() < GAS_SUBSTANCE_RESERVE) {
+            revert InsufficientChallengeGas();
+        }
         bool substance = false;
         try IExternalFraudProofVerifier(fraudProofVerifier).verifyFraudSubstance(
             challengeHeight, challengeStateRoot, fraudProof
         ) returns (bool substanceProven) {
             substance = substanceProven;
         } catch {}
+        // aderyn-fp-next-line(reentrancy-state-change)
         c.challenger = msg.sender;
         c.resolved = true;
         // A verdict that only shows one envelope's post-quantum blob is invalid
@@ -361,10 +398,10 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         accepted[digest] = false;
         if (pendingEnvelopeCount[challengeIdentity] > 0) {
             pendingEnvelopeCount[challengeIdentity] -= 1;
-            if (pendingEnvelopeCount[challengeIdentity] == 0
-                && !heightFinal[challengeHeight]
-                && pendingAttestationAtHeight[challengeHeight] == challengeIdentity)
-            {
+            if (
+                pendingEnvelopeCount[challengeIdentity] == 0 && !heightFinal[challengeHeight]
+                    && pendingAttestationAtHeight[challengeHeight] == challengeIdentity
+            ) {
                 pendingAttestationAtHeight[challengeHeight] = bytes32(0);
                 pendingRootAtHeight[challengeHeight] = bytes32(0);
             }
@@ -394,10 +431,10 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         }
         bytes32 identity = pendingIdentity(c.height, c.stateRoot);
         bool sameFinalized = heightFinal[c.height] && rootAtHeight[c.height] == c.stateRoot;
-        if (!sameFinalized
-            && (pendingAttestationAtHeight[c.height] != identity
-                || pendingRootAtHeight[c.height] != c.stateRoot))
-        {
+        if (
+            !sameFinalized
+                && (pendingAttestationAtHeight[c.height] != identity || pendingRootAtHeight[c.height] != c.stateRoot)
+        ) {
             revert PendingAttestation(c.height, pendingAttestationAtHeight[c.height]);
         }
         if (pendingEnvelopeCount[identity] > 0) {
@@ -408,6 +445,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             pendingRootAtHeight[c.height] = bytes32(0);
             rootAtHeight[c.height] = c.stateRoot;
             heightFinal[c.height] = true;
+            finalityModeAtHeight[c.height] = c.mode;
             if (c.height > latestFinalHeight) {
                 latestFinalHeight = c.height;
             }
@@ -422,11 +460,50 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         return accepted[digest];
     }
 
-    function _verifyBls(bytes32 root, bytes calldata g2Pubkey, bytes calldata g2Generator, bytes calldata g1NegSignature)
-        internal
+    /// @notice Authenticate a global header through the finalized state root.
+    /// @param height Finalized Budlum block height.
+    /// @param headerHash Global header hash to verify.
+    /// @param stateRootBody State root body paired with the global header.
+    /// @return finalized True when the finalized root opens to `(stateRootBody, headerHash)`.
+    function isFinalizedHeader(uint64 height, bytes32 headerHash, bytes32 stateRootBody)
+        external
         view
-        returns (bool)
+        returns (bool finalized)
     {
+        return finalizedHeaderMode(height, headerHash, stateRootBody) != FinalityMode.None;
+    }
+
+    /// @notice Authenticate a global header and report the verification mode
+    ///         recorded when `height` became final.
+    function finalizedHeaderMode(uint64 height, bytes32 headerHash, bytes32 stateRootBody)
+        public
+        view
+        returns (FinalityMode mode)
+    {
+        mode = finalityModeAtHeight[height];
+        if (!heightFinal[height] || mode == FinalityMode.None || headerHash == bytes32(0)) {
+            return FinalityMode.None;
+        }
+        bytes[] memory fields = new bytes[](HEADER_OPENING_FIELDS);
+        fields[0] = "BDLM_STATE_ROOT_GLOBAL_HEADER_V1";
+        fields[1] = bytes.concat(stateRootBody);
+        fields[2] = bytes.concat(headerHash);
+        if (rootAtHeight[height] != BudlumHash.hashFields(fields)) {
+            return FinalityMode.None;
+        }
+        return mode;
+    }
+
+    // ---------------------------------------------------------------------
+    // Verification internals
+    // ---------------------------------------------------------------------
+
+    function _verifyBls(
+        bytes32 root,
+        bytes calldata g2Pubkey,
+        bytes calldata g2Generator,
+        bytes calldata g1NegSignature
+    ) internal view returns (bool) {
         if (g2Pubkey.length != G2_UNCOMPRESSED_LEN) {
             revert BadSignatureLength("aggregate pubkey must be an uncompressed G2 point (256 bytes)");
         }
@@ -439,15 +516,12 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (_isInfinity(g2Pubkey) || _isInfinity(g2Generator) || _isInfinity(g1NegSignature)) {
             revert SignatureInvalid("BLS points at infinity cannot verify an attestation");
         }
-        bytes memory input = bytes.concat(
-            _hashToG1(root), g2Pubkey,
-            g1NegSignature, g2Generator
-        );
+        bytes memory input = bytes.concat(_hashToG1(root), g2Pubkey, g1NegSignature, g2Generator);
         if (gasleft() < GAS_BLS_PAIRING_VERIFY) {
             return false;
         }
         (bool ok, bytes memory out) = PRECOMPILE_BLS_PAIRING.staticcall{gas: GAS_BLS_PAIRING_VERIFY}(input);
-        if (!ok || out.length < WORD_LEN) {
+        if (!ok || out.length != WORD_LEN) {
             return false;
         }
         uint256 result;
@@ -468,9 +542,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
 
     function _hashToG1(bytes32 root) internal view returns (bytes memory) {
         bytes memory dstPrime = bytes.concat(BLS_DST, bytes1(uint8(BLS_DST.length)));
-        bytes32 b0 = sha256(
-            bytes.concat(new bytes(FP_PADDED_LEN), root, bytes2(XMD_LEN_IN_BYTES), bytes1(0), dstPrime)
-        );
+        bytes32 b0 = sha256(bytes.concat(new bytes(FP_PADDED_LEN), root, bytes2(XMD_LEN_IN_BYTES), bytes1(0), dstPrime));
         bytes32 b1 = sha256(bytes.concat(b0, bytes1(XMD_BLOCK_1), dstPrime));
         bytes32 b2 = sha256(bytes.concat(b0 ^ b1, bytes1(XMD_BLOCK_2), dstPrime));
         bytes32 b3 = sha256(bytes.concat(b0 ^ b2, bytes1(XMD_BLOCK_3), dstPrime));
@@ -506,14 +578,20 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         return out;
     }
 
-    function _verifyMlDsa(
-        bytes32 root,
-        bytes calldata pubkey,
-        bytes calldata signature,
-        bool ethVariant
-    ) internal view returns (bool) {
+    function _verifyMlDsa(bytes32 root, bytes calldata pubkey, bytes calldata signature, bool ethVariant)
+        internal
+        view
+        returns (bool)
+    {
+        if (
+            pubkey.length == 0 || pubkey.length > MAX_MLDSA_PUBKEY_LEN || signature.length == 0
+                || signature.length > MAX_MLDSA_SIG_LEN
+        ) {
+            return false;
+        }
+        bool enabled = ethVariant ? hasMlDsaEthPrecompile : hasMlDsaStdPrecompile;
         address target = ethVariant ? PRECOMPILE_MLDSA_ETH : PRECOMPILE_MLDSA;
-        if (!_probeRejectsMalformed(target)) {
+        if (!enabled || target.code.length > 0) {
             return false;
         }
         if (gasleft() < GAS_MLDSA_VERIFY) {
@@ -521,7 +599,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         }
         bytes memory input = bytes.concat(root, pubkey, signature);
         (bool ok, bytes memory out) = target.staticcall{gas: GAS_MLDSA_VERIFY}(input);
-        if (!ok || out.length < WORD_LEN) {
+        if (!ok || out.length != WORD_LEN) {
             return false;
         }
         uint256 result;

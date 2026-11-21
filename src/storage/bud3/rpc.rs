@@ -1,0 +1,1048 @@
+//! Section 6.22.2 B.U.D. 3.0 JSON-RPC surface (`bud_storage*`,  item 6).
+//! exposed for `src/rpc/server.rs` `bud_storage*` dispatch.
+//!
+//! Dispatches all 17 canonical `bud_storage*` methods over [`Bud3Registry`],
+//! [`UploadSessionManager`], [`RevealSessionManager`], and [`NetworkSymbolSource`]:
+//! * Upload sessions: `bud_storageUploadOpen`, `bud_storageUploadAppend`, `bud_storageUploadFinish`
+//! * Chain reads: `bud_storageGetObject`, `bud_storageGetPlacement`, `bud_storageGetCustody`
+//! * Symbol & paid fallback reads: `bud_storageGetSymbols`, `bud_storageGetContent`
+//! * Unsigned tx builders: `bud_storagePrepareRegister`, `bud_storagePrepareBurn`, `bud_storagePrepareRenew`
+//! * View grants: `bud_storageIssueViewGrant`, `bud_storageRevokeViewGrant`, `bud_storageMayView`, `bud_storageListViewGrants`
+//! * Reveal sessions: `bud_storageOpenReveal`, `bud_storageRevealFrames`, `bud_storageCloseReveal`
+
+use super::access_tiering::AccessTierTracker;
+use super::content_gateway::Bud3ContentGateway;
+use super::content_ref::ContentRef;
+use super::fountain::Symbol;
+use super::grants::GrantRow;
+use super::limits::{Bud3Limits, Profile};
+use super::maintenance::Bud3StorageMetrics;
+use super::placement::{Candidate, PlacementRow};
+use super::registry::{Address, Bud3Query, Bud3Registry, NftId, ObjectKey};
+use super::repair::verify_repaired_symbol;
+use super::segment::Segmentation;
+use super::symbol_protocol::SymbolPeerLimiter;
+use super::tx::StorageTxV3;
+use super::upload::UploadSessionManager;
+use super::view::{
+    fallback_decode_public, NetworkSymbolSource, PaidViewReceipt, RevealSessionManager,
+};
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
+
+/// Canonical Section 6.22.2 B.U.D. 3.0 RPC method names.
+pub const BUD3_RPC_METHODS: &[&str] = &[
+    "bud_storageUploadOpen",
+    "bud_storageUploadAppend",
+    "bud_storageUploadFinish",
+    "bud_storageGetObject",
+    "bud_storageGetSymbols",
+    "bud_storageGetContent",
+    "bud_storageGetPlacement",
+    "bud_storageGetCustody",
+    "bud_storagePrepareRegister",
+    "bud_storagePrepareBurn",
+    "bud_storagePrepareRenew",
+    "bud_storageIssueViewGrant",
+    "bud_storageRevokeViewGrant",
+    "bud_storageMayView",
+    "bud_storageListViewGrants",
+    "bud_storageOpenReveal",
+    "bud_storageRevealFrames",
+    "bud_storageCloseReveal",
+];
+
+fn parse_hex32(val: Option<&Value>, field: &str) -> Result<[u8; 32], String> {
+    let raw = val
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing hex string `{field}`"))?;
+    let trimmed = raw.strip_prefix("0x").unwrap_or(raw);
+    let bytes = hex::decode(trimmed).map_err(|e| format!("invalid hex `{field}`: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("`{field}` must be 32 bytes, got {}", bytes.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn parse_hex_bytes(val: Option<&Value>, field: &str) -> Result<Vec<u8>, String> {
+    let raw = val
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing hex string `{field}`"))?;
+    let trimmed = raw.strip_prefix("0x").unwrap_or(raw);
+    hex::decode(trimmed).map_err(|e| format!("invalid hex `{field}`: {e}"))
+}
+
+/// The per-client bucket [`UploadSessionManager`] caps concurrent sessions on.
+///
+/// The upload door used to pass `[0u8; 16]` for every caller, so the cap the
+/// manager keeps per client was really one global cap: `MAX_CONCURRENT_SESSIONS_PER_IP`
+/// uploads, from anybody, and the next honest uploader was refused. A caller
+/// that states its address now gets its own bucket; a caller that does not is
+/// bucketed by its own account, which keeps one account from spending another
+/// account's allowance and cannot be shared by a crowd.
+fn upload_client_bucket(params: &Value, account: &Address) -> Result<[u8; 16], String> {
+    if let Some(raw) = params.get("client_ip").and_then(Value::as_str) {
+        let text = raw.trim();
+        let parsed = text
+            .parse::<std::net::IpAddr>()
+            .or_else(|_| text.parse::<std::net::SocketAddr>().map(|addr| addr.ip()))
+            .map_err(|_| String::from("invalid `client_ip`"))?;
+        // An IPv4 caller is bucketed by its IPv4-mapped IPv6 form, so both
+        // families land in one 16-byte key without a partial copy.
+        return Ok(match parsed {
+            std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+            std::net::IpAddr::V6(v6) => v6.octets(),
+        });
+    }
+    let mut bucket = [0u8; 16];
+    if let Some(head) = account.first_chunk::<16>() {
+        bucket.copy_from_slice(head);
+    }
+    Ok(bucket)
+}
+
+/// Stateful node-local B.U.D. 3.0 RPC endpoint holding upload & reveal sessions.
+pub struct Bud3RpcService {
+    uploads: UploadSessionManager,
+    reveals: RevealSessionManager,
+    tiers: AccessTierTracker,
+    limiter: SymbolPeerLimiter,
+    metrics: Bud3StorageMetrics,
+    consumed_paid_views: BTreeSet<[u8; 32]>,
+}
+
+impl Default for Bud3RpcService {
+    fn default() -> Self {
+        Self {
+            uploads: UploadSessionManager::new(Bud3Limits::default()),
+            reveals: RevealSessionManager::default(),
+            tiers: AccessTierTracker::default(),
+            limiter: SymbolPeerLimiter::default(),
+            metrics: Bud3StorageMetrics::default(),
+            consumed_paid_views: BTreeSet::new(),
+        }
+    }
+}
+
+impl Bud3RpcService {
+    /// Dispatch a Section 6.22.2 `bud_storage*` JSON-RPC request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable error string if parameters are malformed, session
+    /// limits trigger, or G8 paid/public rules refuse the request.
+    pub fn handle<N: NetworkSymbolSource>(
+        &mut self,
+        method: &str,
+        params: &Value,
+        registry: &Bud3Registry,
+        network: &N,
+        placement_ctx: (&PlacementRow, &[Candidate], u64),
+    ) -> Result<Value, String> {
+        let (placement_row, candidates, now_sec) = placement_ctx;
+        match method {
+            "bud_storageUploadOpen" => {
+                let account: Address = parse_hex32(params.get("account"), "account")?;
+                let declared_len = params
+                    .get("declared_len")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| String::from("missing `declared_len`"))?;
+                let raw_flags =
+                    u8::try_from(params.get("flags").and_then(Value::as_u64).unwrap_or(0))
+                        .map_err(|_| String::from("invalid `flags`"))?;
+                let lifetime_epochs = params
+                    .get("lifetime_epochs")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(100);
+                let pre_sealed = params
+                    .get("pre_sealed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let ip_bucket = upload_client_bucket(params, &account)?;
+                let sid =
+                    if let Some(days_u64) = params.get("lifetime_days").and_then(Value::as_u64) {
+                        let days = u32::try_from(days_u64)
+                            .map_err(|_| String::from("invalid `lifetime_days`"))?;
+                        self.uploads
+                            .open_session_for_days(
+                                (account, ip_bucket),
+                                declared_len,
+                                raw_flags,
+                                days,
+                                pre_sealed,
+                                now_sec,
+                            )
+                            .map_err(|e| format!("{e:?}"))?
+                    } else {
+                        self.uploads
+                            .open_session(
+                                (account, ip_bucket),
+                                declared_len,
+                                raw_flags,
+                                lifetime_epochs,
+                                pre_sealed,
+                                now_sec,
+                            )
+                            .map_err(|e| format!("{e:?}"))?
+                    };
+                Ok(json!({ "session_id": sid }))
+            }
+            "bud_storageUploadAppend" => {
+                let sid = params
+                    .get("session_id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| String::from("missing `session_id`"))?;
+                let chunk = parse_hex_bytes(params.get("chunk_hex"), "chunk_hex")?;
+                let received = self
+                    .uploads
+                    .append_chunk(sid, &chunk, now_sec)
+                    .map_err(|e| format!("{e:?}"))?;
+                Ok(json!({ "session_id": sid, "received_len": received }))
+            }
+            "bud_storageUploadFinish" => {
+                let sid = params
+                    .get("session_id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| String::from("missing `session_id`"))?;
+                let done = self
+                    .uploads
+                    .finish_session(
+                        sid,
+                        &Profile::P0,
+                        placement_row,
+                        candidates,
+                        registry,
+                        now_sec,
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                // The current symbol protocol defines custody push messages but
+                // has no network send/receipt implementation. Until every new
+                // share is durably delivered, returning a successful commitment
+                // would discard `done.segments` and advertise unavailable data.
+                if done.deduplicated_existing.is_none() || !done.segments.is_empty() {
+                    return Err(String::from(
+                        "custody delivery unavailable: upload produced symbols but no verified holder receipts",
+                    ));
+                }
+                Ok(json!({
+                    "object_commitment": hex::encode(done.record.commitment),
+                    "content_digest": hex::encode(done.record.content_id.digest),
+                    "object_len": done.record.object_len,
+                    "deduplicated_existing": done.deduplicated_existing.map(hex::encode),
+                }))
+            }
+            "bud_storageGetObject" | "bud_storageGetPlacement" => {
+                let key: ObjectKey = parse_hex32(params.get("object"), "object")?;
+                let mut val = registry.query_json(&Bud3Query::Object(key));
+                if method == "bud_storageGetPlacement" {
+                    if let Some((live_key, entry)) = registry.resolve_live_object(&key) {
+                        let total_src =
+                            Segmentation::new(entry.record.object_len, &entry.record.profile)
+                                .map_or(0, |s| s.total_source_symbols());
+                        let k_seg = u32::try_from(total_src).unwrap_or(1).max(1);
+                        if let Some(map) = val.as_object_mut() {
+                            if live_key != key {
+                                map.insert(
+                                    "resolved_commitment".to_owned(),
+                                    json!(hex::encode(live_key)),
+                                );
+                            }
+                            map.insert(
+                                "mobile_share_milli".to_owned(),
+                                json!(placement_row.mobile_share_milli()),
+                            );
+                            map.insert(
+                                "redundancy_milli".to_owned(),
+                                json!(placement_row.redundancy_milli(k_seg)),
+                            );
+                            map.insert(
+                                "total_physical_bytes".to_owned(),
+                                json!(entry.endowment.fee_record.total_physical_bytes()),
+                            );
+                        }
+                    }
+                }
+                Ok(val)
+            }
+            "bud_storageGetCustody" => {
+                let validator: Address = parse_hex32(params.get("validator"), "validator")?;
+                Ok(registry.query_json(&Bud3Query::Custody(validator)))
+            }
+            "bud_storageGetSymbols" => {
+                let holder: Address = parse_hex32(params.get("holder"), "holder")?;
+                let object: ObjectKey = parse_hex32(params.get("object"), "object")?;
+                let segment = params.get("segment").and_then(Value::as_u64).unwrap_or(0);
+                let first_esi =
+                    u32::try_from(params.get("first_esi").and_then(Value::as_u64).unwrap_or(0))
+                        .map_err(|_| String::from("invalid `first_esi`"))?;
+                let count = u32::try_from(params.get("count").and_then(Value::as_u64).unwrap_or(1))
+                    .map_err(|_| String::from("invalid `count`"))?;
+                if count == 0 || count > super::symbol_protocol::MAX_SYMBOLS_PER_REQUEST {
+                    return Err(String::from("symbol count outside 1..=64"));
+                }
+                let range_req = super::symbol_protocol::SymbolRangeRequest {
+                    object,
+                    segment,
+                    first_esi,
+                    count,
+                };
+                self.limiter
+                    .check_symbol_request(&holder, &range_req, now_sec)
+                    .map_err(|e| format!("symbol request rate limit: {e:?}"))?;
+                let syms =
+                    network.fetch_holder_symbols(&holder, &object, segment, first_esi, count);
+                let encoded: Vec<Value> = syms
+                    .into_iter()
+                    .map(|s| json!({ "segment": s.segment, "esi": s.esi, "data_hex": hex::encode(s.data) }))
+                    .collect();
+                Ok(json!({ "symbols": encoded }))
+            }
+            "bud_storageGetContent" => {
+                const MAX_CONSUMED_PAID_VIEWS: usize = 65_536;
+                let payer: Address = parse_hex32(params.get("payer"), "payer")?;
+                let object: ObjectKey = parse_hex32(params.get("object"), "object")?;
+                let receipt_id: [u8; 32] = parse_hex32(params.get("receipt_id"), "receipt_id")?;
+                self.consumed_paid_views
+                    .retain(|id| registry.has_paid_view(id));
+                if self.consumed_paid_views.contains(&receipt_id) {
+                    return Err(String::from("paid view receipt already consumed"));
+                }
+                if self.consumed_paid_views.len() >= MAX_CONSUMED_PAID_VIEWS {
+                    return Err(String::from("paid view replay cache full"));
+                }
+                let fee_paid_atoms = params
+                    .get("fee_paid_atoms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let receipt = PaidViewReceipt {
+                    payer,
+                    object,
+                    receipt_id,
+                    fee_paid_atoms,
+                };
+                let caller_epoch = params
+                    .get("current_epoch")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let effective_epoch = caller_epoch.max(registry.observed_paid_view_epoch());
+                if !registry.verify_paid_view_at(&receipt, effective_epoch) {
+                    return Err(String::from("paid view receipt expired or unpaid"));
+                }
+                let content = fallback_decode_public(registry, &object, &receipt, network)
+                    .map_err(|e| format!("{e:?}"))?;
+                self.consumed_paid_views.insert(receipt_id);
+                let _ = self.tiers.record_access(object, false, now_sec);
+                Ok(json!({ "content_hex": hex::encode(content) }))
+            }
+            "bud_storagePrepareBurn"
+            | "bud_storagePrepareRenew"
+            | "bud_storagePrepareRegister"
+            | "bud_storageIssueViewGrant"
+            | "bud_storageRevokeViewGrant"
+            | "bud_storageMayView"
+            | "bud_storageListViewGrants"
+            | "bud_storageOpenReveal"
+            | "bud_storageRevealFrames"
+            | "bud_storageCloseReveal"
+            | "bud_storageFetchBundle"
+            | "bud_storageAuditRepairSymbol" => {
+                self.handle_grants_and_reveal(method, params, registry, network)
+            }
+            other => Err(format!("unknown B.U.D. 3.0 RPC method `{other}`")),
+        }
+    }
+
+    fn handle_grants_and_reveal<N: NetworkSymbolSource>(
+        &mut self,
+        method: &str,
+        params: &Value,
+        registry: &Bud3Registry,
+        network: &N,
+    ) -> Result<Value, String> {
+        match method {
+            "bud_storagePrepareBurn" => {
+                let nft: NftId = parse_hex32(params.get("nft"), "nft")?;
+                let tx = StorageTxV3::BurnReference { nft };
+                Ok(serde_json::to_value(tx).map_err(|e| e.to_string())?)
+            }
+            "bud_storagePrepareRenew" => {
+                let object: ObjectKey = parse_hex32(params.get("object"), "object")?;
+                let extra_epochs = params
+                    .get("extra_epochs")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| String::from("missing `extra_epochs`"))?;
+                let tx = StorageTxV3::RenewObject {
+                    object,
+                    extra_epochs,
+                };
+                Ok(serde_json::to_value(tx).map_err(|e| e.to_string())?)
+            }
+            "bud_storagePrepareRegister" => {
+                Ok(json!({ "ready": true, "via": "bud_storageUploadFinish" }))
+            }
+            "bud_storageIssueViewGrant" => {
+                let nft = parse_hex32(params.get("nft"), "nft")?;
+                let grant_nonce = parse_hex32(params.get("grant_nonce"), "grant_nonce")?;
+                let grant_tag = parse_hex32(params.get("grant_tag"), "grant_tag")?;
+                let one_time_pk = parse_hex_bytes(params.get("one_time_pk"), "one_time_pk")?;
+                let sealed_key_package =
+                    parse_hex_bytes(params.get("sealed_key_package"), "sealed_key_package")?;
+                let expires_at_epoch = params
+                    .get("expires_at_epoch")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| String::from("missing `expires_at_epoch`"))?;
+                let tx = StorageTxV3::IssueViewGrant {
+                    nft,
+                    grant_nonce,
+                    row: GrantRow {
+                        grant_tag,
+                        one_time_pk,
+                        sealed_key_package,
+                        expires_at_epoch,
+                    },
+                };
+                Ok(serde_json::to_value(tx).map_err(|e| e.to_string())?)
+            }
+            "bud_storageRevokeViewGrant" => {
+                let grant_tag = parse_hex32(params.get("grant_tag"), "grant_tag")?;
+                let one_time_signature =
+                    parse_hex_bytes(params.get("one_time_signature"), "one_time_signature")?;
+                let tx = StorageTxV3::RevokeViewGrant {
+                    grant_tag,
+                    one_time_signature,
+                };
+                Ok(serde_json::to_value(tx).map_err(|e| e.to_string())?)
+            }
+            "bud_storageMayView" => {
+                let grant_tag = parse_hex32(params.get("grant_tag"), "grant_tag")?;
+                let current_epoch = params
+                    .get("current_epoch")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| String::from("missing `current_epoch`"))?;
+                let active = registry.active_grant(&grant_tag, current_epoch).is_some();
+                Ok(json!({ "grant_tag": hex::encode(grant_tag), "may_view": active }))
+            }
+            "bud_storageListViewGrants" => {
+                let grant_tag = parse_hex32(params.get("grant_tag"), "grant_tag")?;
+                Ok(registry.query_json(&Bud3Query::Grant(grant_tag)))
+            }
+            "bud_storageOpenReveal" => {
+                let object: ObjectKey = parse_hex32(params.get("object"), "object")?;
+                let sid = self
+                    .reveals
+                    .open_reveal(registry, &object, 2, network)
+                    .map_err(|e| format!("{e:?}"))?;
+                Ok(json!({ "reveal_session_id": sid }))
+            }
+            "bud_storageRevealFrames" => {
+                let sid = params
+                    .get("reveal_session_id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| String::from("missing `reveal_session_id`"))?;
+                let offset =
+                    usize::try_from(params.get("offset").and_then(Value::as_u64).unwrap_or(0))
+                        .unwrap_or(0);
+                let limit =
+                    usize::try_from(params.get("limit").and_then(Value::as_u64).unwrap_or(16))
+                        .unwrap_or(16);
+                let (obj, frames, total) = self
+                    .reveals
+                    .reveal_frames(sid, offset, limit)
+                    .map_err(|e| format!("{e:?}"))?;
+                let encoded: Vec<String> = frames
+                    .iter()
+                    .map(|f| hex::encode(f.encode_wire()))
+                    .collect();
+                Ok(json!({
+                    "object": hex::encode(obj),
+                    "total_frames": total,
+                    "frames_hex": encoded,
+                }))
+            }
+            "bud_storageCloseReveal" => {
+                let sid = params
+                    .get("reveal_session_id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| String::from("missing `reveal_session_id`"))?;
+                self.reveals
+                    .close_reveal(sid)
+                    .map_err(|e| format!("{e:?}"))?;
+                Ok(json!({ "closed": true }))
+            }
+            "bud_storageFetchBundle" => {
+                let object: ObjectKey = parse_hex32(params.get("object"), "object")?;
+                let (_, entry) = registry
+                    .resolve_live_object(&object)
+                    .ok_or_else(|| String::from("unknown object"))?;
+                let cref = ContentRef::new(entry.record.content_id, object, None)
+                    .map_err(|e| format!("{e:?}"))?;
+                let bundle = Bud3ContentGateway::fetch_symbol_bundle(registry, &cref, network)
+                    .map_err(|e| format!("{e:?}"))?;
+                Ok(json!({
+                    "object": hex::encode(bundle.record.commitment),
+                    "symbol_count": bundle.symbols.len(),
+                }))
+            }
+            "bud_storageAuditRepairSymbol" => {
+                // Every parameter is parsed before the custody stream opens. The
+                // stream slot is a bounded per-peer resource the limiter reclaims
+                // only through `close_custody_stream`, and a malformed call used
+                // to return between the open and the close, so a peer could spend
+                // its whole allowance on calls that never reached the verifier
+                // and then be refused when it sent a real symbol.
+                let peer: Address = parse_hex32(params.get("peer"), "peer")?;
+                let segment = params.get("segment").and_then(Value::as_u64).unwrap_or(0);
+                let esi = u32::try_from(params.get("esi").and_then(Value::as_u64).unwrap_or(0))
+                    .map_err(|_| String::from("invalid `esi`"))?;
+                let segment_bytes = parse_hex_bytes(params.get("segment_hex"), "segment_hex")?;
+                let symbol_bytes = parse_hex_bytes(params.get("symbol_hex"), "symbol_hex")?;
+                self.limiter
+                    .open_custody_stream(&peer)
+                    .map_err(|e| format!("{e:?}"))?;
+                let claimed = Symbol {
+                    segment,
+                    esi,
+                    data: symbol_bytes,
+                };
+                let res = verify_repaired_symbol(segment, &segment_bytes, &Profile::P0, &claimed);
+                self.limiter.close_custody_stream(&peer);
+                let valid = res.map_err(|e| format!("{e:?}"))?;
+                Ok(json!({
+                    "valid": valid,
+                    "metrics": self.metrics.render_prometheus(),
+                }))
+            }
+            other => Err(format!("unknown B.U.D. 3.0 RPC method `{other}`")),
+        }
+    }
+
+    /// Return public cold objects eligible for testnet `SlowY` / Codec 13 archival
+    /// conversion via [`AccessTierTracker::expansion_archival_candidates`].
+    #[must_use]
+    pub fn archival_candidates(&self, now_sec: u64) -> Vec<ObjectKey> {
+        self.tiers
+            .expansion_archival_candidates(now_sec, AccessTierTracker::testnet_converts_objects())
+    }
+}
+
+#[cfg(test)]
+mod upload_delivery_tests {
+    use super::super::pipeline::prepare_public_upload;
+    use super::super::placement::{Class, Share};
+    use super::super::registry::Registered;
+    use super::super::view::MemorySymbolNetwork;
+    use super::*;
+
+    fn placement() -> (PlacementRow, Vec<Candidate>) {
+        (
+            PlacementRow {
+                n_full: 1,
+                s_full: 3,
+                n_mobile: 0,
+                s_mobile: 0,
+            },
+            vec![Candidate {
+                validator: [10; 32],
+                account: [10; 32],
+                class: Class::Full,
+                stake: 1_000,
+                free_quota_bytes: u64::MAX,
+                network: None,
+            }],
+        )
+    }
+
+    fn upload_from_rpc(
+        service: &mut Bud3RpcService,
+        registry: &Bud3Registry,
+        row: &PlacementRow,
+        candidates: &[Candidate],
+        content: &[u8],
+    ) -> Result<Value, String> {
+        let network = MemorySymbolNetwork::default();
+        let open = service.handle(
+            "bud_storageUploadOpen",
+            &json!({ "account": hex::encode([2u8; 32]), "declared_len": content.len() }),
+            registry,
+            &network,
+            (row, candidates, 100),
+        )?;
+        let sid = open["session_id"].as_u64().unwrap();
+        service.handle(
+            "bud_storageUploadAppend",
+            &json!({ "session_id": sid, "chunk_hex": hex::encode(content) }),
+            registry,
+            &network,
+            (row, candidates, 101),
+        )?;
+        service.handle(
+            "bud_storageUploadFinish",
+            &json!({ "session_id": sid }),
+            registry,
+            &network,
+            (row, candidates, 102),
+        )
+    }
+
+    #[test]
+    fn upload_finish_refuses_new_object_without_custody_delivery_receipts() {
+        let (row, candidates) = placement();
+        let err = upload_from_rpc(
+            &mut Bud3RpcService::default(),
+            &Bud3Registry::default(),
+            &row,
+            &candidates,
+            b"new object needs custody",
+        )
+        .unwrap_err();
+        assert!(err.contains("custody delivery unavailable"), "{err}");
+    }
+
+    #[test]
+    fn upload_finish_can_reuse_already_custodied_public_object() {
+        let content = b"same public bytes";
+        let prepared =
+            prepare_public_upload(content, &Profile::P0, &Bud3Limits::default(), 3).unwrap();
+        let key = prepared.record.commitment;
+        let mut registry = Bud3Registry::default();
+        assert_eq!(
+            registry.register_object(
+                [1; 32],
+                prepared.record,
+                vec![
+                    (
+                        0,
+                        Share {
+                            validator: [10; 32],
+                            class: Class::Full,
+                            first_esi: 0,
+                            symbols: 2,
+                        },
+                    ),
+                    (
+                        0,
+                        Share {
+                            validator: [11; 32],
+                            class: Class::Full,
+                            first_esi: 2,
+                            symbols: 1,
+                        },
+                    ),
+                ],
+                0,
+                20,
+            ),
+            Ok(Registered::New(key))
+        );
+        registry.ack(&key, &[10; 32]).unwrap();
+        registry.ack(&key, &[11; 32]).unwrap();
+        let (row, candidates) = placement();
+        let reply = upload_from_rpc(
+            &mut Bud3RpcService::default(),
+            &registry,
+            &row,
+            &candidates,
+            content,
+        )
+        .unwrap();
+        assert_eq!(reply["deduplicated_existing"], hex::encode(key));
+        assert_eq!(reply["object_commitment"], hex::encode(key));
+    }
+
+    #[test]
+    fn bud_storage_get_content_blocks_paid_view_receipt_replay() {
+        use super::super::view::{
+            MemorySymbolNetwork, MIN_PAID_VIEW_FEE_ATOMS, PAID_VIEW_RETENTION_EPOCHS,
+        };
+
+        let content = b"one time paid view content".repeat(4);
+        let prepared =
+            prepare_public_upload(&content, &Profile::P0, &Bud3Limits::default(), 4).unwrap();
+        let key = prepared.record.commitment;
+        let mut registry = Bud3Registry::default();
+        registry
+            .register_object(
+                [1; 32],
+                prepared.record,
+                vec![
+                    (
+                        0,
+                        Share {
+                            validator: [10; 32],
+                            class: Class::Full,
+                            first_esi: 0,
+                            symbols: 2,
+                        },
+                    ),
+                    (
+                        0,
+                        Share {
+                            validator: [11; 32],
+                            class: Class::Full,
+                            first_esi: 2,
+                            symbols: 2,
+                        },
+                    ),
+                ],
+                0,
+                PAID_VIEW_RETENTION_EPOCHS * 3,
+            )
+            .unwrap();
+
+        let mut net = MemorySymbolNetwork::default();
+        net.store_holder_share([10; 32], key, 0, prepared.segments[0][..2].to_vec());
+        net.store_holder_share([11; 32], key, 0, prepared.segments[0][2..].to_vec());
+
+        let receipt_id = [0xD3; 32];
+        let payer = [2u8; 32];
+        registry
+            .record_paid_view(payer, key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 1)
+            .unwrap();
+
+        let mut rpc = Bud3RpcService::default();
+        let (row, candidates) = placement();
+        let req = json!({
+            "payer": hex::encode(payer),
+            "object": hex::encode(key),
+            "receipt_id": hex::encode(receipt_id),
+            "fee_paid_atoms": MIN_PAID_VIEW_FEE_ATOMS,
+            "current_epoch": 1,
+        });
+        let first = rpc
+            .handle(
+                "bud_storageGetContent",
+                &req,
+                &registry,
+                &net,
+                (&row, &candidates, 10),
+            )
+            .unwrap();
+        assert_eq!(first["content_hex"], hex::encode(&content));
+
+        let replay = rpc
+            .handle(
+                "bud_storageGetContent",
+                &req,
+                &registry,
+                &net,
+                (&row, &candidates, 11),
+            )
+            .unwrap_err();
+        assert!(replay.contains("already consumed"), "{replay}");
+
+        // Omitting or backdating `current_epoch` cannot bypass paid-view TTL once
+        // the registry has recorded activity past the retention horizon.
+        let expired_receipt = [0xD4; 32];
+        let fresh_receipt = [0xD5; 32];
+        let post_ttl_epoch = PAID_VIEW_RETENTION_EPOCHS + 2;
+        registry
+            .record_paid_view(payer, key, expired_receipt, MIN_PAID_VIEW_FEE_ATOMS, 1)
+            .unwrap();
+        registry
+            .record_paid_view(
+                payer,
+                key,
+                fresh_receipt,
+                MIN_PAID_VIEW_FEE_ATOMS,
+                post_ttl_epoch,
+            )
+            .unwrap();
+        let omitted_epoch_err = rpc
+            .handle(
+                "bud_storageGetContent",
+                &json!({
+                    "payer": hex::encode(payer),
+                    "object": hex::encode(key),
+                    "receipt_id": hex::encode(expired_receipt),
+                    "fee_paid_atoms": MIN_PAID_VIEW_FEE_ATOMS,
+                }),
+                &registry,
+                &net,
+                (&row, &candidates, 12),
+            )
+            .unwrap_err();
+        assert!(omitted_epoch_err.contains("expired"), "{omitted_epoch_err}");
+
+        // Once paid_views expire out of the registry, the next paid-view lookup
+        // prunes stale consumed receipt IDs so node memory stays bounded.
+        let sweep_epoch = post_ttl_epoch + PAID_VIEW_RETENTION_EPOCHS + 2;
+        let _ = registry.expire(sweep_epoch);
+        let stale_probe = rpc.handle(
+            "bud_storageGetContent",
+            &json!({
+                "payer": hex::encode(payer),
+                "object": hex::encode(key),
+                "receipt_id": hex::encode([0xEE; 32]),
+                "fee_paid_atoms": MIN_PAID_VIEW_FEE_ATOMS,
+                "current_epoch": sweep_epoch,
+            }),
+            &registry,
+            &net,
+            (&row, &candidates, 13),
+        );
+        assert!(stale_probe.is_err());
+        assert!(
+            rpc.consumed_paid_views.is_empty(),
+            "expired paid-view receipt id leaked in Bud3RpcService"
+        );
+    }
+
+    #[test]
+    fn rpc_get_symbols_rejects_burst_above_symbol_peer_rate_limit() {
+        let registry = Bud3Registry::default();
+        let net = MemorySymbolNetwork::default();
+        let (row, candidates) = placement();
+        let mut rpc = Bud3RpcService::default();
+        let req = json!({
+            "holder": hex::encode([0x42; 32]),
+            "object": hex::encode([0x24; 32]),
+            "segment": 0,
+            "first_esi": 0,
+            "count": 1,
+        });
+        for _ in 0..crate::storage::bud3::symbol_protocol::MAX_SYMBOL_REQUESTS_PER_SEC {
+            rpc.handle(
+                "bud_storageGetSymbols",
+                &req,
+                &registry,
+                &net,
+                (&row, &candidates, 77),
+            )
+            .expect("within per-second symbol budget");
+        }
+        let burst_err = rpc
+            .handle(
+                "bud_storageGetSymbols",
+                &req,
+                &registry,
+                &net,
+                (&row, &candidates, 77),
+            )
+            .expect_err("burst past MAX_SYMBOL_REQUESTS_PER_SEC must be refused");
+        assert!(
+            burst_err.contains("RateLimited") || burst_err.contains("rate"),
+            "{burst_err}"
+        );
+    }
+
+    #[test]
+    fn bud_storage_get_placement_and_fetch_bundle_follow_replace_redirect() {
+        use super::super::bof1::Object;
+        use super::super::custody::{symbol_leaf, symbol_root};
+        use super::super::fountain::SegmentEncoder;
+        use super::super::pipeline::ObjectRecord;
+        use super::super::replace::sign_replace_attestation;
+        use super::super::segment::commit_object;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+        use std::collections::BTreeMap;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload = b"rpc redirect test payload for placement and fetch ".repeat(4);
+        let up_old = prepare_public_upload(&payload, &profile, &Bud3Limits::default(), 16).unwrap();
+        let old_key = up_old.record.commitment;
+
+        let raw_obj = Object::raw_public(&payload);
+        let raw_bytes = raw_obj.encode();
+        let new_commit = commit_object(&raw_bytes, &profile).unwrap();
+        let enc_raw = SegmentEncoder::new(0, &raw_bytes, &profile).unwrap();
+        let k_raw = enc_raw.k();
+        let mut syms_new = enc_raw.source_symbols();
+        syms_new.extend(enc_raw.repair_symbols(0, 16 - k_raw).unwrap());
+        let leaves_new: Vec<(u32, [u8; 32])> = syms_new
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let new_record = ObjectRecord {
+            content_id: up_old.record.content_id,
+            object_len: raw_bytes.len() as u64,
+            commitment: new_commit,
+            profile,
+            codec: raw_obj.header.codec,
+            symbols_per_segment: 16,
+            symbol_roots: vec![symbol_root(&leaves_new)],
+        };
+
+        let validators = [[71u8; 32], [72u8; 32], [73u8; 32]];
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: validators[0],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[1],
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[2],
+                    class: Class::Full,
+                    first_esi: 12,
+                    symbols: 4,
+                },
+            ),
+        ];
+
+        let mut registry = Bud3Registry::default();
+        registry
+            .register_object([1; 32], up_old.record, shares.clone(), 0, 40)
+            .unwrap();
+        for v in &validators {
+            registry.ack(&old_key, v).unwrap();
+        }
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [71u8, 72, 73]
+            .into_iter()
+            .map(|v| {
+                (
+                    [v; 32],
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let attestations: Vec<_> = [71u8, 72, 73]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation([v; 32], &[v; 32], &old_key, &new_record, &shares).unwrap()
+            })
+            .collect();
+        let new_key = registry
+            .replace_object(
+                (validators[0], 10_000),
+                &old_key,
+                new_record,
+                shares,
+                &attestations,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for v in &validators {
+            registry.ack(&new_key, v).unwrap();
+        }
+
+        let mut net = MemorySymbolNetwork::default();
+        net.store_holder_share(validators[0], new_key, 0, syms_new[0..6].to_vec());
+        net.store_holder_share(validators[1], new_key, 0, syms_new[6..12].to_vec());
+        net.store_holder_share(validators[2], new_key, 0, syms_new[12..16].to_vec());
+
+        let mut rpc = Bud3RpcService::default();
+        let (row, candidates) = placement();
+        let placement_reply = rpc
+            .handle(
+                "bud_storageGetPlacement",
+                &json!({ "object": hex::encode(old_key) }),
+                &registry,
+                &net,
+                (&row, &candidates, 20),
+            )
+            .unwrap();
+        assert_eq!(placement_reply["status"], "replaced");
+        assert_eq!(placement_reply["resolved_commitment"], hex::encode(new_key));
+        assert!(placement_reply["total_physical_bytes"].as_u64().unwrap() > 0);
+
+        let bundle_reply = rpc
+            .handle(
+                "bud_storageFetchBundle",
+                &json!({ "object": hex::encode(old_key) }),
+                &registry,
+                &net,
+                (&row, &candidates, 21),
+            )
+            .unwrap();
+        assert_eq!(bundle_reply["object"], hex::encode(new_key));
+        assert_eq!(bundle_reply["symbol_count"], 16);
+    }
+
+    #[test]
+    fn upload_open_isolates_distinct_accounts_and_audit_repair_closes_stream_on_bad_params() {
+        let mut rpc = Bud3RpcService::default();
+        let registry = Bud3Registry::default();
+        let net = MemorySymbolNetwork::default();
+        let (row, candidates) = placement();
+
+        for acct_byte in [1u8, 2u8, 3u8] {
+            let reply = rpc
+                .handle(
+                    "bud_storageUploadOpen",
+                    &json!({ "account": hex::encode([acct_byte; 32]), "declared_len": 128 }),
+                    &registry,
+                    &net,
+                    (&row, &candidates, 100),
+                )
+                .expect("distinct accounts must not share a single [0u8; 16] IP cap");
+            assert!(reply["session_id"].as_u64().is_some());
+        }
+
+        let peer = hex::encode([0x77u8; 32]);
+        for _ in 0..8 {
+            let err = rpc
+                .handle(
+                    "bud_storageAuditRepairSymbol",
+                    &json!({
+                        "peer": peer,
+                        "segment": 0,
+                        "esi": 0,
+                        "segment_hex": "not-valid-hex",
+                        "symbol_hex": "00"
+                    }),
+                    &registry,
+                    &net,
+                    (&row, &candidates, 101),
+                )
+                .unwrap_err();
+            assert!(err.contains("invalid hex"), "unexpected error: {err}");
+        }
+        // A well-formed call right after: one real P0 segment and a fresh
+        // symbol the encoder itself produced, so the door answers instead of
+        // refusing a peer that spent its allowance on malformed calls.
+        use super::super::fountain::SegmentEncoder;
+        let segment_bytes = vec![0x42u8; 5_822];
+        let encoder =
+            SegmentEncoder::new(0, &segment_bytes, &Profile::P0).expect("a P0 segment encodes");
+        let fresh = encoder
+            .repair_symbols(0, 1)
+            .expect("one fresh repair symbol")
+            .remove(0);
+        let valid_reply = rpc
+            .handle(
+                "bud_storageAuditRepairSymbol",
+                &json!({
+                    "peer": peer,
+                    "segment": 0,
+                    "esi": fresh.esi,
+                    "segment_hex": hex::encode(&segment_bytes),
+                    "symbol_hex": hex::encode(&fresh.data)
+                }),
+                &registry,
+                &net,
+                (&row, &candidates, 102),
+            )
+            .expect("malformed calls must not leak custody stream slots");
+        assert_eq!(
+            valid_reply["valid"], true,
+            "the honest repair symbol must be accepted: {valid_reply}"
+        );
+    }
+}

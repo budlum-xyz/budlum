@@ -1,7 +1,6 @@
 //! Locks on what a `ContentManifest` commits to and who is allowed to say so.
 //!
-//! Two findings closed alongside the Reed-Solomon coder, both of which were
-//! invisible while replication was the only redundancy scheme:
+//! Two invariants sealed alongside the Reed-Solomon coder:
 //!
 //! 1. `manifest_id` arrived from an RPC caller and nothing recomputed it, so a
 //!    caller could register content under any id it chose.
@@ -169,7 +168,7 @@ fn understating_k_changes_the_manifest_id() {
 fn content_size_is_the_object_not_the_stored_bytes() {
     // Under erasure coding the two differ by the parity shards and the padded
     // tail stripe. A reconstructor that used total_size would return padding.
-    let data: Vec<u8> = (0..=99u8).cycle().take(1000).collect();
+    let data: Vec<u8> = (0..=96u8).cycle().take(1000).collect();
     let enc = encode_object(&data, ErasureScheme { k: 4, n: 6 }).unwrap();
     let m = enc.to_manifest().unwrap();
 
@@ -525,8 +524,8 @@ mod self_host_policy {
     #[test]
     fn self_hosting_turned_off_is_refused() {
         let mut reg = StorageRegistry::new();
-        reg.declare_self_host_policy(ContentId([1u8; 32]), policy(false, 0, false), &profile())
-            .expect("a non-critical declaration with no replicas is coherent");
+        reg.declare_self_host_policy(ContentId([1u8; 32]), policy(false, 1, false), &profile())
+            .expect("a non-self-hosted declaration with a paid replica is coherent");
 
         let err = reg
             .check_self_host_allowed(&ContentId([1u8; 32]), &ContentId([5u8; 32]))
@@ -536,7 +535,7 @@ mod self_host_policy {
 
     #[test]
     fn critical_content_without_its_paid_replicas_is_refused() {
-        // The finding, stated as a test: the owner asked for two paid
+        // Storage policy invariant: the owner asked for two paid
         // replicas before self-hosting, and none are open.
         let mut reg = StorageRegistry::new();
         reg.declare_self_host_policy(ContentId([1u8; 32]), policy(true, 2, true), &profile())
@@ -561,9 +560,8 @@ mod self_host_policy {
     ///
     /// Every earlier test in this module calls `check_self_host_allowed`
     /// itself, which proves the check is correct and proves nothing about
-    /// whether anything runs it. That distinction is the finding: the check
-    /// was correct and tested six ways for as long as no production path
-    /// called it.
+    /// whether anything runs it. End-to-end integration invariant: the check
+    /// must be wired into the live production path.
     fn open_for(
         reg: &mut StorageRegistry,
         manifest: &ContentManifest,
@@ -599,7 +597,7 @@ mod self_host_policy {
 
     #[test]
     fn a_phone_cannot_take_a_replica_the_owner_reserved_for_paid_operators() {
-        // The finding, exercised where it bites: the owner marked this
+        // Enforce priority ordering: the owner marked this
         // content critical and asked for two paid replicas first, none are
         // open, and a phone offers to hold it. Before the check was wired,
         // this call returned a deal id.
@@ -1300,64 +1298,15 @@ mod repair_band {
         );
     }
 
-    /// The repair band is reachable from outside the node, not just from a test.
-    ///
-    /// `objects_needing_repair` was measured as idle: the maintenance sweep
-    /// calls `objects_below_own_repair_margin` instead, which judges each
-    /// object by its own scheme, and nothing else called this one. The tests
-    /// above exercised it directly, which proves the rule is right and proves
-    /// nothing about whether anyone can ask.
-    ///
-    /// That gap matters because the two functions answer different questions.
-    /// The sweep's is "is anything in trouble by its own standard?"; an
-    /// operator's is "what is within N shards of trouble for me?", and a single
-    /// per-object margin cannot answer a fixed N. The second question needed a
-    /// caller, so it has one: `bud_storageRepairBand`.
+    /// The legacy repair-band RPC is absent until the B.U.D. 3.0 surface owns it.
     #[test]
-    fn the_repair_band_is_reachable_over_rpc() {
-        let actor_src = include_str!("../chain/chain_actor.rs");
-        // Anchor on the match arm's own first field, not the enum variant:
-        // both spell `ChainCommand::GetStorageRepairBand {` and `split_once`
-        // takes the first. This is the same trap the coding-audit tests hit.
-        let handler = actor_src
-            .split_once("ChainCommand::GetStorageRepairBand { margin, response } =>")
-            .map(|(_, after)| after)
-            .expect("the GetStorageRepairBand match arm must exist");
-        let handler = &handler[..handler.len().min(1200)];
-
-        assert!(
-            handler.contains("objects_needing_repair(margin)"),
-            "the handler must ask with the CALLER's margin; substituting the \
-             sweep's per-object margin would answer a different question"
-        );
-        assert!(
-            handler.contains("unrecoverable_objects()"),
-            "objects past saving must come back too, or a caller reading an \
-             empty repair band concludes nothing is wrong"
-        );
-
-        let server_src = include_str!("../rpc/server.rs");
-        let rpc = server_src
-            .split_once("async fn storage_repair_band(")
-            .map(|(_, after)| after)
-            .expect("the storage_repair_band RPC method must exist");
-        let rpc = &rpc[..rpc.len().min(1400)];
-        assert!(
-            rpc.contains("get_storage_repair_band(margin)"),
-            "the RPC must reach the chain actor, not recompute the band"
-        );
-        assert!(
-            rpc.contains("\"unrecoverable\"") && rpc.contains("\"repairable\""),
-            "the response must keep the two lists apart: an object below k \
-             cannot be repaired, and must not read as one that can"
-        );
-
+    fn the_legacy_repair_band_rpc_is_not_exposed() {
         let api_src = include_str!("../rpc/api.rs");
-        assert!(
-            api_src.contains("bud_storageRepairBand"),
-            "the method must be declared on the RPC trait, or it is unreachable \
-             from outside the process no matter what the server implements"
-        );
+        let server_src = include_str!("../rpc/server.rs");
+        let method_class_src = include_str!("../rpc/method_class.rs");
+        assert!(!api_src.contains("bud_storageRepairBand"));
+        assert!(!server_src.contains("async fn storage_repair_band("));
+        assert!(!method_class_src.contains("bud_storageRepairBand"));
     }
 
     #[test]
