@@ -2775,6 +2775,9 @@ impl Transaction {
                 | crate::cross_domain::external::ExternalDomainTx::ChallengeContradiction(_)
                 | crate::cross_domain::external::ExternalDomainTx::ChallengeAncestry(_),
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
+            TransactionType::ExternalDomain(
+                crate::cross_domain::external::ExternalDomainTx::SubmitFaultProof { .. },
+            ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature * 2,
             TransactionType::ExternalDomain(_) => schedule.contract_call_gas * 2,
             // Registration validates the domain record and escrows a bond; a
             // ZK proof runs the STARK verifier: both are verification work on
@@ -5071,10 +5074,86 @@ fn encode_external_domain_tx(
             put_u8(out, 6);
             encode_raw_evidence(evidence, out);
         }
-        // Tag 7: cross-slot ancestry challenge, appended last.
+        // Tag 7: cross-slot ancestry challenge.
         ExternalDomainTx::ChallengeAncestry(evidence) => {
             put_u8(out, 7);
             encode_raw_evidence(evidence, out);
+        }
+        // Tag 8: objective protocol equivocation or BitVM2 single-step fault proof, appended last.
+        ExternalDomainTx::SubmitFaultProof { domain, proof } => {
+            put_u8(out, 8);
+            put_fixed(out, &domain.0);
+            encode_objective_fault_proof(proof, out);
+        }
+    }
+}
+
+fn encode_objective_fault_proof(
+    proof: &crate::cross_domain::external::ObjectiveFaultProof,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::ObjectiveFaultProof;
+    match proof {
+        ObjectiveFaultProof::HotStuffEquivocation(hs) => {
+            put_u8(out, 0);
+            put_u64(out, hs.epoch);
+            put_u64(out, hs.view);
+            put_fixed(out, &hs.block_hash_a);
+            put_fixed(out, &hs.block_hash_b);
+            for vote in [&hs.vote_a, &hs.vote_b] {
+                put_fixed(out, &vote.signer_pubkey);
+                put_bytes(out, &vote.ed25519_sig);
+                put_bytes(out, &vote.pq_sig);
+            }
+        }
+        ObjectiveFaultProof::CasperFfgEquivocation(ffg) => {
+            put_u8(out, 1);
+            for vote in [&ffg.vote_a, &ffg.vote_b] {
+                put_fixed(out, &vote.signer);
+                put_u64(out, vote.source_epoch);
+                put_fixed(out, &vote.source_root);
+                put_u64(out, vote.target_epoch);
+                put_fixed(out, &vote.target_root);
+                put_bytes(out, &vote.signature);
+                put_bytes(out, &vote.pq_signature);
+            }
+        }
+        ObjectiveFaultProof::MysticetiEquivocation(my) => {
+            put_u8(out, 2);
+            for vertex in [&my.vertex_a, &my.vertex_b] {
+                put_fixed(out, &vertex.author);
+                put_u64(out, vertex.epoch);
+                put_u64(out, vertex.round);
+                put_fixed(out, &vertex.payload_digest);
+                put_u64(out, vertex.parents.len() as u64);
+                for parent in &vertex.parents {
+                    put_fixed(out, parent);
+                }
+                put_bytes(out, &vertex.ed25519_sig);
+                put_bytes(out, &vertex.pq_sig);
+            }
+        }
+        ObjectiveFaultProof::BitVmDisprove(bv) => {
+            put_u8(out, 3);
+            put_fixed(out, &bv.claim.state_root);
+            put_fixed(out, &bv.claim.tx_root);
+            put_fixed(out, &bv.claim.event_root);
+            put_fixed(out, &bv.claim.program_hash);
+            put_fixed(out, &bv.claim.trace_merkle_root);
+            put_u32(out, bv.claim.trace_chunk_count);
+            put_u64(out, bv.claim.claim_pow_height);
+            put_bytes(out, &bv.claim.operator_ed25519_sig);
+            put_bytes(out, &bv.claim.operator_pq_sig);
+            put_u32(out, bv.disputed_chunk.chunk_index);
+            put_fixed(out, &bv.disputed_chunk.pre_state);
+            put_fixed(out, &bv.disputed_chunk.claimed_post_state);
+            put_u8(out, bv.disputed_chunk.step_opcode);
+            put_fixed(out, &bv.disputed_chunk.step_witness);
+            put_u64(out, bv.trace_merkle_proof.len() as u64);
+            for step in &bv.trace_merkle_proof {
+                put_fixed(out, &step.sibling);
+                put_u8(out, u8::from(step.sibling_is_left));
+            }
         }
     }
 }
@@ -5475,6 +5554,185 @@ mod v29_signing_tests {
             ..QuorumPolicy::strict(2, 3)
         });
         assert_ne!(strict.signing_hash(), loose.signing_hash());
+
+        assert_bft_fault_proof_preimages();
+        assert_dag_and_bitvm_fault_proof_preimages();
+    }
+
+    fn assert_bft_fault_proof_preimages() {
+        use crate::cross_domain::external::casper_ffg::{FfgEquivocationProof, FfgVote};
+        use crate::cross_domain::external::hotstuff::{HotStuffEquivocationProof, HotStuffVoteSig};
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let submit_fault = |domain: DomainKey, proof: ObjectiveFaultProof| {
+            TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof { domain, proof })
+        };
+        let hs_base = HotStuffEquivocationProof {
+            epoch: 7,
+            view: 12,
+            block_hash_a: [0x11; 32],
+            block_hash_b: [0x22; 32],
+            vote_a: HotStuffVoteSig {
+                signer_pubkey: [0x33; 32],
+                ed25519_sig: vec![1, 2],
+                pq_sig: vec![3, 4],
+            },
+            vote_b: HotStuffVoteSig {
+                signer_pubkey: [0x33; 32],
+                ed25519_sig: vec![5, 6],
+                pq_sig: vec![7, 8],
+            },
+        };
+        let hs_h0 = signed_variant(submit_fault(
+            DomainKey([1u8; 32]),
+            ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_base.clone())),
+        ))
+        .signing_hash();
+        let mut hs_mut = hs_base.clone();
+        hs_mut.vote_b.pq_sig.push(9);
+        assert_ne!(
+            hs_h0,
+            signed_variant(submit_fault(
+                DomainKey([1u8; 32]),
+                ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_mut)),
+            ))
+            .signing_hash()
+        );
+        assert_ne!(
+            hs_h0,
+            signed_variant(submit_fault(
+                DomainKey([2u8; 32]),
+                ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_base)),
+            ))
+            .signing_hash()
+        );
+
+        let ffg_base = FfgEquivocationProof {
+            vote_a: FfgVote {
+                signer: [0x41; 32],
+                source_epoch: 1,
+                source_root: [0x42; 32],
+                target_epoch: 3,
+                target_root: [0x43; 32],
+                signature: vec![1],
+                pq_signature: vec![2],
+            },
+            vote_b: FfgVote {
+                signer: [0x41; 32],
+                source_epoch: 2,
+                source_root: [0x44; 32],
+                target_epoch: 4,
+                target_root: [0x45; 32],
+                signature: vec![3],
+                pq_signature: vec![4],
+            },
+        };
+        let ffg_h0 = signed_variant(submit_fault(
+            DomainKey([3u8; 32]),
+            ObjectiveFaultProof::CasperFfgEquivocation(Box::new(ffg_base.clone())),
+        ))
+        .signing_hash();
+        let mut ffg_mut = ffg_base;
+        ffg_mut.vote_b.pq_signature.push(5);
+        assert_ne!(
+            ffg_h0,
+            signed_variant(submit_fault(
+                DomainKey([3u8; 32]),
+                ObjectiveFaultProof::CasperFfgEquivocation(Box::new(ffg_mut)),
+            ))
+            .signing_hash()
+        );
+    }
+
+    fn assert_dag_and_bitvm_fault_proof_preimages() {
+        use crate::cross_domain::external::bitvm_covenant::{
+            BitVmPegClaim, DisproveScriptProof, MerkleStep, TraceChunkStep,
+        };
+        use crate::cross_domain::external::mysticeti_dag::{
+            MysticetiEquivocationProof, MysticetiVertex,
+        };
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let submit_fault = |domain: DomainKey, proof: ObjectiveFaultProof| {
+            TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof { domain, proof })
+        };
+        let my_base = MysticetiEquivocationProof {
+            vertex_a: MysticetiVertex {
+                author: [0x51; 32],
+                epoch: 2,
+                round: 10,
+                payload_digest: [0x52; 32],
+                parents: vec![[0x53; 32]],
+                ed25519_sig: vec![1],
+                pq_sig: vec![2],
+            },
+            vertex_b: MysticetiVertex {
+                author: [0x51; 32],
+                epoch: 2,
+                round: 10,
+                payload_digest: [0x54; 32],
+                parents: vec![[0x55; 32]],
+                ed25519_sig: vec![3],
+                pq_sig: vec![4],
+            },
+        };
+        let my_h0 = signed_variant(submit_fault(
+            DomainKey([4u8; 32]),
+            ObjectiveFaultProof::MysticetiEquivocation(Box::new(my_base.clone())),
+        ))
+        .signing_hash();
+        let mut my_mut = my_base;
+        my_mut.vertex_b.parents.push([0x56; 32]);
+        assert_ne!(
+            my_h0,
+            signed_variant(submit_fault(
+                DomainKey([4u8; 32]),
+                ObjectiveFaultProof::MysticetiEquivocation(Box::new(my_mut)),
+            ))
+            .signing_hash()
+        );
+
+        let bv_base = DisproveScriptProof {
+            claim: BitVmPegClaim {
+                state_root: [0x61; 32],
+                tx_root: [0x62; 32],
+                event_root: [0x63; 32],
+                program_hash: [0x64; 32],
+                trace_merkle_root: [0x65; 32],
+                trace_chunk_count: 2,
+                claim_pow_height: 51,
+                operator_ed25519_sig: vec![1],
+                operator_pq_sig: vec![2],
+            },
+            disputed_chunk: TraceChunkStep {
+                chunk_index: 0,
+                pre_state: [0x66; 32],
+                claimed_post_state: [0x67; 32],
+                step_opcode: 3,
+                step_witness: [0x68; 32],
+            },
+            trace_merkle_proof: vec![MerkleStep {
+                sibling: [0x69; 32],
+                sibling_is_left: false,
+            }],
+        };
+        let bv_h0 = signed_variant(submit_fault(
+            DomainKey([5u8; 32]),
+            ObjectiveFaultProof::BitVmDisprove(Box::new(bv_base.clone())),
+        ))
+        .signing_hash();
+        let mut bv_mut = bv_base;
+        if let Some(step) = bv_mut.trace_merkle_proof.first_mut() {
+            step.sibling_is_left = true;
+        }
+        assert_ne!(
+            bv_h0,
+            signed_variant(submit_fault(
+                DomainKey([5u8; 32]),
+                ObjectiveFaultProof::BitVmDisprove(Box::new(bv_mut)),
+            ))
+            .signing_hash()
+        );
     }
 
     /// Every field a settlement transaction carries reaches the signing

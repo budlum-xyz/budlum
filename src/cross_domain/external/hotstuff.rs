@@ -1,8 +1,10 @@
 //! Linear chained BFT (`HotStuff` / `Jolteon` / `DiemBFT` / `MonadBFT`)
 //! external finality adapter verifying the consecutive three-chain commit rule.
 //!
-//! WIRING: `AdapterSpec::HotStuffQc` runs in `external_tx`; pacemaker timeout-certificate and double-vote equivocation
-//! verifiers land with their governance-gated external slashing intake door.
+//! WIRING: `AdapterSpec::HotStuffQc` runs in `external_tx`; double-vote
+//! equivocation is adjudicated via `IntakeState::adjudicate_hotstuff_equivocation`
+//! (`ExternalDomainTx::SubmitFaultProof`), and timeout-certificate verification
+//! is exposed as a `Convenience:` view-change helper.
 //!
 //! Under Yin et al. (PODC 2019), a block `B_0` at view `v` is deterministically
 //! committed once three certified blocks `(B_0, B_1, B_2)` form an unbroken
@@ -40,11 +42,11 @@ use super::spec::{
 };
 
 /// Canonical adapter name for `HotStuff` three-chain finality.
-const ADAPTER_NAME: &str = "hotstuff-3chain-v1";
+pub(crate) const ADAPTER_NAME: &str = "hotstuff-3chain-v1";
 /// Adapter implementation version.
 const ADAPTER_VERSION: u32 = 1;
 /// Wire evidence version accepted by [`HotStuffThreeChainAdapter`].
-const EVIDENCE_VERSION: u32 = 1;
+pub(crate) const EVIDENCE_VERSION: u32 = 1;
 /// Committed confirmation depth of a 3-chain (`B_0 <- B_1 <- B_2`).
 const THREE_CHAIN_DEPTH: u64 = 3;
 
@@ -339,12 +341,52 @@ pub struct HotStuffTimeoutCertificate {
     pub votes: Vec<HotStuffTimeoutVote>,
 }
 
+pub(super) fn validate_pinned_committee(
+    pinned: &PinnedHotStuffCommittee,
+) -> Result<(BTreeMap<[u8; 32], &HotStuffValidator>, u128), AdapterError> {
+    if pinned.members.is_empty() || pinned.members.len() > MAX_HOTSTUFF_COMMITTEE {
+        return Err(AdapterError::ConsensusRule {
+            rule: "pinned HotStuff committee size outside valid bounds".into(),
+        });
+    }
+    let mut member_map = BTreeMap::new();
+    let mut total_stake = 0u128;
+    for member in &pinned.members {
+        if member.ed25519_pubkey == [0u8; 32] || member.voting_weight == 0 {
+            return Err(AdapterError::ConsensusRule {
+                rule: "pinned HotStuff committee contains zero pubkey or zero voting weight".into(),
+            });
+        }
+        if !member.pq_pubkey.is_empty() {
+            crate::crypto::primitives::PqKeyPair::validate_public_key(&member.pq_pubkey).map_err(
+                |_| AdapterError::Crypto {
+                    what: "invalid ML-DSA-65 public key in pinned HotStuff committee".into(),
+                },
+            )?;
+        }
+        if member_map.insert(member.ed25519_pubkey, member).is_some() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "pinned HotStuff committee contains duplicate validator pubkey".into(),
+            });
+        }
+        total_stake = total_stake
+            .checked_add(u128::from(member.voting_weight))
+            .ok_or_else(|| AdapterError::ConsensusRule {
+                rule: "pinned HotStuff committee total voting weight overflows u128".into(),
+            })?;
+    }
+    Ok((member_map, total_stake))
+}
+
 #[path = "hotstuff_faults.rs"]
 mod faults;
 
 pub use faults::{
     verify_hotstuff_equivocation, verify_hotstuff_timeout_certificate, HotStuffEquivocationProof,
 };
+
+#[cfg(test)]
+pub(crate) use tests::{hotstuff_fault_test_fixture, sign_hotstuff_equivocation_proof};
 
 /// External finality adapter for linear chained BFT (`HotStuff` 3-chain rule).
 pub struct HotStuffThreeChainAdapter {
@@ -401,6 +443,11 @@ impl HotStuffThreeChainAdapter {
                 accepted: EVIDENCE_VERSION.to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "HotStuff network identifier must not be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -414,32 +461,7 @@ impl HotStuffThreeChainAdapter {
                 rule: "no pinned HotStuff committee; admission is closed".into(),
             });
         };
-        if pinned.members.is_empty() || pinned.members.len() > MAX_HOTSTUFF_COMMITTEE {
-            return Err(AdapterError::ConsensusRule {
-                rule: "pinned HotStuff committee size outside valid bounds".into(),
-            });
-        }
-
-        let mut member_map = BTreeMap::new();
-        let mut total_stake = 0u128;
-        for member in &pinned.members {
-            if member.ed25519_pubkey == [0u8; 32] || member.voting_weight == 0 {
-                return Err(AdapterError::ConsensusRule {
-                    rule: "pinned HotStuff committee contains zero pubkey or zero voting weight"
-                        .into(),
-                });
-            }
-            if member_map.insert(member.ed25519_pubkey, member).is_some() {
-                return Err(AdapterError::ConsensusRule {
-                    rule: "pinned HotStuff committee contains duplicate validator pubkey".into(),
-                });
-            }
-            total_stake = total_stake
-                .checked_add(u128::from(member.voting_weight))
-                .ok_or_else(|| AdapterError::ConsensusRule {
-                    rule: "pinned HotStuff committee total voting weight overflows u128".into(),
-                })?;
-        }
+        let (member_map, total_stake) = validate_pinned_committee(pinned)?;
 
         let bundle = decode_hotstuff_evidence(&evidence.payload)?;
         let b0 = &bundle.prepare_block;
@@ -752,8 +774,32 @@ mod tests {
         HotStuffThreeChainEvidence,
         RawConsensusEvidence,
     ) {
-        let network = "aptos-jolteon-1";
-        let epoch = 7;
+        hotstuff_fixture_for("aptos-jolteon-1", 7, Address::from([0x09; 32]))
+    }
+
+    pub fn hotstuff_fault_test_fixture(
+        network: &str,
+        epoch: u64,
+        submitter: Address,
+    ) -> (
+        PinnedHotStuffCommittee,
+        Vec<(KeyPair, PqKeyPair)>,
+        RawConsensusEvidence,
+    ) {
+        let (committee, keys, _bundle, ev) = hotstuff_fixture_for(network, epoch, submitter);
+        (committee, keys, ev)
+    }
+
+    fn hotstuff_fixture_for(
+        network: &str,
+        epoch: u64,
+        submitter: Address,
+    ) -> (
+        PinnedHotStuffCommittee,
+        Vec<(KeyPair, PqKeyPair)>,
+        HotStuffThreeChainEvidence,
+        RawConsensusEvidence,
+    ) {
         let mut keys = Vec::new();
         let mut members = Vec::new();
         for _ in 0..4 {
@@ -805,9 +851,42 @@ mod tests {
             payload: encode_hotstuff_evidence(&bundle).expect("encode"),
             declared_height: b0.height,
             declared_root: b0.state_root,
-            submitter: Address::from([0x09; 32]),
+            submitter,
         };
         (PinnedHotStuffCommittee { epoch, members }, keys, bundle, ev)
+    }
+
+    pub fn sign_hotstuff_equivocation_proof(
+        network: &str,
+        epoch: u64,
+        view: u64,
+        block_hash_a: Hash32,
+        block_hash_b: Hash32,
+        culprit_ed: &KeyPair,
+        culprit_pq: &PqKeyPair,
+    ) -> HotStuffEquivocationProof {
+        let ma = hotstuff_vote_sign_bytes(network, epoch, view, &block_hash_a);
+        let mb = hotstuff_vote_sign_bytes(network, epoch, view, &block_hash_b);
+        HotStuffEquivocationProof {
+            epoch,
+            view,
+            block_hash_a,
+            block_hash_b,
+            vote_a: HotStuffVoteSig {
+                signer_pubkey: culprit_ed.public_key_bytes(),
+                ed25519_sig: culprit_ed.sign(&ma).to_vec(),
+                pq_sig: culprit_pq
+                    .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &ma)
+                    .expect("pq"),
+            },
+            vote_b: HotStuffVoteSig {
+                signer_pubkey: culprit_ed.public_key_bytes(),
+                ed25519_sig: culprit_ed.sign(&mb).to_vec(),
+                pq_sig: culprit_pq
+                    .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &mb)
+                    .expect("pq"),
+            },
+        }
     }
 
     #[test]
