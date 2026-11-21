@@ -3321,10 +3321,22 @@ impl Executor {
                 // single-table deposit (decision: shared-pool occupancy is
                 // priced as locked capital, never burned). The whole cost is
                 // refused up front so no partial mutation can strand money.
-                let deposit = crate::tokenomics::pool_deposit::policy_of(
-                    crate::tokenomics::pool_deposit::SharedPool::PrivacyNote,
-                )
-                .deposit;
+                let policy: crate::tokenomics::pool_deposit::PoolDepositPolicy =
+                    crate::tokenomics::pool_deposit::policy_of(
+                        crate::tokenomics::pool_deposit::SharedPool::PrivacyNote,
+                    );
+                // The aggregate ledger is only for claims that ride
+                // rollovers; any other class must take the row ledger, so
+                // the class gates the path fail-closed.
+                let crate::tokenomics::pool_deposit::PoolDepositClass::ShieldedBalance =
+                    policy.class
+                else {
+                    return Err(BudlumError::validation(
+                        "privacy_note_deposit",
+                        "the note pool's table row is not shielded-class; refusing the wrong ledger",
+                    ));
+                };
+                let deposit = policy.deposit;
                 let full_cost = deposit.checked_add(tx.fee).ok_or_else(|| {
                     BudlumError::validation(
                         "privacy_note_deposit",
@@ -3857,18 +3869,79 @@ impl Executor {
                 // tested at full depth for the sender-binding rules, the
                 // recovery quorum arithmetic, and every registry gate.
                 // Two things the door itself owes, and nothing more:
-                // identity writes commit state, they never move value -
+                // identity writes commit state, they never carry an amount -
                 if tx.amount != 0 {
                     return Err(BudlumError::validation(
                         "identity_amount_must_be_zero",
                         "an identity transaction commits state; an unspent amount would be silently burned",
                     ));
                 }
+                // Occupying a registry row locks the single-table deposit
+                // behind that exact row; a successful revoke closes its row
+                // and refunds whoever locked it, exactly once. A row with
+                // no record (pre-deposit era) refunds nothing.
+                use crate::tokenomics::pool_deposit::{policy_of, SharedPool};
+                // The row ledger is only for owner-refundable classes: the
+                // class gates the path, so a table edit that flipped a row
+                // to shielded would refuse here instead of stranding money.
+                let owner_refundable_deposit = |pool: SharedPool| -> Result<u64, BudlumError> {
+                    let policy: crate::tokenomics::pool_deposit::PoolDepositPolicy =
+                        policy_of(pool);
+                    match policy.class {
+                        crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable {
+                            ..
+                        } => Ok(policy.deposit),
+                        crate::tokenomics::pool_deposit::PoolDepositClass::ShieldedBalance => {
+                            Err(BudlumError::validation(
+                                "identity_pool_deposit",
+                                "an identity row is not shielded-class; refusing the wrong ledger",
+                            ))
+                        }
+                    }
+                };
+                let deposit_plan: Option<(String, u64)> = match identity_tx {
+                    crate::registry::identity::IdentityTx::Register { record } => Some((
+                        format!("identity-record:{}", hex::encode(record.subject.as_bytes())),
+                        owner_refundable_deposit(SharedPool::IdentityRecord)?,
+                    )),
+                    crate::registry::identity::IdentityTx::Issue { credential, .. } => Some((
+                        format!(
+                            "identity-credential:{}",
+                            hex::encode(crate::registry::identity::credential_id(credential))
+                        ),
+                        owner_refundable_deposit(SharedPool::IssuedCredential)?,
+                    )),
+                    _ => None,
+                };
+                let refund_key: Option<String> = match identity_tx {
+                    crate::registry::identity::IdentityTx::Revoke { credential } => Some(format!(
+                        "identity-credential:{}",
+                        hex::encode(crate::registry::identity::credential_id(credential))
+                    )),
+                    _ => None,
+                };
+                if let Some((key, amount)) = &deposit_plan {
+                    let full_cost = amount.checked_add(tx.fee).ok_or_else(|| {
+                        BudlumError::validation(
+                            "identity_pool_deposit",
+                            "deposit + fee arithmetic overflow",
+                        )
+                    })?;
+                    if state.spendable_balance(&tx.from) < full_cost {
+                        return Err(BudlumError::validation(
+                            "identity_pool_deposit",
+                            "spendable balance cannot cover the row deposit and the fee",
+                        ));
+                    }
+                    state
+                        .lock_pool_deposit_row(key, &tx.from, *amount)
+                        .map_err(|e| BudlumError::validation("identity_pool_deposit", e))?;
+                }
                 // - and the domain is read from state, where the node's own
                 // engine put it, never from the transaction: a caller
                 // declaring "this is PoA" would be manufacturing write
                 // authority for the master registry.
-                crate::registry::identity::execute_identity_tx_in(
+                if let Err(e) = crate::registry::identity::execute_identity_tx_in(
                     &state.scheme_registry,
                     &mut state.identity,
                     &tx.from,
@@ -3876,8 +3949,25 @@ impl Executor {
                     &state.execution_domain,
                     state.epoch_index,
                     tx.chain_id,
-                )
-                .map_err(|e| BudlumError::validation("identity_tx_failed", e.to_string()))?;
+                ) {
+                    // A registry refusal releases the freshly locked
+                    // deposit in the same breath: a refused row must not
+                    // strand the depositor's money.
+                    if let Some((key, _)) = &deposit_plan {
+                        state.release_pool_deposit_row(key).map_err(|r| {
+                            BudlumError::validation("identity_pool_deposit_release", r)
+                        })?;
+                    }
+                    return Err(BudlumError::validation(
+                        "identity_tx_failed",
+                        e.to_string(),
+                    ));
+                }
+                if let Some(key) = &refund_key {
+                    state
+                        .release_pool_deposit_row(key)
+                        .map_err(|r| BudlumError::validation("identity_pool_deposit_release", r))?;
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")

@@ -57,7 +57,7 @@ pub const MAX_REVEAL_PACKED_BYTES: usize = 1_048_576;
 /// Hard cap on the packed bytes ALL open sessions may pin together. The
 /// per-session bound times the session cap is still 1 GiB; this is the
 /// node-wide memory budget the table may never exceed.
-pub const MAX_REVEAL_TOTAL_PINNED_BYTES: usize = 64 * 1_048_576;
+const MAX_REVEAL_TOTAL_PINNED_BYTES: usize = 64 * 1_048_576;
 
 /// Wall-clock lifetime of an open reveal session, in seconds. The product
 /// read path is a short burst; five minutes is far longer than a burst and

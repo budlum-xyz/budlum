@@ -29,7 +29,7 @@ use crate::tokenomics::BUD_UNIT;
 /// One deposit atom: 0.01 BUD in base units. Every deposit in the table is
 /// `K * POOL_DEPOSIT_ATOM`, so re-pricing the whole economy is one constant,
 /// and no pool can drift to its own unit.
-pub const POOL_DEPOSIT_ATOM: u64 = BUD_UNIT / 100;
+const POOL_DEPOSIT_ATOM: u64 = BUD_UNIT / 100;
 
 /// The shared pools the deposit economy covers. One variant per bounded
 /// registry; a new bounded registry earns a row here before it may charge

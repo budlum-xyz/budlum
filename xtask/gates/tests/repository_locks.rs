@@ -291,8 +291,12 @@ fn android_compile_sdk_uses_a_compatible_toolchain() {
 fn pool_deposit_amounts_come_only_from_the_single_table() {
     let table = read("src/tokenomics/pool_deposit.rs");
     assert!(
-        table.contains("pub const POOL_DEPOSIT_ATOM"),
+        table.contains("const POOL_DEPOSIT_ATOM"),
         "the single table lost its atom"
+    );
+    assert!(
+        !table.contains("pub const POOL_DEPOSIT_ATOM"),
+        "the atom is the table's own unit: consumers take whole policies"
     );
     assert!(
         table.contains("pub const fn policy_of"),

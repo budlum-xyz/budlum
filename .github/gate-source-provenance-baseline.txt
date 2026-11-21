@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: 12c55db71c7c37d1f294204f2772ec8e8167a6e25c343a2cce2efa4e2867b0c1
+digest: 637059b3bd493bed6d107e1884445f0260d6f1d4552ffd3b8bf262dda1751061
 files: 193
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -99,7 +99,7 @@ src/gates/master_derivation.rs	3bc8f319b69f4fd6fcafb496c920108ad6198f7ed5b033757
 src/gates/mempool_mev_free.rs	ed4da420a23cdaae36fb20e9c70c54e9e7642e0c4da420e3c75def90e9a6a5a4
 src/gates/mermaid.rs	594cd9e5da2b54be9ce1f013f1e1d2b99b084d2e186e51ae73c2c7ac2517be81
 src/gates/metrics_are_written.rs	64cc47471ff7d0293f6ef3ae74e0b6fe9a4173c6e7d1e8b0bd77077684f578a2
-src/gates/minting_paths_are_counted.rs	324eefa4586c2c49e9e911e8de304364511bb25bb830303433403acdef1274c0
+src/gates/minting_paths_are_counted.rs	b304e0c5df63bf735340e2c1f349d81ae798733b52f8a9cb715c3736da988ead
 src/gates/mobile_validator_apps.rs	be0ad969780f45decaf996fdf25b2758eaa1058b7845c85cedc3a28406c3b7ab
 src/gates/module_coverage.rs	8d58f7085e3b6b085a5c9a45168a3734c138989f146546354c629ea726e459d3
 src/gates/multi_ratio_consensus.rs	fa2242d025b406ce4cc75086ddd4daa333b9abcfff15bc36f91bfdb77f71159e
@@ -196,5 +196,5 @@ src/gates/zizmor.rs	ce74e736b69d80d711a9c8a61b79f357a0a278a56201af8a19f7dc6f3b5c
 src/gates/zkvm_refuses_untrusted_proofs.rs	dfca412c7a6bbc72aba195ebaffcd9f759406bfca4531ab535ae60748af88520
 src/main.rs	2255e029bdc4446e4175827d8be6db71cc44c9a43ab56901fa16e067579dc876
 src/sha256.rs	b43ece6c2d4936308d742266930a3d598dfd3175722856b7e4924f5439d35eb5
-tests/repository_locks.rs	407cb7ae5c23e9e7714d3b16352644ca89b241818d409df0d34e7efab762cbe5
+tests/repository_locks.rs	6407d19d002bbc52a8bbf186bec015129fb12c609a507ca88534dc3b4fdca721
 

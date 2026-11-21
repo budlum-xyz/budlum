@@ -837,6 +837,13 @@ pub struct AccountState {
     /// escrow, so a pool deposit is unslashable at the type level, and a
     /// bond door bug can never pay out of deposits (or the reverse).
     pub pool_deposit_escrow: BTreeMap<Address, u64>,
+    /// Row-level deposit records for pools whose rows close one at a time
+    /// (identity records, issued credentials, content offers): each entry
+    /// remembers who locked how much behind which row, so a refund can only
+    /// ever return what that exact row locked, exactly once. Pools whose
+    /// rows roll over symmetrically (the note pool) use only the aggregate
+    /// ledger above.
+    pub pool_deposit_rows: BTreeMap<String, (Address, u64)>,
     /// The settlement registries (the external-domain intake first): state
     /// that used to live on `Blockchain`, outside the state root, written by
     /// operator RPCs. Written only by block execution now, and folded into
@@ -1059,6 +1066,7 @@ impl AccountState {
             external_roots: BTreeMap::new(),
             external_bond_escrow: BTreeMap::new(),
             pool_deposit_escrow: BTreeMap::new(),
+            pool_deposit_rows: BTreeMap::new(),
             settlement: crate::settlement::SettlementRegistries::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
@@ -1128,6 +1136,7 @@ impl AccountState {
             external_roots: BTreeMap::new(),
             external_bond_escrow: BTreeMap::new(),
             pool_deposit_escrow: BTreeMap::new(),
+            pool_deposit_rows: BTreeMap::new(),
             settlement: crate::settlement::SettlementRegistries::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
@@ -1207,6 +1216,7 @@ impl AccountState {
             external_roots: BTreeMap::new(),
             external_bond_escrow: BTreeMap::new(),
             pool_deposit_escrow: BTreeMap::new(),
+            pool_deposit_rows: BTreeMap::new(),
             settlement: crate::settlement::SettlementRegistries::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
@@ -1347,6 +1357,7 @@ impl AccountState {
             external_roots: snapshot.external_roots.clone().unwrap_or_default(),
             external_bond_escrow: snapshot.external_bond_escrow.clone().unwrap_or_default(),
             pool_deposit_escrow: snapshot.pool_deposit_escrow.clone().unwrap_or_default(),
+            pool_deposit_rows: snapshot.pool_deposit_rows.clone().unwrap_or_default(),
             settlement: snapshot.settlement.clone().unwrap_or_default(),
             base_fee: snapshot.base_fee,
             fee_distributions: Vec::new(),
@@ -5433,6 +5444,45 @@ impl AccountState {
         amount
     }
 
+    /// Locks a deposit behind one named row. Refuses a key that already
+    /// carries a deposit: two deposits behind one row would mean one of
+    /// them can never come back.
+    ///
+    /// # Errors
+    ///
+    /// The row already carries a deposit, or the owner cannot cover it.
+    pub fn lock_pool_deposit_row(
+        &mut self,
+        key: &str,
+        owner: &Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        if self.pool_deposit_rows.contains_key(key) {
+            return Err(format!("a deposit already backs this row: {key}"));
+        }
+        self.lock_pool_deposit(owner, amount)?;
+        self.pool_deposit_rows
+            .insert(key.to_string(), (*owner, amount));
+        Ok(())
+    }
+
+    /// Closes one named row and refunds exactly what it locked to exactly
+    /// who locked it. A key with no record returns `0` and refunds
+    /// nothing: a row recorded before the deposit era carried no deposit,
+    /// and inventing one here would mint.
+    ///
+    /// # Errors
+    ///
+    /// The aggregate ledger cannot cover the recorded amount - that would
+    /// mean the two ledgers disagree, and paying anyway would hide it.
+    pub fn release_pool_deposit_row(&mut self, key: &str) -> Result<u64, String> {
+        let Some((owner, amount)) = self.pool_deposit_rows.remove(key) else {
+            return Ok(0);
+        };
+        self.release_pool_deposit(&owner, amount)?;
+        Ok(amount)
+    }
+
     /// Applies a slash to escrowed bond: `taken` leaves the
     /// escrow, `reward` lands in the challenger's balance, and the rest is
     /// BURNED - a slash that returns the remainder to the slashed prover
@@ -6326,6 +6376,13 @@ impl AccountState {
             final_hasher.update(b"pool_deposit_escrow_v1");
             final_hasher.update(
                 bincode::serialize(&self.pool_deposit_escrow)
+                    .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
+            );
+        }
+        if !self.pool_deposit_rows.is_empty() {
+            final_hasher.update(b"pool_deposit_rows_v1");
+            final_hasher.update(
+                bincode::serialize(&self.pool_deposit_rows)
                     .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
