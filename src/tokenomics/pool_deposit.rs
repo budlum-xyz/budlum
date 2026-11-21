@@ -231,7 +231,9 @@ mod tests {
     #[test]
     fn a_merkle_rooted_registry_can_never_be_swept() {
         assert!(!ttl_sweep_permitted(
-            PoolDepositClass::OwnerRefundable { ttl_blocks: 100_000 },
+            PoolDepositClass::OwnerRefundable {
+                ttl_blocks: 100_000
+            },
             RegistryRootShape::MerkleOrAccumulator,
             RowLiveness::Live,
         ));
@@ -240,7 +242,9 @@ mod tests {
     #[test]
     fn a_spent_row_is_replay_protection_and_never_sweepable() {
         assert!(!ttl_sweep_permitted(
-            PoolDepositClass::OwnerRefundable { ttl_blocks: 100_000 },
+            PoolDepositClass::OwnerRefundable {
+                ttl_blocks: 100_000
+            },
             RegistryRootShape::FlatRowSet,
             RowLiveness::Spent,
         ));
