@@ -30,6 +30,10 @@ const PROMISES: &[(&str, &str)] = &[
     ("on demand", "workflow_dispatch"),
     ("on the schedule", "schedule"),
     ("on a schedule", "schedule"),
+    ("nightly", "schedule"),
+    ("weekly", "schedule"),
+    ("daily", "schedule"),
+    ("periodic", "schedule"),
 ];
 
 /// Indentation of a line, in spaces.
@@ -190,6 +194,15 @@ pub fn self_test() -> Result<String, String> {
     if v.len() != 1 || !v[0].contains("schedule") {
         problems.push(format!(
             "VACUOUS: a schedule promise without a schedule trigger was not refused exactly once: {v:?}"
+        ));
+    }
+
+    // A cadence word is a timing promise too: "nightly" with no schedule
+    // trigger is the same lie in one word.
+    let nightly = "name: X\non:\n  workflow_dispatch:\n  # Runs nightly.\n  push:\njobs:\n  a:\n    runs-on: ubuntu-latest\n";
+    if violations_for("nightly.yml", nightly).is_empty() {
+        problems.push(String::from(
+            "VACUOUS: a \"nightly\" promise without a schedule trigger was accepted",
         ));
     }
 
