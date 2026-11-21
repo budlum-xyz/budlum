@@ -126,6 +126,15 @@ fn window(root: &Path) -> Result<Option<String>, String> {
                     return Ok(Some(format!("{candidate}..HEAD")));
                 }
             }
+            // A pull-request checkout often carries only the PR head; one
+            // fetch attempt keeps the declared window honest before the
+            // refusal. A repository with no such remote ref still fails
+            // closed below - the canary pins that.
+            if git(root, &["fetch", "--quiet", "origin", base]).is_ok()
+                && git(root, &["rev-parse", "--verify", "--quiet", "FETCH_HEAD"]).is_ok()
+            {
+                return Ok(Some(String::from("FETCH_HEAD..HEAD")));
+            }
             return Err(format!(
                 "GITHUB_BASE_REF is `{base}` but neither origin/{base} nor {base} resolves; refusing to inspect an empty window"
             ));
@@ -352,6 +361,30 @@ pub fn run(root: &Path) -> Result<String, String> {
     evaluate(root)
 }
 
+/// Clears the ambient `GITHUB_BASE_REF` for the canary's lifetime and puts
+/// it back on drop. On a pull-request runner the variable names the REAL
+/// repository's base ref; left in place it poisons every scratch-repository
+/// evaluation (no scratch repo has `origin/main`), and the canary dies for
+/// the environment's reasons instead of its own. The one canary that tests
+/// the unresolvable-base refusal sets the variable itself.
+struct AmbientBaseRef(Option<String>);
+
+impl AmbientBaseRef {
+    fn cleared() -> Self {
+        let previous = std::env::var("GITHUB_BASE_REF").ok();
+        std::env::remove_var("GITHUB_BASE_REF");
+        Self(previous)
+    }
+}
+
+impl Drop for AmbientBaseRef {
+    fn drop(&mut self) {
+        if let Some(value) = &self.0 {
+            std::env::set_var("GITHUB_BASE_REF", value);
+        }
+    }
+}
+
 /// Scratch directory for the canary, unique per process and instant.
 fn scratch_dir() -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -553,6 +586,7 @@ fn canary_cutoffs(base: &Path) -> Result<(), String> {
 
 /// Canary: a seal beside its tree passes, a seal alone fails.
 pub fn self_test() -> Result<String, String> {
+    let _ambient = AmbientBaseRef::cleared();
     let base = scratch_dir();
     for d in [
         "xtask/gates/pins",
@@ -582,6 +616,16 @@ pub fn self_test() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CI shape that killed two jobs per wave: the runner's own
+    /// `GITHUB_BASE_REF` must not leak into the scratch repositories.
+    #[test]
+    fn an_ambient_base_ref_does_not_poison_the_scratch_canary() {
+        std::env::set_var("GITHUB_BASE_REF", "main");
+        let outcome = self_test();
+        std::env::remove_var("GITHUB_BASE_REF");
+        outcome.expect("the canary must judge its scratch repos, not the runner's env");
+    }
 
     #[test]
     fn seals_answer_to_their_own_tree() {
