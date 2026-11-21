@@ -117,10 +117,11 @@ pub const EPOCH_VOTE_TAG: &[u8] = b"BDLM_BABYLON_EOTS_VOTE_V1";
 /// `BDLM_*` domain tag prefixed to the equivocation digest.
 pub const EQUIVOCATION_TAG: &[u8] = b"BDLM_BABYLON_EOTS_EQUIVOCATION_V1";
 
-/// The Bitcoin checkpoint an epoch vote covers. Babylon periodic checkpointing
-/// commits to an MMR of Bitcoin headers; the vote names the checkpoint block
-/// and that MMR root, so a vote for another checkpoint is a vote for another
-/// Bitcoin history.
+/// The Bitcoin checkpoint an epoch vote covers.
+///
+/// Babylon periodic checkpointing commits to an MMR of Bitcoin headers; the
+/// vote names the checkpoint block and that MMR root, so a vote for another
+/// checkpoint is a vote for another Bitcoin history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BtcCheckpoint {
     /// The Bitcoin block hash the checkpoint is anchored at.
@@ -463,7 +464,7 @@ impl BtcWeakSubjectivityAnchor {
     /// WIRING: the admission report prints this bound beside the anchor, and
     /// the registry's rejection reason quotes it.
     #[must_use]
-    pub fn minimum_checkpoint_height(&self) -> u64 {
+    pub const fn minimum_checkpoint_height(&self) -> u64 {
         self.tip_height.saturating_sub(self.required_confirmations)
     }
 }
@@ -485,6 +486,7 @@ impl EotsEvidence {
     /// [`AdapterError::Malformed`] for a payload above the cap, one that does
     /// not decode, or one with trailing bytes.
     pub fn decode(payload: &[u8]) -> Result<Self, AdapterError> {
+        use bincode::Options;
         if payload.len() > MAX_PAYLOAD_BYTES {
             return Err(AdapterError::Malformed {
                 offset: MAX_PAYLOAD_BYTES,
@@ -494,7 +496,6 @@ impl EotsEvidence {
                 ),
             });
         }
-        use bincode::Options;
         let byte_limit = u64::try_from(payload.len()).unwrap_or(u64::MAX);
         bincode::options()
             .with_fixint_encoding()
@@ -712,7 +713,7 @@ impl BabylonEotsAdapter {
     /// WIRING: the registration pins the anchor from the domain record; no
     /// production line builds one yet.
     #[must_use]
-    pub fn with_anchor(mut self, anchor: BtcWeakSubjectivityAnchor) -> Self {
+    pub const fn with_anchor(mut self, anchor: BtcWeakSubjectivityAnchor) -> Self {
         self.anchor = Some(anchor);
         self
     }
@@ -758,7 +759,7 @@ impl BabylonEotsAdapter {
     /// classical-only claim". The mapping lives here, in one place, instead of
     /// being re-inferred at every call site.
     #[must_use]
-    pub fn requires_post_quantum(policy: &VerificationPolicy) -> bool {
+    pub const fn requires_post_quantum(policy: &VerificationPolicy) -> bool {
         policy.require_slashable
     }
 
@@ -842,7 +843,7 @@ impl BabylonEotsAdapter {
                     vote.epoch
                 )));
             }
-            self.check_buried(index, vote, anchor)?;
+            Self::check_buried(index, vote, anchor)?;
             if requires_pq
                 && (vote.post_quantum.is_none() || self.announced_pq_key(vote.epoch).is_none())
             {
@@ -931,7 +932,6 @@ impl BabylonEotsAdapter {
     /// [`AdapterError::ConsensusRule`] when the checkpoint is above the
     /// anchored tip or inside the confirmation window.
     fn check_buried(
-        &self,
         index: usize,
         vote: &EotsVote,
         anchor: &BtcWeakSubjectivityAnchor,
@@ -1520,7 +1520,7 @@ mod tests {
             [0x91; 32],
             checkpoint(869_000, 0x44),
         );
-        let evidence = envelope(vec![first.clone(), second]);
+        let evidence = envelope(vec![first, second]);
         let (attestation, proof) = adapter()
             .verify_evidence(&evidence, &policy())
             .expect("two conflicting votes still attest in verify_evidence, and yield a proof");
@@ -1625,7 +1625,7 @@ mod tests {
         let vote = golden_vote();
         // Keep the signature, change the epoch the vote claims. The epoch is
         // inside the signed message, so this is a forgery and not a replay.
-        let mut moved = vote.clone();
+        let mut moved = vote;
         moved.epoch = EPOCH + 1;
         let evidence = envelope(vec![moved]);
         let pq_pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &[0x7B; 32]).expect("ml-dsa-65 key");
@@ -1707,7 +1707,7 @@ mod tests {
         }
         .encode()
         .expect("encodes");
-        let mut extended = payload.clone();
+        let mut extended = payload;
         extended.push(0x00);
         assert!(matches!(
             EotsEvidence::decode(&extended),
