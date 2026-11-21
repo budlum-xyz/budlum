@@ -1,14 +1,6 @@
 name: Mobile Android & Field Harness
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - "mobile/android/**"
-      - "mobile/tools/**"
-      - "src/registry/mobile_runtime.rs"
-      - "xtask/gates/src/gates/mobile_validator_apps.rs"
-      - ".github/workflows/mobile.yml"
   push:
     branches: [main]
     paths:
@@ -28,9 +20,8 @@ concurrency:
 
 jobs:
   android-validator-and-log-analyzer:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     name: Mobile Log Analyzer & Android Validator Suite
     runs-on: ubuntu-24.04
     # Measured 20.2 min of real work against a 20 min budget: the job was
@@ -118,9 +109,8 @@ jobs:
           java -ea -cp /tmp/budlum-mobile-android-tests.jar network.budlum.validator.MobileValidatorUnitTest
 
   android-gradle:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     name: Android Gradle build and unit tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30

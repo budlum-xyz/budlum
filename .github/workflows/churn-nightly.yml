@@ -20,22 +20,10 @@ on:
   schedule:
     - cron: "11 12 * * *" # daily 12:11 UTC, outside the long scheduled sweeps
   workflow_dispatch:
-  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
-  # stack), on the schedule and on demand. A stacked pull request skips the job
-  # through the job-level condition: GitHub evaluates the `branches` filter of a
-  # stacked pull request against the root of the stack.
-  pull_request:
-    branches: [main, consensus-of-consensuses]
-    paths:
-      - "src/validators/**"
-      - "src/registry/**"
-      - "src/consensus/**"
-      - "src/chain/finality*"
-      - "src/storage/bud3/custody*"
-      - "src/storage/bud3/repair*"
-      - "tests/churn/**"
-      - "tests/rehearsal/**"
-      - ".github/workflows/churn-nightly.yml"
+  # Heavy battery. It runs on the schedule and on demand (the evidence-window
+  # owner dispatches it on the wave head). It is out of the pull-request path
+  # on purpose: one push was queueing more work than the shared runner pool
+  # could finish, and `ci-pull-request-fanout-is-budgeted` pins that path's size.
 
 concurrency:
   group: churn-nightly-${{ github.ref }}
@@ -46,9 +34,8 @@ permissions:
 
 jobs:
   churn:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     name: Churn simulation (tests/churn)
     runs-on: ubuntu-24.04
     timeout-minutes: 60

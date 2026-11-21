@@ -2,17 +2,10 @@ name: Garden NAT
 
 # Garden behind address translation that is real: network namespaces, two
 # private networks, two translating routers, the host on the public side.
-# The directive runs NAT simulation at night; the pull request trigger is
-# there so that a change to Garden shows its result before it merges, on
-# whichever of the two long-lived branches the pull request is opened against.
+# The directive runs NAT simulation at night; on-demand dispatch is there so
+# a change to Garden can show its result before it merges, without the
+# pull-request path paying this battery on every push.
 on:
-  pull_request:
-    branches: [main, testnet, garden, budlum-stack, budlum-consensus-of-consensuses]
-    paths:
-      - "src/garden/**"
-      - "tests/garden/**"
-      - "xtask/gates/src/gates/garden_nat.rs"
-      - ".github/workflows/garden-nat-nightly.yml"
   workflow_dispatch:
   schedule:
     - cron: '30 2 * * *'
