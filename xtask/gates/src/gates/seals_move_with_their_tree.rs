@@ -116,9 +116,12 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Resolve the commit window to inspect.
-fn window(root: &Path) -> Result<Option<String>, String> {
-    if let Ok(base) = std::env::var("GITHUB_BASE_REF") {
+/// Resolve the commit window to inspect. `declared_base` is the CI base
+/// ref, read from the environment exactly once at the gate's entry point:
+/// a pure parameter here, so the canary's scratch repositories and the
+/// unit tests never touch process-global state.
+fn window(root: &Path, declared_base: Option<&str>) -> Result<Option<String>, String> {
+    if let Some(base) = declared_base {
         let base = base.trim();
         if !base.is_empty() {
             for candidate in [format!("origin/{base}"), base.to_string()] {
@@ -277,9 +280,22 @@ fn cutoff(root: &Path) -> Result<Option<i64>, String> {
 }
 
 /// Core judgement over an already-resolved window.
-fn evaluate(root: &Path) -> Result<String, String> {
-    let range = window(root)?;
+fn evaluate(root: &Path, declared_base: Option<&str>) -> Result<String, String> {
+    let range = window(root, declared_base)?;
     let shas = commits(root, range.as_deref())?;
+    // A declared base that resolves to an empty window is not a verdict:
+    // a shallow checkout of a merge head can hide every commit from
+    // `rev-list --no-merges`, and judging nothing must never read as
+    // green. The local fallbacks keep their meaning - a repository
+    // shorter than the window genuinely has that few commits.
+    if shas.is_empty() && declared_base.is_some() {
+        let shallow =
+            git(root, &["rev-parse", "--is-shallow-repository"]).is_ok_and(|s| s.trim() == "true");
+        return Err(format!(
+            "the declared base window contains no commits (shallow checkout: {shallow}); \
+             an empty declared window is not a verdict - fetch the full history (fetch-depth: 0)"
+        ));
+    }
     let cutoff = cutoff(root)?;
     let mut findings: Vec<Finding> = Vec::new();
     let mut inspected = 0_usize;
@@ -356,33 +372,10 @@ fn evaluate(root: &Path) -> Result<String, String> {
     ))
 }
 
-/// Gate entry point.
+/// Gate entry point: the one place the environment is read.
 pub fn run(root: &Path) -> Result<String, String> {
-    evaluate(root)
-}
-
-/// Clears the ambient `GITHUB_BASE_REF` for the canary's lifetime and puts
-/// it back on drop. On a pull-request runner the variable names the REAL
-/// repository's base ref; left in place it poisons every scratch-repository
-/// evaluation (no scratch repo has `origin/main`), and the canary dies for
-/// the environment's reasons instead of its own. The one canary that tests
-/// the unresolvable-base refusal sets the variable itself.
-struct AmbientBaseRef(Option<String>);
-
-impl AmbientBaseRef {
-    fn cleared() -> Self {
-        let previous = std::env::var("GITHUB_BASE_REF").ok();
-        std::env::remove_var("GITHUB_BASE_REF");
-        Self(previous)
-    }
-}
-
-impl Drop for AmbientBaseRef {
-    fn drop(&mut self) {
-        if let Some(value) = &self.0 {
-            std::env::set_var("GITHUB_BASE_REF", value);
-        }
-    }
+    let declared = std::env::var("GITHUB_BASE_REF").ok();
+    evaluate(root, declared.as_deref())
 }
 
 /// Scratch directory for the canary, unique per process and instant.
@@ -452,7 +445,7 @@ fn seed(base: &Path) -> Result<(), String> {
     write_in(base, "src/x.rs", "pub fn x() {}\n")?;
     add_all_in(base)?;
     commit_in(base, "seed: tree and seal together")?;
-    evaluate(base)
+    evaluate(base, None)
         .map(|_| ())
         .map_err(|e| format!("canary `seed` failed when it must pass: {e}"))
 }
@@ -468,7 +461,7 @@ fn canary_seal_rules(base: &Path) -> Result<(), String> {
     )?;
     add_all_in(base)?;
     commit_in(base, "seal moves with its tree")?;
-    evaluate(base)
+    evaluate(base, None)
         .map(|_| ())
         .map_err(|e| format!("canary `seal-with-tree` failed when it must pass: {e}"))?;
 
@@ -480,7 +473,7 @@ fn canary_seal_rules(base: &Path) -> Result<(), String> {
     )?;
     add_all_in(base)?;
     commit_in(base, "seal alone")?;
-    if evaluate(base).is_ok() {
+    if evaluate(base, None).is_ok() {
         return Err(String::from("canary `seal-alone` passed when it must fail"));
     }
     git_in(base, &["reset", "-q", "--hard", "HEAD~1"])?;
@@ -493,7 +486,7 @@ fn canary_seal_rules(base: &Path) -> Result<(), String> {
     )?;
     add_all_in(base)?;
     commit_in(base, "provenance seal alone")?;
-    if evaluate(base).is_ok() {
+    if evaluate(base, None).is_ok() {
         return Err(String::from(
             "canary `provenance-seal-alone` passed when it must fail",
         ));
@@ -513,7 +506,7 @@ fn canary_seal_rules(base: &Path) -> Result<(), String> {
     )?;
     add_all_in(base)?;
     commit_in(base, "provenance seal with its tree")?;
-    evaluate(base)
+    evaluate(base, None)
         .map(|_| ())
         .map_err(|e| format!("canary `provenance-with-tree` failed when it must pass: {e}"))?;
 
@@ -522,7 +515,7 @@ fn canary_seal_rules(base: &Path) -> Result<(), String> {
     write_in(base, "src/x.rs", "pub fn x() { let _ = 2; }\n")?;
     add_all_in(base)?;
     commit_in(base, "ratchet baseline with its code")?;
-    evaluate(base)
+    evaluate(base, None)
         .map(|_| ())
         .map_err(|e| format!("canary `ratchet-with-code` failed when it must pass: {e}"))?;
 
@@ -538,7 +531,7 @@ fn canary_seal_rules(base: &Path) -> Result<(), String> {
     write_in(base, "src/x.rs", "pub fn x() { let _ = 3; }\n")?;
     add_all_in(base)?;
     commit_in(base, "seal, its tree, and unrelated work in one commit")?;
-    evaluate(base)
+    evaluate(base, None)
         .map(|_| ())
         .map_err(|e| format!("canary `seal-tree-plus-work` failed when it must pass: {e}"))
 }
@@ -552,7 +545,7 @@ fn canary_cutoffs(base: &Path) -> Result<(), String> {
     )?;
     add_all_in(base)?;
     commit_in(base, "seal alone again")?;
-    if evaluate(base).is_ok() {
+    if evaluate(base, None).is_ok() {
         return Err(String::from(
             "canary `second-seal-alone` passed when it must fail",
         ));
@@ -561,32 +554,37 @@ fn canary_cutoffs(base: &Path) -> Result<(), String> {
     write_in(base, CUTOFF_FILE, "2999-01-01T00:00:00Z\n")?;
     add_all_in(base)?;
     commit_in(base, "cutoff: grandfather the history")?;
-    evaluate(base)
+    evaluate(base, None)
         .map(|_| ())
         .map_err(|e| format!("canary `cutoff-grandfathers` failed when it must pass: {e}"))?;
     // An unparsable cutoff fails closed.
     write_in(base, CUTOFF_FILE, "next quarter\n")?;
-    if evaluate(base).is_ok() {
+    if evaluate(base, None).is_ok() {
         return Err(String::from(
             "canary `unparsable-cutoff` passed when it must fail closed",
         ));
     }
     // An unresolvable base ref fails closed rather than inspecting nothing.
     write_in(base, CUTOFF_FILE, "1970-01-02T00:00:00Z\n")?;
-    std::env::set_var("GITHUB_BASE_REF", "no-such-base-ref");
-    let closed = evaluate(base);
-    std::env::remove_var("GITHUB_BASE_REF");
-    if closed.is_ok() {
+    if evaluate(base, Some("no-such-base-ref")).is_ok() {
         return Err(String::from(
             "canary `unresolvable-base-ref` passed when it must fail closed",
         ));
     }
+    // A base ref that RESOLVES but spans no commits is refused too: an
+    // empty declared window judged nothing and must not read as green.
+    git_in(base, &["branch", "--force", "window-base", "HEAD"])?;
+    if evaluate(base, Some("window-base")).is_ok() {
+        return Err(String::from(
+            "canary `empty-declared-window` passed when it must fail closed",
+        ));
+    }
+    git_in(base, &["branch", "-D", "window-base"])?;
     Ok(())
 }
 
 /// Canary: a seal beside its tree passes, a seal alone fails.
 pub fn self_test() -> Result<String, String> {
-    let _ambient = AmbientBaseRef::cleared();
     let base = scratch_dir();
     for d in [
         "xtask/gates/pins",
@@ -609,7 +607,7 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&base);
     outcome?;
     Ok(String::from(
-        "seals-move-with-their-tree canary OK: seal-with-tree, provenance-with-tree, ratchet-with-code and seal-tree-plus-work accepted; seal-alone and provenance-seal-alone refused; a future cutoff grandfathers; unparsable cutoff and unresolvable base ref fail closed",
+        "seals-move-with-their-tree canary OK: seal-with-tree, provenance-with-tree, ratchet-with-code and seal-tree-plus-work accepted; seal-alone and provenance-seal-alone refused; a future cutoff grandfathers; unparsable cutoff, unresolvable base ref and an empty declared window fail closed",
     ))
 }
 
@@ -618,7 +616,10 @@ mod tests {
     use super::*;
 
     /// The CI shape that killed two jobs per wave: the runner's own
-    /// `GITHUB_BASE_REF` must not leak into the scratch repositories.
+    /// `GITHUB_BASE_REF` must not leak into the scratch repositories. The
+    /// base ref is a pure parameter now and only `run()` reads the
+    /// environment, so the canary is immune by construction - this pins
+    /// that the plumbing stays that way even with the variable present.
     #[test]
     fn an_ambient_base_ref_does_not_poison_the_scratch_canary() {
         std::env::set_var("GITHUB_BASE_REF", "main");

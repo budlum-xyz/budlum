@@ -1252,6 +1252,11 @@ pub fn prove_universal_light_proof(
 /// Every refusal of [`open_universal_light_proof`], plus
 /// [`UlpError::BindingMismatch`] when any declared header field is not the
 /// one the proof's statement actually witnessed.
+///
+/// WIRING: the multi-hop route verifier adopts this opener once the route
+/// packet carries the bundle's full snapshot set; today the packet's hops
+/// carry only their own two endpoints, so the route still opens through
+/// the snapshotless door and the domain-tree slice closes the gap.
 pub fn open_universal_light_proof_with_snapshots(
     bundle: &UniversalLightProofBundle,
     expected_program_hash: &Hash32,
