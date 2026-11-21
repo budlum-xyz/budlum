@@ -342,7 +342,7 @@ fn verify_validator_sig_set(
     sigs: &[JolteonValidatorSig],
     member_map: &BTreeMap<[u8; 32], &JolteonValidator>,
     total_power: u128,
-) -> Result<(u64, bool), AdapterError> {
+) -> Result<(u128, bool), AdapterError> {
     if sigs.is_empty() || sigs.len() > MAX_JOLTEON_COMMITTEE {
         return Err(AdapterError::ConsensusRule {
             rule: format!("Jolteon {label} signature count outside valid bounds"),
@@ -385,17 +385,41 @@ fn verify_validator_sig_set(
                 what: format!("invalid ML-DSA-65 co-signature in Jolteon {label}"),
             })?;
         }
-        signed_power = signed_power.saturating_add(u128::from(member.voting_power));
+        signed_power = signed_power
+            .checked_add(u128::from(member.voting_power))
+            .ok_or_else(|| AdapterError::ConsensusRule {
+                rule: format!("Jolteon {label} signed power overflows u128"),
+            })?;
     }
 
-    if signed_power.saturating_mul(3) <= total_power.saturating_mul(2) {
+    let lhs = signed_power
+        .checked_mul(3)
+        .ok_or_else(|| AdapterError::ConsensusRule {
+            rule: format!("Jolteon {label} quorum multiplication overflow"),
+        })?;
+    let rhs = total_power
+        .checked_mul(2)
+        .ok_or_else(|| AdapterError::ConsensusRule {
+            rule: format!("Jolteon {label} total power multiplication overflow"),
+        })?;
+    if lhs <= rhs {
         return Err(AdapterError::ConsensusRule {
             rule: format!(
                 "Jolteon {label} signed power {signed_power}/{total_power} does not exceed 2/3"
             ),
         });
     }
-    Ok((u64::try_from(seen.len()).unwrap_or(u64::MAX), all_pq))
+    Ok((signed_power, all_pq))
+}
+
+fn scale_power_quorum_u64(signed: u128, required: u128) -> (u64, u64) {
+    let shift = 128u32
+        .saturating_sub(signed.leading_zeros())
+        .saturating_sub(64);
+    let s_scaled = u64::try_from(signed >> shift).unwrap_or(u64::MAX);
+    let r_raw = u64::try_from(required >> shift).unwrap_or(u64::MAX);
+    let r_scaled = r_raw.clamp(1, s_scaled.max(1));
+    (s_scaled, r_scaled)
 }
 
 fn verify_jolteon_bundle_chain(
@@ -404,7 +428,7 @@ fn verify_jolteon_bundle_chain(
     bundle: &JolteonTwoChainEvidence,
     member_map: &BTreeMap<[u8; 32], &JolteonValidator>,
     total_power: u128,
-) -> Result<(u64, bool), AdapterError> {
+) -> Result<(u128, bool), AdapterError> {
     let b0 = &bundle.ordered_block;
     let b1 = &bundle.commit_block;
 
@@ -702,7 +726,13 @@ impl AptosJolteonAdapter {
                 required: policy.min_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > b0.height {
+        if policy.max_age > 0 {
+            if b0.height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: b0.height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - b0.height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -716,13 +746,14 @@ impl AptosJolteonAdapter {
             return Err(AdapterError::UnslashableBacking);
         }
 
-        let (min_signers, all_pq) =
+        let (min_signed_power, all_pq) =
             verify_jolteon_bundle_chain(&self.network, pinned, &bundle, &member_map, total_power)?;
-        let required_signers = (u64::try_from(pinned.validators.len())
-            .unwrap_or(1)
-            .saturating_mul(2))
-        .div_ceil(3)
-        .max(1);
+        let required_power = (total_power / 3)
+            .saturating_mul(2)
+            .saturating_add(((total_power % 3) * 2) / 3)
+            .saturating_add(1);
+        let (min_signers, required_signers) =
+            scale_power_quorum_u64(min_signed_power, required_power);
         let scheme = if all_pq {
             ObservedScheme::Scheme(SchemeId::ML_DSA_65)
         } else {
@@ -988,10 +1019,54 @@ mod tests {
 
     #[test]
     fn aptos_jolteon_2chain_adapter_passes_full_selftest_admission() {
-        let (_, _, adapter, _) = sample_adapter_with_round_skip_tc();
+        let (signers, mut epoch_state, adapter, golden_ev) = sample_adapter_with_round_skip_tc();
         let report = admit(&adapter, &VerificationPolicy::strict(0));
         assert!(report.admitted, "selftest failed: {report:?}");
         assert_eq!(report.probes.len(), 8);
+
+        // Unequal-stake committee: validator 0 holds 700/1000 (> 2/3) alone.
+        // Its attestation must not fail FinalityProofShape with DegenerateSignatureQuorum.
+        if let Some(first_val) = epoch_state.validators.first_mut() {
+            first_val.voting_power = 700;
+        }
+        let mut bundle = decode_jolteon_evidence(&golden_ev.payload).unwrap();
+        let single_signer = signers.get(..1).unwrap_or(&[]);
+        let net = "aptos-mainnet";
+        let d0 = jolteon_vote_sign_bytes(
+            net,
+            bundle.ordered_block.epoch,
+            bundle.ordered_block.round,
+            &bundle.ordered_block.block_hash,
+            &bundle.ordered_block.state_root,
+        );
+        let d1 = jolteon_vote_sign_bytes(
+            net,
+            bundle.commit_block.epoch,
+            bundle.commit_block.round,
+            &bundle.commit_block.block_hash,
+            &bundle.commit_block.state_root,
+        );
+        let tc_d = jolteon_tc_sign_bytes(net, 4, 11, 10);
+        bundle.ordered_qc.signatures = sign_digest(single_signer, &d0);
+        bundle.commit_qc.signatures = sign_digest(single_signer, &d1);
+        if let Some(ref mut tc) = bundle.round_skip_tc {
+            tc.signatures = sign_digest(single_signer, &tc_d);
+        }
+        let mut unequal_ev = golden_ev;
+        unequal_ev.payload = encode_jolteon_evidence(&bundle).unwrap();
+        let unequal_adapter = AptosJolteonAdapter::new(net, Some(epoch_state));
+        let unequal_att = unequal_adapter
+            .verify(&unequal_ev, &VerificationPolicy::strict(0))
+            .expect("unequal-stake supermajority quorum must verify");
+        assert!(
+            crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+                &unequal_adapter.descriptor(),
+                &unequal_att,
+            )
+            .is_ok(),
+            "unequal-stake Jolteon attestation must form a non-degenerate FinalityProofShape (got {:?})",
+            unequal_att.security
+        );
     }
 
     #[test]
@@ -1049,7 +1124,7 @@ mod tests {
             ),
             "bare external Jolteon stake without a local Budlum confiscation arm must report slashable=false"
         );
-        let mut slash_policy = unbonded_policy;
+        let mut slash_policy = unbonded_policy.clone();
         slash_policy.require_slashable = true;
         assert!(
             matches!(
@@ -1057,6 +1132,18 @@ mod tests {
                 Err(AdapterError::UnslashableBacking)
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
+        );
+        let future_policy = VerificationPolicy {
+            max_age: 100,
+            now: 1,
+            ..unbonded_policy
+        };
+        assert!(
+            matches!(
+                clean_adapter.verify(&clean_ev, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future Jolteon height bypassed max_age"
         );
     }
 }

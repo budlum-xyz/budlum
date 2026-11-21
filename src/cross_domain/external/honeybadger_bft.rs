@@ -654,7 +654,13 @@ impl ExternalFinalityAdapter for HoneyBadgerBftAdapter {
             });
         }
         if policy.max_age > 0 {
-            let age = policy.now.saturating_sub(ev.acs_epoch);
+            if ev.acs_epoch > policy.now {
+                return Err(AdapterError::Stale {
+                    age: ev.acs_epoch - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - ev.acs_epoch;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -1137,6 +1143,22 @@ mod tests {
             adapter2.verify(&raw2, &policy),
             Err(AdapterError::ConsensusRule { .. })
         ));
+
+        // Future acs_epoch > policy.now must fail closed with Stale when max_age > 0.
+        let (_, pinned_f, _, raw_f) = fixture();
+        let adapter_f = HoneyBadgerBftAdapter::new("hbbft-testnet", Some(pinned_f));
+        let future_policy = VerificationPolicy {
+            max_age: 10,
+            now: 5,
+            ..VerificationPolicy::strict(5)
+        };
+        assert!(
+            matches!(
+                adapter_f.verify(&raw_f, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future HoneyBadger acs_epoch bypassed max_age"
+        );
     }
 
     #[test]

@@ -395,6 +395,17 @@ struct VerifiedLeg {
     used_ed25519: bool,
     used_ml_dsa: bool,
     used_stark: bool,
+    signed_weight: u128,
+}
+
+fn scale_stake_quorum_u64(signed: u128, required: u128) -> (u64, u64) {
+    let shift = 128u32
+        .saturating_sub(signed.leading_zeros())
+        .saturating_sub(64);
+    let s_scaled = u64::try_from(signed >> shift).unwrap_or(u64::MAX);
+    let r_raw = u64::try_from(required >> shift).unwrap_or(u64::MAX);
+    let r_scaled = r_raw.clamp(1, s_scaled.max(1));
+    (s_scaled, r_scaled)
 }
 
 fn verify_pinned_config(cfg: &PinnedMultiProverConfig) -> Result<(), AdapterError> {
@@ -488,6 +499,7 @@ fn verify_stark_leg(
         used_ed25519: false,
         used_ml_dsa: false,
         used_stark: true,
+        signed_weight: 0,
     })
 }
 
@@ -581,6 +593,7 @@ fn verify_fault_leg(
         used_ed25519: true,
         used_ml_dsa: pq_safe,
         used_stark: false,
+        signed_weight: 0,
     })
 }
 
@@ -675,7 +688,17 @@ fn verify_committee_leg(
             })?;
     }
 
-    if signed_weight.saturating_mul(3) <= total_weight.saturating_mul(2) {
+    let lhs = signed_weight
+        .checked_mul(3)
+        .ok_or_else(|| AdapterError::ConsensusRule {
+            rule: "MultiProver committee quorum multiplication overflow".into(),
+        })?;
+    let rhs = total_weight
+        .checked_mul(2)
+        .ok_or_else(|| AdapterError::ConsensusRule {
+            rule: "MultiProver committee total weight multiplication overflow".into(),
+        })?;
+    if lhs <= rhs {
         return Err(AdapterError::ConsensusRule {
             rule: "MultiProver committee signed weight does not exceed strict 2/3".into(),
         });
@@ -689,6 +712,7 @@ fn verify_committee_leg(
         used_ed25519: true,
         used_ml_dsa: all_pq,
         used_stark: false,
+        signed_weight,
     })
 }
 
@@ -840,7 +864,13 @@ impl HeterogeneousMultiProverAdapter {
                 return Err(AdapterError::DeclarationMismatch { field: "root" });
             }
         }
-        if policy.max_age > 0 && policy.now > bundle.claim.batch_timestamp_secs {
+        if policy.max_age > 0 {
+            if bundle.claim.batch_timestamp_secs > policy.now {
+                return Err(AdapterError::Stale {
+                    age: bundle.claim.batch_timestamp_secs - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - bundle.claim.batch_timestamp_secs;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -899,22 +929,30 @@ impl HeterogeneousMultiProverAdapter {
             let total_weight = pinned
                 .committee
                 .iter()
-                .fold(0u128, |acc, m| acc.saturating_add(u128::from(m.weight)));
-            let req = total_weight
+                .try_fold(0u128, |acc, m| acc.checked_add(u128::from(m.weight)))
+                .ok_or_else(|| AdapterError::ConsensusRule {
+                    rule: "pinned MultiProver committee weight overflows u128".into(),
+                })?;
+            let req = (total_weight / 3)
                 .saturating_mul(2)
-                .saturating_div(3)
+                .saturating_add(((total_weight % 3) * 2) / 3)
                 .saturating_add(1);
+            let committee_signed = legs
+                .iter()
+                .find(|l| l.family == ProverFamily::PqAttestedCommittee)
+                .map_or(0, |l| l.signed_weight);
+            let (signers, required) = scale_stake_quorum_u64(committee_signed, req);
             SecurityBacking::SignatureSet {
                 scheme,
-                signers: u64::try_from(legs.len()).unwrap_or(2),
-                required: u64::try_from(req).unwrap_or(u64::MAX),
+                signers,
+                required,
                 total_weight,
                 // External rollup fault bonds and re-execution committees have no
                 // local Budlum confiscation arm in BridgeEconomicGuard yet.
                 slashable: false,
             }
         };
-        if policy.require_slashable {
+        if !has_stark && policy.require_slashable {
             return Err(AdapterError::UnslashableBacking);
         }
         let att = FinalityAttestation {
@@ -1279,6 +1317,29 @@ mod tests {
         );
         assert_eq!(facts.count(ObservedScheme::Scheme(SchemeId::ED25519)), 1);
         assert_eq!(facts.count(ObservedScheme::Scheme(SchemeId::ML_DSA_65)), 1);
+
+        // Proven HashStark + Committee attestation produces SecurityBacking::Zk and must
+        // remain admissible even when the caller demands require_slashable=true.
+        let mut slashable_zk_policy = policy.clone();
+        slashable_zk_policy.require_slashable = true;
+        assert!(
+            adapter.verify(&golden, &slashable_zk_policy).is_ok(),
+            "ZK-backed MultiProver attestation must not be refused by require_slashable=true"
+        );
+
+        // Future batch_timestamp_secs > policy.now must fail closed with Stale when max_age > 0.
+        let future_policy = VerificationPolicy {
+            now: BATCH_TS - 100,
+            max_age: 3_600,
+            ..policy
+        };
+        assert!(
+            matches!(
+                adapter.verify(&golden, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future batch_timestamp_secs bypassed max_age"
+        );
     }
 
     #[test]
@@ -1386,6 +1447,15 @@ mod tests {
         let att2 = adapter2
             .verify(&non_stark_raw, &mature_policy)
             .expect("mature fault+committee quorum verifies when slashability is not required");
+        assert!(
+            crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+                &adapter2.descriptor(),
+                &att2,
+            )
+            .is_ok(),
+            "non-STARK MultiProver attestation must form a non-degenerate FinalityProofShape (got {:?})",
+            att2.security
+        );
         assert!(
             matches!(
                 att2.security,
