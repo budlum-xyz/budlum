@@ -550,7 +550,6 @@ src/cross_domain/evm/bud_to_eth.rs	const	DEFAULT_BRIDGE_CAP
 src/cross_domain/evm/bud_to_eth.rs	enum	BudToEthError
 src/cross_domain/evm/bud_to_eth.rs	fn	build_bud_to_eth_claim
 src/cross_domain/evm/bud_to_eth.rs	struct	BudToEthClaim
-src/cross_domain/evm/header.rs	enum	HeaderError
 src/cross_domain/evm/mpt.rs	const	EMPTY_TRIE_ROOT
 src/cross_domain/evm/mpt.rs	const	MAX_WALK_DEPTH
 src/cross_domain/evm/mpt.rs	fn	hp_decode

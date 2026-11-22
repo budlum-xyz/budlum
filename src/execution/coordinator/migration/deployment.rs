@@ -7,9 +7,14 @@
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use super::DeploymentEvidence;
+use crate::cross_domain::evm::header::{self, HeaderError};
 use crate::cross_domain::evm::mpt::{self, MptError};
 use crate::cross_domain::evm::receipt::{self, ReceiptError};
 use crate::cross_domain::evm::rlp::{self, Item, RlpError};
+use crate::cross_domain::evm::sync_committee::{
+    self, SyncCommitteeError, EXECUTION_BLOCK_NUMBER_GINDEX, EXECUTION_RECEIPTS_ROOT_GINDEX,
+    EXECUTION_TRANSACTIONS_ROOT_GINDEX,
+};
 use crate::crypto::secp256k1_recover::{recover_address, RecoverError};
 use serde::{Deserialize, Serialize};
 
@@ -46,10 +51,49 @@ impl DeploymentProof {
     }
 }
 
+/// Consensus-anchored source binding proving that a [`DeploymentProof`]'s
+/// `deployment_block`, `transactions_root`, and `receipts_root` originate from
+/// a finalized Ethereum header rather than an untrusted caller assertion.
+///
+/// Convenience: exposed for trustless EVM migration authority verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeploymentHeaderAnchor {
+    /// Post-Merge Cancun/Prague RLP execution header whose `keccak256` hash
+    /// equals `expected_block_hash` (e.g. from a finalized domain certificate).
+    RawRlpHeader {
+        expected_block_hash: [u8; 32],
+        raw_header_rlp: Vec<u8>,
+    },
+    /// Three 9-sibling SSZ generalized-index proofs against a finalized Beacon
+    /// `body_root` covering `execution_payload.block_number` (`806`),
+    /// `execution_payload.transactions_root` (`813`), and
+    /// `execution_payload.receipts_root` (`803`).
+    BeaconBodyBranches {
+        beacon_body_root: [u8; 32],
+        block_number_branch: Vec<[u8; 32]>,
+        transactions_root_branch: Vec<[u8; 32]>,
+        receipts_root_branch: Vec<[u8; 32]>,
+    },
+    /// Pre-verified finalized source roots directly from an attested Ethereum
+    /// domain finality certificate.
+    AttestedRoots {
+        attested_block: u64,
+        transactions_root: [u8; 32],
+        receipts_root: [u8; 32],
+    },
+}
+
 /// Refusal reason for deployment authority verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeploymentProofError {
     ProofTooLarge,
+    ZeroRoot,
+    HeaderDecode(HeaderError),
+    HeaderBlockHashMismatch,
+    BeaconFieldBranchFailed(SyncCommitteeError),
+    UnattestedDeploymentBlock { claimed: u64, attested: u64 },
+    TransactionsRootMismatch,
+    ReceiptsRootMismatch,
     TransactionTrie(MptError),
     ReceiptTrie(MptError),
     TransactionMismatch,
@@ -69,6 +113,35 @@ impl std::fmt::Display for DeploymentProofError {
         match self {
             Self::ProofTooLarge => {
                 write!(f, "deployment proof: exceeds {MAX_PROOF_NODES} nodes")
+            }
+            Self::ZeroRoot => {
+                write!(
+                    f,
+                    "deployment proof: transactions_root and receipts_root must be non-zero"
+                )
+            }
+            Self::HeaderDecode(e) => write!(f, "deployment proof: execution header decode: {e}"),
+            Self::HeaderBlockHashMismatch => {
+                write!(f, "deployment proof: decoded execution header hash mismatches anchored block hash")
+            }
+            Self::BeaconFieldBranchFailed(e) => {
+                write!(f, "deployment proof: beacon SSZ field proof failed: {e}")
+            }
+            Self::UnattestedDeploymentBlock { claimed, attested } => write!(
+                f,
+                "deployment proof: claimed block {claimed} mismatches attested block {attested}"
+            ),
+            Self::TransactionsRootMismatch => {
+                write!(
+                    f,
+                    "deployment proof: transactions_root mismatches finalized source header"
+                )
+            }
+            Self::ReceiptsRootMismatch => {
+                write!(
+                    f,
+                    "deployment proof: receipts_root mismatches finalized source header"
+                )
             }
             Self::TransactionTrie(e) => write!(f, "deployment transaction trie: {e}"),
             Self::ReceiptTrie(e) => write!(f, "deployment receipt trie: {e}"),
@@ -116,6 +189,131 @@ impl From<RecoverError> for DeploymentProofError {
     }
 }
 
+/// Verifies that a [`DeploymentProof`]'s claimed `deployment_block`,
+/// `transactions_root`, and `receipts_root` match a consensus-finalized
+/// Ethereum header anchor (RLP execution header hash, Beacon SSZ branches,
+/// or an attested domain finality certificate).
+///
+/// Convenience: exposed for trustless EVM migration verification without
+/// trusting caller-supplied transaction or receipt roots.
+///
+/// # Errors
+///
+/// Returns [`DeploymentProofError`] if any root is zero, the RLP header or
+/// SSZ branches fail verification, or any field mismatches the proof.
+pub fn verify_deployment_anchor(
+    proof: &DeploymentProof,
+    anchor: &DeploymentHeaderAnchor,
+) -> Result<(), DeploymentProofError> {
+    if proof.transactions_root == [0u8; 32] || proof.receipts_root == [0u8; 32] {
+        return Err(DeploymentProofError::ZeroRoot);
+    }
+    match anchor {
+        DeploymentHeaderAnchor::RawRlpHeader {
+            expected_block_hash,
+            raw_header_rlp,
+        } => {
+            if *expected_block_hash == [0u8; 32] {
+                return Err(DeploymentProofError::ZeroRoot);
+            }
+            let decoded = header::decode_post_merge_execution_header(raw_header_rlp)
+                .map_err(DeploymentProofError::HeaderDecode)?;
+            if decoded.block_hash != *expected_block_hash {
+                return Err(DeploymentProofError::HeaderBlockHashMismatch);
+            }
+            if decoded.number != proof.deployment_block {
+                return Err(DeploymentProofError::UnattestedDeploymentBlock {
+                    claimed: proof.deployment_block,
+                    attested: decoded.number,
+                });
+            }
+            if decoded.transactions_root != proof.transactions_root {
+                return Err(DeploymentProofError::TransactionsRootMismatch);
+            }
+            if decoded.receipts_root != proof.receipts_root {
+                return Err(DeploymentProofError::ReceiptsRootMismatch);
+            }
+            Ok(())
+        }
+        DeploymentHeaderAnchor::BeaconBodyBranches {
+            beacon_body_root,
+            block_number_branch,
+            transactions_root_branch,
+            receipts_root_branch,
+        } => {
+            if *beacon_body_root == [0u8; 32] {
+                return Err(DeploymentProofError::ZeroRoot);
+            }
+            let mut block_num_chunk = [0u8; 32];
+            let (low, _) = block_num_chunk.split_at_mut(8);
+            low.copy_from_slice(&proof.deployment_block.to_le_bytes());
+            sync_committee::verify_execution_field_branch(
+                beacon_body_root,
+                block_num_chunk,
+                block_number_branch,
+                EXECUTION_BLOCK_NUMBER_GINDEX,
+            )
+            .map_err(DeploymentProofError::BeaconFieldBranchFailed)?;
+            sync_committee::verify_execution_field_branch(
+                beacon_body_root,
+                proof.transactions_root,
+                transactions_root_branch,
+                EXECUTION_TRANSACTIONS_ROOT_GINDEX,
+            )
+            .map_err(DeploymentProofError::BeaconFieldBranchFailed)?;
+            sync_committee::verify_execution_field_branch(
+                beacon_body_root,
+                proof.receipts_root,
+                receipts_root_branch,
+                EXECUTION_RECEIPTS_ROOT_GINDEX,
+            )
+            .map_err(DeploymentProofError::BeaconFieldBranchFailed)?;
+            Ok(())
+        }
+        DeploymentHeaderAnchor::AttestedRoots {
+            attested_block,
+            transactions_root,
+            receipts_root,
+        } => {
+            if *transactions_root == [0u8; 32] || *receipts_root == [0u8; 32] {
+                return Err(DeploymentProofError::ZeroRoot);
+            }
+            if proof.deployment_block != *attested_block {
+                return Err(DeploymentProofError::UnattestedDeploymentBlock {
+                    claimed: proof.deployment_block,
+                    attested: *attested_block,
+                });
+            }
+            if proof.transactions_root != *transactions_root {
+                return Err(DeploymentProofError::TransactionsRootMismatch);
+            }
+            if proof.receipts_root != *receipts_root {
+                return Err(DeploymentProofError::ReceiptsRootMismatch);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Verifies deployment authority against both a consensus-anchored Ethereum
+/// header and the transaction/receipt MPT proofs.
+///
+/// Convenience: exposed for fail-closed EVM migration gateways that never
+/// accept unanchored `transactions_root` or `receipts_root` claims.
+///
+/// # Errors
+///
+/// Returns [`DeploymentProofError`] if header anchoring or MPT/signature
+/// verification fails.
+pub fn verify_deployment_attested(
+    proof: &DeploymentProof,
+    expected_source_chain_id: u64,
+    anchor: &DeploymentHeaderAnchor,
+) -> Result<DeploymentEvidence, DeploymentProofError> {
+    verify_deployment_anchor(proof, anchor)?;
+    verify_deployment(proof, expected_source_chain_id)
+}
+
 /// Verifies deployment authority against finalized source-chain roots.
 ///
 /// # Errors
@@ -125,6 +323,9 @@ pub fn verify_deployment(
     proof: &DeploymentProof,
     expected_source_chain_id: u64,
 ) -> Result<DeploymentEvidence, DeploymentProofError> {
+    if proof.transactions_root == [0u8; 32] || proof.receipts_root == [0u8; 32] {
+        return Err(DeploymentProofError::ZeroRoot);
+    }
     if proof.transaction_proof.len() > MAX_PROOF_NODES
         || proof.receipt_proof.len() > MAX_PROOF_NODES
     {
