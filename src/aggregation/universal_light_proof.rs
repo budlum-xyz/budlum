@@ -2118,3 +2118,122 @@ mod modern_domain_kind_tests {
         .is_err());
     }
 }
+
+#[cfg(test)]
+mod input_hash_binding_tests {
+    //! The declared statement hashes are re-derived, not believed.
+    //!
+    //! `open_universal_light_proof` recomputes `input_hash` from the trusted
+    //! hub anchor and checkpoint epoch, and `output_hash` from the declared
+    //! header fields, before the STARK opening ever runs. These tests take an
+    //! honest bundle, move one declared hash, and require the refusal - a
+    //! verifier that trusted either field would accept a statement the prover
+    //! never proved.
+    use super::*;
+
+    /// An honest proven bundle on devnet, with everything the caller needs to
+    /// verify it. Kept in one place so both tampering tests start from a
+    /// statement that is known good.
+    fn honest_bundle() -> (
+        UniversalLightProofBundle,
+        Hash32,
+        Hash32,
+        u64,
+        SchemeStatusRegistry,
+    ) {
+        let families = [
+            (81_u32, UlpDomainKind::BasedPreconf, 7_100_u64),
+            (82_u32, UlpDomainKind::TonCatchain, 8_200_u64),
+        ];
+        let snapshots: Vec<UlpDomainSnapshot> = families
+            .iter()
+            .enumerate()
+            .map(|(i, &(domain_id, kind, weight))| {
+                let tag = u8::try_from(i + 0x51).expect("fits u8");
+                UlpDomainSnapshot {
+                    domain_id,
+                    external_chain_id: u64::from(domain_id) * 100,
+                    kind,
+                    prev_height: 2_000 + i as u64,
+                    finalized_height: 2_010 + i as u64,
+                    state_root: [tag; 32],
+                    event_root: [tag.wrapping_add(0x10); 32],
+                    anchor_hash: [tag.wrapping_add(0x20); 32],
+                    security_weight: weight,
+                    pq_attested: true,
+                    outflow_bps: 400,
+                }
+            })
+            .collect();
+
+        let compiled = compile_ulp_program(45_262, snapshots.len()).expect("compile ULP-1");
+        let hub_root = [0xAB; 32];
+        let seed = [0xCD; 32];
+        let registry = SchemeStatusRegistry::genesis();
+        const CHECKPOINT_HEIGHT: u64 = 25;
+        let epoch = ulp_expected_settlement_epoch(45_262, CHECKPOINT_HEIGHT);
+        let (bundle, _sorted, _metrics) = prove_universal_light_proof(
+            &compiled,
+            epoch,
+            hub_root,
+            &snapshots,
+            &seed,
+            12,
+            &registry,
+        )
+        .expect("prove ULP-1");
+        (bundle, compiled.program_hash, hub_root, epoch, registry)
+    }
+
+    #[test]
+    fn a_tampered_input_hash_is_refused_before_the_stark_opening() {
+        let (bundle, program_hash, hub_root, epoch, registry) = honest_bundle();
+        open_universal_light_proof(&bundle, &program_hash, 45_262, &hub_root, epoch, &registry)
+            .expect("the honest bundle verifies");
+
+        let mut lied = bundle.clone();
+        lied.input_hash = [0x77; 32];
+        let refused =
+            open_universal_light_proof(&lied, &program_hash, 45_262, &hub_root, epoch, &registry);
+        assert!(
+            matches!(refused, Err(UlpError::BindingMismatch(msg)) if msg.contains("input_hash")),
+            "a moved input_hash must be refused as a binding mismatch, got {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_tampered_output_hash_is_refused_before_the_stark_opening() {
+        let (bundle, program_hash, hub_root, epoch, registry) = honest_bundle();
+        open_universal_light_proof(&bundle, &program_hash, 45_262, &hub_root, epoch, &registry)
+            .expect("the honest bundle verifies");
+
+        let mut lied = bundle.clone();
+        lied.output_hash = [0x99; 32];
+        let refused =
+            open_universal_light_proof(&lied, &program_hash, 45_262, &hub_root, epoch, &registry);
+        assert!(
+            matches!(refused, Err(UlpError::BindingMismatch(msg)) if msg.contains("output_hash")),
+            "a moved output_hash must be refused as a binding mismatch, got {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_header_field_moved_after_proving_is_refused_by_the_output_hash() {
+        // Moving a field the output hash covers, without re-proving, leaves the
+        // declared output_hash describing the old statement.
+        let (bundle, program_hash, hub_root, epoch, registry) = honest_bundle();
+        let mut lied = bundle.clone();
+        lied.max_outflow_bps = lied.max_outflow_bps.saturating_add(50);
+        let refused =
+            open_universal_light_proof(&lied, &program_hash, 45_262, &hub_root, epoch, &registry);
+        assert!(
+            matches!(refused, Err(UlpError::BindingMismatch(msg)) if msg.contains("output_hash")),
+            "an outflow ceiling moved after proving must be refused, got {refused:?}"
+        );
+
+        // The honest bundle is still accepted: the refusal above is the
+        // tampering, not the fixture.
+        open_universal_light_proof(&bundle, &program_hash, 45_262, &hub_root, epoch, &registry)
+            .expect("the untouched bundle still verifies");
+    }
+}
