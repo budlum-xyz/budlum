@@ -60,7 +60,7 @@
 //! A seal that arrived one commit after its tree is still a finding, because
 //! the history cannot be rewritten without discarding the CI evidence every
 //! SHA carries. Such a commit can be recorded in
-//! [`.github/seal-late-pin-exemptions.txt`], one line per seal transition:
+//! `.github/seal-late-pin-exemptions.txt`, one line per seal transition:
 //! `<seal_diff_digest> <seal> <tree> <reason>`. The key is not a SHA - a rebase
 //! rewrites those - but the digest of the transition itself: the seal's path,
 //! and its mode and blob id before and after the commit. A blob id hashes the
@@ -70,6 +70,14 @@
 //! names a pair that is not a seal and its tree, or gives no reason of at least
 //! [`MIN_REASON_CHARS`] characters fails closed. Every finding prints its
 //! digest, so a record is copied from the report, never computed by hand.
+//!
+//! A record cannot forgive the commit that writes it. Each line exempts only a
+//! commit strictly older than the commit that introduced the line: an ancestor
+//! of it, never the same commit, and never through a line that is not
+//! committed yet. The number of lines is ratcheted in
+//! `.github/seal-late-pin-exemptions-count.txt`: adding a record means
+//! moving that count in the same change, and a count that disagrees with the
+//! record fails closed.
 //!
 //! # Merge commits
 //!
@@ -96,6 +104,9 @@ const CUTOFF_FILE: &str = ".github/seal-tree-cutoff.txt";
 
 /// Recorded late re-seals, keyed by the digest of the seal transition.
 const LATE_PIN_FILE: &str = ".github/seal-late-pin-exemptions.txt";
+
+/// How many records [`LATE_PIN_FILE`] may hold, ratcheted by hand.
+const LATE_PIN_COUNT_FILE: &str = ".github/seal-late-pin-exemptions-count.txt";
 
 /// Domain separation for [`seal_diff_digest`].
 const LATE_PIN_TAG: &[u8] = b"seal-late-pin/v1";
@@ -337,6 +348,72 @@ fn late_pins(root: &Path) -> Result<Vec<LatePin>, String> {
     parse_late_pins(&text)
 }
 
+/// The record must hold exactly as many lines as its ratchet says.
+fn check_record_count(root: &Path, records: usize) -> Result<(), String> {
+    let path = root.join(LATE_PIN_COUNT_FILE);
+    if !path.exists() {
+        if records == 0 {
+            return Ok(());
+        }
+        return Err(format!(
+            "{LATE_PIN_FILE} holds {records} record(s) but {LATE_PIN_COUNT_FILE} is missing; \
+             a record and its count move together"
+        ));
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {LATE_PIN_COUNT_FILE}: {e}"))?;
+    let declared: usize = text
+        .trim()
+        .parse()
+        .map_err(|e| format!("{LATE_PIN_COUNT_FILE} is not a count: {e}"))?;
+    if declared != records {
+        return Err(format!(
+            "{LATE_PIN_FILE} holds {records} record(s) but {LATE_PIN_COUNT_FILE} says {declared}; \
+             a record and its count move together"
+        ));
+    }
+    Ok(())
+}
+
+/// The commit that introduced the record line carrying `digest`, if any
+/// commit did: the newest commit that changed how often the digest appears in
+/// the record. While the line is present, that commit added it.
+fn record_introduction(root: &Path, digest: &str) -> Result<Option<String>, String> {
+    let pickaxe = format!("-S{digest}");
+    let out = git(root, &["log", "--format=%H", &pickaxe, "--", LATE_PIN_FILE])?;
+    Ok(out.lines().next().map(|l| l.trim().to_string()))
+}
+
+/// Whether `older` is an ancestor of `newer` (a commit is its own ancestor).
+fn is_ancestor(root: &Path, older: &str, newer: &str) -> Result<bool, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["merge-base", "--is-ancestor", older, newer])
+        .output()
+        .map_err(|e| format!("cannot run git merge-base: {e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "git merge-base --is-ancestor {older} {newer} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// A record line exempts `sha` only when the line was committed after it:
+/// introduced by a strict descendant of `sha`.
+fn record_predates(root: &Path, sha: &str, digest: &str) -> Result<bool, String> {
+    let Some(intro) = record_introduction(root, digest)? else {
+        return Ok(false);
+    };
+    if intro == sha {
+        return Ok(false);
+    }
+    is_ancestor(root, sha, &intro)
+}
+
 /// Parse an RFC 3339 UTC date into a unix timestamp without pulling in chrono.
 ///
 /// Only the documented shape is accepted: `YYYY-MM-DD` with an optional
@@ -465,6 +542,7 @@ fn evaluate(root: &Path, declared_base: Option<&str>) -> Result<String, String> 
     }
     let cutoff = cutoff(root)?;
     let late = late_pins(root)?;
+    check_record_count(root, late.len())?;
     let mut findings: Vec<Finding> = Vec::new();
     let mut inspected = 0_usize;
     let mut seals = 0_usize;
@@ -498,6 +576,7 @@ fn evaluate(root: &Path, declared_base: Option<&str>) -> Result<String, String> 
                 if late
                     .iter()
                     .any(|p| p.digest == digest && p.seal == seal && p.tree == tree)
+                    && record_predates(root, sha, &digest)?
                 {
                     recorded = recorded.saturating_add(1);
                     continue;
@@ -782,6 +861,14 @@ fn record_in(base: &Path, body: &str) -> Result<(), String> {
     write_in(base, LATE_PIN_FILE, body)
 }
 
+/// Write a one-line record with its count and commit both.
+fn commit_record_in(base: &Path, line: &str, message: &str) -> Result<(), String> {
+    record_in(base, &format!("{line}\n"))?;
+    write_in(base, LATE_PIN_COUNT_FILE, "1\n")?;
+    add_all_in(base)?;
+    commit_in(base, message)
+}
+
 /// Canaries around the late re-seal record: the key is the transition, the
 /// record fails closed, and a rebase keeps the key.
 fn canary_late_pins(base: &Path) -> Result<(), String> {
@@ -805,14 +892,36 @@ fn canary_late_pins(base: &Path) -> Result<(), String> {
     }
     let late = head_in(base)?;
     let key = seal_diff_digest(base, &late, SEAL)?;
-    // Recorded under its own transition digest, the late seal is accepted.
-    record_in(
-        base,
-        &format!("# recorded late re-seals\n{key} {SEAL} budzero/ {REASON}\n"),
-    )?;
+    let line = format!("{key} {SEAL} budzero/ {REASON}");
+    // A record that is not committed yet forgives nothing.
+    record_in(base, &format!("{line}\n"))?;
+    write_in(base, LATE_PIN_COUNT_FILE, "1\n")?;
+    if evaluate(base, None).is_ok() {
+        return Err(String::from(
+            "canary `record-uncommitted` passed when it must fail",
+        ));
+    }
+    // Committed after the late seal, under its own transition digest, the
+    // record forgives it.
+    commit_record_in(base, &line, "record the late seal")?;
     evaluate(base, None)
         .map(|_| ())
         .map_err(|e| format!("canary `late-seal-recorded` failed when it must pass: {e}"))?;
+    // The count is a ratchet: one that disagrees with the record, or is
+    // missing while records exist, fails closed.
+    write_in(base, LATE_PIN_COUNT_FILE, "0\n")?;
+    if evaluate(base, None).is_ok() {
+        return Err(String::from(
+            "canary `record-count-mismatch` passed when it must fail closed",
+        ));
+    }
+    std::fs::remove_file(base.join(LATE_PIN_COUNT_FILE)).map_err(|e| e.to_string())?;
+    if evaluate(base, None).is_ok() {
+        return Err(String::from(
+            "canary `record-count-missing` passed when it must fail closed",
+        ));
+    }
+    git_in(base, &["checkout", "-q", "--", LATE_PIN_COUNT_FILE])?;
     // A record without a reason, with a short one, with a malformed digest or
     // for a pair that is not a seal and its tree fails closed.
     for (name, body) in [
@@ -835,8 +944,41 @@ fn canary_late_pins(base: &Path) -> Result<(), String> {
             return Err(format!("canary `{name}` passed when it must fail closed"));
         }
     }
-    record_in(base, &format!("{key} {SEAL} budzero/ {REASON}\n"))?;
+    git_in(base, &["checkout", "-q", "--", LATE_PIN_FILE])?;
+    canary_record_cannot_forgive_itself(base)?;
     canary_late_pin_key(base, &key)
+}
+
+/// Canary: a commit that re-seals late and records its own transition in the
+/// same commit is not forgiven.
+fn canary_record_cannot_forgive_itself(base: &Path) -> Result<(), String> {
+    const SEAL: &str = "xtask/gates/pins/tree.pins";
+    const REASON: &str = "late re-seal recorded by the commit that makes it";
+    let start = head_in(base)?;
+    write_in(base, "budzero/src/lib.rs", "pub fn f() -> u8 { 8 }\n")?;
+    add_all_in(base)?;
+    commit_in(base, "tree alone again")?;
+    write_in(base, SEAL, "budzero/src/lib.rs mmm\n")?;
+    add_all_in(base)?;
+    commit_in(base, "late seal, about to record itself")?;
+    let own = seal_diff_digest(base, &head_in(base)?, SEAL)?;
+    // Fold the record into the same commit: the transition, and so the
+    // digest, does not change. The earlier record stays, so only this commit
+    // can make the verdict red.
+    git_in(base, &["reset", "-q", "--soft", "HEAD~1"])?;
+    let earlier = std::fs::read_to_string(base.join(LATE_PIN_FILE)).map_err(|e| e.to_string())?;
+    record_in(base, &format!("{earlier}{own} {SEAL} budzero/ {REASON}\n"))?;
+    write_in(base, LATE_PIN_COUNT_FILE, "2\n")?;
+    add_all_in(base)?;
+    commit_in(base, "late seal that records itself")?;
+    let verdict = evaluate(base, None);
+    git_in(base, &["reset", "-q", "--hard", &start])?;
+    if verdict.is_ok() {
+        return Err(String::from(
+            "canary `record-same-commit` passed when it must fail",
+        ));
+    }
+    Ok(())
 }
 
 /// Canaries around the record key: a rebase keeps it, a byte or a moved hunk
@@ -844,8 +986,10 @@ fn canary_late_pins(base: &Path) -> Result<(), String> {
 fn canary_late_pin_key(base: &Path, key: &str) -> Result<(), String> {
     const SEAL: &str = "xtask/gates/pins/tree.pins";
     const REASON: &str = "late re-seal of a tree changed one commit earlier";
+    let line = format!("{key} {SEAL} budzero/ {REASON}");
     // Metadata alone - a reworded, re-dated commit, as a rebase produces -
-    // keeps the key.
+    // keeps the key. The record commit is replayed on top, as a rebase would.
+    git_in(base, &["reset", "-q", "--hard", "HEAD~1"])?;
     git_in(
         base,
         &[
@@ -867,36 +1011,37 @@ fn canary_late_pin_key(base: &Path, key: &str) -> Result<(), String> {
             "canary `metadata-only-same-digest` failed: a reworded commit changed the key",
         ));
     }
+    commit_record_in(base, &line, "record the late seal again")?;
     evaluate(base, None)
         .map(|_| ())
         .map_err(|e| format!("canary `metadata-only-same-digest` failed when it must pass: {e}"))?;
     // A whitespace difference inside a literal is a different transition.
-    git_in(base, &["reset", "-q", "--hard", "HEAD~1"])?;
+    git_in(base, &["reset", "-q", "--hard", "HEAD~2"])?;
     write_in(
         base,
         SEAL,
         "budzero/src/lib.rs  kkk\nbudzero/src/other.rs lll\n",
     )?;
-    record_in(base, &format!("{key} {SEAL} budzero/ {REASON}\n"))?;
     add_all_in(base)?;
     commit_in(base, "late seal with a different space")?;
     let spaced = head_in(base)?;
+    commit_record_in(base, &line, "record the original key")?;
     if seal_diff_digest(base, &spaced, SEAL)? == key || evaluate(base, None).is_ok() {
         return Err(String::from(
             "canary `whitespace-different-digest` passed when it must fail",
         ));
     }
     // The same added line in another place of the seal is a different key.
-    git_in(base, &["reset", "-q", "--hard", "HEAD~1"])?;
+    git_in(base, &["reset", "-q", "--hard", "HEAD~2"])?;
     write_in(
         base,
         SEAL,
         "budzero/src/other.rs lll\nbudzero/src/lib.rs kkk\n",
     )?;
-    record_in(base, &format!("{key} {SEAL} budzero/ {REASON}\n"))?;
     add_all_in(base)?;
     commit_in(base, "late seal with the hunk moved")?;
     let moved = head_in(base)?;
+    commit_record_in(base, &line, "record the original key")?;
     if seal_diff_digest(base, &moved, SEAL)? == key || evaluate(base, None).is_ok() {
         return Err(String::from(
             "canary `moved-hunk-different-digest` passed when it must fail",
@@ -961,7 +1106,7 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&late);
     late_outcome?;
     Ok(String::from(
-        "seals-move-with-their-tree canary OK: seal-with-tree, provenance-with-tree, ratchet-with-code and seal-tree-plus-work accepted; seal-alone and provenance-seal-alone refused; a future cutoff grandfathers; unparsable cutoff, unresolvable base ref, an empty declared window and a shallow checkout fail closed; a late seal is refused until recorded under its transition digest, a reworded commit keeps the key, a whitespace or moved-hunk variant does not, and a record without a reason, with a short one, a malformed digest or a wrong pair fails closed",
+        "seals-move-with-their-tree canary OK: seal-with-tree, provenance-with-tree, ratchet-with-code and seal-tree-plus-work accepted; seal-alone and provenance-seal-alone refused; a future cutoff grandfathers; unparsable cutoff, unresolvable base ref, an empty declared window and a shallow checkout fail closed; a late seal is refused until recorded under its transition digest in a later commit, an uncommitted record, a record in the violating commit itself and a count that disagrees or is missing are refused, a reworded commit keeps the key, a whitespace or moved-hunk variant does not, and a record without a reason, with a short one, a malformed digest or a wrong pair fails closed",
     ))
 }
 
