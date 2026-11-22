@@ -459,7 +459,7 @@ pub fn begin_import_attested(
     chain_id: u64,
     anchor: &DeploymentHeaderAnchor,
 ) -> Result<MigrationPlan, ImportError> {
-    verify_deployment_anchor(&request.deployment, anchor)?;
+    verify_deployment_attested(&request.deployment, request.source_chain_id, anchor)?;
     begin_import(request, chain_id)
 }
 

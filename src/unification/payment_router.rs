@@ -637,6 +637,13 @@ impl UniversalPaymentRouter {
                 .ok_or(PaymentError::ArithmeticOverflow)?;
             provisional.push((idx, next_amount));
         }
+        // Enforce split-tender leg sum == delivered supply conservation prior to commit.
+        verify_split_tender_supply_conservation(
+            &receipt,
+            receipt.target_amount_delivered,
+            receipt.target_amount_delivered,
+            0,
+        )?;
         // Atomic commit: apply validated debits, quote fills, and anti-replay together.
         for (idx, next_amount) in provisional {
             if let Some(bal) = balances.get_mut(idx) {
@@ -1038,6 +1045,36 @@ impl UniversalLiquidationCoordinator {
             seized_legs,
             receipt_hash,
         })
+    }
+
+    /// Execute an oracle-free, state-root-proven cross-domain liquidation via
+    /// the unified [`crate::settlement::liquidation_proof`] engine.
+    ///
+    /// Convenience: bridges [`UniversalLiquidationCoordinator`] to the
+    /// proof-carrying TWAP liquidation engine without external price oracles.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::settlement::liquidation_proof::LiquidationProofError`]
+    /// if any reserve Merkle proof, TWAP bound, health check, or close-factor
+    /// / bonus cap fails.
+    pub fn execute_proven_liquidation(
+        position: &crate::settlement::liquidation_proof::LiquidationPosition,
+        certified_state_roots: &BTreeMap<u32, Hash32>,
+        observations: &[crate::settlement::liquidation_proof::StateRootReserveObservation],
+        collateral_legs: &[crate::settlement::liquidation_proof::CollateralLegSpec],
+        params: &crate::settlement::liquidation_proof::CrossDomainLiquidationParams,
+    ) -> Result<
+        crate::settlement::liquidation_proof::CrossDomainLiquidationSettlement,
+        crate::settlement::liquidation_proof::LiquidationProofError,
+    > {
+        crate::settlement::liquidation_proof::execute_proven_cross_domain_liquidation(
+            position,
+            certified_state_roots,
+            observations,
+            collateral_legs,
+            params,
+        )
     }
 }
 
