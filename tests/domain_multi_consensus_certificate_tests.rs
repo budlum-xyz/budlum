@@ -18,7 +18,7 @@ use budlum_core::chain::finality::{
 use budlum_core::core::account::AccountState;
 use budlum_core::core::address::Address;
 use budlum_core::cross_domain::external::IntakeState;
-use budlum_core::crypto::composite::CompositeKeypair;
+use budlum_core::crypto::composite::{CompositeError, CompositeKeypair};
 use budlum_core::crypto::facts::{ObservedScheme, QuantumClass};
 use budlum_core::crypto::pq::{ml_dsa_public_key, ML_DSA_SEED_LEN};
 use budlum_core::crypto::primitives::{BlsKeypair, PqKeyPair};
@@ -35,7 +35,9 @@ use budlum_core::domain::{
     POW_HEADER_CHAIN_ADAPTER,
 };
 use budlum_core::registry::role::roles::RELAYER;
-use budlum_core::settlement::domains::{execute_settlement_tx, SettlementTx, SettlementTxContext};
+use budlum_core::settlement::domains::{
+    execute_settlement_tx, SettlementTx, SettlementTxContext, SettlementTxError,
+};
 use budlum_core::settlement::universal_finality::{
     compose, compose_cross_domain_route, DomainFinalityEntry, EconomicSecurityBound,
     FinalityGuarantee, FinalityPendingReason, FinalityReversibility, FinalityVerdict,
@@ -56,35 +58,36 @@ fn tx_ctx(sender: Address) -> SettlementTxContext {
     }
 }
 
-fn composite_authorities(count: u8) -> (Vec<CompositeKeypair>, Vec<PoAAuthorityKey>) {
-    let keypairs: Vec<CompositeKeypair> = (0..count)
+fn composite_authorities(
+    count: u8,
+) -> Result<(Vec<CompositeKeypair>, Vec<PoAAuthorityKey>), CompositeError> {
+    let keypairs = (0..count)
         .map(|i| {
             CompositeKeypair::from_seeds(
                 SuiteId::VALIDATOR,
                 &[i + 0x31; ML_DSA_SEED_LEN],
                 &[i + 0x71; 32],
             )
-            .unwrap()
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     let authorities = keypairs
         .iter()
         .map(|kp| {
-            let public = kp.public_key().unwrap();
-            PoAAuthorityKey {
+            let public = kp.public_key()?;
+            Ok(PoAAuthorityKey {
                 authority: Address::from(public.ed),
                 public_key: public.encode(),
-            }
+            })
         })
-        .collect();
-    (keypairs, authorities)
+        .collect::<Result<Vec<_>, CompositeError>>()?;
+    Ok((keypairs, authorities))
 }
 
 fn register_funded_domain(
     state: &mut AccountState,
     operator: Address,
     mut domain: ConsensusDomain,
-) {
+) -> Result<(), SettlementTxError> {
     domain.operator = Some(operator);
     domain.operator_bond = MIN_DOMAIN_OPERATOR_BOND.max(100_000);
     domain.last_committed_height = 0;
@@ -94,7 +97,6 @@ fn register_funded_domain(
         &tx_ctx(operator),
         &SettlementTx::RegisterDomain(Box::new(domain)),
     )
-    .unwrap();
 }
 
 #[test]
@@ -124,7 +126,7 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
         min_cumulative_work: 4,
         max_headers: 8,
     });
-    register_funded_domain(&mut state, operator, pow_domain);
+    register_funded_domain(&mut state, operator, pow_domain).unwrap();
     let pow_registered = state.settlement.domains.get(101).unwrap().clone();
     let pow_built = build_pow_commitment(&PowChainSpec {
         domain: pow_registered.clone(),
@@ -192,7 +194,7 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
     );
     bft_domain.validator_set_hash = bft_vset_hash;
     bft_domain.config_hash = [0x12; 32];
-    register_funded_domain(&mut state, operator, bft_domain);
+    register_funded_domain(&mut state, operator, bft_domain).unwrap();
     let bft_registered = state.settlement.domains.get(102).unwrap().clone();
     let bft_built = build_bft_commitment(
         &QuorumBlockSpec {
@@ -216,14 +218,14 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
     .unwrap();
 
     // Shared composite authority pool for DAG, PoH, and PoSpace structural families
-    let (comp_keys, comp_authorities) = composite_authorities(4);
+    let (comp_keys, comp_authorities) = composite_authorities(4).unwrap();
 
     // 3. Domain 103: Post-quantum causal DAG (`dag-tip-vote-v1`)
     let mut dag_domain = default_domain(103, ConsensusKind::Dag, 9_103, "dag-tip-vote-v1", 1);
     dag_domain.config_hash = [0x13; 32];
     dag_domain.validator_set_hash =
         poa_pq_authority_set_hash(&dag_domain, &comp_authorities).unwrap();
-    register_funded_domain(&mut state, operator, dag_domain);
+    register_funded_domain(&mut state, operator, dag_domain).unwrap();
     let dag_registered = state.settlement.domains.get(103).unwrap().clone();
     let dag_built = build_dag_commitment(
         &QuorumBlockSpec {
@@ -249,7 +251,7 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
     poh_domain.config_hash = [0x14; 32];
     poh_domain.validator_set_hash =
         poa_pq_authority_set_hash(&poh_domain, &comp_authorities).unwrap();
-    register_funded_domain(&mut state, operator, poh_domain);
+    register_funded_domain(&mut state, operator, poh_domain).unwrap();
     let poh_registered = state.settlement.domains.get(104).unwrap().clone();
     let poh_built = build_poh_commitment(
         &QuorumBlockSpec {
@@ -277,7 +279,7 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
     pospace_domain.config_hash = [0x15; 32];
     pospace_domain.validator_set_hash =
         poa_pq_authority_set_hash(&pospace_domain, &comp_authorities).unwrap();
-    register_funded_domain(&mut state, operator, pospace_domain);
+    register_funded_domain(&mut state, operator, pospace_domain).unwrap();
     let pospace_registered = state.settlement.domains.get(105).unwrap().clone();
     let mut pospace_spec = QuorumBlockSpec {
         domain: pospace_registered.clone(),
