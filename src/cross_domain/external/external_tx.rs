@@ -116,6 +116,19 @@ pub enum ObjectiveFaultProof {
     /// Single-step `DisproveScript` execution fraud proof for an
     /// `AdapterSpec::BitVmCovenant` domain.
     BitVmDisprove(Box<crate::cross_domain::external::bitvm_covenant::DisproveScriptProof>),
+    /// Objective Bullshark `DAG-BFT` equivocation proof (double availability
+    /// certificate or same-round vertex fork) for an
+    /// `AdapterSpec::DagCertificate` domain. APPENDED (tag `4`).
+    DagEquivocation(Box<crate::cross_domain::external::dag_bft::DagEquivocationProof>),
+    /// Objective ICS-07 `Tendermint`/`CometBFT` misbehaviour proof (double-sign,
+    /// BFT time violation, or lunatic header) bound to the domain's pinned
+    /// validator-set commitment for an `AdapterSpec::TendermintCommit` domain.
+    /// APPENDED (tag `5`).
+    TendermintMisbehaviour {
+        trusted: Box<crate::cross_domain::external::tendermint::TrustedTendermintState>,
+        params: crate::cross_domain::external::tendermint::TendermintLightParams,
+        evidence: Box<crate::cross_domain::external::tendermint::TendermintMisbehaviour>,
+    },
 }
 
 /// What the executor hands the door: the signer, the chain, the fee the
@@ -650,6 +663,7 @@ fn submit_fault_proof(
     domain: &DomainKey,
     proof: &ObjectiveFaultProof,
 ) -> Result<(), ExternalDomainTxError> {
+    let now_secs = state.current_block_unix_secs;
     let intake = &mut state.settlement.external_intake;
     match proof {
         ObjectiveFaultProof::HotStuffEquivocation(hs) => intake
@@ -664,6 +678,16 @@ fn submit_fault_proof(
         ObjectiveFaultProof::BitVmDisprove(bv) => {
             intake.adjudicate_bitvm_disprove(domain, bv).map(|_| ())
         }
+        ObjectiveFaultProof::DagEquivocation(dag) => {
+            intake.adjudicate_dag_equivocation(domain, dag).map(|_| ())
+        }
+        ObjectiveFaultProof::TendermintMisbehaviour {
+            trusted,
+            params,
+            evidence,
+        } => intake
+            .adjudicate_tendermint_misbehaviour(domain, trusted, params, evidence, now_secs)
+            .map(|_| ()),
     }
     .map_err(ExternalDomainTxError::from)
 }
@@ -1887,5 +1911,334 @@ mod tests {
             headers.push(hdr);
         }
         headers
+    }
+
+    #[test]
+    fn submit_fault_proof_freezes_dag_and_tendermint_domains_and_refuses_unpinned_set() {
+        use crate::cross_domain::external::dag_bft::{
+            dag_anchor_cert_sign_bytes, DagAnchorVertex, DagBftSig, DagCausalParent,
+            DagCommitteeMember, DagEquivocationProof, DagVoterVertex, DagWaveCommitEvidence,
+            PinnedDagCommittee,
+        };
+        use crate::cross_domain::external::intake::PinnedTendermintAnchor;
+        use crate::cross_domain::external::tendermint::{
+            validator_address_of, validator_set_commitment, vote_sign_bytes,
+            TendermintCommitEvidence, TendermintLightParams, TendermintMisbehaviour,
+            TendermintSignature, TendermintValidator, TrustedTendermintState,
+        };
+        use crate::crypto::primitives::{KeyPair, PqKeyPair};
+
+        let poster = addr(0x31);
+        let challenger = addr(0x32);
+        let mut state = AccountState::new();
+        state.add_balance(&poster, 2_000_000);
+        state.add_balance(&challenger, 2_000_000);
+
+        // --- 1. Bullshark DAG-BFT double-certification equivocation ---
+        let dag_net = "bullshark-fault-testnet";
+        let keys: Vec<(KeyPair, PqKeyPair)> = (0..4)
+            .map(|_| (KeyPair::generate(), PqKeyPair::generate()))
+            .collect();
+        let members: Vec<DagCommitteeMember> = keys
+            .iter()
+            .map(|(ek, pk)| DagCommitteeMember {
+                ed25519_pubkey: ek.public_key_bytes(),
+                pq_pubkey: pk.public_key(),
+                stake: 100,
+            })
+            .collect();
+        let pinned_dag = PinnedDagCommittee { epoch: 1, members };
+        state
+            .settlement
+            .external_intake
+            .pin_dag_committee(dag_net, pinned_dag.clone());
+
+        let mut parents: Vec<DagCausalParent> = keys
+            .iter()
+            .take(3)
+            .enumerate()
+            .map(|(idx, (ek, pk))| {
+                let mut cp = DagCausalParent {
+                    round: 99,
+                    author: ek.public_key_bytes(),
+                    payload_root: [0x10u8.saturating_add(u8::try_from(idx).unwrap_or(0)); 32],
+                    digest: [0u8; 32],
+                    author_ed25519_sig: Vec::new(),
+                    author_pq_sig: Vec::new(),
+                };
+                cp.digest = cp.compute_digest(dag_net, 1);
+                cp.author_ed25519_sig = ek.sign(&cp.digest).to_vec();
+                cp.author_pq_sig = pk
+                    .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &cp.digest)
+                    .expect("pq sign");
+                cp
+            })
+            .collect();
+        parents.sort_by_key(|p| p.digest);
+        let parent_digests: Vec<[u8; 32]> = parents.iter().map(|p| p.digest).collect();
+
+        let leader = crate::cross_domain::external::dag_bft::elect_dag_wave_leader(
+            dag_net,
+            &pinned_dag,
+            100,
+        )
+        .expect("leader");
+        let mut anchor = DagAnchorVertex {
+            epoch: 1,
+            round: 100,
+            author: leader,
+            timestamp_secs: 1_700_000_100,
+            state_root: [0xA1; 32],
+            tx_root: [0xA2; 32],
+            event_root: [0xA3; 32],
+            parent_digests: parent_digests.clone(),
+            digest: [0u8; 32],
+        };
+        anchor.digest = anchor.compute_digest(dag_net);
+
+        let sign_cert = |digest: &[u8; 32]| -> Vec<DagBftSig> {
+            let msg = dag_anchor_cert_sign_bytes(dag_net, 1, 100, digest);
+            keys.iter()
+                .take(3)
+                .map(|(ek, pk)| DagBftSig {
+                    signer: ek.public_key_bytes(),
+                    ed25519_sig: ek.sign(&msg).to_vec(),
+                    pq_sig: pk
+                        .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &msg)
+                        .expect("pq sign"),
+                })
+                .collect()
+        };
+        let cert_sigs = sign_cert(&anchor.digest);
+        let voters: Vec<DagVoterVertex> = keys
+            .iter()
+            .take(3)
+            .map(|(ek, pk)| {
+                let mut v = DagVoterVertex {
+                    round: 101,
+                    author: ek.public_key_bytes(),
+                    parent_digests: vec![anchor.digest],
+                    digest: [0u8; 32],
+                    ed25519_sig: Vec::new(),
+                    pq_sig: Vec::new(),
+                };
+                v.digest = v.compute_digest(dag_net, 1);
+                v.ed25519_sig = ek.sign(&v.digest).to_vec();
+                v.pq_sig = pk
+                    .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &v.digest)
+                    .expect("pq sign");
+                v
+            })
+            .collect();
+        let dag_evidence = DagWaveCommitEvidence {
+            anchor: anchor.clone(),
+            causal_parents: parents,
+            anchor_cert_sigs: cert_sigs.clone(),
+            voter_vertices: voters,
+        };
+        let dag_spec = AdapterSpec::DagCertificate {
+            network: dag_net.into(),
+            committee: Some(pinned_dag),
+        };
+        let dag_key = register_fault_domain(
+            &mut state,
+            dag_spec,
+            RawConsensusEvidence {
+                adapter: crate::cross_domain::external::spec::AdapterId::from_name(
+                    crate::cross_domain::external::dag_bft::ADAPTER_NAME,
+                ),
+                evidence_version: 1,
+                network: dag_net.into(),
+                declared_height: 100,
+                declared_root: [0xA1; 32],
+                payload: bincode::serialize(&dag_evidence).expect("encode dag golden"),
+                submitter: poster,
+            },
+            poster,
+        );
+
+        let mut alt_anchor = anchor.clone();
+        alt_anchor.state_root = [0xB1; 32];
+        alt_anchor.digest = alt_anchor.compute_digest(dag_net);
+        let alt_cert_sigs = sign_cert(&alt_anchor.digest);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: dag_key,
+                proof: ObjectiveFaultProof::DagEquivocation(Box::new(
+                    DagEquivocationProof::AnchorCertificate {
+                        round: 100,
+                        first_anchor_digest: anchor.digest,
+                        first_sigs: cert_sigs,
+                        second_anchor_digest: alt_anchor.digest,
+                        second_sigs: alt_cert_sigs,
+                    },
+                )),
+            },
+        )
+        .expect("dag SubmitFaultProof freezes serving domain");
+        assert_fault_domain_state(&state, &dag_key, DomainState::Faulted);
+
+        // --- 2. Tendermint/CometBFT ICS-07 double-sign equivocation ---
+        let tm_net = "cometbft-fault-testnet";
+        let tm_chain = "comet-fault-1";
+        let tm_keys: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
+        let tm_vals: Vec<TendermintValidator> = tm_keys
+            .iter()
+            .map(|k| TendermintValidator {
+                address: validator_address_of(&k.public_key_bytes()),
+                public_key: k.public_key_bytes(),
+                voting_power: 100,
+            })
+            .collect();
+        let tm_val_hash = validator_set_commitment(&tm_vals);
+
+        let make_tm_commit = |height: u64,
+                              ts: u64,
+                              app_hash: [u8; 32],
+                              signers: &[usize]|
+         -> TendermintCommitEvidence {
+            let mut c = TendermintCommitEvidence {
+                chain_id: tm_chain.into(),
+                height,
+                round: 0,
+                block_hash: [0u8; 32],
+                parts_total: 1,
+                parts_hash: [0x55; 32],
+                version_block: 11,
+                last_block_hash: [0x44; 32],
+                last_parts_total: 1,
+                last_parts_hash: [0x45; 32],
+                last_commit_hash: [0x46; 32],
+                data_hash: [0x47; 32],
+                validators_hash: tm_val_hash,
+                next_validators_hash: tm_val_hash,
+                consensus_hash: [0x48; 32],
+                app_hash,
+                last_results_hash: [0x49; 32],
+                evidence_hash: [0x4A; 32],
+                proposer_address: tm_vals[0].address,
+                commit_time: ts,
+                validators: tm_vals.clone(),
+                signatures: Vec::new(),
+            };
+            c.block_hash = c.header_hash();
+            c.signatures = signers
+                .iter()
+                .map(|&idx| {
+                    let sb = vote_sign_bytes(
+                        &c.chain_id,
+                        c.height,
+                        c.round,
+                        &c.block_hash,
+                        c.parts_total,
+                        &c.parts_hash,
+                        c.commit_time,
+                    );
+                    TendermintSignature {
+                        validator_address: tm_vals[idx].address,
+                        timestamp_secs: c.commit_time,
+                        timestamp_nanos: 0,
+                        signature: tm_keys[idx].sign(&sb).to_vec(),
+                    }
+                })
+                .collect();
+            c
+        };
+
+        state.settlement.external_intake.pin_tendermint_anchor(
+            tm_net,
+            PinnedTendermintAnchor {
+                chain_id: tm_chain.into(),
+                validator_set_hash: tm_val_hash,
+            },
+        );
+        let tm_golden = make_tm_commit(500, 1_780_000_000, [0x77; 32], &[0, 1, 2, 3]);
+        let tm_spec = AdapterSpec::TendermintCommit {
+            network: tm_net.into(),
+            chain_id: tm_chain.into(),
+            validator_set_hash: Some(tm_val_hash),
+        };
+        let tm_key = register_fault_domain(
+            &mut state,
+            tm_spec,
+            RawConsensusEvidence {
+                adapter: crate::cross_domain::external::spec::AdapterId::from_name(&format!(
+                    "tendermint-commit-{tm_net}"
+                )),
+                evidence_version: crate::cross_domain::external::tendermint::EVIDENCE_VERSION,
+                network: tm_net.into(),
+                declared_height: 500,
+                declared_root: [0x77; 32],
+                payload: tm_golden.encode().expect("encode tm golden"),
+                submitter: poster,
+            },
+            poster,
+        );
+
+        let params = TendermintLightParams::standard_for_unbonding(1_814_400).expect("params");
+        let fork_a = make_tm_commit(510, 1_780_000_600, [0xC1; 32], &[0, 1, 2]);
+        let fork_b = make_tm_commit(510, 1_780_000_600, [0xD2; 32], &[1, 2, 3]);
+        state.current_block_unix_secs = 1_780_001_000;
+
+        // Forged trusted validator set that does not match pinned validator_set_hash MUST be refused.
+        let forged_key = KeyPair::generate();
+        let forged_trusted = TrustedTendermintState {
+            chain_id: tm_chain.into(),
+            height: 500,
+            time_secs: 1_780_000_000,
+            trusting_period_secs: params.trusting_period_secs,
+            validators: vec![TendermintValidator {
+                address: validator_address_of(&forged_key.public_key_bytes()),
+                public_key: forged_key.public_key_bytes(),
+                voting_power: 400,
+            }],
+            next_validators_hash: tm_val_hash,
+        };
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: tm_key,
+                proof: ObjectiveFaultProof::TendermintMisbehaviour {
+                    trusted: Box::new(forged_trusted),
+                    params,
+                    evidence: Box::new(TendermintMisbehaviour {
+                        header_1: fork_a.clone(),
+                        header_2: Some(fork_b.clone()),
+                    }),
+                },
+            },
+        )
+        .is_err());
+        assert_fault_domain_state(&state, &tm_key, DomainState::Serving);
+
+        // Pinned trusted state + valid ICS-07 double-sign equivocation freezes the domain.
+        let honest_trusted = TrustedTendermintState {
+            chain_id: tm_chain.into(),
+            height: 500,
+            time_secs: 1_780_000_000,
+            trusting_period_secs: params.trusting_period_secs,
+            validators: tm_vals,
+            next_validators_hash: tm_val_hash,
+        };
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: tm_key,
+                proof: ObjectiveFaultProof::TendermintMisbehaviour {
+                    trusted: Box::new(honest_trusted),
+                    params,
+                    evidence: Box::new(TendermintMisbehaviour {
+                        header_1: fork_a,
+                        header_2: Some(fork_b),
+                    }),
+                },
+            },
+        )
+        .expect("tendermint SubmitFaultProof freezes serving domain");
+        assert_fault_domain_state(&state, &tm_key, DomainState::Faulted);
     }
 }

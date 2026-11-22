@@ -2462,6 +2462,135 @@ impl IntakeState {
             .map_err(IntakeError::Registry)?;
         Ok((chunk_idx, expected_post, claimed_post))
     }
+
+    /// Verify an objective Bullshark `DAG-BFT` equivocation proof (double
+    /// availability certification or same-round vertex fork) against the
+    /// domain's governance-pinned committee, record an adverse round, and
+    /// freeze the domain (`DomainState::Faulted`).
+    ///
+    /// WIRING: objective `DAG-BFT` equivocation door freezing
+    /// `AdapterSpec::DagCertificate` domains (wired via `ExternalDomainTx::SubmitFaultProof`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if `key` is unknown, not serving, not a
+    /// `DagCertificate` domain, unpinned, or `proof` fails cryptographic
+    /// equivocation verification.
+    pub fn adjudicate_dag_equivocation(
+        &mut self,
+        key: &DomainKey,
+        proof: &crate::cross_domain::external::dag_bft::DagEquivocationProof,
+    ) -> Result<crate::cross_domain::external::dag_bft::DagSlashVerdict, IntakeError> {
+        let (entry, expected_name) = self.serving_entry(key)?;
+        let AdapterSpec::DagCertificate { network, committee } = &entry.spec else {
+            return Err(IntakeError::Registry(RegistryError::DescriptorMismatch {
+                expected: expected_name.to_string(),
+                found: crate::cross_domain::external::dag_bft::ADAPTER_NAME.to_string(),
+            }));
+        };
+        let Some(pinned) = committee else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        let verdict = crate::cross_domain::external::dag_bft::verify_dag_equivocation_proof(
+            network, pinned, proof,
+        )
+        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let local_height = self.registry.height();
+        let _ = self.guard.record_adverse_round(*key, local_height);
+        self.registry
+            .mark_faulted(
+                key,
+                &format!(
+                    "Bullshark DAG equivocation at epoch {} round {} (slashed_weight={})",
+                    verdict.epoch, verdict.round, verdict.slashed_weight
+                ),
+            )
+            .map_err(IntakeError::Registry)?;
+        Ok(verdict)
+    }
+
+    /// Verify an objective ICS-07 `Tendermint`/`CometBFT` misbehaviour proof
+    /// (double-sign equivocation, BFT time violation, or lunatic header)
+    /// against the domain's governance-pinned `chain_id` and
+    /// `validator_set_hash`, record an adverse round, and freeze the domain
+    /// (`DomainState::Faulted`).
+    ///
+    /// WIRING: objective `Tendermint`/`CometBFT` equivocation door freezing
+    /// `AdapterSpec::TendermintCommit` domains (wired via `ExternalDomainTx::SubmitFaultProof`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if `key` is unknown, not serving, not a
+    /// `TendermintCommit` domain, unpinned, if `trusted` does not match the
+    /// pinned `chain_id` and `validator_set_hash`, or if `evidence` fails
+    /// ICS-07 misbehaviour verification.
+    pub fn adjudicate_tendermint_misbehaviour(
+        &mut self,
+        key: &DomainKey,
+        trusted: &crate::cross_domain::external::tendermint::TrustedTendermintState,
+        params: &crate::cross_domain::external::tendermint::TendermintLightParams,
+        evidence: &crate::cross_domain::external::tendermint::TendermintMisbehaviour,
+        now_secs: u64,
+    ) -> Result<
+        crate::cross_domain::external::tendermint::VerifiedTendermintMisbehaviour,
+        IntakeError,
+    > {
+        use subtle::ConstantTimeEq;
+
+        let (entry, expected_name) = self.serving_entry(key)?;
+        let AdapterSpec::TendermintCommit {
+            chain_id,
+            validator_set_hash,
+            ..
+        } = &entry.spec
+        else {
+            return Err(IntakeError::Registry(RegistryError::DescriptorMismatch {
+                expected: expected_name.to_string(),
+                found: "tendermint-commit".to_string(),
+            }));
+        };
+        let Some(pinned_hash) = validator_set_hash else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        if trusted.chain_id != *chain_id {
+            return Err(IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                    rule: format!(
+                        "trusted Tendermint state chain_id {} does not match pinned {}",
+                        trusted.chain_id, chain_id
+                    ),
+                },
+            )));
+        }
+        let supplied_hash = crate::cross_domain::external::tendermint::validator_set_commitment(
+            &trusted.validators,
+        );
+        if !bool::from(supplied_hash.ct_eq(pinned_hash)) {
+            return Err(IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                    rule:
+                        "trusted Tendermint validator set does not match pinned validator_set_hash"
+                            .to_string(),
+                },
+            )));
+        }
+        let verdict = crate::cross_domain::external::tendermint::verify_tendermint_misbehaviour(
+            trusted, params, evidence, now_secs,
+        )
+        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let local_height = self.registry.height();
+        let _ = self.guard.record_adverse_round(*key, local_height);
+        self.registry
+            .mark_faulted(
+                key,
+                &format!(
+                    "Tendermint/CometBFT {:?} at height {} (culprit_power={})",
+                    verdict.kind, verdict.infraction_height, verdict.culprit_trusted_power
+                ),
+            )
+            .map_err(IntakeError::Registry)?;
+        Ok(verdict)
+    }
 }
 
 #[cfg(test)]

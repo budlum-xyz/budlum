@@ -43,7 +43,7 @@ use super::spec::{
 };
 
 /// Canonical adapter name for stake-weighted round-DAG BFT finality.
-const ADAPTER_NAME: &str = "bullshark-dag-v1";
+pub(crate) const ADAPTER_NAME: &str = "bullshark-dag-v1";
 /// Adapter implementation version.
 const ADAPTER_VERSION: u32 = 1;
 /// Wire evidence version accepted by [`BullsharkDagAdapter`].
@@ -107,7 +107,7 @@ pub struct DagCausalParent {
 impl DagCausalParent {
     /// Canonical self-derived digest of a round `r - 1` causal parent header.
     #[must_use]
-    fn compute_digest(&self, network: &str, epoch: u64) -> Hash32 {
+    pub(crate) fn compute_digest(&self, network: &str, epoch: u64) -> Hash32 {
         crate::core::hash::hash_fields_bytes(&[
             b"BDLM_DAGBFT_PARENT_V1",
             network.as_bytes(),
@@ -139,7 +139,7 @@ pub struct DagAnchorVertex {
 impl DagAnchorVertex {
     /// Canonical self-derived anchor vertex digest.
     #[must_use]
-    fn compute_digest(&self, network: &str) -> Hash32 {
+    pub(crate) fn compute_digest(&self, network: &str) -> Hash32 {
         let parent_fold = fold_sorted_digests(&self.parent_digests);
         crate::core::hash::hash_fields_bytes(&[
             b"BDLM_DAGBFT_VERTEX_V1",
@@ -175,7 +175,7 @@ pub struct DagVoterVertex {
 impl DagVoterVertex {
     /// Canonical self-derived voter vertex digest.
     #[must_use]
-    fn compute_digest(&self, network: &str, epoch: u64) -> Hash32 {
+    pub(crate) fn compute_digest(&self, network: &str, epoch: u64) -> Hash32 {
         let parent_fold = fold_sorted_digests(&self.parent_digests);
         crate::core::hash::hash_fields_bytes(&[
             b"BDLM_DAGBFT_VOTE_V1",
@@ -219,7 +219,8 @@ fn is_strictly_ascending(digests: &[Hash32]) -> bool {
 
 /// Canonical domain-separated message signed by validators certifying `anchor`.
 #[must_use]
-fn dag_anchor_cert_sign_bytes(
+/// WIRING: canonical DAG anchor-certificate signing bytes verified by `verify_dag_equivocation_proof` and `external_tx` tests.
+pub(crate) fn dag_anchor_cert_sign_bytes(
     network: &str,
     epoch: u64,
     round: u64,
