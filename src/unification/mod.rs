@@ -1586,4 +1586,103 @@ mod tests {
              so the ledger's finality-gated payment rules are unreachable in production"
         );
     }
+
+    /// Every external domain must be able to name itself in the ledger.
+    ///
+    /// `anchor_domain_finality` identifies a domain by `DomainId` - a
+    /// `u32`. The guarantee that carries the observed backing belongs to an
+    /// *external* domain, and external domains are addressed by
+    /// `DomainKey([u8; 32])`. Something has to translate one into the other:
+    /// either the domain carries a ledger identity from the start, or the
+    /// ledger assigns one when the domain is admitted.
+    ///
+    /// Today nothing does. There is no `DomainKey -> DomainId` conversion in
+    /// the cross-domain intake, and the universal domain catalog cannot
+    /// absorb an external domain either, because
+    /// `UniversalDomainCatalog::register_domain` requires a `caip2_reference`
+    /// and an external intake record carries none. So an external domain
+    /// cannot enter the catalog, and it cannot enter the ledger either -
+    /// which is why the guarantee produced for it never reaches the ledger
+    /// even after the previous chain is closed.
+    ///
+    /// This test refuses to let that stay invisible. It looks for the
+    /// identity bridge in production and names the missing link when it
+    /// cannot find it.
+    #[test]
+    fn an_external_domain_has_a_ledger_identity() {
+        let sources: [(&str, &str); 5] = [
+            (
+                "src/unification/mod.rs",
+                include_str!("../unification/mod.rs"),
+            ),
+            (
+                "src/unification/domain_catalog.rs",
+                include_str!("../domain_catalog.rs"),
+            ),
+            (
+                "src/cross_domain/external/spec.rs",
+                include_str!("../../cross_domain/external/spec.rs"),
+            ),
+            (
+                "src/cross_domain/external/intake.rs",
+                include_str!("../../cross_domain/external/intake.rs"),
+            ),
+            (
+                "src/cross_domain/external/profile.rs",
+                include_str!("../../cross_domain/external/profile.rs"),
+            ),
+        ];
+
+        let test_module_start = sources
+            .iter()
+            .find(|(path, _)| *path == "src/unification/mod.rs")
+            .and_then(|(_, source)| source.find("#[cfg(test)]"))
+            .expect("the unification test module is present");
+
+        // The bridge may be spelled in more than one way, so look for the
+        // shapes it could take rather than for one name.
+        let bridges = [
+            "DomainKey",
+            "domain_id_for",
+            "ledger_domain_id",
+            "register_domain",
+        ];
+
+        let mut production_bridges = Vec::new();
+        for (path, source) in sources {
+            for bridge in bridges {
+                for (at, _) in source.match_indices(bridge) {
+                    // A declaration or a mention is not a bridge.
+                    let is_declaration = source[at..].starts_with(&format!("{bridge}("))
+                        || source[..at].trim_end().ends_with("fn ")
+                        || source[..at].trim_end().ends_with("struct ");
+                    if is_declaration {
+                        continue;
+                    }
+                    let line = source[..at].lines().count() + 1;
+                    let in_test_module =
+                        path == "src/unification/mod.rs" && at >= test_module_start;
+                    if !in_test_module {
+                        production_bridges.push(format!("{path}:{line} {bridge}"));
+                    }
+                }
+            }
+        }
+
+        // `register_domain` alone is not a bridge: it is the catalog's
+        // insertion point and it is reachable today. What must exist is a
+        // mapping between the external domain's own key and the numeric
+        // identity the ledger stores.
+        let maps_external_key = production_bridges.iter().any(|entry| {
+            let path = entry.split(':').next().unwrap_or_default();
+            !path.starts_with("src/unification/domain_catalog.rs") && entry.contains("DomainKey")
+        });
+
+        assert!(
+            maps_external_key,
+            "no production path maps an external domain's `DomainKey` to the `DomainId` \
+             the unification ledger stores; an external domain cannot be named in the \
+             ledger at all, so its observed finality guarantee has no destination"
+        );
+    }
 }
