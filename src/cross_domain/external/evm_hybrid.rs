@@ -208,6 +208,16 @@ pub struct EvmHybridProof {
 /// resource bound, not a claim that every parameter set has this size.
 pub const MAX_ML_DSA_FIELD_BYTES: usize = 8 * 1024;
 
+/// Maximum ML-DSA public-key bytes the EVM verifier contract accepts.
+/// Mirrors `BudlumFinalityVerifier.MAX_MLDSA_PUBKEY_LEN`; the planner must
+/// refuse anything larger before reporting a plan, or a "valid" plan reverts
+/// on chain.
+pub const MAX_ML_DSA_PUBKEY_BYTES: usize = 2_592;
+
+/// Maximum ML-DSA signature bytes the EVM verifier contract accepts.
+/// Mirrors `BudlumFinalityVerifier.MAX_MLDSA_SIG_LEN`.
+pub const MAX_ML_DSA_SIGNATURE_BYTES: usize = 4_627;
+
 impl EvmHybridProof {
     /// Returns the exact signing root used by
     /// `BudlumFinalityVerifier.signingRoot`.
@@ -257,11 +267,19 @@ impl EvmHybridProof {
                 });
             }
         }
-        for (field, length) in [
-            ("ml_dsa_public_key", self.ml_dsa_public_key.len()),
-            ("ml_dsa_signature", self.ml_dsa_signature.len()),
+        for (field, length, limit) in [
+            (
+                "ml_dsa_public_key",
+                self.ml_dsa_public_key.len(),
+                MAX_ML_DSA_PUBKEY_BYTES,
+            ),
+            (
+                "ml_dsa_signature",
+                self.ml_dsa_signature.len(),
+                MAX_ML_DSA_SIGNATURE_BYTES,
+            ),
         ] {
-            if length == 0 || length > MAX_ML_DSA_FIELD_BYTES {
+            if length == 0 || length > limit {
                 return Err(EvmPlanError::BadMlDsaLength { field, length });
             }
         }
@@ -402,9 +420,17 @@ impl EvmFinalityAttestation {
                 return Err(EvmEncodingError::IdentityPoint);
             }
         }
-        for (field, actual) in [
-            ("ml_dsa_signature", self.ml_dsa_signature.len()),
-            ("ml_dsa_pubkey", self.ml_dsa_pubkey.len()),
+        for (field, actual, limit) in [
+            (
+                "ml_dsa_signature",
+                self.ml_dsa_signature.len(),
+                MAX_ML_DSA_SIGNATURE_BYTES,
+            ),
+            (
+                "ml_dsa_pubkey",
+                self.ml_dsa_pubkey.len(),
+                MAX_ML_DSA_PUBKEY_BYTES,
+            ),
         ] {
             if actual == 0 {
                 return Err(EvmEncodingError::WrongLength {
@@ -413,10 +439,10 @@ impl EvmFinalityAttestation {
                     actual: 0,
                 });
             }
-            if actual > MAX_ML_DSA_FIELD_BYTES {
+            if actual > limit {
                 return Err(EvmEncodingError::WrongLength {
                     field,
-                    expected: MAX_ML_DSA_FIELD_BYTES,
+                    expected: limit,
                     actual,
                 });
             }
@@ -771,11 +797,11 @@ mod tests {
         );
 
         let mut oversized_sig = valid.clone();
-        oversized_sig.ml_dsa_signature = vec![5; MAX_ML_DSA_FIELD_BYTES + 1];
+        oversized_sig.ml_dsa_signature = vec![5; MAX_ML_DSA_SIGNATURE_BYTES + 1];
         assert!(oversized_sig.encode_verify_calldata(11_155_111).is_err());
 
         let mut oversized_pk = valid.clone();
-        oversized_pk.ml_dsa_pubkey = vec![6; MAX_ML_DSA_FIELD_BYTES + 1];
+        oversized_pk.ml_dsa_pubkey = vec![6; MAX_ML_DSA_PUBKEY_BYTES + 1];
         assert!(oversized_pk.encode_verify_calldata(11_155_111).is_err());
 
         let mut identity_g2 = valid.clone();
@@ -790,4 +816,64 @@ mod tests {
         zero_chain.budlum_chain_id = 0;
         assert!(zero_chain.encode_verify_calldata(11_155_111).is_err());
     }
+
+    #[test]
+    fn planner_refuses_ml_dsa_fields_the_contract_cannot_accept() {
+        // The contract caps are 2_592 (pubkey) / 4_627 (signature); the old
+        // shared 8_192 bound let both sides pass here and revert on chain.
+        let full = EvmPrecompiles {
+            bls_pairing: true,
+            ml_dsa_fips: true,
+            ml_dsa_eth: false,
+        };
+        let mut big_key = proof(MessageBinding::ZkCircuit);
+        big_key.ml_dsa_public_key = point(MAX_ML_DSA_PUBKEY_BYTES + 1, 5);
+        let err = plan_verification(full, &big_key, EvmGasSchedule::default(), 100).unwrap_err();
+        assert!(matches!(err, EvmPlanError::BadMlDsaLength { .. }));
+
+        let mut big_sig = proof(MessageBinding::ZkCircuit);
+        big_sig.ml_dsa_signature = point(MAX_ML_DSA_SIGNATURE_BYTES + 1, 6);
+        let err = plan_verification(full, &big_sig, EvmGasSchedule::default(), 100).unwrap_err();
+        assert!(matches!(err, EvmPlanError::BadMlDsaLength { .. }));
+
+        // Boundary values stay accepted on both doors.
+        let mut edge = proof(MessageBinding::ZkCircuit);
+        edge.ml_dsa_public_key = point(MAX_ML_DSA_PUBKEY_BYTES, 5);
+        edge.ml_dsa_signature = point(MAX_ML_DSA_SIGNATURE_BYTES, 6);
+        assert!(plan_verification(full, &edge, EvmGasSchedule::default(), 100).is_ok());
+    }
+
+    #[test]
+    fn rust_and_contract_ml_dsa_bounds_stay_in_step() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("contracts/external-domain/BudlumFinalityVerifier.sol"),
+        )
+        .expect("the verifier source is present");
+        for (name, value) in [
+            ("MAX_MLDSA_PUBKEY_LEN", MAX_ML_DSA_PUBKEY_BYTES),
+            ("MAX_MLDSA_SIG_LEN", MAX_ML_DSA_SIGNATURE_BYTES),
+        ] {
+            // Solidity writes these with `_` separators; match both styles.
+            let grouped = format!("{name} = {}", grouped_usize(value));
+            let plain = format!("{name} = {value}");
+            assert!(
+                source.contains(&grouped) || source.contains(&plain),
+                "contract {name} drifted from Rust {value}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+fn grouped_usize(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push('_');
+        }
+        out.push(ch);
+    }
+    out
 }
