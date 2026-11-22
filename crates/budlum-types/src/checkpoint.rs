@@ -30,8 +30,13 @@ pub const QC_WIRE_MAX_STRING: usize = 128;
 pub const QC_WIRE_MAX_SIGNATURE: usize = 4_627;
 /// Transport chunk size for large [`QcBlob`] transfers (256 KiB).
 pub const QC_CHUNK_BYTES: usize = 256 * 1024;
-/// Big-endian wire identifier of ML-DSA-65 (`0x0001`), folded into [`pq_signing_message`].
-pub const ML_DSA_65_SCHEME_WIRE_ID: u16 = 0x0001;
+/// Big-endian wire identifier of ML-DSA-65, folded into [`pq_signing_message`].
+///
+/// This MUST stay equal to the node's registered `SchemeId::ML_DSA_65`
+/// (`0x0102`): the phone and the node fold this value into the same QC
+/// signing message, and any divergence makes each side reject the other's
+/// checkpoint signatures.
+pub const ML_DSA_65_SCHEME_WIRE_ID: u16 = 0x0102;
 
 const QC_ENTRY_OVERHEAD: usize = 4 + 2 + QC_WIRE_MAX_STRING + 4;
 /// Largest wire size of one [`PqSignatureEntry`].

@@ -1038,20 +1038,14 @@ pub fn pq_signing_message(
     checkpoint_hash: &str,
     validator_index: u32,
 ) -> Vec<u8> {
-    let scheme = crate::crypto::scheme::SchemeId::ML_DSA_65.0.to_be_bytes();
-    let mut msg = Vec::new();
-    for field in [
-        b"BDLM_PQ_QC_V2".as_slice(),
-        scheme.as_slice(),
-        &epoch.to_le_bytes(),
-        &checkpoint_height.to_le_bytes(),
-        checkpoint_hash.as_bytes(),
-        &validator_index.to_le_bytes(),
-    ] {
-        msg.extend_from_slice(&(field.len() as u64).to_le_bytes());
-        msg.extend_from_slice(field);
-    }
-    msg
+    // Delegated so the phone and the node can never fold different scheme
+    // identifiers into the same checkpoint attestation again.
+    budlum_types::checkpoint::pq_signing_message(
+        epoch,
+        checkpoint_height,
+        checkpoint_hash,
+        validator_index,
+    )
 }
 
 /// Version byte of the QC blob wire encoding.
@@ -1467,7 +1461,13 @@ mod tests {
         assert_ne!(base, pq_signing_message(1, 101, "hash", 0));
         assert_ne!(base, pq_signing_message(1, 100, "hasi", 0));
         assert_ne!(base, pq_signing_message(1, 100, "hash", 1));
-        // The scheme id of the signing key is in the message (INV-02).
+        // The scheme id of the signing key is in the message (INV-02), and
+        // the shared checkpoint crate must fold the very same identifier or
+        // the phone rejects every node checkpoint signature.
+        assert_eq!(
+            budlum_types::checkpoint::ML_DSA_65_SCHEME_WIRE_ID,
+            crate::crypto::scheme::SchemeId::ML_DSA_65.0
+        );
         let scheme = crate::crypto::scheme::SchemeId::ML_DSA_65.0.to_be_bytes();
         assert!(base.windows(2).any(|w| w == scheme));
         assert!(base

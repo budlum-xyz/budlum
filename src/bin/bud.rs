@@ -3659,90 +3659,6 @@ fn verify_certificate_rpc_response(
     }
     Ok(cert)
 }
-
-fn verify_domain_finality_rpc_response(
-    resp: &serde_json::Value,
-    expected_domain: u32,
-) -> Result<budlum_core::settlement::DomainFinalityInclusionProof, String> {
-    let bucket_root_str = resp
-        .get("bucketRoot")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "RPC response missing `bucketRoot`".to_string())?;
-    let bucket_root = parse_hex_bytes32(bucket_root_str, "bucketRoot")?;
-    let proof: budlum_core::settlement::DomainFinalityInclusionProof = serde_json::from_value(
-        resp.get("proof")
-            .cloned()
-            .ok_or_else(|| "RPC response missing `proof`".to_string())?,
-    )
-    .map_err(|e| format!("failed to decode DomainFinalityInclusionProof: {e}"))?;
-    if proof.entry.domain_id != expected_domain {
-        return Err(format!(
-            "proof domain_id {} does not match requested domain {expected_domain}",
-            proof.entry.domain_id
-        ));
-    }
-    if !proof.verify(&bucket_root) {
-        return Err("domain finality Merkle inclusion proof failed local verification".to_string());
-    }
-    Ok(proof)
-}
-
-fn verify_route_finality_rpc_response(
-    resp: &serde_json::Value,
-    expected_source: u32,
-    expected_target: u32,
-) -> Result<
-    (
-        budlum_core::settlement::DomainFinalityInclusionProof,
-        budlum_core::settlement::DomainFinalityInclusionProof,
-    ),
-    String,
-> {
-    let src_root = parse_hex_bytes32(
-        resp.get("sourceBucketRoot")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "RPC response missing `sourceBucketRoot`".to_string())?,
-        "sourceBucketRoot",
-    )?;
-    let dst_root = parse_hex_bytes32(
-        resp.get("targetBucketRoot")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "RPC response missing `targetBucketRoot`".to_string())?,
-        "targetBucketRoot",
-    )?;
-    let src_proof: budlum_core::settlement::DomainFinalityInclusionProof = serde_json::from_value(
-        resp.get("sourceProof")
-            .cloned()
-            .ok_or_else(|| "RPC response missing `sourceProof`".to_string())?,
-    )
-    .map_err(|e| format!("failed to decode sourceProof: {e}"))?;
-    let dst_proof: budlum_core::settlement::DomainFinalityInclusionProof = serde_json::from_value(
-        resp.get("targetProof")
-            .cloned()
-            .ok_or_else(|| "RPC response missing `targetProof`".to_string())?,
-    )
-    .map_err(|e| format!("failed to decode targetProof: {e}"))?;
-    if src_proof.entry.domain_id != expected_source {
-        return Err(format!(
-            "sourceProof domain_id {} != requested source {expected_source}",
-            src_proof.entry.domain_id
-        ));
-    }
-    if dst_proof.entry.domain_id != expected_target {
-        return Err(format!(
-            "targetProof domain_id {} != requested target {expected_target}",
-            dst_proof.entry.domain_id
-        ));
-    }
-    if !src_proof.verify(&src_root) {
-        return Err("source domain finality Merkle proof failed local verification".to_string());
-    }
-    if !dst_proof.verify(&dst_root) {
-        return Err("target domain finality Merkle proof failed local verification".to_string());
-    }
-    Ok((src_proof, dst_proof))
-}
-
 fn run_finality_show(
     rpc_url: &str,
     checkpoint: Option<u64>,
@@ -5887,27 +5803,11 @@ mod rpc_auth_tests {
         forged_cert["certificateDigest"] = serde_json::json!(format!("0x{}", "ff".repeat(32)));
         assert!(verify_certificate_rpc_response(&forged_cert).is_err());
 
-        let dom_resp = serde_json::json!({
-            "bucketRoot": format!("0x{}", hex::encode(cert.established_root)),
-            "proof": p1,
-        });
-        assert!(verify_domain_finality_rpc_response(&dom_resp, 1).is_ok());
-        assert!(verify_domain_finality_rpc_response(&dom_resp, 2).is_err());
-
-        let mut forged_dom = dom_resp;
-        forged_dom["bucketRoot"] = serde_json::json!(format!("0x{}", "00".repeat(32)));
-        assert!(verify_domain_finality_rpc_response(&forged_dom, 1).is_err());
-
-        let route_resp = serde_json::json!({
-            "sourceBucketRoot": format!("0x{}", hex::encode(cert.established_root)),
-            "targetBucketRoot": format!("0x{}", hex::encode(cert.established_root)),
-            "sourceProof": p1,
-            "targetProof": p2,
-        });
-        assert!(verify_route_finality_rpc_response(&route_resp, 1, 2).is_ok());
-
-        let mut forged_route = route_resp;
-        forged_route["targetBucketRoot"] = serde_json::json!(format!("0x{}", "aa".repeat(32)));
-        assert!(verify_route_finality_rpc_response(&forged_route, 1, 2).is_err());
+        // Inclusion proofs are judged against the locally verified
+        // certificate's own bucket roots - an RPC-chosen root is never an
+        // input, so a root the server forges can prove nothing.
+        assert!(p1.verify(&cert.bucket_root(p1.bucket)));
+        assert!(p2.verify(&cert.bucket_root(p2.bucket)));
+        assert!(!p1.verify(&[0u8; 32]));
     }
 }
