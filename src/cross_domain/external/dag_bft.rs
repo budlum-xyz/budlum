@@ -270,6 +270,9 @@ fn verify_member_sig(
 
 /// Canonical wire payload of a wave-commit bundle: the magic prefix the
 /// decoder requires, then the bincode body, under the payload ceiling.
+///
+/// Convenience: exposed for the fault-proof test in `external_tx`, which
+/// registers a Bullshark domain from a golden sample in this exact encoding.
 pub(crate) fn encode_dag_evidence(bundle: &DagWaveCommitEvidence) -> Result<Vec<u8>, String> {
     let body = bincode::serialize(bundle).map_err(|e| format!("DAG-BFT encode failed: {e}"))?;
     let total = PAYLOAD_MAGIC.len().saturating_add(body.len());
