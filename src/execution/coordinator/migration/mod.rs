@@ -36,10 +36,7 @@ pub mod non_evm;
 pub mod storage_root;
 
 pub use dependencies::{dependency_report, DependencyReport};
-pub use deployment::{
-    create_address, verify_deployment, verify_deployment_anchor, verify_deployment_attested,
-    DeploymentHeaderAnchor, DeploymentProof, DeploymentProofError,
-};
+pub use deployment::{create_address, verify_deployment, DeploymentProof, DeploymentProofError};
 pub use fee::{
     quote_migration_fee, MigrationFeeOverflow, MigrationFeeQuote, MigrationFeeSchedule,
     MigrationUsage,
@@ -440,27 +437,6 @@ pub enum MigrationTxOutcome {
         entries: usize,
         fee: MigrationFeeQuote,
     },
-}
-
-/// Verifies deployment authority against a consensus-anchored Ethereum header
-/// (RLP execution header hash, Beacon SSZ branches, or attested finality
-/// certificate roots) before verifying the deployment MPT proofs, deployer
-/// signature, and source account proof.
-///
-/// Convenience: exposed for fail-closed EVM migration callers that bind
-/// `transactions_root` and `receipts_root` to finalized Ethereum consensus
-/// state rather than caller assertions.
-///
-/// # Errors
-///
-/// Returns [`ImportError`] if header anchoring or any migration invariant fails.
-pub fn begin_import_attested(
-    request: MigrationRequest,
-    chain_id: u64,
-    anchor: &DeploymentHeaderAnchor,
-) -> Result<MigrationPlan, ImportError> {
-    verify_deployment_anchor(&request.deployment, anchor)?;
-    begin_import(request, chain_id)
 }
 
 /// Verifies deployment authority and the finalized source account proof.
