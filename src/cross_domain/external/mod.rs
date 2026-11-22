@@ -206,8 +206,9 @@ pub use domain_bridge::{
 };
 pub use ethereum::{
     bits_for, epoch_of_slot, has_supermajority, minimum_signers, parse_update, participation,
-    period_of_slot, BlsVerifier, EthereumSyncAdapter, SszCommitteePin, SyncCommitteeUpdate,
-    BITVECTOR_BYTES, EPOCHS_PER_SYNC_COMMITTEE_PERIOD, SLOTS_PER_EPOCH, SYNC_COMMITTEE_SIZE,
+    period_of_slot, BlsVerifier, EthereumSyncAdapter, EthereumSyncRotationPayload, SszCommitteePin,
+    SyncCommitteeUpdate, BITVECTOR_BYTES, EPOCHS_PER_SYNC_COMMITTEE_PERIOD, SLOTS_PER_EPOCH,
+    SYNC_COMMITTEE_SIZE,
 };
 pub use evm_hybrid::{
     plan_from_observations, plan_verification, EvmGasSchedule, EvmHybridProof, EvmPlanError,
@@ -217,8 +218,8 @@ pub use evm_hybrid::{
     MAX_ML_DSA_FIELD_BYTES, ML_DSA_ETH_ADDRESS, ML_DSA_FIPS_ADDRESS,
 };
 pub use external_tx::{
-    execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext, ExternalDomainTxError,
-    ObjectiveFaultProof,
+    execute_external_domain_tx, CommitteeRotationProof, ExternalDomainTx, ExternalDomainTxContext,
+    ExternalDomainTxError, ObjectiveFaultProof,
 };
 pub use ghostdag::{
     encode_ghostdag_evidence, GhostdagEvidence, GhostdagHeader, GhostdagPowAdapter,

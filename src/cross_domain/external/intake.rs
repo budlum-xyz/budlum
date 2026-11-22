@@ -806,6 +806,55 @@ impl IntakeState {
     /// forged `RFC-6962` header proofs.
     ///
     /// WIRING: Light-client Tendermint validator-set rotation advancing `pinned_tendermint_anchors`.
+    /// Permissionlessly advance a pinned Ethereum sync committee to the next
+    /// sequential period using an SSZ Merkle branch (`rotate_committee_with_ssz_branch`)
+    /// proving the incoming 512-member BLS12-381 G1 roster opens both the
+    /// finalized beacon `state_root` and the pinned `next_committee_root`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError::CommitteeNotPinned`] if no sync committee is
+    /// pinned for `network`, or [`IntakeError::Registry`] if the SSZ branch,
+    /// gindex pairing, period sequence, commitment opening, or BLS12-381 G1
+    /// pubkey validation fails. State is bit-identical on error.
+    pub(crate) fn rotate_ethereum_committee(
+        &mut self,
+        network: &str,
+        payload: &crate::cross_domain::external::ethereum::EthereumSyncRotationPayload,
+    ) -> Result<crate::cross_domain::external::ethereum::PinnedCommittee, IntakeError> {
+        use crate::cross_domain::external::ethereum::EthereumSyncAdapter;
+
+        let Some(pinned) = self.pinned_ethereum_committees.get(network).cloned() else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        let rotation = payload
+            .to_ssz_rotation()
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let mut adapter = EthereumSyncAdapter::new(network, Some(pinned), None);
+        adapter
+            .rotate_committee_with_ssz_branch(&rotation)
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let updated = adapter
+            .pinned_committee()
+            .cloned()
+            .ok_or(IntakeError::CommitteeNotPinned)?;
+
+        self.pinned_ethereum_committees
+            .insert(network.to_string(), updated.clone());
+        for entry in self.entries.values_mut() {
+            if let AdapterSpec::EthereumSync {
+                network: entry_net,
+                committee,
+            } = &mut entry.spec
+            {
+                if entry_net == network {
+                    *committee = Some(updated.clone());
+                }
+            }
+        }
+        Ok(updated)
+    }
+
     pub fn rotate_tendermint_anchor(
         &mut self,
         network: &str,

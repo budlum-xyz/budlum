@@ -1012,6 +1012,83 @@ pub struct SszCommitteeRotation {
     pub subsequent_committee_root: [u8; 32],
 }
 
+/// Wire-serializable Ethereum Altair/Deneb/Electra sync-committee rotation
+/// bundle carried in `ExternalDomainTx::RotateCommittee` and decoded into
+/// [`SszCommitteeRotation`] with strict 512x48-byte BLS12-381 G1 shape checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EthereumSyncRotationPayload {
+    /// Target sequential period (`current.period + 1`).
+    pub next_period: u64,
+    /// Full 512-member compressed 48-byte BLS12-381 G1 roster for `next_period`.
+    pub next_member_pubkeys: Vec<Vec<u8>>,
+    /// Compressed 48-byte aggregate G1 public key for `next_period`.
+    pub next_aggregate_pubkey: Vec<u8>,
+    /// Verified finalized `BeaconBlockHeader.state_root` from `current.period`.
+    pub finalized_state_root: [u8; 32],
+    /// Fork-matched `next_sync_committee` generalized index (`55` Deneb / `87` Electra).
+    pub next_sync_committee_gindex: u64,
+    /// SSZ Merkle branch proving `sync_committee_hash_tree_root` in `finalized_state_root`.
+    pub next_sync_committee_branch: Vec<[u8; 32]>,
+    /// Fork's `finalized_root_gindex` (`105` Deneb / `169` Electra).
+    pub finalized_root_gindex: u64,
+    /// Commitment to period `next_period + 1` (either `committee_root` or SSZ root).
+    pub subsequent_committee_root: [u8; 32],
+}
+
+impl EthereumSyncRotationPayload {
+    /// Decode and validate exact 512x48-byte BLS12-381 G1 key dimensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError::ConsensusRule`] if the member count is not 512
+    /// or any compressed G1 public key is not 48 bytes.
+    pub(crate) fn to_ssz_rotation(&self) -> Result<SszCommitteeRotation, AdapterError> {
+        if self.next_member_pubkeys.len() != SYNC_COMMITTEE_SIZE as usize {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "sync committee rotation must carry {SYNC_COMMITTEE_SIZE} pubkeys, found {}",
+                    self.next_member_pubkeys.len()
+                ),
+            });
+        }
+        let next_aggregate_pubkey: [u8; 48] = self
+            .next_aggregate_pubkey
+            .as_slice()
+            .try_into()
+            .map_err(|_| AdapterError::ConsensusRule {
+                rule: format!(
+                    "next_aggregate_pubkey must be 48 bytes, found {}",
+                    self.next_aggregate_pubkey.len()
+                ),
+            })?;
+        let mut next_member_pubkeys = [[0u8; 48]; 512];
+        for (idx, pk) in self.next_member_pubkeys.iter().enumerate() {
+            let bytes: [u8; 48] =
+                pk.as_slice()
+                    .try_into()
+                    .map_err(|_| AdapterError::ConsensusRule {
+                        rule: format!(
+                            "sync committee member {idx} pubkey must be 48 bytes, found {}",
+                            pk.len()
+                        ),
+                    })?;
+            if let Some(slot) = next_member_pubkeys.get_mut(idx) {
+                *slot = bytes;
+            }
+        }
+        Ok(SszCommitteeRotation {
+            next_period: self.next_period,
+            next_member_pubkeys,
+            next_aggregate_pubkey,
+            finalized_state_root: self.finalized_state_root,
+            next_sync_committee_gindex: self.next_sync_committee_gindex,
+            next_sync_committee_branch: self.next_sync_committee_branch.clone(),
+            finalized_root_gindex: self.finalized_root_gindex,
+            subsequent_committee_root: self.subsequent_committee_root,
+        })
+    }
+}
+
 /// The adapter.
 pub struct EthereumSyncAdapter {
     descriptor: AdapterDescriptor,
@@ -1338,6 +1415,12 @@ impl EthereumSyncAdapter {
         });
         self.member_pubkeys = Some(rotation.next_member_pubkeys.to_vec());
         Ok(())
+    }
+
+    /// Returns the currently pinned sync committee, if installed.
+    #[must_use]
+    pub(crate) fn pinned_committee(&self) -> Option<&PinnedCommittee> {
+        self.committee.as_ref()
     }
 
     /// Attaches a golden sample. Separate from `new` because a golden sample

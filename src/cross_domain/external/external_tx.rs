@@ -96,6 +96,42 @@ pub enum ExternalDomainTx {
         domain: DomainKey,
         proof: ObjectiveFaultProof,
     },
+    /// Permissionlessly rotate a registered external domain's pinned sync
+    /// committee or BFT validator set using a cryptographic rotation proof
+    /// (Ethereum SSZ branch or ICS-07 Tendermint skipping / bisection update),
+    /// eliminating governance votes for routine committee turnover.
+    /// APPENDED LAST (tag `9`).
+    RotateCommittee {
+        domain: DomainKey,
+        proof: CommitteeRotationProof,
+    },
+}
+
+/// Cryptographic proof authorizing a permissionless committee or validator-set
+/// rotation on a serving external domain without a governance vote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommitteeRotationProof {
+    /// Ethereum Altair/Deneb/Electra sequential sync-committee rotation proved
+    /// via an SSZ Merkle branch (`EthereumSyncAdapter::rotate_committee_with_ssz_branch`).
+    EthereumSyncSsz(Box<crate::cross_domain::external::ethereum::EthereumSyncRotationPayload>),
+    /// Single-hop ICS-07 Tendermint skipping commit rotation
+    /// (`IntakeState::rotate_tendermint_anchor`).
+    TendermintSkip {
+        anchor_commit: Box<crate::cross_domain::external::tendermint::TendermintCommitEvidence>,
+        update: Box<crate::cross_domain::external::tendermint::TendermintCommitEvidence>,
+        next_validators_proof: Option<(
+            [u8; 32],
+            crate::cross_domain::external::tendermint::Rfc6962Proof,
+        )>,
+        trusting_period_secs: u64,
+    },
+    /// Multi-hop ICS-07 Tendermint bisection rotation
+    /// (`IntakeState::rotate_tendermint_anchor_bisection`).
+    TendermintBisection {
+        trusted: Box<crate::cross_domain::external::tendermint::TrustedTendermintState>,
+        light_params: crate::cross_domain::external::tendermint::TendermintLightParams,
+        steps: Vec<crate::cross_domain::external::tendermint::TendermintCommitEvidence>,
+    },
 }
 
 /// Objective protocol-level cryptographic equivocation or single-step fraud
@@ -284,6 +320,9 @@ pub fn execute_external_domain_tx(
         ExternalDomainTx::ChallengeAncestry(evidence) => challenge_ancestry(state, ctx, evidence),
         ExternalDomainTx::SubmitFaultProof { domain, proof } => {
             submit_fault_proof(state, domain, proof)
+        }
+        ExternalDomainTx::RotateCommittee { domain, proof } => {
+            rotate_committee(state, domain, proof)
         }
     }
 }
@@ -656,6 +695,73 @@ fn schedule_fork(
     intake
         .set_version_policy(domain, versions)
         .map_err(ExternalDomainTxError::Fork)
+}
+
+fn rotate_committee(
+    state: &mut AccountState,
+    domain: &DomainKey,
+    proof: &CommitteeRotationProof,
+) -> Result<(), ExternalDomainTxError> {
+    let spec = state
+        .settlement
+        .external_intake
+        .entries
+        .get(domain)
+        .ok_or(ExternalDomainTxError::UnknownDomain)?
+        .spec
+        .clone();
+    let now_unix_secs = state.current_block_unix_secs;
+    let intake = &mut state.settlement.external_intake;
+    match (&spec, proof) {
+        (
+            AdapterSpec::EthereumSync { network, .. },
+            CommitteeRotationProof::EthereumSyncSsz(payload),
+        ) => {
+            intake.rotate_ethereum_committee(network, payload)?;
+            Ok(())
+        }
+        (
+            AdapterSpec::TendermintCommit { network, .. },
+            CommitteeRotationProof::TendermintSkip {
+                anchor_commit,
+                update,
+                next_validators_proof,
+                trusting_period_secs,
+            },
+        ) => {
+            intake.rotate_tendermint_anchor(
+                network,
+                anchor_commit,
+                update,
+                next_validators_proof
+                    .as_ref()
+                    .map(|(root, merkle)| (*root, merkle)),
+                *trusting_period_secs,
+                now_unix_secs,
+            )?;
+            Ok(())
+        }
+        (
+            AdapterSpec::TendermintCommit { network, .. },
+            CommitteeRotationProof::TendermintBisection {
+                trusted,
+                light_params,
+                steps,
+            },
+        ) => {
+            intake.rotate_tendermint_anchor_bisection(
+                network,
+                trusted,
+                *light_params,
+                steps,
+                now_unix_secs,
+            )?;
+            Ok(())
+        }
+        _ => Err(ExternalDomainTxError::Intake(
+            IntakeError::CommitteeNotPinned,
+        )),
+    }
 }
 
 fn submit_fault_proof(
@@ -1916,11 +2022,11 @@ mod tests {
     #[test]
     fn submit_fault_proof_freezes_dag_and_tendermint_domains_and_refuses_unpinned_set() {
         use crate::cross_domain::external::dag_bft::{
-            dag_anchor_cert_sign_bytes, DagAnchorVertex, DagBftSig, DagCausalParent,
-            DagCommitteeMember, DagEquivocationProof, DagVoterVertex, DagWaveCommitEvidence,
+            dag_anchor_cert_sign_bytes, DagAnchorVertex, DagBftSig, DagBftValidator,
+            DagCausalParent, DagEquivocationProof, DagVoterVertex, DagWaveCommitEvidence,
             PinnedDagCommittee,
         };
-        use crate::cross_domain::external::intake::PinnedTendermintAnchor;
+        use crate::cross_domain::external::tendermint::PinnedTendermintAnchor;
         use crate::cross_domain::external::tendermint::{
             validator_address_of, validator_set_commitment, vote_sign_bytes,
             TendermintCommitEvidence, TendermintLightParams, TendermintMisbehaviour,
@@ -1939,12 +2045,12 @@ mod tests {
         let keys: Vec<(KeyPair, PqKeyPair)> = (0..4)
             .map(|_| (KeyPair::generate(), PqKeyPair::generate()))
             .collect();
-        let members: Vec<DagCommitteeMember> = keys
+        let members: Vec<DagBftValidator> = keys
             .iter()
-            .map(|(ek, pk)| DagCommitteeMember {
+            .map(|(ek, pk)| DagBftValidator {
                 ed25519_pubkey: ek.public_key_bytes(),
                 pq_pubkey: pk.public_key_bytes().to_vec(),
-                stake: 100,
+                voting_weight: 100,
             })
             .collect();
         let pinned_dag = PinnedDagCommittee { epoch: 1, members };
@@ -2001,7 +2107,7 @@ mod tests {
             keys.iter()
                 .take(3)
                 .map(|(ek, pk)| DagBftSig {
-                    signer: ek.public_key_bytes(),
+                    signer_pubkey: ek.public_key_bytes(),
                     ed25519_sig: ek.sign(&msg).to_vec(),
                     pq_sig: pk
                         .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &msg)
@@ -2120,6 +2226,7 @@ mod tests {
                 evidence_hash: [0x4A; 32],
                 proposer_address: tm_vals[0].address,
                 commit_time: ts,
+                commit_time_nanos: 0,
                 validators: tm_vals.clone(),
                 signatures: Vec::new(),
             };
@@ -2134,11 +2241,11 @@ mod tests {
                         &c.block_hash,
                         c.parts_total,
                         &c.parts_hash,
-                        c.commit_time,
+                        (c.commit_time as i64, 0),
                     );
                     TendermintSignature {
-                        validator_address: tm_vals[idx].address,
-                        timestamp_secs: c.commit_time,
+                        address: tm_vals[idx].address,
+                        timestamp_seconds: c.commit_time as i64,
                         timestamp_nanos: 0,
                         signature: tm_keys[idx].sign(&sb).to_vec(),
                     }
@@ -2240,5 +2347,226 @@ mod tests {
         )
         .expect("tendermint SubmitFaultProof freezes serving domain");
         assert_fault_domain_state(&state, &tm_key, DomainState::Faulted);
+    }
+
+    #[test]
+    fn rotate_committee_tx_rotates_tendermint_permissionlessly_and_refuses_invalid_eth_ssz() {
+        use crate::cross_domain::external::ethereum::{
+            EthereumSyncRotationPayload, PinnedCommittee,
+        };
+        use crate::cross_domain::external::tendermint::{
+            validator_address_of, validator_set_commitment, vote_sign_bytes,
+            PinnedTendermintAnchor, TendermintCommitEvidence, TendermintSignature,
+            TendermintValidator, EVIDENCE_VERSION,
+        };
+        use crate::crypto::primitives::KeyPair;
+
+        let mut state = AccountState::new();
+        state.current_block_unix_secs = 1_700_000_600;
+        let registrant = addr(0x61);
+        let relayer = addr(0x62); // NOT the registrant (permissionless!)
+        state.add_balance(&registrant, 2_000_000);
+        state.add_balance(&relayer, 2_000_000);
+
+        let chain_id = "cosmos-rot-tx-1";
+        let net = "cosmos-rot-tx";
+        let keys_v1: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
+        let vals_v1: Vec<TendermintValidator> = keys_v1
+            .iter()
+            .map(|kp| TendermintValidator {
+                address: validator_address_of(&kp.public_key_bytes()),
+                public_key: kp.public_key_bytes(),
+                voting_power: 100,
+            })
+            .collect();
+        let set_hash_v1 = validator_set_commitment(&vals_v1);
+
+        // Rotate 1 of 4 validators (3/4 = 75% > 1/3 trusted overlap, 4/4 >= 2/3+1 target quorum).
+        let replacement_kp = KeyPair::generate();
+        let mut vals_v2 = vals_v1.clone();
+        vals_v2[3] = TendermintValidator {
+            address: validator_address_of(&replacement_kp.public_key_bytes()),
+            public_key: replacement_kp.public_key_bytes(),
+            voting_power: 100,
+        };
+        let set_hash_v2 = validator_set_commitment(&vals_v2);
+        let keys_v2: Vec<&KeyPair> = vec![&keys_v1[0], &keys_v1[1], &keys_v1[2], &replacement_kp];
+
+        let mk_commit = |height: u64,
+                         commit_time: u64,
+                         vals: &[TendermintValidator],
+                         kps: &[&KeyPair],
+                         v_hash: [u8; 32],
+                         next_v_hash: [u8; 32],
+                         app_hash: [u8; 32]|
+         -> TendermintCommitEvidence {
+            let mut c = TendermintCommitEvidence {
+                chain_id: chain_id.to_string(),
+                height,
+                round: 0,
+                block_hash: [0u8; 32],
+                parts_total: 1,
+                parts_hash: [0x22; 32],
+                version_block: 11,
+                last_block_hash: [0x33; 32],
+                last_parts_total: 1,
+                last_parts_hash: [0x44; 32],
+                last_commit_hash: [0x55; 32],
+                data_hash: [0x66; 32],
+                validators_hash: v_hash,
+                next_validators_hash: next_v_hash,
+                consensus_hash: [0x77; 32],
+                app_hash,
+                last_results_hash: [0x88; 32],
+                evidence_hash: [0x99; 32],
+                proposer_address: vals[0].address,
+                commit_time,
+                commit_time_nanos: 0,
+                validators: vals.to_vec(),
+                signatures: Vec::new(),
+            };
+            c.block_hash = c.header_hash();
+            for (v, kp) in vals.iter().zip(kps.iter()) {
+                let sb = vote_sign_bytes(
+                    chain_id,
+                    height,
+                    0,
+                    &c.block_hash,
+                    c.parts_total,
+                    &c.parts_hash,
+                    (commit_time as i64, 0),
+                );
+                c.signatures.push(TendermintSignature {
+                    address: v.address,
+                    timestamp_seconds: commit_time as i64,
+                    timestamp_nanos: 0,
+                    signature: kp.sign(&sb).to_vec(),
+                });
+            }
+            c
+        };
+
+        let kps_v1_refs: Vec<&KeyPair> = keys_v1.iter().collect();
+        let anchor_commit = mk_commit(
+            10,
+            1_700_000_000,
+            &vals_v1,
+            &kps_v1_refs,
+            set_hash_v1,
+            set_hash_v2,
+            [0xA1; 32],
+        );
+        let update_commit = mk_commit(
+            20,
+            1_700_000_500,
+            &vals_v2,
+            &keys_v2,
+            set_hash_v2,
+            set_hash_v2,
+            [0xA2; 32],
+        );
+
+        state.settlement.external_intake.pin_tendermint_anchor(
+            net,
+            PinnedTendermintAnchor {
+                chain_id: chain_id.to_string(),
+                validator_set_hash: set_hash_v1,
+            },
+        );
+        let tm_spec = AdapterSpec::TendermintCommit {
+            network: net.to_string(),
+            chain_id: chain_id.to_string(),
+            validator_set_hash: Some(set_hash_v1),
+        };
+        let tm_domain = register_fault_domain(
+            &mut state,
+            tm_spec,
+            RawConsensusEvidence {
+                adapter: crate::cross_domain::external::spec::AdapterId::from_name(&format!(
+                    "tendermint-commit-{net}"
+                )),
+                evidence_version: EVIDENCE_VERSION,
+                network: net.to_string(),
+                payload: anchor_commit.encode().expect("encode tm anchor"),
+                declared_height: 10,
+                declared_root: [0xA1; 32],
+                submitter: registrant,
+            },
+            registrant,
+        );
+
+        // Any relayer (not the registrant) can permissionlessly rotate the
+        // validator set via a valid ICS-07 skipping commit proof.
+        let rot_tx = ExternalDomainTx::RotateCommittee {
+            domain: tm_domain,
+            proof: CommitteeRotationProof::TendermintSkip {
+                anchor_commit: Box::new(anchor_commit),
+                update: Box::new(update_commit),
+                next_validators_proof: None,
+                trusting_period_secs: 3_600,
+            },
+        };
+        execute_external_domain_tx(&mut state, &ctx(relayer), &rot_tx)
+            .expect("permissionless Tendermint ICS-07 rotation must succeed");
+        let pinned_after = state
+            .settlement
+            .external_intake
+            .pinned_tendermint_anchors
+            .get(net)
+            .expect("pinned anchor");
+        assert_eq!(pinned_after.validator_set_hash, set_hash_v2);
+
+        // Mismatched proof family (Ethereum SSZ proof against Tendermint domain)
+        // must fail closed without mutating the anchor.
+        let bad_eth_payload = EthereumSyncRotationPayload {
+            next_period: 1,
+            next_member_pubkeys: Vec::new(),
+            next_aggregate_pubkey: Vec::new(),
+            finalized_state_root: [0u8; 32],
+            next_sync_committee_gindex: 55,
+            next_sync_committee_branch: Vec::new(),
+            finalized_root_gindex: 105,
+            subsequent_committee_root: [0u8; 32],
+        };
+        let err = execute_external_domain_tx(
+            &mut state,
+            &ctx(relayer),
+            &ExternalDomainTx::RotateCommittee {
+                domain: tm_domain,
+                proof: CommitteeRotationProof::EthereumSyncSsz(Box::new(bad_eth_payload.clone())),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExternalDomainTxError::Intake(IntakeError::CommitteeNotPinned)
+        ));
+
+        // Direct Ethereum SSZ rotation with malformed member count must fail closed
+        // and leave the pinned committee untouched.
+        state.settlement.external_intake.pin_ethereum_committee(
+            "sepolia",
+            PinnedCommittee {
+                period: 100,
+                aggregate_pubkey: vec![0xAA; 96],
+                next_committee_root: [0xBB; 32],
+            },
+        );
+        let eth_err = state
+            .settlement
+            .external_intake
+            .rotate_ethereum_committee("sepolia", &bad_eth_payload)
+            .unwrap_err();
+        assert!(matches!(eth_err, IntakeError::Registry(_)));
+        assert_eq!(
+            state
+                .settlement
+                .external_intake
+                .pinned_ethereum_committees
+                .get("sepolia")
+                .expect("pinned")
+                .period,
+            100
+        );
     }
 }

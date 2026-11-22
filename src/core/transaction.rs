@@ -2776,7 +2776,8 @@ impl Transaction {
                 | crate::cross_domain::external::ExternalDomainTx::ChallengeAncestry(_),
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
             TransactionType::ExternalDomain(
-                crate::cross_domain::external::ExternalDomainTx::SubmitFaultProof { .. },
+                crate::cross_domain::external::ExternalDomainTx::SubmitFaultProof { .. }
+                | crate::cross_domain::external::ExternalDomainTx::RotateCommittee { .. },
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature * 2,
             TransactionType::ExternalDomain(_) => schedule.contract_call_gas * 2,
             // Registration validates the domain record and escrows a bond; a
@@ -5079,11 +5080,93 @@ fn encode_external_domain_tx(
             put_u8(out, 7);
             encode_raw_evidence(evidence, out);
         }
-        // Tag 8: objective protocol equivocation or BitVM2 single-step fault proof, appended last.
+        // Tag 8: objective protocol equivocation or BitVM2 single-step fault proof.
         ExternalDomainTx::SubmitFaultProof { domain, proof } => {
             put_u8(out, 8);
             put_fixed(out, &domain.0);
             encode_objective_fault_proof(proof, out);
+        }
+        // Tag 9: permissionless committee or validator-set rotation proof, appended last.
+        ExternalDomainTx::RotateCommittee { domain, proof } => {
+            put_u8(out, 9);
+            put_fixed(out, &domain.0);
+            encode_committee_rotation_proof(proof, out);
+        }
+    }
+}
+
+fn encode_committee_rotation_proof(
+    proof: &crate::cross_domain::external::CommitteeRotationProof,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::CommitteeRotationProof;
+    match proof {
+        CommitteeRotationProof::EthereumSyncSsz(eth) => {
+            put_u8(out, 0);
+            put_u64(out, eth.next_period);
+            put_u64(out, eth.next_member_pubkeys.len() as u64);
+            for pk in &eth.next_member_pubkeys {
+                put_bytes(out, pk);
+            }
+            put_bytes(out, &eth.next_aggregate_pubkey);
+            put_fixed(out, &eth.finalized_state_root);
+            put_u64(out, eth.next_sync_committee_gindex);
+            put_u64(out, eth.next_sync_committee_branch.len() as u64);
+            for node in &eth.next_sync_committee_branch {
+                put_fixed(out, node);
+            }
+            put_u64(out, eth.finalized_root_gindex);
+            put_fixed(out, &eth.subsequent_committee_root);
+        }
+        CommitteeRotationProof::TendermintSkip {
+            anchor_commit,
+            update,
+            next_validators_proof,
+            trusting_period_secs,
+        } => {
+            put_u8(out, 1);
+            encode_tendermint_commit_evidence(anchor_commit, out);
+            encode_tendermint_commit_evidence(update, out);
+            match next_validators_proof {
+                Some((root, merkle)) => {
+                    put_u8(out, 1);
+                    put_fixed(out, root);
+                    put_u64(out, merkle.index as u64);
+                    put_u64(out, merkle.total as u64);
+                    put_u64(out, merkle.aunts.len() as u64);
+                    for aunt in &merkle.aunts {
+                        put_fixed(out, aunt);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+            put_u64(out, *trusting_period_secs);
+        }
+        CommitteeRotationProof::TendermintBisection {
+            trusted,
+            light_params,
+            steps,
+        } => {
+            put_u8(out, 2);
+            put_string(out, &trusted.chain_id);
+            put_u64(out, trusted.height);
+            put_u64(out, trusted.time_secs);
+            put_u64(out, trusted.trusting_period_secs);
+            put_u64(out, trusted.validators.len() as u64);
+            for v in &trusted.validators {
+                put_fixed(out, &v.address);
+                put_fixed(out, &v.public_key);
+                put_u64(out, v.voting_power);
+            }
+            put_fixed(out, &trusted.next_validators_hash);
+            put_u64(out, light_params.trusting_period_secs);
+            put_u64(out, light_params.unbonding_period_secs);
+            put_u64(out, light_params.max_clock_drift_secs);
+            put_u64(out, light_params.max_height_drift);
+            put_u64(out, steps.len() as u64);
+            for step in steps {
+                encode_tendermint_commit_evidence(step, out);
+            }
         }
     }
 }
@@ -5212,8 +5295,8 @@ fn encode_objective_fault_proof(
         }
         ObjectiveFaultProof::TendermintMisbehaviour {
             trusted,
-            light_params,
-            misbehaviour,
+            params: light_params,
+            evidence: misbehaviour,
         } => {
             put_u8(out, 5);
             put_string(out, &trusted.chain_id);
