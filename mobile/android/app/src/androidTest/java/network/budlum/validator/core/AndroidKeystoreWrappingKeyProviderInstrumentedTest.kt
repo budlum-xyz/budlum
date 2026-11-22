@@ -26,12 +26,27 @@ class AndroidKeystoreWrappingKeyProviderInstrumentedTest {
         assertNull(key.encoded)
         assertNull(provider.getExistingAes256Key("budlum.instrumented.absent", false))
 
+        // The provider never calls setRandomizedEncryptionRequired(false), so
+        // the Keystore generates the IV and refuses one from the caller. That
+        // refusal is the invariant, not an obstacle: measured on an emulator
+        // (run 44983814725, job 137089901345), handing the cipher a
+        // caller-generated IV in ENCRYPT_MODE threw
+        // InvalidAlgorithmParameterException: Caller-provided IV not permitted.
+        val callerIv = ByteArray(12).also { SecureRandom().nextBytes(it) }
+        assertTrue(
+            "a Keystore key that accepts a caller IV would allow GCM nonce reuse",
+            runCatching {
+                Cipher.getInstance("AES/GCM/NoPadding")
+                    .init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, callerIv))
+            }.isFailure,
+        )
+
         val plaintext = ByteArray(64).also { SecureRandom().nextBytes(it) }
-        val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
-        val wrapped = Cipher.getInstance("AES/GCM/NoPadding").run {
-            init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
-            doFinal(plaintext)
-        }
+        val encrypting = Cipher.getInstance("AES/GCM/NoPadding")
+        encrypting.init(Cipher.ENCRYPT_MODE, key)
+        val wrapped = encrypting.doFinal(plaintext)
+        val iv = encrypting.iv
+        assertEquals("the Keystore must hand back a fresh 12-byte GCM IV", 12, iv.size)
         val existing = provider.getExistingAes256Key(alias, false)
         val unwrapped = Cipher.getInstance("AES/GCM/NoPadding").run {
             init(Cipher.DECRYPT_MODE, existing, GCMParameterSpec(128, iv))
@@ -69,11 +84,13 @@ class AndroidKeystoreWrappingKeyProviderInstrumentedTest {
             start.countDown()
             val resolved = keys.map { it.get(60, TimeUnit.SECONDS) }
             val plaintext = byteArrayOf(1, 2, 3, 4)
-            val iv = ByteArray(12) { 7 }
-            val wrapped = Cipher.getInstance("AES/GCM/NoPadding").run {
-                init(Cipher.ENCRYPT_MODE, resolved.first(), GCMParameterSpec(128, iv))
-                doFinal(plaintext)
-            }
+            // Same Keystore contract as above: no caller IV on encrypt. The IV
+            // is read back off the cipher and reused for every unwrap, which is
+            // what proves all eight concurrent lookups resolved the same key.
+            val encrypting = Cipher.getInstance("AES/GCM/NoPadding")
+            encrypting.init(Cipher.ENCRYPT_MODE, resolved.first())
+            val wrapped = encrypting.doFinal(plaintext)
+            val iv = encrypting.iv
             for (key in resolved) {
                 val unwrapped = Cipher.getInstance("AES/GCM/NoPadding").run {
                     init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
