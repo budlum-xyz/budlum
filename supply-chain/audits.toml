@@ -73,6 +73,12 @@ criteria = "safe-to-deploy"
 delta = "1.1.10 -> 1.1.11"
 notes = "delta audit against this tree's audited 1.1.10 (diff of the two published sources, 24 files): the miniz_oxide backend now resets with FullReset so a reused decoder cannot leak the previous stream's dictionary, zio.rs reports partial writes and read errors instead of swallowing them, and five tests are added. The only new unsafe is in src/ffi/c.rs (C backend, checks the inflateReset2 return code) and in a test. No build script, network, filesystem or process additions. This workspace pins default-features=false + rust_backend, so the shipped path stays pure-Rust miniz_oxide."
 
+[[audits.form_urlencoded]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+delta = "1.2.2 -> 1.2.3"
+notes = "delta audit chained onto Mozilla's audited 1.2.1 -> 1.2.2 record (supply-chain/imports.lock). 1.2.3 changes exactly two things: Cargo.toml bumps the version and the percent-encoding requirement 2.3.0 -> 2.3.2, and Serializer::for_suffix replaces the start_position-greater-than-target-length panic with start_position.min(len) clamping (src/lib.rs). No unsafe code, no build script, no filesystem, network, process or environment access; the crate is a pure no_std application/x-www-form-urlencoded serializer. Reached through url 2.5.9, the RUSTSEC-2026-0592 fix."
+
 [[audits.g2gen]]
 who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
