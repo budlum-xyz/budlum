@@ -1485,6 +1485,39 @@ mod tests {
         );
     }
 
+    /// Every production source file that could hold the settlement chain.
+    ///
+    /// The list is read from disk at run time rather than baked in with
+    /// `include_str!`. A baked-in path is a compile-time contract: if the
+    /// file it names does not exist in this tree, the test module does not
+    /// compile and every test in the crate fails to build - which reads as a
+    /// red test while proving nothing at all. Reading the tree at run time
+    /// keeps a missing file a test failure instead of a build failure.
+    fn production_sources() -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for relative in [
+            "src/unification/mod.rs",
+            "src/rpc/server.rs",
+            "src/settlement/domains.rs",
+            "src/settlement/universal_finality.rs",
+            "src/settlement/registries.rs",
+            "src/settlement/anchor_ledger.rs",
+            "src/settlement/anchor_production.rs",
+            "src/chain/chain_actor.rs",
+            "src/cross_domain/external/spec.rs",
+            "src/cross_domain/external/intake.rs",
+            "src/cross_domain/external/profile.rs",
+            "src/unification/domain_catalog.rs",
+        ] {
+            let path = root.join(relative);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{relative} is unreadable: {e}"));
+            files.push((relative.to_string(), text));
+        }
+        files
+    }
+
     /// The settlement finality chain must reach the unification ledger.
     ///
     /// A `FinalityGuarantee` derived from an external domain's observed
@@ -1510,29 +1543,7 @@ mod tests {
     /// module itself.
     #[test]
     fn the_observed_finality_guarantee_reaches_the_unification_ledger_in_production() {
-        let sources: [(&str, &str); 6] = [
-            (
-                "src/unification/mod.rs",
-                include_str!("../unification/mod.rs"),
-            ),
-            ("src/rpc/server.rs", include_str!("../rpc/server.rs")),
-            (
-                "src/settlement/domains.rs",
-                include_str!("../settlement/domains.rs"),
-            ),
-            (
-                "src/settlement/universal_finality.rs",
-                include_str!("../settlement/universal_finality.rs"),
-            ),
-            (
-                "src/settlement/registries.rs",
-                include_str!("../settlement/registries.rs"),
-            ),
-            (
-                "src/settlement/finality_gate.rs",
-                include_str!("../settlement/finality_gate.rs"),
-            ),
-        ];
+        let sources = production_sources();
 
         // The test module that may legitimately call into the ledger.
         let test_module_start = sources
@@ -1545,16 +1556,21 @@ mod tests {
         // itself and everything that lives in a `#[cfg(test)]` module.
         let production_callers = |name: &str| -> Vec<String> {
             let mut found = Vec::new();
-            for (path, source) in sources {
+            for (path, source) in &sources {
                 for (at, _) in source.match_indices(name) {
-                    // A declaration is not a call.
-                    if source[at..].starts_with(&format!("{name}(")) {
+                    // The declaration is not a call. It reads `fn name(` or
+                    // `pub fn name(`; strip the space the keyword carries and
+                    // check the word before the name.
+                    let before = source[..at].trim_end();
+                    let word = before
+                        .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or_default();
+                    if word == "fn" {
                         continue;
                     }
-                    // A mention in a doc comment or a string is not a call.
-                    let is_call = source[..at].ends_with('.')
-                        || source[at..].trim_start().starts_with(&format!("{name}("));
-                    if !is_call {
+                    // A call is the name immediately followed by `(`.
+                    if !source[at..].starts_with(&format!("{name}(")) {
                         continue;
                     }
                     let line = source[..at].lines().count() + 1;
@@ -1610,53 +1626,38 @@ mod tests {
     /// cannot find it.
     #[test]
     fn an_external_domain_has_a_ledger_identity() {
-        let sources: [(&str, &str); 5] = [
-            (
-                "src/unification/mod.rs",
-                include_str!("../unification/mod.rs"),
-            ),
-            (
-                "src/unification/domain_catalog.rs",
-                include_str!("../domain_catalog.rs"),
-            ),
-            (
-                "src/cross_domain/external/spec.rs",
-                include_str!("../../cross_domain/external/spec.rs"),
-            ),
-            (
-                "src/cross_domain/external/intake.rs",
-                include_str!("../../cross_domain/external/intake.rs"),
-            ),
-            (
-                "src/cross_domain/external/profile.rs",
-                include_str!("../../cross_domain/external/profile.rs"),
-            ),
-        ];
+        let sources = production_sources();
 
         let test_module_start = sources
             .iter()
-            .find(|(path, _)| *path == "src/unification/mod.rs")
+            .find(|(path, _)| path == "src/unification/mod.rs")
             .and_then(|(_, source)| source.find("#[cfg(test)]"))
             .expect("the unification test module is present");
 
         // The bridge may be spelled in more than one way, so look for the
         // shapes it could take rather than for one name.
         let bridges = [
-            "DomainKey",
             "domain_id_for",
             "ledger_domain_id",
-            "register_domain",
+            "anchor_external_domain_finality",
         ];
 
         let mut production_bridges = Vec::new();
-        for (path, source) in sources {
+        for (path, source) in &sources {
             for bridge in bridges {
                 for (at, _) in source.match_indices(bridge) {
-                    // A declaration or a mention is not a bridge.
-                    let is_declaration = source[at..].starts_with(&format!("{bridge}("))
-                        || source[..at].trim_end().ends_with("fn ")
-                        || source[..at].trim_end().ends_with("struct ");
-                    if is_declaration {
+                    // A declaration is not a bridge. It reads `fn name(` or
+                    // `pub fn name(`; check the word before the name.
+                    let before = source[..at].trim_end();
+                    let word = before
+                        .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or_default();
+                    if word == "fn" {
+                        continue;
+                    }
+                    // A call is the name immediately followed by `(`.
+                    if !source[at..].starts_with(&format!("{bridge}(")) {
                         continue;
                     }
                     let line = source[..at].lines().count() + 1;
@@ -1669,13 +1670,14 @@ mod tests {
             }
         }
 
-        // `register_domain` alone is not a bridge: it is the catalog's
-        // insertion point and it is reachable today. What must exist is a
-        // mapping between the external domain's own key and the numeric
-        // identity the ledger stores.
+        // The bridge has to be a real one: a function that takes an external
+        // domain's own `DomainKey` and hands back the numeric `DomainId` the
+        // ledger stores under. A mention of the key type, on its own, is not
+        // a bridge - the external intake has plenty of those, and none of
+        // them reach the ledger.
         let maps_external_key = production_bridges.iter().any(|entry| {
             let path = entry.split(':').next().unwrap_or_default();
-            !path.starts_with("src/unification/domain_catalog.rs") && entry.contains("DomainKey")
+            !path.starts_with("src/unification/domain_catalog.rs")
         });
 
         assert!(
