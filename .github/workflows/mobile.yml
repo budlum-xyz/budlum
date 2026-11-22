@@ -129,6 +129,15 @@ jobs:
         uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4, 2025-09-09
         with:
           gradle-version: "8.11.1"
+          # The action treats every ref except the default branch as a
+          # read-only cache, and this workflow's only traffic today is a pull
+          # request, so no run was ever allowed to save state: the Gradle user
+          # home and the Gradle distribution were downloaded from scratch on
+          # every run. A cold resolve is what let an upstream rate limit turn
+          # into a red gate. Write on push and dispatch runs, and keep pull
+          # request runs read-only so an unmerged tree cannot seed a cache
+          # that a trusted build later restores.
+          cache-read-only: ${{ github.event_name != 'pull_request' }}
       - name: Install Android SDK platform 36
         run: |
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
@@ -185,6 +194,15 @@ jobs:
         uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4, 2025-09-09
         with:
           gradle-version: "8.11.1"
+          # The action treats every ref except the default branch as a
+          # read-only cache, and this workflow's only traffic today is a pull
+          # request, so no run was ever allowed to save state: the Gradle user
+          # home and the Gradle distribution were downloaded from scratch on
+          # every run. A cold resolve is what let an upstream rate limit turn
+          # into a red gate. Write on push and dispatch runs, and keep pull
+          # request runs read-only so an unmerged tree cannot seed a cache
+          # that a trusted build later restores.
+          cache-read-only: ${{ github.event_name != 'pull_request' }}
       - name: Run Keystore and boot instrumentation on an emulator
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2, 2026-07-05
         with:
