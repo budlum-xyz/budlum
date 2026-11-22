@@ -778,75 +778,86 @@ impl IntakeState {
             .insert(network.into(), anchor);
     }
 
+    /// Maximum `ICS-07` trusting window (14 days, strictly below standard
+    /// 21-day `CometBFT` staking unbonding) accepted by intake anchor rotation.
+    ///
+    /// WIRING: consensus ceiling enforced by [`Self::rotate_tendermint_anchor`]
+    /// and [`Self::rotate_tendermint_anchor_bisection`].
+    pub const MAX_TENDERMINT_TRUSTING_PERIOD_SECS: u64 = 14 * 24 * 60 * 60;
+
     /// Advance a pinned Tendermint light-client anchor across a validator-set
-    /// rotation by verifying an IBC-style skipping or adjacent commit (`>1/3`
-    /// trusted overlap + `>=2/3 + 1` target quorum + RFC-6962 header proofs).
+    /// rotation using two-phase cryptographic anchor authentication (`>= 2/3 + 1`
+    /// pinned-set commit over `anchor_commit` followed by `ICS-07` skipping or
+    /// adjacent commit verification + atomic domain-entry synchronization).
+    ///
+    /// Because [`crate::cross_domain::external::tendermint::PinnedTendermintAnchor`]
+    /// persists `(chain_id, validator_set_hash)` without `next_validators_hash`
+    /// or anchor timestamps, accepting an unsigned caller-built checkpoint would
+    /// let an attacker supply a forged `next_validators_hash` at `height + 1`
+    /// with zero honest signatures or set `trusting_period_secs = u64::MAX`.
+    /// Every trusted header field (`height`, `commit_time`, `next_validators_hash`)
+    /// is therefore derived exclusively from the verified `anchor_commit`.
     ///
     /// # Errors
     ///
-    /// Refuses unpinned networks, chain-id or trusted-set mismatches, expired
-    /// trusting periods, insufficient trusted overlap, or forged header proofs.
+    /// Refuses unpinned networks, chain-id or validator-set mismatches,
+    /// out-of-range or expired trusting periods, forged `anchor_commit`s,
+    /// insufficient trusted overlap, rollback below finalized domain tips, or
+    /// forged `RFC-6962` header proofs.
     ///
     /// WIRING: Light-client Tendermint validator-set rotation advancing `pinned_tendermint_anchors`.
     pub fn rotate_tendermint_anchor(
         &mut self,
         network: &str,
-        trusted: &crate::cross_domain::external::tendermint::TrustedTendermintState,
+        anchor_commit: &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
         update: &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
         next_validators_proof: Option<(
             [u8; 32],
             &crate::cross_domain::external::tendermint::Rfc6962Proof,
         )>,
+        trusting_period_secs: u64,
         now_unix_secs: u64,
     ) -> Result<crate::cross_domain::external::tendermint::VerifiedTendermintSkip, IntakeError>
     {
-        use subtle::ConstantTimeEq;
-
-        let Some(pinned) = self.pinned_tendermint_anchors.get(network) else {
+        let Some(pinned) = self.pinned_tendermint_anchors.get(network).cloned() else {
             return Err(IntakeError::CommitteeNotPinned);
         };
-        if pinned.chain_id != trusted.chain_id {
+        Self::validate_tendermint_trusting_period(trusting_period_secs)?;
+        if pinned.chain_id != anchor_commit.chain_id {
             return Err(IntakeError::CommitteeNotPinned);
         }
-        let trusted_hash = crate::cross_domain::external::tendermint::validator_set_commitment(
-            &trusted.validators,
-        );
-        if !bool::from(trusted_hash.ct_eq(&pinned.validator_set_hash)) {
-            return Err(IntakeError::CommitteeNotPinned);
-        }
+        let derived_trusted = Self::authenticate_tendermint_anchor_commit(
+            network,
+            &pinned,
+            anchor_commit,
+            trusting_period_secs,
+            now_unix_secs,
+        )?;
         let skip = crate::cross_domain::external::tendermint::verify_skipping_commit(
-            trusted,
+            &derived_trusted,
             update,
             None,
             next_validators_proof,
             now_unix_secs,
         )
         .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
-        let new_hash = skip.next_validators_hash.unwrap_or(skip.validator_set_hash);
-        self.pinned_tendermint_anchors.insert(
-            network.to_string(),
-            crate::cross_domain::external::tendermint::PinnedTendermintAnchor {
-                chain_id: trusted.chain_id.clone(),
-                validator_set_hash: new_hash,
-            },
-        );
+        self.commit_rotated_tendermint_anchor(network, &pinned.chain_id, &skip, Some(update))?;
         Ok(skip)
     }
 
     /// Advance a pinned Tendermint light-client anchor across a multi-step
-    /// ICS-07 bisection (`> 1/3` trusted overlap per hop + `>= 2/3 + 1`
-    /// target quorum + RFC-6962 header binding), accepting validator turnover
+    /// `ICS-07` bisection (`> 1/3` trusted overlap per hop + `>= 2/3 + 1`
+    /// target quorum + `RFC-6962` header binding), accepting validator turnover
     /// no single direct skip would accept.
     ///
     /// # Errors
     ///
     /// Refuses unpinned networks and chain-id or validator-set pin mismatches
-    /// with [`IntakeError::CommitteeNotPinned`]; refuses light params that do
-    /// not equal the trusted checkpoint's trusting period (fail-closed - no
-    /// widening, no silent shrink); and refuses empty or oversized step lists
-    /// or any failing step with the light client's own [`AdapterError`]. The
-    /// pin advances only after the whole bisection verifies, so a failing path
-    /// leaves it bit-identical.
+    /// with [`IntakeError::CommitteeNotPinned`]; refuses unauthenticated
+    /// `next_validators_hash` values that diverge from the pinned set; refuses
+    /// out-of-bounds or mismatched light params; refuses rollback below
+    /// finalized domain tips; and refuses empty, oversized, or invalid step
+    /// lists while leaving state bit-identical.
     ///
     /// WIRING: the production door of `tendermint_bisection::verify_bisection`
     /// (the multi-step ICS-07 surface), advancing `pinned_tendermint_anchors`.
@@ -861,7 +872,7 @@ impl IntakeState {
     {
         use subtle::ConstantTimeEq;
 
-        let Some(pinned) = self.pinned_tendermint_anchors.get(network) else {
+        let Some(pinned) = self.pinned_tendermint_anchors.get(network).cloned() else {
             return Err(IntakeError::CommitteeNotPinned);
         };
         if pinned.chain_id != trusted.chain_id {
@@ -873,11 +884,20 @@ impl IntakeState {
         if !bool::from(trusted_hash.ct_eq(&pinned.validator_set_hash)) {
             return Err(IntakeError::CommitteeNotPinned);
         }
+        if trusted.next_validators_hash != [0u8; 32]
+            && !bool::from(
+                trusted
+                    .next_validators_hash
+                    .ct_eq(&pinned.validator_set_hash),
+            )
+        {
+            return Err(IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                    rule: "unauthenticated checkpoint next_validators_hash diverges from pinned validator set; supply a signed anchor commit via rotate_tendermint_anchor".to_string(),
+                },
+            )));
+        }
         if light_params.trusting_period_secs != trusted.trusting_period_secs {
-            // Fail-closed equality: widening the trusting period would let a
-            // stale checkpoint verify outside its bonded fork-accountability
-            // window, and a silent shrink would retire the anchor early. The
-            // rotation runs under exactly the period the checkpoint carries.
             return Err(IntakeError::Registry(RegistryError::Adapter(
                 crate::cross_domain::external::spec::AdapterError::ConsensusRule {
                     rule: format!(
@@ -888,6 +908,7 @@ impl IntakeState {
                 },
             )));
         }
+        Self::validate_tendermint_trusting_period(light_params.trusting_period_secs)?;
         let anchor_root =
             crate::cross_domain::external::tendermint::validator_set_hash(&trusted.validators);
         let mut client = crate::cross_domain::external::tendermint::TendermintLightClient::new(
@@ -900,15 +921,240 @@ impl IntakeState {
         let tip = client
             .verify_bisection(steps, now_unix_secs)
             .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
-        let new_hash = tip.next_validators_hash.unwrap_or(tip.validator_set_hash);
+        self.commit_rotated_tendermint_anchor(network, &pinned.chain_id, &tip, steps.last())?;
+        Ok(tip)
+    }
+
+    fn validate_tendermint_trusting_period(trusting_period_secs: u64) -> Result<(), IntakeError> {
+        if trusting_period_secs == 0
+            || trusting_period_secs > Self::MAX_TENDERMINT_TRUSTING_PERIOD_SECS
+        {
+            return Err(IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                    rule: format!(
+                        "Tendermint rotation trusting_period_secs ({trusting_period_secs}) outside 1..={}",
+                        Self::MAX_TENDERMINT_TRUSTING_PERIOD_SECS
+                    ),
+                },
+            )));
+        }
+        Ok(())
+    }
+
+    fn authenticate_tendermint_anchor_commit(
+        network: &str,
+        pinned: &crate::cross_domain::external::tendermint::PinnedTendermintAnchor,
+        anchor_commit: &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+        trusting_period_secs: u64,
+        now_unix_secs: u64,
+    ) -> Result<crate::cross_domain::external::tendermint::TrustedTendermintState, IntakeError>
+    {
+        use subtle::ConstantTimeEq;
+
+        let commit_set_hash = crate::cross_domain::external::tendermint::validator_set_commitment(
+            &anchor_commit.validators,
+        );
+        if !bool::from(commit_set_hash.ct_eq(&pinned.validator_set_hash)) {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
+        let anchor_adapter = TendermintFinalityAdapter::new_pinned(
+            network,
+            &pinned.chain_id,
+            Some(pinned.validator_set_hash),
+        );
+        let payload = bincode::serialize(anchor_commit).map_err(|e| {
+            IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::Malformed {
+                    offset: 0,
+                    reason: format!("failed to encode Tendermint anchor commit: {e}"),
+                },
+            ))
+        })?;
+        let raw = RawConsensusEvidence {
+            adapter: anchor_adapter.descriptor().id,
+            evidence_version: crate::cross_domain::external::tendermint::EVIDENCE_VERSION,
+            network: network.to_string(),
+            declared_height: anchor_commit.height,
+            declared_root: anchor_commit.app_hash,
+            payload,
+            submitter: Address::default(),
+        };
+        let policy = VerificationPolicy {
+            min_depth: 1,
+            max_age: trusting_period_secs,
+            now: now_unix_secs,
+            require_slashable: true,
+            require_declared_match: true,
+        };
+        anchor_adapter
+            .verify(&raw, &policy)
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let age = now_unix_secs.saturating_sub(anchor_commit.commit_time);
+        if age >= trusting_period_secs {
+            return Err(IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::Stale {
+                    age,
+                    max_age: trusting_period_secs,
+                },
+            )));
+        }
+        Ok(
+            crate::cross_domain::external::tendermint::TrustedTendermintState {
+                chain_id: pinned.chain_id.clone(),
+                height: anchor_commit.height,
+                time_secs: anchor_commit.commit_time,
+                trusting_period_secs,
+                validators: anchor_commit.validators.clone(),
+                next_validators_hash: anchor_commit.next_validators_hash,
+            },
+        )
+    }
+
+    fn stage_rotated_tendermint_entry(
+        &self,
+        key: &DomainKey,
+        entry: &IntakeEntry,
+        (network, chain_id): (&str, &str),
+        new_hash: [u8; 32],
+        skip: &crate::cross_domain::external::tendermint::VerifiedTendermintSkip,
+        final_commit: Option<&crate::cross_domain::external::tendermint::TendermintCommitEvidence>,
+    ) -> Result<
+        (
+            DomainKey,
+            AdapterSpec,
+            RawConsensusEvidence,
+            VerificationPolicy,
+            AdmissionReport,
+        ),
+        IntakeError,
+    > {
+        if let Some(reg) = self.registry.domain(key) {
+            if let Some(last_h) = reg.record.last_accepted_height {
+                if skip.height <= last_h {
+                    return Err(IntakeError::Registry(RegistryError::Adapter(
+                        crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                            rule: format!(
+                                "Tendermint anchor rotation target height {} does not advance past finalized domain tip {last_h}",
+                                skip.height
+                            ),
+                        },
+                    )));
+                }
+            }
+            if let Some(last_ts) = accepted_policy_clock_tip(reg, TimeUnit::UnixSeconds) {
+                if skip.median_time_secs < last_ts
+                    || final_commit.is_some_and(|c| c.commit_time < last_ts)
+                {
+                    return Err(IntakeError::Registry(RegistryError::Adapter(
+                        crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                            rule: format!(
+                                "Tendermint anchor rotation commit time regresses below finalized domain timestamp {last_ts}"
+                            ),
+                        },
+                    )));
+                }
+            }
+        }
+        let Some(commit) = final_commit else {
+            return Err(IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                    rule:
+                        "Tendermint anchor rotation missing terminal commit for registered domain"
+                            .to_string(),
+                },
+            )));
+        };
+        if new_hash != skip.validator_set_hash {
+            return Err(IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                    rule: "registered Tendermint domain rotation requires a commit signed by the rotated validator set so readmission golden evidence stays valid".to_string(),
+                },
+            )));
+        }
+        let new_spec = AdapterSpec::TendermintCommit {
+            network: network.to_string(),
+            chain_id: chain_id.to_string(),
+            validator_set_hash: Some(new_hash),
+        };
+        let payload = bincode::serialize(commit).map_err(|e| {
+            IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::Malformed {
+                    offset: 0,
+                    reason: format!("failed to encode rotated Tendermint golden commit: {e}"),
+                },
+            ))
+        })?;
+        let new_golden = RawConsensusEvidence {
+            adapter: entry.golden.adapter,
+            evidence_version: crate::cross_domain::external::tendermint::EVIDENCE_VERSION,
+            network: network.to_string(),
+            declared_height: commit.height,
+            declared_root: commit.app_hash,
+            payload,
+            submitter: entry.golden.submitter,
+        };
+        let mut new_policy = entry.policy.clone();
+        new_policy.now = new_policy.now.max(commit.commit_time);
+        let rebuilt = new_spec.build(None, Some(new_golden.clone()));
+        let new_admission = admit(rebuilt.as_ref(), &new_policy);
+        if !new_admission.admitted {
+            return Err(IntakeError::AdmissionRefused {
+                golden_verified: new_admission.golden_verified,
+                passed: new_admission.passed(),
+                total: new_admission.total(),
+            });
+        }
+        Ok((*key, new_spec, new_golden, new_policy, new_admission))
+    }
+
+    fn commit_rotated_tendermint_anchor(
+        &mut self,
+        network: &str,
+        chain_id: &str,
+        skip: &crate::cross_domain::external::tendermint::VerifiedTendermintSkip,
+        final_commit: Option<&crate::cross_domain::external::tendermint::TendermintCommitEvidence>,
+    ) -> Result<(), IntakeError> {
+        let new_hash = skip.next_validators_hash.unwrap_or(skip.validator_set_hash);
+        let mut staged_updates = Vec::new();
+
+        for (key, entry) in &self.entries {
+            let AdapterSpec::TendermintCommit {
+                network: entry_net,
+                chain_id: entry_chain,
+                ..
+            } = &entry.spec
+            else {
+                continue;
+            };
+            if entry_net != network || entry_chain != chain_id {
+                continue;
+            }
+            staged_updates.push(self.stage_rotated_tendermint_entry(
+                key,
+                entry,
+                (network, chain_id),
+                new_hash,
+                skip,
+                final_commit,
+            )?);
+        }
+
+        for (key, new_spec, new_golden, new_policy, new_admission) in staged_updates {
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.spec = new_spec;
+                entry.golden = new_golden;
+                entry.policy = new_policy;
+                entry.admission = new_admission;
+            }
+        }
         self.pinned_tendermint_anchors.insert(
             network.to_string(),
             crate::cross_domain::external::tendermint::PinnedTendermintAnchor {
-                chain_id: trusted.chain_id.clone(),
+                chain_id: chain_id.to_string(),
                 validator_set_hash: new_hash,
             },
         );
-        Ok(tip)
+        Ok(())
     }
 
     /// Installs or updates the consensus-pinned modular DA committee for `network`.
@@ -3391,6 +3637,7 @@ mod tests {
             .register_domain(mk_req(Some(valset_hash)), None)
             .expect("pinned Tendermint anchor must admit cleanly");
         assert!(intake.registry.domain(&key).is_some());
+        assert_tendermint_anchor_rotation_doors();
     }
 
     #[test]
@@ -4033,5 +4280,412 @@ mod tests {
             "a proof with no work behind it cannot out-work work"
         );
         assert!(!out_works(10, &SecurityBacking::None));
+    }
+
+    fn sign_tendermint_rotation_commit(
+        chain_id: &str,
+        height: u64,
+        commit_time: u64,
+        app_hash: [u8; 32],
+        next_validators_hash: [u8; 32],
+        keys: &[(&ed25519_dalek::SigningKey, u64)],
+        signer_indices: &[usize],
+    ) -> (
+        Vec<crate::cross_domain::external::tendermint::TendermintValidator>,
+        crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+    ) {
+        use crate::cross_domain::external::tendermint::{
+            validator_address_of, validator_set_commitment, vote_sign_bytes,
+            TendermintCommitEvidence, TendermintSignature, TendermintValidator,
+        };
+        use ed25519_dalek::Signer;
+
+        let validators: Vec<TendermintValidator> = keys
+            .iter()
+            .map(|(sk, power)| {
+                let pk: [u8; 32] = sk.verifying_key().to_bytes();
+                TendermintValidator {
+                    address: validator_address_of(&pk),
+                    public_key: pk,
+                    voting_power: *power,
+                }
+            })
+            .collect();
+        let validators_hash = validator_set_commitment(&validators);
+        let proposer_address = validators.first().map_or([0u8; 20], |v| v.address);
+        let parts_hash = [0x3cu8; 32];
+        let mut commit = TendermintCommitEvidence {
+            chain_id: chain_id.to_string(),
+            height,
+            round: 0,
+            block_hash: [0u8; 32],
+            parts_total: 1,
+            parts_hash,
+            version_block: 11,
+            last_block_hash: [0x11u8; 32],
+            last_parts_total: 1,
+            last_parts_hash: [0x22u8; 32],
+            last_commit_hash: [0x33u8; 32],
+            data_hash: [0x44u8; 32],
+            validators_hash,
+            next_validators_hash,
+            consensus_hash: [0x66u8; 32],
+            app_hash,
+            last_results_hash: [0x88u8; 32],
+            evidence_hash: [0xaau8; 32],
+            proposer_address,
+            commit_time,
+            commit_time_nanos: 0,
+            validators: validators.clone(),
+            signatures: Vec::new(),
+        };
+        commit.block_hash = commit.header_hash();
+        let ts_i64 = i64::try_from(commit_time).expect("timestamp fits i64");
+        commit.signatures = signer_indices
+            .iter()
+            .map(|&idx| {
+                let (sk, _) = keys.get(idx).copied().expect("signer index");
+                let pk: [u8; 32] = sk.verifying_key().to_bytes();
+                let sign_bytes = vote_sign_bytes(
+                    chain_id,
+                    height,
+                    0,
+                    &commit.block_hash,
+                    1,
+                    &parts_hash,
+                    (ts_i64, 0),
+                );
+                TendermintSignature {
+                    address: validator_address_of(&pk),
+                    timestamp_seconds: ts_i64,
+                    timestamp_nanos: 0,
+                    signature: sk.sign(&sign_bytes).to_bytes().to_vec(),
+                }
+            })
+            .collect();
+        (validators, commit)
+    }
+
+    fn assert_tendermint_anchor_rotation_doors() {
+        use crate::cross_domain::external::spec::AdapterError;
+        use crate::cross_domain::external::tendermint::{
+            validator_set_commitment, PinnedTendermintAnchor, TendermintLightParams,
+            TrustedTendermintState, EVIDENCE_VERSION,
+        };
+        use ed25519_dalek::SigningKey;
+
+        let all_sks: Vec<SigningKey> = (1u8..=6)
+            .map(|b| SigningKey::from_bytes(&[b; 32]))
+            .collect();
+        let honest_refs: Vec<(&SigningKey, u64)> =
+            all_sks.iter().take(4).map(|sk| (sk, 100u64)).collect();
+        let rotated_refs: Vec<(&SigningKey, u64)> = all_sks
+            .iter()
+            .skip(2)
+            .take(4)
+            .map(|sk| (sk, 100u64))
+            .collect();
+        let attacker_sks: Vec<SigningKey> = (0xA1u8..=0xA4)
+            .map(|b| SigningKey::from_bytes(&[b; 32]))
+            .collect();
+        let attacker_refs: Vec<(&SigningKey, u64)> =
+            attacker_sks.iter().map(|sk| (sk, 100u64)).collect();
+
+        let (honest_vals, anchor_h100) = sign_tendermint_rotation_commit(
+            "noble-1",
+            100,
+            1_700_000_000,
+            [0x5au8; 32],
+            [0u8; 32],
+            &honest_refs,
+            &[0, 1, 2],
+        );
+        let honest_hash = validator_set_commitment(&honest_vals);
+        let (attacker_vals, attacker_h101) = sign_tendermint_rotation_commit(
+            "noble-1",
+            101,
+            1_700_000_010,
+            [0xEEu8; 32],
+            [0u8; 32],
+            &attacker_refs,
+            &[0, 1, 2, 3],
+        );
+        let attacker_hash = validator_set_commitment(&attacker_vals);
+
+        let mut intake = IntakeState::new();
+        intake.pin_tendermint_anchor(
+            "noble-testnet",
+            PinnedTendermintAnchor {
+                chain_id: "noble-1".to_string(),
+                validator_set_hash: honest_hash,
+            },
+        );
+
+        // 1. Tampering `next_validators_hash` on a genuine anchor commit without
+        //    honest quorum signatures over the rewritten header must fail closed.
+        let mut tampered_anchor = anchor_h100.clone();
+        tampered_anchor.next_validators_hash = attacker_hash;
+        tampered_anchor.block_hash = tampered_anchor.header_hash();
+        assert!(matches!(
+            intake.rotate_tendermint_anchor(
+                "noble-testnet",
+                &tampered_anchor,
+                &attacker_h101,
+                None,
+                86_400,
+                1_700_000_020,
+            ),
+            Err(IntakeError::Registry(RegistryError::Adapter(
+                AdapterError::Crypto { .. }
+            )))
+        ));
+        // Supplying an attacker-signed anchor commit directly fails the pin check.
+        assert!(matches!(
+            intake.rotate_tendermint_anchor(
+                "noble-testnet",
+                &attacker_h101,
+                &attacker_h101,
+                None,
+                86_400,
+                1_700_000_020,
+            ),
+            Err(IntakeError::CommitteeNotPinned)
+        ));
+
+        // 2. Bisection rotation must also refuse an unsigned `next_validators_hash`
+        //    that diverges from the pinned validator set (zero-signature hijack).
+        let forged_trusted = TrustedTendermintState {
+            chain_id: "noble-1".to_string(),
+            height: 100,
+            time_secs: 1_700_000_000,
+            trusting_period_secs: 86_400,
+            validators: honest_vals.clone(),
+            next_validators_hash: attacker_hash,
+        };
+        let bisection_params = TendermintLightParams {
+            trusting_period_secs: 86_400,
+            unbonding_period_secs: 172_800,
+            max_clock_drift_secs: 5,
+            max_height_drift: 100_000,
+        };
+        assert!(matches!(
+            intake.rotate_tendermint_anchor_bisection(
+                "noble-testnet",
+                &forged_trusted,
+                bisection_params,
+                std::slice::from_ref(&attacker_h101),
+                1_700_000_020,
+            ),
+            Err(IntakeError::Registry(RegistryError::Adapter(
+                AdapterError::ConsensusRule { .. }
+            )))
+        ));
+
+        // 3. Trusting-period bounds: 0, > MAX_TENDERMINT_TRUSTING_PERIOD_SECS,
+        //    `u64::MAX`, and expired anchor commits must all fail closed.
+        let (rotated_vals, rot_h120) = sign_tendermint_rotation_commit(
+            "noble-1",
+            120,
+            1_700_000_100,
+            [0x6bu8; 32],
+            [0u8; 32],
+            &rotated_refs,
+            &[0, 1, 2],
+        );
+        let rotated_hash = validator_set_commitment(&rotated_vals);
+        for bad_period in [
+            0u64,
+            IntakeState::MAX_TENDERMINT_TRUSTING_PERIOD_SECS + 1,
+            u64::MAX,
+        ] {
+            assert!(matches!(
+                intake.rotate_tendermint_anchor(
+                    "noble-testnet",
+                    &anchor_h100,
+                    &rot_h120,
+                    None,
+                    bad_period,
+                    1_700_000_105,
+                ),
+                Err(IntakeError::Registry(RegistryError::Adapter(
+                    AdapterError::ConsensusRule { .. }
+                )))
+            ));
+        }
+        assert!(matches!(
+            intake.rotate_tendermint_anchor(
+                "noble-testnet",
+                &anchor_h100,
+                &rot_h120,
+                None,
+                86_400,
+                1_700_086_400,
+            ),
+            Err(IntakeError::Registry(RegistryError::Adapter(
+                AdapterError::Stale { .. }
+            )))
+        ));
+        assert_eq!(
+            intake
+                .pinned_tendermint_anchors
+                .get("noble-testnet")
+                .map(|p| p.validator_set_hash),
+            Some(honest_hash)
+        );
+
+        // 4. Register a live `TendermintCommit` domain and verify rollback refusal + sync.
+        assert_tendermint_domain_rotation_sync(
+            &mut intake,
+            (honest_hash, rotated_hash),
+            (&honest_refs, &rotated_refs),
+            (&anchor_h100, &rot_h120),
+        );
+    }
+
+    fn assert_tendermint_domain_rotation_sync(
+        intake: &mut IntakeState,
+        (honest_hash, rotated_hash): ([u8; 32], [u8; 32]),
+        (honest_refs, rotated_refs): (
+            &[(&ed25519_dalek::SigningKey, u64)],
+            &[(&ed25519_dalek::SigningKey, u64)],
+        ),
+        (anchor_h100, rot_h120): (
+            &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+            &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+        ),
+    ) {
+        use crate::cross_domain::external::spec::AdapterError;
+        use crate::cross_domain::external::tendermint::EVIDENCE_VERSION;
+
+        let spec = AdapterSpec::TendermintCommit {
+            network: "noble-testnet".to_string(),
+            chain_id: "noble-1".to_string(),
+            validator_set_hash: Some(honest_hash),
+        };
+        let adapter_id = spec.build(None, None).descriptor().id;
+        let mk_raw = |c: &crate::cross_domain::external::tendermint::TendermintCommitEvidence| {
+            RawConsensusEvidence {
+                adapter: adapter_id,
+                evidence_version: EVIDENCE_VERSION,
+                network: "noble-testnet".to_string(),
+                declared_height: c.height,
+                declared_root: c.app_hash,
+                payload: bincode::serialize(c).expect("encode commit"),
+                submitter: addr(1),
+            }
+        };
+        let mut policy = VerificationPolicy::strict(1_700_000_000);
+        policy.max_age = 3_600;
+        let key = intake
+            .register_domain(
+                RegistrationRequest {
+                    spec: spec.clone(),
+                    policy,
+                    economics: IntakeState::conservative_economics(1_000_000),
+                    versions: versions_for(&spec),
+                    golden: mk_raw(anchor_h100),
+                    bond_atoms: economics_bond(),
+                    poster: addr(1),
+                },
+                None,
+            )
+            .expect("register domain");
+
+        let (_, tip_h110) = sign_tendermint_rotation_commit(
+            "noble-1",
+            110,
+            1_700_000_050,
+            [0x61u8; 32],
+            [0u8; 32],
+            honest_refs,
+            &[0, 1, 2],
+        );
+        intake
+            .submit_evidence(&mk_raw(&tip_h110), None)
+            .expect("accept finalized height 110");
+
+        let (_, stale_rot_h105) = sign_tendermint_rotation_commit(
+            "noble-1",
+            105,
+            1_700_000_060,
+            [0x62u8; 32],
+            [0u8; 32],
+            rotated_refs,
+            &[0, 1, 2],
+        );
+        assert!(matches!(
+            intake.rotate_tendermint_anchor(
+                "noble-testnet",
+                anchor_h100,
+                &stale_rot_h105,
+                None,
+                86_400,
+                1_700_000_070,
+            ),
+            Err(IntakeError::Registry(RegistryError::Adapter(
+                AdapterError::ConsensusRule { .. }
+            )))
+        ));
+
+        let skip = intake
+            .rotate_tendermint_anchor(
+                "noble-testnet",
+                &tip_h110,
+                rot_h120,
+                None,
+                86_400,
+                1_700_000_105,
+            )
+            .expect("valid two-phase rotation to height 120");
+        assert_eq!(skip.validator_set_hash, rotated_hash);
+        assert_eq!(
+            intake
+                .pinned_tendermint_anchors
+                .get("noble-testnet")
+                .map(|p| p.validator_set_hash),
+            Some(rotated_hash)
+        );
+
+        let (_, retired_h121) = sign_tendermint_rotation_commit(
+            "noble-1",
+            121,
+            1_700_000_110,
+            [0x71u8; 32],
+            [0u8; 32],
+            honest_refs,
+            &[0, 1, 2],
+        );
+        assert!(intake
+            .submit_evidence(&mk_raw(&retired_h121), None)
+            .is_err());
+
+        let (_, post_rot_h121) = sign_tendermint_rotation_commit(
+            "noble-1",
+            121,
+            1_700_000_110,
+            [0x72u8; 32],
+            [0u8; 32],
+            rotated_refs,
+            &[0, 1, 2],
+        );
+        let attested = intake
+            .submit_evidence(&mk_raw(&post_rot_h121), None)
+            .expect("rotated validator set commit must be accepted");
+        assert_eq!(attested.height, 121);
+
+        intake
+            .registry
+            .mark_faulted(&key, "rotation readmit probe")
+            .expect("fault domain");
+        let stored_entry = intake.entries.get(&key).expect("stored entry").clone();
+        let rebuilt = stored_entry
+            .spec
+            .build(None, Some(stored_entry.golden.clone()));
+        let (re_adm, _) =
+            crate::cross_domain::external::admit_observed(rebuilt.as_ref(), &stored_entry.policy);
+        intake
+            .registry
+            .readmit(&key, &re_adm, "post-rotation readmission")
+            .expect("readmission must succeed with rotated golden evidence");
     }
 }
