@@ -2263,20 +2263,20 @@ mod tests {
 
         // Data-offer table bounds per-seller live occupancy and refuses overflow prices.
         assert!(
-            reg.create_offer(seller, ContentId::of(b"unbuyable"), u64::MAX)
+            reg.create_offer(seller, ContentId::of(b"unbuyable"), u64::MAX, 1)
                 .is_err(),
             "u64::MAX price makes purchase arithmetic overflow and permanently pins the slot"
         );
         for n in 0..256u32 {
-            reg.create_offer(seller, ContentId::of(&n.to_le_bytes()), 100)
+            reg.create_offer(seller, ContentId::of(&n.to_le_bytes()), 100, 1)
                 .expect("seller within 256 live data offers");
         }
         assert!(
-            reg.create_offer(seller, ContentId::of(b"257th-offer"), 100)
+            reg.create_offer(seller, ContentId::of(b"257th-offer"), 100, 1)
                 .is_err(),
             "seller exceeding 256 live data offers must be refused"
         );
-        reg.create_offer(other, ContentId::of(b"other-seller-offer"), 100)
+        reg.create_offer(other, ContentId::of(b"other-seller-offer"), 100, 1)
             .expect("independent seller remains able to list");
     }
 }
