@@ -3589,10 +3589,59 @@ mod tests {
             DomainGuardStatus::FrozenByContradiction { .. }
         ));
 
-        // Any evidence submitted at an epoch before the pruned horizon is refused.
-        let stale_err = guard
-            .submit_contradiction(domain_id, &evidence, Address::from([0x77; 32]), 50)
+        // Re-submitting the spent evidence trips the offender replay gate,
+        // which deliberately outranks the epoch-horizon rule.
+        let replay_err = guard
+            .submit_contradiction(
+                domain_id,
+                &evidence,
+                Address::from([0x77; 32]),
+                fresh_height,
+            )
             .unwrap_err();
-        assert!(matches!(stale_err, EconomicGuardError::InvalidEvidence(_)));
+        assert!(matches!(
+            replay_err,
+            EconomicGuardError::DuplicateEvidence(_)
+        ));
+
+        // Evidence whose epoch predates the pruned horizon is refused even
+        // from an untouched prover: the ledger can no longer say whether that
+        // epoch's duplicates were already spent and forgotten.
+        let ed_kp2 = KeyPair::from_seed(&[0x67; 32]).unwrap();
+        let pq_kp2 = PqKeyPair::generate();
+        let domain2 = 607u32;
+        guard
+            .configure_domain(
+                domain2,
+                DomainCeilingPolicy {
+                    prover_ed25519_pubkey: Some(ed_kp2.public_key_bytes()),
+                    prover_pq_pubkey: pq_kp2.public_key_bytes().to_vec(),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .expect("configure second domain");
+        let stmt2_a = contradiction_statement_bytes(domain2, 42, &root_a);
+        let stmt2_b = contradiction_statement_bytes(domain2, 42, &root_b);
+        let stale = ContradictionEvidence::SignedProverDoubleRoot {
+            domain_height: 42,
+            state_root_a: root_a,
+            ed25519_sig_a: ed_kp2.sign(&stmt2_a).to_vec(),
+            pq_sig_a: pq_kp2
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt2_a)
+                .unwrap(),
+            state_root_b: root_b,
+            ed25519_sig_b: ed_kp2.sign(&stmt2_b).to_vec(),
+            pq_sig_b: pq_kp2
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt2_b)
+                .unwrap(),
+        };
+        let stale_err = guard
+            .submit_contradiction(domain2, &stale, Address::from([0x78; 32]), 50)
+            .unwrap_err();
+        assert!(
+            matches!(stale_err, EconomicGuardError::InvalidEvidence(_)),
+            "pre-horizon epoch must be refused: {stale_err:?}"
+        );
     }
 }
