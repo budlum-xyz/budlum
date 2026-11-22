@@ -4370,7 +4370,7 @@ mod tests {
         use crate::cross_domain::external::spec::AdapterError;
         use crate::cross_domain::external::tendermint::{
             validator_set_commitment, PinnedTendermintAnchor, TendermintLightParams,
-            TrustedTendermintState, EVIDENCE_VERSION,
+            TrustedTendermintState,
         };
         use ed25519_dalek::SigningKey;
 
@@ -4492,7 +4492,10 @@ mod tests {
             &rotated_refs,
             &[0, 1, 2],
         );
-        let rotated_hash = validator_set_commitment(&rotated_vals);
+        assert_eq!(
+            rot_h120.validators_hash,
+            validator_set_commitment(&rotated_vals)
+        );
         for bad_period in [
             0u64,
             IntakeState::MAX_TENDERMINT_TRUSTING_PERIOD_SECS + 1,
@@ -4536,27 +4539,25 @@ mod tests {
         // 4. Register a live `TendermintCommit` domain and verify rollback refusal + sync.
         assert_tendermint_domain_rotation_sync(
             &mut intake,
-            (honest_hash, rotated_hash),
-            (&honest_refs, &rotated_refs),
-            (&anchor_h100, &rot_h120),
+            &honest_refs,
+            &rotated_refs,
+            &anchor_h100,
+            &rot_h120,
         );
     }
 
     fn assert_tendermint_domain_rotation_sync(
         intake: &mut IntakeState,
-        (honest_hash, rotated_hash): ([u8; 32], [u8; 32]),
-        (honest_refs, rotated_refs): (
-            &[(&ed25519_dalek::SigningKey, u64)],
-            &[(&ed25519_dalek::SigningKey, u64)],
-        ),
-        (anchor_h100, rot_h120): (
-            &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
-            &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
-        ),
+        honest_refs: &[(&ed25519_dalek::SigningKey, u64)],
+        rotated_refs: &[(&ed25519_dalek::SigningKey, u64)],
+        anchor_h100: &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+        rot_h120: &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
     ) {
         use crate::cross_domain::external::spec::AdapterError;
         use crate::cross_domain::external::tendermint::EVIDENCE_VERSION;
 
+        let honest_hash = anchor_h100.validators_hash;
+        let rotated_hash = rot_h120.validators_hash;
         let spec = AdapterSpec::TendermintCommit {
             network: "noble-testnet".to_string(),
             chain_id: "noble-1".to_string(),
