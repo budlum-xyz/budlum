@@ -2499,6 +2499,10 @@ impl Blockchain {
                 block.index
             },
             ulp_domains_root: state.settlement.ulp_domains_root(),
+            finality_certificate_root: state
+                .settlement
+                .universal_finality_certificate(block.index)
+                .map(|cert| cert.certificate_digest),
         }
     }
 
@@ -3010,6 +3014,10 @@ impl Blockchain {
                 self.chain.last().map_or(0, |b| b.index)
             },
             ulp_domains_root: self.state.settlement.ulp_domains_root(),
+            finality_certificate_root: self
+                .state
+                .settlement
+                .finality_certificate_root(self.chain.last().map_or(0, |b| b.index)),
         }
     }
 

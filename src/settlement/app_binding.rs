@@ -2731,6 +2731,7 @@ mod tests {
                 proof_root: None,
                 proven_height: 0,
                 ulp_domains_root: None,
+                finality_certificate_root: None,
             },
             block_height: 15,
             state_root: "00".repeat(32),

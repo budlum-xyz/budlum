@@ -212,6 +212,104 @@ impl SettlementRegistries {
         }
     }
 
+    /// Derive the canonical three-bucket [`crate::settlement::GlobalFinalityCertificate`]
+    /// for `checkpoint_height` strictly from on-chain settlement state.
+    ///
+    /// Guarantees are always re-derived from registered consensus domains and
+    /// their observed cryptographic posture, never accepted from callers.
+    /// Returns `None` when no consensus domain is registered (empty-gate rule).
+    #[must_use]
+    pub fn universal_finality_certificate(
+        &self,
+        checkpoint_height: u64,
+    ) -> Option<crate::settlement::GlobalFinalityCertificate> {
+        use crate::crypto::facts::QuantumClass;
+        use crate::domain::types::DomainStatus;
+        use crate::settlement::universal_finality::{
+            compose, DomainFinalityEntry, FinalityGuarantee, FinalityPendingReason,
+            FinalityVerdict, FINALITY_BINDS_ALL,
+        };
+
+        if self.domains.is_empty() {
+            return None;
+        }
+        let all_commitments = self.commitments.commitments_for_global_block();
+        let mut entries = Vec::new();
+        for domain in self.domains.domains() {
+            let pq_attested = matches!(
+                self.domains.observed(domain.id).quantum_class(),
+                Some(QuantumClass::Lattice | QuantumClass::Hash)
+            );
+            let guarantee = FinalityGuarantee::for_domain(&domain, pq_attested);
+            let latest_commitment =
+                if domain.last_committed_height > 0 && domain.last_committed_hash != [0u8; 32] {
+                    all_commitments.iter().find(|c| {
+                        c.domain_id == domain.id
+                            && c.domain_height == domain.last_committed_height
+                            && c.domain_block_hash == domain.last_committed_hash
+                    })
+                } else {
+                    None
+                };
+            let (state_root, finality_proof_hash) = latest_commitment
+                .map_or(([0u8; 32], [0u8; 32]), |c| {
+                    (c.state_root, c.finality_proof_hash)
+                });
+            let verdict = match domain.status {
+                DomainStatus::Frozen => FinalityVerdict::Refuted { code: 1 },
+                DomainStatus::Retired => FinalityVerdict::Pending {
+                    reason: FinalityPendingReason::RuleNotSatisfied,
+                },
+                DomainStatus::Active => match latest_commitment {
+                    Some(c) if c.state_root != [0u8; 32] => {
+                        if guarantee.attestation != FINALITY_BINDS_ALL {
+                            FinalityVerdict::Pending {
+                                reason: FinalityPendingReason::AttestationUnbound,
+                            }
+                        } else if guarantee.fault_tolerance_bps == 0 {
+                            FinalityVerdict::Pending {
+                                reason: FinalityPendingReason::RuleNotSatisfied,
+                            }
+                        } else {
+                            FinalityVerdict::Established
+                        }
+                    }
+                    _ => FinalityVerdict::Pending {
+                        reason: FinalityPendingReason::EvidenceMissing,
+                    },
+                },
+            };
+            let guarantee_backing_hash = if domain.validator_set_hash != [0u8; 32] {
+                domain.validator_set_hash
+            } else {
+                domain.config_hash
+            };
+            entries.push(DomainFinalityEntry {
+                domain_id: domain.id,
+                height: domain.last_committed_height,
+                checkpoint_height,
+                state_root,
+                adapter_id: domain.finality_adapter.clone(),
+                adapter_version: 1,
+                finality_proof_hash,
+                guarantee_backing_hash,
+                bond_atoms: u128::from(domain.operator_bond),
+                guarantee,
+                verdict,
+            });
+        }
+        compose(&entries).ok()
+    }
+
+    /// Canonical Keccak-256 digest of the checkpoint
+    /// [`crate::settlement::GlobalFinalityCertificate`], or `None` when no
+    /// consensus domain is registered.
+    #[must_use]
+    pub fn finality_certificate_root(&self, checkpoint_height: u64) -> Option<[u8; 32]> {
+        self.universal_finality_certificate(checkpoint_height)
+            .map(|cert| cert.certificate_digest)
+    }
+
     fn ulp_domain_snapshots(
         &self,
     ) -> Vec<crate::aggregation::universal_light_proof::UlpDomainSnapshot> {
@@ -519,5 +617,111 @@ mod tests {
             .set_status(7, DomainStatus::Frozen)
             .expect("freeze domain");
         assert_eq!(registries.ulp_domains_root(), None);
+    }
+
+    #[test]
+    fn universal_finality_certificate_derives_three_buckets_from_consensus_state() {
+        use crate::core::address::Address;
+        use crate::crypto::facts::{AssumptionClass, CryptoFacts, ObservedScheme};
+        use crate::domain::types::{
+            ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, RootScheme,
+        };
+        use crate::settlement::{FinalityBucket, FinalityPendingReason, FinalityVerdict};
+
+        let mut registries = SettlementRegistries::new();
+        assert_eq!(registries.finality_certificate_root(100), None);
+        assert_eq!(registries.universal_finality_certificate(100), None);
+
+        let make_domain = |id: u32, status: DomainStatus, last_h: u64| ConsensusDomain {
+            id,
+            kind: ConsensusKind::Bft,
+            status,
+            domain_chain_id: 7_000 + u64::from(id),
+            operator: Some(Address::from([1u8; 32])),
+            operator_bond: crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND,
+            config_hash: [0xAA; 32],
+            validator_set_hash: [0xBB; 32],
+            finality_adapter: "tendermint-v1".into(),
+            min_confirmations: 1,
+            bridge_enabled: true,
+            block_hash_scheme: RootScheme::Sha256,
+            state_root_scheme: RootScheme::Sha256,
+            tx_root_scheme: RootScheme::Sha256,
+            last_committed_height: last_h,
+            last_committed_hash: if last_h > 0 { [0x15; 32] } else { [0u8; 32] },
+            pow_parameters: None,
+            zk_program_allowlist: Vec::new(),
+            plugin_code_hash: None,
+            genesis_state_root: [0u8; 32],
+        };
+
+        registries
+            .domains
+            .restore_persisted(make_domain(1, DomainStatus::Active, 15))
+            .expect("register domain 1");
+        let mut facts = CryptoFacts::new();
+        facts.record(ObservedScheme::Proof(AssumptionClass::Hash));
+        registries.domains.record_observed(1, &facts);
+        registries
+            .commitments
+            .insert(DomainCommitment {
+                domain_id: 1,
+                domain_height: 15,
+                domain_block_hash: [0x15; 32],
+                parent_domain_block_hash: [0x14; 32],
+                state_root: [0x30; 32],
+                tx_root: [0x31; 32],
+                event_root: [0x32; 32],
+                finality_proof_hash: [0x33; 32],
+                consensus_kind: ConsensusKind::Bft,
+                validator_set_hash: [0xBB; 32],
+                timestamp_ms: 1_000,
+                sequence: 1,
+                producer: None,
+                state_updates: std::collections::BTreeMap::new(),
+            })
+            .expect("insert commitment for domain 1");
+
+        registries
+            .domains
+            .restore_persisted(make_domain(2, DomainStatus::Active, 0))
+            .expect("register domain 2");
+
+        registries
+            .domains
+            .restore_persisted(make_domain(3, DomainStatus::Frozen, 0))
+            .expect("register domain 3");
+
+        let cert = registries
+            .universal_finality_certificate(100)
+            .expect("certificate must be built");
+        assert_eq!(
+            registries.finality_certificate_root(100),
+            Some(cert.certificate_digest)
+        );
+        assert_eq!(cert.established_count, 1);
+        assert_eq!(cert.pending_count, 1);
+        assert_eq!(cert.refuted_count, 1);
+        assert_eq!(cert.verify_integrity(), Ok(()));
+
+        let p1 = cert.prove_domain(1).expect("proof for domain 1");
+        assert_eq!(p1.bucket, FinalityBucket::Established);
+        assert_eq!(p1.entry.verdict, FinalityVerdict::Established);
+        assert!(p1.verify(&cert.established_root));
+
+        let p2 = cert.prove_domain(2).expect("proof for domain 2");
+        assert_eq!(p2.bucket, FinalityBucket::Pending);
+        assert_eq!(
+            p2.entry.verdict,
+            FinalityVerdict::Pending {
+                reason: FinalityPendingReason::EvidenceMissing,
+            }
+        );
+        assert!(p2.verify(&cert.pending_root));
+
+        let p3 = cert.prove_domain(3).expect("proof for domain 3");
+        assert_eq!(p3.bucket, FinalityBucket::Refuted);
+        assert_eq!(p3.entry.verdict, FinalityVerdict::Refuted { code: 1 });
+        assert!(p3.verify(&cert.refuted_root));
     }
 }

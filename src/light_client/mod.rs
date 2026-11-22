@@ -139,6 +139,20 @@ pub struct UniversalLightPacket {
 
 /// Verified receipt produced by [`LightClient::verify_multi_hop_light_route`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Verified single-domain finality outcome extracted from a trusted
+/// [`crate::settlement::GlobalBlockHeader::finality_certificate_root`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedDomainFinality {
+    pub domain_id: u32,
+    pub bucket: crate::settlement::FinalityBucket,
+    pub height: u64,
+    pub state_root: crate::domain::types::Hash32,
+    pub verdict: crate::settlement::FinalityVerdict,
+    pub guarantee: crate::settlement::FinalityGuarantee,
+    pub hub_composed_guarantee: crate::settlement::FinalityGuarantee,
+    pub guarantee_label: String,
+}
+
 pub struct VerifiedUniversalRoute {
     /// Finalized settlement hub checkpoint height.
     pub hub_height: u64,
@@ -995,6 +1009,88 @@ impl LightClient {
             )));
         }
         Ok(())
+    }
+
+    /// Verify a single domain's finality row and Merkle inclusion proof against
+    /// a consensus-committed [`crate::settlement::GlobalBlockHeader`].
+    ///
+    /// Re-verifies checkpoint trust, global-header state-root binding,
+    /// `finality_certificate_root == Some(certificate.certificate_digest)`,
+    /// full certificate integrity (`verify_integrity`), canonical bucket lookup,
+    /// and the `O(log N)` Keccak-256 Merkle inclusion path.
+    ///
+    /// Convenience: exposed for light-client and wallet callers reading
+    /// certified domain finality without trusting an RPC node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LightClientError`] if checkpoint trust, global-header binding,
+    /// certificate root match, certificate integrity, or Merkle inclusion fails.
+    pub fn verify_finality_certificate_domain(
+        &self,
+        checkpoint: &VerifiedCheckpoint,
+        state_root_body: &crate::domain::types::Hash32,
+        global_header: &crate::settlement::GlobalBlockHeader,
+        certificate: &crate::settlement::GlobalFinalityCertificate,
+        proof: &crate::settlement::DomainFinalityInclusionProof,
+    ) -> Result<VerifiedDomainFinality, LightClientError> {
+        self.ensure_checkpoint_bound_to_trust(checkpoint)?;
+        Self::verify_global_header(checkpoint, state_root_body, global_header)?;
+
+        let Some(committed_root) = global_header.finality_certificate_root else {
+            return Err(LightClientError::GlobalHeaderBinding(
+                "global header carries no finality_certificate_root".into(),
+            ));
+        };
+        if committed_root != certificate.certificate_digest {
+            return Err(LightClientError::GlobalHeaderBinding(
+                "certificate digest does not match global_header.finality_certificate_root".into(),
+            ));
+        }
+        if certificate.checkpoint_height != global_header.checkpoint_height {
+            return Err(LightClientError::GlobalHeaderBinding(
+                "certificate checkpoint_height does not match global_header.checkpoint_height"
+                    .into(),
+            ));
+        }
+        certificate.verify_integrity().map_err(
+            |err: crate::settlement::FinalityComposeError| {
+                LightClientError::VerificationFailed(format!(
+                    "global finality certificate integrity failed: {err:?}"
+                ))
+            },
+        )?;
+        let bucket_root = certificate.bucket_root(proof.bucket);
+        if !proof.verify(&bucket_root) {
+            return Err(LightClientError::VerificationFailed(
+                "domain finality Merkle inclusion proof failed verification".into(),
+            ));
+        }
+        let expected_proof = certificate
+            .prove_domain(proof.entry.domain_id)
+            .ok_or_else(|| {
+                LightClientError::VerificationFailed(
+                    "domain_id absent from verified finality certificate".into(),
+                )
+            })?;
+        if expected_proof.entry.row_digest() != proof.entry.row_digest() {
+            return Err(LightClientError::VerificationFailed(
+                "domain finality row digest conflicts with certificate entry".into(),
+            ));
+        }
+        Ok(VerifiedDomainFinality {
+            domain_id: proof.entry.domain_id,
+            bucket: proof.bucket,
+            height: proof.entry.height,
+            state_root: proof.entry.state_root,
+            verdict: proof.entry.verdict,
+            guarantee: proof.entry.guarantee,
+            hub_composed_guarantee: proof
+                .entry
+                .guarantee
+                .meet(&crate::settlement::FinalityGuarantee::settlement_hub()),
+            guarantee_label: proof.entry.guarantee.label(),
+        })
     }
 
     /// Verifies a multi-hop cross-domain light-client route (`A -> B -> C ...`)
@@ -2110,6 +2206,7 @@ mod tests {
             proof_root: Some([7u8; 32]),
             proven_height: 10,
             ulp_domains_root: None,
+            finality_certificate_root: None,
         };
         state.global_header_summary = header.calculate_hash_bytes();
         let body = state.state_root_body();
@@ -2206,6 +2303,7 @@ mod tests {
             proof_root: Some([7u8; 32]),
             proven_height: 10,
             ulp_domains_root: None,
+            finality_certificate_root: None,
         };
         state.global_header_summary = header.calculate_hash_bytes();
         let body = state.state_root_body();
@@ -2405,6 +2503,7 @@ mod tests {
             proof_root: Some([0x80; 32]),
             proven_height: 25,
             ulp_domains_root: None,
+            finality_certificate_root: None,
         };
         let hub_root = global_header.calculate_hash_bytes();
         state.global_header_summary = hub_root;
@@ -2917,5 +3016,137 @@ mod tests {
             conflict_err,
             LightClientError::GlobalHeaderBinding(_)
         ));
+    }
+
+    #[test]
+    fn verify_finality_certificate_domain_accepts_certified_row_and_rejects_tampering() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::crypto::facts::{AssumptionClass, CryptoFacts, ObservedScheme};
+        use crate::domain::types::{
+            ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, RootScheme,
+        };
+        use crate::settlement::{FinalityBucket, GlobalBlockHeader};
+
+        let mut state = AccountState::new();
+        let dom = ConsensusDomain {
+            id: 42,
+            kind: ConsensusKind::Bft,
+            status: DomainStatus::Active,
+            domain_chain_id: 42_000,
+            operator: Some(Address::from([2u8; 32])),
+            operator_bond: crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND,
+            config_hash: [0xA1; 32],
+            validator_set_hash: [0xB2; 32],
+            finality_adapter: "tendermint-v1".into(),
+            min_confirmations: 1,
+            bridge_enabled: true,
+            block_hash_scheme: RootScheme::Sha256,
+            state_root_scheme: RootScheme::Sha256,
+            tx_root_scheme: RootScheme::Sha256,
+            last_committed_height: 99,
+            last_committed_hash: [0x99; 32],
+            pow_parameters: None,
+            zk_program_allowlist: Vec::new(),
+            plugin_code_hash: None,
+            genesis_state_root: [0u8; 32],
+        };
+        state
+            .settlement
+            .domains
+            .restore_persisted(dom)
+            .expect("register domain");
+        let mut facts = CryptoFacts::new();
+        facts.record(ObservedScheme::Proof(AssumptionClass::Hash));
+        state.settlement.domains.record_observed(42, &facts);
+        state
+            .settlement
+            .commitments
+            .insert(DomainCommitment {
+                domain_id: 42,
+                domain_height: 99,
+                domain_block_hash: [0x99; 32],
+                parent_domain_block_hash: [0x98; 32],
+                state_root: [0x55; 32],
+                tx_root: [0x56; 32],
+                event_root: [0x57; 32],
+                finality_proof_hash: [0x58; 32],
+                consensus_kind: ConsensusKind::Bft,
+                validator_set_hash: [0xB2; 32],
+                timestamp_ms: 1_000,
+                sequence: 1,
+                producer: None,
+                state_updates: std::collections::BTreeMap::new(),
+            })
+            .expect("insert commitment");
+
+        let cert = state
+            .settlement
+            .universal_finality_certificate(10)
+            .expect("certificate derived from consensus state");
+        let proof = cert.prove_domain(42).expect("proof for domain 42");
+
+        let header = GlobalBlockHeader {
+            version: 2,
+            global_height: 0,
+            previous_global_hash: [0u8; 32],
+            chain_id: TEST_CHAIN_ID,
+            timestamp_ms: 1,
+            domain_registry_root: [1u8; 32],
+            domain_commitment_root: [2u8; 32],
+            message_root: [3u8; 32],
+            bridge_state_root: [4u8; 32],
+            replay_nonce_root: [5u8; 32],
+            proposer: None,
+            settlement_finality_root: [6u8; 32],
+            storage_root: None,
+            ai_root: None,
+            identity_root: None,
+            checkpoint_height: 10,
+            external_intake_root: None,
+            app_binding_root: None,
+            delegation_root: None,
+            object_layer_root: None,
+            proof_root: None,
+            proven_height: 0,
+            ulp_domains_root: state.settlement.ulp_domains_root(),
+            finality_certificate_root: Some(cert.certificate_digest),
+        };
+        state.global_header_summary = header.calculate_hash_bytes();
+        let body = state.state_root_body();
+        let checkpoint = VerifiedCheckpoint {
+            height: 10,
+            block_hash: "aa".repeat(32),
+            set_hash: "bb".repeat(32),
+            epoch: 1,
+            state_root: state.calculate_state_root(),
+        };
+        let mut lc = LightClient::new(TEST_CHAIN_ID);
+        lc.anchor_trusted_checkpoint(checkpoint.clone())
+            .expect("anchor checkpoint");
+
+        let verified = lc
+            .verify_finality_certificate_domain(&checkpoint, &body, &header, &cert, &proof)
+            .expect("certified domain inclusion must verify");
+        assert_eq!(verified.domain_id, 42);
+        assert_eq!(verified.bucket, FinalityBucket::Established);
+        assert_eq!(verified.height, 99);
+        assert_eq!(verified.state_root, [0x55; 32]);
+        assert_eq!(
+            verified.guarantee_label,
+            "deterministic-quorum|lattice|slashable|ft=3333bps"
+        );
+
+        let mut bad_cert = cert.clone();
+        bad_cert.certificate_digest[0] ^= 0xFF;
+        assert!(lc
+            .verify_finality_certificate_domain(&checkpoint, &body, &header, &bad_cert, &proof)
+            .is_err());
+
+        let mut bad_proof = proof;
+        bad_proof.entry.state_root[0] ^= 0xFF;
+        assert!(lc
+            .verify_finality_certificate_domain(&checkpoint, &body, &header, &cert, &bad_proof)
+            .is_err());
     }
 }

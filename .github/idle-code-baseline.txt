@@ -614,7 +614,6 @@ src/domain/fork_choice.rs	struct	ResolvedHead
 src/domain/fork_choice.rs	trait	ConsensusDomainForkChoice
 src/domain/plugin.rs	struct	ZkDomainPlugin
 src/domain/plugin_registry.rs	struct	PluginReplacement
-src/domain/registry.rs	const	MAX_REGISTERED_DOMAINS
 src/domain/registry.rs	fn	domain_leaf_hash
 src/domain/sovereign.rs	const	MAX_AUDIT_EXPORT_SPAN_BLOCKS
 src/domain/sovereign.rs	const	MAX_SOVEREIGN_DOMAIN_TEMPLATES

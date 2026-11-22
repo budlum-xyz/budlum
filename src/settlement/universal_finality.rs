@@ -14,12 +14,12 @@
 //! in pure integer arithmetic, and [`compose_cross_domain_route`] computes the
 //! associative, commutative weakest-link meet across any 2-hop or N-hop route.
 //!
-//! WIRING: the global certificate layer ([`FINALITY_BINDS_ALL`],
-//! [`DomainFinalityEntry`], [`FinalityVerdict`], [`FinalityComposeError`] and
-//! [`compose`]) is composed here and called by the settlement aggregator that
-//! builds one `GlobalFinalityHeader` per window; that call site does not exist
-//! in this tree yet, so today the composer's only callers are the tests below.
-//! The note is the door, not a claim that the door is hung.
+//! Every finality checkpoint builds a canonical three-bucket
+//! [`GlobalFinalityCertificate`] via [`compose`] from consensus state in
+//! [`crate::settlement::SettlementRegistries`], commits its Keccak-256 digest
+//! into [`crate::settlement::GlobalBlockHeader::finality_certificate_root`],
+//! and exposes `O(log N)` Merkle inclusion proofs verified by
+//! [`crate::light_client::LightClient::verify_finality_certificate_domain`].
 
 use crate::cross_domain::external::spec::SecurityBacking;
 use crate::cross_domain::external::AdapterSpec;
@@ -729,6 +729,34 @@ impl FinalityGuarantee {
             | FinalityReversibility::DataAvailabilitySampled { .. } => false,
         }
     }
+
+    /// Deterministic human-readable security label describing the exact
+    /// reversibility class, quantum posture, slashable backing, and basis-point
+    /// fault tolerance without any heuristic score or ranking.
+    #[must_use]
+    pub fn label(&self) -> String {
+        let rev = match self.reversibility {
+            FinalityReversibility::ProbabilisticWork { confirmations } => {
+                format!("probabilistic-work({confirmations})")
+            }
+            FinalityReversibility::DataAvailabilitySampled { min_samples } => {
+                format!("da-sampled({min_samples})")
+            }
+            FinalityReversibility::DeterministicQuorum => "deterministic-quorum".to_owned(),
+            FinalityReversibility::CryptographicValidity => "cryptographic-validity".to_owned(),
+        };
+        let quantum = match self.quantum_posture {
+            QuantumClass::Classical => "classical",
+            QuantumClass::Lattice => "lattice",
+            QuantumClass::Hash => "hash",
+        };
+        let slash = if self.slashable_backing {
+            "slashable"
+        } else {
+            "non-slashable"
+        };
+        format!("{rev}|{quantum}|{slash}|ft={}bps", self.fault_tolerance_bps)
+    }
 }
 
 /// Validate a pinned external quorum committee: non-empty, bounded non-zero
@@ -872,201 +900,519 @@ pub enum FinalityVerdict {
     },
 }
 
-/// One domain's certified verdict, as fed into [`compose`].
+/// Maximum number of consensus domains committed in a single
+/// [`GlobalFinalityCertificate`], aligned with the consensus domain registry
+/// ceiling (`4_096`).
+const MAX_CERTIFICATE_DOMAINS: usize = crate::domain::registry::MAX_REGISTERED_DOMAINS;
+
+/// Which of the three non-blocking certificate buckets holds a domain row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FinalityBucket {
+    /// Domain verified and bound all required commitments.
+    Established,
+    /// Domain evidence is incomplete or pending; neither accepted nor refuted.
+    Pending,
+    /// Domain was frozen or rejected by its own rule or dispute evidence.
+    Refuted,
+}
+
+impl FinalityBucket {
+    const fn matches_verdict(self, verdict: FinalityVerdict) -> bool {
+        matches!(
+            (self, verdict),
+            (Self::Established, FinalityVerdict::Established)
+                | (Self::Pending, FinalityVerdict::Pending { .. })
+                | (Self::Refuted, FinalityVerdict::Refuted { .. })
+        )
+    }
+}
+
+/// One domain's certified verdict, as fed into [`compose`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomainFinalityEntry {
-    /// Index of the consensus domain in the settlement registry (`0..16`).
-    pub domain_id: u16,
+    /// Canonical domain identifier in the settlement registry (`DomainId = u32`).
+    pub domain_id: u32,
     /// Finalized height the verdict refers to.
     pub height: u64,
+    /// Settlement checkpoint height at which this row was sealed.
+    pub checkpoint_height: u64,
     /// Domain state root the verdict commits to.
     pub state_root: [u8; 32],
-    /// Exact finality guarantee the domain proof provides.
+    /// Registered finality adapter identifier.
+    pub adapter_id: String,
+    /// Adapter protocol version.
+    pub adapter_version: u32,
+    /// Digest of the verified finality proof bound to this row.
+    pub finality_proof_hash: [u8; 32],
+    /// Digest of the cryptographic/economic backing anchor (validator set or config hash).
+    pub guarantee_backing_hash: [u8; 32],
+    /// Escrowed slashable operator bond backing this domain (in atoms).
+    pub bond_atoms: u128,
+    /// Exact finality guarantee derived strictly from consensus state.
     pub guarantee: FinalityGuarantee,
     /// Three-valued verdict of the domain's own finality rule.
     pub verdict: FinalityVerdict,
 }
 
-/// Failure of [`compose`]. Ordered: structural contradictions first, then
-/// findings, then evidence debt, so a caller always sees the strongest reason.
+impl DomainFinalityEntry {
+    /// Canonical Keccak-256 digest binding every field of this row with explicit
+    /// length-prefixing and domain separation (`BDLM_FINALITY_CERT_ROW_V1`).
+    #[must_use]
+    pub fn row_digest(&self) -> [u8; 32] {
+        use sha3::{Digest as _, Keccak256};
+
+        let mut hasher = Keccak256::new();
+        hasher.update(b"BDLM_FINALITY_CERT_ROW_V1");
+        hasher.update(self.domain_id.to_be_bytes());
+        hasher.update(self.height.to_be_bytes());
+        hasher.update(self.checkpoint_height.to_be_bytes());
+        hasher.update(self.state_root);
+        let adapter_bytes = self.adapter_id.as_bytes();
+        let adapter_len = u64::try_from(adapter_bytes.len()).unwrap_or(u64::MAX);
+        hasher.update(adapter_len.to_be_bytes());
+        hasher.update(adapter_bytes);
+        hasher.update(self.adapter_version.to_be_bytes());
+        hasher.update(self.finality_proof_hash);
+        hasher.update(self.guarantee_backing_hash);
+        hasher.update(self.bond_atoms.to_be_bytes());
+        absorb_guarantee_keccak(&mut hasher, &self.guarantee);
+        absorb_verdict_keccak(&mut hasher, self.verdict);
+        hasher.finalize().into()
+    }
+}
+
+fn absorb_guarantee_keccak(hasher: &mut sha3::Keccak256, guarantee: &FinalityGuarantee) {
+    use sha3::Digest as _;
+
+    let (rev_tag, rev_param): (u8, u64) = match guarantee.reversibility {
+        FinalityReversibility::ProbabilisticWork { confirmations } => (0, confirmations),
+        FinalityReversibility::DataAvailabilitySampled { min_samples } => {
+            (1, u64::from(min_samples))
+        }
+        FinalityReversibility::DeterministicQuorum => (2, 0),
+        FinalityReversibility::CryptographicValidity => (3, 0),
+    };
+    let quantum_tag: u8 = match guarantee.quantum_posture {
+        QuantumClass::Classical => 0,
+        QuantumClass::Lattice => 1,
+        QuantumClass::Hash => 2,
+    };
+    hasher.update([rev_tag]);
+    hasher.update(rev_param.to_be_bytes());
+    hasher.update([quantum_tag]);
+    hasher.update([
+        u8::from(guarantee.attestation.state_root),
+        u8::from(guarantee.attestation.tx_root),
+        u8::from(guarantee.attestation.event_root),
+        u8::from(guarantee.attestation.parent),
+    ]);
+    hasher.update([u8::from(guarantee.slashable_backing)]);
+    hasher.update(guarantee.fault_tolerance_bps.to_be_bytes());
+}
+
+fn absorb_verdict_keccak(hasher: &mut sha3::Keccak256, verdict: FinalityVerdict) {
+    use sha3::Digest as _;
+
+    let (tag, detail): (u8, u16) = match verdict {
+        FinalityVerdict::Established => (0, 0),
+        FinalityVerdict::Refuted { code } => (1, code),
+        FinalityVerdict::Pending { reason } => (
+            2,
+            match reason {
+                FinalityPendingReason::EvidenceMissing => 1,
+                FinalityPendingReason::AttestationUnbound => 2,
+                FinalityPendingReason::RuleNotSatisfied => 3,
+                FinalityPendingReason::BondUnverified => 4,
+            },
+        ),
+    };
+    hasher.update([tag]);
+    hasher.update(detail.to_be_bytes());
+}
+
+fn keccak_cert_empty_root() -> [u8; 32] {
+    use sha3::{Digest as _, Keccak256};
+
+    let mut hasher = Keccak256::new();
+    hasher.update(b"BDLM_FINALITY_CERT_EMPTY_V1");
+    hasher.finalize().into()
+}
+
+fn keccak_cert_leaf(row_digest: &[u8; 32]) -> [u8; 32] {
+    use sha3::{Digest as _, Keccak256};
+
+    let mut hasher = Keccak256::new();
+    hasher.update(b"BDLM_FINALITY_CERT_LEAF_V1");
+    hasher.update(row_digest);
+    hasher.finalize().into()
+}
+
+fn keccak_cert_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    use sha3::{Digest as _, Keccak256};
+
+    let mut hasher = Keccak256::new();
+    hasher.update(b"BDLM_FINALITY_CERT_NODE_V1");
+    hasher.update(left);
+    hasher.update(right);
+    hasher.finalize().into()
+}
+
+fn merkle_depth_for_count(leaf_count: usize) -> usize {
+    if leaf_count <= 1 {
+        return 0;
+    }
+    let mut depth = 0usize;
+    let mut n = leaf_count;
+    while n > 1 {
+        n = n.div_ceil(2);
+        depth = depth.saturating_add(1);
+    }
+    depth
+}
+
+fn compute_bucket_merkle_root(rows: &[DomainFinalityEntry]) -> [u8; 32] {
+    if rows.is_empty() {
+        return keccak_cert_empty_root();
+    }
+    let mut level: Vec<[u8; 32]> = rows
+        .iter()
+        .map(|row| keccak_cert_leaf(&row.row_digest()))
+        .collect();
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut idx = 0usize;
+        while idx < level.len() {
+            let left = level[idx];
+            let right = if idx + 1 < level.len() {
+                level[idx + 1]
+            } else {
+                left
+            };
+            next.push(keccak_cert_node(&left, &right));
+            idx += 2;
+        }
+        level = next;
+    }
+    level[0]
+}
+
+fn build_bucket_inclusion_proof(
+    bucket: FinalityBucket,
+    rows: &[DomainFinalityEntry],
+    target_index: usize,
+) -> Option<DomainFinalityInclusionProof> {
+    let entry = rows.get(target_index)?.clone();
+    let leaf_count = u32::try_from(rows.len()).ok()?;
+    let leaf_index = u32::try_from(target_index).ok()?;
+    let mut level: Vec<[u8; 32]> = rows
+        .iter()
+        .map(|row| keccak_cert_leaf(&row.row_digest()))
+        .collect();
+    let mut siblings = Vec::with_capacity(merkle_depth_for_count(rows.len()));
+    let mut cursor = target_index;
+    while level.len() > 1 {
+        let sibling_idx = if cursor % 2 == 0 {
+            if cursor + 1 < level.len() {
+                cursor + 1
+            } else {
+                cursor
+            }
+        } else {
+            cursor - 1
+        };
+        siblings.push(level[sibling_idx]);
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut idx = 0usize;
+        while idx < level.len() {
+            let left = level[idx];
+            let right = if idx + 1 < level.len() {
+                level[idx + 1]
+            } else {
+                left
+            };
+            next.push(keccak_cert_node(&left, &right));
+            idx += 2;
+        }
+        level = next;
+        cursor /= 2;
+    }
+    Some(DomainFinalityInclusionProof {
+        bucket,
+        leaf_index,
+        leaf_count,
+        entry,
+        siblings,
+    })
+}
+
+/// `O(log N)` binary Keccak-256 Merkle inclusion proof for a single domain row
+/// inside one bucket of a [`GlobalFinalityCertificate`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainFinalityInclusionProof {
+    /// Certificate bucket (`Established`, `Pending`, or `Refuted`) owning this leaf.
+    pub bucket: FinalityBucket,
+    /// Zero-based leaf position inside the sorted bucket.
+    pub leaf_index: u32,
+    /// Total number of leaves in that bucket.
+    pub leaf_count: u32,
+    /// Full domain finality row proven by this path.
+    pub entry: DomainFinalityEntry,
+    /// Bottom-up sibling digests up to the bucket root.
+    pub siblings: Vec<[u8; 32]>,
+}
+
+impl DomainFinalityInclusionProof {
+    /// Verify this inclusion proof against `expected_bucket_root` fail-closed.
+    #[must_use]
+    pub fn verify(&self, expected_bucket_root: &[u8; 32]) -> bool {
+        if self.leaf_count == 0 || self.leaf_index >= self.leaf_count {
+            return false;
+        }
+        if !self.bucket.matches_verdict(self.entry.verdict) {
+            return false;
+        }
+        let Ok(leaf_count_usize) = usize::try_from(self.leaf_count) else {
+            return false;
+        };
+        if self.siblings.len() != merkle_depth_for_count(leaf_count_usize) {
+            return false;
+        }
+        let mut acc = keccak_cert_leaf(&self.entry.row_digest());
+        let mut cursor = self.leaf_index;
+        for sibling in &self.siblings {
+            acc = if cursor % 2 == 0 {
+                keccak_cert_node(&acc, sibling)
+            } else {
+                keccak_cert_node(sibling, &acc)
+            };
+            cursor /= 2;
+        }
+        acc == *expected_bucket_root
+    }
+}
+
+/// Failure of [`compose`] or [`GlobalFinalityCertificate::verify_integrity`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FinalityComposeError {
     /// No domain entries were supplied; an empty certificate proves nothing.
     EmptyDomainSet,
-    /// The same domain index appears twice with different heights or roots.
+    /// The same domain identifier appears more than once in the input set.
     DuplicateDomain {
-        /// Offending domain index.
-        domain_id: u16,
+        /// Offending domain identifier.
+        domain_id: u32,
     },
-    /// Two domains report the same index but contradictory verdicts.
-    ConflictingVerdicts {
-        /// First domain index.
-        first: u16,
-        /// Second domain index.
-        second: u16,
+    /// Entries disagree on the settlement checkpoint height.
+    ConflictingCheckpoints {
+        /// Checkpoint height of the first entry.
+        expected: u64,
+        /// Conflicting checkpoint height encountered.
+        found: u64,
     },
-    /// A domain's own rule rejected its block.
-    RefutedDomain {
-        /// Offending domain tier.
-        domain_id: u16,
-        /// Domain-defined rejection code.
-        code: u16,
-    },
-    /// A proof was measured but does not bind the full commitment set.
+    /// An `Established` row does not bind the full commitment set or carries zero fault tolerance.
     AttestationUnbound {
-        /// Offending domain index.
-        domain_id: u16,
+        /// Offending domain identifier.
+        domain_id: u32,
     },
-    /// Measurement is incomplete; the certificate must be re-submitted.
-    DomainNotEstablished {
-        /// Domain index whose evidence is missing.
-        domain_id: u16,
-        /// Named cause.
-        reason: FinalityPendingReason,
-    },
-    /// More than sixteen domains were supplied; the mask cannot represent them.
+    /// More than [`MAX_CERTIFICATE_DOMAINS`] domains were supplied.
     TooManyDomains,
+    /// A serialized or externally supplied certificate does not match its recomputed digest/roots.
+    IntegrityMismatch,
 }
 
-/// Single global header committing to bounded, individually certified domain
-/// finality verdicts.
+/// Canonical three-bucket global finality certificate sealed at a settlement
+/// checkpoint.
 ///
-/// The certificate is *derived*, never asserted: [`compose`] is the only
-/// constructor, and re-deriving it from the same entries is the verification
-/// rule, so a certificate cannot claim a weaker or stronger guarantee than its
-/// inputs support. The transport-side re-derivation lands with the settlement
-/// aggregator; until then the rule is enforced by the composer itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The certificate is strictly *derived*, never asserted: [`compose`] partitions
+/// all registered domains into `established`, `pending`, and `refuted` buckets
+/// sorted canonically by `domain_id: u32`, commits each bucket with a binary
+/// Keccak-256 Merkle root, folds the weakest-link guarantee over `established`
+/// rows only, and binds every field into [`Self::certificate_digest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GlobalFinalityCertificate {
-    /// Bit `i` set iff domain `i` is `Established` and bound in this certificate.
-    pub domain_mask: u16,
-    /// Number of bound domains (`domain_mask.count_ones()`).
-    pub domain_count: u8,
-    /// Weakest-link guarantee across all bound domains.
-    pub guarantee: FinalityGuarantee,
-    /// Digest over every `(domain_id, height, state_root, guarantee, verdict)`
-    /// tuple: two certificates over different domain roots can never collide.
-    pub domain_commitment: [u8; 32],
-    /// Digest over the certificate header including [`Self::domain_commitment`].
+    /// Settlement checkpoint height at which this certificate was derived.
+    pub checkpoint_height: u64,
+    /// Sorted `Established` domain rows.
+    pub established: Vec<DomainFinalityEntry>,
+    /// Sorted `Pending` domain rows (each carrying its [`FinalityPendingReason`]).
+    pub pending: Vec<DomainFinalityEntry>,
+    /// Sorted `Refuted` domain rows (each carrying its rejection code).
+    pub refuted: Vec<DomainFinalityEntry>,
+    /// Number of `Established` domain rows.
+    pub established_count: u32,
+    /// Number of `Pending` domain rows.
+    pub pending_count: u32,
+    /// Number of `Refuted` domain rows.
+    pub refuted_count: u32,
+    /// Binary Keccak-256 Merkle root over `established`.
+    pub established_root: [u8; 32],
+    /// Binary Keccak-256 Merkle root over `pending`.
+    pub pending_root: [u8; 32],
+    /// Binary Keccak-256 Merkle root over `refuted`.
+    pub refuted_root: [u8; 32],
+    /// Weakest-link guarantee across all `established` rows (`None` when none established).
+    pub guarantee: Option<FinalityGuarantee>,
+    /// Canonical Keccak-256 digest committing every bucket root, count, checkpoint, and guarantee.
     pub certificate_digest: [u8; 32],
 }
 
-/// Mix one entry into a running SHA-256 state, length-prefixed and
-/// domain-separated so that no two tuples share an encoding.
-fn absorb_entry(hasher: &mut impl sha2::Digest, entry: &DomainFinalityEntry) {
-    hasher.update(b"budlum.finality.entry.v1");
-    hasher.update(entry.domain_id.to_be_bytes());
-    hasher.update(entry.height.to_be_bytes());
-    hasher.update(entry.state_root);
-    hasher.update(entry.guarantee.fault_tolerance_bps.to_be_bytes());
-    hasher.update([u8::from(entry.guarantee.slashable_backing)]);
-    hasher.update([
-        u8::from(entry.guarantee.attestation.state_root),
-        u8::from(entry.guarantee.attestation.tx_root),
-        u8::from(entry.guarantee.attestation.event_root),
-        u8::from(entry.guarantee.attestation.parent),
-    ]);
-    hasher.update([match entry.verdict {
-        FinalityVerdict::Established => 0u8,
-        FinalityVerdict::Refuted { .. } => 1,
-        FinalityVerdict::Pending { .. } => 2,
-    }]);
-    hasher.update([entry.guarantee.reversibility.rank()]);
+impl GlobalFinalityCertificate {
+    /// Return the canonical Merkle root for `bucket`.
+    #[must_use]
+    pub const fn bucket_root(&self, bucket: FinalityBucket) -> [u8; 32] {
+        match bucket {
+            FinalityBucket::Established => self.established_root,
+            FinalityBucket::Pending => self.pending_root,
+            FinalityBucket::Refuted => self.refuted_root,
+        }
+    }
+
+    /// Build a binary Keccak-256 Merkle inclusion proof for `domain_id` in its
+    /// owning bucket, or `None` if `domain_id` is absent from this certificate.
+    #[must_use]
+    pub fn prove_domain(&self, domain_id: u32) -> Option<DomainFinalityInclusionProof> {
+        for (bucket, rows) in [
+            (FinalityBucket::Established, self.established.as_slice()),
+            (FinalityBucket::Pending, self.pending.as_slice()),
+            (FinalityBucket::Refuted, self.refuted.as_slice()),
+        ] {
+            if let Ok(idx) = rows.binary_search_by_key(&domain_id, |row| row.domain_id) {
+                return build_bucket_inclusion_proof(bucket, rows, idx);
+            }
+        }
+        None
+    }
+
+    /// Re-derive the entire certificate from its rows and fail closed if any
+    /// bucket root, count, guarantee, ordering, or digest has been tampered with.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FinalityComposeError`] if the underlying rows violate any
+    /// composition invariant or if the recomputed certificate differs from `self`.
+    pub fn verify_integrity(&self) -> Result<(), FinalityComposeError> {
+        let mut all =
+            Vec::with_capacity(self.established.len() + self.pending.len() + self.refuted.len());
+        all.extend(self.established.iter().cloned());
+        all.extend(self.pending.iter().cloned());
+        all.extend(self.refuted.iter().cloned());
+        let rebuilt = compose(&all)?;
+        if rebuilt != *self {
+            return Err(FinalityComposeError::IntegrityMismatch);
+        }
+        Ok(())
+    }
 }
 
-/// Compose a [`GlobalFinalityCertificate`] from per-domain verdicts.
+/// Compose a canonical three-bucket [`GlobalFinalityCertificate`] from
+/// state-derived per-domain verdicts.
 ///
-/// Order of refusal is fixed and therefore testable:
-/// empty set, duplicate domain, refuted domain, unbound attestation, pending
-/// evidence, and only then the weakest-link fold. Structural contradictions
-/// outrank findings, and findings outrank evidence debt; a missing measurement
-/// is never allowed to mask a real contradiction.
+/// Order-independent: entries may be supplied in any order and are sorted
+/// canonically by `domain_id` inside each bucket. Non-blocking: `Pending` and
+/// `Refuted` domains are recorded in their own Merkle-committed buckets rather
+/// than stalling `Established` domains.
 ///
 /// # Errors
 ///
-/// Returns the strongest applicable [`FinalityComposeError`]; see its variants.
+/// Returns [`FinalityComposeError`] on empty input, capacity overflow,
+/// duplicate `domain_id`, conflicting `checkpoint_height`, or an `Established`
+/// entry lacking full commitment attestation or positive fault tolerance.
 pub fn compose(
     entries: &[DomainFinalityEntry],
 ) -> Result<GlobalFinalityCertificate, FinalityComposeError> {
-    use sha2::{Digest as _, Sha256};
+    use sha3::{Digest as _, Keccak256};
 
     let Some(first) = entries.first() else {
         return Err(FinalityComposeError::EmptyDomainSet);
     };
-    if entries.len() > 16 {
+    if entries.len() > MAX_CERTIFICATE_DOMAINS {
         return Err(FinalityComposeError::TooManyDomains);
     }
 
-    let mut seen: u16 = 0;
+    let checkpoint_height = first.checkpoint_height;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut established = Vec::new();
+    let mut pending = Vec::new();
+    let mut refuted = Vec::new();
+
     for entry in entries {
-        if entry.domain_id >= 16 {
-            return Err(FinalityComposeError::TooManyDomains);
-        }
-        let bit = 1u16 << entry.domain_id;
-        if seen & bit != 0 {
+        if !seen.insert(entry.domain_id) {
             return Err(FinalityComposeError::DuplicateDomain {
                 domain_id: entry.domain_id,
             });
         }
-        seen |= bit;
-    }
-
-    for entry in entries {
-        if let FinalityVerdict::Refuted { code } = entry.verdict {
-            return Err(FinalityComposeError::RefutedDomain {
-                domain_id: entry.domain_id,
-                code,
+        if entry.checkpoint_height != checkpoint_height {
+            return Err(FinalityComposeError::ConflictingCheckpoints {
+                expected: checkpoint_height,
+                found: entry.checkpoint_height,
             });
+        }
+        match entry.verdict {
+            FinalityVerdict::Established => {
+                if entry.guarantee.attestation != FINALITY_BINDS_ALL
+                    || entry.guarantee.fault_tolerance_bps == 0
+                {
+                    return Err(FinalityComposeError::AttestationUnbound {
+                        domain_id: entry.domain_id,
+                    });
+                }
+                established.push(entry.clone());
+            }
+            FinalityVerdict::Pending { .. } => pending.push(entry.clone()),
+            FinalityVerdict::Refuted { .. } => refuted.push(entry.clone()),
         }
     }
 
-    for entry in entries {
-        if entry.guarantee.attestation != FINALITY_BINDS_ALL {
-            return Err(FinalityComposeError::AttestationUnbound {
-                domain_id: entry.domain_id,
-            });
+    established.sort_by_key(|row| row.domain_id);
+    pending.sort_by_key(|row| row.domain_id);
+    refuted.sort_by_key(|row| row.domain_id);
+
+    let established_root = compute_bucket_merkle_root(&established);
+    let pending_root = compute_bucket_merkle_root(&pending);
+    let refuted_root = compute_bucket_merkle_root(&refuted);
+
+    let established_count = u32::try_from(established.len()).unwrap_or(u32::MAX);
+    let pending_count = u32::try_from(pending.len()).unwrap_or(u32::MAX);
+    let refuted_count = u32::try_from(refuted.len()).unwrap_or(u32::MAX);
+
+    let guarantee = established.first().map(|head| {
+        established
+            .iter()
+            .skip(1)
+            .fold(head.guarantee, |acc, row| acc.meet(&row.guarantee))
+    });
+
+    let mut header = Keccak256::new();
+    header.update(b"BDLM_FINALITY_CERT_V1");
+    header.update(checkpoint_height.to_be_bytes());
+    header.update(established_count.to_be_bytes());
+    header.update(pending_count.to_be_bytes());
+    header.update(refuted_count.to_be_bytes());
+    header.update(established_root);
+    header.update(pending_root);
+    header.update(refuted_root);
+    match &guarantee {
+        Some(g) => {
+            header.update([1u8]);
+            absorb_guarantee_keccak(&mut header, g);
+        }
+        None => {
+            header.update([0u8]);
         }
     }
-
-    for entry in entries {
-        if let FinalityVerdict::Pending { reason } = entry.verdict {
-            return Err(FinalityComposeError::DomainNotEstablished {
-                domain_id: entry.domain_id,
-                reason,
-            });
-        }
-    }
-
-    let guarantee = entries
-        .iter()
-        .skip(1)
-        .fold(first.guarantee, |acc, entry| acc.meet(&entry.guarantee));
-
-    let mut entry_hasher = Sha256::new();
-    entry_hasher.update(b"budlum.finality.commitment.v1");
-    entry_hasher.update((entries.len() as u64).to_be_bytes());
-    for entry in entries {
-        absorb_entry(&mut entry_hasher, entry);
-    }
-    let domain_commitment: [u8; 32] = entry_hasher.finalize().into();
-
-    let domain_count = seen.count_ones();
-    let domain_count_u8 = u8::try_from(domain_count).unwrap_or(u8::MAX);
-
-    let mut header = Sha256::new();
-    header.update(b"budlum.finality.certificate.v1");
-    header.update(seen.to_be_bytes());
-    header.update([domain_count_u8]);
-    header.update(guarantee.fault_tolerance_bps.to_be_bytes());
-    header.update([guarantee.reversibility.rank()]);
-    header.update(domain_commitment);
     let certificate_digest: [u8; 32] = header.finalize().into();
 
     Ok(GlobalFinalityCertificate {
-        domain_mask: seen,
-        domain_count: domain_count_u8,
+        checkpoint_height,
+        established,
+        pending,
+        refuted,
+        established_count,
+        pending_count,
+        refuted_count,
+        established_root,
+        pending_root,
+        refuted_root,
         guarantee,
-        domain_commitment,
         certificate_digest,
     })
 }
@@ -1617,13 +1963,10 @@ mod tests {
         assert_eq!(econ.safe_value_outflow_ceiling_atoms, 20_000);
     }
 
-    // --- Global certificate composer (TIP-03 production slice) --------------
-    //
-    // These are the same cases proven in the offline scratch crate before the
-    // port; each one pins a rule a naive composer gets wrong.
+    // --- Global certificate composer ---------------------------------------
 
     fn cert_entry(
-        id: u16,
+        id: u32,
         bps: u16,
         reversibility: FinalityReversibility,
         verdict: FinalityVerdict,
@@ -1631,7 +1974,13 @@ mod tests {
         DomainFinalityEntry {
             domain_id: id,
             height: 100 + u64::from(id),
-            state_root: [u8::try_from(id).unwrap_or(0); 32],
+            checkpoint_height: 500,
+            state_root: [u8::try_from(id % 251).unwrap_or(0); 32],
+            adapter_id: "tendermint-v1".to_owned(),
+            adapter_version: 1,
+            finality_proof_hash: [0x11; 32],
+            guarantee_backing_hash: [0x22; 32],
+            bond_atoms: 1_000_000,
             guarantee: FinalityGuarantee {
                 reversibility,
                 quantum_posture: QuantumClass::Hash,
@@ -1644,26 +1993,41 @@ mod tests {
     }
 
     #[test]
-    fn certificate_covers_all_domain_families() {
-        let entries: Vec<_> = (0u16..9)
+    fn certificate_covers_1000_domains_with_merkle_inclusion_proofs() {
+        let entries: Vec<_> = (0u32..1_000)
             .map(|i| {
                 cert_entry(
                     i,
-                    3_333 + i,
+                    3_333 + u16::try_from(i % 100).unwrap_or(0),
                     FinalityReversibility::DeterministicQuorum,
                     FinalityVerdict::Established,
                 )
             })
             .collect();
-        let cert = compose(&entries).expect("nine established domains must compose");
-        assert_eq!(cert.domain_count, 9);
-        assert_eq!(cert.domain_mask, 0b1_1111_1111);
-        assert_eq!(cert.guarantee.fault_tolerance_bps, 3_333);
+        let cert = compose(&entries).expect("1000 established domains must compose");
+        assert_eq!(cert.established_count, 1_000);
+        assert_eq!(cert.pending_count, 0);
+        assert_eq!(cert.refuted_count, 0);
         assert_eq!(
-            compose(&entries),
-            Ok(cert),
-            "composition must be deterministic"
+            cert.guarantee
+                .expect("guarantee present")
+                .fault_tolerance_bps,
+            3_333
         );
+        assert_eq!(cert.verify_integrity(), Ok(()));
+
+        for id in [0u32, 1, 500, 998, 999] {
+            let proof = cert
+                .prove_domain(id)
+                .expect("every certified domain yields a Merkle inclusion proof");
+            assert_eq!(proof.bucket, FinalityBucket::Established);
+            assert!(proof.verify(&cert.established_root));
+            assert!(!proof.verify(&cert.pending_root));
+
+            let mut tampered = proof.clone();
+            tampered.siblings[0][0] ^= 0x01;
+            assert!(!tampered.verify(&cert.established_root));
+        }
     }
 
     #[test]
@@ -1672,10 +2036,22 @@ mod tests {
     }
 
     #[test]
-    fn refutation_outranks_missing_evidence() {
+    fn three_buckets_do_not_block_each_other_and_preserve_three_valued_verdicts() {
         let entries = vec![
             cert_entry(
-                0,
+                10,
+                3_333,
+                FinalityReversibility::DeterministicQuorum,
+                FinalityVerdict::Established,
+            ),
+            cert_entry(
+                20,
+                9_999,
+                FinalityReversibility::CryptographicValidity,
+                FinalityVerdict::Established,
+            ),
+            cert_entry(
+                30,
                 3_333,
                 FinalityReversibility::DeterministicQuorum,
                 FinalityVerdict::Pending {
@@ -1683,23 +2059,41 @@ mod tests {
                 },
             ),
             cert_entry(
-                1,
+                40,
                 3_333,
                 FinalityReversibility::DeterministicQuorum,
                 FinalityVerdict::Refuted { code: 7 },
             ),
         ];
+        let cert =
+            compose(&entries).expect("pending and refuted domains must not stall certificate");
+        assert_eq!(cert.established_count, 2);
+        assert_eq!(cert.pending_count, 1);
+        assert_eq!(cert.refuted_count, 1);
         assert_eq!(
-            compose(&entries),
-            Err(FinalityComposeError::RefutedDomain {
-                domain_id: 1,
-                code: 7
-            })
+            cert.guarantee
+                .expect("established guarantee")
+                .fault_tolerance_bps,
+            3_333
         );
+
+        let p_est = cert.prove_domain(10).expect("established proof");
+        let p_pend = cert.prove_domain(30).expect("pending proof");
+        let p_ref = cert.prove_domain(40).expect("refuted proof");
+        assert_eq!(p_est.bucket, FinalityBucket::Established);
+        assert_eq!(p_pend.bucket, FinalityBucket::Pending);
+        assert_eq!(p_ref.bucket, FinalityBucket::Refuted);
+        assert!(p_est.verify(&cert.established_root));
+        assert!(p_pend.verify(&cert.pending_root));
+        assert!(p_ref.verify(&cert.refuted_root));
+
+        let mut spoofed = p_pend;
+        spoofed.bucket = FinalityBucket::Established;
+        assert!(!spoofed.verify(&cert.established_root));
     }
 
     #[test]
-    fn pending_domain_is_resubmittable_not_rejected() {
+    fn pending_only_certificate_has_no_established_guarantee() {
         let entries = vec![cert_entry(
             0,
             3_333,
@@ -1708,20 +2102,15 @@ mod tests {
                 reason: FinalityPendingReason::BondUnverified,
             },
         )];
-        let err = compose(&entries).expect_err("pending must not certify");
-        // Evidence debt is re-submittable, not a rejection: the variant names
-        // the domain and the cause instead of a refusal.
-        assert!(matches!(
-            err,
-            FinalityComposeError::DomainNotEstablished {
-                domain_id: 0,
-                reason: FinalityPendingReason::BondUnverified,
-            }
-        ));
+        let cert = compose(&entries).expect("pending-only checkpoint still seals");
+        assert_eq!(cert.established_count, 0);
+        assert_eq!(cert.pending_count, 1);
+        assert_eq!(cert.guarantee, None);
+        assert_eq!(cert.verify_integrity(), Ok(()));
     }
 
     #[test]
-    fn unbound_attestation_cannot_enter_a_certificate() {
+    fn unbound_established_attestation_cannot_enter_a_certificate() {
         let mut entry = cert_entry(
             0,
             3_333,
@@ -1736,7 +2125,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_domain_index_is_refused() {
+    fn duplicate_domain_index_across_buckets_is_refused() {
         let entries = vec![
             cert_entry(
                 3,
@@ -1748,7 +2137,9 @@ mod tests {
                 3,
                 3_333,
                 FinalityReversibility::DeterministicQuorum,
-                FinalityVerdict::Established,
+                FinalityVerdict::Pending {
+                    reason: FinalityPendingReason::EvidenceMissing,
+                },
             ),
         ];
         assert_eq!(
@@ -1758,23 +2149,164 @@ mod tests {
     }
 
     #[test]
-    fn same_guarantee_different_domain_roots_are_distinguished() {
-        let a = vec![cert_entry(
+    fn conflicting_checkpoint_heights_are_refused() {
+        let a = cert_entry(
             0,
             3_333,
             FinalityReversibility::DeterministicQuorum,
             FinalityVerdict::Established,
-        )];
-        let mut b = a.clone();
-        b[0].state_root = [9u8; 32];
-        let cert_a = compose(&a).expect("a");
-        let cert_b = compose(&b).expect("b");
-        assert_ne!(cert_a.domain_commitment, cert_b.domain_commitment);
-        assert_ne!(cert_a.certificate_digest, cert_b.certificate_digest);
-        assert!(
-            cert_a != compose(&b).expect("b"),
-            "a certificate must not verify another domain set"
         );
+        let mut b = cert_entry(
+            1,
+            3_333,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Established,
+        );
+        b.checkpoint_height = 501;
+        assert_eq!(
+            compose(&[a, b]),
+            Err(FinalityComposeError::ConflictingCheckpoints {
+                expected: 500,
+                found: 501,
+            })
+        );
+    }
+
+    #[test]
+    fn composition_is_order_independent_across_permutations() {
+        let e0 = cert_entry(
+            5,
+            3_333,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Established,
+        );
+        let e1 = cert_entry(
+            1,
+            4_999,
+            FinalityReversibility::ProbabilisticWork { confirmations: 6 },
+            FinalityVerdict::Established,
+        );
+        let e2 = cert_entry(
+            9,
+            3_333,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Pending {
+                reason: FinalityPendingReason::EvidenceMissing,
+            },
+        );
+        let cert_a = compose(&[e0.clone(), e1.clone(), e2.clone()]).expect("order a");
+        let cert_b = compose(&[e2, e0, e1]).expect("order b");
+        assert_eq!(cert_a, cert_b);
+        assert_eq!(cert_a.certificate_digest, cert_b.certificate_digest);
+    }
+
+    #[test]
+    fn every_single_row_field_changes_row_digest() {
+        let base = cert_entry(
+            7,
+            4_999,
+            FinalityReversibility::ProbabilisticWork { confirmations: 6 },
+            FinalityVerdict::Established,
+        );
+        let base_digest = base.row_digest();
+
+        let mut cases: Vec<(&str, DomainFinalityEntry)> = Vec::new();
+        let mut c = base.clone();
+        c.domain_id = 8;
+        cases.push(("domain_id", c));
+        let mut c = base.clone();
+        c.height += 1;
+        cases.push(("height", c));
+        let mut c = base.clone();
+        c.checkpoint_height += 1;
+        cases.push(("checkpoint_height", c));
+        let mut c = base.clone();
+        c.state_root[0] ^= 1;
+        cases.push(("state_root", c));
+        let mut c = base.clone();
+        c.adapter_id = "ethereum-sync-v1".to_owned();
+        cases.push(("adapter_id", c));
+        let mut c = base.clone();
+        c.adapter_version = 2;
+        cases.push(("adapter_version", c));
+        let mut c = base.clone();
+        c.finality_proof_hash[0] ^= 1;
+        cases.push(("finality_proof_hash", c));
+        let mut c = base.clone();
+        c.guarantee_backing_hash[0] ^= 1;
+        cases.push(("guarantee_backing_hash", c));
+        let mut c = base.clone();
+        c.bond_atoms += 1;
+        cases.push(("bond_atoms", c));
+        let mut c = base.clone();
+        c.guarantee.reversibility = FinalityReversibility::ProbabilisticWork { confirmations: 100 };
+        cases.push(("reversibility.confirmations", c));
+        let mut c = base.clone();
+        c.guarantee.reversibility =
+            FinalityReversibility::DataAvailabilitySampled { min_samples: 75 };
+        cases.push(("reversibility.da_samples", c));
+        let mut c = base.clone();
+        c.guarantee.quantum_posture = QuantumClass::Classical;
+        cases.push(("quantum_posture", c));
+        let mut c = base.clone();
+        c.guarantee.attestation.event_root = false;
+        cases.push(("attestation.event_root", c));
+        let mut c = base.clone();
+        c.guarantee.slashable_backing = false;
+        cases.push(("slashable_backing", c));
+        let mut c = base.clone();
+        c.guarantee.fault_tolerance_bps = 3_333;
+        cases.push(("fault_tolerance_bps", c));
+        let mut c = base.clone();
+        c.verdict = FinalityVerdict::Refuted { code: 1 };
+        cases.push(("verdict.refuted_1", c));
+        let mut c = base.clone();
+        c.verdict = FinalityVerdict::Refuted { code: 2 };
+        cases.push(("verdict.refuted_2", c));
+        let mut c = base.clone();
+        c.verdict = FinalityVerdict::Pending {
+            reason: FinalityPendingReason::EvidenceMissing,
+        };
+        cases.push(("verdict.pending_missing", c));
+        let mut c = base.clone();
+        c.verdict = FinalityVerdict::Pending {
+            reason: FinalityPendingReason::BondUnverified,
+        };
+        cases.push(("verdict.pending_bond", c));
+
+        for (field, mutated) in &cases {
+            assert_ne!(
+                mutated.row_digest(),
+                base_digest,
+                "mutating {field} must change DomainFinalityEntry::row_digest"
+            );
+        }
+        let r1 = cases
+            .iter()
+            .find(|(n, _)| *n == "verdict.refuted_1")
+            .expect("r1")
+            .1
+            .row_digest();
+        let r2 = cases
+            .iter()
+            .find(|(n, _)| *n == "verdict.refuted_2")
+            .expect("r2")
+            .1
+            .row_digest();
+        assert_ne!(r1, r2);
+        let p1 = cases
+            .iter()
+            .find(|(n, _)| *n == "verdict.pending_missing")
+            .expect("p1")
+            .1
+            .row_digest();
+        let p2 = cases
+            .iter()
+            .find(|(n, _)| *n == "verdict.pending_bond")
+            .expect("p2")
+            .1
+            .row_digest();
+        assert_ne!(p1, p2);
     }
 
     #[test]
@@ -1794,15 +2326,16 @@ mod tests {
             ),
         ];
         let cert = compose(&entries).expect("compose");
-        assert_eq!(cert.guarantee.fault_tolerance_bps, 4_999);
+        let guarantee = cert.guarantee.expect("established guarantee");
+        assert_eq!(guarantee.fault_tolerance_bps, 4_999);
         assert_eq!(
-            cert.guarantee.reversibility,
+            guarantee.reversibility,
             FinalityReversibility::ProbabilisticWork { confirmations: 6 }
         );
     }
 
     #[test]
-    fn tampered_certificate_fails_verification() {
+    fn tampered_certificate_fails_integrity_verification() {
         let entries = vec![cert_entry(
             0,
             3_333,
@@ -1810,13 +2343,16 @@ mod tests {
             FinalityVerdict::Established,
         )];
         let mut cert = compose(&entries).expect("compose");
-        cert.domain_count = 2;
-        assert_ne!(cert, compose(&entries).expect("compose"));
+        cert.established_count = 2;
+        assert_eq!(
+            cert.verify_integrity(),
+            Err(FinalityComposeError::IntegrityMismatch)
+        );
     }
 
     #[test]
-    fn more_than_sixteen_domains_is_refused() {
-        let entries: Vec<_> = (0u16..17)
+    fn more_than_max_certificate_domains_is_refused() {
+        let entries: Vec<_> = (0u32..u32::try_from(MAX_CERTIFICATE_DOMAINS + 1).expect("fits u32"))
             .map(|i| {
                 cert_entry(
                     i,
@@ -1827,6 +2363,15 @@ mod tests {
             })
             .collect();
         assert_eq!(compose(&entries), Err(FinalityComposeError::TooManyDomains));
+    }
+
+    #[test]
+    fn guarantee_label_is_deterministic_and_float_free() {
+        let hub = FinalityGuarantee::settlement_hub();
+        assert_eq!(
+            hub.label(),
+            "deterministic-quorum|lattice|slashable|ft=3333bps"
+        );
     }
 }
 

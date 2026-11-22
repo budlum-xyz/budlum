@@ -3833,6 +3833,7 @@ mod tests {
             proof_root: Some([12u8; 32]),
             proven_height: 7,
             ulp_domains_root: Some([13u8; 32]),
+            finality_certificate_root: Some([14u8; 32]),
         };
         let msg = NetworkMessage::GlobalHeader(header.clone());
         let proto_msg = pb::ProtoNetworkMessage::from(&msg);

@@ -3608,6 +3608,7 @@ mod tests {
             proof_root: None,
             proven_height: 0,
             ulp_domains_root: None,
+            finality_certificate_root: None,
         };
 
         let dir = tempdir().unwrap();

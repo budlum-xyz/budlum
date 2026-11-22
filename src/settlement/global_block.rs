@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Tamper-evident at the global settlement layer.
 ///
 /// **Backward compatibility:** the domain-separation tag is
-/// `BDLM_GLOBAL_BLOCK_V10`. V2 separated pre- and post-storage-root headers,
+/// `BDLM_GLOBAL_BLOCK_V11`. V2 separated pre- and post-storage-root headers,
 /// V3 added `ai_root`, V4 encodes each optional root behind a presence byte
 /// so `None` and `Some([0; 32])` hash differently, and V5 added
 /// `identity_root`. Old serialized headers (without the fields) still
@@ -136,6 +136,16 @@ pub struct GlobalBlockHeader {
     /// directly to consensus state without requiring out-of-band root pinning.
     #[serde(default)]
     pub ulp_domains_root: Option<Hash32>,
+
+    /// Canonical Keccak-256 digest of the checkpoint
+    /// [`crate::settlement::GlobalFinalityCertificate`] over all registered
+    /// consensus domains (V11), presence-tagged.
+    ///
+    /// `None` when no consensus domain is registered; `Some(digest)` anchors
+    /// three-bucket (`established`, `pending`, `refuted`) Merkle inclusion
+    /// proofs directly to the finalized global header.
+    #[serde(default)]
+    pub finality_certificate_root: Option<Hash32>,
 }
 
 /// How many checkpoint headers the account state keeps. Older headers stay
@@ -228,9 +238,10 @@ impl GlobalBlockHeader {
         let object_layer_root_bytes = presence_tagged(self.object_layer_root);
         let proof_root_bytes = presence_tagged(self.proof_root);
         let ulp_domains_root_bytes = presence_tagged(self.ulp_domains_root);
+        let finality_certificate_root_bytes = presence_tagged(self.finality_certificate_root);
 
         hash_fields_bytes(&[
-            b"BDLM_GLOBAL_BLOCK_V10",
+            b"BDLM_GLOBAL_BLOCK_V11",
             &self.version.to_le_bytes(),
             &self.global_height.to_le_bytes(),
             &self.previous_global_hash,
@@ -254,6 +265,7 @@ impl GlobalBlockHeader {
             &proof_root_bytes,
             &self.proven_height.to_le_bytes(),
             &ulp_domains_root_bytes,
+            &finality_certificate_root_bytes,
         ])
     }
 
@@ -304,6 +316,7 @@ mod tests {
             proof_root: None,
             proven_height: 0,
             ulp_domains_root: None,
+            finality_certificate_root: None,
         }
     }
 
@@ -511,6 +524,41 @@ mod tests {
         let encoded = serde_json::to_string(&h_some).expect("encode json");
         let decoded: GlobalBlockHeader = serde_json::from_str(&encoded).expect("decode json");
         assert_eq!(decoded.ulp_domains_root, Some([0x5Au8; 32]));
+        assert_eq!(
+            decoded.calculate_hash_bytes(),
+            h_some.calculate_hash_bytes()
+        );
+    }
+
+    #[test]
+    fn finality_certificate_root_none_some_zero_and_serde_round_trip() {
+        let mut h_none = sample_header();
+        let mut h_zero = sample_header();
+        h_zero.finality_certificate_root = Some([0u8; 32]);
+        assert_ne!(
+            h_none.calculate_hash_bytes(),
+            h_zero.calculate_hash_bytes(),
+            "finality_certificate_root=None and Some([0;32]) must remain distinct"
+        );
+
+        let mut h_some = sample_header();
+        h_some.finality_certificate_root = Some([0x7Cu8; 32]);
+        assert_ne!(h_zero.calculate_hash_bytes(), h_some.calculate_hash_bytes());
+        h_none.finality_certificate_root = Some([0xC7u8; 32]);
+        assert_ne!(h_none.calculate_hash_bytes(), h_some.calculate_hash_bytes());
+
+        let mut legacy_val: serde_json::Value =
+            serde_json::to_value(&h_some).expect("serialize header");
+        if let Some(obj) = legacy_val.as_object_mut() {
+            obj.remove("finality_certificate_root");
+        }
+        let decoded_legacy: GlobalBlockHeader = serde_json::from_value(legacy_val)
+            .expect("legacy header without finality_certificate_root");
+        assert_eq!(decoded_legacy.finality_certificate_root, None);
+
+        let encoded = serde_json::to_string(&h_some).expect("encode json");
+        let decoded: GlobalBlockHeader = serde_json::from_str(&encoded).expect("decode json");
+        assert_eq!(decoded.finality_certificate_root, Some([0x7Cu8; 32]));
         assert_eq!(
             decoded.calculate_hash_bytes(),
             h_some.calculate_hash_bytes()
