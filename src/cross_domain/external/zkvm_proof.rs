@@ -239,6 +239,10 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.program_hash.is_some() && self.chain_id.is_some()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

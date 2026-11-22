@@ -2007,6 +2007,12 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.require_pinned_set
+            || self.pinned_validator_set.is_some()
+            || self.trusted_era.is_some()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

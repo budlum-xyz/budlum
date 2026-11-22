@@ -590,6 +590,38 @@ fn observe(
             "shared-security operator is permanently slashed for proven consensus misbehaviour",
         ));
     }
+    if state
+        .settlement
+        .shared_security
+        .validators
+        .values()
+        .any(|row| {
+            row.status == RestakeStatus::Slashed
+                && row.source.external_chain() == attested_on
+                && row.bls_public_key == allocation.bls_public_key
+        })
+    {
+        return Err(refused(
+            "shared-security consensus BLS key is permanently slashed on this external chain",
+        ));
+    }
+    if allocation.allocated_units > 0
+        && state
+            .settlement
+            .shared_security
+            .validators
+            .values()
+            .any(|row| {
+                row.budlum_validator != allocation.budlum_validator
+                    && row.status == RestakeStatus::Active
+                    && row.bls_public_key == allocation.bls_public_key
+                    && (row.source != source || row.eth_operator != allocation.eth_operator)
+            })
+    {
+        return Err(refused(
+            "shared-security consensus BLS key is already bound to another active operator or source",
+        ));
+    }
     if let Some(validator) = state.validators.get(&allocation.budlum_validator) {
         if !validator.bls_public_key.is_empty()
             && validator.bls_public_key != allocation.bls_public_key
@@ -797,12 +829,36 @@ pub fn execute_tendermint_misbehaviour_slash(
             "verified Tendermint misbehaviour matches no active unslashed shared-security operator",
         ));
     }
+    let chain = source.external_chain();
+    let mut correlated_sources: Vec<RestakeSource> = ALL_RESTAKE_SOURCES
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.external_chain() == chain)
+        .collect();
+    if !correlated_sources.contains(&source) {
+        correlated_sources.push(source);
+    }
+    let new_quarantine_keys = correlated_sources
+        .iter()
+        .flat_map(|candidate| {
+            culprit_addrs
+                .iter()
+                .map(move |op| candidate.operator_map_key(op))
+        })
+        .filter(|key| {
+            !state
+                .settlement
+                .shared_security
+                .slashed_operators
+                .contains_key(key)
+        })
+        .count();
     if state
         .settlement
         .shared_security
         .slashed_operators
         .len()
-        .saturating_add(targets.len())
+        .saturating_add(new_quarantine_keys)
         > MAX_RESTAKED_VALIDATORS
     {
         return Err(refused("shared-security slash quarantine table is full"));
@@ -892,11 +948,14 @@ pub fn quarantine_correlated_sources(
     status: RestakeStatus,
 ) -> usize {
     let chain = slashed_source.external_chain();
-    let correlated: Vec<RestakeSource> = ALL_RESTAKE_SOURCES
+    let mut correlated: Vec<RestakeSource> = ALL_RESTAKE_SOURCES
         .iter()
         .copied()
         .filter(|source| source.external_chain() == chain)
         .collect();
+    if !correlated.contains(&slashed_source) {
+        correlated.push(slashed_source);
+    }
     let mut written = 0usize;
     for source in correlated {
         for operator in operators {
@@ -969,6 +1028,16 @@ pub fn apply_restaked_weights(state: &mut AccountState, params: &SharedSecurityP
     let epoch = state.epoch_index;
     let mut raw: BTreeMap<Address, u64> = BTreeMap::new();
     if params.enabled {
+        let mut eligible_rows: Vec<(
+            Address,
+            crate::core::transaction::ExternalChain,
+            [u8; 20],
+            u64,
+        )> = Vec::new();
+        let mut group_totals: BTreeMap<
+            (crate::core::transaction::ExternalChain, [u8; 20]),
+            (u128, u128),
+        > = BTreeMap::new();
         for (address, row) in &state.settlement.shared_security.validators {
             if row.status != RestakeStatus::Active {
                 continue;
@@ -1006,8 +1075,29 @@ pub fn apply_restaked_weights(state: &mut AccountState, params: &SharedSecurityP
                 v.is_eligible(epoch) && !v.slashed && v.bls_public_key == row.bls_public_key
             });
             if counts {
-                raw.insert(*address, params.weight_of_units(row.allocated_units));
+                let row_weight = params.weight_of_units(row.allocated_units);
+                let chain = row.source.external_chain();
+                let entry = group_totals
+                    .entry((chain, row.eth_operator))
+                    .or_insert((0u128, 0u128));
+                entry.0 = entry.0.saturating_add(u128::from(row_weight));
+                entry.1 = entry.1.max(u128::from(row_weight));
+                eligible_rows.push((*address, chain, row.eth_operator, row_weight));
             }
+        }
+        // Cap same-(external_chain, eth_operator) total weight at that operator's
+        // largest single-source allocation on that chain so registering both
+        // EigenLayer and Symbiotic against the same free-downside ETH collateral
+        // cannot multiply BFT voting weight before slashing occurs.
+        for (address, chain, operator, row_weight) in eligible_rows {
+            let deduplicated = match group_totals.get(&(chain, operator)).copied() {
+                Some((group_sum, group_max)) if group_sum > group_max && group_sum > 0 => {
+                    let scaled = u128::from(row_weight) * group_max / group_sum;
+                    u64::try_from(scaled).unwrap_or(u64::MAX)
+                }
+                _ => row_weight,
+            };
+            raw.insert(address, deduplicated);
         }
     }
     let bud_total = state
@@ -2127,5 +2217,245 @@ mod tests {
             ),
             Err(SettlementTxError::Refused(_))
         ));
+    }
+
+    #[test]
+    fn same_chain_multi_source_operator_cannot_double_restaked_voting_weight() {
+        let reg_op = Address::from([0x01; 32]);
+        let mut state = state_with_registrar(reg_op);
+
+        let val_eigen = Address::from([0x81; 32]);
+        let val_symb = Address::from([0x82; 32]);
+        let val_honest = Address::from([0x83; 32]);
+        let bls_eigen = vec![0xE1; BLS_PUBLIC_KEY_BYTES];
+        let bls_symb = vec![0xE2; BLS_PUBLIC_KEY_BYTES];
+        let bls_honest = vec![0xE3; BLS_PUBLIC_KEY_BYTES];
+        for (addr, bls) in [
+            (val_eigen, bls_eigen.clone()),
+            (val_symb, bls_symb.clone()),
+            (val_honest, bls_honest.clone()),
+        ] {
+            let mut v = Validator::new(addr, 100_000);
+            v.active = true;
+            v.bls_public_key = bls;
+            state.validators.insert(addr, v);
+        }
+
+        let claim_eigen = AllocationClaim {
+            budlum_validator: val_eigen,
+            eth_operator: [0xAA; 20],
+            allocated_units: 10_000,
+            observed_epoch: 1,
+            bls_public_key: bls_eigen,
+        };
+        let claim_symb = AllocationClaim {
+            budlum_validator: val_symb,
+            eth_operator: [0xAA; 20],
+            allocated_units: 10_000,
+            observed_epoch: 1,
+            bls_public_key: bls_symb,
+        };
+        let claim_honest = AllocationClaim {
+            budlum_validator: val_honest,
+            eth_operator: [0xBB; 20],
+            allocated_units: 10_000,
+            observed_epoch: 1,
+            bls_public_key: bls_honest,
+        };
+        for (nonce, src, cl) in [
+            (1u64, RestakeSource::EigenLayer, &claim_eigen),
+            (2u64, RestakeSource::Symbiotic, &claim_symb),
+            (3u64, RestakeSource::EigenLayer, &claim_honest),
+        ] {
+            let ev = anchored_for_source(&mut state, DOMAIN, &REGISTRAR, src, cl, nonce);
+            execute_shared_security_tx(
+                &mut state,
+                &ctx(reg_op, devnet()),
+                &SharedSecurityTx::Observe {
+                    domain_key: DOMAIN,
+                    source: src,
+                    allocation: cl.clone(),
+                    evidence: ev,
+                },
+            )
+            .expect("observe");
+        }
+
+        let params = crate::core::chain_config::shared_security_for_chain_id(devnet());
+        apply_restaked_weights(&mut state, &params);
+        let same_op_combined = state.validators[&val_eigen]
+            .restaked_weight
+            .saturating_add(state.validators[&val_symb].restaked_weight);
+        let honest_single = state.validators[&val_honest].restaked_weight;
+        assert!(same_op_combined <= honest_single);
+        assert_eq!(same_op_combined, honest_single);
+    }
+
+    #[test]
+    fn slashed_or_cloned_consensus_bls_key_is_refused_across_operators() {
+        let reg_op = Address::from([0x01; 32]);
+        let mut state = state_with_registrar(reg_op);
+
+        let val_1 = Address::from([0x91; 32]);
+        let val_2 = Address::from([0x92; 32]);
+        let val_3 = Address::from([0x93; 32]);
+        let shared_bls = vec![0xF1; BLS_PUBLIC_KEY_BYTES];
+
+        let cl_1 = AllocationClaim {
+            budlum_validator: val_1,
+            eth_operator: [0x51; 20],
+            allocated_units: 10_000,
+            observed_epoch: 1,
+            bls_public_key: shared_bls.clone(),
+        };
+        let ev_1 = anchored_for_source(
+            &mut state,
+            DOMAIN,
+            &REGISTRAR,
+            RestakeSource::EigenLayer,
+            &cl_1,
+            1,
+        );
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(reg_op, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: DOMAIN,
+                source: RestakeSource::EigenLayer,
+                allocation: cl_1,
+                evidence: ev_1,
+            },
+        )
+        .expect("first operator binds key");
+
+        // Cloning an active BLS key under a second operator must be refused.
+        let cl_clone = AllocationClaim {
+            budlum_validator: val_2,
+            eth_operator: [0x52; 20],
+            allocated_units: 10_000,
+            observed_epoch: 1,
+            bls_public_key: shared_bls.clone(),
+        };
+        let ev_clone = anchored_for_source(
+            &mut state,
+            DOMAIN,
+            &REGISTRAR,
+            RestakeSource::EigenLayer,
+            &cl_clone,
+            2,
+        );
+        assert!(matches!(
+            execute_shared_security_tx(
+                &mut state,
+                &ctx(reg_op, devnet()),
+                &SharedSecurityTx::Observe {
+                    domain_key: DOMAIN,
+                    source: RestakeSource::EigenLayer,
+                    allocation: cl_clone,
+                    evidence: ev_clone,
+                },
+            ),
+            Err(SettlementTxError::Refused(_))
+        ));
+
+        // Once slashed, re-presenting the same BLS key under a fresh operator proxy on the same
+        // external chain must also be refused.
+        quarantine_correlated_sources(
+            &mut state,
+            RestakeSource::EigenLayer,
+            &[[0x51; 20]],
+            RestakeStatus::Slashed,
+        );
+        let cl_launder = AllocationClaim {
+            budlum_validator: val_3,
+            eth_operator: [0x53; 20],
+            allocated_units: 10_000,
+            observed_epoch: 2,
+            bls_public_key: shared_bls,
+        };
+        let ev_launder = anchored_for_source(
+            &mut state,
+            DOMAIN,
+            &REGISTRAR,
+            RestakeSource::Symbiotic,
+            &cl_launder,
+            3,
+        );
+        assert!(matches!(
+            execute_shared_security_tx(
+                &mut state,
+                &ctx(reg_op, devnet()),
+                &SharedSecurityTx::Observe {
+                    domain_key: DOMAIN,
+                    source: RestakeSource::Symbiotic,
+                    allocation: cl_launder,
+                    evidence: ev_launder,
+                },
+            ),
+            Err(SettlementTxError::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn quarantine_correlated_sources_records_cosmos_ics_domain() {
+        let reg_op = Address::from([0x01; 32]);
+        let mut state = AccountState::new();
+        let ics_domain_id = 77u32;
+        let mut domain = crate::domain::plugin::default_domain(
+            ics_domain_id,
+            crate::domain::ConsensusKind::Bft,
+            7700,
+            "tendermint-bft",
+            1,
+        );
+        domain.operator = Some(reg_op);
+        state.add_balance(&reg_op, domain.operator_bond.saturating_add(FEE));
+        crate::settlement::domains::register_domain(&mut state, domain).expect("ics domain");
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(reg_op, devnet()),
+            &SharedSecurityTx::SetRegistrar {
+                domain_key: ics_domain_id,
+                registrar: REGISTRAR.to_vec(),
+            },
+        )
+        .expect("ics registrar");
+
+        let source = RestakeSource::CosmosIcs {
+            domain_id: ics_domain_id,
+        };
+        let op = [0x66; 20];
+        let val = Address::from([0x96; 32]);
+        let cl = AllocationClaim {
+            budlum_validator: val,
+            eth_operator: op,
+            allocated_units: 9_000,
+            observed_epoch: 1,
+            bls_public_key: vec![0xF6; BLS_PUBLIC_KEY_BYTES],
+        };
+        let ev = anchored_for_source(&mut state, ics_domain_id, &REGISTRAR, source, &cl, 1);
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(reg_op, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: ics_domain_id,
+                source,
+                allocation: cl,
+                evidence: ev,
+            },
+        )
+        .expect("ics observe");
+
+        let written =
+            quarantine_correlated_sources(&mut state, source, &[op], RestakeStatus::Slashed);
+        assert_eq!(written, 1);
+        assert!(state
+            .settlement
+            .shared_security
+            .is_operator_slashed(source, &op));
+        assert_eq!(
+            state.settlement.shared_security.validators[&val].status,
+            RestakeStatus::Slashed
+        );
     }
 }

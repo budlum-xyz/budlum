@@ -174,6 +174,14 @@ pub(crate) enum ExternalShapeError {
         family: ExternalVerifierFamily,
         reason: &'static str,
     },
+    /// `TrustModel::TrustedParty` may never finalize a domain commitment.
+    TrustedPartyBackingRefused,
+    /// `attestation.security` contradicts the adapter's declared finality
+    /// kind, trust model, or canonical verifier family.
+    SecurityBackingMismatch {
+        consensus_kind: String,
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for ExternalShapeError {
@@ -211,6 +219,16 @@ impl std::fmt::Display for ExternalShapeError {
                 f,
                 "external family profile mismatch for {}: {reason}",
                 family.consensus_kind()
+            ),
+            Self::TrustedPartyBackingRefused => {
+                f.write_str("TrustedParty trust model cannot finalize an external domain commitment")
+            }
+            Self::SecurityBackingMismatch {
+                consensus_kind,
+                reason,
+            } => write!(
+                f,
+                "external security backing mismatch for {consensus_kind}: {reason}"
             ),
         }
     }
@@ -428,6 +446,9 @@ impl FinalityProofShape {
                 observed: attestation.time_unit,
             });
         }
+        if matches!(descriptor.trust_model, TrustModel::TrustedParty) {
+            return Err(ExternalShapeError::TrustedPartyBackingRefused);
+        }
 
         let (quorum, trust_anchor) = match (&descriptor.trust_model, &attestation.security) {
             (_, SecurityBacking::None) => return Err(ExternalShapeError::EmptySecurityBacking),
@@ -458,15 +479,99 @@ impl FinalityProofShape {
             (_, SecurityBacking::Zk { .. }) => {
                 (QuorumClass::ProofCarrying, TrustAnchor::ProofCarrying)
             }
-            (TrustModel::Trustless, SecurityBacking::Authority { count })
-            | (TrustModel::HonestMajority { .. }, SecurityBacking::Authority { count })
-            | (TrustModel::TrustedParty, SecurityBacking::Authority { count }) => {
+            (TrustModel::Trustless, SecurityBacking::Authority { .. }) => {
+                return Err(ExternalShapeError::SecurityBackingMismatch {
+                    consensus_kind: descriptor.consensus_kind.clone(),
+                    reason:
+                        "Trustless descriptor cannot finalize on permissioned Authority backing",
+                });
+            }
+            (TrustModel::HonestMajority { .. }, SecurityBacking::Authority { count }) => {
                 if *count == 0 {
                     return Err(ExternalShapeError::EmptyAuthoritySet);
                 }
                 (QuorumClass::AuthorityWeighted, TrustAnchor::RegisteredSet)
             }
+            (TrustModel::TrustedParty, SecurityBacking::Authority { .. }) => {
+                return Err(ExternalShapeError::TrustedPartyBackingRefused);
+            }
         };
+
+        if let Some(family) =
+            ExternalVerifierFamily::from_consensus_kind(&descriptor.consensus_kind)
+        {
+            let allowed = match family {
+                ExternalVerifierFamily::StarkValidityRollup
+                | ExternalVerifierFamily::MinaSuccinctRecursive
+                | ExternalVerifierFamily::BudZkVmExecution => {
+                    matches!(attestation.security, SecurityBacking::Zk { .. })
+                }
+                ExternalVerifierFamily::HeterogeneousMultiProver => matches!(
+                    attestation.security,
+                    SecurityBacking::Zk { .. } | SecurityBacking::SignatureSet { .. }
+                ),
+                ExternalVerifierFamily::BitcoinNakamotoPow
+                | ExternalVerifierFamily::BitVmCovenant
+                | ExternalVerifierFamily::GhostdagPow
+                | ExternalVerifierFamily::NipopowSuperblock => {
+                    matches!(attestation.security, SecurityBacking::Work { .. })
+                }
+                ExternalVerifierFamily::AuxPowPop | ExternalVerifierFamily::PoSpaceVdf => matches!(
+                    attestation.security,
+                    SecurityBacking::Work { .. } | SecurityBacking::SignatureSet { .. }
+                ),
+                ExternalVerifierFamily::AlgorandStateProof
+                | ExternalVerifierFamily::AptosJolteonBft
+                | ExternalVerifierFamily::ArweaveSpOra
+                | ExternalVerifierFamily::BabylonEots
+                | ExternalVerifierFamily::BasedPreconf
+                | ExternalVerifierFamily::CasperFfg
+                | ExternalVerifierFamily::ChainKeyNiDkg
+                | ExternalVerifierFamily::CelestiaDas
+                | ExternalVerifierFamily::BullsharkDagBft
+                | ExternalVerifierFamily::EthereumGasperSync
+                | ExternalVerifierFamily::HoneyBadgerBft
+                | ExternalVerifierFamily::HotStuffChainedBft
+                | ExternalVerifierFamily::MysticetiDag
+                | ExternalVerifierFamily::NearDoomslugBft
+                | ExternalVerifierFamily::OuroborosMithril
+                | ExternalVerifierFamily::RestakingAvs
+                | ExternalVerifierFamily::SimplexBft
+                | ExternalVerifierFamily::SolanaTowerBft
+                | ExternalVerifierFamily::StellarScp
+                | ExternalVerifierFamily::SymbioticVault
+                | ExternalVerifierFamily::TendermintBft
+                | ExternalVerifierFamily::TonCatchainBft => {
+                    matches!(attestation.security, SecurityBacking::SignatureSet { .. })
+                }
+            };
+            if !allowed {
+                return Err(ExternalShapeError::SecurityBackingMismatch {
+                    consensus_kind: descriptor.consensus_kind.clone(),
+                    reason: "attestation SecurityBacking violates canonical verifier family",
+                });
+            }
+        } else {
+            let kind_allowed = match descriptor.finality_kind {
+                FinalityKind::Proven => matches!(
+                    attestation.security,
+                    SecurityBacking::Zk { .. } | SecurityBacking::SignatureSet { .. }
+                ),
+                FinalityKind::Probabilistic => matches!(
+                    attestation.security,
+                    SecurityBacking::Work { .. } | SecurityBacking::SignatureSet { .. }
+                ),
+                FinalityKind::ProtocolFinality | FinalityKind::EconomicFinality => {
+                    !matches!(attestation.security, SecurityBacking::Work { .. })
+                }
+            };
+            if !kind_allowed {
+                return Err(ExternalShapeError::SecurityBackingMismatch {
+                    consensus_kind: descriptor.consensus_kind.clone(),
+                    reason: "attestation SecurityBacking contradicts descriptor FinalityKind",
+                });
+            }
+        }
 
         let depth = match descriptor.finality_kind {
             FinalityKind::Probabilistic => DepthClass::Confirmations,
@@ -956,6 +1061,43 @@ mod tests {
                 Err(ExternalShapeError::FamilyProfileMismatch { .. })
             ));
 
+            let (canonical_security, expected_quorum, expected_anchor) = match family {
+                ExternalVerifierFamily::StarkValidityRollup
+                | ExternalVerifierFamily::MinaSuccinctRecursive
+                | ExternalVerifierFamily::BudZkVmExecution
+                | ExternalVerifierFamily::HeterogeneousMultiProver => (
+                    SecurityBacking::Zk {
+                        system: crate::cross_domain::external::spec::ProofSystem::BudlumZkVm,
+                        public_inputs_digest: [0x55; 32],
+                    },
+                    QuorumClass::ProofCarrying,
+                    TrustAnchor::ProofCarrying,
+                ),
+                ExternalVerifierFamily::BitcoinNakamotoPow
+                | ExternalVerifierFamily::BitVmCovenant
+                | ExternalVerifierFamily::GhostdagPow
+                | ExternalVerifierFamily::NipopowSuperblock
+                | ExternalVerifierFamily::AuxPowPop
+                | ExternalVerifierFamily::PoSpaceVdf => (
+                    SecurityBacking::Work {
+                        difficulty_bits: 80,
+                    },
+                    QuorumClass::WorkWeighted,
+                    TrustAnchor::TrustedCheckpoint,
+                ),
+                _ => (
+                    SecurityBacking::SignatureSet {
+                        scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
+                        signers: 4,
+                        required: 3,
+                        total_weight: 100,
+                        slashable: true,
+                    },
+                    QuorumClass::StakeWeighted,
+                    TrustAnchor::RegisteredSet,
+                ),
+            };
+
             let attestation = FinalityAttestation {
                 adapter: adapter_id,
                 domain: DomainKey::from_parts(&adapter_id, "mainnet"),
@@ -966,13 +1108,7 @@ mod tests {
                 attested_tx_root: Some([0x33; 32]),
                 finalized_at: 100,
                 time_unit,
-                security: SecurityBacking::SignatureSet {
-                    scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
-                    signers: 4,
-                    required: 3,
-                    total_weight: 100,
-                    slashable: true,
-                },
+                security: canonical_security,
                 evidence_digest: [0x44; 32],
                 adapter_version: 1,
                 evidence_version: 1,
@@ -987,8 +1123,21 @@ mod tests {
                     | BINDS_BLOCK_HASH
                     | BINDS_TX_ROOT
             );
-            assert_eq!(shape.quorum, QuorumClass::StakeWeighted);
-            assert_eq!(shape.trust_anchor, TrustAnchor::RegisteredSet);
+            assert_eq!(shape.quorum, expected_quorum);
+            assert_eq!(shape.trust_anchor, expected_anchor);
+
+            let mut authority_downgrade = attestation.clone();
+            authority_downgrade.security = SecurityBacking::Authority { count: 3 };
+            assert!(
+                matches!(
+                    FinalityProofShape::from_external_attestation(
+                        &descriptor,
+                        &authority_downgrade
+                    ),
+                    Err(ExternalShapeError::SecurityBackingMismatch { .. })
+                ),
+                "built-in family {kind} must refuse Authority security backing"
+            );
         }
         assert_eq!(
             ExternalVerifierFamily::from_consensus_kind("fixture-consensus"),
@@ -1023,5 +1172,79 @@ mod tests {
         assert_eq!(shape.quorum, QuorumClass::ProofCarrying);
         assert_eq!(shape.trust_anchor, TrustAnchor::ProofCarrying);
         assert_eq!(shape.depth, DepthClass::ProofDelay);
+    }
+
+    #[test]
+    fn external_attestation_refuses_trusted_party_and_mismatched_family_backing() {
+        use crate::cross_domain::external::spec::{
+            AdapterDescriptor, AdapterId, DomainKey, FinalityAttestation, FinalityKind,
+            SecurityBacking, TimeUnit, TrustModel,
+        };
+        use crate::crypto::facts::ObservedScheme;
+        use crate::crypto::scheme::SchemeId;
+
+        let id = AdapterId::from_name("shape-cross-check");
+        let make_att = |time_unit: TimeUnit, security: SecurityBacking| FinalityAttestation {
+            adapter: id,
+            domain: DomainKey::from_parts(&id, "mainnet"),
+            height: 10,
+            state_root: [0x11; 32],
+            attested_block_hash: Some([0x22; 32]),
+            attested_event_root: None,
+            attested_tx_root: None,
+            finalized_at: 10,
+            time_unit,
+            security,
+            evidence_digest: [0x33; 32],
+            adapter_version: 1,
+            evidence_version: 1,
+        };
+
+        let trusted_party = AdapterDescriptor {
+            id,
+            name: "tp".to_string(),
+            adapter_version: 1,
+            accepted_evidence_versions: vec![1],
+            consensus_kind: "custom-tp".to_string(),
+            finality_kind: FinalityKind::ProtocolFinality,
+            required_depth: 0,
+            time_unit: TimeUnit::Height,
+            trust_model: TrustModel::TrustedParty,
+        };
+        assert_eq!(
+            FinalityProofShape::from_external_attestation(
+                &trusted_party,
+                &make_att(TimeUnit::Height, SecurityBacking::Authority { count: 1 }),
+            ),
+            Err(ExternalShapeError::TrustedPartyBackingRefused)
+        );
+
+        let pow_desc = AdapterDescriptor {
+            id,
+            name: "pow".to_string(),
+            adapter_version: 1,
+            accepted_evidence_versions: vec![1],
+            consensus_kind: "nakamoto-pow".to_string(),
+            finality_kind: FinalityKind::Probabilistic,
+            required_depth: 6,
+            time_unit: TimeUnit::UnixSeconds,
+            trust_model: TrustModel::Trustless,
+        };
+        assert!(matches!(
+            FinalityProofShape::from_external_attestation(
+                &pow_desc,
+                &make_att(
+                    TimeUnit::UnixSeconds,
+                    SecurityBacking::SignatureSet {
+                        scheme: ObservedScheme::Scheme(SchemeId::ED25519),
+                        signers: 3,
+                        required: 2,
+                        total_weight: 3,
+                        slashable: true,
+                    },
+                ),
+            ),
+            Err(ExternalShapeError::SecurityBackingMismatch { .. })
+        ));
     }
 }

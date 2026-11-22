@@ -1035,6 +1035,10 @@ impl ExternalFinalityAdapter for BitVmCovenantAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.anchor.is_some()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

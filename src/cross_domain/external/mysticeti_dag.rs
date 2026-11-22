@@ -968,6 +968,10 @@ impl ExternalFinalityAdapter for MysticetiDagAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.committee.is_some()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

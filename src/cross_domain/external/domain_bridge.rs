@@ -167,17 +167,33 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
         }
         let evidence = decode_external_evidence(proof)?;
         let descriptor = self.adapter.descriptor();
+        let anchor_pinned = self.adapter.has_pinned_trust_anchor();
         if let Some(family) =
             crate::domain::finality_proof_model::ExternalVerifierFamily::from_consensus_kind(
                 &descriptor.consensus_kind,
             )
         {
             let checked: Result<(), crate::domain::finality_proof_model::ExternalShapeError> =
-                family.verify_descriptor(&descriptor, true);
+                family.verify_descriptor(&descriptor, anchor_pinned);
             if let Err(err) = checked {
                 return Ok(FinalityStatus::Rejected(format!(
                     "external family profile refused: {err}"
                 )));
+            }
+        } else {
+            if !anchor_pinned {
+                return Ok(FinalityStatus::Rejected(
+                    "external adapter has no pinned trust anchor".to_string(),
+                ));
+            }
+            if matches!(
+                descriptor.trust_model,
+                crate::cross_domain::external::spec::TrustModel::TrustedParty
+            ) {
+                return Ok(FinalityStatus::Rejected(
+                    "external adapter declares TrustModel::TrustedParty, which cannot finalize a domain commitment"
+                        .to_string(),
+                ));
             }
         }
         let mut seen = CryptoFacts::new();
@@ -415,10 +431,10 @@ mod tests {
             adapter_version: 1,
             accepted_evidence_versions: vec![1],
             consensus_kind: "fixture-consensus".to_string(),
-            finality_kind: FinalityKind::Proven,
+            finality_kind: FinalityKind::ProtocolFinality,
             required_depth: 0,
             time_unit: TimeUnit::Height,
-            trust_model: TrustModel::Trustless,
+            trust_model: TrustModel::HonestMajority { set_size: 3 },
         };
         let evidence = RawConsensusEvidence {
             adapter: descriptor.id,
@@ -791,6 +807,108 @@ mod tests {
                 FinalityStatus::Rejected(ref message) if message.contains("family profile")
             ),
             "downgraded built-in family descriptor must be rejected: {status:?}"
+        );
+    }
+
+    #[test]
+    fn bridge_refuses_unpinned_trust_anchor_for_builtin_and_custom_families() {
+        let closed_tm =
+            crate::cross_domain::external::tendermint::TendermintFinalityAdapter::new_pinned(
+                "mainnet",
+                "cosmoshub-4",
+                None,
+            );
+        let tm_desc = closed_tm.descriptor();
+        let tm_ev = RawConsensusEvidence {
+            adapter: tm_desc.id,
+            evidence_version: 1,
+            network: "mainnet".to_string(),
+            payload: vec![1, 2, 3],
+            declared_height: 7,
+            declared_root: [8; 32],
+            submitter: Address::from([3; 32]),
+        };
+        let tm_proof = encode_external_evidence(&tm_ev).expect("encode");
+        let (_, mut domain, mut commitment) = fixture();
+        domain.kind = ConsensusKind::Custom(tm_desc.consensus_kind);
+        commitment.consensus_kind = domain.kind.clone();
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&tm_proof).unwrap();
+        let tm_bridge =
+            ExternalDomainFinalityBridge::new(Box::new(closed_tm), VerificationPolicy::proven(100));
+        let tm_status = tm_bridge
+            .verify_finality(&domain, &commitment, &tm_proof)
+            .expect("verify");
+        assert!(
+            matches!(
+                tm_status,
+                FinalityStatus::Rejected(ref message) if message.contains("requires a pinned trust anchor")
+            ),
+            "unpinned built-in adapter must be rejected with MissingTrustAnchor: {tm_status:?}"
+        );
+    }
+
+    #[test]
+    fn bridge_refuses_trusted_party_and_cross_family_security_backing() {
+        let (mut base, domain, mut commitment) = fixture();
+        base.descriptor.trust_model = TrustModel::TrustedParty;
+        let proof = encode_external_evidence(&base.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let trusted_party_adapter = CustomBackingAdapter {
+            descriptor: base.descriptor,
+            evidence: base.evidence,
+            security: SecurityBacking::Authority { count: 1 },
+            attestation_time_unit: TimeUnit::Height,
+        };
+        let mut policy = VerificationPolicy::proven(100);
+        policy.require_slashable = false;
+        let bridge = ExternalDomainFinalityBridge::new(Box::new(trusted_party_adapter), policy);
+        let status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .expect("verify");
+        assert!(
+            matches!(
+                status,
+                FinalityStatus::Rejected(ref message) if message.contains("TrustedParty")
+            ),
+            "custom TrustedParty adapter must be rejected: {status:?}"
+        );
+
+        let (mut stark_base, mut stark_domain, mut stark_commitment) = fixture();
+        stark_base.descriptor.consensus_kind = "stark-state-diff-validity-rollup".to_string();
+        stark_base.descriptor.finality_kind = FinalityKind::Proven;
+        stark_base.descriptor.trust_model = TrustModel::Trustless;
+        stark_domain.kind = ConsensusKind::Custom("stark-state-diff-validity-rollup".to_string());
+        stark_commitment.consensus_kind = stark_domain.kind.clone();
+        let stark_proof = encode_external_evidence(&stark_base.evidence).expect("encode");
+        stark_commitment.finality_proof_hash =
+            crate::domain::hash_finality_proof(&stark_proof).unwrap();
+        let wrong_backing_adapter = CustomBackingAdapter {
+            descriptor: stark_base.descriptor,
+            evidence: stark_base.evidence,
+            security: SecurityBacking::SignatureSet {
+                scheme: crate::crypto::facts::ObservedScheme::Scheme(
+                    crate::crypto::scheme::SchemeId::BLS12381_MINSIG,
+                ),
+                signers: 3,
+                required: 2,
+                total_weight: 3,
+                slashable: true,
+            },
+            attestation_time_unit: TimeUnit::Height,
+        };
+        let mut stark_policy = VerificationPolicy::proven(100);
+        stark_policy.require_slashable = false;
+        let stark_bridge =
+            ExternalDomainFinalityBridge::new(Box::new(wrong_backing_adapter), stark_policy);
+        let stark_status = stark_bridge
+            .verify_finality(&stark_domain, &stark_commitment, &stark_proof)
+            .expect("verify");
+        assert!(
+            matches!(
+                stark_status,
+                FinalityStatus::Rejected(ref message) if message.contains("security backing mismatch")
+            ),
+            "Proven validity rollup family must refuse SignatureSet backing: {stark_status:?}"
         );
     }
 }

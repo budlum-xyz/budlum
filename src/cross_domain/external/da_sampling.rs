@@ -788,6 +788,10 @@ impl ExternalFinalityAdapter for DataAvailabilityAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.is_some()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

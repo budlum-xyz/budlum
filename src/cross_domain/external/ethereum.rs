@@ -1605,6 +1605,10 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.committee.is_some() || self.ssz_pin.is_some()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
