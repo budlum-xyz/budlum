@@ -21,9 +21,6 @@
 # "unmaintained" class only - RUSTSEC marks them as maintenance status, and
 # deny.toml carries the same policy through `unmaintained = "none"`.
 
-[[IgnoredVulns]]
-id = "RUSTSEC-2023-0089"
-reason = "atomic-polyfill unmaintained (a maintenance warning, not a vulnerability) - the OSV mirror of the deny.toml `unmaintained = \"none\"` policy."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0141"
