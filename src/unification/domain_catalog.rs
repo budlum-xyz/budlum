@@ -260,13 +260,28 @@ impl UniversalDomainCatalog {
                         DomainState::Active | DomainState::Admitted
                     )
                 });
+            let is_bonded = state
+                .settlement
+                .external_intake
+                .registry
+                .domain(key)
+                .is_some_and(|reg| reg.record.anchor_class.is_bonded());
             let adapter_name = entry.golden.adapter;
             let network = entry.golden.network.as_str();
-            let caip2_reference = format!(
-                "external:{}:{}",
-                hex::encode(adapter_name.0.get(..6).unwrap_or(&adapter_name.0)),
-                network
-            );
+            let caip2_reference = if is_bonded {
+                format!(
+                    "external:{}:{}:{}",
+                    hex::encode(adapter_name.0.get(..6).unwrap_or(&adapter_name.0)),
+                    network,
+                    hex::encode(key.0.get(..6).unwrap_or(&key.0)),
+                )
+            } else {
+                format!(
+                    "external:{}:{}",
+                    hex::encode(adapter_name.0.get(..6).unwrap_or(&adapter_name.0)),
+                    network
+                )
+            };
             let mut capabilities = BTreeSet::new();
             if state.bridge_state.has_asset_for_domain(candidate) {
                 capabilities.insert(DomainCapability::UniversalPayment);

@@ -243,8 +243,10 @@ pub use hotstuff::{
 };
 pub(crate) use intake::live_policy_clock;
 pub use intake::{
-    AdapterSpec, ContradictionSlashOutcome, IntakeEntry, IntakeError, IntakeState,
-    RegistrationRequest,
+    AdapterSpec, BondedAnchorChallengeProof, BondedRegistrationRequest,
+    CertifiedExternalDomainEnvelope, ContradictionSlashOutcome, IntakeEntry, IntakeError,
+    IntakeState, RegistrationRequest, MAX_BONDED_ANCHOR_CHALLENGE_HEIGHTS,
+    MIN_BONDED_ANCHOR_CHALLENGE_HEIGHTS,
 };
 pub use intake_guard::{ContradictedClaim, DomainGuardRecord, IntakeGuard, IntakeGuardError};
 pub use intake_quorum::{
@@ -276,7 +278,9 @@ pub use pospace_vdf::{
     verify_double_signage_equivocation, PinnedPoSpaceAnchor, PoSpaceEquivocationProof,
     PoSpaceVdfAdapter, PoSpaceVdfBlock, PoSpaceVdfEvidence, SignedPoSpaceSignage,
 };
-pub use profile::{profile_of, DomainProfile, DomainRecord, DomainState, StateEvent, BOND_UNIT};
+pub use profile::{
+    profile_of, AnchorClass, DomainProfile, DomainRecord, DomainState, StateEvent, BOND_UNIT,
+};
 pub use prover::{
     honesty_is_cheaper, required_bond_atoms, ChallengeReward, DomainEconomics, ProverBond,
     ProverFee, Slashing, BOND_RATIO_DEN, BOND_RATIO_NUM, BPS_DEN,
@@ -867,6 +871,7 @@ mod tests {
             }),
             history: Vec::new(),
             crypto_facts: CryptoFacts::new(),
+            anchor_class: AnchorClass::GovernanceVoted,
         };
         let p = profile_of(&record);
         assert_eq!(p.bond_atoms, 1_000);
@@ -911,6 +916,7 @@ mod tests {
             last_backing: None,
             history: Vec::new(),
             crypto_facts: CryptoFacts::new(),
+            anchor_class: AnchorClass::GovernanceVoted,
         };
         let p = profile_of(&record);
         assert_eq!(

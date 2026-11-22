@@ -17,7 +17,7 @@
 //! demonstrated anything.
 
 use crate::core::address::Address;
-use crate::cross_domain::external::profile::{DomainRecord, DomainState, StateEvent};
+use crate::cross_domain::external::profile::{AnchorClass, DomainRecord, DomainState, StateEvent};
 use crate::cross_domain::external::prover::{DomainEconomics, ProverBond};
 use crate::cross_domain::external::selftest::AdmissionReport;
 use crate::cross_domain::external::spec::{
@@ -121,6 +121,29 @@ impl DomainRegistration {
             .keys()
             .max()
             .and_then(|k| self.attestations.get(k))
+    }
+
+    /// Effective per-epoch routing value ceiling (`K-B.4`, `K-B.5`).
+    ///
+    /// - Returns `0` whenever `!self.record.state.serves()` (including the
+    ///   entire [`DomainState::PendingAnchorChallenge`] window, `Faulted`,
+    ///   `Retired`, and `QuantumIsolated`).
+    /// - For [`AnchorClass::Bonded`], caps the declared ceiling by the live
+    ///   unslashed escrowed collateral (`self.record.bond_atoms`) so a bonded
+    ///   anchor can never route more value than its live collateral backs.
+    /// - For [`AnchorClass::GovernanceVoted`], returns `self.economics.routing_ceiling_atoms`.
+    #[must_use]
+    pub fn effective_routing_ceiling_atoms(&self) -> u128 {
+        if !self.record.state.serves() {
+            return 0;
+        }
+        if self.record.anchor_class.is_bonded() {
+            self.economics
+                .routing_ceiling_atoms
+                .min(self.record.bond_atoms)
+        } else {
+            self.economics.routing_ceiling_atoms
+        }
     }
 }
 
@@ -270,6 +293,7 @@ impl ExternalDomainRegistry {
             last_verified_at: None,
             last_backing: None,
             crypto_facts: CryptoFacts::new(),
+            anchor_class: AnchorClass::GovernanceVoted,
             history: vec![StateEvent {
                 at_height: self.height,
                 from: DomainState::Registered,
@@ -308,6 +332,182 @@ impl ExternalDomainRegistry {
             },
         );
         Ok(domain)
+    }
+
+    /// Registers a collateral-bonded external domain without a governance vote
+    /// (`K-B.4`, `K-B.5`).
+    ///
+    /// - Folds `anchor_digest` into [`DomainKey::from_bonded_anchor`] so two
+    ///   distinct anchors on the same network produce distinct `DomainKey`s.
+    /// - Places the domain into [`DomainState::PendingAnchorChallenge`] until
+    ///   `challenge_until_height`, during which `serves() == false` and
+    ///   `effective_routing_ceiling_atoms() == 0`.
+    /// - Caps the registrant's routing ceiling by `bond_atoms` (`K-B.4`).
+    ///
+    /// # Errors
+    ///
+    /// Refuses empty networks, failed admission probes, inconsistent versions,
+    /// underfunded bonds, non-positive challenge windows, or duplicate keys.
+    pub fn register_bonded(
+        &mut self,
+        network: &str,
+        descriptor: AdapterDescriptor,
+        (economics, versions, admission): (DomainEconomics, VersionPolicy, &AdmissionReport),
+        (bond_atoms, poster): (u128, Address),
+        (anchor_digest, challenge_until_height): ([u8; 32], u64),
+    ) -> Result<DomainKey, RegistryError> {
+        if network.trim().is_empty() {
+            return Err(RegistryError::EmptyNetwork);
+        }
+        if challenge_until_height <= self.height {
+            return Err(RegistryError::NotServing {
+                state: "challenge_until_height must strictly exceed current height".to_string(),
+            });
+        }
+        if !admission.admitted
+            || !admission.golden_verified
+            || admission.total() == 0
+            || admission.passed() != admission.total()
+        {
+            return Err(RegistryError::AdmissionFailed {
+                golden_verified: admission.golden_verified,
+                admitted: admission.admitted,
+                passed: admission.passed(),
+                total: admission.total(),
+            });
+        }
+        if versions.adapter != descriptor.id {
+            return Err(RegistryError::DescriptorMismatch {
+                expected: hex(&descriptor.id.0),
+                found: hex(&versions.adapter.0),
+            });
+        }
+        if !versions.is_consistent() {
+            return Err(RegistryError::InvalidVersionPolicy);
+        }
+        if admission.adapter_version != descriptor.adapter_version {
+            return Err(RegistryError::AdmissionAdapterVersionMismatch {
+                expected: descriptor.adapter_version,
+                found: admission.adapter_version,
+            });
+        }
+        if !descriptor
+            .accepted_evidence_versions
+            .contains(&admission.evidence_version)
+            || versions.window(admission.evidence_version).is_none()
+        {
+            return Err(RegistryError::AdmissionEvidenceVersionMismatch {
+                version: admission.evidence_version,
+            });
+        }
+        let required = economics.required_bond_atoms();
+        if bond_atoms < required {
+            return Err(RegistryError::InsufficientBond {
+                posted: bond_atoms,
+                required,
+            });
+        }
+
+        let domain = DomainKey::from_bonded_anchor(&descriptor.id, network, &anchor_digest);
+        if self.domains.contains_key(&domain) {
+            return Err(RegistryError::AlreadyRegistered(hex(domain.as_bytes())));
+        }
+
+        let capped_ceiling = economics.routing_ceiling_atoms.min(bond_atoms);
+        let capped_economics = DomainEconomics {
+            routing_ceiling_atoms: capped_ceiling,
+            ..economics
+        };
+        let anchor_class = AnchorClass::Bonded {
+            anchor_digest,
+            challenge_until_height,
+        };
+        let record = DomainRecord {
+            domain,
+            descriptor: descriptor.clone(),
+            state: DomainState::PendingAnchorChallenge,
+            bond_atoms,
+            bond_posters: 1,
+            evidence_forks: 0,
+            accepted_evidence_versions: descriptor.accepted_evidence_versions.clone(),
+            attestations_accepted: 0,
+            attestations_refused: 0,
+            last_accepted_height: None,
+            last_verified_at: None,
+            last_backing: None,
+            crypto_facts: CryptoFacts::new(),
+            anchor_class,
+            history: vec![StateEvent {
+                at_height: self.height,
+                from: DomainState::Registered,
+                to: DomainState::PendingAnchorChallenge,
+                reason: format!(
+                    "bonded anchor {} queued for challenge until height {challenge_until_height}, bond {bond_atoms}",
+                    hex(&anchor_digest)
+                ),
+            }],
+        };
+
+        let mut provers = BTreeMap::new();
+        provers.insert(
+            poster,
+            ProverBond {
+                prover: poster,
+                bond_atoms,
+                ceiling_atoms: capped_ceiling,
+                slashed_atoms: 0,
+                slashings: Vec::new(),
+                accepted: 0,
+                refused: 0,
+            },
+        );
+
+        self.domains.insert(
+            domain,
+            DomainRegistration {
+                record,
+                economics: capped_economics,
+                versions,
+                admission_digest: admission.digest(),
+                attestations: BTreeMap::new(),
+                attestation_provers: BTreeMap::new(),
+                provers,
+            },
+        );
+        Ok(domain)
+    }
+
+    /// Promotes every unrefuted bonded registration whose optimistic challenge
+    /// window has reached `self.height` from [`DomainState::PendingAnchorChallenge`]
+    /// to [`DomainState::Admitted`] (`K-B.5`).
+    pub fn activate_matured_bonded_domains(&mut self) -> usize {
+        let height = self.height;
+        let mut activated = 0;
+        for reg in self.domains.values_mut() {
+            if reg.record.state != DomainState::PendingAnchorChallenge {
+                continue;
+            }
+            let AnchorClass::Bonded {
+                challenge_until_height,
+                ..
+            } = reg.record.anchor_class
+            else {
+                continue;
+            };
+            if height >= challenge_until_height {
+                reg.record.state = DomainState::Admitted;
+                reg.record.history.push(StateEvent {
+                    at_height: height,
+                    from: DomainState::PendingAnchorChallenge,
+                    to: DomainState::Admitted,
+                    reason: format!(
+                        "bonded anchor challenge window completed at height {height} (target {challenge_until_height})"
+                    ),
+                });
+                activated += 1;
+            }
+        }
+        activated
     }
 
     /// Replaces a domain's version policy. The one sanctioned later mutation
@@ -361,6 +561,18 @@ impl ExternalDomainRegistry {
         let Some(reg) = self.domains.get_mut(domain) else {
             return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
         };
+        if reg.record.state == DomainState::PendingAnchorChallenge {
+            return Err(RegistryError::NotServing {
+                state: reg.record.state.as_str().to_string(),
+            });
+        }
+        if reg.record.history.iter().any(|ev| {
+            ev.from == DomainState::PendingAnchorChallenge && ev.to == DomainState::Faulted
+        }) {
+            return Err(RegistryError::NotServing {
+                state: "refuted-bonded-anchor".to_string(),
+            });
+        }
         if !admission.admitted
             || !admission.golden_verified
             || admission.total() == 0
@@ -430,7 +642,10 @@ impl ExternalDomainRegistry {
             if !classical
                 || !matches!(
                     reg.record.state,
-                    DomainState::Registered | DomainState::Admitted | DomainState::Active
+                    DomainState::Registered
+                        | DomainState::PendingAnchorChallenge
+                        | DomainState::Admitted
+                        | DomainState::Active
                 )
             {
                 continue;
@@ -465,22 +680,26 @@ impl ExternalDomainRegistry {
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, RegistryError> {
         let domain = DomainKey::from_parts(&adapter.descriptor().id, &evidence.network);
+        self.submit_for_domain(&domain, adapter, evidence, policy)
+    }
+
+    /// Submits finality evidence against an explicit registered [`DomainKey`]
+    /// (covering both governance-voted keys and matured bonded-anchor keys).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] if the domain is unknown, still in
+    /// [`DomainState::PendingAnchorChallenge`], faulted, or fails adapter/bond checks.
+    pub fn submit_for_domain(
+        &mut self,
+        domain: &DomainKey,
+        adapter: &dyn ExternalFinalityAdapter,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+    ) -> Result<FinalityAttestation, RegistryError> {
+        let domain = *domain;
         let height = self.height;
 
-        // Everything below needs the registration; take it once and hold the
-        // key, not a borrow, so the counters can be updated on the way out.
-        // One lookup, then clone out what the checks need. Taking the
-        // registration once matters for a reason that is not stylistic:
-        //
-        // The previous shape fell back to `VersionPolicy::single(descriptor.id,
-        // evidence.evidence_version, 0)` and `DomainEconomics::default()` when
-        // the lookup missed. Those fallbacks were unreachable - the line above
-        // already returned on a miss - but they were reachable *by an edit*,
-        // and the version fallback was a hole: it built the version policy from
-        // the evidence's own declared version, which is the evidence choosing
-        // the rules it is checked against. An unreachable fallback that would
-        // be a hole if it became reachable is a worse thing to leave behind
-        // than no fallback at all.
         let Some(reg) = self.domains.get(&domain) else {
             return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
         };
@@ -489,7 +708,8 @@ impl ExternalDomainRegistry {
         let economics = reg.economics;
         let prover_bond = reg.provers.get(&evidence.submitter).cloned();
 
-        let refusal = self.check(
+        let refusal = self.check_for_domain(
+            &domain,
             adapter,
             &descriptor,
             &versions,
@@ -566,14 +786,31 @@ impl ExternalDomainRegistry {
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, RegistryError> {
         let domain = DomainKey::from_parts(&adapter.descriptor().id, &evidence.network);
-        let Some(reg) = self.domains.get(&domain) else {
+        self.evaluate_for_domain(&domain, adapter, evidence, policy)
+    }
+
+    /// Evaluates finality evidence against an explicit [`DomainKey`] without
+    /// mutating the attestation book.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] under the exact conditions of [`Self::submit_for_domain`].
+    pub fn evaluate_for_domain(
+        &self,
+        domain: &DomainKey,
+        adapter: &dyn ExternalFinalityAdapter,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+    ) -> Result<FinalityAttestation, RegistryError> {
+        let Some(reg) = self.domains.get(domain) else {
             return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
         };
         let descriptor = reg.record.descriptor.clone();
         let versions = reg.versions.clone();
         let economics = reg.economics;
         let prover_bond = reg.provers.get(&evidence.submitter).cloned();
-        self.check(
+        self.check_for_domain(
+            domain,
             adapter,
             &descriptor,
             &versions,
@@ -604,14 +841,31 @@ impl ExternalDomainRegistry {
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, RegistryError> {
         let domain = DomainKey::from_parts(&adapter.descriptor().id, &evidence.network);
-        let Some(reg) = self.domains.get(&domain) else {
+        self.evaluate_for_commitment_domain(&domain, adapter, evidence, policy)
+    }
+
+    /// Commitment evaluation against an explicit [`DomainKey`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] if the domain is unknown, not serving, fails
+    /// version/bond/adapter checks, or names a slashed claim.
+    fn evaluate_for_commitment_domain(
+        &self,
+        domain: &DomainKey,
+        adapter: &dyn ExternalFinalityAdapter,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+    ) -> Result<FinalityAttestation, RegistryError> {
+        let Some(reg) = self.domains.get(domain) else {
             return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
         };
         let descriptor = reg.record.descriptor.clone();
         let versions = reg.versions.clone();
         let economics = reg.economics;
         let prover_bond = reg.provers.get(&evidence.submitter).cloned();
-        self.check(
+        self.check_for_domain(
+            domain,
             adapter,
             &descriptor,
             &versions,
@@ -779,11 +1033,12 @@ impl ExternalDomainRegistry {
         Ok(())
     }
 
-    /// The checks, in order. Split out of [`Self::submit`] so the intake path
-    /// above stays readable and the order is in one place.
+    /// The checks, in order. Split out of [`Self::submit_for_domain`] so the
+    /// intake path stays readable and the order is in one place.
     #[allow(clippy::too_many_arguments)]
-    fn check(
+    fn check_for_domain(
         &self,
+        domain: &DomainKey,
         adapter: &dyn ExternalFinalityAdapter,
         descriptor: &AdapterDescriptor,
         versions: &VersionPolicy,
@@ -793,6 +1048,7 @@ impl ExternalDomainRegistry {
         policy: &VerificationPolicy,
         allow_decided_slot: bool,
     ) -> Result<(FinalityAttestation, CryptoFacts), RegistryError> {
+        let domain = *domain;
         // 1. The adapter must be the one this domain is bound to. Without this
         //    an adapter could be swapped under a domain that already has a
         //    bond and a history.
@@ -816,9 +1072,8 @@ impl ExternalDomainRegistry {
         // 3. One height/version slot can hold only one accepted evidence
         //    format. Without this check a replay would overwrite the first
         //    attestation while incrementing the accepted counter again.
-        let domain = DomainKey::from_parts(&descriptor.id, &evidence.network);
-        // A domain that does not serve (Faulted after a dispute) takes no
-        // new attestation. Without this the fault would be a label only.
+        // A domain that does not serve (PendingAnchorChallenge or Faulted after
+        // a dispute) takes no new attestation.
         if let Some(reg) = self.domains.get(&domain) {
             if !reg.record.state.serves() {
                 return Err(RegistryError::NotServing {
@@ -868,24 +1123,28 @@ impl ExternalDomainRegistry {
 
         // 6. The adapter itself.
         let mut observed = CryptoFacts::new();
-        let attestation = adapter
+        let mut attestation = adapter
             .verify_observed(evidence, policy, &mut observed)
             .map_err(RegistryError::Adapter)?;
 
         // The adapter output is bound back to the registered domain before
-        // any counters are incremented. Checking only the digest, height and
-        // root would let a broken adapter return an attestation for another
-        // adapter, domain or format while still looking internally coherent.
+        // any counters are incremented. Stateless adapters derive
+        // `DomainKey::from_parts(&descriptor.id, &evidence.network)`, whereas a
+        // bonded registration folds `anchor_digest` into `domain`; verify the
+        // adapter's network key and stamp the exact registered `DomainKey` on
+        // the returned attestation.
+        let expected_network_domain = DomainKey::from_parts(&descriptor.id, &evidence.network);
         if attestation.adapter != descriptor.id {
             return Err(RegistryError::Adapter(AdapterError::DeclarationMismatch {
                 field: "adapter",
             }));
         }
-        if attestation.domain != domain {
+        if attestation.domain != domain && attestation.domain != expected_network_domain {
             return Err(RegistryError::Adapter(AdapterError::DeclarationMismatch {
                 field: "domain",
             }));
         }
+        attestation.domain = domain;
         if attestation.adapter_version != descriptor.adapter_version {
             return Err(RegistryError::Adapter(AdapterError::DeclarationMismatch {
                 field: "adapter_version",
@@ -918,6 +1177,75 @@ impl ExternalDomainRegistry {
         }
 
         Ok((attestation, observed))
+    }
+
+    /// Slashes a bonded anchor registrant whose anchor was refuted inside its
+    /// optimistic challenge window (`K-B.5`) and drops the domain to
+    /// [`DomainState::Faulted`].
+    pub(crate) fn slash_bonded_anchor(
+        &mut self,
+        domain: &DomainKey,
+        registrant: Address,
+        challenge_digest: [u8; 32],
+        challenger: Address,
+    ) -> Result<(u128, u128), RegistryError> {
+        let height = self.height;
+        let Some(reg) = self.domains.get_mut(domain) else {
+            return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
+        };
+        if reg.record.state != DomainState::PendingAnchorChallenge {
+            return Err(RegistryError::NotServing {
+                state: reg.record.state.as_str().to_string(),
+            });
+        }
+        let AnchorClass::Bonded {
+            challenge_until_height,
+            ..
+        } = reg.record.anchor_class
+        else {
+            return Err(RegistryError::NotServing {
+                state: reg.record.anchor_class.as_str().to_string(),
+            });
+        };
+        if height >= challenge_until_height {
+            return Err(RegistryError::NotServing {
+                state: "challenge-window-expired".to_string(),
+            });
+        }
+        let Some(bond) = reg.provers.get_mut(&registrant) else {
+            return Err(RegistryError::UnknownProver(hex(registrant.as_bytes())));
+        };
+        if bond
+            .slashings
+            .iter()
+            .any(|slashing| slashing.evidence_digest == challenge_digest)
+        {
+            return Err(RegistryError::AlreadySlashed {
+                evidence: hex(&challenge_digest),
+            });
+        }
+        let live = bond.live_atoms();
+        let penalty = reg
+            .economics
+            .penalty_for(reg.economics.routing_ceiling_atoms, live)
+            .max(live);
+        let reward = reg.economics.challenge.for_slash(penalty);
+        let taken = bond.slash(height, challenge_digest, penalty, challenger, reward);
+        let reward = reward.min(taken);
+        reg.record.state = DomainState::Faulted;
+        reg.record.history.push(StateEvent {
+            at_height: height,
+            from: DomainState::PendingAnchorChallenge,
+            to: DomainState::Faulted,
+            reason: format!(
+                "bonded anchor refuted during challenge window by {} (proof {}), slashed {} atoms",
+                hex(challenger.as_bytes()),
+                hex(&challenge_digest),
+                taken
+            ),
+        });
+        reg.sync_record_bond_facts();
+        Ok((taken, reward))
     }
 
     /// Slashes a prover whose attestation was contradicted. Returns the amount
