@@ -1224,3 +1224,106 @@ fn oracle_free_proof_carrying_liquidation_enforces_state_root_proofs_close_facto
     )
     .is_err());
 }
+
+#[test]
+fn identity_profile_linked_account_requires_ownership_signature_or_external_domain_proof() {
+    use crate::core::address::Address;
+    use crate::crypto::composite::CompositeKeypair;
+    use crate::crypto::pq::ML_DSA_SEED_LEN;
+    use crate::crypto::scheme::SuiteId;
+    use crate::wallet::identity_profile::{
+        build_external_attestation_proof, build_external_attestation_root,
+        evaluate_linked_account_evidence, external_attestation_leaf, AccountOwnershipProof,
+        EvidenceStatus, LinkedAccountClaim, IDENTITY_ADDR_LINK_CTX,
+    };
+
+    let kp =
+        CompositeKeypair::from_seeds(SuiteId::VALIDATOR, &[0x61; ML_DSA_SEED_LEN], &[0x72; 32])
+            .expect("keypair");
+    let pk = kp.public_key().expect("pk");
+    let owned_addr = Address::from(pk.ed);
+
+    let claim = LinkedAccountClaim {
+        subject_name: String::from("alice.bud"),
+        target_domain: 1,
+        account_label: String::from("budlum-main"),
+        linked_address_bytes: owned_addr.as_bytes().to_vec(),
+    };
+
+    // 1. Unproven text record is NEVER Verified.
+    let raw_card =
+        evaluate_linked_account_evidence(&claim, &AccountOwnershipProof::UnprovenTextRecord);
+    assert_eq!(raw_card.status, EvidenceStatus::Unverified);
+    raw_card.validate().expect("unverified card validates");
+
+    // 2. Valid PQ-hybrid signature from the address owner yields Verified.
+    let digest = claim.binding_digest();
+    let sig = kp
+        .sign(IDENTITY_ADDR_LINK_CTX, &digest, &[0x88; 32])
+        .expect("sign");
+    let verified_card = evaluate_linked_account_evidence(
+        &claim,
+        &AccountOwnershipProof::BudlumCompositeSignature {
+            composite_pubkey: pk.encode(),
+            signature: sig.encode(),
+        },
+    );
+    assert_eq!(verified_card.status, EvidenceStatus::Verified);
+    verified_card.validate().expect("verified card validates");
+
+    // Wrong subject_name invalidates the ownership proof fail-closed.
+    let mut stolen_claim = claim.clone();
+    stolen_claim.subject_name = String::from("mallory.bud");
+    let rejected_card = evaluate_linked_account_evidence(
+        &stolen_claim,
+        &AccountOwnershipProof::BudlumCompositeSignature {
+            composite_pubkey: pk.encode(),
+            signature: sig.encode(),
+        },
+    );
+    assert_eq!(rejected_card.status, EvidenceStatus::Unverified);
+
+    // 3. External-domain attestation verified via finalized Merkle inclusion proof.
+    let eth_claim = LinkedAccountClaim {
+        subject_name: String::from("alice.bud"),
+        target_domain: 10,
+        account_label: String::from("eth-eas"),
+        linked_address_bytes: vec![0xab; 20],
+    };
+    let att_digest = [0xee; 32];
+    let leaf = external_attestation_leaf(&eth_claim, &att_digest);
+    let leaves = [leaf, [0x44; 32]];
+    let root = build_external_attestation_root(&leaves);
+    let proof = build_external_attestation_proof(&leaves, 0).expect("attestation proof");
+
+    let ext_card = evaluate_linked_account_evidence(
+        &eth_claim,
+        &AccountOwnershipProof::ExternalDomainAttestation {
+            domain_id: 10,
+            finalized_state_root: root,
+            attestation_digest: att_digest,
+            leaf_index: 0,
+            leaf_count: leaves.len(),
+            proof: proof.clone(),
+        },
+    );
+    assert_eq!(ext_card.status, EvidenceStatus::Verified);
+    ext_card
+        .validate()
+        .expect("external verified card validates");
+
+    let mut bad_root = root;
+    bad_root[0] ^= 0xff;
+    let bad_ext = evaluate_linked_account_evidence(
+        &eth_claim,
+        &AccountOwnershipProof::ExternalDomainAttestation {
+            domain_id: 10,
+            finalized_state_root: bad_root,
+            attestation_digest: att_digest,
+            leaf_index: 0,
+            leaf_count: leaves.len(),
+            proof,
+        },
+    );
+    assert_eq!(bad_ext.status, EvidenceStatus::Unverified);
+}
