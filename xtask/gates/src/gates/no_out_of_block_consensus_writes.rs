@@ -176,9 +176,6 @@ const READ_NAMES: &[&str] = &[
     "prove_name",
     "list_names_by_owner",
     "list_subdomains",
-    // Pure `&self` finality certificate query answered by `bud_getFinalityCertificate`
-    // and `bud_getDomainFinalityProof`; never mutates consensus state.
-    "universal_finality_certificate",
 ];
 
 /// Read-only queries reached through an explicit sub-registry. The method
@@ -190,6 +187,9 @@ const READ_CHAINS: &[&str] = &[
     // Read-only snapshot of owned `ConsensusSentry` fields returned by
     // `ChainCommand::GetConsensusSentry`; no generic `clone` exemption.
     ".bridge_state.consensus_sentry.clone(",
+    // Pure `&self` finality certificate query answered by `bud_getFinalityCertificate`
+    // and `bud_getDomainFinalityProof`; scoped to `settlement` receiver only.
+    ".settlement.universal_finality_certificate(",
 ];
 
 /// Calls on `self.state` inside a `Blockchain` method body that write it.
@@ -327,32 +327,34 @@ fn check_actor_state_access(actor: &str) -> Result<(), String> {
         }
         if let Some(method) = method {
             let chain = actor[at..].trim_start();
-            let nested_read = matches!(method.as_str(), "query_json" | "clone")
-                && READ_CHAINS.iter().any(|allowed| {
-                    chain.strip_prefix(allowed).is_some_and(|arguments| {
-                        // Walk this call's balanced parentheses. A following
-                        // method on its result is outside the read exception.
-                        let mut depth = 1usize;
-                        let mut end = None;
-                        for (i, byte) in arguments.bytes().enumerate() {
-                            match byte {
-                                b'(' => depth += 1,
-                                b')' => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        end = Some(i + 1);
-                                        break;
-                                    }
+            let nested_read = matches!(
+                method.as_str(),
+                "query_json" | "clone" | "universal_finality_certificate"
+            ) && READ_CHAINS.iter().any(|allowed| {
+                chain.strip_prefix(allowed).is_some_and(|arguments| {
+                    // Walk this call's balanced parentheses. A following
+                    // method on its result is outside the read exception.
+                    let mut depth = 1usize;
+                    let mut end = None;
+                    for (i, byte) in arguments.bytes().enumerate() {
+                        match byte {
+                            b'(' => depth += 1,
+                            b')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = Some(i + 1);
+                                    break;
                                 }
-                                _ => {}
                             }
+                            _ => {}
                         }
-                        end.is_some_and(|end| {
-                            let tail = arguments[end..].trim_start();
-                            !tail.starts_with('.')
-                        })
+                    }
+                    end.is_some_and(|end| {
+                        let tail = arguments[end..].trim_start();
+                        !tail.starts_with('.')
                     })
-                });
+                })
+            });
             if !nested_read
                 && !READ_PREFIXES.iter().any(|p| method.starts_with(p))
                 && !READ_NAMES.contains(&method.as_str())
@@ -638,6 +640,32 @@ mod tests {
             "let sentry = &mut self.blockchain.state.bridge_state.consensus_sentry;",
             "self.blockchain.state.add_balance(&addr, 1);",
             "self.blockchain.state.bridge_state.consensus_sentry.clone(",
+        ] {
+            assert!(
+                check_actor_state_access(&normalize(path)).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn settlement_finality_certificate_is_an_exact_read() {
+        for path in [
+            "let c = self.blockchain.state.settlement.universal_finality_certificate(height);",
+            "let c = self\n.blockchain\n.state\n.settlement\n.universal_finality_certificate(height.unwrap_or(tip));",
+        ] {
+            assert!(check_actor_state_access(&normalize(path)).is_ok(), "{path}");
+        }
+    }
+
+    #[test]
+    fn settlement_certificate_does_not_allow_other_receivers_or_writes() {
+        for path in [
+            "self.blockchain.state.universal_finality_certificate(height);",
+            "self.blockchain.state.bridge_state.universal_finality_certificate(height);",
+            "self.blockchain.state.settlement.universal_finality_certificate_mut(height);",
+            "self.blockchain.state.settlement.universal_finality_certificate(height).take();",
+            "self.blockchain.state.settlement.universal_finality_certificate(",
         ] {
             assert!(
                 check_actor_state_access(&normalize(path)).is_err(),
