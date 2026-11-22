@@ -1924,6 +1924,32 @@ fn execute_object_layer_tx(
     ctx: &SettlementTxContext,
     tx: &crate::object_layer::ObjectLayerTx,
 ) -> Result<(), SettlementTxError> {
+    let charter_caip2 = |charter: &crate::object_layer::DomainCharter| -> Option<String> {
+        let trimmed = charter.chain_reference.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.contains(':') {
+            Some(trimmed.to_string())
+        } else {
+            let ns = format!("{:?}", charter.vm_family).to_ascii_lowercase();
+            Some(format!("{ns}:{trimmed}"))
+        }
+    };
+    if let crate::object_layer::ObjectLayerTx::Charter {
+        domain, charter, ..
+    } = tx
+    {
+        if let Some(caip2) = charter_caip2(charter) {
+            if let Some(existing) = state.settlement.domains.domain_id_by_caip2(&caip2) {
+                if existing != *domain {
+                    return Err(SettlementTxError::Refused(format!(
+                        "CAIP-2 reference '{caip2}' is already bound to domain {existing}"
+                    )));
+                }
+            }
+        }
+    }
     if let crate::object_layer::ObjectLayerTx::Arrive(proof) = tx {
         crate::settlement::finality_gate::enforce_domain_not_refuted(
             &state.settlement,
@@ -2174,7 +2200,20 @@ fn execute_object_layer_tx(
             crate::object_layer::tx::TxRefusal::Refused(r) => {
                 SettlementTxError::Refused(format!("object_layer_refused: {r:?}"))
             }
-        })
+        })?;
+    if let crate::object_layer::ObjectLayerTx::Charter {
+        domain, charter, ..
+    } = tx
+    {
+        if let Some(caip2) = charter_caip2(charter) {
+            state
+                .settlement
+                .domains
+                .bind_caip2(*domain, &caip2)
+                .map_err(SettlementTxError::Refused)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn execute_relayer_intent_tx(

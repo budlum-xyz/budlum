@@ -2050,7 +2050,7 @@ mod tests {
             .map(|_| {
                 (
                     KeyPair::generate().expect("ed25519 key"),
-                    PqKeyPair::generate().expect("ed25519 key"),
+                    PqKeyPair::generate(),
                 )
             })
             .collect();

@@ -4,7 +4,7 @@
 //! cheap, non-expiring entry. Per-owner quotas bound one KEY, but addresses
 //! are free, so `capacity / per_owner_quota` addresses fill a pool for
 //! everyone (the privacy note pool needs only
-//! `MAX_LIVE_COMMITMENTS / MAX_LIVE_COMMITMENTS_PER_OWNER = 64`). The answer
+//! `MAX_LIVE_COMMITMENTS / MAX_LIVE_COMMITMENTS_PER_OWNER = 1_024`). The answer
 //! is economic, not structural: every live row LOCKS capital while it
 //! occupies a slot, and the lock is a deposit, never a burn, so a legitimate
 //! heavy user loses nothing while a squatter pays rent in locked supply.
@@ -192,11 +192,11 @@ mod tests {
     }
 
     /// The occupancy arithmetic the K values price: the per-owner quota
-    /// forces at least 64 addresses to saturate the note pool, and the
+    /// forces at least 1,024 addresses to saturate the note pool, and the
     /// saturation capital is deterministic from the table.
     #[test]
-    fn note_pool_saturation_needs_64_addresses_and_locks_the_table_capital() {
-        assert_eq!(MAX_LIVE_COMMITMENTS / MAX_LIVE_COMMITMENTS_PER_OWNER, 64);
+    fn note_pool_saturation_needs_1024_addresses_and_locks_the_table_capital() {
+        assert_eq!(MAX_LIVE_COMMITMENTS / MAX_LIVE_COMMITMENTS_PER_OWNER, 1_024);
         let per_row = policy_of(SharedPool::PrivacyNote).deposit;
         let saturation = (MAX_LIVE_COMMITMENTS as u64) * per_row;
         assert_eq!(saturation, 65_536 * 10 * POOL_DEPOSIT_ATOM);

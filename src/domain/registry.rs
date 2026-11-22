@@ -56,6 +56,42 @@ pub struct ConsensusDomainRegistry {
     /// domain, and folded into [`Self::progress_root`] once non-empty.
     #[serde(default)]
     observed: BTreeMap<DomainId, CryptoFacts>,
+    /// Canonical CAIP-2 chain reference bound to each registered domain.
+    /// Appended with `#[serde(default)]` for backwards-compatible snapshots.
+    #[serde(default)]
+    caip2_by_domain: BTreeMap<DomainId, String>,
+    /// Reverse uniqueness index (`CAIP-2 -> DomainId`) enforcing that no two
+    /// registered domains may ever claim the same CAIP-2 chain identity.
+    #[serde(default)]
+    domain_by_caip2: BTreeMap<String, DomainId>,
+}
+
+/// Validates and normalizes a CAIP-2 reference (`namespace:reference`).
+fn normalize_caip2(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return Err("CAIP-2 reference must be 1..=128 bytes".to_string());
+    }
+    let Some((ns, reference)) = trimmed.split_once(':') else {
+        return Err(format!("CAIP-2 reference '{trimmed}' must contain ':'"));
+    };
+    if ns.is_empty() || reference.is_empty() || reference.contains(':') {
+        return Err(format!(
+            "CAIP-2 reference '{trimmed}' has malformed segments"
+        ));
+    }
+    if !ns
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        || !reference
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+    {
+        return Err(format!(
+            "CAIP-2 reference '{trimmed}' contains disallowed characters"
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 impl ConsensusDomainRegistry {
@@ -64,7 +100,81 @@ impl ConsensusDomainRegistry {
         Self {
             domains: BTreeMap::new(),
             observed: BTreeMap::new(),
+            caip2_by_domain: BTreeMap::new(),
+            domain_by_caip2: BTreeMap::new(),
         }
+    }
+
+    /// Binds a unique CAIP-2 chain reference to an already registered domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without mutating state if `domain_id` is unknown, the
+    /// CAIP-2 string is malformed, the CAIP-2 reference is already bound to a
+    /// different domain, or `domain_id` is already bound to a different CAIP-2.
+    pub fn bind_caip2(&mut self, domain_id: DomainId, caip2: &str) -> Result<(), String> {
+        if !self.domains.contains_key(&domain_id) {
+            return Err(format!("Domain {domain_id} is not registered"));
+        }
+        let normalized = normalize_caip2(caip2)?;
+        if let Some(&existing_domain) = self.domain_by_caip2.get(&normalized) {
+            if existing_domain != domain_id {
+                return Err(format!(
+                    "CAIP-2 reference '{normalized}' is already registered to domain {existing_domain}"
+                ));
+            }
+            return Ok(());
+        }
+        if let Some(existing_ref) = self.caip2_by_domain.get(&domain_id) {
+            if existing_ref != &normalized {
+                return Err(format!(
+                    "Domain {domain_id} is already bound to CAIP-2 '{existing_ref}'"
+                ));
+            }
+            return Ok(());
+        }
+        self.caip2_by_domain.insert(domain_id, normalized.clone());
+        self.domain_by_caip2.insert(normalized, domain_id);
+        Ok(())
+    }
+
+    /// Atomically registers a new consensus domain together with its unique
+    /// CAIP-2 identity. If the CAIP-2 reference is invalid or already claimed
+    /// by another domain, registration is refused with zero state mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the CAIP-2 is malformed or duplicated, or if domain
+    /// registration validation fails.
+    /// Convenience: kept for atomic domain+CAIP-2 registration callers and CLI.
+    pub fn register_with_caip2(
+        &mut self,
+        domain: ConsensusDomain,
+        caip2: &str,
+    ) -> Result<(), String> {
+        let normalized = normalize_caip2(caip2)?;
+        if let Some(&existing_domain) = self.domain_by_caip2.get(&normalized) {
+            return Err(format!(
+                "CAIP-2 reference '{normalized}' is already registered to domain {existing_domain}"
+            ));
+        }
+        let id = domain.id;
+        self.register(domain)?;
+        self.caip2_by_domain.insert(id, normalized.clone());
+        self.domain_by_caip2.insert(normalized, id);
+        Ok(())
+    }
+
+    /// Resolves a canonical CAIP-2 reference to its unique registered `DomainId`.
+    #[must_use]
+    pub fn domain_id_by_caip2(&self, caip2: &str) -> Option<DomainId> {
+        self.domain_by_caip2.get(caip2.trim()).copied()
+    }
+
+    /// Returns the canonical CAIP-2 reference bound to `domain_id`, if any.
+    #[must_use]
+    pub fn caip2_for_domain(&self, domain_id: DomainId) -> Option<&str> {
+        self.caip2_by_domain.get(&domain_id).map(String::as_str)
     }
 
     /// Adds what an adapter checked for a commitment of `id`.
@@ -427,7 +537,19 @@ impl ConsensusDomainRegistry {
     }
 
     pub fn root(&self) -> Hash32 {
-        let leaves: Vec<Hash32> = self.domains.values().map(domain_leaf_hash).collect();
+        let leaves: Vec<Hash32> = self
+            .domains
+            .values()
+            .map(|domain| {
+                let leaf = domain_leaf_hash(domain);
+                match self.caip2_by_domain.get(&domain.id) {
+                    Some(caip2) => {
+                        hash_fields_bytes(&[b"BDLM_DOMAIN_CAIP2_LEAF_V1", &leaf, caip2.as_bytes()])
+                    }
+                    None => leaf,
+                }
+            })
+            .collect();
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 
@@ -929,5 +1051,42 @@ mod tests {
                 6,
             ))
             .expect("a PoW header-chain domain is exactly where depth applies");
+    }
+
+    #[test]
+    fn duplicate_caip2_registration_is_refused_without_mutating_state() {
+        let mut reg = ConsensusDomainRegistry::new();
+        let d1 = default_domain(101, ConsensusKind::Bft, 1, "bft-quorum-commit", 1);
+        let d2 = default_domain(102, ConsensusKind::Bft, 11_155_111, "bft-quorum-commit", 1);
+
+        // First registration with CAIP-2 succeeds and binds caip2 -> DomainId.
+        reg.register_with_caip2(d1, "eip155:1")
+            .expect("first CAIP-2 registration must succeed");
+        assert_eq!(reg.domain_id_by_caip2("eip155:1"), Some(101));
+        assert_eq!(reg.caip2_for_domain(101), Some("eip155:1"));
+        let root_after_first = reg.root();
+
+        // Second registration claiming the exact same CAIP-2 must fail atomically
+        // without adding d2 or mutating the registry root.
+        let dup_err = reg.register_with_caip2(d2.clone(), "eip155:1").unwrap_err();
+        assert!(dup_err.contains("already registered"));
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get(102).is_none());
+        assert_eq!(reg.root(), root_after_first);
+
+        // Malformed CAIP-2 references are also rejected without state mutation.
+        assert!(reg.register_with_caip2(d2.clone(), "").is_err());
+        assert!(reg
+            .register_with_caip2(d2.clone(), "missing-colon")
+            .is_err());
+        assert!(reg.register_with_caip2(d2.clone(), "a:b:c").is_err());
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg.root(), root_after_first);
+
+        // Distinct CAIP-2 succeeds and updates the root deterministically.
+        reg.register_with_caip2(d2, "eip155:11155111")
+            .expect("distinct CAIP-2 must succeed");
+        assert_eq!(reg.domain_id_by_caip2("eip155:11155111"), Some(102));
+        assert_ne!(reg.root(), root_after_first);
     }
 }

@@ -178,9 +178,15 @@ impl UniversalDomainCatalog {
                 .get(&domain.id)
                 .filter(|c| c.status == CharterStatus::Active);
 
-            let caip2_reference = active_charter
-                .map(|c| c.chain_reference.trim())
-                .filter(|r| !r.is_empty())
+            let caip2_reference = state
+                .settlement
+                .domains
+                .caip2_for_domain(domain.id)
+                .or_else(|| {
+                    active_charter
+                        .map(|c| c.chain_reference.trim())
+                        .filter(|r| !r.is_empty())
+                })
                 .map_or_else(
                     || format!("budlum-domain:{}:{}", domain.domain_chain_id, domain.id),
                     ToOwned::to_owned,
@@ -200,7 +206,7 @@ impl UniversalDomainCatalog {
                 capabilities.insert(DomainCapability::ObjectLayerCustody);
             }
             let adapter_lower = domain.finality_adapter.to_ascii_lowercase();
-            if domain.kind == ConsensusKind::PoSpace
+            if domain.kind == ConsensusKind::Pospace
                 || adapter_lower.contains("storage")
                 || adapter_lower.contains("arweave")
                 || adapter_lower.contains("filecoin")
