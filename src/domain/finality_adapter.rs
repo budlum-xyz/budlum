@@ -4100,7 +4100,7 @@ mod tests {
         for status in [pos, bft, poa, pow] {
             match status {
                 FinalityStatus::Rejected(reason) => {
-                    assert!(reason.contains("Commitment names domain 1"), "{reason}")
+                    assert!(reason.contains("Commitment names domain 1"), "{reason}");
                 }
                 other => panic!("expected a domain mismatch refusal, got {other:?}"),
             }
@@ -4669,7 +4669,7 @@ mod tests {
             .expect("a foreign chain id is a refusal, not an error");
         match status {
             FinalityStatus::Rejected(reason) => {
-                assert!(reason.contains("chain id"), "{reason}")
+                assert!(reason.contains("chain id"), "{reason}");
             }
             _ => panic!("a certificate signed under another chain id was not refused"),
         }
@@ -4731,7 +4731,7 @@ mod tests {
             .expect("a foreign chain id is a refusal, not an error");
         match status {
             FinalityStatus::Rejected(reason) => {
-                assert!(reason.contains("chain id"), "{reason}")
+                assert!(reason.contains("chain id"), "{reason}");
             }
             _ => panic!("a certificate signed under another chain id was not refused"),
         }

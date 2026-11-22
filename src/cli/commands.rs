@@ -17,9 +17,9 @@ pub enum ConsensusType {
 impl std::fmt::Display for ConsensusType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConsensusType::PoW => write!(f, "PoW (Proof of Work)"),
-            ConsensusType::PoS => write!(f, "PoS (Proof of Stake)"),
-            ConsensusType::PoA => write!(f, "PoA (Proof of Authority)"),
+            Self::PoW => write!(f, "PoW (Proof of Work)"),
+            Self::PoS => write!(f, "PoS (Proof of Stake)"),
+            Self::PoA => write!(f, "PoA (Proof of Authority)"),
         }
     }
 }
@@ -40,10 +40,10 @@ pub enum PrivacyLevel {
 impl std::fmt::Display for PrivacyLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PrivacyLevel::None => write!(f, "None (Public)"),
-            PrivacyLevel::Stealth => write!(f, "Stealth Addresses"),
-            PrivacyLevel::Confidential => write!(f, "Confidential Transactions"),
-            PrivacyLevel::Full => write!(f, "Full Privacy"),
+            Self::None => write!(f, "None (Public)"),
+            Self::Stealth => write!(f, "Stealth Addresses"),
+            Self::Confidential => write!(f, "Confidential Transactions"),
+            Self::Full => write!(f, "Full Privacy"),
         }
     }
 }

@@ -1866,17 +1866,17 @@ mod tests {
             ("report_invalid_block", |m, p| m.report_invalid_block(p)),
             ("report_invalid_tx", |m, p| m.report_invalid_tx(p)),
             ("report_oversized_message", |m, p| {
-                m.report_oversized_message(p)
+                m.report_oversized_message(p);
             }),
             ("report_bad_behavior", |m, p| m.report_bad_behavior(p)),
             ("report_good_behavior", |m, p| m.report_good_behavior(p)),
             ("report_unanswered_request", |m, p| {
-                m.report_unanswered_request(p)
+                m.report_unanswered_request(p);
             }),
             ("report_unjoined_block", |m, p| m.report_unjoined_block(p)),
             ("report_slow_sync", |m, p| m.report_slow_sync(p)),
             ("report_invalid_handshake", |m, p| {
-                m.report_invalid_handshake(p)
+                m.report_invalid_handshake(p);
             }),
             ("ban_peer", |m, p| m.ban_peer(p)),
             ("set_handshaked", |m, p| m.set_handshaked(p, true)),

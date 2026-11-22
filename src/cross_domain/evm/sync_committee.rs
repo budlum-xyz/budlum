@@ -110,63 +110,63 @@ pub enum SyncCommitteeError {
 impl std::fmt::Display for SyncCommitteeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SyncCommitteeError::NotFinalized => write!(
+            Self::NotFinalized => write!(
                 f,
                 "sync: the finality branch does not prove the header finalized"
             ),
-            SyncCommitteeError::InvalidPubkey => write!(f, "sync: invalid pubkey"),
-            SyncCommitteeError::InvalidSignature => write!(f, "sync: invalid signature"),
-            SyncCommitteeError::InsufficientParticipation {
+            Self::InvalidPubkey => write!(f, "sync: invalid pubkey"),
+            Self::InvalidSignature => write!(f, "sync: invalid signature"),
+            Self::InsufficientParticipation {
                 participating,
                 threshold,
             } => write!(
                 f,
                 "sync: participation {participating} < threshold {threshold} (2/3)"
             ),
-            SyncCommitteeError::SignatureVerificationFailed => {
+            Self::SignatureVerificationFailed => {
                 write!(f, "sync: BLS signature verification failed")
             }
-            SyncCommitteeError::StateMismatch => write!(f, "sync: light-client state mismatch"),
-            SyncCommitteeError::HeaderMismatch => write!(f, "sync: header mismatch"),
-            SyncCommitteeError::ExecutionBlockNotInBeaconBody => write!(
+            Self::StateMismatch => write!(f, "sync: light-client state mismatch"),
+            Self::HeaderMismatch => write!(f, "sync: header mismatch"),
+            Self::ExecutionBlockNotInBeaconBody => write!(
                 f,
                 "sync: the signed beacon header does not commit to the execution block"
             ),
-            SyncCommitteeError::PeriodMismatch {
+            Self::PeriodMismatch {
                 slot_period,
                 state_period,
             } => write!(
                 f,
                 "sync: beacon slot is in period {slot_period}, committee state is for period {state_period}"
             ),
-            SyncCommitteeError::RotationBranchRequired => write!(
+            Self::RotationBranchRequired => write!(
                 f,
                 "sync: period rotation refused - no branch proving next_sync_committee \
                  to the finalized state ( interim)"
             ),
-            SyncCommitteeError::InvalidExecutionPayload(why) => {
+            Self::InvalidExecutionPayload(why) => {
                 write!(f, "sync: invalid execution payload header: {why}")
             }
-            SyncCommitteeError::ForkGindexMismatch { expected, found } => {
+            Self::ForkGindexMismatch { expected, found } => {
                 write!(
                     f,
                     "sync: fork generalized index mismatch: expected {expected}, found {found}"
                 )
             }
-            SyncCommitteeError::NonMonotonicFinality(why) => {
+            Self::NonMonotonicFinality(why) => {
                 write!(f, "sync: non-monotonic finality update: {why}")
             }
-            SyncCommitteeError::LightClientFrozen(digest) => {
+            Self::LightClientFrozen(digest) => {
                 write!(
                     f,
                     "sync: light client permanently frozen after equivocation {:02x}{:02x}{:02x}{:02x}",
                     digest[0], digest[1], digest[2], digest[3]
                 )
             }
-            SyncCommitteeError::InvalidEquivocationEvidence(why) => {
+            Self::InvalidEquivocationEvidence(why) => {
                 write!(f, "sync: invalid equivocation evidence: {why}")
             }
-            SyncCommitteeError::ExecutionProofFailed(why) => {
+            Self::ExecutionProofFailed(why) => {
                 write!(f, "sync: execution proof failed: {why}")
             }
         }

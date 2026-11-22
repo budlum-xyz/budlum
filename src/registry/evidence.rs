@@ -135,13 +135,13 @@ impl SlashingProof {
     /// The [`SlashingCondition`] this proof attests to.
     pub fn condition(&self) -> SlashingCondition {
         match self {
-            SlashingProof::DoubleSign { .. } => SlashingCondition::DoubleSign,
-            SlashingProof::Liveness { .. } => SlashingCondition::LivenessFault,
-            SlashingProof::Other { .. } => SlashingCondition::MaliciousBehaviour,
+            Self::DoubleSign { .. } => SlashingCondition::DoubleSign,
+            Self::Liveness { .. } => SlashingCondition::LivenessFault,
+            Self::Other { .. } => SlashingCondition::MaliciousBehaviour,
             // Repeated invalid-signature spam is treated as provable malicious
             // Behaviour (approved severity decision: reuse the existing
             // MaliciousBehaviour ratio rather than adding a new one).
-            SlashingProof::InvalidSignatureSpam { .. } => SlashingCondition::MaliciousBehaviour,
+            Self::InvalidSignatureSpam { .. } => SlashingCondition::MaliciousBehaviour,
         }
     }
 }
@@ -217,43 +217,43 @@ pub enum EvidenceError {
 impl std::fmt::Display for EvidenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EvidenceError::FieldTooLarge { field, len, max } => {
+            Self::FieldTooLarge { field, len, max } => {
                 write!(
                     f,
                     "report field `{field}` is {len} bytes, over the {max}-byte bound"
                 )
             }
-            EvidenceError::ZeroOffender => write!(f, "offender is the zero address"),
-            EvidenceError::NonConflictingHashes => {
+            Self::ZeroOffender => write!(f, "offender is the zero address"),
+            Self::NonConflictingHashes => {
                 write!(f, "double-sign proof references identical block hashes")
             }
-            EvidenceError::MissingSignature => write!(f, "double-sign proof missing a signature"),
-            EvidenceError::ImpossibleLivenessWindow => {
+            Self::MissingSignature => write!(f, "double-sign proof missing a signature"),
+            Self::ImpossibleLivenessWindow => {
                 write!(f, "liveness proof claims more missed than expected")
             }
-            EvidenceError::EmptyProofTag => write!(f, "opaque proof has an empty tag"),
-            EvidenceError::InsufficientInvalidVoteCount => {
+            Self::EmptyProofTag => write!(f, "opaque proof has an empty tag"),
+            Self::InsufficientInvalidVoteCount => {
                 write!(
                     f,
                     "invalid-signature-spam proof does not cross its threshold"
                 )
             }
-            EvidenceError::Unverified => {
+            Self::Unverified => {
                 write!(f, "cannot slash on an unverified evidence report")
             }
-            EvidenceError::MalformedBlockHash => {
+            Self::MalformedBlockHash => {
                 write!(f, "block hash is not 32 bytes of hex")
             }
-            EvidenceError::SignatureDoesNotVerify => {
+            Self::SignatureDoesNotVerify => {
                 write!(f, "signature does not verify under the offender's key")
             }
-            EvidenceError::WrongRoleForProof => {
+            Self::WrongRoleForProof => {
                 write!(f, "double-sign proof names a role other than validator")
             }
-            EvidenceError::WrongProofForVerification => {
+            Self::WrongProofForVerification => {
                 write!(f, "proof is not a double-sign proof")
             }
-            EvidenceError::KindEpochMismatch => {
+            Self::KindEpochMismatch => {
                 write!(f, "double-sign proof kind and epoch disagree")
             }
         }

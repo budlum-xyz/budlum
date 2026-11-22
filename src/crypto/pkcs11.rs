@@ -933,7 +933,7 @@ impl ConsensusSigner for Pkcs11Signer {
                                 "vendor-native BLS signing required, fallback forbidden: {e}"
                             )));
                         }
-                        tracing::warn!("Vendor BLS sign failed ({e}), sw fallback")
+                        tracing::warn!("Vendor BLS sign failed ({e}), sw fallback");
                     }
                 }
             } else if self.strict_vendor_native {

@@ -509,7 +509,7 @@ impl Block {
                 // Guaranteed not to collide with any well-formed 32-byte hash because
                 // Of the distinct 0x01 domain tag.
                 if let Some(bytes) = hex_32(&tx.hash) {
-                    leaf.extend_from_slice(&bytes)
+                    leaf.extend_from_slice(&bytes);
                 } else {
                     // Domain tag 0x01: malformed hash. The leaf commits to
                     // a digest of the string itself, not to a constant:

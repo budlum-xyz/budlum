@@ -4954,7 +4954,7 @@ impl Blockchain {
                 match self.state.get_validator(&tx.from) {
                     None => reasons.push("validator_not_bonded".to_string()),
                     Some(validator) if validator.active => {
-                        reasons.push("active_validator_key_rotation_forbidden".to_string())
+                        reasons.push("active_validator_key_rotation_forbidden".to_string());
                     }
                     Some(_) => {}
                 }
@@ -5856,13 +5856,13 @@ impl Blockchain {
         for (requester, max_fee) in refunds {
             let account = state.get_or_create(&requester);
             if let Some(updated) = account.balance.checked_add(max_fee) {
-                account.balance = updated
+                account.balance = updated;
             } else {
                 tracing::error!(
                     %requester,
                     max_fee,
                     "AI prune refund would overflow the balance; fee left uncredited"
-                )
+                );
             }
         }
         let expired = state.ai_registry.expire_dispute_window(block_height);
@@ -7752,7 +7752,7 @@ impl Blockchain {
                 ),
                 Ok(_) => {}
                 Err(error) => {
-                    tracing::error!("Failed to quarantine stale reorg snapshots: {error}")
+                    tracing::error!("Failed to quarantine stale reorg snapshots: {error}");
                 }
             }
         }

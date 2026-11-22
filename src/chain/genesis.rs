@@ -2063,7 +2063,7 @@ mod tests {
                     assert!(
                         reason.contains("no registered validator set"),
                         "{kind}: {reason}"
-                    )
+                    );
                 }
                 other => panic!("{kind} placeholder must refuse, got {other:?}"),
             }

@@ -1524,13 +1524,13 @@ impl ConsensusEngine for PoSEngine {
         match self.epoch_randomness_from_chain(block.chain_id, next_epoch, chain) {
             Ok(randomness) => {
                 if let Ok(mut cached) = self.epoch_seed.write() {
-                    *cached = randomness
+                    *cached = randomness;
                 } else {
-                    tracing::error!("PoS replay-derived randomness cache lock is poisoned")
+                    tracing::error!("PoS replay-derived randomness cache lock is poisoned");
                 }
             }
             Err(error) => {
-                tracing::error!("Failed to refresh replay-derived PoS randomness cache: {error}")
+                tracing::error!("Failed to refresh replay-derived PoS randomness cache: {error}");
             }
         }
     }
