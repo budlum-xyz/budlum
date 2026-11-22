@@ -187,8 +187,8 @@ const READ_CHAINS: &[&str] = &[
     // Read-only snapshot of owned `ConsensusSentry` fields returned by
     // `ChainCommand::GetConsensusSentry`; no generic `clone` exemption.
     ".bridge_state.consensus_sentry.clone(",
-    // Pure `&self` finality certificate query answered by `bud_getFinalityCertificate`
-    // and `bud_getDomainFinalityProof`; scoped to `settlement` receiver only.
+    // Owned certificate derived by the settlement registry's `&self` accessor;
+    // no exemption for the same method name on other receivers.
     ".settlement.universal_finality_certificate(",
 ];
 
@@ -350,7 +350,12 @@ fn check_actor_state_access(actor: &str) -> Result<(), String> {
                         }
                     }
                     end.is_some_and(|end| {
-                        let tail = arguments[end..].trim_start();
+                        let mut tail = arguments[end..].trim_start();
+                        // `?` propagates an error; it must not hide a method
+                        // chained on the successful result of this read.
+                        while let Some(rest) = tail.strip_prefix('?') {
+                            tail = rest.trim_start();
+                        }
                         !tail.starts_with('.')
                     })
                 })
@@ -669,6 +674,40 @@ mod tests {
         ] {
             assert!(
                 check_actor_state_access(&normalize(path)).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_reads_reject_methods_after_try_postfix() {
+        for receiver in [
+            "bud3_registry.query_json(())",
+            "validator_directory.query_json(())",
+            "bridge_state.consensus_sentry.clone()",
+            "settlement.universal_finality_certificate(height)",
+        ] {
+            for suffix in ["?.take();", "? .verify_integrity();", "? ? .take();"] {
+                let path = format!("self.blockchain.state.{receiver}{suffix}");
+                assert!(
+                    check_actor_state_access(&normalize(&path)).is_err(),
+                    "{path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_reads_allow_standalone_try_postfix() {
+        for receiver in [
+            "bud3_registry.query_json(())",
+            "validator_directory.query_json(())",
+            "bridge_state.consensus_sentry.clone()",
+            "settlement.universal_finality_certificate(height)",
+        ] {
+            let path = format!("let value = self.blockchain.state.{receiver}?;");
+            assert!(
+                check_actor_state_access(&normalize(&path)).is_ok(),
                 "{path}"
             );
         }
