@@ -181,7 +181,42 @@ impl ProverFee {
         let value_part = q.saturating_mul(bps).saturating_add(rem_ceil);
         self.base_atoms.saturating_add(value_part)
     }
+
+    /// Escalates the base + value attestation fee when a domain has been
+    /// neglected beyond `IDLE_ESCALATION_GRACE_HEIGHTS` heights without a
+    /// fresh attestation. Uses pure saturating `u128` integer arithmetic and
+    /// caps the multiplier at `IDLE_ESCALATION_MAX_BPS` (`5x`).
+    #[must_use]
+    fn for_value_with_idle_escalation(&self, value_atoms: u128, idle_heights: u64) -> u128 {
+        let base_fee = self.for_value(value_atoms);
+        if idle_heights <= IDLE_ESCALATION_GRACE_HEIGHTS || base_fee == 0 {
+            return base_fee;
+        }
+        let excess = idle_heights.saturating_sub(IDLE_ESCALATION_GRACE_HEIGHTS);
+        let steps = u128::from(excess / IDLE_ESCALATION_STEP_HEIGHTS);
+        if steps == 0 {
+            return base_fee;
+        }
+        let bonus_bps = steps.saturating_mul(u128::from(IDLE_ESCALATION_STEP_BPS));
+        let mult_bps = BPS_DEN
+            .saturating_add(bonus_bps)
+            .min(u128::from(IDLE_ESCALATION_MAX_BPS));
+        let q = base_fee / BPS_DEN;
+        let r = base_fee % BPS_DEN;
+        let scaled_r = r.saturating_mul(mult_bps);
+        let rem_ceil = (scaled_r / BPS_DEN).saturating_add(u128::from(scaled_r % BPS_DEN != 0));
+        q.saturating_mul(mult_bps).saturating_add(rem_ceil)
+    }
 }
+
+/// Heights a domain may stay idle before carrier reward escalation begins.
+const IDLE_ESCALATION_GRACE_HEIGHTS: u64 = 100;
+/// Idle height step between successive carrier reward increases.
+const IDLE_ESCALATION_STEP_HEIGHTS: u64 = 100;
+/// Reward increase per idle step in basis points (`2_500` = +25%).
+const IDLE_ESCALATION_STEP_BPS: u32 = 2_500;
+/// Hard ceiling on idle escalation multiplier in basis points (`50_000` = 5x).
+const IDLE_ESCALATION_MAX_BPS: u32 = 50_000;
 
 /// Basis-point denominator, named so `value_bps: 25` cannot be misread as 25%.
 pub const BPS_DEN: u128 = 10_000;
@@ -259,6 +294,24 @@ impl DomainEconomics {
         // atoms. Capped at the bond because that is all there is.
         value_atoms.min(bond_atoms)
     }
+
+    /// Carrier reward for serving an attestation carrying `value_atoms` after
+    /// `idle_heights` heights of inactivity. Escalates monotonically while a
+    /// domain goes unserved, yet stays strictly below the prover's slashing
+    /// loss whenever `penalty > 0` so idle escalation never makes lying
+    /// profitable.
+    #[must_use]
+    pub fn carrier_reward_for_idle(&self, value_atoms: u128, idle_heights: u64) -> u128 {
+        let escalated = self
+            .fee
+            .for_value_with_idle_escalation(value_atoms, idle_heights);
+        let loss = self.penalty_for(value_atoms, self.required_bond_atoms());
+        if loss > 0 {
+            escalated.min(loss.saturating_sub(1))
+        } else {
+            escalated
+        }
+    }
 }
 
 /// Whether a prover's economics make honesty the cheaper option.
@@ -275,4 +328,62 @@ pub fn honesty_is_cheaper(economics: &DomainEconomics, value_atoms: u128) -> boo
     let gain = economics.fee.for_value(value_atoms);
     let loss = economics.penalty_for(value_atoms, economics.required_bond_atoms());
     gain < loss
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_domain_escalates_carrier_reward_until_cap_and_preserves_honesty_rule() {
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000_000,
+            fee: ProverFee {
+                base_atoms: 1_000,
+                value_bps: 10, // 0.10% -> 1_000 value fee, 2_000 total at ceiling
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 2_500,
+                floor_atoms: 500,
+            },
+            unbonding_heights: 100,
+        };
+        let ceiling = econ.routing_ceiling_atoms;
+        let loss = econ.penalty_for(ceiling, econ.required_bond_atoms());
+        assert_eq!(loss, 100_000);
+
+        let r0 = econ.carrier_reward_for_idle(ceiling, 0);
+        let r_grace = econ.carrier_reward_for_idle(ceiling, IDLE_ESCALATION_GRACE_HEIGHTS);
+        let r_step1 = econ.carrier_reward_for_idle(ceiling, 200);
+        let r_step2 = econ.carrier_reward_for_idle(ceiling, 300);
+        let r_cap = econ.carrier_reward_for_idle(ceiling, 10_000);
+        let r_huge = econ.carrier_reward_for_idle(ceiling, u64::MAX);
+
+        assert_eq!(r0, 2_000);
+        assert_eq!(r_grace, r0);
+        assert!(r_step1 > r_grace, "reward must rise after grace window");
+        assert!(r_step2 > r_step1, "reward must keep rising while idle");
+        assert_eq!(r_cap, 10_000, "5x escalation cap on 2_000 base fee");
+        assert_eq!(r_huge, r_cap, "saturation at cap prevents overflow");
+        assert!(
+            r_huge < loss,
+            "idle escalation must never make lying profitable"
+        );
+
+        // Tight-margin domain: escalation is clamped strictly below slashing loss.
+        let tight = DomainEconomics {
+            routing_ceiling_atoms: 10_000, // required bond = 1_000 = loss
+            fee: ProverFee {
+                base_atoms: 400,
+                value_bps: 0,
+            },
+            challenge: ChallengeReward::default(),
+            unbonding_heights: 10,
+        };
+        let tight_loss = tight.penalty_for(10_000, tight.required_bond_atoms());
+        let tight_reward = tight.carrier_reward_for_idle(10_000, 10_000);
+        assert_eq!(tight_loss, 1_000);
+        assert_eq!(tight_reward, 999);
+        assert!(tight_reward < tight_loss);
+    }
 }

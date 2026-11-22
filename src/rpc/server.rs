@@ -3949,6 +3949,12 @@ impl BudlumApiServer for RpcServer {
                            "valueBps": economics.fee.value_bps,
                            "bpsDenominator": BPS_DEN.to_string(),
                            "feeAtCeilingAtoms": economics.fee.for_value(ceiling).to_string(),
+                           "idleEscalatedRewardAtCeilingAtoms": economics
+                               .carrier_reward_for_idle(
+                                   ceiling,
+                                   profile.staleness(clock_height).unwrap_or(0),
+                               )
+                               .to_string(),
                        },
                        "challenge": to_val("Challenge", serde_json::to_value(economics.challenge))?,
                        "unbondingHeights": economics.unbonding_heights,
