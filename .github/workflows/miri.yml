@@ -58,9 +58,9 @@ jobs:
     # timeout-minutes value can ever let this step finish. The step is bounded
     # below instead, and the remainder is reported rather than waited for.
     #
-    # 210 covers crypto (up to ~75 min on slow EPYC runners) + bud-zero (12 min)
-    # + the bounded storage window (60 min) with comfortable headroom.
-    timeout-minutes: 210
+    # 300 covers crypto (up to ~180 min on slow EPYC runners) + bud-zero (15 min)
+    # + the bounded storage window (40 min; full 32-shard sweep runs in miri-storage-weekly.yml).
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -210,7 +210,7 @@ jobs:
           # skipped behaviour is still covered by the normal (non-Miri) test
           # run in CI; only the UB inspection of them is impossible.
           set +e
-          timeout 3600 cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage \
+          timeout 2400 cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage \
             --skip startup_loads_consensus_state_from_storage \
             --skip test_storage_maintenance_fail_closed_regression \
             --skip storage_economics_state_persists_across_restart \
@@ -289,7 +289,7 @@ jobs:
             echo "| :-- | --: |"
             echo "| tests inspected under Miri | ${n:-0} |"
             echo "| tests in the suite | ${total:-unknown} |"
-            echo "| window | 3600 s |"
+            echo "| window | 2400 s |"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "Miri storage: ${n:-0} of ${total:-unknown} tests inspected"
 
@@ -298,7 +298,7 @@ jobs:
             # rather than dressed up: at ~148 s/test the suite needs ~26.5 h
             # against a 6 h hard ceiling. This is a NOTICE, not a silent pass -
             # the number above is the coverage claim, and it is a partial one.
-            echo "::warning::Miri storage inspection hit its 3600 s window after ${n:-0} of ${total:-unknown} tests. This is a measured shortfall, not a clean run: the full suite needs roughly 26.5 h and a hosted job is capped at 6 h. Weekly sharded storage Miri now carries that full-cost sweep on schedule/workflow_dispatch."
+            echo "::warning::Miri storage inspection hit its 2400 s window after ${n:-0} of ${total:-unknown} tests. This is a measured shortfall, not a clean run: the full suite needs roughly 26.5 h and a hosted job is capped at 6 h. Weekly sharded storage Miri now carries that full-cost sweep on schedule/workflow_dispatch."
           elif [ "$rc" -ne 0 ]; then
             echo "::error::Miri storage inspection failed with exit $rc - this is a real failure, not the time bound."
             exit "$rc"
@@ -394,9 +394,9 @@ jobs:
     runs-on: ubuntu-latest
     # Measured on PR #79 head 3a97569: the canary passed and the ASan lib
     # suite reached 2956/3219 tests before the old 45 minute job timeout
-    # cancelled it mid-run; at 3778 tests a full pass takes ~81 minutes on a
-    # hosted runner. Keep the gate blocking and leave real wall-time headroom.
-    timeout-minutes: 180
+    # cancelled it mid-run; 180 minutes later cancelled on 6700+ tests.
+    # Keep the gate blocking and leave real wall-time headroom.
+    timeout-minutes: 270
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

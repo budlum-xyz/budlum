@@ -57,7 +57,9 @@ jobs:
     # the top of the file.
     name: Stage 1 (${{ matrix.label }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
       matrix:

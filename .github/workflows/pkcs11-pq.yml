@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-  # Heavy battery. It runs on the schedule, on demand (the evidence-window
+  # Heavy battery. It runs on demand (the evidence-window
   # owner dispatches it on the wave head) and on pushes to `main`. It is out
   # of the pull-request path on purpose: one push was queueing more work than
   # the shared runner pool could finish, and the budget gate
