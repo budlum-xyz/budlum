@@ -3029,9 +3029,11 @@ mod tests {
         use crate::settlement::{FinalityBucket, GlobalBlockHeader};
 
         let mut state = AccountState::new();
+        // An attestation-complete kind: a bare BFT registration binds no
+        // commitment roots at baseline and can only reach the Pending bucket.
         let dom = ConsensusDomain {
             id: 42,
-            kind: ConsensusKind::Bft,
+            kind: ConsensusKind::AiInference,
             status: DomainStatus::Active,
             domain_chain_id: 42_000,
             operator: Some(Address::from([2u8; 32])),
@@ -3071,7 +3073,7 @@ mod tests {
                 tx_root: [0x56; 32],
                 event_root: [0x57; 32],
                 finality_proof_hash: [0x58; 32],
-                consensus_kind: ConsensusKind::Bft,
+                consensus_kind: ConsensusKind::AiInference,
                 validator_set_hash: [0xB2; 32],
                 timestamp_ms: 1_000,
                 sequence: 1,
@@ -3137,7 +3139,7 @@ mod tests {
         assert_eq!(verified.state_root, [0x55; 32]);
         assert_eq!(
             verified.guarantee_label,
-            "deterministic-quorum|lattice|slashable|ft=3333bps"
+            "deterministic-quorum|lattice|non-slashable|ft=3333bps"
         );
 
         let mut bad_cert = cert.clone();

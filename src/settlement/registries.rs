@@ -632,32 +632,42 @@ mod tests {
         assert_eq!(registries.finality_certificate_root(100), None);
         assert_eq!(registries.universal_finality_certificate(100), None);
 
-        let make_domain = |id: u32, status: DomainStatus, last_h: u64| ConsensusDomain {
-            id,
-            kind: ConsensusKind::Bft,
-            status,
-            domain_chain_id: 7_000 + u64::from(id),
-            operator: Some(Address::from([1u8; 32])),
-            operator_bond: crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND,
-            config_hash: [0xAA; 32],
-            validator_set_hash: [0xBB; 32],
-            finality_adapter: "tendermint-v1".into(),
-            min_confirmations: 1,
-            bridge_enabled: true,
-            block_hash_scheme: RootScheme::Sha256,
-            state_root_scheme: RootScheme::Sha256,
-            tx_root_scheme: RootScheme::Sha256,
-            last_committed_height: last_h,
-            last_committed_hash: if last_h > 0 { [0x15; 32] } else { [0u8; 32] },
-            pow_parameters: None,
-            zk_program_allowlist: Vec::new(),
-            plugin_code_hash: None,
-            genesis_state_root: [0u8; 32],
-        };
+        // Baseline guarantees only certify kinds whose registered adapter
+        // attests the full commitment set; a bare BFT registration binds
+        // nothing until a verified proof says otherwise, so the Established
+        // row uses an attestation-complete kind on purpose.
+        let make_domain =
+            |id: u32, kind: ConsensusKind, status: DomainStatus, last_h: u64| ConsensusDomain {
+                id,
+                kind,
+                status,
+                domain_chain_id: 7_000 + u64::from(id),
+                operator: Some(Address::from([1u8; 32])),
+                operator_bond: crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND,
+                config_hash: [0xAA; 32],
+                validator_set_hash: [0xBB; 32],
+                finality_adapter: "tendermint-v1".into(),
+                min_confirmations: 1,
+                bridge_enabled: true,
+                block_hash_scheme: RootScheme::Sha256,
+                state_root_scheme: RootScheme::Sha256,
+                tx_root_scheme: RootScheme::Sha256,
+                last_committed_height: last_h,
+                last_committed_hash: if last_h > 0 { [0x15; 32] } else { [0u8; 32] },
+                pow_parameters: None,
+                zk_program_allowlist: Vec::new(),
+                plugin_code_hash: None,
+                genesis_state_root: [0u8; 32],
+            };
 
         registries
             .domains
-            .restore_persisted(make_domain(1, DomainStatus::Active, 15))
+            .restore_persisted(make_domain(
+                1,
+                ConsensusKind::AiInference,
+                DomainStatus::Active,
+                15,
+            ))
             .expect("register domain 1");
         let mut facts = CryptoFacts::new();
         facts.record(ObservedScheme::Proof(AssumptionClass::Hash));
@@ -673,7 +683,7 @@ mod tests {
                 tx_root: [0x31; 32],
                 event_root: [0x32; 32],
                 finality_proof_hash: [0x33; 32],
-                consensus_kind: ConsensusKind::Bft,
+                consensus_kind: ConsensusKind::AiInference,
                 validator_set_hash: [0xBB; 32],
                 timestamp_ms: 1_000,
                 sequence: 1,
@@ -684,12 +694,12 @@ mod tests {
 
         registries
             .domains
-            .restore_persisted(make_domain(2, DomainStatus::Active, 0))
+            .restore_persisted(make_domain(2, ConsensusKind::Bft, DomainStatus::Active, 0))
             .expect("register domain 2");
 
         registries
             .domains
-            .restore_persisted(make_domain(3, DomainStatus::Frozen, 0))
+            .restore_persisted(make_domain(3, ConsensusKind::Bft, DomainStatus::Frozen, 0))
             .expect("register domain 3");
 
         let cert = registries
