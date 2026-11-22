@@ -33,6 +33,12 @@ pub use plugin::{
 };
 pub use plugin_registry::DomainPluginRegistry;
 pub use pq_canonical::{PqCanonicalSource, SealId, SealKind, SourceError};
+pub use producer::{
+    build_bft_commitment, build_bitcoin_spv_commitment, build_dag_commitment, build_poa_commitment,
+    build_poh_commitment, build_pospace_commitment, build_pow_commitment, mine_pospace_block_hash,
+    BftMember, BitcoinBlockContent, BitcoinSpvChainSpec, PowBlockContent, PowChainSpec,
+    QuorumBlockSpec,
+};
 pub use registry::ConsensusDomainRegistry;
 pub use sovereign::{
     AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,

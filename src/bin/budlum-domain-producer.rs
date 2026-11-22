@@ -62,22 +62,40 @@ struct Cli {
     )]
     payload: Option<PathBuf>,
     /// JSON `PowChainSpec`: mine the header chain and build the payload.
-    #[arg(long)]
+    #[arg(
+        long,
+        conflicts_with_all = ["bitcoin_spec", "bft_spec", "poa_spec", "dag_spec", "poh_spec", "pospace_spec"]
+    )]
     pow_spec: Option<PathBuf>,
     /// JSON `BitcoinSpvChainSpec`: mine the Bitcoin header window and build the payload.
-    #[arg(long)]
+    #[arg(
+        long,
+        conflicts_with_all = ["bft_spec", "poa_spec", "dag_spec", "poh_spec", "pospace_spec"]
+    )]
     bitcoin_spec: Option<PathBuf>,
     /// JSON `BftJob`: sign the checkpoint with the BFT validators' keys.
-    #[arg(long, requires = "quorum_keys")]
+    #[arg(
+        long,
+        requires = "quorum_keys",
+        conflicts_with_all = ["poa_spec", "dag_spec", "poh_spec", "pospace_spec"]
+    )]
     bft_spec: Option<PathBuf>,
     /// JSON `PoaJob`: sign the block with the `PoA` authorities' keys.
-    #[arg(long, requires = "quorum_keys")]
+    #[arg(
+        long,
+        requires = "quorum_keys",
+        conflicts_with_all = ["dag_spec", "poh_spec", "pospace_spec"]
+    )]
     poa_spec: Option<PathBuf>,
     /// JSON `DagJob`: derive the causal anchor and sign with DAG authorities' composite keys.
-    #[arg(long, requires = "quorum_keys")]
+    #[arg(
+        long,
+        requires = "quorum_keys",
+        conflicts_with_all = ["poh_spec", "pospace_spec"]
+    )]
     dag_spec: Option<PathBuf>,
     /// JSON `PohJob`: compute the sequential PoH hash ladder and sign with authorities' composite keys.
-    #[arg(long, requires = "quorum_keys")]
+    #[arg(long, requires = "quorum_keys", conflicts_with = "pospace_spec")]
     poh_spec: Option<PathBuf>,
     /// JSON `PospaceJob`: prove plot quality and sign with prover and authorities' composite keys.
     #[arg(long, requires = "quorum_keys")]
@@ -191,7 +209,7 @@ struct PoaJob {
 }
 
 /// A DAG commitment job: causal round plus the composite authority set.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct DagJob {
     block: budlum_core::domain::producer::QuorumBlockSpec,
     round: u64,
@@ -200,7 +218,7 @@ struct DagJob {
 
 /// A `PoH` commitment job: seed tick (used for heights 0/1), ladder tick count,
 /// and the composite authority set.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PohJob {
     block: budlum_core::domain::producer::QuorumBlockSpec,
     #[serde(default)]
@@ -210,12 +228,15 @@ struct PohJob {
 }
 
 /// A `PoSpace` commitment job: index into `QuorumKeys::composite` identifying
-/// the plot prover, plus the composite authority set.
-#[derive(Debug, serde::Deserialize)]
+/// the plot prover, optional deterministic challenge mining, and the composite
+/// authority set.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PospaceJob {
     block: budlum_core::domain::producer::QuorumBlockSpec,
     #[serde(default)]
     prover_index: usize,
+    #[serde(default)]
+    mine_block_hash: bool,
     authorities: Vec<budlum_core::domain::finality_adapter::PoAAuthorityKey>,
 }
 
@@ -223,7 +244,7 @@ struct PospaceJob {
 /// `pq_seeds` (32 bytes) align with the job's members. For `PoA`, `composite`
 /// holds one `[ml_dsa_65_seed, ed25519_seed]` pair (32 bytes each) per
 /// signing authority.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct QuorumKeys {
     #[serde(default)]
     bls_seeds: Vec<String>,
@@ -373,8 +394,20 @@ fn build_pospace(
     cli: &Cli,
     path: &PathBuf,
 ) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
-    let job: PospaceJob = read_json(path, "PospaceJob")?;
+    let mut job: PospaceJob = read_json(path, "PospaceJob")?;
     let signers = load_composite_signers(cli)?;
+    if job.mine_block_hash {
+        let prover_kp = signers.get(job.prover_index).ok_or_else(|| {
+            format!(
+                "PoSpace prover_index {} is out of range for {} signers",
+                job.prover_index,
+                signers.len()
+            )
+        })?;
+        let prover_pub = prover_kp.public_key().map_err(|e| e.to_string())?;
+        let prover_addr = Address::from(prover_pub.ed);
+        budlum_core::domain::producer::mine_pospace_block_hash(&mut job.block, &prover_addr)?;
+    }
     budlum_core::domain::producer::build_pospace_commitment(
         &job.block,
         job.prover_index,
@@ -693,5 +726,234 @@ mod tests {
         let direct = build_bitcoin_spv_commitment(&spec).unwrap();
         assert_eq!(loaded.commitment, direct.commitment);
         assert!(matches!(loaded.proof, FinalityProof::BitcoinSpv { .. }));
+    }
+
+    #[test]
+    fn cli_rejects_conflicting_spec_flags_and_missing_quorum_keys() {
+        for flag in ["--dag-spec", "--poh-spec", "--pospace-spec"] {
+            assert!(Cli::try_parse_from([
+                "budlum-domain-producer",
+                flag,
+                "spec.json",
+                "--quorum-keys",
+                "keys.json",
+                "--write-payload",
+                "out.json",
+            ])
+            .is_ok());
+            assert!(Cli::try_parse_from([
+                "budlum-domain-producer",
+                flag,
+                "spec.json",
+                "--write-payload",
+                "out.json",
+            ])
+            .is_err());
+        }
+        let conflicting = Cli::try_parse_from([
+            "budlum-domain-producer",
+            "--dag-spec",
+            "dag.json",
+            "--poh-spec",
+            "poh.json",
+            "--quorum-keys",
+            "keys.json",
+            "--write-payload",
+            "out.json",
+        ]);
+        assert!(
+            conflicting.is_err(),
+            "two spec flags in one invocation must fail closed rather than silently dropping one"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dag_poh_and_pospace_specs_write_finalizable_payloads() {
+        use budlum_core::domain::finality_adapter::{
+            poa_pq_authority_set_hash, DagFinalityAdapter, DomainFinalityAdapter, FinalityProof,
+            FinalityStatus, PoAAuthorityKey, PohFinalityAdapter, PospaceFinalityAdapter,
+        };
+        use budlum_core::domain::producer::QuorumBlockSpec;
+        use budlum_core::domain::{default_domain, ConsensusKind, VerifiedDomainCommitment};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let keys_path = dir.path().join("quorum_keys.json");
+
+        let mut authorities = Vec::new();
+        let mut composite_seeds = Vec::new();
+        for idx in 0..3u8 {
+            let pq_seed = [idx + 0x21; 32];
+            let ed_seed = [idx + 0x61; 32];
+            let kp = budlum_core::crypto::composite::CompositeKeypair::from_seeds(
+                budlum_core::crypto::scheme::SuiteId::VALIDATOR,
+                &pq_seed,
+                &ed_seed,
+            )
+            .unwrap();
+            let pubkey = kp.public_key().unwrap();
+            authorities.push(PoAAuthorityKey {
+                authority: Address::from(pubkey.ed),
+                public_key: pubkey.encode(),
+            });
+            if idx < 2 {
+                composite_seeds.push([hex::encode(pq_seed), hex::encode(ed_seed)]);
+            }
+        }
+        let keys = QuorumKeys {
+            bls_seeds: Vec::new(),
+            pq_seeds: Vec::new(),
+            composite: composite_seeds,
+        };
+        std::fs::write(&keys_path, serde_json::to_vec(&keys).unwrap()).unwrap();
+        std::fs::set_permissions(&keys_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let make_block = |id: u32, kind: ConsensusKind, adapter: &str| {
+            let mut domain = default_domain(id, kind, 0, adapter, 1);
+            domain.domain_chain_id = 45_262 + u64::from(id);
+            domain.config_hash = [id as u8; 32];
+            domain.validator_set_hash = poa_pq_authority_set_hash(&domain, &authorities).unwrap();
+            QuorumBlockSpec {
+                domain,
+                parent_hash: [0x11; 32],
+                block_hash: [0x22; 32],
+                height: 2,
+                sequence: 1,
+                timestamp_ms: 1_700_000_000_000,
+                producer: Some(authorities[0].authority),
+                state_root: [0x33; 32],
+                tx_root: [0x44; 32],
+                event_root: [0x55; 32],
+            }
+        };
+
+        // 1. --dag-spec
+        let dag_block = make_block(11, ConsensusKind::Dag, "dag-tip-vote-v1");
+        let dag_domain = dag_block.domain.clone();
+        let dag_job = DagJob {
+            block: dag_block,
+            round: 5,
+            authorities: authorities.clone(),
+        };
+        let dag_spec_path = dir.path().join("dag_job.json");
+        let dag_out_path = dir.path().join("dag_out.json");
+        std::fs::write(&dag_spec_path, serde_json::to_vec(&dag_job).unwrap()).unwrap();
+        super::run(
+            Cli::try_parse_from([
+                "budlum-domain-producer",
+                "--dag-spec",
+                dag_spec_path.to_str().unwrap(),
+                "--quorum-keys",
+                keys_path.to_str().unwrap(),
+                "--write-payload",
+                dag_out_path.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let dag_written: VerifiedDomainCommitment =
+            serde_json::from_slice(&std::fs::read(&dag_out_path).unwrap()).unwrap();
+        assert!(matches!(dag_written.proof, FinalityProof::DagPq { .. }));
+        assert_eq!(
+            DagFinalityAdapter
+                .verify_finality(&dag_domain, &dag_written.commitment, &dag_written.proof)
+                .unwrap(),
+            FinalityStatus::Finalized
+        );
+
+        // 2. --poh-spec
+        let poh_block = make_block(12, ConsensusKind::Poh, "poh-hash-chain-v1");
+        let poh_domain = poh_block.domain.clone();
+        let poh_job = PohJob {
+            seed_tick: poh_block.parent_hash,
+            tick_count: 8,
+            block: poh_block,
+            authorities: authorities.clone(),
+        };
+        let poh_spec_path = dir.path().join("poh_job.json");
+        let poh_out_path = dir.path().join("poh_out.json");
+        std::fs::write(&poh_spec_path, serde_json::to_vec(&poh_job).unwrap()).unwrap();
+        super::run(
+            Cli::try_parse_from([
+                "budlum-domain-producer",
+                "--poh-spec",
+                poh_spec_path.to_str().unwrap(),
+                "--quorum-keys",
+                keys_path.to_str().unwrap(),
+                "--write-payload",
+                poh_out_path.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let poh_written: VerifiedDomainCommitment =
+            serde_json::from_slice(&std::fs::read(&poh_out_path).unwrap()).unwrap();
+        assert!(matches!(poh_written.proof, FinalityProof::PohPq { .. }));
+        assert_eq!(
+            PohFinalityAdapter
+                .verify_finality(&poh_domain, &poh_written.commitment, &poh_written.proof)
+                .unwrap(),
+            FinalityStatus::Finalized
+        );
+
+        // 3. --pospace-spec with deterministic challenge mining
+        let pos_block = make_block(13, ConsensusKind::Pospace, "pospace-plot-v1");
+        let pos_domain = pos_block.domain.clone();
+        let pos_job = PospaceJob {
+            block: pos_block,
+            prover_index: 0,
+            mine_block_hash: true,
+            authorities: authorities.clone(),
+        };
+        let pos_spec_path = dir.path().join("pos_job.json");
+        let pos_out_path = dir.path().join("pos_out.json");
+        std::fs::write(&pos_spec_path, serde_json::to_vec(&pos_job).unwrap()).unwrap();
+        super::run(
+            Cli::try_parse_from([
+                "budlum-domain-producer",
+                "--pospace-spec",
+                pos_spec_path.to_str().unwrap(),
+                "--quorum-keys",
+                keys_path.to_str().unwrap(),
+                "--write-payload",
+                pos_out_path.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let pos_written: VerifiedDomainCommitment =
+            serde_json::from_slice(&std::fs::read(&pos_out_path).unwrap()).unwrap();
+        assert!(matches!(pos_written.proof, FinalityProof::PospacePq { .. }));
+        assert_eq!(
+            PospaceFinalityAdapter
+                .verify_finality(&pos_domain, &pos_written.commitment, &pos_written.proof)
+                .unwrap(),
+            FinalityStatus::Finalized
+        );
+
+        // 4. Out-of-bounds prover_index fails closed
+        let mut bad_pos_job = pos_job;
+        bad_pos_job.prover_index = 99;
+        let bad_pos_path = dir.path().join("bad_pos_job.json");
+        std::fs::write(&bad_pos_path, serde_json::to_vec(&bad_pos_job).unwrap()).unwrap();
+        let err = super::run(
+            Cli::try_parse_from([
+                "budlum-domain-producer",
+                "--pospace-spec",
+                bad_pos_path.to_str().unwrap(),
+                "--quorum-keys",
+                keys_path.to_str().unwrap(),
+                "--write-payload",
+                pos_out_path.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .await
+        .expect_err("out-of-bounds prover_index must fail closed");
+        assert!(err.contains("prover_index"), "{err}");
     }
 }
