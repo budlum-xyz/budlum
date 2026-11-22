@@ -551,6 +551,7 @@ impl AiInferenceResult {
     /// Anyone wiring this into verification must add `chain_id` to the
     /// Preimage first, or the inner signature will be replayable between
     /// Networks in a way the outer one is not.
+    /// Convenience: exposed for envelope-verified AI result digest inspection once `chain_id` is folded in.
     #[must_use]
     pub fn calculate_signing_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();

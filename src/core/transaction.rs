@@ -7520,4 +7520,194 @@ mod recovery_tests {
         kind.hash = kind.calculate_hash();
         assert!(!kind.verify_in(&registry));
     }
+
+    #[test]
+    fn objective_fault_proof_preimage_covers_dag_and_tendermint_fields() {
+        use crate::cross_domain::external::dag_bft::{
+            DagBftSig, DagCausalParent, DagEquivocationProof, DagVoterVertex,
+        };
+        use crate::cross_domain::external::tendermint::{
+            TendermintCommitEvidence, TendermintLightParams, TendermintMisbehaviour,
+            TendermintSignature, TendermintValidator, TrustedTendermintState,
+        };
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let domain = DomainKey([0x44; 32]);
+        let base_tx = Transaction::new_with_chain_id(
+            Address::from([1u8; 32]),
+            Address::from([2u8; 32]),
+            0,
+            1,
+            0,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::Transfer,
+        );
+        let hash_of = |proof: ObjectiveFaultProof| {
+            let mut tx = base_tx.clone();
+            tx.tx_type = TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof {
+                domain,
+                proof,
+            });
+            tx.signing_hash()
+        };
+
+        let base_sig = DagBftSig {
+            signer_pubkey: [1u8; 32],
+            ed25519_sig: vec![2u8; 64],
+            pq_sig: vec![3u8; 8],
+        };
+        let anchor_base = DagEquivocationProof::AnchorCertificate {
+            round: 4,
+            first_anchor_digest: [0xA1; 32],
+            first_sigs: vec![base_sig.clone()],
+            second_anchor_digest: [0xA2; 32],
+            second_sigs: vec![base_sig],
+        };
+        let mut anchor_round = anchor_base.clone();
+        if let DagEquivocationProof::AnchorCertificate { round, .. } = &mut anchor_round {
+            *round = 6;
+        }
+        let mut anchor_pq = anchor_base.clone();
+        if let DagEquivocationProof::AnchorCertificate { second_sigs, .. } = &mut anchor_pq {
+            second_sigs[0].pq_sig.push(9);
+        }
+
+        let parent_base = DagCausalParent {
+            round: 3,
+            author: [0xB1; 32],
+            payload_root: [0xB2; 32],
+            digest: [0xB3; 32],
+            author_ed25519_sig: vec![4u8; 64],
+            author_pq_sig: vec![5u8; 8],
+        };
+        let mut parent_alt = parent_base.clone();
+        parent_alt.payload_root[0] ^= 1;
+
+        let voter_base = DagVoterVertex {
+            round: 5,
+            author: [0xC1; 32],
+            parent_digests: vec![[0xC2; 32]],
+            digest: [0xC3; 32],
+            ed25519_sig: vec![6u8; 64],
+            pq_sig: vec![7u8; 8],
+        };
+        let mut voter_alt = voter_base.clone();
+        voter_alt.parent_digests.push([0xC4; 32]);
+
+        let tm_val = TendermintValidator {
+            address: [0x11; 20],
+            public_key: [0x22; 32],
+            voting_power: 100,
+        };
+        let tm_header = TendermintCommitEvidence {
+            chain_id: "cosmoshub-4".to_string(),
+            height: 50,
+            round: 0,
+            block_hash: [0x31; 32],
+            parts_total: 1,
+            parts_hash: [0x32; 32],
+            version_block: 11,
+            last_block_hash: [0x33; 32],
+            last_parts_total: 1,
+            last_parts_hash: [0x34; 32],
+            last_commit_hash: [0x35; 32],
+            data_hash: [0x36; 32],
+            validators_hash: [0x37; 32],
+            next_validators_hash: [0x38; 32],
+            consensus_hash: [0x39; 32],
+            app_hash: [0x3A; 32],
+            last_results_hash: [0x3B; 32],
+            evidence_hash: [0x3C; 32],
+            proposer_address: [0x3D; 20],
+            commit_time: 1_700_000_000,
+            commit_time_nanos: 42,
+            validators: vec![tm_val],
+            signatures: vec![TendermintSignature {
+                address: [0x11; 20],
+                timestamp_seconds: 1_700_000_000,
+                timestamp_nanos: 42,
+                signature: vec![8u8; 64],
+            }],
+        };
+        let tm_trusted = TrustedTendermintState {
+            chain_id: "cosmoshub-4".to_string(),
+            height: 49,
+            time_secs: 1_699_999_990,
+            trusting_period_secs: 1_209_600,
+            validators: vec![tm_val],
+            next_validators_hash: [0x37; 32],
+        };
+        let tm_params = TendermintLightParams {
+            trusting_period_secs: 1_209_600,
+            unbonding_period_secs: 1_814_400,
+            max_clock_drift_secs: 10,
+            max_height_drift: 10_000,
+        };
+        let mut tm_header_2 = tm_header.clone();
+        tm_header_2.block_hash[0] ^= 0xFF;
+
+        let mut tm_params_alt = tm_params;
+        tm_params_alt.max_height_drift += 1;
+
+        let hashes = [
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_base))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_round))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_pq))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::CausalParent {
+                    first: parent_base.clone(),
+                    second: parent_base,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::CausalParent {
+                    first: parent_alt.clone(),
+                    second: parent_alt,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::VoterVertex {
+                    first: voter_base.clone(),
+                    second: voter_base,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::VoterVertex {
+                    first: voter_alt.clone(),
+                    second: voter_alt,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted.clone()),
+                params: tm_params,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header.clone(),
+                    header_2: None,
+                }),
+            }),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted.clone()),
+                params: tm_params,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header.clone(),
+                    header_2: Some(tm_header_2),
+                }),
+            }),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted),
+                params: tm_params_alt,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header,
+                    header_2: None,
+                }),
+            }),
+        ];
+        let unique: std::collections::BTreeSet<[u8; 32]> = hashes.into_iter().collect();
+        assert_eq!(
+            unique.len(),
+            hashes.len(),
+            "every DagEquivocation and TendermintMisbehaviour field must move signing_hash"
+        );
+    }
 }
