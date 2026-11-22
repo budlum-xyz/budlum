@@ -9553,14 +9553,26 @@ impl Blockchain {
                 agg.checkpoint_height,
                 agg.precommits.keys(),
             );
-            record
-                .verify_against_signers(
-                    &agg.committee,
-                    agg.checkpoint_height,
-                    agg.precommits.keys(),
-                )
-                .ok()?;
-            Some(record)
+            // A record that verified is evidence of absence; a record that did
+            // not is not evidence, and the difference must not disappear into
+            // `None`. `.ok()?` here made a failed verification indistinguishable
+            // from a round that produced nothing, which is exactly the reading
+            // the comment above says must be earned.
+            match record.verify_against_signers(
+                &agg.committee,
+                agg.checkpoint_height,
+                agg.precommits.keys(),
+            ) {
+                Ok(()) => Some(record),
+                Err(err) => {
+                    tracing::error!(
+                        height = agg.checkpoint_height,
+                        "seat participation record did not verify: {err}; \
+                         this round keeps no participation record"
+                    );
+                    None
+                }
+            }
         });
         self.finality_aggregator = None;
 
@@ -10107,14 +10119,25 @@ impl Blockchain {
                 if blob.checkpoint_hash != cp_block.hash {
                     return None;
                 }
-                let signers = blob
-                    .verify_against_snapshot_in(
-                        &self.state.scheme_registry,
-                        snapshot,
-                        None,
-                        Some(epoch),
-                    )
-                    .ok()?;
+                // Same discipline: a blob that fails verification is not a
+                // missing blob. `.ok()?` folded the refusal into "no proof
+                // here", so a tampered or foreign QC blob read exactly like an
+                // absent one.
+                let signers = match blob.verify_against_snapshot_in(
+                    &self.state.scheme_registry,
+                    snapshot,
+                    None,
+                    Some(epoch),
+                ) {
+                    Ok(signers) => signers,
+                    Err(err) => {
+                        tracing::error!(
+                            checkpoint = %cp_block.hash,
+                            "qc blob did not verify against the snapshot: {err}"
+                        );
+                        return None;
+                    }
+                };
                 let signer_addrs: Vec<crate::core::address::Address> = signers
                     .iter()
                     .filter_map(|idx| snapshot.validators.get(*idx))
