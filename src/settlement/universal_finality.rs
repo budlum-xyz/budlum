@@ -585,7 +585,7 @@ impl FinalityGuarantee {
     /// unslashable.
     ///
     /// WIRING: the canonical external-domain guarantee derivation; the
-    /// spec-only half ([`Self::for_external_spec_declared`]) is module-private
+    /// spec-only half (`Self::for_external_spec_declared`) is module-private
     /// so this is the only reachable path.
     #[must_use]
     pub fn for_external_spec_with_backing(
@@ -1082,12 +1082,10 @@ fn compute_bucket_merkle_root(rows: &[DomainFinalityEntry]) -> [u8; 32] {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         let mut idx = 0usize;
         while idx < level.len() {
-            let left = level[idx];
-            let right = if idx + 1 < level.len() {
-                level[idx + 1]
-            } else {
-                left
+            let Some(&left) = level.get(idx) else {
+                break;
             };
+            let right = level.get(idx + 1).copied().unwrap_or(left);
             next.push(keccak_cert_node(&left, &right));
             idx += 2;
         }
@@ -1120,16 +1118,14 @@ fn build_bucket_inclusion_proof(
         } else {
             cursor - 1
         };
-        siblings.push(level[sibling_idx]);
+        siblings.push(*level.get(sibling_idx)?);
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         let mut idx = 0usize;
         while idx < level.len() {
-            let left = level[idx];
-            let right = if idx + 1 < level.len() {
-                level[idx + 1]
-            } else {
-                left
+            let Some(&left) = level.get(idx) else {
+                break;
             };
+            let right = level.get(idx + 1).copied().unwrap_or(left);
             next.push(keccak_cert_node(&left, &right));
             idx += 2;
         }
@@ -1213,7 +1209,7 @@ pub enum FinalityComposeError {
         /// Offending domain identifier.
         domain_id: u32,
     },
-    /// More than [`MAX_CERTIFICATE_DOMAINS`] domains were supplied.
+    /// More than `MAX_CERTIFICATE_DOMAINS` domains were supplied.
     TooManyDomains,
     /// A serialized or externally supplied certificate does not match its recomputed digest/roots.
     IntegrityMismatch,
