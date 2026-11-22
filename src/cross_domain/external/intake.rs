@@ -833,6 +833,84 @@ impl IntakeState {
         Ok(skip)
     }
 
+    /// Advance a pinned Tendermint light-client anchor across a multi-step
+    /// ICS-07 bisection (`> 1/3` trusted overlap per hop + `>= 2/3 + 1`
+    /// target quorum + RFC-6962 header binding), accepting validator turnover
+    /// no single direct skip would accept.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unpinned networks and chain-id or validator-set pin mismatches
+    /// with [`IntakeError::CommitteeNotPinned`]; refuses light params that do
+    /// not equal the trusted checkpoint's trusting period (fail-closed — no
+    /// widening, no silent shrink); and refuses empty or oversized step lists
+    /// or any failing step with the light client's own [`AdapterError`]. The
+    /// pin advances only after the whole bisection verifies, so a failing path
+    /// leaves it bit-identical.
+    ///
+    /// WIRING: the production door of `tendermint_bisection::verify_bisection`
+    /// (the multi-step ICS-07 surface), advancing `pinned_tendermint_anchors`.
+    pub fn rotate_tendermint_anchor_bisection(
+        &mut self,
+        network: &str,
+        trusted: &crate::cross_domain::external::tendermint::TrustedTendermintState,
+        light_params: crate::cross_domain::external::tendermint::TendermintLightParams,
+        steps: &[crate::cross_domain::external::tendermint::TendermintCommitEvidence],
+        now_unix_secs: u64,
+    ) -> Result<crate::cross_domain::external::tendermint::VerifiedTendermintSkip, IntakeError>
+    {
+        use subtle::ConstantTimeEq;
+
+        let Some(pinned) = self.pinned_tendermint_anchors.get(network) else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        if pinned.chain_id != trusted.chain_id {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
+        let trusted_hash = crate::cross_domain::external::tendermint::validator_set_commitment(
+            &trusted.validators,
+        );
+        if !bool::from(trusted_hash.ct_eq(&pinned.validator_set_hash)) {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
+        if light_params.trusting_period_secs != trusted.trusting_period_secs {
+            // Fail-closed equality: widening the trusting period would let a
+            // stale checkpoint verify outside its bonded fork-accountability
+            // window, and a silent shrink would retire the anchor early. The
+            // rotation runs under exactly the period the checkpoint carries.
+            return Err(IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                    rule: format!(
+                        "rotation light params must equal the checkpoint trusting period: \
+                         {} != {}",
+                        light_params.trusting_period_secs, trusted.trusting_period_secs
+                    ),
+                },
+            )));
+        }
+        let anchor_root =
+            crate::cross_domain::external::tendermint::validator_set_hash(&trusted.validators);
+        let mut client = crate::cross_domain::external::tendermint::TendermintLightClient::new(
+            trusted.clone(),
+            anchor_root,
+            [0u8; 32],
+            light_params,
+        )
+        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let tip = client
+            .verify_bisection(steps, now_unix_secs)
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let new_hash = tip.next_validators_hash.unwrap_or(tip.validator_set_hash);
+        self.pinned_tendermint_anchors.insert(
+            network.to_string(),
+            crate::cross_domain::external::tendermint::PinnedTendermintAnchor {
+                chain_id: trusted.chain_id.clone(),
+                validator_set_hash: new_hash,
+            },
+        );
+        Ok(tip)
+    }
+
     /// Installs or updates the consensus-pinned modular DA committee for `network`.
     /// WIRING: governance/genesis DA committee surface paired with `register_domain`.
     pub fn pin_da_committee(

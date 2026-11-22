@@ -166,6 +166,8 @@ pub mod storage_tx_door;
 #[cfg(test)]
 pub mod target_700;
 #[cfg(test)]
+pub mod tendermint_bisection_door;
+#[cfg(test)]
 pub mod testnet_closed_features;
 #[cfg(test)]
 pub mod tokenomics;

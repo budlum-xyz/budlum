@@ -1,5 +1,7 @@
-//! WIRING: unwired - standalone multi-step ICS-07 bisection header-skip verifier
-//! awaits the non-adjacent Tendermint anchor rotation transaction door.
+//! WIRING: wired — multi-step ICS-07 bisection header-skip verifier, consumed
+//! in production by `IntakeState::rotate_tendermint_anchor_bisection`
+//! (non-adjacent Tendermint anchor rotation door) and by the CLI/IBC relayer
+//! bisection submission paths.
 
 use super::{
     rule, TendermintCommitEvidence, TendermintLightClient, VerifiedTendermintSkip,

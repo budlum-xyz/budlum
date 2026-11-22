@@ -1257,7 +1257,9 @@ fn verify_skipping_commit_bounded(
 /// Returns [`AdapterError`] if any header, signature, quorum, overlap, height
 /// drift, trusting period, BFT time, or RFC-6962 proof check fails.
 ///
-/// WIRING: consumed by `IntakeState::advance_tendermint_anchor` and [`TendermintLightClient`].
+/// WIRING: consumed by `IntakeState::rotate_tendermint_anchor`,
+/// `IntakeState::rotate_tendermint_anchor_bisection` (through
+/// [`TendermintLightClient::verify_bisection`]) and [`TendermintLightClient`].
 pub fn verify_skipping_commit(
     trusted: &TrustedTendermintState,
     target: &TendermintCommitEvidence,
