@@ -5155,6 +5155,131 @@ fn encode_objective_fault_proof(
                 put_u8(out, u8::from(step.sibling_is_left));
             }
         }
+        ObjectiveFaultProof::DagEquivocation(dag) => {
+            use crate::cross_domain::external::dag_bft::DagEquivocationProof;
+            put_u8(out, 4);
+            match dag.as_ref() {
+                DagEquivocationProof::AnchorCertificate {
+                    round,
+                    first_anchor_digest,
+                    first_sigs,
+                    second_anchor_digest,
+                    second_sigs,
+                } => {
+                    put_u8(out, 0);
+                    put_u64(out, *round);
+                    put_fixed(out, first_anchor_digest);
+                    put_u64(out, first_sigs.len() as u64);
+                    for s in first_sigs {
+                        put_fixed(out, &s.signer_pubkey);
+                        put_bytes(out, &s.ed25519_sig);
+                        put_bytes(out, &s.pq_sig);
+                    }
+                    put_fixed(out, second_anchor_digest);
+                    put_u64(out, second_sigs.len() as u64);
+                    for s in second_sigs {
+                        put_fixed(out, &s.signer_pubkey);
+                        put_bytes(out, &s.ed25519_sig);
+                        put_bytes(out, &s.pq_sig);
+                    }
+                }
+                DagEquivocationProof::CausalParent { first, second } => {
+                    put_u8(out, 1);
+                    for cp in [first, second] {
+                        put_u64(out, cp.round);
+                        put_fixed(out, &cp.author);
+                        put_fixed(out, &cp.payload_root);
+                        put_fixed(out, &cp.digest);
+                        put_bytes(out, &cp.author_ed25519_sig);
+                        put_bytes(out, &cp.author_pq_sig);
+                    }
+                }
+                DagEquivocationProof::VoterVertex { first, second } => {
+                    put_u8(out, 2);
+                    for vv in [first, second] {
+                        put_u64(out, vv.round);
+                        put_fixed(out, &vv.author);
+                        put_u64(out, vv.parent_digests.len() as u64);
+                        for pd in &vv.parent_digests {
+                            put_fixed(out, pd);
+                        }
+                        put_fixed(out, &vv.digest);
+                        put_bytes(out, &vv.ed25519_sig);
+                        put_bytes(out, &vv.pq_sig);
+                    }
+                }
+            }
+        }
+        ObjectiveFaultProof::TendermintMisbehaviour {
+            trusted,
+            light_params,
+            misbehaviour,
+        } => {
+            put_u8(out, 5);
+            put_string(out, &trusted.chain_id);
+            put_u64(out, trusted.height);
+            put_u64(out, trusted.time_secs);
+            put_u64(out, trusted.trusting_period_secs);
+            put_u64(out, trusted.validators.len() as u64);
+            for v in &trusted.validators {
+                put_fixed(out, &v.address);
+                put_fixed(out, &v.public_key);
+                put_u64(out, v.voting_power);
+            }
+            put_fixed(out, &trusted.next_validators_hash);
+            put_u64(out, light_params.trusting_period_secs);
+            put_u64(out, light_params.unbonding_period_secs);
+            put_u64(out, light_params.max_clock_drift_secs);
+            put_u64(out, light_params.max_height_drift);
+            encode_tendermint_commit_evidence(&misbehaviour.header_1, out);
+            match &misbehaviour.header_2 {
+                Some(h2) => {
+                    put_u8(out, 1);
+                    encode_tendermint_commit_evidence(h2, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+    }
+}
+
+fn encode_tendermint_commit_evidence(
+    c: &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+    out: &mut Vec<u8>,
+) {
+    put_string(out, &c.chain_id);
+    put_u64(out, c.height);
+    put_u64(out, c.round.cast_unsigned());
+    put_fixed(out, &c.block_hash);
+    put_u32(out, c.parts_total);
+    put_fixed(out, &c.parts_hash);
+    put_u64(out, c.version_block);
+    put_fixed(out, &c.last_block_hash);
+    put_u32(out, c.last_parts_total);
+    put_fixed(out, &c.last_parts_hash);
+    put_fixed(out, &c.last_commit_hash);
+    put_fixed(out, &c.data_hash);
+    put_fixed(out, &c.validators_hash);
+    put_fixed(out, &c.next_validators_hash);
+    put_fixed(out, &c.consensus_hash);
+    put_fixed(out, &c.app_hash);
+    put_fixed(out, &c.last_results_hash);
+    put_fixed(out, &c.evidence_hash);
+    put_fixed(out, &c.proposer_address);
+    put_u64(out, c.commit_time);
+    put_u32(out, c.commit_time_nanos);
+    put_u64(out, c.validators.len() as u64);
+    for v in &c.validators {
+        put_fixed(out, &v.address);
+        put_fixed(out, &v.public_key);
+        put_u64(out, v.voting_power);
+    }
+    put_u64(out, c.signatures.len() as u64);
+    for sig in &c.signatures {
+        put_fixed(out, &sig.address);
+        put_u64(out, sig.timestamp_seconds.cast_unsigned());
+        put_u32(out, sig.timestamp_nanos);
+        put_bytes(out, &sig.signature);
     }
 }
 

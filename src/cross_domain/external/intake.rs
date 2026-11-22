@@ -2585,7 +2585,7 @@ impl IntakeState {
                 key,
                 &format!(
                     "Tendermint/CometBFT {:?} at height {} (culprit_power={})",
-                    verdict.kind, verdict.infraction_height, verdict.culprit_trusted_power
+                    verdict.kind, verdict.header_1_height, verdict.culprit_trusted_power
                 ),
             )
             .map_err(IntakeError::Registry)?;
