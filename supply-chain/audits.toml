@@ -151,6 +151,18 @@ criteria = "safe-to-deploy"
 version = "0.8.1"
 notes = "color-management transforms for image 0.25; reviewed 0.8.1: no build script, unsafe inventory is SIMD kernel intrinsics guarded by runtime feature detection; no FFI, no network"
 
+[[audits.p3-keccak-air]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "0.8.0"
+notes = "reviewed full 0.8.0 source (src/, 2380 lines across 10 files): Plonky3 Keccak-f[1600] AIR constraints and trace generator; MIT OR Apache-2.0, no build script, no filesystem, network, process or environment access. All 16 unsafe sites are repr(C) align_to/align_to_mut/transmute slice reinterprets over KeccakCols/KeccakBinaryCols/[[u64;5];5] guarded by prefix/suffix emptiness assertions."
+
+[[audits.pem]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-run"
+version = "4.0.0"
+notes = "reviewed full 4.0.0 source (src/, 1376 lines): PEM encode/decode over base64; unsafe_code is denied crate-wide, no build script, no filesystem, network, process or environment access. Reached only through rcgen, a dev-dependency that generates throwaway TLS identities in tests."
+
 [[audits.poly1305]]
 who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
@@ -163,17 +175,35 @@ criteria = "safe-to-deploy"
 version = "0.1.30"
 notes = "pixel-format conversion tables for image 0.25; reviewed 0.1.30: no build script, unsafe is SIMD conversion kernels behind is_x86_feature_detected guards; no FFI"
 
+[[audits.qrcode]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "0.14.1"
+notes = "QR encoder used by the qr_* modules; reviewed 0.14.1 in full during the 3.0 QR work: no build script, zero unsafe, pure-Rust matrix construction"
+
 [[audits.raptorq]]
 who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
 version = "2.0.0"
 notes = "RFC 6330 RaptorQ fountain erasure coding used by budlum-core; reviewed 2.0.0 source (27 files): no build script, no network or filesystem access; unsafe is bounded to GF(256) octet arithmetic in src/octet.rs and src/octets.rs"
 
+[[audits.rcgen]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-run"
+version = "0.14.10"
+notes = "reviewed 0.14.10 source (src/, 5742 lines): X.509 certificate generation; #![forbid(unsafe_code)], no build script, no filesystem, process or socket use (std::net appears only as the IpAddr type of subject alternative names). Dev-dependency: generates throwaway self-signed TLS identities in src/rpc/tls.rs and src/crypto/tls.rs tests; nothing shipped links it."
+
 [[audits.rfc6979]]
 who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
 version = "0.6.0"
 notes = "RustCrypto first-party crate; reviewed 0.6.0 source (3 files): zero unsafe blocks, no build script, no network or filesystem access; pure-Rust RFC 6979 deterministic nonce generation"
+
+[[audits.rqrr]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "0.10.1"
+notes = "QR decoder used as the independent read-back check in tests; reviewed 0.10.1: no build script, zero unsafe, pure-Rust detection and Reed-Solomon"
 
 [[audits.ruzstd]]
 who = "Budlum Security <security@budlum.xyz>"
@@ -186,18 +216,6 @@ who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
 version = "0.4.3"
 notes = "RustCrypto first-party constant-time serde hex helper; reviewed 0.4.3 source (9 files): zero unsafe blocks, no build script, no network or filesystem access"
-
-[[audits.qrcode]]
-who = "Budlum Security <security@budlum.xyz>"
-criteria = "safe-to-deploy"
-version = "0.14.1"
-notes = "QR encoder used by the qr_* modules; reviewed 0.14.1 in full during the 3.0 QR work: no build script, zero unsafe, pure-Rust matrix construction"
-
-[[audits.rqrr]]
-who = "Budlum Security <security@budlum.xyz>"
-criteria = "safe-to-deploy"
-version = "0.10.1"
-notes = "QR decoder used as the independent read-back check in tests; reviewed 0.10.1: no build script, zero unsafe, pure-Rust detection and Reed-Solomon"
 
 [[audits.simd-adler32]]
 who = "Budlum Security <security@budlum.xyz>"
@@ -234,24 +252,6 @@ who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
 version = "2.1.2+zstd.1.5.7"
 notes = "vendored libzstd 1.5.7 C FFI bindings; reviewed 2.1.2+zstd.1.5.7 build.rs and generated bindings: compiles vendored C sources via cc with no network downloads or external process fetches"
-
-[[audits.p3-keccak-air]]
-who = "Budlum Security <security@budlum.xyz>"
-criteria = "safe-to-deploy"
-version = "0.8.0"
-notes = "reviewed full 0.8.0 source (src/, 2380 lines across 10 files): Plonky3 Keccak-f[1600] AIR constraints and trace generator; MIT OR Apache-2.0, no build script, no filesystem, network, process or environment access. All 16 unsafe sites are repr(C) align_to/align_to_mut/transmute slice reinterprets over KeccakCols/KeccakBinaryCols/[[u64;5];5] guarded by prefix/suffix emptiness assertions."
-
-[[audits.pem]]
-who = "Budlum Security <security@budlum.xyz>"
-criteria = "safe-to-run"
-version = "4.0.0"
-notes = "reviewed full 4.0.0 source (src/, 1376 lines): PEM encode/decode over base64; unsafe_code is denied crate-wide, no build script, no filesystem, network, process or environment access. Reached only through rcgen, a dev-dependency that generates throwaway TLS identities in tests."
-
-[[audits.rcgen]]
-who = "Budlum Security <security@budlum.xyz>"
-criteria = "safe-to-run"
-version = "0.14.10"
-notes = "reviewed 0.14.10 source (src/, 5742 lines): X.509 certificate generation; #![forbid(unsafe_code)], no build script, no filesystem, process or socket use (std::net appears only as the IpAddr type of subject alternative names). Dev-dependency: generates throwaway self-signed TLS identities in src/rpc/tls.rs and src/crypto/tls.rs tests; nothing shipped links it."
 
 [[audits.url]]
 who = "Budlum Security <security@budlum.xyz>"
