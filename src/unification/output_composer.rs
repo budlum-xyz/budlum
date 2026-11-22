@@ -1338,7 +1338,7 @@ impl OutputComposer {
             b"BDLM_ATTESTED_BUNDLE_V1",
             &[
                 &[atomicity.tag_byte()],
-                &bundle.bundle_hash,
+                &bundle.bundle_root,
                 &steps_att_root,
             ],
         );

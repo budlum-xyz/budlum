@@ -556,7 +556,7 @@ fn output_composer_attested_verifies_uer_batch_synchronous_steps_and_rejects_for
             },
             to_step: String::from("wasm_leg"),
             target_input: String::from("in_amount"),
-            expected_value: Some(CanonicalValue::U128(500)),
+            enforce_match: true,
         }],
     };
 
@@ -1072,8 +1072,8 @@ fn oracle_free_proof_carrying_liquidation_enforces_state_root_proofs_close_facto
     use crate::settlement::liquidation_proof::{
         build_reserve_inclusion_proof, build_reserve_state_root,
         execute_proven_cross_domain_liquidation, prove_position_health, reserve_observation_leaf,
-        AmmReserveSnapshot, CollateralLegSpec, LiquidationPosition, ProvenReserveObservation,
-        LIQ_BONUS_MAX_BPS,
+        AmmReserveSnapshot, CollateralLegSpec, CrossDomainLiquidationParams, LiquidationPosition,
+        ProvenReserveObservation, LIQ_BONUS_MAX_BPS,
     };
     use std::collections::BTreeMap;
 
@@ -1149,49 +1149,57 @@ fn oracle_free_proof_carrying_liquidation_enforces_state_root_proofs_close_facto
     // Exceeding close factor (>50% of 1_000 = 500) or bonus cap (>1500 bps) fails closed.
     assert!(execute_proven_cross_domain_liquidation(
         &unhealthy,
-        debt_domain,
         &certified_roots,
         &observations,
         &legs,
-        501,
-        500,
-        [0xdd; 32],
+        &CrossDomainLiquidationParams {
+            debt_domain_id: debt_domain,
+            repay_debt_x: 501,
+            bonus_bps: 500,
+            delivery_proof_root: [0xdd; 32],
+        },
     )
     .is_err());
     assert!(execute_proven_cross_domain_liquidation(
         &unhealthy,
-        debt_domain,
         &certified_roots,
         &observations,
         &legs,
-        500,
-        LIQ_BONUS_MAX_BPS + 1,
-        [0xdd; 32],
+        &CrossDomainLiquidationParams {
+            debt_domain_id: debt_domain,
+            repay_debt_x: 500,
+            bonus_bps: LIQ_BONUS_MAX_BPS + 1,
+            delivery_proof_root: [0xdd; 32],
+        },
     )
     .is_err());
     // Missing delivery proof root fails closed.
     assert!(execute_proven_cross_domain_liquidation(
         &unhealthy,
-        debt_domain,
         &certified_roots,
         &observations,
         &legs,
-        500,
-        500,
-        [0u8; 32],
+        &CrossDomainLiquidationParams {
+            debt_domain_id: debt_domain,
+            repay_debt_x: 500,
+            bonus_bps: 500,
+            delivery_proof_root: [0u8; 32],
+        },
     )
     .is_err());
 
     // Valid partial liquidation (500 X repaid @ price 2.0 + 5% bonus = 1_050 Y seized across domain 20 then 30).
     let res = execute_proven_cross_domain_liquidation(
         &unhealthy,
-        debt_domain,
         &certified_roots,
         &observations,
         &legs,
-        500,
-        500,
-        [0xdd; 32],
+        &CrossDomainLiquidationParams {
+            debt_domain_id: debt_domain,
+            repay_debt_x: 500,
+            bonus_bps: 500,
+            delivery_proof_root: [0xdd; 32],
+        },
     )
     .expect("valid cross-domain partial liquidation");
     assert_eq!(res.debt_repaid_x, 500);
@@ -1214,13 +1222,15 @@ fn oracle_free_proof_carrying_liquidation_enforces_state_root_proofs_close_facto
     }];
     assert!(execute_proven_cross_domain_liquidation(
         &healthy,
-        debt_domain,
         &certified_roots,
         &observations,
         &healthy_legs,
-        200,
-        500,
-        [0xdd; 32],
+        &CrossDomainLiquidationParams {
+            debt_domain_id: debt_domain,
+            repay_debt_x: 200,
+            bonus_bps: 500,
+            delivery_proof_root: [0xdd; 32],
+        },
     )
     .is_err());
 }

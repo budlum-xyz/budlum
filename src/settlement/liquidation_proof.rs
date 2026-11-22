@@ -624,16 +624,27 @@ pub fn prove_position_health(
     })
 }
 
+/// Parameters binding a cross-domain liquidation execution request to its debt
+/// domain, close amount, capped incentive bonus, and debt-domain delivery proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossDomainLiquidationParams {
+    pub debt_domain_id: u32,
+    pub repay_debt_x: u128,
+    pub bonus_bps: u64,
+    pub delivery_proof_root: Hash32,
+}
+
 /// Execute an oracle-free, proof-carrying, close-factor- and bonus-capped
-/// cross-domain liquidation (debt on `debt_domain_id`, collateral legs across
-/// arbitrary domains anchored by custody or remote-account proof roots).
+/// cross-domain liquidation (debt on `params.debt_domain_id`, collateral legs
+/// across arbitrary domains anchored by custody or remote-account proof roots).
 ///
 /// Rejects fail-closed if:
 /// - Any AMM reserve observation fails Merkle verification against `certified_roots`.
 /// - The position is healthy (`!health.liquidatable`).
-/// - `bonus_bps > LIQ_BONUS_MAX_BPS` or `repay_debt_x` is zero / exceeds the
-///   50% close-factor ceiling (`LIQ_CLOSE_FACTOR_MAX_BPS`).
-/// - `delivery_proof_root` or any collateral leg `custody_or_remote_root` is all-zero.
+/// - `params.bonus_bps > LIQ_BONUS_MAX_BPS` or `params.repay_debt_x` is zero /
+///   exceeds the 50% close-factor ceiling (`LIQ_CLOSE_FACTOR_MAX_BPS`).
+/// - `params.delivery_proof_root` or any collateral leg `custody_or_remote_root`
+///   is all-zero.
 /// - Collateral legs are empty or exceed `MAX_COLLATERAL_LEGS`, or their sum
 ///   disagrees with `position.collateral_y`.
 ///
@@ -643,24 +654,20 @@ pub fn prove_position_health(
 /// # Errors
 ///
 /// Returns [`LiquidationError`] on any failed proof, health, bound, or anchor check.
-#[allow(clippy::too_many_arguments)]
 pub fn execute_proven_cross_domain_liquidation(
     position: &LiquidationPosition,
-    debt_domain_id: u32,
     certified_roots: &std::collections::BTreeMap<(u32, u64), Hash32>,
     observations: &[ProvenReserveObservation],
     collateral_legs: &[CollateralLegSpec],
-    repay_debt_x: u128,
-    bonus_bps: u64,
-    delivery_proof_root: Hash32,
+    params: &CrossDomainLiquidationParams,
 ) -> Result<ProvenLiquidationResult, LiquidationError> {
-    if bonus_bps > LIQ_BONUS_MAX_BPS {
+    if params.bonus_bps > LIQ_BONUS_MAX_BPS {
         return Err(LiquidationError::BonusExceedsCap {
-            got_bps: bonus_bps,
+            got_bps: params.bonus_bps,
             max_bps: LIQ_BONUS_MAX_BPS,
         });
     }
-    if delivery_proof_root == [0u8; 32] {
+    if params.delivery_proof_root == [0u8; 32] {
         return Err(LiquidationError::MissingProofAnchor(String::from(
             "debt-domain delivery_proof_root must be non-zero",
         )));
@@ -690,7 +697,12 @@ pub fn execute_proven_cross_domain_liquidation(
         )));
     }
 
-    let health = prove_position_health(position, debt_domain_id, certified_roots, observations)?;
+    let health = prove_position_health(
+        position,
+        params.debt_domain_id,
+        certified_roots,
+        observations,
+    )?;
     if !health.liquidatable {
         return Err(LiquidationError::PositionHealthy {
             position_id: position.position_id,
@@ -704,16 +716,17 @@ pub fn execute_proven_cross_domain_liquidation(
         / u128::from(BPS_DEN))
     .max(1)
     .min(position.debt_x);
-    if repay_debt_x == 0 || repay_debt_x > max_repay {
+    if params.repay_debt_x == 0 || params.repay_debt_x > max_repay {
         return Err(LiquidationError::InvalidCloseAmount {
-            requested: repay_debt_x,
+            requested: params.repay_debt_x,
             max_repay,
         });
     }
 
     let scale: u128 = 1_000_000_000_000_000_000;
-    let bonus_mult = u128::from(BPS_DEN.saturating_add(bonus_bps));
-    let mut target_seize_y = repay_debt_x
+    let bonus_mult = u128::from(BPS_DEN.saturating_add(params.bonus_bps));
+    let mut target_seize_y = params
+        .repay_debt_x
         .saturating_mul(health.twap_price_scaled)
         .saturating_mul(bonus_mult)
         / (scale * u128::from(BPS_DEN));
@@ -742,10 +755,10 @@ pub fn execute_proven_cross_domain_liquidation(
 
     Ok(ProvenLiquidationResult {
         health,
-        debt_repaid_x: repay_debt_x,
-        bonus_bps,
+        debt_repaid_x: params.repay_debt_x,
+        bonus_bps: params.bonus_bps,
         seized_legs,
-        delivery_proof_root,
+        delivery_proof_root: params.delivery_proof_root,
     })
 }
 
