@@ -41,8 +41,24 @@ struct Cli {
     /// JSON file containing a `VerifiedDomainCommitment`.
     #[arg(
         long,
-        required_unless_present_any = ["pow_spec", "bitcoin_spec", "bft_spec", "poa_spec"],
-        conflicts_with_all = ["pow_spec", "bitcoin_spec", "bft_spec", "poa_spec"]
+        required_unless_present_any = [
+            "pow_spec",
+            "bitcoin_spec",
+            "bft_spec",
+            "poa_spec",
+            "dag_spec",
+            "poh_spec",
+            "pospace_spec"
+        ],
+        conflicts_with_all = [
+            "pow_spec",
+            "bitcoin_spec",
+            "bft_spec",
+            "poa_spec",
+            "dag_spec",
+            "poh_spec",
+            "pospace_spec"
+        ]
     )]
     payload: Option<PathBuf>,
     /// JSON `PowChainSpec`: mine the header chain and build the payload.
@@ -57,6 +73,15 @@ struct Cli {
     /// JSON `PoaJob`: sign the block with the `PoA` authorities' keys.
     #[arg(long, requires = "quorum_keys")]
     poa_spec: Option<PathBuf>,
+    /// JSON `DagJob`: derive the causal anchor and sign with DAG authorities' composite keys.
+    #[arg(long, requires = "quorum_keys")]
+    dag_spec: Option<PathBuf>,
+    /// JSON `PohJob`: compute the sequential PoH hash ladder and sign with authorities' composite keys.
+    #[arg(long, requires = "quorum_keys")]
+    poh_spec: Option<PathBuf>,
+    /// JSON `PospaceJob`: prove plot quality and sign with prover and authorities' composite keys.
+    #[arg(long, requires = "quorum_keys")]
+    pospace_spec: Option<PathBuf>,
     /// A mode-0600 JSON file with the signing seeds (`QuorumKeys`).
     #[arg(long)]
     quorum_keys: Option<PathBuf>,
@@ -165,6 +190,35 @@ struct PoaJob {
     authorities: Vec<budlum_core::domain::finality_adapter::PoAAuthorityKey>,
 }
 
+/// A DAG commitment job: causal round plus the composite authority set.
+#[derive(Debug, serde::Deserialize)]
+struct DagJob {
+    block: budlum_core::domain::producer::QuorumBlockSpec,
+    round: u64,
+    authorities: Vec<budlum_core::domain::finality_adapter::PoAAuthorityKey>,
+}
+
+/// A `PoH` commitment job: seed tick (used for heights 0/1), ladder tick count,
+/// and the composite authority set.
+#[derive(Debug, serde::Deserialize)]
+struct PohJob {
+    block: budlum_core::domain::producer::QuorumBlockSpec,
+    #[serde(default)]
+    seed_tick: budlum_core::domain::Hash32,
+    tick_count: usize,
+    authorities: Vec<budlum_core::domain::finality_adapter::PoAAuthorityKey>,
+}
+
+/// A `PoSpace` commitment job: index into `QuorumKeys::composite` identifying
+/// the plot prover, plus the composite authority set.
+#[derive(Debug, serde::Deserialize)]
+struct PospaceJob {
+    block: budlum_core::domain::producer::QuorumBlockSpec,
+    #[serde(default)]
+    prover_index: usize,
+    authorities: Vec<budlum_core::domain::finality_adapter::PoAAuthorityKey>,
+}
+
 /// The signing seeds, hex. For BFT, `bls_seeds` (64 bytes) and optional
 /// `pq_seeds` (32 bytes) align with the job's members. For `PoA`, `composite`
 /// holds one `[ml_dsa_65_seed, ed25519_seed]` pair (32 bytes each) per
@@ -259,11 +313,9 @@ fn build_bft(
     )
 }
 
-fn build_poa(
+fn load_composite_signers(
     cli: &Cli,
-    path: &PathBuf,
-) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
-    let job: PoaJob = read_json(path, "PoaJob")?;
+) -> Result<Vec<budlum_core::crypto::composite::CompositeKeypair>, String> {
     let keys = read_keys(cli)?;
     let mut signers = Vec::with_capacity(keys.composite.len());
     for [pq_seed, ed_seed] in &keys.composite {
@@ -276,7 +328,59 @@ fn build_poa(
             .map_err(|e| e.to_string())?,
         );
     }
+    Ok(signers)
+}
+
+fn build_poa(
+    cli: &Cli,
+    path: &PathBuf,
+) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
+    let job: PoaJob = read_json(path, "PoaJob")?;
+    let signers = load_composite_signers(cli)?;
     budlum_core::domain::producer::build_poa_commitment(&job.block, &job.authorities, &signers)
+}
+
+fn build_dag(
+    cli: &Cli,
+    path: &PathBuf,
+) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
+    let job: DagJob = read_json(path, "DagJob")?;
+    let signers = load_composite_signers(cli)?;
+    budlum_core::domain::producer::build_dag_commitment(
+        &job.block,
+        job.round,
+        &job.authorities,
+        &signers,
+    )
+}
+
+fn build_poh(
+    cli: &Cli,
+    path: &PathBuf,
+) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
+    let job: PohJob = read_json(path, "PohJob")?;
+    let signers = load_composite_signers(cli)?;
+    budlum_core::domain::producer::build_poh_commitment(
+        &job.block,
+        job.seed_tick,
+        job.tick_count,
+        &job.authorities,
+        &signers,
+    )
+}
+
+fn build_pospace(
+    cli: &Cli,
+    path: &PathBuf,
+) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
+    let job: PospaceJob = read_json(path, "PospaceJob")?;
+    let signers = load_composite_signers(cli)?;
+    budlum_core::domain::producer::build_pospace_commitment(
+        &job.block,
+        job.prover_index,
+        &job.authorities,
+        &signers,
+    )
 }
 
 fn load_payload(cli: &Cli) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
@@ -285,6 +389,15 @@ fn load_payload(cli: &Cli) -> Result<budlum_core::domain::VerifiedDomainCommitme
     }
     if let Some(path) = &cli.poa_spec {
         return build_poa(cli, path);
+    }
+    if let Some(path) = &cli.dag_spec {
+        return build_dag(cli, path);
+    }
+    if let Some(path) = &cli.poh_spec {
+        return build_poh(cli, path);
+    }
+    if let Some(path) = &cli.pospace_spec {
+        return build_pospace(cli, path);
     }
     if let Some(path) = &cli.pow_spec {
         let spec: budlum_core::domain::producer::PowChainSpec = serde_json::from_slice(
@@ -448,6 +561,9 @@ mod tests {
             bitcoin_spec: None,
             bft_spec: None,
             poa_spec: None,
+            dag_spec: None,
+            poh_spec: None,
+            pospace_spec: None,
             quorum_keys: Some(path.clone()),
             write_payload: Some(path.clone()),
             key_file: None,
@@ -485,6 +601,9 @@ mod tests {
             bitcoin_spec: None,
             bft_spec: None,
             poa_spec: None,
+            dag_spec: None,
+            poh_spec: None,
+            pospace_spec: None,
             quorum_keys: None,
             write_payload: None,
             key_file: Some(files.key.clone()),
@@ -560,6 +679,9 @@ mod tests {
             bitcoin_spec: Some(spec_path),
             bft_spec: None,
             poa_spec: None,
+            dag_spec: None,
+            poh_spec: None,
+            pospace_spec: None,
             quorum_keys: None,
             write_payload: None,
             key_file: None,

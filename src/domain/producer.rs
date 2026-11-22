@@ -430,15 +430,14 @@ pub fn build_bft_commitment(
 /// # Errors
 ///
 /// A signer outside the set, or a key that cannot sign.
-pub fn build_poa_commitment(
+fn unsigned_commitment_for(
     spec: &QuorumBlockSpec,
-    authorities: &[crate::domain::finality_adapter::PoAAuthorityKey],
-    signers: &[crate::crypto::composite::CompositeKeypair],
-) -> Result<VerifiedDomainCommitment, String> {
+    consensus_kind: crate::domain::ConsensusKind,
+) -> DomainCommitment {
     // The producer signs the same state-updates map the verifier will fold in.
     // A commitment built here carries none: the writes it would attest are the
     // relayer's claim and belong to the settlement door, not to this builder.
-    let unsigned_commitment = crate::domain::types::DomainCommitment {
+    DomainCommitment {
         domain_id: spec.domain.id,
         domain_height: spec.height,
         domain_block_hash: spec.block_hash,
@@ -447,18 +446,20 @@ pub fn build_poa_commitment(
         tx_root: spec.tx_root,
         event_root: spec.event_root,
         finality_proof_hash: [0u8; 32],
-        consensus_kind: crate::domain::ConsensusKind::PoA,
+        consensus_kind,
         validator_set_hash: [0u8; 32],
         timestamp_ms: spec.timestamp_ms,
         sequence: spec.sequence,
         producer: spec.producer,
         state_updates: std::collections::BTreeMap::new(),
-    };
-    let digest = crate::domain::finality_adapter::poa_commit_digest(
-        spec.domain.domain_chain_id,
-        spec.domain.id,
-        &unsigned_commitment,
-    );
+    }
+}
+
+fn sign_composite_quorum(
+    authorities: &[crate::domain::finality_adapter::PoAAuthorityKey],
+    signers: &[crate::crypto::composite::CompositeKeypair],
+    digest: &[u8; 32],
+) -> Result<Vec<crate::domain::finality_adapter::PoAAuthoritySignature>, String> {
     let mut signatures = Vec::with_capacity(signers.len());
     for keypair in signers {
         let public = keypair.public_key().map_err(|e| e.to_string())?;
@@ -471,17 +472,224 @@ pub fn build_poa_commitment(
             use rand::Rng;
             rand::rng().fill_bytes(&mut rnd);
         }
-        let signature = crate::consensus::block_signature::sign_poa(keypair, &digest, &rnd)
+        let signature = crate::consensus::block_signature::sign_poa(keypair, digest, &rnd)
             .map_err(|e| e.to_string())?;
         signatures.push(crate::domain::finality_adapter::PoAAuthoritySignature {
             authority,
             signature,
         });
     }
+    Ok(signatures)
+}
+
+pub fn build_poa_commitment(
+    spec: &QuorumBlockSpec,
+    authorities: &[crate::domain::finality_adapter::PoAAuthorityKey],
+    signers: &[crate::crypto::composite::CompositeKeypair],
+) -> Result<VerifiedDomainCommitment, String> {
+    let unsigned_commitment = unsigned_commitment_for(spec, crate::domain::ConsensusKind::PoA);
+    let digest = crate::domain::finality_adapter::poa_commit_digest(
+        spec.domain.domain_chain_id,
+        spec.domain.id,
+        &unsigned_commitment,
+    );
+    let signatures = sign_composite_quorum(authorities, signers, &digest)?;
     let set_hash =
         crate::domain::finality_adapter::poa_pq_authority_set_hash(&spec.domain, authorities)
             .map_err(|e| e.to_string())?;
     let proof = FinalityProof::PoAPq {
+        authorities: authorities.to_vec(),
+        signatures,
+    };
+    let commitment = commitment_for(spec, &proof, set_hash)?;
+    Ok(VerifiedDomainCommitment { commitment, proof })
+}
+
+/// Build a post-quantum DAG structural finality commitment (`FinalityProof::DagPq`):
+/// derives the causal anchor from `(chain_id, domain_id, round, parent_hash, block_hash)`
+/// and collects composite (`Ed25519 + ML-DSA-65`) authority signatures over the
+/// domain-separated DAG PQ commit digest.
+///
+/// # Errors
+///
+/// A signer outside `authorities`, a self-referential anchor, or a signing/hashing failure.
+pub fn build_dag_commitment(
+    spec: &QuorumBlockSpec,
+    round: u64,
+    authorities: &[crate::domain::finality_adapter::PoAAuthorityKey],
+    signers: &[crate::crypto::composite::CompositeKeypair],
+) -> Result<VerifiedDomainCommitment, String> {
+    let unsigned_commitment = unsigned_commitment_for(spec, crate::domain::ConsensusKind::Dag);
+    let parent_anchor = spec.parent_hash;
+    let anchor = crate::domain::finality_adapter::dag_anchor_hash(
+        spec.domain.domain_chain_id,
+        spec.domain.id,
+        round,
+        parent_anchor,
+        spec.block_hash,
+    );
+    if parent_anchor == anchor {
+        return Err("DAG anchor collides with parent anchor".to_string());
+    }
+    let digest = crate::domain::finality_adapter::dag_pq_commit_digest(
+        spec.domain.domain_chain_id,
+        spec.domain.id,
+        round,
+        anchor,
+        parent_anchor,
+        &unsigned_commitment,
+    );
+    let signatures = sign_composite_quorum(authorities, signers, &digest)?;
+    let set_hash =
+        crate::domain::finality_adapter::poa_pq_authority_set_hash(&spec.domain, authorities)
+            .map_err(|e| e.to_string())?;
+    let proof = FinalityProof::DagPq {
+        round,
+        anchor,
+        parent_anchor,
+        authorities: authorities.to_vec(),
+        signatures,
+    };
+    let commitment = commitment_for(spec, &proof, set_hash)?;
+    Ok(VerifiedDomainCommitment { commitment, proof })
+}
+
+/// Build a post-quantum `PoH` structural finality commitment (`FinalityProof::PohPq`):
+/// computes the sequential hash ladder starting from `spec.parent_hash` (when
+/// `spec.height > 1`) or `seed_tick` (at height 0/1) for `tick_count` entries and
+/// collects composite (`Ed25519 + ML-DSA-65`) authority signatures over the ladder root.
+///
+/// # Errors
+///
+/// `tick_count` outside `2..=DAG_FAMILY_MAX_POH_TICKS`, a signer outside
+/// `authorities`, or a signing/hashing failure.
+pub fn build_poh_commitment(
+    spec: &QuorumBlockSpec,
+    seed_tick: Hash32,
+    tick_count: usize,
+    authorities: &[crate::domain::finality_adapter::PoAAuthorityKey],
+    signers: &[crate::crypto::composite::CompositeKeypair],
+) -> Result<VerifiedDomainCommitment, String> {
+    let max_ticks = crate::domain::finality_adapter::DAG_FAMILY_MAX_POH_TICKS;
+    if tick_count < 2 || tick_count > max_ticks {
+        return Err(format!(
+            "PoH tick_count {tick_count} must be in 2..={max_ticks}"
+        ));
+    }
+    let unsigned_commitment = unsigned_commitment_for(spec, crate::domain::ConsensusKind::Poh);
+    let seed = if spec.height > 1 {
+        spec.parent_hash
+    } else {
+        seed_tick
+    };
+    let mut chain = Vec::with_capacity(tick_count);
+    let mut current = seed;
+    chain.push(current);
+    for _ in 1..tick_count {
+        current = crate::domain::finality_adapter::poh_next_tick(&current);
+        chain.push(current);
+    }
+    let first = chain
+        .first()
+        .copied()
+        .ok_or_else(|| "PoH ladder is empty".to_string())?;
+    let last = chain
+        .last()
+        .copied()
+        .ok_or_else(|| "PoH ladder is empty".to_string())?;
+    let root = crate::domain::finality_adapter::poh_ladder_root(
+        spec.domain.domain_chain_id,
+        spec.domain.id,
+        spec.block_hash,
+        last,
+        chain.len() as u64,
+    );
+    let digest = crate::domain::finality_adapter::poh_pq_commit_digest(
+        spec.domain.domain_chain_id,
+        spec.domain.id,
+        root,
+        first,
+        &unsigned_commitment,
+    );
+    let signatures = sign_composite_quorum(authorities, signers, &digest)?;
+    let set_hash =
+        crate::domain::finality_adapter::poa_pq_authority_set_hash(&spec.domain, authorities)
+            .map_err(|e| e.to_string())?;
+    let proof = FinalityProof::PohPq {
+        chain,
+        authorities: authorities.to_vec(),
+        signatures,
+    };
+    let commitment = commitment_for(spec, &proof, set_hash)?;
+    Ok(VerifiedDomainCommitment { commitment, proof })
+}
+
+/// Build a post-quantum `PoSpace` structural finality commitment (`FinalityProof::PospacePq`):
+/// derives the prover's plot id from `(prover, domain.config_hash)`, checks that the
+/// plot quality for the commitment challenge meets `DAG_FAMILY_QUALITY_BITS`, signs
+/// the digest with the prover's composite key and the authority quorum.
+///
+/// # Errors
+///
+/// `prover_index` out of range, the prover outside `authorities`, plot quality
+/// below `DAG_FAMILY_QUALITY_BITS`, or a signing/hashing failure.
+pub fn build_pospace_commitment(
+    spec: &QuorumBlockSpec,
+    prover_index: usize,
+    authorities: &[crate::domain::finality_adapter::PoAAuthorityKey],
+    signers: &[crate::crypto::composite::CompositeKeypair],
+) -> Result<VerifiedDomainCommitment, String> {
+    let prover_keypair = signers.get(prover_index).ok_or_else(|| {
+        format!(
+            "PoSpace prover_index {prover_index} is out of range for {} signers",
+            signers.len()
+        )
+    })?;
+    let prover_public = prover_keypair.public_key().map_err(|e| e.to_string())?;
+    let prover = Address::from(prover_public.ed);
+    if !authorities.iter().any(|a| a.authority == prover) {
+        return Err(format!(
+            "PoSpace prover {prover} is not in the authority set"
+        ));
+    }
+    let unsigned_commitment = unsigned_commitment_for(spec, crate::domain::ConsensusKind::Pospace);
+    let plot_id =
+        crate::domain::finality_adapter::pospace_plot_id(&prover, &spec.domain.config_hash);
+    let challenge =
+        crate::domain::finality_adapter::pospace_challenge(&spec.domain, &unsigned_commitment);
+    let quality = crate::domain::finality_adapter::pospace_quality(&plot_id, &challenge);
+    let quality_bits = leading_zero_bits(&quality);
+    let required = crate::domain::finality_adapter::DAG_FAMILY_QUALITY_BITS;
+    if quality_bits < required {
+        return Err(format!(
+            "PoSpace plot quality {quality_bits} bits is below required {required} bits"
+        ));
+    }
+    let digest = crate::domain::finality_adapter::pospace_pq_commit_digest(
+        spec.domain.domain_chain_id,
+        spec.domain.id,
+        &prover,
+        plot_id,
+        quality_bits,
+        &unsigned_commitment,
+    );
+    let mut prover_rnd = [0u8; 32];
+    {
+        use rand::Rng;
+        rand::rng().fill_bytes(&mut prover_rnd);
+    }
+    let prover_signature =
+        crate::consensus::block_signature::sign_poa(prover_keypair, &digest, &prover_rnd)
+            .map_err(|e| e.to_string())?;
+    let signatures = sign_composite_quorum(authorities, signers, &digest)?;
+    let set_hash =
+        crate::domain::finality_adapter::poa_pq_authority_set_hash(&spec.domain, authorities)
+            .map_err(|e| e.to_string())?;
+    let proof = FinalityProof::PospacePq {
+        prover,
+        plot_id,
+        quality_bits,
+        prover_signature,
         authorities: authorities.to_vec(),
         signatures,
     };
@@ -718,5 +926,119 @@ mod tests {
             .verify_finality(&domain, &built.commitment, &built.proof)
             .expect("adapter runs");
         assert_eq!(status, FinalityStatus::Finalized);
+    }
+
+    fn composite_quorum(
+        count: u8,
+    ) -> (
+        Vec<crate::crypto::composite::CompositeKeypair>,
+        Vec<crate::domain::finality_adapter::PoAAuthorityKey>,
+    ) {
+        let keypairs: Vec<crate::crypto::composite::CompositeKeypair> = (0..count)
+            .map(|i| {
+                crate::crypto::composite::CompositeKeypair::from_seeds(
+                    crate::crypto::scheme::SuiteId::VALIDATOR,
+                    &[i + 11; crate::crypto::pq::ML_DSA_SEED_LEN],
+                    &[i + 29; 32],
+                )
+                .expect("seeds")
+            })
+            .collect();
+        let authorities: Vec<crate::domain::finality_adapter::PoAAuthorityKey> = keypairs
+            .iter()
+            .map(|kp| {
+                let public = kp.public_key().expect("public");
+                crate::domain::finality_adapter::PoAAuthorityKey {
+                    authority: Address::from(public.ed),
+                    public_key: public.encode(),
+                }
+            })
+            .collect();
+        (keypairs, authorities)
+    }
+
+    #[test]
+    fn dag_poh_and_pospace_commitments_finalize_under_their_native_adapters() {
+        let (keypairs, authorities) = composite_quorum(3);
+        let quorum = keypairs.get(..2).expect("two signers");
+
+        // 1. DAG PQ commitment
+        let mut dag_spec = quorum_spec(crate::domain::ConsensusKind::Dag, "dag-causal-anchor-v1");
+        dag_spec.domain.validator_set_hash =
+            crate::domain::finality_adapter::poa_pq_authority_set_hash(
+                &dag_spec.domain,
+                &authorities,
+            )
+            .expect("dag set hash");
+        let dag_built = build_dag_commitment(&dag_spec, 7, &authorities, quorum).expect("dag");
+        assert!(matches!(dag_built.proof, FinalityProof::DagPq { .. }));
+        let dag_status = crate::domain::finality_adapter::DagFinalityAdapter
+            .verify_finality(&dag_spec.domain, &dag_built.commitment, &dag_built.proof)
+            .expect("dag adapter");
+        assert_eq!(dag_status, FinalityStatus::Finalized);
+
+        // 2. PoH PQ commitment
+        let mut poh_spec = quorum_spec(crate::domain::ConsensusKind::Poh, "poh-hash-ladder-v1");
+        poh_spec.domain.validator_set_hash =
+            crate::domain::finality_adapter::poa_pq_authority_set_hash(
+                &poh_spec.domain,
+                &authorities,
+            )
+            .expect("poh set hash");
+        let poh_built =
+            build_poh_commitment(&poh_spec, [0x42; 32], 8, &authorities, quorum).expect("poh");
+        assert!(matches!(poh_built.proof, FinalityProof::PohPq { .. }));
+        let poh_status = crate::domain::finality_adapter::PohFinalityAdapter
+            .verify_finality(&poh_spec.domain, &poh_built.commitment, &poh_built.proof)
+            .expect("poh adapter");
+        assert_eq!(poh_status, FinalityStatus::Finalized);
+
+        // 3. PoSpace PQ commitment: find a deterministic block hash whose plot quality >= 16 bits.
+        let mut pospace_spec =
+            quorum_spec(crate::domain::ConsensusKind::Pospace, "pospace-plot-v1");
+        pospace_spec.domain.validator_set_hash =
+            crate::domain::finality_adapter::poa_pq_authority_set_hash(
+                &pospace_spec.domain,
+                &authorities,
+            )
+            .expect("pospace set hash");
+        let prover_addr = authorities.first().expect("prover").authority;
+        let plot_id = crate::domain::finality_adapter::pospace_plot_id(
+            &prover_addr,
+            &pospace_spec.domain.config_hash,
+        );
+        let mut found = false;
+        for nonce in 0u64..1_000_000 {
+            pospace_spec.block_hash =
+                crate::core::hash::hash_fields_bytes(&[b"pospace-test", &nonce.to_le_bytes()]);
+            let candidate =
+                unsigned_commitment_for(&pospace_spec, crate::domain::ConsensusKind::Pospace);
+            let challenge = crate::domain::finality_adapter::pospace_challenge(
+                &pospace_spec.domain,
+                &candidate,
+            );
+            let quality = crate::domain::finality_adapter::pospace_quality(&plot_id, &challenge);
+            if leading_zero_bits(&quality)
+                >= crate::domain::finality_adapter::DAG_FAMILY_QUALITY_BITS
+            {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected a PoSpace block hash meeting quality bits");
+        let pospace_built =
+            build_pospace_commitment(&pospace_spec, 0, &authorities, quorum).expect("pospace");
+        assert!(matches!(
+            pospace_built.proof,
+            FinalityProof::PospacePq { .. }
+        ));
+        let pospace_status = crate::domain::finality_adapter::PospaceFinalityAdapter
+            .verify_finality(
+                &pospace_spec.domain,
+                &pospace_built.commitment,
+                &pospace_built.proof,
+            )
+            .expect("pospace adapter");
+        assert_eq!(pospace_status, FinalityStatus::Finalized);
     }
 }
