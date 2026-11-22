@@ -30,7 +30,8 @@ pub const DOMAIN_SENTRY_AUDIT_ROOT: &[u8] = b"BDLM_SENTRY_AUDIT_ROOT_V1";
 pub const DOMAIN_SENTRY_LAUNCH_VERDICT: &[u8] = b"BDLM_SENTRY_LAUNCH_VERDICT_V1";
 
 /// Maximum watched consensus domains before fail-closed refusal.
-pub const MAX_SENTRY_DOMAINS: usize = 512;
+pub const MAX_SENTRY_DOMAINS: usize = crate::domain::registry::MAX_REGISTERED_DOMAINS;
+const _: () = assert!(MAX_SENTRY_DOMAINS == crate::domain::registry::MAX_REGISTERED_DOMAINS);
 
 /// Maximum retained alerts in the bounded on-chain ring log.
 pub const MAX_SENTRY_EVENTS: usize = 4_096;

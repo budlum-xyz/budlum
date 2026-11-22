@@ -425,6 +425,16 @@ impl BridgeState {
 
     /// How many transfer rows this state holds, terminal or not.
     #[must_use]
+    /// Returns `true` when at least one registered bridge asset is namespaced
+    /// to `domain_id`. Used to derive `DomainCapability::UniversalPayment`
+    /// directly from live chain state.
+    #[must_use]
+    pub(crate) fn has_asset_for_domain(&self, domain_id: DomainId) -> bool {
+        self.asset_locations
+            .keys()
+            .any(|asset| asset.is_namespaced_for(domain_id))
+    }
+
     pub fn transfer_count(&self) -> usize {
         self.transfers.len()
     }

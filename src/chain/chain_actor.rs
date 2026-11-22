@@ -250,6 +250,7 @@ pub enum ChainCommand {
     ),
     /// Snapshot the state-rooted `ConsensusSentry` health and circuit breaker state.
     GetConsensusSentry(oneshot::Sender<crate::cross_domain::external::sentry::ConsensusSentry>),
+    GetUniversalDomains(oneshot::Sender<crate::unification::UniversalDomainCatalog>),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetDomainCommitmentsWithGarden(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
@@ -1880,6 +1881,12 @@ impl ChainHandle {
     ) -> crate::cross_domain::external::sentry::ConsensusSentry {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetConsensusSentry(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_universal_domains(&self) -> crate::unification::UniversalDomainCatalog {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetUniversalDomains(tx)).await;
         rx.await.unwrap_or_default()
     }
 
@@ -3692,6 +3699,12 @@ impl ChainActor {
                 ChainCommand::GetConsensusSentry(tx) => {
                     let sentry = self.blockchain.state.bridge_state.consensus_sentry.clone();
                     let _ = tx.send(sentry);
+                }
+                ChainCommand::GetUniversalDomains(tx) => {
+                    let catalog = crate::unification::UniversalDomainCatalog::from_chain_state(
+                        &self.blockchain.state,
+                    );
+                    let _ = tx.send(catalog);
                 }
                 ChainCommand::GetFinalityCertificate(checkpoint_height, tx) => {
                     let tip = self.blockchain.chain.last().map_or(0, |b| b.index);

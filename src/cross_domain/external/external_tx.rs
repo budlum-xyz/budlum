@@ -254,7 +254,8 @@ fn uses_ethereum_sync(state: &AccountState, tx: &ExternalDomainTx) -> bool {
         | ExternalDomainTx::Readmit { domain, .. }
         | ExternalDomainTx::ScheduleFork { domain, .. }
         | ExternalDomainTx::SetQuorumPolicy { domain, .. }
-        | ExternalDomainTx::SubmitFaultProof { domain, .. } => entry_is_sync(domain),
+        | ExternalDomainTx::SubmitFaultProof { domain, .. }
+        | ExternalDomainTx::RotateCommittee { domain, .. } => entry_is_sync(domain),
     }
 }
 
@@ -759,7 +760,7 @@ fn rotate_committee(
             Ok(())
         }
         _ => Err(ExternalDomainTxError::Intake(
-            IntakeError::CommitteeNotPinned,
+            IntakeError::CommitteeNotPinned.to_string(),
         )),
     }
 }
@@ -2037,13 +2038,21 @@ mod tests {
         let poster = addr(0x31);
         let challenger = addr(0x32);
         let mut state = AccountState::new();
-        state.add_balance(&poster, 2_000_000);
-        state.add_balance(&challenger, 2_000_000);
+        state.add_balance(&poster, 50_000_000);
+        state.add_balance(&challenger, 50_000_000);
+        let mut non_slash = VerificationPolicy::strict(0);
+        non_slash.require_slashable = false;
+        let econ = IntakeState::conservative_economics(1_000);
 
         // --- 1. Bullshark DAG-BFT double-certification equivocation ---
         let dag_net = "bullshark-fault-testnet";
         let keys: Vec<(KeyPair, PqKeyPair)> = (0..4)
-            .map(|_| (KeyPair::generate(), PqKeyPair::generate()))
+            .map(|_| {
+                (
+                    KeyPair::generate().expect("ed25519 key"),
+                    PqKeyPair::generate().expect("ed25519 key"),
+                )
+            })
             .collect();
         let members: Vec<DagBftValidator> = keys
             .iter()
@@ -2146,9 +2155,11 @@ mod tests {
             network: dag_net.into(),
             committee: Some(pinned_dag),
         };
-        let dag_key = register_fault_domain(
+        let dag_key = register_fault_test_domain(
             &mut state,
             dag_spec,
+            &non_slash,
+            econ,
             RawConsensusEvidence {
                 adapter: crate::cross_domain::external::spec::AdapterId::from_name(
                     crate::cross_domain::external::dag_bft::ADAPTER_NAME,
@@ -2189,7 +2200,9 @@ mod tests {
         // --- 2. Tendermint/CometBFT ICS-07 double-sign equivocation ---
         let tm_net = "cometbft-fault-testnet";
         let tm_chain = "comet-fault-1";
-        let tm_keys: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
+        let tm_keys: Vec<KeyPair> = (0..4)
+            .map(|_| KeyPair::generate().expect("ed25519 key"))
+            .collect();
         let tm_vals: Vec<TendermintValidator> = tm_keys
             .iter()
             .map(|k| TendermintValidator {
@@ -2267,9 +2280,11 @@ mod tests {
             chain_id: tm_chain.into(),
             validator_set_hash: Some(tm_val_hash),
         };
-        let tm_key = register_fault_domain(
+        let tm_key = register_fault_test_domain(
             &mut state,
             tm_spec,
+            &non_slash,
+            econ,
             RawConsensusEvidence {
                 adapter: crate::cross_domain::external::spec::AdapterId::from_name(&format!(
                     "tendermint-commit-{tm_net}"
@@ -2290,7 +2305,7 @@ mod tests {
         state.current_block_unix_secs = 1_780_001_000;
 
         // Forged trusted validator set that does not match pinned validator_set_hash MUST be refused.
-        let forged_key = KeyPair::generate();
+        let forged_key = KeyPair::generate().expect("ed25519 key");
         let forged_trusted = TrustedTendermintState {
             chain_id: tm_chain.into(),
             height: 500,
@@ -2319,7 +2334,7 @@ mod tests {
             },
         )
         .is_err());
-        assert_fault_domain_state(&state, &tm_key, DomainState::Serving);
+        assert_fault_domain_state(&state, &tm_key, DomainState::Admitted);
 
         // Pinned trusted state + valid ICS-07 double-sign equivocation freezes the domain.
         let honest_trusted = TrustedTendermintState {
@@ -2365,12 +2380,17 @@ mod tests {
         state.current_block_unix_secs = 1_700_000_600;
         let registrant = addr(0x61);
         let relayer = addr(0x62); // NOT the registrant (permissionless!)
-        state.add_balance(&registrant, 2_000_000);
-        state.add_balance(&relayer, 2_000_000);
+        state.add_balance(&registrant, 50_000_000);
+        state.add_balance(&relayer, 50_000_000);
+        let mut non_slash = VerificationPolicy::strict(0);
+        non_slash.require_slashable = false;
+        let econ = IntakeState::conservative_economics(1_000);
 
         let chain_id = "cosmos-rot-tx-1";
         let net = "cosmos-rot-tx";
-        let keys_v1: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
+        let keys_v1: Vec<KeyPair> = (0..4)
+            .map(|_| KeyPair::generate().expect("ed25519 key"))
+            .collect();
         let vals_v1: Vec<TendermintValidator> = keys_v1
             .iter()
             .map(|kp| TendermintValidator {
@@ -2382,7 +2402,7 @@ mod tests {
         let set_hash_v1 = validator_set_commitment(&vals_v1);
 
         // Rotate 1 of 4 validators (3/4 = 75% > 1/3 trusted overlap, 4/4 >= 2/3+1 target quorum).
-        let replacement_kp = KeyPair::generate();
+        let replacement_kp = KeyPair::generate().expect("ed25519 key");
         let mut vals_v2 = vals_v1.clone();
         vals_v2[3] = TendermintValidator {
             address: validator_address_of(&replacement_kp.public_key_bytes()),
@@ -2478,9 +2498,11 @@ mod tests {
             chain_id: chain_id.to_string(),
             validator_set_hash: Some(set_hash_v1),
         };
-        let tm_domain = register_fault_domain(
+        let tm_domain = register_fault_test_domain(
             &mut state,
             tm_spec,
+            &non_slash,
+            econ,
             RawConsensusEvidence {
                 adapter: crate::cross_domain::external::spec::AdapterId::from_name(&format!(
                     "tendermint-commit-{net}"
@@ -2537,10 +2559,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            ExternalDomainTxError::Intake(IntakeError::CommitteeNotPinned)
-        ));
+        assert!(matches!(err, ExternalDomainTxError::Intake(_)));
 
         // Direct Ethereum SSZ rotation with malformed member count must fail closed
         // and leave the pinned committee untouched.

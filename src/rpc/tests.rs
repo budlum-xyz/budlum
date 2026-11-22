@@ -4111,9 +4111,14 @@ mod rpc_tests {
 
         let (server, _) = setup().await;
 
-        // 1. bud_getUniversalDomains (0-arg answer)
+        // 1. bud_getUniversalDomains (0-arg live chain-state view, never leaks unregistered templates)
         let domains = server.get_universal_domains().await.unwrap();
-        assert!(domains["count"].as_u64().unwrap_or(0) >= 19);
+        assert_eq!(domains["source"], "chain_state");
+        assert!(domains["template_count"].as_u64().unwrap_or(0) >= 19);
+        assert_eq!(
+            domains["count"].as_u64().unwrap_or(u64::MAX) as usize,
+            domains["domains"].as_array().map_or(0, Vec::len)
+        );
         assert!(domains["catalog_root"].as_str().unwrap().starts_with("0x"));
 
         // 2. bud_quoteUniversalPayment (refusal + answer)

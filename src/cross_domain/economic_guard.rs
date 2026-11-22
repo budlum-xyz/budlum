@@ -3427,7 +3427,7 @@ mod tests {
                 domain_id,
                 DomainCeilingPolicy {
                     backing: SecurityBacking::SignatureSet {
-                        scheme: ObservedScheme::Ed25519,
+                        scheme: ObservedScheme::Secp256k1,
                         signers: 4,
                         required: 3,
                         total_weight: 300_000,
@@ -3525,7 +3525,7 @@ mod tests {
 
     #[test]
     fn epoch_boundary_pruning_prevents_replay_table_exhaustion_attack() {
-        let ed_kp = KeyPair::generate();
+        let ed_kp = KeyPair::generate().expect("ed25519 key");
         let pq_kp = PqKeyPair::generate();
         let mut guard = BridgeEconomicGuard::new();
         let domain_id = 606u32;
