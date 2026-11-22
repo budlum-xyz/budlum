@@ -132,6 +132,15 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     // Android's org.json API is stubbed in local JVM unit tests.
     testImplementation("org.json:json:20240303")
+    // Measured on run 44982930517: the emulator booted, then
+    // connectedDebugAndroidTest reported "Starting 0 tests" and crashed with
+    // "ClassNotFoundException: Didn't find class
+    // androidx.test.runner.AndroidJUnitRunner". The instrumentation runner
+    // named in defaultConfig lives in androidx.test:runner, and the POM of
+    // androidx.test.ext:junit:1.2.1 lists annotation, storage, core, monitor,
+    // junit and kotlin-stdlib but not runner, so the test APK shipped without
+    // the class the manifest asked it to load.
+    androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.work:work-testing:2.10.0")
 }
