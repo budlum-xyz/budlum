@@ -108,6 +108,107 @@ impl ConsensusDomainForkChoice for DomainForkChoice {
     }
 }
 
+/// Freeze state produced when conflicting finalized commitments are observed
+/// for the same domain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum DomainForkFreezeStatus {
+    Active,
+    Frozen {
+        conflicting_height: u64,
+        head_a: Hash32,
+        head_b: Hash32,
+    },
+}
+
+/// In-block evidence required to unfreeze a domain frozen by conflicting
+/// finalized commitments. Out-of-block claims (`verified_in_block == false`)
+/// or zero digests are unconditionally refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InBlockForkResolutionProof {
+    block_height: u64,
+    winning_head_hash: Hash32,
+    quorum_proof_digest: Hash32,
+    verified_in_block: bool,
+}
+
+impl DomainForkChoice {
+    fn first_conflict_pair(candidates: &[ForkCandidate]) -> Option<(u64, Hash32, Hash32)> {
+        let mut seen = std::collections::BTreeMap::<u64, Hash32>::new();
+        for c in candidates {
+            if let Some(prev) = seen.insert(c.height, c.head_hash) {
+                if prev != c.head_hash {
+                    return Some((c.height, prev, c.head_hash));
+                }
+            }
+        }
+        let mut seen_cp: Option<(u64, Hash32)> = None;
+        for c in candidates {
+            if let Some(cp) = c.finalized_checkpoint {
+                match seen_cp {
+                    None => seen_cp = Some((c.height, cp)),
+                    Some((h, prev_cp)) if prev_cp != cp => {
+                        return Some((h.min(c.height), prev_cp, cp));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
+    fn evaluate_with_freeze(
+        &self,
+        candidates: &[ForkCandidate],
+    ) -> Result<(DomainForkFreezeStatus, ResolvedHead), (ForkChoiceError, DomainForkFreezeStatus)>
+    {
+        match self.fork_choice(candidates) {
+            Ok(head) => Ok((DomainForkFreezeStatus::Active, head)),
+            Err(ForkChoiceError::ConflictingFinality) => {
+                let (conflicting_height, head_a, head_b) =
+                    Self::first_conflict_pair(candidates).unwrap_or((0, [0u8; 32], [0u8; 32]));
+                Err((
+                    ForkChoiceError::ConflictingFinality,
+                    DomainForkFreezeStatus::Frozen {
+                        conflicting_height,
+                        head_a,
+                        head_b,
+                    },
+                ))
+            }
+            Err(err) => Err((err, DomainForkFreezeStatus::Active)),
+        }
+    }
+
+    #[cfg(test)]
+    fn unfreeze_with_in_block_proof(
+        &self,
+        current: &DomainForkFreezeStatus,
+        winning_candidate: &ForkCandidate,
+        proof: &InBlockForkResolutionProof,
+    ) -> Result<(DomainForkFreezeStatus, ResolvedHead), ForkChoiceError> {
+        let DomainForkFreezeStatus::Frozen {
+            conflicting_height, ..
+        } = current
+        else {
+            return Err(ForkChoiceError::NoCandidates);
+        };
+        if !proof.verified_in_block
+            || proof.quorum_proof_digest == [0u8; 32]
+            || proof.block_height == 0
+            || proof.winning_head_hash != winning_candidate.head_hash
+            || winning_candidate.height < *conflicting_height
+        {
+            return Err(ForkChoiceError::ConflictingFinality);
+        }
+        let resolved = self.fork_choice(std::slice::from_ref(winning_candidate))?;
+        if resolved.finality != DomainFinalityStatus::Finalized {
+            return Err(ForkChoiceError::ConflictingFinality);
+        }
+        Ok((DomainForkFreezeStatus::Active, resolved))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DomainLifecycleStatus {
     Proposed,
@@ -545,5 +646,84 @@ mod tests {
             zk.fork_choice(&[base(10, 0x11), base(10, 0x99), base(12, 0x22)]),
             Err(ForkChoiceError::ConflictingFinality)
         );
+    }
+
+    #[test]
+    fn conflicting_finalized_commitments_freeze_domain_and_only_in_block_proof_unfreezes() {
+        let bft = DomainForkChoice {
+            domain_id: 9,
+            kind: ConsensusKind::Bft,
+        };
+        let branch_a = ForkCandidate {
+            domain_id: 9,
+            head_hash: [0x11; 32],
+            parent_hash: [0x01; 32],
+            height: 42,
+            cumulative_work: None,
+            vote_weight: Some(1_000),
+            justified_checkpoint: Some([0x11; 32]),
+            finalized_checkpoint: Some([0x11; 32]),
+            proposer: None,
+            qc_present: true,
+            authority_quorum: true,
+        };
+        let branch_b = ForkCandidate {
+            head_hash: [0x22; 32],
+            justified_checkpoint: Some([0x22; 32]),
+            finalized_checkpoint: Some([0x22; 32]),
+            ..branch_a.clone()
+        };
+
+        // 1. Conflicting finalized commitments freeze the domain.
+        let (err, frozen) = bft
+            .evaluate_with_freeze(&[branch_a.clone(), branch_b])
+            .expect_err("conflicting finalized commitments must freeze domain");
+        assert_eq!(err, ForkChoiceError::ConflictingFinality);
+        assert_eq!(
+            frozen,
+            DomainForkFreezeStatus::Frozen {
+                conflicting_height: 42,
+                head_a: [0x11; 32],
+                head_b: [0x22; 32],
+            }
+        );
+
+        // 2. Out-of-block claim cannot unfreeze.
+        let off_chain_proof = InBlockForkResolutionProof {
+            block_height: 100,
+            winning_head_hash: branch_a.head_hash,
+            quorum_proof_digest: [0xAB; 32],
+            verified_in_block: false,
+        };
+        assert_eq!(
+            bft.unfreeze_with_in_block_proof(&frozen, &branch_a, &off_chain_proof),
+            Err(ForkChoiceError::ConflictingFinality)
+        );
+
+        // 3. Zero-digest proof cannot unfreeze even if marked in-block.
+        let zero_proof = InBlockForkResolutionProof {
+            verified_in_block: true,
+            quorum_proof_digest: [0u8; 32],
+            ..off_chain_proof.clone()
+        };
+        assert_eq!(
+            bft.unfreeze_with_in_block_proof(&frozen, &branch_a, &zero_proof),
+            Err(ForkChoiceError::ConflictingFinality)
+        );
+
+        // 4. Valid in-block proof over the winning finalized branch unfreezes the domain.
+        let in_block_proof = InBlockForkResolutionProof {
+            block_height: 101,
+            winning_head_hash: branch_a.head_hash,
+            quorum_proof_digest: [0xCD; 32],
+            verified_in_block: true,
+        };
+        let (next_state, resolved) = bft
+            .unfreeze_with_in_block_proof(&frozen, &branch_a, &in_block_proof)
+            .expect("valid in-block proof must unfreeze domain");
+        assert_eq!(next_state, DomainForkFreezeStatus::Active);
+        assert_eq!(resolved.head_hash, [0x11; 32]);
+        assert_eq!(resolved.height, 42);
+        assert_eq!(resolved.finality, DomainFinalityStatus::Finalized);
     }
 }
