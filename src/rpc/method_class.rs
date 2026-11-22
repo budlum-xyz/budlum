@@ -98,6 +98,7 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_getFinalityCertificate", Public, Read),
     row("bud_getDomainFinality", Public, Read),
     row("bud_getRouteFinality", Public, Read),
+    row("bud_getDomainHealth", Public, Read),
     row("bud_getDomainCommitments", Public, Read),
     row("bud_getConsensusDomains", Public, Read),
     row("bud_getAppBindingApplication", Public, Read),

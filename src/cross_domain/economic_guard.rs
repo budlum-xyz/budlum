@@ -858,7 +858,7 @@ pub fn effective_ceiling_atoms(record: &DomainEconomicRecord) -> u128 {
 }
 
 /// Pure-integer computation of a domain's per-window bridge ceiling derived
-/// directly from its row in the [`crate::settlement::universal_finality::UniversalFinalityCertificate`].
+/// directly from its row in the [`crate::settlement::universal_finality::GlobalFinalityCertificate`].
 ///
 /// Any domain whose certificate verdict is `Pending` or `Refuted` receives a
 /// strict `0` ceiling in that block so bridge outflows halt immediately when a
@@ -868,7 +868,7 @@ pub fn effective_ceiling_atoms(record: &DomainEconomicRecord) -> u128 {
 #[must_use]
 pub fn effective_ceiling_from_certificate_row(
     record: &DomainEconomicRecord,
-    row: &crate::settlement::universal_finality::FinalityCertificateRow,
+    entry: &crate::settlement::universal_finality::DomainFinalityEntry,
 ) -> u128 {
     if matches!(
         record.status,
@@ -877,21 +877,22 @@ pub fn effective_ceiling_from_certificate_row(
         return 0;
     }
     if !matches!(
-        row.verdict,
+        entry.verdict,
         crate::settlement::universal_finality::FinalityVerdict::Established
     ) {
         return 0;
     }
-    if !row.guarantee.admits_cross_domain_value() {
+    if !entry.guarantee.admits_cross_domain_value() {
         return 0;
     }
     let policy_cap = effective_ceiling_atoms(record);
     let cert_bound = crate::settlement::universal_finality::EconomicSecurityBound::derive(
-        row.domain_id,
-        &row.guarantee,
+        &entry.guarantee,
+        entry.bond_atoms,
+        entry.bond_atoms,
     );
-    if cert_bound.safe_outflow_ceiling_atoms > 0 {
-        policy_cap.min(cert_bound.safe_outflow_ceiling_atoms)
+    if cert_bound.safe_value_outflow_ceiling_atoms > 0 {
+        policy_cap.min(cert_bound.safe_value_outflow_ceiling_atoms)
     } else {
         policy_cap
     }
@@ -1197,7 +1198,7 @@ impl BridgeEconomicGuard {
     }
 
     /// Verify and record an inbound bridge flow while deriving the domain's
-    /// ceiling directly from its [`crate::settlement::universal_finality::UniversalFinalityCertificate`]
+    /// ceiling directly from its [`crate::settlement::universal_finality::GlobalFinalityCertificate`]
     /// row when present.
     ///
     /// When `domain_id` appears in `certificate` with a `Pending` or `Refuted`
@@ -1215,7 +1216,7 @@ impl BridgeEconomicGuard {
         domain_id: DomainId,
         amount_atoms: u128,
         current_height: u64,
-        certificate: &crate::settlement::universal_finality::UniversalFinalityCertificate,
+        certificate: &crate::settlement::universal_finality::GlobalFinalityCertificate,
     ) -> Result<(), EconomicGuardError> {
         let Some(rec) = self.domains.get(&domain_id) else {
             if self.require_configured_domains {
@@ -1239,8 +1240,8 @@ impl BridgeEconomicGuard {
         } else {
             0
         };
-        let ceiling = match certificate.row(domain_id) {
-            Some(row) => effective_ceiling_from_certificate_row(rec, row),
+        let ceiling = match certificate.prove_domain(domain_id) {
+            Some(proof) => effective_ceiling_from_certificate_row(rec, &proof.entry),
             None => effective_ceiling_atoms(rec),
         };
         let Some(next_used) = used.checked_add(amount_atoms) else {
@@ -3413,9 +3414,10 @@ mod tests {
 
     #[test]
     fn certificate_pending_or_refuted_zeroes_economic_guard_ceiling_immediately() {
+        use crate::crypto::facts::QuantumClass;
         use crate::settlement::universal_finality::{
-            FinalityCertificateRow, FinalityGuarantee, FinalityMechanism, FinalityVerdict,
-            PendingReason, RefutationReason, UniversalFinalityCertificate,
+            compose, DomainFinalityEntry, FinalityGuarantee, FinalityPendingReason,
+            FinalityReversibility, FinalityVerdict, FINALITY_BINDS_ALL,
         };
 
         let mut guard = BridgeEconomicGuard::new();
@@ -3437,23 +3439,31 @@ mod tests {
             )
             .expect("configure domain");
 
-        let established_guarantee =
-            FinalityGuarantee::deterministic_bft(FinalityMechanism::CometBft, 3_333, 300_000, true);
-        let est_cert = UniversalFinalityCertificate::build(
-            50,
-            vec![FinalityCertificateRow {
-                domain_id,
-                height: 12,
-                state_root: [0x11; 32],
-                guarantee: established_guarantee.clone(),
-                verdict: FinalityVerdict::Established,
-            }],
-        );
+        let mk_entry = |verdict: FinalityVerdict| DomainFinalityEntry {
+            domain_id,
+            height: 12,
+            checkpoint_height: 50,
+            state_root: [0x11; 32],
+            adapter_id: "cometbft-v1".to_owned(),
+            adapter_version: 1,
+            finality_proof_hash: [0x22; 32],
+            guarantee_backing_hash: [0x33; 32],
+            bond_atoms: 300_000,
+            guarantee: FinalityGuarantee {
+                reversibility: FinalityReversibility::DeterministicQuorum,
+                quantum_posture: QuantumClass::Hash,
+                attestation: FINALITY_BINDS_ALL,
+                slashable_backing: true,
+                fault_tolerance_bps: 3_333,
+            },
+            verdict,
+        };
+
+        let est_cert =
+            compose(&[mk_entry(FinalityVerdict::Established)]).expect("established cert");
         let rec = guard.record(domain_id).expect("record");
-        let est_ceiling = effective_ceiling_from_certificate_row(
-            rec,
-            est_cert.row(domain_id).expect("established row"),
-        );
+        let est_proof = est_cert.prove_domain(domain_id).expect("established row");
+        let est_ceiling = effective_ceiling_from_certificate_row(rec, &est_proof.entry);
         assert!(
             est_ceiling > 0,
             "established domain must expose positive ceiling"
@@ -3464,23 +3474,16 @@ mod tests {
 
         // In the very same block, if the domain drops to Pending, its ceiling
         // becomes strictly 0 and any bridge flow is refused without mutating state.
-        let pending_cert = UniversalFinalityCertificate::build(
-            50,
-            vec![FinalityCertificateRow {
-                domain_id,
-                height: 12,
-                state_root: [0x11; 32],
-                guarantee: established_guarantee.clone(),
-                verdict: FinalityVerdict::Pending {
-                    reason: PendingReason::EvidenceMissing,
-                },
-            }],
-        );
+        let pending_cert = compose(&[mk_entry(FinalityVerdict::Pending {
+            reason: FinalityPendingReason::EvidenceMissing,
+        })])
+        .expect("pending cert");
         let root_before_pending = guard.root();
+        let pending_proof = pending_cert.prove_domain(domain_id).expect("pending row");
         assert_eq!(
             effective_ceiling_from_certificate_row(
                 guard.record(domain_id).expect("record"),
-                pending_cert.row(domain_id).expect("pending row"),
+                &pending_proof.entry,
             ),
             0
         );
@@ -3499,22 +3502,13 @@ mod tests {
         assert_eq!(guard.root(), root_before_pending);
 
         // Refuted verdict also yields a strict 0 ceiling.
-        let refuted_cert = UniversalFinalityCertificate::build(
-            50,
-            vec![FinalityCertificateRow {
-                domain_id,
-                height: 12,
-                state_root: [0x11; 32],
-                guarantee: established_guarantee,
-                verdict: FinalityVerdict::Refuted {
-                    reason: RefutationReason::DomainFrozen,
-                },
-            }],
-        );
+        let refuted_cert =
+            compose(&[mk_entry(FinalityVerdict::Refuted { code: 1 })]).expect("refuted cert");
+        let refuted_proof = refuted_cert.prove_domain(domain_id).expect("refuted row");
         assert_eq!(
             effective_ceiling_from_certificate_row(
                 guard.record(domain_id).expect("record"),
-                refuted_cert.row(domain_id).expect("refuted row"),
+                &refuted_proof.entry,
             ),
             0
         );

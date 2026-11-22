@@ -71,6 +71,15 @@ pub enum ValueGateRefusal {
         /// Pending reason carried by the certificate row.
         reason: FinalityPendingReason,
     },
+    /// Consensus Sentry circuit breaker escalated this domain out of `Open`.
+    SentryCircuitEscalated {
+        /// Value gate that refused settlement.
+        gate: ValueGate,
+        /// Domain whose Sentry circuit is escalated.
+        domain_id: u32,
+        /// Canonical uppercase circuit label (`THROTTLED`, `HALTED`, `FROZEN`).
+        circuit: &'static str,
+    },
     /// Composed route guarantee fails `admits_cross_domain_value` or has zero fault tolerance.
     RouteFinalityInsufficient {
         /// Source domain identifier.
@@ -98,6 +107,15 @@ impl fmt::Display for ValueGateRefusal {
             Self::DomainPending { domain_id, reason } => write!(
                 f,
                 "domain {domain_id} is pending in the finality certificate ({reason:?})"
+            ),
+            Self::SentryCircuitEscalated {
+                gate,
+                domain_id,
+                circuit,
+            } => write!(
+                f,
+                "{} refused: consensus sentry circuit for domain {domain_id} is {circuit}",
+                gate.as_str()
             ),
             Self::RouteFinalityInsufficient {
                 source_domain,
@@ -280,6 +298,35 @@ pub fn enforce_domain_not_refuted(
     Ok(())
 }
 
+/// Fail-closed check against the deterministic [`crate::cross_domain::external::sentry::ConsensusSentry`]
+/// circuit breaker for `domain_id`.
+///
+/// Whenever Sentry has registered `domain_id` and escalated its circuit out of
+/// `Open` (`Throttled`, `Halted`, or `Frozen`), value settlement is refused
+/// immediately in that block without any admin override.
+///
+/// # Errors
+///
+/// Returns [`ValueGateRefusal::SentryCircuitEscalated`] when Sentry blocks
+/// settlement for `domain_id`.
+pub fn enforce_sentry_circuit_clear(
+    sentry: &crate::cross_domain::external::sentry::ConsensusSentry,
+    gate: ValueGate,
+    domain_id: u32,
+) -> Result<(), ValueGateRefusal> {
+    let key = crate::cross_domain::external::sentry::ConsensusSentry::domain_key_for_id(domain_id);
+    if let Some(watched) = sentry.domain(&key) {
+        if !watched.circuit.accepts_settlement() {
+            return Err(ValueGateRefusal::SentryCircuitEscalated {
+                gate,
+                domain_id,
+                circuit: watched.circuit.label(),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +455,83 @@ mod tests {
             check_certificate_value_gate(&cert, ValueGate::RelayerIntentSettle, 99, None),
             Err(ValueGateRefusal::DomainMissing { domain_id: 99 })
         );
+    }
+
+    #[test]
+    fn sentry_circuit_escalation_halts_all_value_gates() {
+        use crate::cross_domain::external::sentry::{
+            ConsensusSentry, DomainQuantumPosture, SentryCircuitState, SentryDomainPolicy,
+            SentryObservation, DEFAULT_MAX_RESTAKE_SHARE_PPM,
+        };
+
+        let mut sentry = ConsensusSentry::new();
+        let domain_id = 77u32;
+        let key = ConsensusSentry::domain_key_for_id(domain_id);
+        sentry
+            .register_domain(
+                key.clone(),
+                SentryDomainPolicy {
+                    consensus_family: "cometbft-v1".into(),
+                    quantum_posture: DomainQuantumPosture::ClassicalOnly,
+                    max_finality_stall_secs: 60,
+                    min_trusting_window_secs: 30,
+                    max_reorg_blocks: 0,
+                    max_consecutive_proof_failures: 2,
+                    max_restake_share_ppm: DEFAULT_MAX_RESTAKE_SHARE_PPM,
+                    recovery_cooldown_secs: 300,
+                },
+            )
+            .expect("register sentry domain");
+
+        for gate in [
+            ValueGate::BridgeMint,
+            ValueGate::BridgeUnlock,
+            ValueGate::RelayerIntentSettle,
+            ValueGate::AppBindingClaim,
+            ValueGate::ObjectLayerArrive,
+            ValueGate::UniversalPayment,
+        ] {
+            enforce_sentry_circuit_clear(&sentry, gate, domain_id)
+                .expect("open sentry circuit admits value");
+        }
+
+        sentry
+            .observe(&SentryObservation {
+                domain_id: key.clone(),
+                height: 100,
+                state_root: [0x22; 32],
+                observed_at_secs: 1_000,
+                remaining_trust_window_secs: Some(600),
+                restake_share_ppm: 100_000,
+            })
+            .expect("initial observation");
+        let alerts = sentry.check_liveness(1_100);
+        assert!(
+            !alerts.is_empty(),
+            "liveness stall must produce sentry alert"
+        );
+        assert_eq!(
+            sentry.domain(&key).expect("watched").circuit,
+            SentryCircuitState::Halted
+        );
+
+        for gate in [
+            ValueGate::BridgeMint,
+            ValueGate::BridgeUnlock,
+            ValueGate::RelayerIntentSettle,
+            ValueGate::AppBindingClaim,
+            ValueGate::ObjectLayerArrive,
+            ValueGate::UniversalPayment,
+        ] {
+            let err = enforce_sentry_circuit_clear(&sentry, gate, domain_id).unwrap_err();
+            assert_eq!(
+                err,
+                ValueGateRefusal::SentryCircuitEscalated {
+                    gate,
+                    domain_id,
+                    circuit: "HALTED",
+                }
+            );
+        }
     }
 }

@@ -377,6 +377,23 @@ impl Blockchain {
                 .set(i64::try_from(self.state.poa_onboarding.admin_count()).unwrap_or(i64::MAX));
             m.pending_domain_unfreeze_rows
                 .set(i64::try_from(self.state.pending_domain_unfreezes.len()).unwrap_or(i64::MAX));
+            m.sentry_watched_domains.set(
+                i64::try_from(self.state.bridge_state.consensus_sentry.domain_count())
+                    .unwrap_or(i64::MAX),
+            );
+            m.sentry_frozen_domains.set(
+                i64::try_from(
+                    self.state
+                        .bridge_state
+                        .consensus_sentry
+                        .frozen_domain_count(),
+                )
+                .unwrap_or(i64::MAX),
+            );
+            m.sentry_alerts_total.set(
+                i64::try_from(self.state.bridge_state.consensus_sentry.alerts().len())
+                    .unwrap_or(i64::MAX),
+            );
             m.pending_poa_freeze_rows
                 .set(i64::try_from(self.state.pending_poa_freezes.len()).unwrap_or(i64::MAX));
             m.pending_poa_unfreeze_rows
@@ -2417,6 +2434,7 @@ impl Blockchain {
         preceding: &[Block],
         chain_id: u64,
     ) {
+        let _ = state.refresh_consensus_sentry(Self::block_timestamp_secs(block.timestamp));
         state.bridge_root = state.bridge_state.root();
         state.message_root = state.message_registry.root();
         state.settlement_root =

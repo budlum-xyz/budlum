@@ -3276,6 +3276,78 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn get_domain_health(
+        &self,
+        domain_id: Option<u32>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if domain_id == Some(0) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "domain_id 0 is reserved",
+                None::<()>,
+            ));
+        }
+        let sentry = self.chain.get_consensus_sentry().await;
+        let cert = self.chain.get_finality_certificate(None).await;
+        let audit_root = Self::bytes32_to_0x(sentry.state_root());
+
+        if let Some(id) = domain_id {
+            let key = crate::cross_domain::external::sentry::ConsensusSentry::domain_key_for_id(id);
+            let watched = sentry.domain(&key);
+            let cert_proof = cert.as_ref().and_then(|c| c.prove_domain(id));
+            if watched.is_none() && cert_proof.is_none() {
+                return Err(ErrorObjectOwned::owned(
+                    -32004,
+                    format!("domain {id} is neither watched by sentry nor present in finality certificate"),
+                    None::<()>,
+                ));
+            }
+            let circuit_state = watched.map_or("OPEN", |w| w.circuit.label());
+            let accepts_settlement = watched.is_none_or(|w| w.circuit.accepts_settlement());
+            return Ok(serde_json::json!({
+                "domainId": id,
+                "sentryKey": key,
+                "watched": watched.is_some(),
+                "circuitState": circuit_state,
+                "acceptsSettlement": accepts_settlement,
+                "lastHeight": watched.and_then(|w| w.last_height),
+                "lastStateRoot": watched.and_then(|w| w.last_state_root).map(Self::bytes32_to_0x),
+                "consecutiveProofFailures": watched.map_or(0, |w| w.consecutive_proof_failures),
+                "latestRestakeSharePpm": watched.map_or(0, |w| w.latest_restake_share_ppm),
+                "crqcAlarmActive": sentry.crqc_alarm_active(),
+                "sentryAuditRoot": audit_root,
+                "certificateHeight": cert.as_ref().map(|c| c.checkpoint_height),
+                "certificateVerdict": cert_proof.as_ref().map(|p| format!("{:?}", p.entry.verdict)),
+            }));
+        }
+
+        let domains: Vec<serde_json::Value> = sentry
+            .watched_domains()
+            .iter()
+            .map(|(k, w)| {
+                serde_json::json!({
+                    "domainKey": k,
+                    "consensusFamily": w.policy.consensus_family,
+                    "circuitState": w.circuit.label(),
+                    "acceptsSettlement": w.circuit.accepts_settlement(),
+                    "lastHeight": w.last_height,
+                    "lastStateRoot": w.last_state_root.map(Self::bytes32_to_0x),
+                    "consecutiveProofFailures": w.consecutive_proof_failures,
+                    "latestRestakeSharePpm": w.latest_restake_share_ppm,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "watchedDomainCount": sentry.domain_count(),
+            "frozenDomainCount": sentry.frozen_domain_count(),
+            "alertCount": sentry.alerts().len(),
+            "crqcAlarmActive": sentry.crqc_alarm_active(),
+            "sentryAuditRoot": audit_root,
+            "certificateHeight": cert.as_ref().map(|c| c.checkpoint_height),
+            "domains": domains,
+        }))
+    }
+
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let commitments = if self.mode == RpcMode::Operator {
             self.chain.get_domain_commitments_with_garden().await

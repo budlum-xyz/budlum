@@ -248,6 +248,8 @@ pub enum ChainCommand {
         Option<u64>,
         oneshot::Sender<Option<crate::settlement::GlobalFinalityCertificate>>,
     ),
+    /// Snapshot the state-rooted `ConsensusSentry` health and circuit breaker state.
+    GetConsensusSentry(oneshot::Sender<crate::cross_domain::external::sentry::ConsensusSentry>),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetDomainCommitmentsWithGarden(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
@@ -1870,6 +1872,15 @@ impl ChainHandle {
             .send(ChainCommand::GetFinalityCertificate(checkpoint_height, tx))
             .await;
         rx.await.unwrap_or(None)
+    }
+
+    /// Read a snapshot of the embedded deterministic [`crate::cross_domain::external::sentry::ConsensusSentry`].
+    pub async fn get_consensus_sentry(
+        &self,
+    ) -> crate::cross_domain::external::sentry::ConsensusSentry {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetConsensusSentry(tx)).await;
+        rx.await.unwrap_or_default()
     }
 
     pub async fn get_domain_commitments(&self) -> Vec<crate::domain::DomainCommitment> {
@@ -3677,6 +3688,10 @@ impl ChainActor {
                 ChainCommand::GetGlobalHeader(height, tx) => {
                     let header = self.blockchain.global_header(height);
                     let _ = tx.send(header);
+                }
+                ChainCommand::GetConsensusSentry(tx) => {
+                    let sentry = self.blockchain.state.bridge_state.consensus_sentry.clone();
+                    let _ = tx.send(sentry);
                 }
                 ChainCommand::GetFinalityCertificate(checkpoint_height, tx) => {
                     let tip = self.blockchain.chain.last().map_or(0, |b| b.index);

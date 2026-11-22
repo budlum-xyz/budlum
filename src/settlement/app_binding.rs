@@ -1027,6 +1027,12 @@ pub fn execute_app_binding_tx(
                 app.domain_key,
             )
             .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+            crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+                &state.bridge_state.consensus_sentry,
+                crate::settlement::finality_gate::ValueGate::AppBindingClaim,
+                app.domain_key,
+            )
+            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
             ensure_serving_origin(state, app.domain_key)?;
             if evidence.chain.domain_id() != app.domain_key {
                 return Err(refused(

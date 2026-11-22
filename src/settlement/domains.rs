@@ -1932,6 +1932,12 @@ fn execute_object_layer_tx(
             proof.domain,
         )
         .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+        crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+            &state.bridge_state.consensus_sentry,
+            crate::settlement::finality_gate::ValueGate::ObjectLayerArrive,
+            proof.domain,
+        )
+        .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
     }
     struct IntakeFinality<'a> {
         domains: &'a crate::domain::ConsensusDomainRegistry,
@@ -2269,6 +2275,12 @@ pub(crate) fn execute_relayer_intent_tx(
             crate::settlement::finality_gate::enforce_domain_not_refuted(
                 &state.settlement,
                 state.current_block_height,
+                crate::settlement::finality_gate::ValueGate::RelayerIntentSettle,
+                intent.target_domain,
+            )
+            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+            crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+                &state.bridge_state.consensus_sentry,
                 crate::settlement::finality_gate::ValueGate::RelayerIntentSettle,
                 intent.target_domain,
             )

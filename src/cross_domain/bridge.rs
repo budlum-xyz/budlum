@@ -240,6 +240,10 @@ pub struct BridgeState {
     /// Adaptive escrow ceiling and permissionless contradiction slashing guard.
     #[serde(default)]
     pub economic_guard: super::economic_guard::BridgeEconomicGuard,
+    /// Deterministic Consensus Sentry circuit breaker whose audit root commits
+    /// into [`Self::root`] whenever watched domains or alerts are present.
+    #[serde(default)]
+    pub consensus_sentry: super::external::sentry::ConsensusSentry,
     /// Settled queue: the height a transfer reached a terminal status
     /// (`Unlocked`, or `Active` again after its lock expired) -> `[message_id]`.
     /// `sweep_expired_locks` drops those rows `SETTLED_RETENTION_BLOCKS`
@@ -415,6 +419,7 @@ impl BridgeState {
             settled_queue: BTreeMap::new(),
             replay: ReplayNonceStore::new(),
             economic_guard: super::economic_guard::BridgeEconomicGuard::new(),
+            consensus_sentry: super::external::sentry::ConsensusSentry::new(),
         }
     }
 
@@ -566,7 +571,7 @@ impl BridgeState {
     }
 
     /// Mint on the target domain while enforcing the source domain's ceiling
-    /// directly from the [`crate::settlement::universal_finality::UniversalFinalityCertificate`].
+    /// directly from the [`crate::settlement::universal_finality::GlobalFinalityCertificate`].
     ///
     /// # Errors
     ///
@@ -576,7 +581,7 @@ impl BridgeState {
         &mut self,
         message: &CrossDomainMessage,
         current_height: u64,
-        certificate: &crate::settlement::universal_finality::UniversalFinalityCertificate,
+        certificate: &crate::settlement::universal_finality::GlobalFinalityCertificate,
     ) -> Result<(), BridgeError> {
         self.mint_inner(message, current_height, Some(certificate))
     }
@@ -585,7 +590,7 @@ impl BridgeState {
         &mut self,
         message: &CrossDomainMessage,
         current_height: u64,
-        certificate: Option<&crate::settlement::universal_finality::UniversalFinalityCertificate>,
+        certificate: Option<&crate::settlement::universal_finality::GlobalFinalityCertificate>,
     ) -> Result<(), BridgeError> {
         if !message.verify_id() {
             return Err(BridgeError("Invalid cross-domain message id".into()));
@@ -857,7 +862,7 @@ impl BridgeState {
     }
 
     /// Unlock on the origin domain while enforcing the source domain's ceiling
-    /// directly from the [`crate::settlement::universal_finality::UniversalFinalityCertificate`].
+    /// directly from the [`crate::settlement::universal_finality::GlobalFinalityCertificate`].
     ///
     /// # Errors
     ///
@@ -868,7 +873,7 @@ impl BridgeState {
         message_id: MessageId,
         source_domain: DomainId,
         settled_height: u64,
-        certificate: &crate::settlement::universal_finality::UniversalFinalityCertificate,
+        certificate: &crate::settlement::universal_finality::GlobalFinalityCertificate,
     ) -> Result<(), BridgeError> {
         self.unlock_inner(message_id, source_domain, settled_height, Some(certificate))
     }
@@ -878,7 +883,7 @@ impl BridgeState {
         message_id: MessageId,
         source_domain: DomainId,
         settled_height: u64,
-        certificate: Option<&crate::settlement::universal_finality::UniversalFinalityCertificate>,
+        certificate: Option<&crate::settlement::universal_finality::GlobalFinalityCertificate>,
     ) -> Result<(), BridgeError> {
         let transfer = self
             .transfers
@@ -1045,6 +1050,12 @@ impl BridgeState {
             leaves.push(hash_fields_bytes(&[
                 b"BDLM_ECON_GUARD_ROOT_V1",
                 &self.economic_guard.root(),
+            ]));
+        }
+        if !self.consensus_sentry.is_empty() {
+            leaves.push(hash_fields_bytes(&[
+                super::external::sentry::DOMAIN_SENTRY_AUDIT_ROOT,
+                &self.consensus_sentry.state_root(),
             ]));
         }
         crate::settlement::commitment_tree::merkle_root(&leaves)

@@ -4958,4 +4958,39 @@ mod rpc_tests {
             -32004
         );
     }
+
+    #[tokio::test]
+    async fn domain_health_rpc_reports_sentry_circuit_state_and_refuses_reserved_domain() {
+        let (server, _dir) = create_test_server().await;
+
+        // Summary query succeeds even before any external domain is registered.
+        let summary = server
+            .get_domain_health(None)
+            .await
+            .expect("bud_getDomainHealth summary must succeed");
+        assert_eq!(summary["watchedDomainCount"], 0);
+        assert_eq!(summary["frozenDomainCount"], 0);
+        assert_eq!(summary["crqcAlarmActive"], false);
+        assert!(summary["sentryAuditRoot"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("0x") && s.len() == 66));
+
+        // Reserved domain 0 refuses with -32602; unknown domain refuses with -32004.
+        assert_eq!(
+            server
+                .get_domain_health(Some(0))
+                .await
+                .expect_err("bud_getDomainHealth must refuse reserved domain 0")
+                .code(),
+            -32602
+        );
+        assert_eq!(
+            server
+                .get_domain_health(Some(999_999))
+                .await
+                .expect_err("bud_getDomainHealth must refuse unknown domain")
+                .code(),
+            -32004
+        );
+    }
 }

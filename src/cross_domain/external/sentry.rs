@@ -11,7 +11,7 @@
 //!
 //! Convenience: exposed for external finality intake, RPC health surfaces,
 //! governance slashing hooks, and testnet launch-gate verification.
-//! WIRING: unwired - per-block Sentry liveness polling hooks into the block executor intake loop.
+//! WIRING: wired - refreshed at block end via `AccountState::refresh_consensus_sentry` (`Blockchain::apply_block_end_roots`), committed into `BridgeState::root` -> `AccountState` state root, enforced by `finality_gate::enforce_sentry_circuit_clear`, exported via `Metrics`, and served through `bud_getDomainHealth`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -117,6 +117,12 @@ impl SentryCircuitState {
     #[must_use]
     pub const fn accepts_settlement(self) -> bool {
         matches!(self, Self::Open)
+    }
+
+    /// Canonical uppercase label for RPC and metrics reporting.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        self.as_str()
     }
 
     const fn as_str(self) -> &'static str {
@@ -470,6 +476,30 @@ impl ConsensusSentry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Canonical Sentry domain key for a numeric settlement `DomainId`.
+    #[must_use]
+    pub fn domain_key_for_id(domain_id: u32) -> String {
+        format!("domain:{domain_id}")
+    }
+
+    /// Returns `true` when no domains, alerts, or CRQC alarms are active.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.domains.is_empty() && self.alerts.is_empty() && !self.crqc_alarm_active
+    }
+
+    /// Borrow all deterministically tracked watched domains.
+    #[must_use]
+    pub const fn watched_domains(&self) -> &BTreeMap<String, WatchedDomainState> {
+        &self.domains
+    }
+
+    /// Returns `true` when the global CRQC quantum isolation alarm is active.
+    #[must_use]
+    pub const fn crqc_alarm_active(&self) -> bool {
+        self.crqc_alarm_active
     }
 
     /// Number of registered watched domains.

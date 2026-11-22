@@ -136,6 +136,14 @@ pub trait BudlumApi {
         target_domain: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Read deterministic Consensus Sentry circuit state, alerts, audit root,
+    /// and (when `domain_id` is supplied) the combined finality verdict for a domain.
+    #[method(name = "bud_getDomainHealth")]
+    async fn get_domain_health(
+        &self,
+        domain_id: Option<u32>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_getDomainCommitments")]
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 

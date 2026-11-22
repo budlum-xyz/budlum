@@ -64,6 +64,12 @@ pub struct Metrics {
     pub poa_onboarding_admin_rows: IntGauge,
     /// Governance domain-unfreeze requests waiting for block-end application.
     pub pending_domain_unfreeze_rows: IntGauge,
+    /// Consensus domains actively watched by the embedded `ConsensusSentry`.
+    pub sentry_watched_domains: IntGauge,
+    /// Watched consensus domains currently in the `Frozen` circuit state.
+    pub sentry_frozen_domains: IntGauge,
+    /// Deterministic alerts retained in the embedded `ConsensusSentry` ring log.
+    pub sentry_alerts_total: IntGauge,
     /// Governance `PoA` freeze requests waiting for block-end application.
     pub pending_poa_freeze_rows: IntGauge,
     /// Governance `PoA` unfreeze requests waiting for block-end application.
@@ -433,7 +439,22 @@ impl Metrics {
         )?;
         let pending_domain_unfreeze_rows = IntGauge::new(
             "budlum_pending_domain_unfreeze_rows",
+            "budlum_sentry_watched_domains",
+            "budlum_sentry_frozen_domains",
+            "budlum_sentry_alerts_total",
             "Governance domain-unfreeze requests waiting for block-end application",
+        )?;
+        let sentry_watched_domains = IntGauge::new(
+            "budlum_sentry_watched_domains",
+            "Consensus domains actively watched by the embedded ConsensusSentry",
+        )?;
+        let sentry_frozen_domains = IntGauge::new(
+            "budlum_sentry_frozen_domains",
+            "Watched consensus domains currently frozen by the embedded ConsensusSentry",
+        )?;
+        let sentry_alerts_total = IntGauge::new(
+            "budlum_sentry_alerts_total",
+            "Deterministic alerts retained in the embedded ConsensusSentry audit log",
         )?;
         let pending_poa_freeze_rows = IntGauge::new(
             "budlum_pending_poa_freeze_rows",
@@ -957,6 +978,9 @@ impl Metrics {
         registry.register(Box::new(poa_onboarding_membership_rows.clone()))?;
         registry.register(Box::new(poa_onboarding_admin_rows.clone()))?;
         registry.register(Box::new(pending_domain_unfreeze_rows.clone()))?;
+        registry.register(Box::new(sentry_watched_domains.clone()))?;
+        registry.register(Box::new(sentry_frozen_domains.clone()))?;
+        registry.register(Box::new(sentry_alerts_total.clone()))?;
         registry.register(Box::new(pending_poa_freeze_rows.clone()))?;
         registry.register(Box::new(pending_poa_unfreeze_rows.clone()))?;
         registry.register(Box::new(pending_bud_boost_atoms.clone()))?;
@@ -1108,6 +1132,9 @@ impl Metrics {
             poa_onboarding_membership_rows,
             poa_onboarding_admin_rows,
             pending_domain_unfreeze_rows,
+            sentry_watched_domains,
+            sentry_frozen_domains,
+            sentry_alerts_total,
             pending_poa_freeze_rows,
             pending_poa_unfreeze_rows,
             pending_bud_boost_atoms,

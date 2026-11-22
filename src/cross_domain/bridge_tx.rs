@@ -402,6 +402,12 @@ pub fn mint_from_verified_event(
         source_domain,
     )
     .map_err(|e| e.to_string())?;
+    crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+        &state.bridge_state.consensus_sentry,
+        crate::settlement::finality_gate::ValueGate::BridgeMint,
+        source_domain,
+    )
+    .map_err(|e| e.to_string())?;
     ensure_domain_class_intake(state, source_domain, source_height)?;
     // A finalized proof may arrive out of order and be staged in the
     // commitment registry; bridge verification may not consume it until the
@@ -483,15 +489,17 @@ pub fn mint_from_verified_event(
         (relayer, fee.get()),
     )?;
 
-    let finality_cert =
-        crate::settlement::universal_finality::UniversalFinalityCertificate::from_registries_at_height(
-            &state.settlement,
-            height,
-        );
-    state
-        .bridge_state
-        .mint_with_certificate(&message, height, &finality_cert)
-        .map_err(|e| e.to_string())?;
+    if let Some(finality_cert) = state.settlement.universal_finality_certificate(height) {
+        state
+            .bridge_state
+            .mint_with_certificate(&message, height, &finality_cert)
+            .map_err(|e| e.to_string())?;
+    } else {
+        state
+            .bridge_state
+            .mint(&message, height)
+            .map_err(|e| e.to_string())?;
+    }
     // The supply-creating path: the on-chain counterpart of the asset
     // arriving from the bridge is minted here, both legs under the fixed
     // ceiling.
@@ -633,6 +641,12 @@ pub fn unlock_from_verified_event(
         proven.domain,
     )
     .map_err(|e| e.to_string())?;
+    crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+        &state.bridge_state.consensus_sentry,
+        crate::settlement::finality_gate::ValueGate::BridgeUnlock,
+        proven.domain,
+    )
+    .map_err(|e| e.to_string())?;
     ensure_domain_class_intake(state, proven.domain, proven.height)?;
     // A finalized commitment may arrive out of order and sit staged in the
     // commitment registry until its parent chain links up; bridge unlock may
@@ -705,15 +719,17 @@ pub fn unlock_from_verified_event(
     }
 
     let bridge_before = state.bridge_state.clone();
-    let finality_cert =
-        crate::settlement::universal_finality::UniversalFinalityCertificate::from_registries_at_height(
-            &state.settlement,
-            height,
-        );
-    state
-        .bridge_state
-        .unlock_with_certificate(transfer_id, message.source_domain, height, &finality_cert)
-        .map_err(|e| e.to_string())?;
+    if let Some(finality_cert) = state.settlement.universal_finality_certificate(height) {
+        state
+            .bridge_state
+            .unlock_with_certificate(transfer_id, message.source_domain, height, &finality_cert)
+            .map_err(|e| e.to_string())?;
+    } else {
+        state
+            .bridge_state
+            .unlock(transfer_id, message.source_domain, height)
+            .map_err(|e| e.to_string())?;
+    }
     if let Err(e) = state
         .bridge_state
         .record_burn_message_processed(&message, height)
@@ -881,15 +897,17 @@ fn apply_relay_effects(
                 (transfer.recipient, final_amount.get()),
                 (relayer, fee.get()),
             )?;
-            let finality_cert =
-                crate::settlement::universal_finality::UniversalFinalityCertificate::from_registries_at_height(
-                    &state.settlement,
-                    height,
-                );
-            state
-                .bridge_state
-                .mint_with_certificate(message, height, &finality_cert)
-                .map_err(|e| e.to_string())?;
+            if let Some(finality_cert) = state.settlement.universal_finality_certificate(height) {
+                state
+                    .bridge_state
+                    .mint_with_certificate(message, height, &finality_cert)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                state
+                    .bridge_state
+                    .mint(message, height)
+                    .map_err(|e| e.to_string())?;
+            }
             state
                 .try_mint_balance(&transfer.recipient, final_amount.get())
                 .map_err(|e| format!("Bridge relay mint (recipient): {e}"))?;
@@ -927,15 +945,22 @@ fn apply_relay_effects(
                     .map_err(|e| e.to_string())?;
             }
             let bridge_before = state.bridge_state.clone();
-            let finality_cert =
-                crate::settlement::universal_finality::UniversalFinalityCertificate::from_registries_at_height(
-                    &state.settlement,
-                    height,
-                );
-            state
-                .bridge_state
-                .unlock_with_certificate(transfer_id, message.source_domain, height, &finality_cert)
-                .map_err(|e| e.to_string())?;
+            if let Some(finality_cert) = state.settlement.universal_finality_certificate(height) {
+                state
+                    .bridge_state
+                    .unlock_with_certificate(
+                        transfer_id,
+                        message.source_domain,
+                        height,
+                        &finality_cert,
+                    )
+                    .map_err(|e| e.to_string())?;
+            } else {
+                state
+                    .bridge_state
+                    .unlock(transfer_id, message.source_domain, height)
+                    .map_err(|e| e.to_string())?;
+            }
             if let Err(e) = state
                 .bridge_state
                 .record_burn_message_processed(message, height)

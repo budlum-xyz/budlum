@@ -6414,6 +6414,95 @@ impl AccountState {
     pub fn clear_dirty(&mut self) {
         self.dirty_accounts.clear();
     }
+
+    /// Deterministically refresh the embedded [`crate::cross_domain::external::sentry::ConsensusSentry`]
+    /// at block end from external-domain intake records and any already-watched
+    /// domains, returning the number of new Sentry alerts emitted in this block.
+    pub fn refresh_consensus_sentry(&mut self, block_unix_secs: u64) -> usize {
+        use crate::cross_domain::external::sentry::{
+            DomainQuantumPosture, SentryDomainPolicy, SentryObservation,
+            DEFAULT_MAX_RESTAKE_SHARE_PPM,
+        };
+        use crate::cross_domain::external::spec::{AssumptionClass, SecurityBacking};
+
+        let mut emitted = 0usize;
+        let external_samples: Vec<(
+            String,
+            String,
+            DomainQuantumPosture,
+            Option<(u64, [u8; 32])>,
+        )> = self
+            .settlement
+            .external_intake
+            .registry
+            .domains()
+            .map(|reg| {
+                let key = format!("ext:{}", hex::encode(reg.domain().0));
+                let family = reg.record.descriptor.name.clone();
+                let posture = match &reg.record.last_backing {
+                    Some(SecurityBacking::Work { .. }) => DomainQuantumPosture::PurePostQuantum,
+                    Some(SecurityBacking::Zk { system, .. })
+                        if system.assumption_class() == AssumptionClass::Hash =>
+                    {
+                        DomainQuantumPosture::PurePostQuantum
+                    }
+                    _ => DomainQuantumPosture::ClassicalOnly,
+                };
+                let tip = reg
+                    .latest_attestation()
+                    .map(|att| (att.height, att.state_root));
+                (key, family, posture, tip)
+            })
+            .collect();
+
+        for (key, family, posture, tip) in external_samples {
+            if self.bridge_state.consensus_sentry.domain(&key).is_none() {
+                let _ = self.bridge_state.consensus_sentry.register_domain(
+                    key.clone(),
+                    SentryDomainPolicy {
+                        consensus_family: if family.is_empty() {
+                            "external-domain".into()
+                        } else {
+                            family
+                        },
+                        quantum_posture: posture,
+                        max_finality_stall_secs: 3_600,
+                        min_trusting_window_secs: 600,
+                        max_reorg_blocks: 6,
+                        max_consecutive_proof_failures: 3,
+                        max_restake_share_ppm: DEFAULT_MAX_RESTAKE_SHARE_PPM,
+                        recovery_cooldown_secs: 3_600,
+                    },
+                );
+            }
+            if let Some((height, state_root)) = tip {
+                if let Ok(alerts) = self
+                    .bridge_state
+                    .consensus_sentry
+                    .observe(&SentryObservation {
+                        domain_id: key,
+                        height,
+                        state_root,
+                        observed_at_secs: block_unix_secs,
+                        remaining_trust_window_secs: None,
+                        restake_share_ppm: 0,
+                    })
+                {
+                    emitted = emitted.saturating_add(alerts.len());
+                }
+            }
+        }
+
+        if !self.bridge_state.consensus_sentry.is_empty() {
+            emitted = emitted.saturating_add(
+                self.bridge_state
+                    .consensus_sentry
+                    .check_liveness(block_unix_secs)
+                    .len(),
+            );
+        }
+        emitted
+    }
 }
 impl Default for AccountState {
     fn default() -> Self {
