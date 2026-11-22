@@ -136,8 +136,11 @@ jobs:
           # every run. A cold resolve is what let an upstream rate limit turn
           # into a red gate. Write on push and dispatch runs, and keep pull
           # request runs read-only so an unmerged tree cannot seed a cache
-          # that a trusted build later restores.
-          cache-read-only: ${{ github.event_name != 'pull_request' }}
+          # that a trusted build later restores. The condition is an equality
+          # test on the event name: measured on run 44982412549, the negated
+          # form made dispatch runs read-only too, which is the opposite of
+          # the intent and left every run cold.
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
       - name: Install Android SDK platform 36
         run: |
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
@@ -201,8 +204,11 @@ jobs:
           # every run. A cold resolve is what let an upstream rate limit turn
           # into a red gate. Write on push and dispatch runs, and keep pull
           # request runs read-only so an unmerged tree cannot seed a cache
-          # that a trusted build later restores.
-          cache-read-only: ${{ github.event_name != 'pull_request' }}
+          # that a trusted build later restores. The condition is an equality
+          # test on the event name: measured on run 44982412549, the negated
+          # form made dispatch runs read-only too, which is the opposite of
+          # the intent and left every run cold.
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
       # Measured on the first dispatch runs of this job: the runner reports
       # "hardware acceleration is not available", and the x86 system image the
       # action asked for is not published for this API level
