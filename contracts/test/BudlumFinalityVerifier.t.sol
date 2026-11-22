@@ -9,7 +9,9 @@ import {
     IExternalFraudProofVerifier
 } from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumHash} from "../lib/BudlumHash.sol";
-import {BudlumObjectLayerFinality, IBudlumHeaderFinality} from "../object-layer/BudlumFinalityVerifier.sol";
+import {BudlumObjectLayerFinality, IBudlumHeaderFinality, ProofFormat} from "../object-layer/BudlumFinalityVerifier.sol";
+import {IBudlumFinality} from "../external-domain/BudlumFinalityVerifier.sol";
+import {BudlumStateReader} from "../lib/BudlumStateReader.sol";
 import {BudlumSettlementEndpoint, IBudlumObjectLayerFinality} from "../object-layer/BudlumSettlementEndpoint.sol";
 
 /// Test tokens: both mutations must roll back when the endpoint refuses custody.
@@ -606,5 +608,130 @@ contract BudlumFinalityVerifierTest is Harness {
         endpoint.acceptHeader(46);
         assertEq(endpoint.lastAcceptedHeight(), 46, "Hybrid accepted by settlement endpoint");
         assertTrue(endpoint.lastAcceptedFinalityMode() == FinalityMode.Hybrid, "endpoint records Hybrid mode");
+    }
+
+    function test_object_layer_ibudlum_finality_parity_and_four_state_reads() public {
+        SeededFinalityVerifier seeded = new SeededFinalityVerifier(address(fraud));
+        BudlumObjectLayerFinality objectLayer = new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(seeded)));
+
+        assertTrue(objectLayer.acceptedProofFormat() == ProofFormat.Signature, "signature format active");
+        assertEq(objectLayer.latestFinalHeight(), 0, "no checkpoint recorded yet");
+
+        // Build a 4-leaf Merkle tree holding one of each canonical state fact:
+        // [0] balance, [1] bridge burn, [2] app-binding payment, [3] cross-domain message.
+        bytes32 leafBalance =
+            BudlumHash.balanceLeaf(bytes32(uint256(1)), bytes32(uint256(2)), uint128(500), uint64(3));
+        bytes32 leafBurn = BudlumHash.bridgeBurnLeaf(
+            bytes32(uint256(10)), uint32(1), uint32(2), bytes32(uint256(20)), uint128(250), bytes32(uint256(30))
+        );
+        bytes32 leafPayment = BudlumHash.appBindingPaymentLeaf(
+            bytes32(uint256(40)), bytes32(uint256(41)), bytes32(uint256(42)), bytes32(uint256(43)), uint128(77)
+        );
+        bytes32 leafMsg = BudlumHash.crossDomainMessageLeaf(
+            bytes32(uint256(50)), uint32(2), uint32(3), uint64(9), bytes32(uint256(51))
+        );
+        bytes32 nodeLeft = BudlumHash.merkleNode(leafBalance, leafBurn);
+        bytes32 nodeRight = BudlumHash.merkleNode(leafPayment, leafMsg);
+        bytes32 treeRoot = BudlumHash.merkleNode(nodeLeft, nodeRight);
+
+        // Seed the external verifier with treeRoot at height 77 in Hybrid mode.
+        seeded.seedWithMode(77, treeRoot, FinalityMode.Hybrid);
+        IBudlumFinality fin = IBudlumFinality(address(seeded));
+
+        // Verify all four state facts against the finalized root.
+        bytes32[] memory proof0 = new bytes32[](2);
+        proof0[0] = leafBurn;
+        proof0[1] = nodeRight;
+        assertTrue(
+            BudlumStateReader.verifyBalance(
+                fin, 77, bytes32(uint256(1)), bytes32(uint256(2)), uint128(500), uint64(3), 0, proof0
+            ),
+            "balance inclusion must verify"
+        );
+
+        bytes32[] memory proof1 = new bytes32[](2);
+        proof1[0] = leafBalance;
+        proof1[1] = nodeRight;
+        assertTrue(
+            BudlumStateReader.verifyBridgeBurn(
+                fin,
+                77,
+                bytes32(uint256(10)),
+                uint32(1),
+                uint32(2),
+                bytes32(uint256(20)),
+                uint128(250),
+                bytes32(uint256(30)),
+                1,
+                proof1
+            ),
+            "bridge burn inclusion must verify"
+        );
+
+        bytes32[] memory proof2 = new bytes32[](2);
+        proof2[0] = leafMsg;
+        proof2[1] = nodeLeft;
+        assertTrue(
+            BudlumStateReader.verifyAppBindingPayment(
+                fin,
+                77,
+                bytes32(uint256(40)),
+                bytes32(uint256(41)),
+                bytes32(uint256(42)),
+                bytes32(uint256(43)),
+                uint128(77),
+                2,
+                proof2
+            ),
+            "app-binding payment inclusion must verify"
+        );
+
+        bytes32[] memory proof3 = new bytes32[](2);
+        proof3[0] = leafPayment;
+        proof3[1] = nodeLeft;
+        assertTrue(
+            BudlumStateReader.verifyCrossDomainMessage(
+                fin, 77, bytes32(uint256(50)), uint32(2), uint32(3), uint64(9), bytes32(uint256(51)), 3, proof3
+            ),
+            "cross-domain message inclusion must verify"
+        );
+
+        // Tampered amount or unfinalized height must fail closed.
+        assertTrue(
+            !BudlumStateReader.verifyBridgeBurn(
+                fin,
+                77,
+                bytes32(uint256(10)),
+                uint32(1),
+                uint32(2),
+                bytes32(uint256(20)),
+                uint128(251),
+                bytes32(uint256(30)),
+                1,
+                proof1
+            ),
+            "tampered burn amount must fail"
+        );
+        assertTrue(
+            !BudlumStateReader.verifyBalance(
+                fin, 78, bytes32(uint256(1)), bytes32(uint256(2)), uint128(500), uint64(3), 0, proof0
+            ),
+            "unfinalized height must fail"
+        );
+
+        // Verify BudlumObjectLayerFinality exposes all four IBudlumFinality queries.
+        bytes32 body = bytes32(uint256(91));
+        bytes32 header = bytes32(uint256(92));
+        bytes[] memory hdrFields = new bytes[](3);
+        hdrFields[0] = "BDLM_STATE_ROOT_GLOBAL_HEADER_V1";
+        hdrFields[1] = abi.encodePacked(body);
+        hdrFields[2] = abi.encodePacked(header);
+        bytes32 expectedRoot = BudlumHash.hashFields(hdrFields);
+        seeded.seedWithMode(88, expectedRoot, FinalityMode.Hybrid);
+        objectLayer.record(88, header, body);
+        assertTrue(objectLayer.heightFinal(88), "object layer heightFinal");
+        assertEq(objectLayer.rootAtHeight(88), expectedRoot, "object layer rootAtHeight");
+        assertEq(objectLayer.latestFinalHeight(), 88, "object layer latestFinalHeight");
+        assertTrue(objectLayer.finalityModeAtHeight(88) == FinalityMode.Hybrid, "object layer finalityModeAtHeight");
     }
 }
