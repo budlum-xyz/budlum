@@ -740,3 +740,187 @@ fn output_composer_attested_enforces_external_two_phase_and_compensating_async_c
     assert_eq!(res_async.atomicity, AtomicityClass::CompensatingAsync);
     assert_ne!(res_2pc.attestation_root, res_async.attestation_root);
 }
+
+#[test]
+fn payment_status_report_enforces_three_tier_monotonicity_and_merchant_thresholds() {
+    use crate::unification::payment_router::{
+        DeliveredPaymentProof, FinalizedPaymentProof, GuaranteedPaymentProof,
+        PaymentCompletionLevel, PaymentStatusReport,
+    };
+
+    let mut report = PaymentStatusReport {
+        intent_id: [0x11; 32],
+        guaranteed: Some(GuaranteedPaymentProof {
+            block_height: 100,
+            escrow_commitment: [0x22; 32],
+            solver_bond_commitment: [0x33; 32],
+        }),
+        finalized: None,
+        delivered: None,
+    };
+    report.validate().expect("guaranteed tier valid");
+    assert_eq!(
+        report.highest_level(),
+        Some(PaymentCompletionLevel::Guaranteed)
+    );
+    assert!(report.meets_threshold(PaymentCompletionLevel::Guaranteed));
+    assert!(!report.meets_threshold(PaymentCompletionLevel::Finalized));
+    assert!(!report.meets_threshold(PaymentCompletionLevel::Delivered));
+
+    // Skipping Finalized directly to Delivered must fail closed.
+    let mut skipped = report.clone();
+    skipped.delivered = Some(DeliveredPaymentProof {
+        target_domain: 1,
+        delivery_proof_root: [0x44; 32],
+        merchant_receipt_hash: [0x55; 32],
+    });
+    assert!(skipped.validate().is_err());
+    assert!(!skipped.meets_threshold(PaymentCompletionLevel::Guaranteed));
+
+    report.finalized = Some(FinalizedPaymentProof {
+        checkpoint_height: 105,
+        finality_certificate_digest: [0x66; 32],
+    });
+    assert!(report.meets_threshold(PaymentCompletionLevel::Finalized));
+    assert!(!report.meets_threshold(PaymentCompletionLevel::Delivered));
+
+    report.delivered = Some(DeliveredPaymentProof {
+        target_domain: 1,
+        delivery_proof_root: [0x44; 32],
+        merchant_receipt_hash: [0x55; 32],
+    });
+    report.validate().expect("all three tiers valid");
+    assert!(report.meets_threshold(PaymentCompletionLevel::Delivered));
+}
+
+#[test]
+fn preauthorized_spend_account_verifies_pq_hybrid_offline_vouchers_and_blocks_replay_or_overcap() {
+    use crate::crypto::composite::CompositeKeypair;
+    use crate::crypto::pq::ML_DSA_SEED_LEN;
+    use crate::crypto::scheme::SuiteId;
+    use crate::unification::payment_router::{
+        PreauthorizedSpendAccount, SignedOfflineVoucher, OFFLINE_VOUCHER_CTX,
+    };
+    use std::collections::BTreeSet;
+
+    let payer_kp =
+        CompositeKeypair::from_seeds(SuiteId::VALIDATOR, &[0x31; ML_DSA_SEED_LEN], &[0x42; 32])
+            .expect("composite keypair");
+    let payer_pk = payer_kp.public_key().expect("public key").encode();
+
+    let mut account = PreauthorizedSpendAccount {
+        account_id: [0xaa; 32],
+        payer_composite_pubkey: payer_pk,
+        asset_id: [0xbb; 32],
+        spend_cap_atoms: 1_000,
+        spent_atoms: 0,
+        valid_until_unix_secs: 2_000,
+        used_nonces: BTreeSet::new(),
+    };
+
+    let sign_voucher = |nonce: u64, amount: u128| -> SignedOfflineVoucher {
+        let mut v = SignedOfflineVoucher {
+            account_id: account.account_id,
+            voucher_nonce: nonce,
+            merchant_id: [0xcc; 32],
+            amount_atoms: amount,
+            valid_until_unix_secs: 1_900,
+            signature: Vec::new(),
+        };
+        let digest = v.signing_payload();
+        let sig = payer_kp
+            .sign(OFFLINE_VOUCHER_CTX, &digest, &[0x55; 32])
+            .expect("sign voucher");
+        v.signature = sig.encode();
+        v
+    };
+
+    let v1 = sign_voucher(1, 400);
+    let v2 = sign_voucher(2, 500);
+    v1.verify_offline(&account, 1_500)
+        .expect("offline verification succeeds without network");
+    v2.verify_offline(&account, 1_500)
+        .expect("second offline voucher verifies");
+
+    // Tampered amount must invalidate the PQ-hybrid signature.
+    let mut forged = v1.clone();
+    forged.amount_atoms = 401;
+    assert!(forged.verify_offline(&account, 1_500).is_err());
+
+    // Batch exceeding spend_cap_atoms must fail atomically without mutating state.
+    let v3_overcap = sign_voucher(3, 200);
+    assert!(account
+        .settle_voucher_batch(&[v1.clone(), v2.clone(), v3_overcap], 1_500)
+        .is_err());
+    assert_eq!(account.spent_atoms, 0);
+    assert!(account.used_nonces.is_empty());
+
+    // Valid batch settles atomically.
+    let settled = account
+        .settle_voucher_batch(&[v1.clone(), v2], 1_500)
+        .expect("batch settles");
+    assert_eq!(settled, 900);
+    assert_eq!(account.spent_atoms, 900);
+
+    // Replaying an already-settled voucher nonce fails closed.
+    assert!(account.settle_voucher_batch(&[v1], 1_500).is_err());
+}
+
+#[test]
+fn canonical_payment_request_uri_roundtrips_and_refund_registry_blocks_double_refund() {
+    use crate::unification::payment_router::{
+        universal_asset_id, RefundIntent, RefundRegistry, UniversalPaymentReceipt,
+        UniversalPaymentRequestUri,
+    };
+
+    let req = UniversalPaymentRequestUri {
+        version: 1,
+        recipient: [0x12; 32],
+        target_domain: 1,
+        target_asset_id: universal_asset_id(1, b"USDC"),
+        target_amount: 25_000_000,
+        invoice_digest: [0x34; 32],
+        deadline_unix_secs: 1_800_000_000,
+        callback_ref: Some(String::from("pos-terminal-01")),
+    };
+    let encoded = req.encode_canonical().expect("encode canonical URI");
+    let decoded = UniversalPaymentRequestUri::decode_canonical(&encoded).expect("decode URI");
+    assert_eq!(req, decoded);
+    assert_eq!(req.request_digest(), decoded.request_digest());
+
+    // Non-canonical query ordering or unknown keys must fail closed.
+    assert!(UniversalPaymentRequestUri::decode_canonical("budlum:pay/v2?amount=1").is_err());
+    assert!(UniversalPaymentRequestUri::decode_canonical(&format!("{encoded}&evil=1")).is_err());
+
+    let receipt = UniversalPaymentReceipt {
+        intent_id: [0x55; 32],
+        target_domain: 1,
+        target_asset_id: universal_asset_id(1, b"USDC"),
+        target_amount_delivered: 25_000_000,
+        legs: Vec::new(),
+        legs_merkle_root: [0x66; 32],
+        pos_auth_code: Some(String::from("BDLM12345678")),
+        receipt_hash: [0x77; 32],
+    };
+    let refund = RefundIntent {
+        original_intent_id: receipt.intent_id,
+        original_receipt_hash: receipt.receipt_hash,
+        merchant_id: [0x12; 32],
+        refund_recipient: [0x88; 32],
+        refund_amount: 25_000_000,
+        reason_code: 1,
+    };
+
+    let mut registry = RefundRegistry::default();
+    let mut over_refund = refund.clone();
+    over_refund.refund_amount = 25_000_001;
+    assert!(registry.record_refund(&receipt, &over_refund).is_err());
+
+    let rid = registry
+        .record_refund(&receipt, &refund)
+        .expect("first refund accepted");
+    assert_eq!(rid, refund.refund_id());
+
+    // Second refund against the same settled payment receipt must be rejected.
+    assert!(registry.record_refund(&receipt, &refund).is_err());
+}

@@ -1268,6 +1268,596 @@ pub fn verify_split_tender_supply_conservation(
     Ok(())
 }
 
+/// Three distinct completion levels answering when a payment is "done" and what
+/// backs it at that instant:
+/// 1. [`Self::Guaranteed`]: included in a Budlum block with escrowed payer funds
+///    and sufficient solver bond (~3s).
+/// 2. [`Self::Finalized`]: sealed inside a Budlum finality checkpoint (~15s).
+/// 3. [`Self::Delivered`]: target-domain delivery proof verified on Budlum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentCompletionLevel {
+    Guaranteed = 1,
+    Finalized = 2,
+    Delivered = 3,
+}
+
+/// Block-level guarantee evidence attached once a payment intent enters a block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuaranteedPaymentProof {
+    pub block_height: u64,
+    pub escrow_commitment: Hash32,
+    pub solver_bond_commitment: Hash32,
+}
+
+/// Checkpoint-level finality evidence attached once Budlum finality seals the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalizedPaymentProof {
+    pub checkpoint_height: u64,
+    pub finality_certificate_digest: Hash32,
+}
+
+/// Target-domain delivery evidence attached once merchant receipt is proven on Budlum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveredPaymentProof {
+    pub target_domain: DomainId,
+    pub delivery_proof_root: Hash32,
+    pub merchant_receipt_hash: Hash32,
+}
+
+/// Three-tier payment status report exposing each completion level separately so
+/// terminals and wallets never conflate block inclusion, finality, and delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentStatusReport {
+    pub intent_id: Hash32,
+    pub guaranteed: Option<GuaranteedPaymentProof>,
+    pub finalized: Option<FinalizedPaymentProof>,
+    pub delivered: Option<DeliveredPaymentProof>,
+}
+
+impl PaymentStatusReport {
+    /// Validate strict monotonicity and non-zero commitments across the three
+    /// completion tiers (`Delivered` requires `Finalized`, which requires
+    /// `Guaranteed`).
+    ///
+    /// Convenience: validates three-tier payment completion status before
+    /// exposing it to wallets, POS terminals, or JSON-RPC consumers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] if any commitment is all-zero or
+    /// a higher tier is claimed without its prerequisite lower tier.
+    pub fn validate(&self) -> Result<(), PaymentError> {
+        if self.intent_id == [0u8; 32] {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment status intent_id must be non-zero",
+            )));
+        }
+        if let Some(g) = &self.guaranteed {
+            if g.block_height == 0
+                || g.escrow_commitment == [0u8; 32]
+                || g.solver_bond_commitment == [0u8; 32]
+            {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "guaranteed proof requires non-zero height, escrow, and solver bond commitments",
+                )));
+            }
+        }
+        if let Some(f) = &self.finalized {
+            let Some(g) = &self.guaranteed else {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "finalized status requires prior guaranteed block inclusion proof",
+                )));
+            };
+            if f.checkpoint_height < g.block_height || f.finality_certificate_digest == [0u8; 32] {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "finalized proof requires checkpoint_height >= block_height and non-zero certificate digest",
+                )));
+            }
+        }
+        if let Some(d) = &self.delivered {
+            if self.finalized.is_none() {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "delivered status requires prior finalized checkpoint proof",
+                )));
+            }
+            if d.delivery_proof_root == [0u8; 32] || d.merchant_receipt_hash == [0u8; 32] {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "delivered proof requires non-zero delivery root and merchant receipt hash",
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the highest verified [`PaymentCompletionLevel`] reached so far.
+    ///
+    /// Convenience: lets POS terminals and wallets display exact completion tier.
+    #[must_use]
+    pub fn highest_level(&self) -> Option<PaymentCompletionLevel> {
+        if self.delivered.is_some() {
+            Some(PaymentCompletionLevel::Delivered)
+        } else if self.finalized.is_some() {
+            Some(PaymentCompletionLevel::Finalized)
+        } else if self.guaranteed.is_some() {
+            Some(PaymentCompletionLevel::Guaranteed)
+        } else {
+            None
+        }
+    }
+
+    /// Whether this report validates cleanly and satisfies a merchant's required
+    /// minimum [`PaymentCompletionLevel`].
+    ///
+    /// Convenience: enforces merchant risk thresholds per ticket size.
+    #[must_use]
+    pub fn meets_threshold(&self, required: PaymentCompletionLevel) -> bool {
+        if self.validate().is_err() {
+            return false;
+        }
+        self.highest_level().is_some_and(|level| level >= required)
+    }
+}
+
+/// Domain separation context for PQ-hybrid offline spend vouchers.
+pub const OFFLINE_VOUCHER_CTX: &[u8] = b"BDLM_OFFLINE_VOUCHER_V1";
+
+/// Maximum offline vouchers settled in a single batch call.
+const MAX_OFFLINE_VOUCHERS_PER_BATCH: usize = 256;
+
+/// Pre-authorized spend account backed by an on-chain escrow cap so an offline
+/// POS terminal can verify PQ-hybrid signed vouchers in sub-second latency and
+/// settle them in batch when connectivity resumes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreauthorizedSpendAccount {
+    pub account_id: Hash32,
+    /// Encoded [`crate::crypto::composite::CompositePublicKey`] of the payer.
+    pub payer_composite_pubkey: Vec<u8>,
+    pub asset_id: Hash32,
+    /// Hard upper bound on cumulative offline spend backed by escrow.
+    pub spend_cap_atoms: u128,
+    /// Cumulative atoms already settled from previous batches.
+    pub spent_atoms: u128,
+    /// Account expiry timestamp (Unix seconds).
+    pub valid_until_unix_secs: u64,
+    /// Nonces already consumed (strict replay guard).
+    pub used_nonces: BTreeSet<u64>,
+}
+
+/// Offline-verifiable payment voucher signed by the payer's PQ-hybrid composite
+/// keypair against a [`PreauthorizedSpendAccount`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedOfflineVoucher {
+    pub account_id: Hash32,
+    pub voucher_nonce: u64,
+    pub merchant_id: Hash32,
+    pub amount_atoms: u128,
+    pub valid_until_unix_secs: u64,
+    /// Encoded [`crate::crypto::composite::CompositeSignature`].
+    pub signature: Vec<u8>,
+}
+
+impl SignedOfflineVoucher {
+    /// Deterministic signing payload committing every voucher field.
+    ///
+    /// Convenience: shared by payer wallets signing vouchers and offline POS
+    /// terminals verifying them without network access.
+    #[must_use]
+    pub fn signing_payload(&self) -> Hash32 {
+        hash_domain_fields(
+            OFFLINE_VOUCHER_CTX,
+            &[
+                &self.account_id,
+                &self.voucher_nonce.to_le_bytes(),
+                &self.merchant_id,
+                &self.amount_atoms.to_le_bytes(),
+                &self.valid_until_unix_secs.to_le_bytes(),
+            ],
+        )
+    }
+
+    /// Verify this voucher completely offline against `account` at `now_unix_secs`
+    /// without mutating state.
+    ///
+    /// Convenience: enables sub-second offline POS verification using Budlum's
+    /// PQ-hybrid composite signature verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError`] if the account mismatches, the voucher or account
+    /// is expired, the amount is zero or exceeds remaining escrow, the nonce was
+    /// already spent, or the PQ-hybrid signature fails verification.
+    pub fn verify_offline(
+        &self,
+        account: &PreauthorizedSpendAccount,
+        now_unix_secs: u64,
+    ) -> Result<(), PaymentError> {
+        if self.account_id != account.account_id {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "voucher account_id disagrees with pre-authorized spend account",
+            )));
+        }
+        if self.merchant_id == [0u8; 32] {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "voucher merchant_id must be non-zero",
+            )));
+        }
+        if self.amount_atoms == 0 {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "voucher amount must be positive",
+            )));
+        }
+        if now_unix_secs > account.valid_until_unix_secs {
+            return Err(PaymentError::Expired {
+                now: now_unix_secs,
+                deadline: account.valid_until_unix_secs,
+            });
+        }
+        if now_unix_secs > self.valid_until_unix_secs {
+            return Err(PaymentError::Expired {
+                now: now_unix_secs,
+                deadline: self.valid_until_unix_secs,
+            });
+        }
+        if account.used_nonces.contains(&self.voucher_nonce) {
+            return Err(PaymentError::ReplayDetected);
+        }
+        let remaining = account.spend_cap_atoms.saturating_sub(account.spent_atoms);
+        if self.amount_atoms > remaining {
+            return Err(PaymentError::InsufficientMultiDomainLiquidity {
+                shortfall: self.amount_atoms.saturating_sub(remaining),
+            });
+        }
+
+        let pk =
+            crate::crypto::composite::CompositePublicKey::decode(&account.payer_composite_pubkey)
+                .map_err(|err| {
+                PaymentError::InvalidIntent(format!("invalid payer composite public key: {err}"))
+            })?;
+        let sig = crate::crypto::composite::CompositeSignature::decode(&self.signature).map_err(
+            |err| {
+                PaymentError::InvalidIntent(format!("invalid voucher composite signature: {err}"))
+            },
+        )?;
+        let digest = self.signing_payload();
+        crate::crypto::composite::verify(&pk, OFFLINE_VOUCHER_CTX, &digest, &sig).map_err(
+            |err| {
+                PaymentError::InvalidIntent(format!(
+                    "offline voucher signature verification failed: {err}"
+                ))
+            },
+        )?;
+        Ok(())
+    }
+}
+
+impl PreauthorizedSpendAccount {
+    /// Atomically verify and settle a batch of [`SignedOfflineVoucher`] items.
+    ///
+    /// Rejects duplicate nonces (within the batch or against previously settled
+    /// nonces), expired vouchers, invalid signatures, and cumulative spend
+    /// exceeding `spend_cap_atoms` without mutating the account on any failure.
+    ///
+    /// Convenience: settles batched offline POS vouchers in one atomic step.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError`] without mutating `self` if any voucher fails.
+    pub fn settle_voucher_batch(
+        &mut self,
+        vouchers: &[SignedOfflineVoucher],
+        now_unix_secs: u64,
+    ) -> Result<u128, PaymentError> {
+        if vouchers.is_empty() {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "voucher batch must not be empty",
+            )));
+        }
+        if vouchers.len() > MAX_OFFLINE_VOUCHERS_PER_BATCH {
+            return Err(PaymentError::InputLimitExceeded);
+        }
+
+        let mut batch_nonces = BTreeSet::new();
+        let mut batch_total = 0u128;
+        for v in vouchers {
+            v.verify_offline(self, now_unix_secs)?;
+            if !batch_nonces.insert(v.voucher_nonce) {
+                return Err(PaymentError::ReplayDetected);
+            }
+            batch_total = batch_total
+                .checked_add(v.amount_atoms)
+                .ok_or(PaymentError::ArithmeticOverflow)?;
+        }
+
+        let next_spent = self
+            .spent_atoms
+            .checked_add(batch_total)
+            .ok_or(PaymentError::ArithmeticOverflow)?;
+        if next_spent > self.spend_cap_atoms {
+            return Err(PaymentError::InsufficientMultiDomainLiquidity {
+                shortfall: next_spent.saturating_sub(self.spend_cap_atoms),
+            });
+        }
+
+        // All checks passed: commit atomically.
+        self.spent_atoms = next_spent;
+        for nonce in batch_nonces {
+            self.used_nonces.insert(nonce);
+        }
+        Ok(batch_total)
+    }
+}
+
+/// Versioned, canonically-encoded universal payment request URI/QR standard
+/// (`budlum:pay/v1?...`) so POS terminals, websites, and invoices produce
+/// byte-for-byte identical encodings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UniversalPaymentRequestUri {
+    pub version: u8,
+    pub recipient: Hash32,
+    pub target_domain: DomainId,
+    pub target_asset_id: Hash32,
+    pub target_amount: u128,
+    pub invoice_digest: Hash32,
+    pub deadline_unix_secs: u64,
+    pub callback_ref: Option<String>,
+}
+
+impl UniversalPaymentRequestUri {
+    /// Encode into the canonical `budlum:pay/v1?...` URI string with fixed
+    /// parameter order and lowercase hex digests.
+    ///
+    /// Convenience: produces identical URI/QR bytes across terminals, websites,
+    /// and merchant invoices.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] if version != 1, recipient or
+    /// asset or amount is zero, or `callback_ref` contains unsafe characters.
+    pub fn encode_canonical(&self) -> Result<String, PaymentError> {
+        if self.version != 1 {
+            return Err(PaymentError::InvalidIntent(format!(
+                "unsupported payment request URI version {}",
+                self.version
+            )));
+        }
+        if self.recipient == [0u8; 32]
+            || self.target_asset_id == [0u8; 32]
+            || self.target_amount == 0
+        {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment request requires non-zero recipient, asset, and amount",
+            )));
+        }
+        let mut out = format!(
+            "budlum:pay/v1?amount={}&asset={}&deadline={}&domain={}&invoice={}&recipient={}",
+            self.target_amount,
+            hex::encode(self.target_asset_id),
+            self.deadline_unix_secs,
+            self.target_domain,
+            hex::encode(self.invoice_digest),
+            hex::encode(self.recipient),
+        );
+        if let Some(cb) = &self.callback_ref {
+            validate_safe_label("callback_ref", cb, 64).map_err(PaymentError::InvalidIntent)?;
+            out.push_str("&callback=");
+            out.push_str(cb);
+        }
+        Ok(out)
+    }
+
+    /// Parse a canonical `budlum:pay/v1?...` URI string fail-closed.
+    ///
+    /// Rejects unknown keys, duplicate keys, malformed hex, or missing fields.
+    ///
+    /// Convenience: decodes terminal/web/invoice payment URIs in wallets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] on any syntax or semantic violation.
+    pub fn decode_canonical(raw: &str) -> Result<Self, PaymentError> {
+        let Some(query) = raw.strip_prefix("budlum:pay/v1?") else {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment request URI must start with `budlum:pay/v1?`",
+            )));
+        };
+        if raw.len() > 512 || !raw.is_ascii() {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment request URI exceeds 512 ASCII bytes",
+            )));
+        }
+        let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
+        for pair in query.split('&') {
+            let Some((k, v)) = pair.split_once('=') else {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "malformed query parameter in payment request URI",
+                )));
+            };
+            if kv.insert(k, v).is_some() {
+                return Err(PaymentError::InvalidIntent(format!(
+                    "duplicate parameter `{k}` in payment request URI"
+                )));
+            }
+        }
+
+        let parse_h32 = |key: &str| -> Result<Hash32, PaymentError> {
+            let val = kv.get(key).ok_or_else(|| {
+                PaymentError::InvalidIntent(format!("missing `{key}` in payment request URI"))
+            })?;
+            let bytes = hex::decode(val).map_err(|_| {
+                PaymentError::InvalidIntent(format!(
+                    "invalid hex for `{key}` in payment request URI"
+                ))
+            })?;
+            let arr: Hash32 = bytes.try_into().map_err(|_| {
+                PaymentError::InvalidIntent(format!(
+                    "`{key}` must be 32 bytes in payment request URI"
+                ))
+            })?;
+            Ok(arr)
+        };
+
+        for key in kv.keys() {
+            if !matches!(
+                *key,
+                "amount" | "asset" | "callback" | "deadline" | "domain" | "invoice" | "recipient"
+            ) {
+                return Err(PaymentError::InvalidIntent(format!(
+                    "unknown parameter `{key}` in payment request URI"
+                )));
+            }
+        }
+
+        let target_amount = kv
+            .get("amount")
+            .ok_or_else(|| PaymentError::InvalidIntent(String::from("missing `amount`")))?
+            .parse::<u128>()
+            .map_err(|_| PaymentError::InvalidIntent(String::from("invalid `amount`")))?;
+        let target_domain = kv
+            .get("domain")
+            .ok_or_else(|| PaymentError::InvalidIntent(String::from("missing `domain`")))?
+            .parse::<DomainId>()
+            .map_err(|_| PaymentError::InvalidIntent(String::from("invalid `domain`")))?;
+        let deadline_unix_secs = kv
+            .get("deadline")
+            .ok_or_else(|| PaymentError::InvalidIntent(String::from("missing `deadline`")))?
+            .parse::<u64>()
+            .map_err(|_| PaymentError::InvalidIntent(String::from("invalid `deadline`")))?;
+        let recipient = parse_h32("recipient")?;
+        let target_asset_id = parse_h32("asset")?;
+        let invoice_digest = parse_h32("invoice")?;
+        let callback_ref = match kv.get("callback") {
+            Some(cb) => {
+                validate_safe_label("callback_ref", cb, 64).map_err(PaymentError::InvalidIntent)?;
+                Some(String::from(*cb))
+            }
+            None => None,
+        };
+
+        let parsed = Self {
+            version: 1,
+            recipient,
+            target_domain,
+            target_asset_id,
+            target_amount,
+            invoice_digest,
+            deadline_unix_secs,
+            callback_ref,
+        };
+        let canonical = parsed.encode_canonical()?;
+        if canonical != raw {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment request URI is not in canonical byte order",
+            )));
+        }
+        Ok(parsed)
+    }
+
+    /// Deterministic domain-separated digest committing every field of this request.
+    ///
+    /// Convenience: binds merchant invoices and QR codes to on-chain payment intents.
+    #[must_use]
+    pub fn request_digest(&self) -> Hash32 {
+        let cb = self.callback_ref.as_deref().unwrap_or("");
+        hash_domain_fields(
+            b"BDLM_PAY_REQUEST_URI_V1",
+            &[
+                &[self.version],
+                &self.recipient,
+                &self.target_domain.to_le_bytes(),
+                &self.target_asset_id,
+                &self.target_amount.to_le_bytes(),
+                &self.invoice_digest,
+                &self.deadline_unix_secs.to_le_bytes(),
+                cb.as_bytes(),
+            ],
+        )
+    }
+}
+
+/// Reverse payment intent bound cryptographically to an original
+/// [`UniversalPaymentReceipt`] so a merchant refund can never be forged or
+/// issued twice for the same settled payment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefundIntent {
+    pub original_intent_id: Hash32,
+    pub original_receipt_hash: Hash32,
+    pub merchant_id: Hash32,
+    pub refund_recipient: Hash32,
+    pub refund_amount: u128,
+    pub reason_code: u16,
+}
+
+impl RefundIntent {
+    /// Deterministic identifier committing every refund field.
+    ///
+    /// Convenience: identifies merchant refund intents for accounting and replay checks.
+    #[must_use]
+    pub fn refund_id(&self) -> Hash32 {
+        hash_domain_fields(
+            b"BDLM_REFUND_INTENT_V1",
+            &[
+                &self.original_intent_id,
+                &self.original_receipt_hash,
+                &self.merchant_id,
+                &self.refund_recipient,
+                &self.refund_amount.to_le_bytes(),
+                &self.reason_code.to_le_bytes(),
+            ],
+        )
+    }
+}
+
+/// Single-use refund tracker ensuring each settled [`UniversalPaymentReceipt`]
+/// can be refunded at most once and never above its delivered amount.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefundRegistry {
+    #[serde(with = "crate::core::map_keys")]
+    refunded_receipts: BTreeMap<Hash32, Hash32>,
+}
+
+impl RefundRegistry {
+    /// Validate and record `refund` against `original` receipt fail-closed.
+    ///
+    /// Convenience: prevents duplicate or over-amount refunds against settled receipts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ReplayDetected`] if `original.receipt_hash` was
+    /// already refunded, or [`PaymentError::InvalidIntent`] if bindings or amount
+    /// bounds disagree.
+    pub fn record_refund(
+        &mut self,
+        original: &UniversalPaymentReceipt,
+        refund: &RefundIntent,
+    ) -> Result<Hash32, PaymentError> {
+        if refund.original_intent_id != original.intent_id
+            || refund.original_receipt_hash != original.receipt_hash
+        {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "refund intent does not match original payment receipt proof",
+            )));
+        }
+        if refund.merchant_id == [0u8; 32] || refund.refund_recipient == [0u8; 32] {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "refund requires non-zero merchant_id and refund_recipient",
+            )));
+        }
+        if refund.refund_amount == 0 || refund.refund_amount > original.target_amount_delivered {
+            return Err(PaymentError::InvalidIntent(format!(
+                "refund_amount ({}) must be in 1..={}",
+                refund.refund_amount, original.target_amount_delivered
+            )));
+        }
+        if self.refunded_receipts.contains_key(&original.receipt_hash) {
+            return Err(PaymentError::ReplayDetected);
+        }
+        let rid = refund.refund_id();
+        self.refunded_receipts.insert(original.receipt_hash, rid);
+        Ok(rid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

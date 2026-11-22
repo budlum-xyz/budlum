@@ -49,10 +49,13 @@ pub use output_composer::{
 };
 pub use payment_router::{
     universal_asset_id, verify_split_tender_supply_conservation, AssetEquivalenceClass,
-    AssetEquivalenceMember, CollateralAsset, CrossDomainPosition, DomainTokenBalance,
-    LiquidationError, LiquidationReceipt, LiquidityQuote, PaymentError, PaymentRail,
-    SeizedCollateralLeg, SplitTenderLeg, UniversalLiquidationCoordinator, UniversalPaymentIntent,
-    UniversalPaymentReceipt, UniversalPaymentRouter,
+    AssetEquivalenceMember, CollateralAsset, CrossDomainPosition, DeliveredPaymentProof,
+    DomainTokenBalance, FinalizedPaymentProof, GuaranteedPaymentProof, LiquidationError,
+    LiquidationReceipt, LiquidityQuote, PaymentCompletionLevel, PaymentError, PaymentRail,
+    PaymentStatusReport, PreauthorizedSpendAccount, RefundIntent, RefundRegistry,
+    SeizedCollateralLeg, SignedOfflineVoucher, SplitTenderLeg, UniversalLiquidationCoordinator,
+    UniversalPaymentIntent, UniversalPaymentReceipt, UniversalPaymentRequestUri,
+    UniversalPaymentRouter, OFFLINE_VOUCHER_CTX,
 };
 pub use storage_fabric::{
     ReplicaResolution, StorageFabricError, StorageNetworkKind, StoragePaymentRequest,
