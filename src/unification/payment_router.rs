@@ -619,10 +619,9 @@ impl UniversalPaymentRouter {
                     });
                 }
                 provisional_quotes.insert(qid, updated);
-                mul_div_floor(leg.source_debited, quote.rate_scaled, RATE_SCALE)
-                    .ok_or(PaymentError::ArithmeticOverflow)?
+                verify_leg_against_quote(leg, Some(quote))?
             } else {
-                leg.source_debited
+                verify_leg_against_quote(leg, None)?
             };
             let leg_fee = leg_gross_value
                 .checked_sub(leg.target_delivered)
@@ -762,6 +761,55 @@ fn required_source_for_target(
     let gross_target =
         mul_div_ceil(target_amount, BPS_DENOM, net_bps).ok_or(PaymentError::ArithmeticOverflow)?;
     mul_div_ceil(gross_target, RATE_SCALE, rate_scaled).ok_or(PaymentError::ArithmeticOverflow)
+}
+
+/// Check one split-tender leg against the quote it draws on and return the
+/// source value it debits, in target units.
+///
+/// The debit is re-derived from the quote's own rate and fee instead of being
+/// read from the leg, so a leg that charges another fee than its quote, draws
+/// on another source asset, or debits any other amount is refused before a
+/// balance moves. Conservation over the receipt cannot see this on its own:
+/// it takes each leg's fee as debit minus delivery, so a leg planned with no
+/// fee balances just as well as one planned with the quoted fee. A direct leg
+/// moves the same asset one to one and charges nothing.
+///
+/// # Errors
+///
+/// Returns [`PaymentError::InvalidIntent`] when the leg disagrees with its
+/// quote, or [`PaymentError::ArithmeticOverflow`] when the arithmetic does.
+fn verify_leg_against_quote(
+    leg: &SplitTenderLeg,
+    quote: Option<&LiquidityQuote>,
+) -> Result<u128, PaymentError> {
+    let Some(quote) = quote else {
+        if !leg.direct_same_domain || leg.fee_bps != 0 || leg.source_debited != leg.target_delivered
+        {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "a split-tender leg without a quote must move the same amount and charge no fee",
+            )));
+        }
+        return Ok(leg.source_debited);
+    };
+    if leg.direct_same_domain
+        || leg.fee_bps != quote.fee_bps
+        || leg.source_domain != quote.source_domain
+        || leg.source_asset_id != quote.source_asset_id
+    {
+        return Err(PaymentError::InvalidIntent(String::from(
+            "split-tender leg does not match the source asset and fee of its quote",
+        )));
+    }
+    let charged =
+        required_source_for_target(leg.target_delivered, quote.rate_scaled, quote.fee_bps)?;
+    if leg.source_debited != charged {
+        return Err(PaymentError::InvalidIntent(format!(
+            "split-tender leg debits {} where its quote charges {charged} for {}",
+            leg.source_debited, leg.target_delivered
+        )));
+    }
+    mul_div_floor(leg.source_debited, quote.rate_scaled, RATE_SCALE)
+        .ok_or(PaymentError::ArithmeticOverflow)
 }
 
 /// One collateral holding pledged on an external domain inside a cross-domain
@@ -2492,5 +2540,77 @@ mod tests {
 
         // Conservation violation where delivered + fees != source_total_value fails closed.
         assert!(verify_split_tender_supply_conservation(&receipt, 1_005, 1_000, 3).is_err());
+    }
+
+    /// A leg planned without its quote's fee balances under conservation alone,
+    /// because conservation reads the fee as debit minus delivery. The per-leg
+    /// check re-derives the debit from the quote and refuses it.
+    #[test]
+    fn a_leg_that_skips_its_quoted_fee_is_refused() {
+        let quote = LiquidityQuote {
+            quote_id: [0x91; 32],
+            source_domain: 3,
+            source_asset_id: [0x02; 32],
+            target_domain: 1,
+            target_asset_id: [0x01; 32],
+            rate_scaled: RATE_SCALE,
+            fee_bps: 100,
+            max_target_liquidity: 1_000,
+            valid_until_unix_secs: 2_000,
+        };
+        let leg = |source_debited: u128| SplitTenderLeg {
+            source_domain: 3,
+            source_asset_id: [0x02; 32],
+            source_symbol: String::from("USDC"),
+            source_debited,
+            target_delivered: 400,
+            fee_bps: 100,
+            direct_same_domain: false,
+            quote_id: Some(quote.quote_id),
+        };
+
+        // 400 delivered at a 1% fee costs 405 of source; the gross value is 405
+        // and the fee 5.
+        assert_eq!(verify_leg_against_quote(&leg(405), Some(&quote)), Ok(405));
+
+        // The same leg planned with no fee: 400 for 400.
+        let feeless = leg(400);
+        let receipt = UniversalPaymentReceipt {
+            intent_id: [0xA1; 32],
+            target_domain: 1,
+            target_asset_id: [0x01; 32],
+            target_amount_delivered: 400,
+            legs: vec![feeless.clone()],
+            legs_merkle_root: [0u8; 32],
+            pos_auth_code: None,
+            receipt_hash: [0u8; 32],
+        };
+        assert_eq!(
+            verify_split_tender_supply_conservation(&receipt, 400, 400, 0),
+            Ok(()),
+            "conservation alone accepts the feeless leg"
+        );
+        assert!(verify_leg_against_quote(&feeless, Some(&quote)).is_err());
+
+        // A fee or asset that differs from the quote, and a direct leg that
+        // charges, are refused as well.
+        let mut wrong_fee = leg(405);
+        wrong_fee.fee_bps = 0;
+        assert!(verify_leg_against_quote(&wrong_fee, Some(&quote)).is_err());
+        let mut wrong_asset = leg(405);
+        wrong_asset.source_asset_id = [0x03; 32];
+        assert!(verify_leg_against_quote(&wrong_asset, Some(&quote)).is_err());
+        let direct = SplitTenderLeg {
+            direct_same_domain: true,
+            quote_id: None,
+            fee_bps: 0,
+            ..leg(405)
+        };
+        assert!(verify_leg_against_quote(&direct, None).is_err());
+        let honest_direct = SplitTenderLeg {
+            source_debited: 400,
+            ..direct
+        };
+        assert_eq!(verify_leg_against_quote(&honest_direct, None), Ok(400));
     }
 }
