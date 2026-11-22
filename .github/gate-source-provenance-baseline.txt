@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: 38ad8fb29be91e739ecb45fc1163307b4ab7af3beff93f7e56d5b56389260dcc
+digest: 694f8568620a5e24c383723e7a798a02515c5a8a5cf5491fc578df63e354cc4c
 files: 194
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -150,7 +150,7 @@ src/gates/required_tests.rs	a1d5ae2029fdbda61729d0d7ec0e65a4746c1b672efa49d14053
 src/gates/rust_literals.rs	c3d868b87f2c0c45ae824be25ebf7dbe2c06a562220068680fcb79a50527c748
 src/gates/rust_syntax_is_parseable.rs	95a604231f1ace30d9bd4ac70ab9162b2eb9f3744bbf7103ddec39278d57f0b6
 src/gates/scheme_is_never_inferred.rs	80c2699d460524a078589e2ac453aa2e88a828241a8a54526f58409caed9acef
-src/gates/seals_move_with_their_tree.rs	3e51704c00a1c5af50c49f4c2695a788e93d43a6730d97f1a490732fcdfd5c3e
+src/gates/seals_move_with_their_tree.rs	90732b8437b7c84411dc0a2aff7c3da646b488c7a0c7cee3a21bc9b8ce6f4774
 src/gates/security_parameters.rs	18e7b9cfa3f9e1ad84c9726abc7ae8f2074a3aa48f88bd164ef2d611261e2847
 src/gates/security_quality_wired.rs	2c944318c01da5c5c07f805646d765be3798f80fbfdd74983b470ac621264eba
 src/gates/security_scans_can_fail.rs	2cfc14c4b59f6832636c28b1039e10ff8223ee2df621bce52d52763a8922c3f9

@@ -55,6 +55,22 @@
 //! SHA-keyed exemption list. A missing cutoff judges everything; an unparsable
 //! one fails closed.
 //!
+//! # Recorded late re-seals
+//!
+//! A seal that arrived one commit after its tree is still a finding, because
+//! the history cannot be rewritten without discarding the CI evidence every
+//! SHA carries. Such a commit can be recorded in
+//! [`.github/seal-late-pin-exemptions.txt`], one line per seal transition:
+//! `<seal_diff_digest> <seal> <tree> <reason>`. The key is not a SHA - a rebase
+//! rewrites those - but the digest of the transition itself: the seal's path,
+//! and its mode and blob id before and after the commit. A blob id hashes the
+//! raw bytes, so a whitespace difference inside a literal is a different key,
+//! the same transition replayed by a rebase is the same key, and the same hunk
+//! moved elsewhere in the seal is a different key. A line that does not parse,
+//! names a pair that is not a seal and its tree, or gives no reason of at least
+//! [`MIN_REASON_CHARS`] characters fails closed. Every finding prints its
+//! digest, so a record is copied from the report, never computed by hand.
+//!
 //! # Merge commits
 //!
 //! A merge has no diff of its own, so it is not judged. Merges are counted in
@@ -78,11 +94,29 @@ const WINDOW: usize = 200;
 /// Grandfathering cutoff, as an RFC 3339 date in UTC.
 const CUTOFF_FILE: &str = ".github/seal-tree-cutoff.txt";
 
+/// Recorded late re-seals, keyed by the digest of the seal transition.
+const LATE_PIN_FILE: &str = ".github/seal-late-pin-exemptions.txt";
+
+/// Domain separation for [`seal_diff_digest`].
+const LATE_PIN_TAG: &[u8] = b"seal-late-pin/v1";
+
+/// A recorded late re-seal states why in at least this many characters.
+const MIN_REASON_CHARS: usize = 20;
+
 /// One seal that moved while its tree stood still.
 #[derive(Debug, PartialEq, Eq)]
 struct Finding {
     sha: String,
     subject: String,
+    seal: String,
+    tree: String,
+    digest: String,
+}
+
+/// One recorded late re-seal.
+#[derive(Debug, PartialEq, Eq)]
+struct LatePin {
+    digest: String,
     seal: String,
     tree: String,
 }
@@ -206,6 +240,103 @@ fn commit_time(root: &Path, sha: &str) -> Result<i64, String> {
         .map_err(|e| format!("commit {sha} has no readable time: {e}"))
 }
 
+/// Mode and blob id of `path` at `rev`, or `absent` twice when the path does
+/// not exist there.
+fn seal_object(root: &Path, rev: &str, path: &str) -> Result<(String, String), String> {
+    let out = git(root, &["ls-tree", rev, "--", path])?;
+    let Some(line) = out.lines().next() else {
+        return Ok((String::from("absent"), String::from("absent")));
+    };
+    let meta = line.split('\t').next().unwrap_or_default();
+    let mut fields = meta.split_whitespace();
+    match (fields.next(), fields.next(), fields.next()) {
+        (Some(mode), Some("blob"), Some(oid)) => Ok((mode.to_string(), oid.to_string())),
+        _ => Err(format!(
+            "git ls-tree {rev} -- {path} gave an entry that is not a blob: `{line}`"
+        )),
+    }
+}
+
+/// The digest of one seal transition: the seal's path, and its mode and blob
+/// id before and after `sha`, each length-prefixed under [`LATE_PIN_TAG`].
+fn seal_diff_digest(root: &Path, sha: &str, seal: &str) -> Result<String, String> {
+    let (old_mode, old_blob) = seal_object(root, &format!("{sha}^"), seal)?;
+    let (new_mode, new_blob) = seal_object(root, sha, seal)?;
+    let mut preimage = Vec::new();
+    for part in [
+        LATE_PIN_TAG,
+        seal.as_bytes(),
+        old_mode.as_bytes(),
+        old_blob.as_bytes(),
+        new_mode.as_bytes(),
+        new_blob.as_bytes(),
+    ] {
+        let len = u64::try_from(part.len()).unwrap_or(u64::MAX);
+        preimage.extend_from_slice(&len.to_le_bytes());
+        preimage.extend_from_slice(part);
+    }
+    Ok(crate::sha256::hex_digest(&preimage))
+}
+
+/// Parse the late re-seal record. Comments and blank lines are skipped; every
+/// other line must read `<digest> <seal> <tree> <reason>`.
+fn parse_late_pins(text: &str) -> Result<Vec<LatePin>, String> {
+    let mut out = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let at = index.saturating_add(1);
+        let shape = || format!("{LATE_PIN_FILE}:{at}: expected `<digest> <seal> <tree> <reason>`");
+        let (digest, rest) = line.split_once(char::is_whitespace).ok_or_else(shape)?;
+        let (seal, rest) = rest
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .ok_or_else(shape)?;
+        let (tree, reason) = rest
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .ok_or_else(shape)?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(format!(
+                "{LATE_PIN_FILE}:{at}: the digest must be 64 lowercase hexadecimal characters"
+            ));
+        }
+        if sealed_tree(seal) != Some(tree) {
+            return Err(format!(
+                "{LATE_PIN_FILE}:{at}: `{seal}` is not a seal of `{tree}`"
+            ));
+        }
+        if reason.trim().chars().count() < MIN_REASON_CHARS {
+            return Err(format!(
+                "{LATE_PIN_FILE}:{at}: a recorded late re-seal needs a reason of at least {MIN_REASON_CHARS} characters"
+            ));
+        }
+        out.push(LatePin {
+            digest: digest.to_string(),
+            seal: seal.to_string(),
+            tree: tree.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Read the late re-seal record, if the tree carries one.
+fn late_pins(root: &Path) -> Result<Vec<LatePin>, String> {
+    let path = root.join(LATE_PIN_FILE);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("cannot read {LATE_PIN_FILE}: {e}"))?;
+    parse_late_pins(&text)
+}
+
 /// Parse an RFC 3339 UTC date into a unix timestamp without pulling in chrono.
 ///
 /// Only the documented shape is accepted: `YYYY-MM-DD` with an optional
@@ -279,6 +410,29 @@ fn cutoff(root: &Path) -> Result<Option<i64>, String> {
     Ok(Some(parse_cutoff(&text)?))
 }
 
+/// The red verdict: every unrecorded seal-alone commit with the digest a
+/// record would carry.
+fn findings_report(findings: &[Finding], inspected: usize) -> String {
+    use std::fmt::Write as _;
+    let mut msg = format!(
+        "a seal moved while the tree it seals stood still: {} case(s) in {} commit(s)\n",
+        findings.len(),
+        inspected
+    );
+    for f in findings.iter().take(20) {
+        let _ = writeln!(
+            msg,
+            "  {} {} | seal: {} | sealed tree with no change: {} | seal_diff_digest: {}",
+            f.sha, f.subject, f.seal, f.tree, f.digest
+        );
+    }
+    if findings.len() > 20 {
+        let _ = writeln!(msg, "  ... {} more", findings.len() - 20);
+    }
+    msg.push_str("A regenerated seal belongs in the commit that changed the tree it describes.");
+    msg
+}
+
 /// Core judgement over an already-resolved window.
 fn evaluate(root: &Path, declared_base: Option<&str>) -> Result<String, String> {
     // A shallow checkout cannot witness a declared window at all, and the
@@ -310,10 +464,12 @@ fn evaluate(root: &Path, declared_base: Option<&str>) -> Result<String, String> 
         ));
     }
     let cutoff = cutoff(root)?;
+    let late = late_pins(root)?;
     let mut findings: Vec<Finding> = Vec::new();
     let mut inspected = 0_usize;
     let mut seals = 0_usize;
     let mut exempt = 0_usize;
+    let mut recorded = 0_usize;
 
     for sha in &shas {
         inspected = inspected.saturating_add(1);
@@ -338,37 +494,27 @@ fn evaluate(root: &Path, declared_base: Option<&str>) -> Result<String, String> 
         }
         for (seal, tree) in moved {
             if !files.iter().any(|f| f.starts_with(tree)) {
+                let digest = seal_diff_digest(root, sha, seal)?;
+                if late
+                    .iter()
+                    .any(|p| p.digest == digest && p.seal == seal && p.tree == tree)
+                {
+                    recorded = recorded.saturating_add(1);
+                    continue;
+                }
                 findings.push(Finding {
                     sha: sha.chars().take(10).collect(),
                     subject: subject(root, sha),
                     seal: seal.to_string(),
                     tree: tree.to_string(),
+                    digest,
                 });
             }
         }
     }
 
     if !findings.is_empty() {
-        use std::fmt::Write as _;
-        let mut msg = format!(
-            "a seal moved while the tree it seals stood still: {} case(s) in {} commit(s)\n",
-            findings.len(),
-            inspected
-        );
-        for f in findings.iter().take(20) {
-            let _ = writeln!(
-                msg,
-                "  {} {} | seal: {} | sealed tree with no change: {}",
-                f.sha, f.subject, f.seal, f.tree
-            );
-        }
-        if findings.len() > 20 {
-            let _ = writeln!(msg, "  ... {} more", findings.len() - 20);
-        }
-        msg.push_str(
-            "A regenerated seal belongs in the commit that changed the tree it describes.",
-        );
-        return Err(msg);
+        return Err(findings_report(&findings, inspected));
     }
 
     let scope = match &range {
@@ -380,8 +526,13 @@ fn evaluate(root: &Path, declared_base: Option<&str>) -> Result<String, String> 
     } else {
         String::new()
     };
+    let covered = if recorded > 0 {
+        format!(", {recorded} recorded as late re-seals in {LATE_PIN_FILE}")
+    } else {
+        String::new()
+    };
     Ok(format!(
-        "seals move with their tree: {inspected} commit(s) inspected in {scope}, {seals} seal change(s){exempted}, none moved alone"
+        "seals move with their tree: {inspected} commit(s) inspected in {scope}, {seals} seal change(s){exempted}{covered}, none moved alone"
     ))
 }
 
@@ -621,6 +772,157 @@ fn canary_cutoffs(base: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Head commit of the canary tree.
+fn head_in(base: &Path) -> Result<String, String> {
+    git(base, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())
+}
+
+/// Write the late re-seal record in the canary tree.
+fn record_in(base: &Path, body: &str) -> Result<(), String> {
+    write_in(base, LATE_PIN_FILE, body)
+}
+
+/// Canaries around the late re-seal record: the key is the transition, the
+/// record fails closed, and a rebase keeps the key.
+fn canary_late_pins(base: &Path) -> Result<(), String> {
+    const SEAL: &str = "xtask/gates/pins/tree.pins";
+    const REASON: &str = "late re-seal of a tree changed one commit earlier";
+    // The tree moves alone, then its seal follows one commit late.
+    write_in(base, "budzero/src/lib.rs", "pub fn f() -> u8 { 7 }\n")?;
+    add_all_in(base)?;
+    commit_in(base, "tree alone")?;
+    write_in(
+        base,
+        SEAL,
+        "budzero/src/lib.rs kkk\nbudzero/src/other.rs lll\n",
+    )?;
+    add_all_in(base)?;
+    commit_in(base, "late seal")?;
+    if evaluate(base, None).is_ok() {
+        return Err(String::from(
+            "canary `late-seal-unrecorded` passed when it must fail",
+        ));
+    }
+    let late = head_in(base)?;
+    let key = seal_diff_digest(base, &late, SEAL)?;
+    // Recorded under its own transition digest, the late seal is accepted.
+    record_in(
+        base,
+        &format!("# recorded late re-seals\n{key} {SEAL} budzero/ {REASON}\n"),
+    )?;
+    evaluate(base, None)
+        .map(|_| ())
+        .map_err(|e| format!("canary `late-seal-recorded` failed when it must pass: {e}"))?;
+    // A record without a reason, with a short one, with a malformed digest or
+    // for a pair that is not a seal and its tree fails closed.
+    for (name, body) in [
+        ("record-without-reason", format!("{key} {SEAL} budzero/\n")),
+        (
+            "record-short-reason",
+            format!("{key} {SEAL} budzero/ too short\n"),
+        ),
+        (
+            "record-bad-digest",
+            format!("{} {SEAL} budzero/ {REASON}\n", key.to_uppercase()),
+        ),
+        (
+            "record-wrong-pair",
+            format!("{key} {SEAL} xtask/gates/ {REASON}\n"),
+        ),
+    ] {
+        record_in(base, &body)?;
+        if evaluate(base, None).is_ok() {
+            return Err(format!("canary `{name}` passed when it must fail closed"));
+        }
+    }
+    record_in(base, &format!("{key} {SEAL} budzero/ {REASON}\n"))?;
+    canary_late_pin_key(base, &key)
+}
+
+/// Canaries around the record key: a rebase keeps it, a byte or a moved hunk
+/// changes it.
+fn canary_late_pin_key(base: &Path, key: &str) -> Result<(), String> {
+    const SEAL: &str = "xtask/gates/pins/tree.pins";
+    const REASON: &str = "late re-seal of a tree changed one commit earlier";
+    // Metadata alone - a reworded, re-dated commit, as a rebase produces -
+    // keeps the key.
+    git_in(
+        base,
+        &[
+            "-c",
+            "user.name=canary",
+            "-c",
+            "user.email=canary@budlum.local",
+            "commit",
+            "-q",
+            "--amend",
+            "--date=2000-01-01T00:00:00Z",
+            "-m",
+            "late seal, reworded by a rebase",
+        ],
+    )?;
+    let rebased = head_in(base)?;
+    if seal_diff_digest(base, &rebased, SEAL)? != key {
+        return Err(String::from(
+            "canary `metadata-only-same-digest` failed: a reworded commit changed the key",
+        ));
+    }
+    evaluate(base, None)
+        .map(|_| ())
+        .map_err(|e| format!("canary `metadata-only-same-digest` failed when it must pass: {e}"))?;
+    // A whitespace difference inside a literal is a different transition.
+    git_in(base, &["reset", "-q", "--hard", "HEAD~1"])?;
+    write_in(
+        base,
+        SEAL,
+        "budzero/src/lib.rs  kkk\nbudzero/src/other.rs lll\n",
+    )?;
+    record_in(base, &format!("{key} {SEAL} budzero/ {REASON}\n"))?;
+    add_all_in(base)?;
+    commit_in(base, "late seal with a different space")?;
+    let spaced = head_in(base)?;
+    if seal_diff_digest(base, &spaced, SEAL)? == key || evaluate(base, None).is_ok() {
+        return Err(String::from(
+            "canary `whitespace-different-digest` passed when it must fail",
+        ));
+    }
+    // The same added line in another place of the seal is a different key.
+    git_in(base, &["reset", "-q", "--hard", "HEAD~1"])?;
+    write_in(
+        base,
+        SEAL,
+        "budzero/src/other.rs lll\nbudzero/src/lib.rs kkk\n",
+    )?;
+    record_in(base, &format!("{key} {SEAL} budzero/ {REASON}\n"))?;
+    add_all_in(base)?;
+    commit_in(base, "late seal with the hunk moved")?;
+    let moved = head_in(base)?;
+    if seal_diff_digest(base, &moved, SEAL)? == key || evaluate(base, None).is_ok() {
+        return Err(String::from(
+            "canary `moved-hunk-different-digest` passed when it must fail",
+        ));
+    }
+    Ok(())
+}
+
+/// Create and seed a fresh canary tree.
+fn fresh_canary(base: &Path) -> Result<bool, String> {
+    for d in [
+        "xtask/gates/pins",
+        "xtask/gates/src",
+        "budzero/src",
+        ".github",
+        "src",
+    ] {
+        std::fs::create_dir_all(base.join(d)).map_err(|e| e.to_string())?;
+    }
+    if git_in(base, &["init"]).is_err() {
+        return Ok(false);
+    }
+    seed(base)?;
+    Ok(true)
+}
+
 /// Canary: a seal beside its tree passes, a seal alone fails.
 pub fn self_test() -> Result<String, String> {
     let base = scratch_dir();
@@ -644,8 +946,22 @@ pub fn self_test() -> Result<String, String> {
         .and_then(|()| canary_cutoffs(&base));
     let _ = std::fs::remove_dir_all(&base);
     outcome?;
+    let late = base.with_file_name(format!(
+        "{}-late",
+        base.file_name().and_then(|n| n.to_str()).unwrap_or("seal")
+    ));
+    let _ = std::fs::remove_dir_all(&late);
+    let late_outcome = fresh_canary(&late).and_then(|ready| {
+        if ready {
+            canary_late_pins(&late)
+        } else {
+            Ok(())
+        }
+    });
+    let _ = std::fs::remove_dir_all(&late);
+    late_outcome?;
     Ok(String::from(
-        "seals-move-with-their-tree canary OK: seal-with-tree, provenance-with-tree, ratchet-with-code and seal-tree-plus-work accepted; seal-alone and provenance-seal-alone refused; a future cutoff grandfathers; unparsable cutoff, unresolvable base ref, an empty declared window and a shallow checkout fail closed",
+        "seals-move-with-their-tree canary OK: seal-with-tree, provenance-with-tree, ratchet-with-code and seal-tree-plus-work accepted; seal-alone and provenance-seal-alone refused; a future cutoff grandfathers; unparsable cutoff, unresolvable base ref, an empty declared window and a shallow checkout fail closed; a late seal is refused until recorded under its transition digest, a reworded commit keeps the key, a whitespace or moved-hunk variant does not, and a record without a reason, with a short one, a malformed digest or a wrong pair fails closed",
     ))
 }
 
@@ -746,6 +1062,34 @@ mod tests {
                 parse_cutoff(bad).is_err(),
                 "`{bad}` must not be accepted as a cutoff"
             );
+        }
+    }
+
+    #[test]
+    fn late_pin_records_parse_and_refuse() {
+        let key = "a".repeat(64);
+        let ok = parse_late_pins(&format!(
+            "# comment\n\n{key} xtask/gates/pins/budzero-tree.pins budzero/ re-seal of the url bump lock\n"
+        ))
+        .expect("a well-formed record");
+        assert_eq!(
+            ok,
+            vec![LatePin {
+                digest: key.clone(),
+                seal: String::from("xtask/gates/pins/budzero-tree.pins"),
+                tree: String::from("budzero/"),
+            }]
+        );
+        for bad in [
+            format!("{key} xtask/gates/pins/budzero-tree.pins budzero/"),
+            format!("{key} xtask/gates/pins/budzero-tree.pins budzero/ short"),
+            format!("{} xtask/gates/pins/budzero-tree.pins budzero/ re-seal of the url bump lock", "A".repeat(64)),
+            format!("{} xtask/gates/pins/budzero-tree.pins budzero/ re-seal of the url bump lock", "a".repeat(63)),
+            format!("{key} xtask/gates/pins/budzero-tree.pins xtask/gates/ re-seal of the url bump lock"),
+            format!("{key} src/lib.rs budzero/ re-seal of the url bump lock"),
+            String::from("not a record"),
+        ] {
+            assert!(parse_late_pins(&bad).is_err(), "`{bad}` must be refused");
         }
     }
 
