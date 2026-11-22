@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Shared golden accept and reject vectors for K-G.6 (node <-> mobile light client).
 //!
 //! Pins exact byte-for-byte agreement between `budlum-types` / `budlum-mobile-core`
@@ -109,10 +110,10 @@ fn shared_golden_accept_and_reject_vectors_match_fixture() {
     let in5 = snap5.to_handoff_members();
     let mut handoff = HandoffCertificate::unsigned(chain_id, 4, &out4, &in5, randomness);
     let ho_msg = handoff.signing_message();
-    for idx in 0usize..4 {
+    for (idx, seed) in seeds4.iter().enumerate() {
         let sig = pq::ml_dsa_sign(
             SchemeId::ML_DSA_65,
-            &seeds4[idx],
+            seed,
             &ho_msg,
             ctx::HANDOFF_V1,
             &[0u8; 32],
