@@ -1484,4 +1484,106 @@ mod tests {
             Err(UnificationExecutionError::SolverBondInsufficient)
         );
     }
+
+    /// The settlement finality chain must reach the unification ledger.
+    ///
+    /// A `FinalityGuarantee` derived from an external domain's observed
+    /// backing is the only thing that can make a cross-domain payment
+    /// finality-gated. That guarantee is produced in production by
+    /// `src/rpc/server.rs`, and `UnificationLedger::anchor_domain_finality`
+    /// is the door that admits it into the ledger. If no production path
+    /// calls that door, the ledger's finality conservation, slashing, and
+    /// atomic rollback rules never see a real guarantee: every route would
+    /// have to be authorized by a hand-built test fixture, and the gate
+    /// would be a door that nothing walks through.
+    ///
+    /// The chain has two links, and both must exist in production:
+    ///
+    /// 1. **the ledger exists** - a production path constructs a
+    ///    `UnificationLedger` at all. Without this there is no ledger to
+    ///    anchor anything into, and the whole type is dead weight.
+    /// 2. **the guarantee enters** - a production path calls
+    ///    `anchor_domain_finality` with that ledger.
+    ///
+    /// This test locks that chain shut. It scans the production sources for
+    /// both calls and refuses to pass while the only callers are the test
+    /// module itself.
+    #[test]
+    fn the_observed_finality_guarantee_reaches_the_unification_ledger_in_production() {
+        let sources: [(&str, &str); 6] = [
+            (
+                "src/unification/mod.rs",
+                include_str!("../unification/mod.rs"),
+            ),
+            ("src/rpc/server.rs", include_str!("../rpc/server.rs")),
+            (
+                "src/settlement/domains.rs",
+                include_str!("../settlement/domains.rs"),
+            ),
+            (
+                "src/settlement/universal_finality.rs",
+                include_str!("../settlement/universal_finality.rs"),
+            ),
+            (
+                "src/settlement/registries.rs",
+                include_str!("../settlement/registries.rs"),
+            ),
+            (
+                "src/settlement/finality_gate.rs",
+                include_str!("../settlement/finality_gate.rs"),
+            ),
+        ];
+
+        // The test module that may legitimately call into the ledger.
+        let test_module_start = sources
+            .iter()
+            .find(|(path, _)| *path == "src/unification/mod.rs")
+            .and_then(|(_, source)| source.find("#[cfg(test)]"))
+            .expect("the unification test module is present");
+
+        // Find production call sites of `name`, ignoring the declaration
+        // itself and everything that lives in a `#[cfg(test)]` module.
+        let production_callers = |name: &str| -> Vec<String> {
+            let mut found = Vec::new();
+            for (path, source) in sources {
+                for (at, _) in source.match_indices(name) {
+                    // A declaration is not a call.
+                    if source[at..].starts_with(&format!("{name}(")) {
+                        continue;
+                    }
+                    // A mention in a doc comment or a string is not a call.
+                    let is_call = source[..at].ends_with('.')
+                        || source[at..].trim_start().starts_with(&format!("{name}("));
+                    if !is_call {
+                        continue;
+                    }
+                    let line = source[..at].lines().count() + 1;
+                    let in_test_module =
+                        path == "src/unification/mod.rs" && at >= test_module_start;
+                    if !in_test_module {
+                        found.push(format!("{path}:{line}"));
+                    }
+                }
+            }
+            found
+        };
+
+        let constructors = production_callers("UnificationLedger::new");
+        let anchors = production_callers("anchor_domain_finality");
+
+        assert!(
+            !constructors.is_empty(),
+            "no production path constructs a `UnificationLedger`; \
+             the ledger's finality conservation, slashing, and atomic rollback \
+             rules are unreachable in production, so every finality-gated route \
+             would have to be authorized by a hand-built test fixture"
+        );
+
+        assert!(
+            !anchors.is_empty(),
+            "no production path calls `UnificationLedger::anchor_domain_finality`; \
+             the observed finality guarantee never reaches the unification ledger, \
+             so the ledger's finality-gated payment rules are unreachable in production"
+        );
+    }
 }
