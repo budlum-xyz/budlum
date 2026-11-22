@@ -1943,7 +1943,7 @@ mod tests {
             .iter()
             .map(|(ek, pk)| DagCommitteeMember {
                 ed25519_pubkey: ek.public_key_bytes(),
-                pq_pubkey: pk.public_key(),
+                pq_pubkey: pk.public_key_bytes().to_vec(),
                 stake: 100,
             })
             .collect();

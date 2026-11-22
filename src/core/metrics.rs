@@ -439,9 +439,6 @@ impl Metrics {
         )?;
         let pending_domain_unfreeze_rows = IntGauge::new(
             "budlum_pending_domain_unfreeze_rows",
-            "budlum_sentry_watched_domains",
-            "budlum_sentry_frozen_domains",
-            "budlum_sentry_alerts_total",
             "Governance domain-unfreeze requests waiting for block-end application",
         )?;
         let sentry_watched_domains = IntGauge::new(
@@ -1331,6 +1328,9 @@ mod tests {
             "budlum_poa_onboarding_membership_rows",
             "budlum_poa_onboarding_admin_rows",
             "budlum_pending_domain_unfreeze_rows",
+            "budlum_sentry_watched_domains",
+            "budlum_sentry_frozen_domains",
+            "budlum_sentry_alerts_total",
             "budlum_pending_poa_freeze_rows",
             "budlum_pending_poa_unfreeze_rows",
             "budlum_pending_bud_boost_atoms",

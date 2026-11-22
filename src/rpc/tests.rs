@@ -4961,7 +4961,7 @@ mod rpc_tests {
 
     #[tokio::test]
     async fn domain_health_rpc_reports_sentry_circuit_state_and_refuses_reserved_domain() {
-        let (server, _dir) = create_test_server().await;
+        let (server, _chain) = setup().await;
 
         // Summary query succeeds even before any external domain is registered.
         let summary = server

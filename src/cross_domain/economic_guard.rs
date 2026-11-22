@@ -3427,8 +3427,10 @@ mod tests {
                 domain_id,
                 DomainCeilingPolicy {
                     backing: SecurityBacking::SignatureSet {
+                        scheme: ObservedScheme::Ed25519,
+                        signers: 4,
+                        required: 3,
                         total_weight: 300_000,
-                        threshold_bps: 6_667,
                         slashable: true,
                     },
                     stake_haircut_bps: 3_333,
@@ -3531,8 +3533,8 @@ mod tests {
             .configure_domain(
                 domain_id,
                 DomainCeilingPolicy {
-                    prover_ed25519_pubkey: Some(ed_kp.public_key()),
-                    prover_pq_pubkey: pq_kp.public_key(),
+                    prover_ed25519_pubkey: Some(ed_kp.public_key_bytes()),
+                    prover_pq_pubkey: pq_kp.public_key_bytes().to_vec(),
                     ..DomainCeilingPolicy::default()
                 },
                 None,
@@ -3555,11 +3557,15 @@ mod tests {
         let evidence = ContradictionEvidence::SignedProverDoubleRoot {
             domain_height: 99,
             state_root_a: root_a,
-            ed25519_sig_a: ed_kp.sign(&stmt_a),
-            pq_sig_a: pq_kp.sign(&stmt_a),
+            ed25519_sig_a: ed_kp.sign(&stmt_a).to_vec(),
+            pq_sig_a: pq_kp
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_a)
+                .expect("pq sign a"),
             state_root_b: root_b,
-            ed25519_sig_b: ed_kp.sign(&stmt_b),
-            pq_sig_b: pq_kp.sign(&stmt_b),
+            ed25519_sig_b: ed_kp.sign(&stmt_b).to_vec(),
+            pq_sig_b: pq_kp
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_b)
+                .expect("pq sign b"),
         };
 
         // In epoch 0 the table is full, but once we cross the retention window

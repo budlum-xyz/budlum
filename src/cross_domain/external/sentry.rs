@@ -496,12 +496,6 @@ impl ConsensusSentry {
         &self.domains
     }
 
-    /// Returns `true` when the global CRQC quantum isolation alarm is active.
-    #[must_use]
-    pub const fn crqc_alarm_active(&self) -> bool {
-        self.crqc_alarm_active
-    }
-
     /// Number of registered watched domains.
     ///
     /// Convenience: exposed for Sentry telemetry callers.
