@@ -290,3 +290,7 @@ pub mod rpc_bridge_bns_registry_coverage;
 // Success and refusal RPC coverage for admin, sentry, settlement, wallet, gateway, and identity.
 #[cfg(test)]
 pub mod rpc_admin_wallet_identity_coverage;
+
+// Property, invariant, and refutation coverage for Universal Finality certificates and bounds.
+#[cfg(test)]
+pub mod universal_finality_properties;
