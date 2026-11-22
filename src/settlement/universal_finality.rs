@@ -1111,7 +1111,7 @@ fn build_bucket_inclusion_proof(
     let mut siblings = Vec::with_capacity(merkle_depth_for_count(rows.len()));
     let mut cursor = target_index;
     while level.len() > 1 {
-        let sibling_idx = if cursor % 2 == 0 {
+        let sibling_idx = if cursor.is_multiple_of(2) {
             if cursor + 1 < level.len() {
                 cursor + 1
             } else {
@@ -1180,7 +1180,7 @@ impl DomainFinalityInclusionProof {
         let mut acc = keccak_cert_leaf(&self.entry.row_digest());
         let mut cursor = self.leaf_index;
         for sibling in &self.siblings {
-            acc = if cursor % 2 == 0 {
+            acc = if cursor.is_multiple_of(2) {
                 keccak_cert_node(&acc, sibling)
             } else {
                 keccak_cert_node(sibling, &acc)
