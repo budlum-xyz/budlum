@@ -562,6 +562,31 @@ impl BridgeState {
         message: &CrossDomainMessage,
         current_height: u64,
     ) -> Result<(), BridgeError> {
+        self.mint_inner(message, current_height, None)
+    }
+
+    /// Mint on the target domain while enforcing the source domain's ceiling
+    /// directly from the [`crate::settlement::universal_finality::UniversalFinalityCertificate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError`] when the message is invalid/expired, replayed,
+    /// or refused by [`crate::cross_domain::economic_guard::BridgeEconomicGuard`].
+    pub fn mint_with_certificate(
+        &mut self,
+        message: &CrossDomainMessage,
+        current_height: u64,
+        certificate: &crate::settlement::universal_finality::UniversalFinalityCertificate,
+    ) -> Result<(), BridgeError> {
+        self.mint_inner(message, current_height, Some(certificate))
+    }
+
+    fn mint_inner(
+        &mut self,
+        message: &CrossDomainMessage,
+        current_height: u64,
+        certificate: Option<&crate::settlement::universal_finality::UniversalFinalityCertificate>,
+    ) -> Result<(), BridgeError> {
         if !message.verify_id() {
             return Err(BridgeError("Invalid cross-domain message id".into()));
         }
@@ -629,9 +654,20 @@ impl BridgeState {
         self.economic_guard
             .ensure_domain_not_frozen(message.target_domain)
             .map_err(|e| BridgeError(e.to_string()))?;
-        self.economic_guard
-            .check_and_record_flow(message.source_domain, mint_flow_atoms, current_height)
-            .map_err(|e| BridgeError(e.to_string()))?;
+        if let Some(cert) = certificate {
+            self.economic_guard
+                .check_and_record_flow_with_certificate(
+                    message.source_domain,
+                    mint_flow_atoms,
+                    current_height,
+                    cert,
+                )
+                .map_err(|e| BridgeError(e.to_string()))?;
+        } else {
+            self.economic_guard
+                .check_and_record_flow(message.source_domain, mint_flow_atoms, current_height)
+                .map_err(|e| BridgeError(e.to_string()))?;
+        }
         self.replay
             .mark_processed_at(
                 message.source_domain,
@@ -817,6 +853,33 @@ impl BridgeState {
         source_domain: DomainId,
         settled_height: u64,
     ) -> Result<(), BridgeError> {
+        self.unlock_inner(message_id, source_domain, settled_height, None)
+    }
+
+    /// Unlock on the origin domain while enforcing the source domain's ceiling
+    /// directly from the [`crate::settlement::universal_finality::UniversalFinalityCertificate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError`] when the transfer is unknown, not burned, or
+    /// refused by [`crate::cross_domain::economic_guard::BridgeEconomicGuard`].
+    pub fn unlock_with_certificate(
+        &mut self,
+        message_id: MessageId,
+        source_domain: DomainId,
+        settled_height: u64,
+        certificate: &crate::settlement::universal_finality::UniversalFinalityCertificate,
+    ) -> Result<(), BridgeError> {
+        self.unlock_inner(message_id, source_domain, settled_height, Some(certificate))
+    }
+
+    fn unlock_inner(
+        &mut self,
+        message_id: MessageId,
+        source_domain: DomainId,
+        settled_height: u64,
+        certificate: Option<&crate::settlement::universal_finality::UniversalFinalityCertificate>,
+    ) -> Result<(), BridgeError> {
         let transfer = self
             .transfers
             .get_mut(&message_id)
@@ -868,9 +931,20 @@ impl BridgeState {
         self.economic_guard
             .ensure_domain_not_frozen(original_source)
             .map_err(|e| BridgeError(e.to_string()))?;
-        self.economic_guard
-            .check_and_record_flow(source_domain, unlock_flow_atoms, settled_height)
-            .map_err(|e| BridgeError(e.to_string()))?;
+        if let Some(cert) = certificate {
+            self.economic_guard
+                .check_and_record_flow_with_certificate(
+                    source_domain,
+                    unlock_flow_atoms,
+                    settled_height,
+                    cert,
+                )
+                .map_err(|e| BridgeError(e.to_string()))?;
+        } else {
+            self.economic_guard
+                .check_and_record_flow(source_domain, unlock_flow_atoms, settled_height)
+                .map_err(|e| BridgeError(e.to_string()))?;
+        }
         let transfer = self
             .transfers
             .get_mut(&message_id)

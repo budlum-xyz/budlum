@@ -98,6 +98,17 @@ pub const TESTNET_GUARD_CHAIN_ID: u64 = 45_261;
 /// [`BridgeEconomicGuard::submit_contradiction`].
 pub const MAX_GUARD_REPLAY_ENTRIES: usize = 65_536;
 
+/// Number of Budlum blocks per replay-pruning epoch for contradiction evidence.
+///
+/// WIRING: enforced by [`BridgeEconomicGuard::prune_expired_replay_entries`] and [`BridgeEconomicGuard::submit_contradiction`].
+pub const GUARD_REPLAY_EPOCH_BLOCKS: u64 = 1_000;
+
+/// Number of recent replay epochs retained before expired contradiction replay
+/// entries are deterministically pruned at epoch boundaries.
+///
+/// WIRING: enforced by [`BridgeEconomicGuard::prune_expired_replay_entries`].
+pub const GUARD_REPLAY_RETENTION_EPOCHS: u64 = 4;
+
 /// Default Byzantine corruption haircut on slashable validator stake (`33.33%`).
 ///
 /// WIRING: default protocol constant for [`DomainCeilingPolicy`].
@@ -846,6 +857,46 @@ pub fn effective_ceiling_atoms(record: &DomainEconomicRecord) -> u128 {
     }
 }
 
+/// Pure-integer computation of a domain's per-window bridge ceiling derived
+/// directly from its row in the [`crate::settlement::universal_finality::UniversalFinalityCertificate`].
+///
+/// Any domain whose certificate verdict is `Pending` or `Refuted` receives a
+/// strict `0` ceiling in that block so bridge outflows halt immediately when a
+/// domain leaves the `Established` bucket.
+///
+/// WIRING: enforced by [`BridgeEconomicGuard::check_and_record_flow_with_certificate`] on every bridge mint and unlock.
+#[must_use]
+pub fn effective_ceiling_from_certificate_row(
+    record: &DomainEconomicRecord,
+    row: &crate::settlement::universal_finality::FinalityCertificateRow,
+) -> u128 {
+    if matches!(
+        record.status,
+        DomainGuardStatus::FrozenByContradiction { .. }
+    ) {
+        return 0;
+    }
+    if !matches!(
+        row.verdict,
+        crate::settlement::universal_finality::FinalityVerdict::Established
+    ) {
+        return 0;
+    }
+    if !row.guarantee.admits_cross_domain_value() {
+        return 0;
+    }
+    let policy_cap = effective_ceiling_atoms(record);
+    let cert_bound = crate::settlement::universal_finality::EconomicSecurityBound::derive(
+        row.domain_id,
+        &row.guarantee,
+    );
+    if cert_bound.safe_outflow_ceiling_atoms > 0 {
+        policy_cap.min(cert_bound.safe_outflow_ceiling_atoms)
+    } else {
+        policy_cap
+    }
+}
+
 /// Consensus-deterministic adaptive escrow ceiling and contradiction slashing
 /// ledger embedded inside [`crate::cross_domain::bridge::BridgeState`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -854,6 +905,12 @@ pub struct BridgeEconomicGuard {
     consumed_evidence: BTreeSet<Hash32>,
     #[serde(default)]
     slashed_offenders: BTreeSet<Hash32>,
+    #[serde(default)]
+    consumed_evidence_epochs: BTreeMap<Hash32, u64>,
+    #[serde(default)]
+    slashed_offender_epochs: BTreeMap<Hash32, u64>,
+    #[serde(default)]
+    replay_pruned_before_epoch: u64,
     #[serde(default)]
     require_configured_domains: bool,
 }
@@ -928,6 +985,9 @@ impl BridgeEconomicGuard {
         self.domains.is_empty()
             && self.consumed_evidence.is_empty()
             && self.slashed_offenders.is_empty()
+            && self.consumed_evidence_epochs.is_empty()
+            && self.slashed_offender_epochs.is_empty()
+            && self.replay_pruned_before_epoch == 0
             && !self.require_configured_domains
     }
 
@@ -1134,6 +1194,131 @@ impl BridgeEconomicGuard {
             rec_mut.window_used_atoms = next_used;
         }
         Ok(())
+    }
+
+    /// Verify and record an inbound bridge flow while deriving the domain's
+    /// ceiling directly from its [`crate::settlement::universal_finality::UniversalFinalityCertificate`]
+    /// row when present.
+    ///
+    /// When `domain_id` appears in `certificate` with a `Pending` or `Refuted`
+    /// verdict, its effective ceiling is strictly `0` in that block and the
+    /// flow is refused with [`EconomicGuardError::CeilingExceeded`] before any
+    /// state change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EconomicGuardError::UnknownDomain`],
+    /// [`EconomicGuardError::DomainFrozen`], or
+    /// [`EconomicGuardError::CeilingExceeded`] before any state change.
+    pub fn check_and_record_flow_with_certificate(
+        &mut self,
+        domain_id: DomainId,
+        amount_atoms: u128,
+        current_height: u64,
+        certificate: &crate::settlement::universal_finality::UniversalFinalityCertificate,
+    ) -> Result<(), EconomicGuardError> {
+        let Some(rec) = self.domains.get(&domain_id) else {
+            if self.require_configured_domains {
+                return Err(EconomicGuardError::UnknownDomain(domain_id));
+            }
+            return Ok(());
+        };
+        if let DomainGuardStatus::FrozenByContradiction {
+            evidence_digest, ..
+        } = rec.status
+        {
+            return Err(EconomicGuardError::DomainFrozen {
+                domain_id,
+                evidence_digest,
+            });
+        }
+        let win_len = rec.policy.window_blocks.max(1);
+        let window_idx = current_height / win_len;
+        let used = if window_idx == rec.active_window {
+            rec.window_used_atoms
+        } else {
+            0
+        };
+        let ceiling = match certificate.row(domain_id) {
+            Some(row) => effective_ceiling_from_certificate_row(rec, row),
+            None => effective_ceiling_atoms(rec),
+        };
+        let Some(next_used) = used.checked_add(amount_atoms) else {
+            return Err(EconomicGuardError::CeilingExceeded {
+                domain_id,
+                requested_atoms: amount_atoms,
+                window_used_atoms: used,
+                ceiling_atoms: ceiling,
+            });
+        };
+        if next_used > ceiling || (amount_atoms == 0 && ceiling == 0) {
+            return Err(EconomicGuardError::CeilingExceeded {
+                domain_id,
+                requested_atoms: amount_atoms,
+                window_used_atoms: used,
+                ceiling_atoms: ceiling,
+            });
+        }
+        if let Some(rec_mut) = self.domains.get_mut(&domain_id) {
+            rec_mut.active_window = window_idx;
+            rec_mut.window_used_atoms = next_used;
+        }
+        Ok(())
+    }
+
+    /// Deterministically prune replay-ledger entries from epochs older than
+    /// `current_epoch - GUARD_REPLAY_RETENTION_EPOCHS`, advancing the monotonic
+    /// replay horizon so pruned evidence can never be replayed and a table-fill
+    /// attack in an earlier epoch cannot block fresh contradiction proofs.
+    ///
+    /// WIRING: invoked automatically by [`BridgeEconomicGuard::submit_contradiction`].
+    pub fn prune_expired_replay_entries(&mut self, current_height: u64) -> usize {
+        let current_epoch = current_height / GUARD_REPLAY_EPOCH_BLOCKS;
+        let cutoff = current_epoch.saturating_sub(GUARD_REPLAY_RETENTION_EPOCHS);
+        if cutoff <= self.replay_pruned_before_epoch {
+            return 0;
+        }
+        self.replay_pruned_before_epoch = cutoff;
+        let expired_evidence: Vec<Hash32> = self
+            .consumed_evidence
+            .iter()
+            .copied()
+            .filter(|digest| {
+                self.consumed_evidence_epochs
+                    .get(digest)
+                    .copied()
+                    .unwrap_or(0)
+                    < cutoff
+            })
+            .collect();
+        let mut removed = 0usize;
+        for digest in expired_evidence {
+            if self.consumed_evidence.remove(&digest) {
+                removed = removed.saturating_add(1);
+            }
+            self.consumed_evidence_epochs.remove(&digest);
+        }
+        let expired_offenders: Vec<Hash32> = self
+            .slashed_offenders
+            .iter()
+            .copied()
+            .filter(|key| self.slashed_offender_epochs.get(key).copied().unwrap_or(0) < cutoff)
+            .collect();
+        for key in expired_offenders {
+            if self.slashed_offenders.remove(&key) {
+                removed = removed.saturating_add(1);
+            }
+            self.slashed_offender_epochs.remove(&key);
+        }
+        removed
+    }
+
+    /// Return the earliest replay epoch still accepted by this guard.
+    ///
+    /// WIRING: inspected alongside [`BridgeEconomicGuard::submit_contradiction`] epoch-horizon enforcement.
+    #[must_use]
+    pub const fn replay_pruned_before_epoch(&self) -> u64 {
+        self.replay_pruned_before_epoch
     }
 
     /// Verify permissionless contradiction evidence, freeze `domain_id` without
@@ -1567,6 +1752,13 @@ impl BridgeEconomicGuard {
             }
         };
 
+        let current_epoch = at_height / GUARD_REPLAY_EPOCH_BLOCKS;
+        if current_epoch < self.replay_pruned_before_epoch {
+            return Err(EconomicGuardError::InvalidEvidence(
+                "contradiction evidence epoch predates pruned replay horizon".into(),
+            ));
+        }
+        let _ = self.prune_expired_replay_entries(at_height);
         if self.consumed_evidence.contains(&evidence_digest) {
             return Err(EconomicGuardError::DuplicateEvidence(evidence_digest));
         }
@@ -1582,8 +1774,11 @@ impl BridgeEconomicGuard {
             });
         }
         self.consumed_evidence.insert(evidence_digest);
+        self.consumed_evidence_epochs
+            .insert(evidence_digest, current_epoch);
         for key in new_offender_keys {
             self.slashed_offenders.insert(key);
+            self.slashed_offender_epochs.insert(key, current_epoch);
         }
 
         let Some(rec_mut) = self.domains.get_mut(&domain_id) else {
@@ -1719,6 +1914,10 @@ impl BridgeEconomicGuard {
         fields.push(&off_count_le);
         for offender in &self.slashed_offenders {
             fields.push(offender);
+        }
+        let pruned_epoch_le = self.replay_pruned_before_epoch.to_le_bytes();
+        if self.replay_pruned_before_epoch > 0 {
+            fields.push(&pruned_epoch_le);
         }
         hash_fields_bytes(&fields)
     }
@@ -3210,5 +3409,190 @@ mod tests {
                 sx_out.evidence_digest
             ))
         );
+    }
+
+    #[test]
+    fn certificate_pending_or_refuted_zeroes_economic_guard_ceiling_immediately() {
+        use crate::settlement::universal_finality::{
+            FinalityCertificateRow, FinalityGuarantee, FinalityMechanism, FinalityVerdict,
+            PendingReason, RefutationReason, UniversalFinalityCertificate,
+        };
+
+        let mut guard = BridgeEconomicGuard::new();
+        let domain_id = 404u32;
+        guard
+            .configure_domain(
+                domain_id,
+                DomainCeilingPolicy {
+                    backing: SecurityBacking::SignatureSet {
+                        total_weight: 300_000,
+                        threshold_bps: 6_667,
+                        slashable: true,
+                    },
+                    stake_haircut_bps: 3_333,
+                    window_blocks: 100,
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .expect("configure domain");
+
+        let established_guarantee =
+            FinalityGuarantee::deterministic_bft(FinalityMechanism::CometBft, 3_333, 300_000, true);
+        let est_cert = UniversalFinalityCertificate::build(
+            50,
+            vec![FinalityCertificateRow {
+                domain_id,
+                height: 12,
+                state_root: [0x11; 32],
+                guarantee: established_guarantee.clone(),
+                verdict: FinalityVerdict::Established,
+            }],
+        );
+        let rec = guard.record(domain_id).expect("record");
+        let est_ceiling = effective_ceiling_from_certificate_row(
+            rec,
+            est_cert.row(domain_id).expect("established row"),
+        );
+        assert!(
+            est_ceiling > 0,
+            "established domain must expose positive ceiling"
+        );
+        guard
+            .check_and_record_flow_with_certificate(domain_id, 1_000, 50, &est_cert)
+            .expect("established certificate flow should be admitted");
+
+        // In the very same block, if the domain drops to Pending, its ceiling
+        // becomes strictly 0 and any bridge flow is refused without mutating state.
+        let pending_cert = UniversalFinalityCertificate::build(
+            50,
+            vec![FinalityCertificateRow {
+                domain_id,
+                height: 12,
+                state_root: [0x11; 32],
+                guarantee: established_guarantee.clone(),
+                verdict: FinalityVerdict::Pending {
+                    reason: PendingReason::EvidenceMissing,
+                },
+            }],
+        );
+        let root_before_pending = guard.root();
+        assert_eq!(
+            effective_ceiling_from_certificate_row(
+                guard.record(domain_id).expect("record"),
+                pending_cert.row(domain_id).expect("pending row"),
+            ),
+            0
+        );
+        let pending_err = guard
+            .check_and_record_flow_with_certificate(domain_id, 1, 50, &pending_cert)
+            .unwrap_err();
+        assert_eq!(
+            pending_err,
+            EconomicGuardError::CeilingExceeded {
+                domain_id,
+                requested_atoms: 1,
+                window_used_atoms: 1_000,
+                ceiling_atoms: 0,
+            }
+        );
+        assert_eq!(guard.root(), root_before_pending);
+
+        // Refuted verdict also yields a strict 0 ceiling.
+        let refuted_cert = UniversalFinalityCertificate::build(
+            50,
+            vec![FinalityCertificateRow {
+                domain_id,
+                height: 12,
+                state_root: [0x11; 32],
+                guarantee: established_guarantee,
+                verdict: FinalityVerdict::Refuted {
+                    reason: RefutationReason::DomainFrozen,
+                },
+            }],
+        );
+        assert_eq!(
+            effective_ceiling_from_certificate_row(
+                guard.record(domain_id).expect("record"),
+                refuted_cert.row(domain_id).expect("refuted row"),
+            ),
+            0
+        );
+        assert!(matches!(
+            guard.check_and_record_flow_with_certificate(domain_id, 1, 50, &refuted_cert),
+            Err(EconomicGuardError::CeilingExceeded {
+                ceiling_atoms: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn epoch_boundary_pruning_prevents_replay_table_exhaustion_attack() {
+        let ed_kp = KeyPair::generate();
+        let pq_kp = PqKeyPair::generate();
+        let mut guard = BridgeEconomicGuard::new();
+        let domain_id = 606u32;
+        guard
+            .configure_domain(
+                domain_id,
+                DomainCeilingPolicy {
+                    prover_ed25519_pubkey: Some(ed_kp.public_key()),
+                    prover_pq_pubkey: pq_kp.public_key(),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .expect("configure domain");
+
+        // Attacker saturates the replay ledger in epoch 0.
+        for i in 0..MAX_GUARD_REPLAY_ENTRIES {
+            let mut h = [0u8; 32];
+            h[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            guard.consumed_evidence.insert(h);
+            guard.consumed_evidence_epochs.insert(h, 0);
+        }
+        assert_eq!(guard.consumed_evidence.len(), MAX_GUARD_REPLAY_ENTRIES);
+
+        let root_a = [0xAA; 32];
+        let root_b = [0xBB; 32];
+        let stmt_a = contradiction_statement_bytes(domain_id, 99, &root_a);
+        let stmt_b = contradiction_statement_bytes(domain_id, 99, &root_b);
+        let evidence = ContradictionEvidence::SignedProverDoubleRoot {
+            domain_height: 99,
+            state_root_a: root_a,
+            ed25519_sig_a: ed_kp.sign(&stmt_a),
+            pq_sig_a: pq_kp.sign(&stmt_a),
+            state_root_b: root_b,
+            ed25519_sig_b: ed_kp.sign(&stmt_b),
+            pq_sig_b: pq_kp.sign(&stmt_b),
+        };
+
+        // In epoch 0 the table is full, but once we cross the retention window
+        // into epoch 5, expired epoch-0 entries are deterministically pruned
+        // and the real contradiction succeeds and freezes the domain.
+        let fresh_height = GUARD_REPLAY_EPOCH_BLOCKS
+            .saturating_mul(GUARD_REPLAY_RETENTION_EPOCHS.saturating_add(1));
+        let outcome = guard
+            .submit_contradiction(
+                domain_id,
+                &evidence,
+                Address::from([0x77; 32]),
+                fresh_height,
+            )
+            .expect("epoch-boundary pruning must unblock fresh contradiction proofs");
+        assert_eq!(outcome.domain_id, domain_id);
+        assert_eq!(guard.replay_pruned_before_epoch(), 1);
+        assert_eq!(guard.consumed_evidence.len(), 1);
+        assert!(matches!(
+            guard.record(domain_id).expect("record").status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ));
+
+        // Any evidence submitted at an epoch before the pruned horizon is refused.
+        let stale_err = guard
+            .submit_contradiction(domain_id, &evidence, Address::from([0x77; 32]), 50)
+            .unwrap_err();
+        assert!(matches!(stale_err, EconomicGuardError::InvalidEvidence(_)));
     }
 }

@@ -1927,7 +1927,7 @@ fn execute_object_layer_tx(
     if let crate::object_layer::ObjectLayerTx::Arrive(proof) = tx {
         crate::settlement::finality_gate::enforce_domain_not_refuted(
             &state.settlement,
-            ctx.height,
+            state.current_block_height,
             crate::settlement::finality_gate::ValueGate::ObjectLayerArrive,
             proof.domain,
         )

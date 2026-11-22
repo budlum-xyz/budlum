@@ -483,9 +483,14 @@ pub fn mint_from_verified_event(
         (relayer, fee.get()),
     )?;
 
+    let finality_cert =
+        crate::settlement::universal_finality::UniversalFinalityCertificate::from_registries_at_height(
+            &state.settlement,
+            height,
+        );
     state
         .bridge_state
-        .mint(&message, height)
+        .mint_with_certificate(&message, height, &finality_cert)
         .map_err(|e| e.to_string())?;
     // The supply-creating path: the on-chain counterpart of the asset
     // arriving from the bridge is minted here, both legs under the fixed
@@ -700,9 +705,14 @@ pub fn unlock_from_verified_event(
     }
 
     let bridge_before = state.bridge_state.clone();
+    let finality_cert =
+        crate::settlement::universal_finality::UniversalFinalityCertificate::from_registries_at_height(
+            &state.settlement,
+            height,
+        );
     state
         .bridge_state
-        .unlock(transfer_id, message.source_domain, height)
+        .unlock_with_certificate(transfer_id, message.source_domain, height, &finality_cert)
         .map_err(|e| e.to_string())?;
     if let Err(e) = state
         .bridge_state
@@ -871,9 +881,14 @@ fn apply_relay_effects(
                 (transfer.recipient, final_amount.get()),
                 (relayer, fee.get()),
             )?;
+            let finality_cert =
+                crate::settlement::universal_finality::UniversalFinalityCertificate::from_registries_at_height(
+                    &state.settlement,
+                    height,
+                );
             state
                 .bridge_state
-                .mint(message, height)
+                .mint_with_certificate(message, height, &finality_cert)
                 .map_err(|e| e.to_string())?;
             state
                 .try_mint_balance(&transfer.recipient, final_amount.get())
@@ -912,9 +927,14 @@ fn apply_relay_effects(
                     .map_err(|e| e.to_string())?;
             }
             let bridge_before = state.bridge_state.clone();
+            let finality_cert =
+                crate::settlement::universal_finality::UniversalFinalityCertificate::from_registries_at_height(
+                    &state.settlement,
+                    height,
+                );
             state
                 .bridge_state
-                .unlock(transfer_id, message.source_domain, height)
+                .unlock_with_certificate(transfer_id, message.source_domain, height, &finality_cert)
                 .map_err(|e| e.to_string())?;
             if let Err(e) = state
                 .bridge_state
