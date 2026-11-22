@@ -51,7 +51,7 @@ use crate::execution::coordinator::universal_call::{
 };
 use crate::execution::coordinator::wasm_ee::WasmEe;
 use crate::execution::coordinator::worker::{
-    WorkerEndpoint, WorkerError, WorkerSupervisor, MAX_BLOCK_WORKER_RETRIES,
+    EngineClass, WorkerEndpoint, WorkerError, WorkerSupervisor, MAX_BLOCK_WORKER_RETRIES,
 };
 use crate::execution::zkvm::{TxContext, ZkVmExecutor, DEFAULT_CONTRACT_GAS_LIMIT};
 use budlum_uel_abi::{
@@ -277,6 +277,13 @@ pub enum CoordinatorError {
     InvalidBlock(String),
     /// Worker failed non-deterministically across all 3 block retries; node halts.
     WorkerHalt { attempts: usize, cause: String },
+    /// A chain configured to run only real engines met a block that needs an
+    /// environment currently served by the in-tree interpreter.
+    ///
+    /// The block is refused before the first write, so the sender, the aliases
+    /// and the state root are untouched: refusing an engine the chain did not
+    /// agree to is not the same as failing to execute it halfway.
+    ModelEngineRefused { ee: EeId },
 }
 
 impl std::fmt::Display for CoordinatorError {
@@ -286,6 +293,12 @@ impl std::fmt::Display for CoordinatorError {
             Self::WorkerHalt { attempts, cause } => {
                 write!(f, "UEL halted after {attempts} worker retries: {cause}")
             }
+            Self::ModelEngineRefused { ee } => write!(
+                f,
+                "EE 0x{:02x} is served by this tree's interpreter, not by the engine; \
+                 the chain requires real engines",
+                ee.0
+            ),
         }
     }
 }
@@ -641,6 +654,9 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
 /// Coordinator executing UEL transactions across isolated EE workers.
 pub struct ExecutionCoordinator {
     supervisor: WorkerSupervisor,
+    /// When set, a block that routes work to an environment served by this
+    /// tree's interpreter is refused instead of executed.
+    require_real_engines: bool,
 }
 
 impl Default for ExecutionCoordinator {
@@ -671,7 +687,10 @@ impl ExecutionCoordinator {
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(UtxoEe::new())));
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(PlutusEe::new())));
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(Rv32Ee::new())));
-        Self { supervisor }
+        Self {
+            supervisor,
+            require_real_engines: false,
+        }
     }
 
     /// Registers or overrides a worker endpoint (e.g. `budlum-ee-evm` Unix socket).
@@ -687,6 +706,40 @@ impl ExecutionCoordinator {
     #[must_use]
     pub const fn supervisor(&self) -> &WorkerSupervisor {
         &self.supervisor
+    }
+
+    /// Engine class answering `ee`, or `None` when no endpoint is registered.
+    ///
+    /// exposed for: node readiness reads and the opening ladder, which must
+    /// publish which environments run on the engine and which on the stand-in.
+    #[must_use]
+    pub fn engine_class(&self, ee: EeId) -> Option<EngineClass> {
+        self.supervisor.engine_class(ee)
+    }
+
+    /// Requires every environment a block touches to be served by its engine.
+    ///
+    /// Off by default so a devnet keeps the interpreters it was built with; a
+    /// chain that publishes "real engine" in the feature matrix turns it on.
+    ///
+    /// exposed for: node configuration and the opening ladder, which set it from
+    /// the profile the node runs rather than from a per-block request.
+    pub const fn set_require_real_engines(&mut self, required: bool) {
+        self.require_real_engines = required;
+    }
+
+    /// The first environment in `txs` that `require_real_engines` refuses.
+    ///
+    /// Exposed so the opening ladder and the rehearsal can ask the same question
+    /// of a block before submitting it, instead of discovering it mid-block.
+    #[must_use]
+    pub fn first_refused_environment(&self, txs: &[UelTx]) -> Option<EeId> {
+        if !self.require_real_engines {
+            return None;
+        }
+        txs.iter()
+            .map(|tx| tx.ee)
+            .find(|ee| self.engine_class(*ee) != Some(EngineClass::Real))
     }
 
     /// Applies a verified contract or account migration transaction (`8.12.2` EVM & `8.12.3` WASM/SVM/Move).
@@ -803,6 +856,9 @@ impl ExecutionCoordinator {
         proposer: Address,
         txs: &[UelTx],
     ) -> Result<Vec<UelReceipt>, CoordinatorError> {
+        if let Some(ee) = self.first_refused_environment(txs) {
+            return Err(CoordinatorError::ModelEngineRefused { ee });
+        }
         let mut last_transport_err = String::new();
         for attempt in 1..=MAX_BLOCK_WORKER_RETRIES {
             let mut candidate = state.clone();
@@ -1581,3 +1637,6 @@ mod review_2_attack_tests;
 mod svm_move_tests;
 #[cfg(test)]
 mod worker_identity_tests;
+
+#[cfg(test)]
+mod engine_class_tests;
