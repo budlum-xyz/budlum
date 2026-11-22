@@ -68,6 +68,19 @@ struct Cli {
     /// Trusted epoch corresponding to `--trusted-bns-root`.
     #[arg(long, global = true)]
     trusted_bns_epoch: Option<u64>,
+
+    /// Trusted Universal Finality Certificate digest (32-byte hex) from an
+    /// out-of-band source. When set, the certificate fetched via RPC must
+    /// match it exactly: trusting the `certificateDigest` returned in the RPC
+    /// reply itself would let a hostile node present a forged certificate.
+    #[arg(long, global = true)]
+    trusted_finality_digest: Option<String>,
+
+    /// Trusted finality checkpoint height. When set, the certificate's
+    /// `checkpoint_height` must match it exactly, refusing stale or forked
+    /// certificates the RPC node might serve.
+    #[arg(long, global = true)]
+    trusted_finality_checkpoint: Option<u64>,
     /// Maximum fee in atoms that auto-fee resolution (`bud_estimateGas` /
     /// `bud_gasPrice`) is allowed to adopt when `--fee` is omitted.
     #[arg(long, global = true)]
@@ -3734,53 +3747,119 @@ fn run_finality_show(
     rpc_url: &str,
     checkpoint: Option<u64>,
     domain: Option<u32>,
+    trusted_digest: Option<&str>,
+    trusted_checkpoint: Option<u64>,
 ) -> Result<(), String> {
-    if let Some(domain_id) = domain {
-        let resp = rpc_call(
-            rpc_url,
-            "bud_getDomainFinality",
-            serde_json::json!([domain_id, checkpoint]),
-        )?;
-        let proof = verify_domain_finality_rpc_response(&resp, domain_id)?;
-        let summary = serde_json::json!({
-            "domainId": domain_id,
-            "checkpointHeight": resp.get("checkpointHeight"),
-            "certificateDigest": resp.get("certificateDigest"),
-            "bucket": proof.bucket,
-            "bucketRoot": resp.get("bucketRoot"),
-            "height": proof.entry.height,
-            "verdict": proof.entry.verdict,
-            "guaranteeLabel": proof.entry.guarantee.label(),
-            "admitsCrossDomainValue": resp.get("admitsCrossDomainValue"),
-            "safeValueOutflowCeilingAtoms": resp.get("safeValueOutflowCeilingAtoms"),
-            "proofVerified": true,
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?
-        );
-        return Ok(());
-    }
-
+    // hxIP: the certificate is the single local source of truth; every field
+    // below is derived from it, never copied from the RPC reply.
     let resp = rpc_call(
         rpc_url,
         "bud_getFinalityCertificate",
         serde_json::json!([checkpoint]),
     )?;
     let cert = verify_certificate_rpc_response(&resp)?;
-    let summary = serde_json::json!({
-        "checkpointHeight": cert.checkpoint_height,
-        "certificateDigest": format!("0x{}", hex::encode(cert.certificate_digest)),
-        "establishedCount": cert.established_count,
-        "pendingCount": cert.pending_count,
-        "refutedCount": cert.refuted_count,
-        "establishedRoot": format!("0x{}", hex::encode(cert.established_root)),
-        "pendingRoot": format!("0x{}", hex::encode(cert.pending_root)),
-        "refutedRoot": format!("0x{}", hex::encode(cert.refuted_root)),
-        "guaranteeLabel": cert.guarantee.map(|g| g.label()),
-        "domainLabels": resp.get("domainLabels"),
-        "integrityVerified": true,
-    });
+
+    // Trusted digest checkpoint parity (hxIP).
+    if let Some(cp) = checkpoint {
+        if cp != cert.checkpoint_height {
+            return Err(format!(
+                "--checkpoint {} conflicts with certificate checkpoint_height {}",
+                cp, cert.checkpoint_height
+            ));
+        }
+    }
+    if let Some(digest_hex) = trusted_digest {
+        let claimed = parse_hex_bytes32(digest_hex, "trusted-finality-digest")?;
+        if claimed != cert.certificate_digest {
+            return Err(
+                "--trusted-finality-digest does not match certificate digest".to_string(),
+            );
+        }
+    }
+    if let Some(cp) = trusted_checkpoint {
+        if cp != cert.checkpoint_height {
+            return Err(format!(
+                "--trusted-finality-checkpoint {} conflicts with certificate checkpoint_height {}",
+                cp, cert.checkpoint_height
+            ));
+        }
+    }
+
+    if let Some(domain_id) = domain {
+        // hxIP: inclusion proof verified against cert.bucket_root(proof.bucket),
+        // not against an RPC-supplied bucket root.
+        let proof = cert.prove_domain(domain_id).ok_or_else(|| {
+            format!("domain {domain_id} is not present in the finality certificate")
+        })?;
+        if !proof.verify(&cert.bucket_root(proof.bucket)) {
+            return Err(
+                "domain finality Merkle inclusion proof failed local verification against certificate bucket root"
+                    .to_string(),
+            );
+        }
+
+        // hxIS: derive admitsCrossDomainValue and safeValueOutflowCeilingAtoms locally.
+        let established = matches!(proof.entry.verdict, budlum_core::settlement::FinalityVerdict::Established);
+        let econ = budlum_core::settlement::EconomicSecurityBound::derive(
+            &proof.entry.guarantee,
+            proof.entry.bond_atoms,
+            proof.entry.bond_atoms,
+        );
+        let admits_value = established && proof.entry.guarantee.admits_cross_domain_value();
+        let safe_ceiling = if admits_value {
+            econ.safe_value_outflow_ceiling_atoms
+        } else {
+            0
+        };
+
+        let summary = serde_json::json!({
+            "domainId": domain_id,
+            "checkpointHeight": cert.checkpoint_height,
+            "certificateDigest": format!("0x{}", hex::encode(cert.certificate_digest)),
+            "bucket": proof.bucket,
+            "bucketRoot": format!("0x{}", hex::encode(cert.bucket_root(proof.bucket))),
+            "rowDigest": format!("0x{}", hex::encode(proof.entry.row_digest())),
+            "height": proof.entry.height,
+            "verdict": proof.entry.verdict,
+            "guaranteeLabel": proof.entry.guarantee.label(),
+            "admitsCrossDomainValue": admits_value,
+            "safeValueOutflowCeilingAtoms": safe_ceiling.to_string(),
+            "proofVerified": true,
+        });
+    } else {
+        // hxIU: derive domainLabels from cert.{established,pending,refuted}, not RPC.
+        let domain_labels: Vec<serde_json::Value> = cert
+            .established
+            .iter()
+            .map(|row| ("established", row))
+            .chain(cert.pending.iter().map(|row| ("pending", row)))
+            .chain(cert.refuted.iter().map(|row| ("refuted", row)))
+            .map(|(bucket, row)| {
+                serde_json::json!({
+                    "domainId": row.domain_id,
+                    "bucket": bucket,
+                    "height": row.height,
+                    "guaranteeLabel": row.guarantee.label(),
+                    "rowDigest": format!("0x{}", hex::encode(row.row_digest())),
+                })
+            })
+            .collect();
+
+        let summary = serde_json::json!({
+            "checkpointHeight": cert.checkpoint_height,
+            "certificateDigest": format!("0x{}", hex::encode(cert.certificate_digest)),
+            "establishedCount": cert.established_count,
+            "pendingCount": cert.pending_count,
+            "refutedCount": cert.refuted_count,
+            "establishedRoot": format!("0x{}", hex::encode(cert.established_root)),
+            "pendingRoot": format!("0x{}", hex::encode(cert.pending_root)),
+            "refutedRoot": format!("0x{}", hex::encode(cert.refuted_root)),
+            "guaranteeLabel": cert.guarantee.map(|g| g.label()),
+            "domainLabels": domain_labels,
+            "integrityVerified": true,
+        });
+    }
+
     println!(
         "{}",
         serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?
@@ -3788,28 +3867,91 @@ fn run_finality_show(
     Ok(())
 }
 
-fn run_finality_route(rpc_url: &str, source: u32, target: u32) -> Result<(), String> {
+fn run_finality_route(
+    rpc_url: &str,
+    source: u32,
+    target: u32,
+    trusted_digest: Option<&str>,
+    trusted_checkpoint: Option<u64>,
+) -> Result<(), String> {
+    // hxIW / hxIP: the certificate is the single local source of truth.
     let resp = rpc_call(
         rpc_url,
-        "bud_getRouteFinality",
-        serde_json::json!([source, target]),
+        "bud_getFinalityCertificate",
+        serde_json::json!([None]),
     )?;
-    let (src_proof, dst_proof) = verify_route_finality_rpc_response(&resp, source, target)?;
+    let cert = verify_certificate_rpc_response(&resp)?;
+
+    // Trusted digest / checkpoint parity (hxIP).
+    if let Some(digest_hex) = trusted_digest {
+        let claimed = parse_hex_bytes32(digest_hex, "trusted-finality-digest")?;
+        if claimed != cert.certificate_digest {
+            return Err(
+                "--trusted-finality-digest does not match certificate digest".to_string(),
+            );
+        }
+    }
+    if let Some(cp) = trusted_checkpoint {
+        if cp != cert.checkpoint_height {
+            return Err(format!(
+                "--trusted-finality-checkpoint {} conflicts with certificate checkpoint_height {}",
+                cp, cert.checkpoint_height
+            ));
+        }
+    }
+
+    let src = cert.prove_domain(source).ok_or_else(|| {
+        format!("source domain {source} is not present in the finality certificate")
+    })?;
+    let dst = cert.prove_domain(target).ok_or_else(|| {
+        format!("target domain {target} is not present in the finality certificate")
+    })?;
+
+    // hxIP: same-cert inclusion proof via cert.bucket_root(proof.bucket).
+    if !src.verify(&cert.bucket_root(src.bucket)) {
+        return Err("source domain finality Merkle proof failed local verification".to_string());
+    }
+    if !dst.verify(&cert.bucket_root(dst.bucket)) {
+        return Err("target domain finality Merkle proof failed local verification".to_string());
+    }
+
+    // hxIW: compute all route values locally from the certificate.
+    let hub = budlum_core::settlement::FinalityGuarantee::settlement_hub();
+    let composed_guarantee = src.entry.guarantee.meet(&hub).meet(&dst.entry.guarantee);
+
+    let gate_result: Result<
+        budlum_core::settlement::finality_gate::ValueGateVerdict,
+        budlum_core::settlement::finality_gate::ValueGateRefusal,
+    > = budlum_core::settlement::finality_gate::check_certificate_value_gate(
+        &cert,
+        budlum_core::settlement::finality_gate::ValueGate::UniversalPayment,
+        source,
+        Some(target),
+    );
+
+    let (admits_value, refusal_reason, safe_ceiling) = match gate_result {
+        Ok(verdict) => (true, None, verdict.safe_value_outflow_ceiling_atoms),
+        Err(refusal) => (false, Some(refusal.to_string()), 0),
+    };
+
     let summary = serde_json::json!({
-        "checkpointHeight": resp.get("checkpointHeight"),
-        "certificateDigest": resp.get("certificateDigest"),
+        "checkpointHeight": cert.checkpoint_height,
+        "certificateDigest": format!("0x{}", hex::encode(cert.certificate_digest)),
         "sourceDomain": source,
         "targetDomain": target,
-        "sourceBucket": src_proof.bucket,
-        "targetBucket": dst_proof.bucket,
-        "admitsCrossDomainValue": resp.get("admitsCrossDomainValue"),
-        "refusalReason": resp.get("refusalReason"),
-        "routeGuaranteeLabel": resp.get("routeGuaranteeLabel"),
-        "sourceGuaranteeLabel": src_proof.entry.guarantee.label(),
-        "targetGuaranteeLabel": dst_proof.entry.guarantee.label(),
-        "safeValueOutflowCeilingAtoms": resp.get("safeValueOutflowCeilingAtoms"),
+        "sourceBucket": src.bucket,
+        "targetBucket": dst.bucket,
+        "sourceBucketRoot": format!("0x{}", hex::encode(cert.bucket_root(src.bucket))),
+        "targetBucketRoot": format!("0x{}", hex::encode(cert.bucket_root(dst.bucket))),
+        "admitsCrossDomainValue": admits_value,
+        "refusalReason": refusal_reason,
+        "routeGuaranteeLabel": composed_guarantee.label(),
+        "sourceGuaranteeLabel": src.entry.guarantee.label(),
+        "targetGuaranteeLabel": dst.entry.guarantee.label(),
+        "safeValueOutflowCeilingAtoms": safe_ceiling.to_string(),
         "proofsVerified": true,
     });
+
     println!(
         "{}",
         serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?
@@ -4439,12 +4581,20 @@ fn main() {
         Command::Dev { action } => run_dev(&cli.rpc_url, action),
         Command::AppBinding { action } => run_app_binding(&cli.rpc_url, action),
         Command::Finality { action } => match action {
-            FinalityAction::Show { checkpoint, domain } => {
-                run_finality_show(&cli.rpc_url, *checkpoint, *domain)
-            }
-            FinalityAction::Route { source, target } => {
-                run_finality_route(&cli.rpc_url, *source, *target)
-            }
+            FinalityAction::Show { checkpoint, domain } => run_finality_show(
+                &cli.rpc_url,
+                *checkpoint,
+                *domain,
+                cli.trusted_finality_digest.as_deref(),
+                cli.trusted_finality_checkpoint,
+            ),
+            FinalityAction::Route { source, target } => run_finality_route(
+                &cli.rpc_url,
+                *source,
+                *target,
+                cli.trusted_finality_digest.as_deref(),
+                cli.trusted_finality_checkpoint,
+            ),
         },
         Command::Bns { action } => match action {
             BnsAction::Sell {
