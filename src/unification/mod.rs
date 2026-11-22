@@ -27,7 +27,6 @@
 
 pub mod abi_bridge;
 pub mod domain_catalog;
-pub mod name_resolver;
 pub mod output_composer;
 pub mod payment_router;
 pub mod storage_fabric;
@@ -35,12 +34,6 @@ pub mod storage_fabric;
 pub use abi_bridge::{
     AbiBridgeError, CanonicalCallArg, CrossVmBridge, CrossVmCallEnvelope, CrossVmCallRequest,
     TargetWireEncoding,
-};
-pub use name_resolver::{
-    ens_mapping_slot, ens_namehash, ens_registry_resolver_slot, multichain_address_binding_digest,
-    verify_ens_resolution, AddressSignaturePosture, EnsResolutionProof, MultiChainAddressBinding,
-    MultiChainAddressProof, MultiChainNameRecord, NameResolverError, VerifiedEnsResolution,
-    MULTICHAIN_ADDR_BIND_CTX,
 };
 
 pub use domain_catalog::{
