@@ -242,6 +242,12 @@ pub enum ChainCommand {
         u64,
         oneshot::Sender<Option<crate::settlement::GlobalBlockHeader>>,
     ),
+    /// Derive the three-bucket Universal Finality Certificate at `checkpoint_height`
+    /// (`None` selects the current chain tip; future heights return `None`).
+    GetFinalityCertificate(
+        Option<u64>,
+        oneshot::Sender<Option<crate::settlement::GlobalFinalityCertificate>>,
+    ),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetDomainCommitmentsWithGarden(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
@@ -1846,6 +1852,22 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::GetGlobalHeaderProof(global_height, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Derive the canonical three-bucket [`crate::settlement::GlobalFinalityCertificate`]
+    /// for `checkpoint_height` (`None` uses the current chain tip height).
+    /// Returns `None` when no consensus domain is registered or when `checkpoint_height`
+    /// exceeds the node's current tip.
+    pub async fn get_finality_certificate(
+        &self,
+        checkpoint_height: Option<u64>,
+    ) -> Option<crate::settlement::GlobalFinalityCertificate> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetFinalityCertificate(checkpoint_height, tx))
             .await;
         rx.await.unwrap_or(None)
     }
@@ -3655,6 +3677,23 @@ impl ChainActor {
                 ChainCommand::GetGlobalHeader(height, tx) => {
                     let header = self.blockchain.global_header(height);
                     let _ = tx.send(header);
+                }
+                ChainCommand::GetFinalityCertificate(checkpoint_height, tx) => {
+                    let tip = self.blockchain.chain.last().map_or(0, |b| b.index);
+                    let cert = match checkpoint_height {
+                        Some(h) if h > tip => None,
+                        Some(h) => self
+                            .blockchain
+                            .state
+                            .settlement
+                            .universal_finality_certificate(h),
+                        None => self
+                            .blockchain
+                            .state
+                            .settlement
+                            .universal_finality_certificate(tip),
+                    };
+                    let _ = tx.send(cert);
                 }
                 ChainCommand::GetDomainCommitments(tx) => {
                     // Public RPC (`bud_getDomainCommitments`) reads canonical

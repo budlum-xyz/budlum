@@ -4749,4 +4749,213 @@ mod rpc_tests {
         local_task.abort();
         remote_task.abort();
     }
+
+    #[tokio::test]
+    async fn finality_certificate_domain_and_route_rpc_verify_and_refuse() {
+        use crate::domain::types::{
+            ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, RootScheme,
+        };
+        use crate::settlement::{
+            DomainFinalityInclusionProof, FinalityBucket, GlobalFinalityCertificate,
+        };
+
+        // 1. Empty chain: every finality read endpoint refuses fail-closed.
+        let (empty_server, _empty_chain) = setup().await;
+        assert!(
+            empty_server
+                .get_finality_certificate(None)
+                .await
+                .expect_err("empty registry has no finality certificate")
+                .code()
+                != 0
+        );
+        assert!(
+            empty_server
+                .get_domain_finality(1, None)
+                .await
+                .expect_err("empty registry has no domain finality")
+                .code()
+                != 0
+        );
+        assert!(
+            empty_server
+                .get_route_finality(1, 2)
+                .await
+                .expect_err("empty registry has no route finality")
+                .code()
+                != 0
+        );
+
+        // 2. Populated settlement state:
+        //    - domain 1 & 2: PoW with 6 confirmations (Established + admits cross-domain value)
+        //    - domain 3: Active BFT with no commitment yet (Pending)
+        //    - domain 4: Active AiInference committed (Established, non-slashable -> no value transfer)
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+
+        let make_domain =
+            |id: u32, kind: ConsensusKind, adapter: &str, last_h: u64| ConsensusDomain {
+                id,
+                kind,
+                status: DomainStatus::Active,
+                domain_chain_id: 45_000 + u64::from(id),
+                operator: Some(Address::from([u8::try_from(id).unwrap_or(1); 32])),
+                operator_bond: crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND,
+                config_hash: [0xA0; 32],
+                validator_set_hash: [0xB0; 32],
+                finality_adapter: adapter.to_owned(),
+                min_confirmations: 6,
+                bridge_enabled: true,
+                block_hash_scheme: RootScheme::Sha256,
+                state_root_scheme: RootScheme::Sha256,
+                tx_root_scheme: RootScheme::Sha256,
+                last_committed_height: last_h,
+                last_committed_hash: if last_h > 0 { [0x21; 32] } else { [0u8; 32] },
+                pow_parameters: None,
+                zk_program_allowlist: Vec::new(),
+                plugin_code_hash: None,
+                genesis_state_root: [0u8; 32],
+            };
+
+        for (id, kind, adapter, last_h) in [
+            (1u32, ConsensusKind::PoW, "pow-header-v1", 12u64),
+            (2u32, ConsensusKind::PoW, "pow-header-v1", 14u64),
+            (3u32, ConsensusKind::Bft, "tendermint-v1", 0u64),
+            (4u32, ConsensusKind::AiInference, "ai-attest-v1", 16u64),
+        ] {
+            blockchain
+                .state
+                .settlement
+                .domains
+                .restore_persisted(make_domain(id, kind.clone(), adapter, last_h))
+                .expect("register consensus domain");
+            if last_h > 0 {
+                blockchain
+                    .state
+                    .settlement
+                    .commitments
+                    .insert(DomainCommitment {
+                        domain_id: id,
+                        domain_height: last_h,
+                        domain_block_hash: [0x21; 32],
+                        parent_domain_block_hash: [0x20; 32],
+                        state_root: [u8::try_from(0x30 + id).unwrap_or(0x30); 32],
+                        tx_root: [0x41; 32],
+                        event_root: [0x42; 32],
+                        finality_proof_hash: [0x43; 32],
+                        consensus_kind: kind,
+                        validator_set_hash: [0xB0; 32],
+                        timestamp_ms: 1_000,
+                        sequence: 1,
+                        producer: None,
+                        state_updates: std::collections::BTreeMap::new(),
+                    })
+                    .expect("insert domain commitment");
+            }
+        }
+
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        // Future checkpoint refuses fail-closed.
+        let future_err = server
+            .get_finality_certificate(Some(999_999))
+            .await
+            .expect_err("future checkpoint must refuse");
+        assert_eq!(future_err.code(), -32004);
+
+        // Current tip certificate succeeds and passes full cryptographic integrity verification.
+        let cert_json = server
+            .get_finality_certificate(None)
+            .await
+            .expect("bud_getFinalityCertificate succeeds for registered domains");
+        assert_eq!(cert_json["establishedCount"], 3);
+        assert_eq!(cert_json["pendingCount"], 1);
+        assert_eq!(cert_json["refutedCount"], 0);
+        let cert: GlobalFinalityCertificate =
+            serde_json::from_value(cert_json["certificate"].clone())
+                .expect("deserialize GlobalFinalityCertificate");
+        assert_eq!(cert.verify_integrity(), Ok(()));
+        assert_eq!(
+            cert_json["certificateDigest"].as_str(),
+            Some(format!("0x{}", hex::encode(cert.certificate_digest)).as_str())
+        );
+
+        // Domain finality returns verifiable O(log N) Merkle inclusion proof.
+        let dom1_json = server
+            .get_domain_finality(1, None)
+            .await
+            .expect("bud_getDomainFinality succeeds for domain 1");
+        let proof1: DomainFinalityInclusionProof =
+            serde_json::from_value(dom1_json["proof"].clone())
+                .expect("deserialize DomainFinalityInclusionProof");
+        assert_eq!(proof1.bucket, FinalityBucket::Established);
+        assert!(proof1.verify(&cert.established_root));
+        assert_eq!(dom1_json["admitsCrossDomainValue"], true);
+        assert!(dom1_json["guaranteeLabel"]
+            .as_str()
+            .expect("guaranteeLabel")
+            .starts_with("probabilistic-work(6)|"));
+
+        // Unknown domain refuses fail-closed.
+        let missing_dom = server
+            .get_domain_finality(999, None)
+            .await
+            .expect_err("unknown domain must refuse");
+        assert_eq!(missing_dom.code(), -32004);
+
+        // Route between two established value-admitting domains (1 -> 2) succeeds with positive ceiling.
+        let route_ok = server
+            .get_route_finality(1, 2)
+            .await
+            .expect("bud_getRouteFinality succeeds for established pair");
+        assert_eq!(route_ok["admitsCrossDomainValue"], true);
+        assert_eq!(route_ok["refusalReason"], serde_json::Value::Null);
+        let ceiling: u128 = route_ok["safeValueOutflowCeilingAtoms"]
+            .as_str()
+            .expect("ceiling string")
+            .parse()
+            .expect("u128 ceiling");
+        assert!(ceiling > 0);
+        let src_proof: DomainFinalityInclusionProof =
+            serde_json::from_value(route_ok["sourceProof"].clone()).expect("sourceProof");
+        let dst_proof: DomainFinalityInclusionProof =
+            serde_json::from_value(route_ok["targetProof"].clone()).expect("targetProof");
+        assert!(src_proof.verify(&cert.established_root));
+        assert!(dst_proof.verify(&cert.established_root));
+
+        // Route involving a Pending domain (1 -> 3) must refuse value transfer with zero ceiling.
+        let route_pending = server
+            .get_route_finality(1, 3)
+            .await
+            .expect("bud_getRouteFinality reports non-admitted route for pending target");
+        assert_eq!(route_pending["admitsCrossDomainValue"], false);
+        assert_eq!(route_pending["safeValueOutflowCeilingAtoms"], "0");
+        assert!(route_pending["refusalReason"].is_string());
+
+        // Route from non-slashable DeterministicQuorum domain (4 -> 2) must refuse value transfer.
+        let route_non_slash = server
+            .get_route_finality(4, 2)
+            .await
+            .expect("bud_getRouteFinality reports non-admitted route for non-slashable source");
+        assert_eq!(route_non_slash["admitsCrossDomainValue"], false);
+        assert_eq!(route_non_slash["safeValueOutflowCeilingAtoms"], "0");
+
+        // Self-route and unknown domain route refuse fail-closed.
+        assert_eq!(
+            server
+                .get_route_finality(1, 1)
+                .await
+                .expect_err("self-route must refuse")
+                .code(),
+            -32602
+        );
+        assert_eq!(
+            server
+                .get_route_finality(1, 999)
+                .await
+                .expect_err("unknown target domain must refuse")
+                .code(),
+            -32004
+        );
+    }
 }

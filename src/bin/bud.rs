@@ -204,6 +204,11 @@ enum Command {
         #[command(subcommand)]
         action: DomainAction,
     },
+    /// Universal finality certificates and cross-domain route guarantees.
+    Finality {
+        #[command(subcommand)]
+        action: FinalityAction,
+    },
     /// Show deterministic cross-VM aliases (EVM / Solana / Aptos) for a Budlum address.
     Alias {
         /// Budlum 32-byte hex address (`0x` optional).
@@ -710,6 +715,31 @@ impl ContentArgs {
         .map(Some)
         .map_err(|e| format!("invalid content reference: {e:?}"))
     }
+}
+
+#[derive(Subcommand)]
+enum FinalityAction {
+    /// Inspect and locally verify the Universal Finality Certificate or one
+    /// domain's `O(log N)` Merkle inclusion proof.
+    Show {
+        /// Optional settlement checkpoint height (defaults to the node tip).
+        #[arg(long)]
+        checkpoint: Option<u64>,
+        /// Optional consensus domain id; when set, fetches and verifies its
+        /// Merkle inclusion proof (`bud_getDomainFinality`).
+        #[arg(long)]
+        domain: Option<u32>,
+    },
+    /// Inspect and locally verify the composed cross-domain finality guarantee
+    /// and safe value outflow ceiling for `source -> hub -> target`.
+    Route {
+        /// Source consensus domain id.
+        #[arg(long, required = true)]
+        source: u32,
+        /// Target consensus domain id.
+        #[arg(long, required = true)]
+        target: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3586,6 +3616,207 @@ fn run_bns_resolve(rpc_url: &str, name: &str, verify_proof: bool) -> Result<(), 
     Ok(())
 }
 
+fn parse_hex_bytes32(value: &str, field: &str) -> Result<[u8; 32], String> {
+    let trimmed = value.strip_prefix("0x").unwrap_or(value);
+    let raw = hex::decode(trimmed).map_err(|e| format!("invalid hex in {field}: {e}"))?;
+    let arr: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| format!("{field} must be 32 bytes (64 hex chars)"))?;
+    Ok(arr)
+}
+
+fn verify_certificate_rpc_response(
+    resp: &serde_json::Value,
+) -> Result<budlum_core::settlement::GlobalFinalityCertificate, String> {
+    let cert: budlum_core::settlement::GlobalFinalityCertificate = serde_json::from_value(
+        resp.get("certificate")
+            .cloned()
+            .ok_or_else(|| "RPC response missing `certificate`".to_string())?,
+    )
+    .map_err(|e| format!("failed to decode GlobalFinalityCertificate: {e}"))?;
+    cert.verify_integrity()
+        .map_err(|e| format!("certificate integrity verification failed: {e:?}"))?;
+    if let Some(hex_digest) = resp.get("certificateDigest").and_then(|v| v.as_str()) {
+        let claimed = parse_hex_bytes32(hex_digest, "certificateDigest")?;
+        if claimed != cert.certificate_digest {
+            return Err(
+                "RPC `certificateDigest` conflicts with recomputed certificate digest".to_string(),
+            );
+        }
+    }
+    Ok(cert)
+}
+
+fn verify_domain_finality_rpc_response(
+    resp: &serde_json::Value,
+    expected_domain: u32,
+) -> Result<budlum_core::settlement::DomainFinalityInclusionProof, String> {
+    let bucket_root_str = resp
+        .get("bucketRoot")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "RPC response missing `bucketRoot`".to_string())?;
+    let bucket_root = parse_hex_bytes32(bucket_root_str, "bucketRoot")?;
+    let proof: budlum_core::settlement::DomainFinalityInclusionProof = serde_json::from_value(
+        resp.get("proof")
+            .cloned()
+            .ok_or_else(|| "RPC response missing `proof`".to_string())?,
+    )
+    .map_err(|e| format!("failed to decode DomainFinalityInclusionProof: {e}"))?;
+    if proof.entry.domain_id != expected_domain {
+        return Err(format!(
+            "proof domain_id {} does not match requested domain {expected_domain}",
+            proof.entry.domain_id
+        ));
+    }
+    if !proof.verify(&bucket_root) {
+        return Err("domain finality Merkle inclusion proof failed local verification".to_string());
+    }
+    Ok(proof)
+}
+
+fn verify_route_finality_rpc_response(
+    resp: &serde_json::Value,
+    expected_source: u32,
+    expected_target: u32,
+) -> Result<
+    (
+        budlum_core::settlement::DomainFinalityInclusionProof,
+        budlum_core::settlement::DomainFinalityInclusionProof,
+    ),
+    String,
+> {
+    let src_root = parse_hex_bytes32(
+        resp.get("sourceBucketRoot")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "RPC response missing `sourceBucketRoot`".to_string())?,
+        "sourceBucketRoot",
+    )?;
+    let dst_root = parse_hex_bytes32(
+        resp.get("targetBucketRoot")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "RPC response missing `targetBucketRoot`".to_string())?,
+        "targetBucketRoot",
+    )?;
+    let src_proof: budlum_core::settlement::DomainFinalityInclusionProof = serde_json::from_value(
+        resp.get("sourceProof")
+            .cloned()
+            .ok_or_else(|| "RPC response missing `sourceProof`".to_string())?,
+    )
+    .map_err(|e| format!("failed to decode sourceProof: {e}"))?;
+    let dst_proof: budlum_core::settlement::DomainFinalityInclusionProof = serde_json::from_value(
+        resp.get("targetProof")
+            .cloned()
+            .ok_or_else(|| "RPC response missing `targetProof`".to_string())?,
+    )
+    .map_err(|e| format!("failed to decode targetProof: {e}"))?;
+    if src_proof.entry.domain_id != expected_source {
+        return Err(format!(
+            "sourceProof domain_id {} != requested source {expected_source}",
+            src_proof.entry.domain_id
+        ));
+    }
+    if dst_proof.entry.domain_id != expected_target {
+        return Err(format!(
+            "targetProof domain_id {} != requested target {expected_target}",
+            dst_proof.entry.domain_id
+        ));
+    }
+    if !src_proof.verify(&src_root) {
+        return Err("source domain finality Merkle proof failed local verification".to_string());
+    }
+    if !dst_proof.verify(&dst_root) {
+        return Err("target domain finality Merkle proof failed local verification".to_string());
+    }
+    Ok((src_proof, dst_proof))
+}
+
+fn run_finality_show(
+    rpc_url: &str,
+    checkpoint: Option<u64>,
+    domain: Option<u32>,
+) -> Result<(), String> {
+    if let Some(domain_id) = domain {
+        let resp = rpc_call(
+            rpc_url,
+            "bud_getDomainFinality",
+            serde_json::json!([domain_id, checkpoint]),
+        )?;
+        let proof = verify_domain_finality_rpc_response(&resp, domain_id)?;
+        let summary = serde_json::json!({
+            "domainId": domain_id,
+            "checkpointHeight": resp.get("checkpointHeight"),
+            "certificateDigest": resp.get("certificateDigest"),
+            "bucket": proof.bucket,
+            "bucketRoot": resp.get("bucketRoot"),
+            "height": proof.entry.height,
+            "verdict": proof.entry.verdict,
+            "guaranteeLabel": proof.entry.guarantee.label(),
+            "admitsCrossDomainValue": resp.get("admitsCrossDomainValue"),
+            "safeValueOutflowCeilingAtoms": resp.get("safeValueOutflowCeilingAtoms"),
+            "proofVerified": true,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+
+    let resp = rpc_call(
+        rpc_url,
+        "bud_getFinalityCertificate",
+        serde_json::json!([checkpoint]),
+    )?;
+    let cert = verify_certificate_rpc_response(&resp)?;
+    let summary = serde_json::json!({
+        "checkpointHeight": cert.checkpoint_height,
+        "certificateDigest": format!("0x{}", hex::encode(cert.certificate_digest)),
+        "establishedCount": cert.established_count,
+        "pendingCount": cert.pending_count,
+        "refutedCount": cert.refuted_count,
+        "establishedRoot": format!("0x{}", hex::encode(cert.established_root)),
+        "pendingRoot": format!("0x{}", hex::encode(cert.pending_root)),
+        "refutedRoot": format!("0x{}", hex::encode(cert.refuted_root)),
+        "guaranteeLabel": cert.guarantee.map(|g| g.label()),
+        "domainLabels": resp.get("domainLabels"),
+        "integrityVerified": true,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+fn run_finality_route(rpc_url: &str, source: u32, target: u32) -> Result<(), String> {
+    let resp = rpc_call(
+        rpc_url,
+        "bud_getRouteFinality",
+        serde_json::json!([source, target]),
+    )?;
+    let (src_proof, dst_proof) = verify_route_finality_rpc_response(&resp, source, target)?;
+    let summary = serde_json::json!({
+        "checkpointHeight": resp.get("checkpointHeight"),
+        "certificateDigest": resp.get("certificateDigest"),
+        "sourceDomain": source,
+        "targetDomain": target,
+        "sourceBucket": src_proof.bucket,
+        "targetBucket": dst_proof.bucket,
+        "admitsCrossDomainValue": resp.get("admitsCrossDomainValue"),
+        "refusalReason": resp.get("refusalReason"),
+        "routeGuaranteeLabel": resp.get("routeGuaranteeLabel"),
+        "sourceGuaranteeLabel": src_proof.entry.guarantee.label(),
+        "targetGuaranteeLabel": dst_proof.entry.guarantee.label(),
+        "safeValueOutflowCeilingAtoms": resp.get("safeValueOutflowCeilingAtoms"),
+        "proofsVerified": true,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 fn run_bns_info(rpc_url: &str, name: &str) -> Result<(), String> {
     if !budlum_core::bns::BnsRegistry::is_valid_name(name) {
         return Err(format!(
@@ -4207,6 +4438,14 @@ fn main() {
         },
         Command::Dev { action } => run_dev(&cli.rpc_url, action),
         Command::AppBinding { action } => run_app_binding(&cli.rpc_url, action),
+        Command::Finality { action } => match action {
+            FinalityAction::Show { checkpoint, domain } => {
+                run_finality_show(&cli.rpc_url, *checkpoint, *domain)
+            }
+            FinalityAction::Route { source, target } => {
+                run_finality_route(&cli.rpc_url, *source, *target)
+            }
+        },
         Command::Bns { action } => match action {
             BnsAction::Sell {
                 signer,
@@ -5454,5 +5693,72 @@ mod rpc_auth_tests {
             err.contains("appears twice"),
             "the refusal must name the cause, got: {err}"
         );
+    }
+
+    #[test]
+    fn finality_cli_verifiers_accept_valid_proofs_and_reject_forged_payloads() {
+        use budlum_core::crypto::facts::QuantumClass;
+        use budlum_core::settlement::{
+            compose_global_finality_certificate, DomainFinalityEntry, FinalityGuarantee,
+            FinalityReversibility, FinalityVerdict, FINALITY_BINDS_ALL,
+        };
+
+        let make_entry = |id: u32| DomainFinalityEntry {
+            domain_id: id,
+            height: 100 + u64::from(id),
+            checkpoint_height: 200,
+            state_root: [u8::try_from(id).unwrap_or(1); 32],
+            adapter_id: "pow-header-v1".to_owned(),
+            adapter_version: 1,
+            finality_proof_hash: [0x11; 32],
+            guarantee_backing_hash: [0x22; 32],
+            bond_atoms: 1_000_000,
+            guarantee: FinalityGuarantee {
+                reversibility: FinalityReversibility::ProbabilisticWork { confirmations: 6 },
+                quantum_posture: QuantumClass::Hash,
+                attestation: FINALITY_BINDS_ALL,
+                slashable_backing: false,
+                fault_tolerance_bps: 4_999,
+            },
+            verdict: FinalityVerdict::Established,
+        };
+
+        let cert = compose_global_finality_certificate(&[make_entry(1), make_entry(2)])
+            .expect("compose certificate");
+        let p1 = cert.prove_domain(1).expect("proof 1");
+        let p2 = cert.prove_domain(2).expect("proof 2");
+
+        let cert_resp = serde_json::json!({
+            "certificateDigest": format!("0x{}", hex::encode(cert.certificate_digest)),
+            "certificate": cert,
+        });
+        assert!(verify_certificate_rpc_response(&cert_resp).is_ok());
+
+        let mut forged_cert = cert_resp.clone();
+        forged_cert["certificateDigest"] = serde_json::json!(format!("0x{}", "ff".repeat(32)));
+        assert!(verify_certificate_rpc_response(&forged_cert).is_err());
+
+        let dom_resp = serde_json::json!({
+            "bucketRoot": format!("0x{}", hex::encode(cert.established_root)),
+            "proof": p1,
+        });
+        assert!(verify_domain_finality_rpc_response(&dom_resp, 1).is_ok());
+        assert!(verify_domain_finality_rpc_response(&dom_resp, 2).is_err());
+
+        let mut forged_dom = dom_resp;
+        forged_dom["bucketRoot"] = serde_json::json!(format!("0x{}", "00".repeat(32)));
+        assert!(verify_domain_finality_rpc_response(&forged_dom, 1).is_err());
+
+        let route_resp = serde_json::json!({
+            "sourceBucketRoot": format!("0x{}", hex::encode(cert.established_root)),
+            "targetBucketRoot": format!("0x{}", hex::encode(cert.established_root)),
+            "sourceProof": p1,
+            "targetProof": p2,
+        });
+        assert!(verify_route_finality_rpc_response(&route_resp, 1, 2).is_ok());
+
+        let mut forged_route = route_resp;
+        forged_route["targetBucketRoot"] = serde_json::json!(format!("0x{}", "aa".repeat(32)));
+        assert!(verify_route_finality_rpc_response(&forged_route, 1, 2).is_err());
     }
 }

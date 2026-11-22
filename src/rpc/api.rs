@@ -109,6 +109,33 @@ pub trait BudlumApi {
         key: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Canonical three-bucket Universal Finality Certificate at `checkpoint`
+    /// (`None` selects the current tip). Refuses when no consensus domain is
+    /// registered or when `checkpoint` is beyond the local chain tip.
+    #[method(name = "bud_getFinalityCertificate")]
+    async fn get_finality_certificate(
+        &self,
+        checkpoint: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Certified finality row and `O(log N)` Keccak-256 Merkle inclusion proof
+    /// for `domain_id` at `checkpoint` (`None` selects the current tip).
+    #[method(name = "bud_getDomainFinality")]
+    async fn get_domain_finality(
+        &self,
+        domain_id: u32,
+        checkpoint: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Composed cross-domain finality guarantee, economic outflow ceiling, and
+    /// verifiable inclusion proofs for the route `source_domain -> hub -> target_domain`.
+    #[method(name = "bud_getRouteFinality")]
+    async fn get_route_finality(
+        &self,
+        source_domain: u32,
+        target_domain: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_getDomainCommitments")]
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 

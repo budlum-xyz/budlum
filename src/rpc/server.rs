@@ -1573,6 +1573,8 @@ impl RpcServer {
                    "objectLayerRoot": h.object_layer_root.map(Self::bytes32_to_0x),
                    "proofRoot": h.proof_root.map(Self::bytes32_to_0x),
                    "provenHeight": Self::to_hex(h.proven_height),
+                   "ulpDomainsRoot": h.ulp_domains_root.map(Self::bytes32_to_0x),
+                   "finalityCertificateRoot": h.finality_certificate_root.map(Self::bytes32_to_0x),
                })
     }
 
@@ -1596,6 +1598,8 @@ impl RpcServer {
             "delegationRoot" => h.delegation_root,
             "objectLayerRoot" => h.object_layer_root,
             "proofRoot" => h.proof_root,
+            "ulpDomainsRoot" => h.ulp_domains_root,
+            "finalityCertificateRoot" => h.finality_certificate_root,
             _ => return None,
         })
     }
@@ -3091,6 +3095,207 @@ impl BudlumApiServer for RpcServer {
         // not record it.
                    "stateRootBody": proof.state_root_body.map(Self::bytes32_to_0x),
                }))
+    }
+
+    async fn get_finality_certificate(
+        &self,
+        checkpoint: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let cert = self
+            .chain
+            .get_finality_certificate(checkpoint)
+            .await
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32004,
+                    "no finality certificate available for the requested checkpoint",
+                    None::<()>,
+                )
+            })?;
+        let domain_labels: Vec<serde_json::Value> = cert
+            .established
+            .iter()
+            .map(|row| ("established", row))
+            .chain(cert.pending.iter().map(|row| ("pending", row)))
+            .chain(cert.refuted.iter().map(|row| ("refuted", row)))
+            .map(|(bucket, row)| {
+                serde_json::json!({
+                    "domainId": row.domain_id,
+                    "bucket": bucket,
+                    "height": row.height,
+                    "guaranteeLabel": row.guarantee.label(),
+                    "rowDigest": Self::bytes32_to_0x(row.row_digest()),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "checkpointHeight": cert.checkpoint_height,
+            "certificateDigest": Self::bytes32_to_0x(cert.certificate_digest),
+            "establishedRoot": Self::bytes32_to_0x(cert.established_root),
+            "pendingRoot": Self::bytes32_to_0x(cert.pending_root),
+            "refutedRoot": Self::bytes32_to_0x(cert.refuted_root),
+            "establishedCount": cert.established_count,
+            "pendingCount": cert.pending_count,
+            "refutedCount": cert.refuted_count,
+            "guaranteeLabel": cert.guarantee.map(|g| g.label()),
+            "domainLabels": domain_labels,
+            "certificate": cert,
+        }))
+    }
+
+    async fn get_domain_finality(
+        &self,
+        domain_id: u32,
+        checkpoint: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let cert = self
+            .chain
+            .get_finality_certificate(checkpoint)
+            .await
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32004,
+                    "no finality certificate available for the requested checkpoint",
+                    None::<()>,
+                )
+            })?;
+        let proof = cert.prove_domain(domain_id).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32004,
+                format!("domain {domain_id} is not present in the finality certificate"),
+                None::<()>,
+            )
+        })?;
+        let bucket_root = cert.bucket_root(proof.bucket);
+        let econ = crate::settlement::EconomicSecurityBound::derive(
+            &proof.entry.guarantee,
+            proof.entry.bond_atoms,
+            proof.entry.bond_atoms,
+        );
+        let established = matches!(
+            proof.entry.verdict,
+            crate::settlement::FinalityVerdict::Established
+        );
+        let admits_value = established && proof.entry.guarantee.admits_cross_domain_value();
+        let safe_ceiling = if admits_value {
+            econ.safe_value_outflow_ceiling_atoms
+        } else {
+            0
+        };
+        Ok(serde_json::json!({
+            "domainId": domain_id,
+            "checkpointHeight": cert.checkpoint_height,
+            "certificateDigest": Self::bytes32_to_0x(cert.certificate_digest),
+            "bucket": proof.bucket,
+            "bucketRoot": Self::bytes32_to_0x(bucket_root),
+            "rowDigest": Self::bytes32_to_0x(proof.entry.row_digest()),
+            "guaranteeLabel": proof.entry.guarantee.label(),
+            "admitsCrossDomainValue": admits_value,
+            "corruptionCostAtoms": econ.corruption_cost_atoms.to_string(),
+            "safeValueOutflowCeilingAtoms": safe_ceiling.to_string(),
+            "entry": proof.entry,
+            "proof": proof,
+        }))
+    }
+
+    async fn get_route_finality(
+        &self,
+        source_domain: u32,
+        target_domain: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if source_domain == target_domain {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "source_domain and target_domain must differ",
+                None::<()>,
+            ));
+        }
+        let cert = self
+            .chain
+            .get_finality_certificate(None)
+            .await
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32004,
+                    "no finality certificate available at the current tip",
+                    None::<()>,
+                )
+            })?;
+        let src = cert.prove_domain(source_domain).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32004,
+                format!("source domain {source_domain} is not present in the finality certificate"),
+                None::<()>,
+            )
+        })?;
+        let dst = cert.prove_domain(target_domain).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32004,
+                format!("target domain {target_domain} is not present in the finality certificate"),
+                None::<()>,
+            )
+        })?;
+        let hub = crate::settlement::FinalityGuarantee::settlement_hub();
+        let bound = crate::settlement::compose_cross_domain_route(
+            &src.entry.guarantee,
+            &hub,
+            &dst.entry.guarantee,
+        );
+        let composed_guarantee = src.entry.guarantee.meet(&hub).meet(&dst.entry.guarantee);
+        let src_econ = crate::settlement::EconomicSecurityBound::derive(
+            &src.entry.guarantee,
+            src.entry.bond_atoms,
+            src.entry.bond_atoms,
+        );
+        let dst_econ = crate::settlement::EconomicSecurityBound::derive(
+            &dst.entry.guarantee,
+            dst.entry.bond_atoms,
+            dst.entry.bond_atoms,
+        );
+        let src_established = matches!(
+            src.entry.verdict,
+            crate::settlement::FinalityVerdict::Established
+        );
+        let dst_established = matches!(
+            dst.entry.verdict,
+            crate::settlement::FinalityVerdict::Established
+        );
+        let admits_value = src_established && dst_established && bound.source_admits_value_transfer;
+        let refusal_reason = if !src_established {
+            Some("source domain is not established in the finality certificate")
+        } else if !dst_established {
+            Some("target domain is not established in the finality certificate")
+        } else if !bound.source_admits_value_transfer {
+            Some("source domain finality guarantee does not admit cross-domain value transfer")
+        } else {
+            None
+        };
+        let safe_ceiling = if admits_value {
+            src_econ
+                .safe_value_outflow_ceiling_atoms
+                .min(dst_econ.safe_value_outflow_ceiling_atoms)
+        } else {
+            0
+        };
+        Ok(serde_json::json!({
+            "checkpointHeight": cert.checkpoint_height,
+            "certificateDigest": Self::bytes32_to_0x(cert.certificate_digest),
+            "sourceDomain": source_domain,
+            "targetDomain": target_domain,
+            "admitsCrossDomainValue": admits_value,
+            "refusalReason": refusal_reason,
+            "routeGuaranteeLabel": composed_guarantee.label(),
+            "sourceGuaranteeLabel": src.entry.guarantee.label(),
+            "targetGuaranteeLabel": dst.entry.guarantee.label(),
+            "routeBound": bound,
+            "safeValueOutflowCeilingAtoms": safe_ceiling.to_string(),
+            "sourceBucket": src.bucket,
+            "targetBucket": dst.bucket,
+            "sourceBucketRoot": Self::bytes32_to_0x(cert.bucket_root(src.bucket)),
+            "targetBucketRoot": Self::bytes32_to_0x(cert.bucket_root(dst.bucket)),
+            "sourceProof": src,
+            "targetProof": dst,
+        }))
     }
 
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
