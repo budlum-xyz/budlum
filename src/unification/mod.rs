@@ -46,10 +46,11 @@ pub use output_composer::{
     UnifiedOutputBundle,
 };
 pub use payment_router::{
-    CollateralAsset, CrossDomainPosition, DomainTokenBalance, LiquidationError, LiquidationReceipt,
-    LiquidityQuote, PaymentError, PaymentRail, SeizedCollateralLeg, SplitTenderLeg,
-    UniversalLiquidationCoordinator, UniversalPaymentIntent, UniversalPaymentReceipt,
-    UniversalPaymentRouter,
+    universal_asset_id, verify_split_tender_supply_conservation, AssetEquivalenceClass,
+    AssetEquivalenceMember, CollateralAsset, CrossDomainPosition, DomainTokenBalance,
+    LiquidationError, LiquidationReceipt, LiquidityQuote, PaymentError, PaymentRail,
+    SeizedCollateralLeg, SplitTenderLeg, UniversalLiquidationCoordinator, UniversalPaymentIntent,
+    UniversalPaymentReceipt, UniversalPaymentRouter,
 };
 pub use storage_fabric::{
     ReplicaResolution, StorageFabricError, StorageNetworkKind, StoragePaymentRequest,

@@ -305,3 +305,158 @@ fn finality_verifier_contracts_carry_no_privileged_admin_or_owner_doors() {
         }
     }
 }
+
+#[test]
+fn unified_asset_id_agrees_across_bridge_object_layer_uer_and_payment_router_with_caip19_check() {
+    use crate::cross_domain::bridge::AssetId as BridgeAssetId;
+    use crate::execution::uer::UniversalExecutionReceipt;
+    use crate::object_layer::ids::AssetId as ObjectAssetId;
+    use crate::unification::payment_router::universal_asset_id;
+
+    let domain = 42u32;
+    let local = b"eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+
+    let from_bridge = BridgeAssetId::for_domain(domain, local);
+    let from_object = ObjectAssetId::universal_bridge_id(domain, local);
+    let from_uer = UniversalExecutionReceipt::universal_asset_id(domain, local);
+    let from_router = universal_asset_id(domain, local);
+
+    assert_eq!(from_bridge, from_object);
+    assert_eq!(from_bridge, from_uer);
+    assert_eq!(*from_bridge.as_bytes(), from_router);
+    assert!(from_bridge.is_namespaced_for(domain));
+    assert_eq!(from_bridge.namespace_domain(), domain);
+
+    // Cross-domain collision is impossible by construction.
+    assert_ne!(
+        universal_asset_id(domain, local),
+        universal_asset_id(domain + 1, local)
+    );
+
+    // CAIP-19 grammar checks (valid fungible + NFT + fail-closed rejections).
+    assert!(ObjectAssetId::is_valid_caip19(
+        "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    ));
+    assert!(ObjectAssetId::is_valid_caip19(
+        "eip155:1/erc721:0x06012c8cf97bead5deae237070f9587f8e7a266d/771769"
+    ));
+    assert!(!ObjectAssetId::is_valid_caip19(""));
+    assert!(!ObjectAssetId::is_valid_caip19("eip155:1"));
+    assert!(!ObjectAssetId::is_valid_caip19("EIP155:1/erc20:0xabc"));
+    assert!(!ObjectAssetId::is_valid_caip19(
+        "eip155:1/erc20:0xabc/1/extra"
+    ));
+}
+
+#[test]
+fn asset_equivalence_class_selects_cheapest_proven_member_and_enforces_supply_conservation() {
+    use crate::unification::payment_router::{
+        universal_asset_id, verify_split_tender_supply_conservation, AssetEquivalenceClass,
+        AssetEquivalenceMember, SplitTenderLeg, UniversalPaymentReceipt,
+    };
+
+    let cheap_unproven = AssetEquivalenceMember {
+        domain_id: 1,
+        asset_id: universal_asset_id(1, b"USDC"),
+        symbol: String::from("USDC"),
+        fee_bps: 1,
+        available_liquidity: 10_000_000,
+        provenance_proof_root: [0x11; 32],
+        finality_proven: false,
+    };
+    let zero_root_unproven = AssetEquivalenceMember {
+        domain_id: 2,
+        asset_id: universal_asset_id(2, b"USDC"),
+        symbol: String::from("USDC"),
+        fee_bps: 2,
+        available_liquidity: 10_000_000,
+        provenance_proof_root: [0u8; 32],
+        finality_proven: true,
+    };
+    let expensive_proven = AssetEquivalenceMember {
+        domain_id: 3,
+        asset_id: universal_asset_id(3, b"USDC"),
+        symbol: String::from("USDC"),
+        fee_bps: 25,
+        available_liquidity: 5_000_000,
+        provenance_proof_root: [0x33; 32],
+        finality_proven: true,
+    };
+    let cheapest_proven = AssetEquivalenceMember {
+        domain_id: 4,
+        asset_id: universal_asset_id(4, b"USDC"),
+        symbol: String::from("USDC"),
+        fee_bps: 10,
+        available_liquidity: 2_000_000,
+        provenance_proof_root: [0x44; 32],
+        finality_proven: true,
+    };
+
+    let eq = AssetEquivalenceClass::new(
+        String::from("USDC"),
+        vec![
+            cheap_unproven,
+            zero_root_unproven,
+            expensive_proven,
+            cheapest_proven,
+        ],
+    )
+    .expect("equivalence class");
+
+    // Order-independent selection skips unproven and zero-root entries.
+    let picked = eq
+        .select_cheapest_proven(1_000_000)
+        .expect("cheapest proven");
+    assert_eq!(picked.domain_id, 4);
+    assert_eq!(picked.fee_bps, 10);
+
+    // Larger amount falls back to the proven member with sufficient liquidity.
+    let large = eq.select_cheapest_proven(3_000_000).expect("larger proven");
+    assert_eq!(large.domain_id, 3);
+
+    // Request exceeding all proven liquidity fails closed.
+    assert!(eq.select_cheapest_proven(9_000_000).is_err());
+
+    let receipt = UniversalPaymentReceipt {
+        intent_id: [0xaa; 32],
+        target_domain: 4,
+        target_asset_id: universal_asset_id(4, b"USDC"),
+        target_amount_delivered: 1_000,
+        legs: vec![
+            SplitTenderLeg {
+                source_domain: 1,
+                source_asset_id: universal_asset_id(1, b"USDC"),
+                source_symbol: String::from("USDC"),
+                source_debited: 605,
+                target_delivered: 600,
+                fee_bps: 10,
+                direct_same_domain: false,
+                quote_id: Some([0xbb; 32]),
+            },
+            SplitTenderLeg {
+                source_domain: 4,
+                source_asset_id: universal_asset_id(4, b"USDC"),
+                source_symbol: String::from("USDC"),
+                source_debited: 400,
+                target_delivered: 400,
+                fee_bps: 0,
+                direct_same_domain: true,
+                quote_id: None,
+            },
+        ],
+        legs_merkle_root: [0xcc; 32],
+        pos_auth_code: None,
+        receipt_hash: [0xdd; 32],
+    };
+
+    verify_split_tender_supply_conservation(&receipt, 1_005, 1_000, 5)
+        .expect("exact supply conservation passes");
+    assert!(
+        verify_split_tender_supply_conservation(&receipt, 1_005, 1_001, 5).is_err(),
+        "inflationary delivery must fail conservation"
+    );
+    assert!(
+        verify_split_tender_supply_conservation(&receipt, u128::MAX, u128::MAX, 1).is_err(),
+        "overflow must fail conservation"
+    );
+}

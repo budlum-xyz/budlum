@@ -310,6 +310,20 @@ impl UniversalExecutionReceipt {
         ])
     }
 
+    /// Derive the unified 32-byte cross-domain asset identifier for a domain-local
+    /// asset reference referenced by a UER-1 execution receipt.
+    ///
+    /// Convenience: ensures the universal execution layer resolves the exact same
+    /// 32-byte domain-namespaced asset identifier as the bridge, object layer, and
+    /// payment router.
+    #[must_use]
+    pub fn universal_asset_id(
+        domain: crate::domain::types::DomainId,
+        local_asset: &[u8],
+    ) -> crate::cross_domain::bridge::AssetId {
+        crate::cross_domain::bridge::AssetId::for_domain(domain, local_asset)
+    }
+
     /// Validates receipt schema invariants before commitment or proof verification.
     ///
     /// Convenience: exposed for RPC/SDK callers validating untrusted decoded receipts.

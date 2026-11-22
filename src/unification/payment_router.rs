@@ -1041,6 +1041,233 @@ impl UniversalLiquidationCoordinator {
     }
 }
 
+/// Maximum number of domain asset members grouped inside a single
+/// [`AssetEquivalenceClass`].
+const MAX_EQUIVALENCE_MEMBERS: usize = 64;
+
+/// One domain-native representation participating in a proof-backed
+/// [`AssetEquivalenceClass`] (for example, native USDC on Ethereum, Solana, or
+/// Cosmos).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetEquivalenceMember {
+    /// Canonical domain identifier in the settlement registry.
+    pub domain_id: DomainId,
+    /// Canonical 32-byte domain-namespaced asset identifier (`bridge::AssetId::for_domain`).
+    pub asset_id: Hash32,
+    /// Human-readable symbol on that domain.
+    pub symbol: String,
+    /// Effective settlement routing fee in basis points (`<= MAX_SLIPPAGE_BPS`).
+    pub fee_bps: u16,
+    /// Available liquidity in base units on this domain.
+    pub available_liquidity: u128,
+    /// Finality or provenance Merkle root attesting that this member is backed
+    /// by an admitted external finality proof rather than an unverified claim.
+    pub provenance_proof_root: Hash32,
+    /// Whether this member's external domain finality proof verified on the
+    /// settlement layer.
+    pub finality_proven: bool,
+}
+
+impl AssetEquivalenceMember {
+    #[must_use]
+    fn commitment_hash(&self) -> Hash32 {
+        hash_domain_fields(
+            b"BDLM_ASSET_EQUIV_MEMBER_V1",
+            &[
+                &self.domain_id.to_le_bytes(),
+                &self.asset_id,
+                self.symbol.as_bytes(),
+                &self.fee_bps.to_le_bytes(),
+                &self.available_liquidity.to_le_bytes(),
+                &self.provenance_proof_root,
+                &[u8::from(self.finality_proven)],
+            ],
+        )
+    }
+}
+
+/// Fungible cross-domain equivalence class grouping proof-verified native
+/// representations of the same logical asset across multiple chains so the
+/// payment router can select the cheapest proven route without minting
+/// synthetic wrappers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetEquivalenceClass {
+    /// Deterministic commitment identifying this equivalence class.
+    pub class_id: Hash32,
+    /// Logical asset symbol (for example `USDC`).
+    pub logical_symbol: String,
+    /// Canonical members sorted by `(domain_id, asset_id)`.
+    pub members: Vec<AssetEquivalenceMember>,
+}
+
+impl AssetEquivalenceClass {
+    /// Build a canonical [`AssetEquivalenceClass`] after validating symbol,
+    /// capacity bounds, fee caps, and `(domain_id, asset_id)` uniqueness.
+    ///
+    /// Convenience: constructs verified cross-domain asset equivalence classes
+    /// for multi-chain payment routing without synthetic wrappers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] if `logical_symbol` is invalid,
+    /// `members` is empty, a fee exceeds `MAX_SLIPPAGE_BPS`, or duplicate
+    /// `(domain_id, asset_id)` members are supplied, or
+    /// [`PaymentError::InputLimitExceeded`] if `members.len() > MAX_EQUIVALENCE_MEMBERS`.
+    pub fn new(
+        logical_symbol: String,
+        mut members: Vec<AssetEquivalenceMember>,
+    ) -> Result<Self, PaymentError> {
+        validate_safe_label("logical_symbol", &logical_symbol, 32)
+            .map_err(PaymentError::InvalidIntent)?;
+        if members.is_empty() {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "asset equivalence class must contain at least one member",
+            )));
+        }
+        if members.len() > MAX_EQUIVALENCE_MEMBERS {
+            return Err(PaymentError::InputLimitExceeded);
+        }
+
+        let mut seen = BTreeSet::new();
+        for member in &members {
+            validate_safe_label("member.symbol", &member.symbol, 32)
+                .map_err(PaymentError::InvalidIntent)?;
+            if member.fee_bps > MAX_SLIPPAGE_BPS {
+                return Err(PaymentError::InvalidIntent(format!(
+                    "member fee {} bps exceeds MAX_SLIPPAGE_BPS ({MAX_SLIPPAGE_BPS})",
+                    member.fee_bps
+                )));
+            }
+            if !seen.insert((member.domain_id, member.asset_id)) {
+                return Err(PaymentError::InvalidIntent(format!(
+                    "duplicate equivalence member for domain {}",
+                    member.domain_id
+                )));
+            }
+        }
+
+        members.sort_by_key(|m| (m.domain_id, m.asset_id));
+        let member_hashes: Vec<Hash32> = members
+            .iter()
+            .map(AssetEquivalenceMember::commitment_hash)
+            .collect();
+        let members_root = unification_merkle_root(b"BDLM_ASSET_EQUIV_CLASS_V1", &member_hashes);
+        let class_id = hash_domain_fields(
+            b"BDLM_ASSET_EQUIV_CLASS_V1",
+            &[logical_symbol.as_bytes(), &members_root],
+        );
+        Ok(Self {
+            class_id,
+            logical_symbol,
+            members,
+        })
+    }
+
+    /// Select the cheapest finality-proven member with a non-zero provenance
+    /// root and enough liquidity to fill `required_amount`.
+    ///
+    /// Unproven members (`finality_proven == false`) or members carrying an
+    /// all-zero `provenance_proof_root` are ignored fail-closed even if they
+    /// advertise a lower fee. Ties break deterministically by `(domain_id, asset_id)`.
+    ///
+    /// Convenience: routes universal payments to the cheapest cryptographically
+    /// proven native asset member in an equivalence class.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] if `required_amount == 0`, or
+    /// [`PaymentError::InsufficientMultiDomainLiquidity`] if no proven member
+    /// can satisfy `required_amount`.
+    pub fn select_cheapest_proven(
+        &self,
+        required_amount: u128,
+    ) -> Result<&AssetEquivalenceMember, PaymentError> {
+        if required_amount == 0 {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "required_amount must be positive",
+            )));
+        }
+        let mut best: Option<&AssetEquivalenceMember> = None;
+        let mut max_available = 0u128;
+
+        for member in &self.members {
+            if !member.finality_proven || member.provenance_proof_root == [0u8; 32] {
+                continue;
+            }
+            if member.available_liquidity > max_available {
+                max_available = member.available_liquidity;
+            }
+            if member.available_liquidity < required_amount {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some(cur) => {
+                    (member.fee_bps, member.domain_id, member.asset_id)
+                        < (cur.fee_bps, cur.domain_id, cur.asset_id)
+                }
+            };
+            if better {
+                best = Some(member);
+            }
+        }
+
+        best.ok_or(PaymentError::InsufficientMultiDomainLiquidity {
+            shortfall: required_amount.saturating_sub(max_available),
+        })
+    }
+}
+
+/// Derive the unified 32-byte cross-domain asset identifier for `(domain, local_asset)`
+/// using the bridge's canonical domain-namespaced rule.
+///
+/// Convenience: keeps payment router balances and quotes aligned on the exact
+/// same 32-byte asset identity used by the bridge, object layer, and UEL.
+#[must_use]
+pub fn universal_asset_id(domain: DomainId, local_asset: &[u8]) -> Hash32 {
+    *crate::cross_domain::bridge::AssetId::for_domain(domain, local_asset).as_bytes()
+}
+
+/// Verify supply conservation on a [`UniversalPaymentReceipt`]:
+/// 1. The sum of `target_delivered` across all `legs` must equal
+///    `receipt.target_amount_delivered` without overflow.
+/// 2. `delivered_total_value + total_fees` must equal `source_total_value`
+///    without overflow (no unbacked minting or silent value leak).
+///
+/// Convenience: external and test verifier enforcing strict conservation of
+/// value across multi-leg split-tender payment receipts.
+///
+/// # Errors
+///
+/// Returns [`PaymentError::ArithmeticOverflow`] on overflow or
+/// [`PaymentError::InvalidIntent`] if conservation is violated.
+pub fn verify_split_tender_supply_conservation(
+    receipt: &UniversalPaymentReceipt,
+    source_total_value: u128,
+    delivered_total_value: u128,
+    total_fees: u128,
+) -> Result<(), PaymentError> {
+    let legs_delivered = receipt.legs.iter().try_fold(0u128, |acc, leg| {
+        acc.checked_add(leg.target_delivered)
+            .ok_or(PaymentError::ArithmeticOverflow)
+    })?;
+    if legs_delivered != receipt.target_amount_delivered {
+        return Err(PaymentError::InvalidIntent(format!(
+            "split-tender leg sum ({legs_delivered}) disagrees with receipt target_amount_delivered ({})",
+            receipt.target_amount_delivered
+        )));
+    }
+    let accounted = delivered_total_value
+        .checked_add(total_fees)
+        .ok_or(PaymentError::ArithmeticOverflow)?;
+    if accounted != source_total_value {
+        return Err(PaymentError::InvalidIntent(format!(
+            "supply conservation violated: delivered ({delivered_total_value}) + fees ({total_fees}) != source ({source_total_value})"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
