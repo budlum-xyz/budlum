@@ -203,11 +203,25 @@ jobs:
           # request runs read-only so an unmerged tree cannot seed a cache
           # that a trusted build later restores.
           cache-read-only: ${{ github.event_name != 'pull_request' }}
+      # Measured on the first dispatch runs of this job: the runner reports
+      # "hardware acceleration is not available", and the x86 system image the
+      # action asked for is not published for this API level
+      # ("Failed to find package 'system-images;android-30;default;x86'"), so
+      # the emulator never booted and the step died in 36 seconds on
+      # `adb emu kill` against a closed port. Give the runner KVM permissions
+      # and ask for an architecture that exists.
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       - name: Run Keystore and boot instrumentation on an emulator
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2, 2026-07-05
         with:
           api-level: 30
           target: default
+          arch: x86_64
           working-directory: mobile/android
           # The action's published input is `script`, not `run`.
           script: gradle connectedDebugAndroidTest --no-daemon
