@@ -131,6 +131,14 @@ pub enum LiquidationError {
     PriceOverflow,
     /// Collateral underflow (impossible, defensive).
     CollateralUnderflow,
+    /// State-root Merkle inclusion proof for an AMM reserve snapshot failed verification.
+    InvalidReserveProof { domain_id: u32, epoch: u64 },
+    /// Liquidation bonus exceeded `LIQ_BONUS_MAX_BPS`.
+    BonusExceedsCap { got_bps: u64, max_bps: u64 },
+    /// Requested debt repayment is zero or exceeds the close-factor ceiling.
+    InvalidCloseAmount { requested: u128, max_repay: u128 },
+    /// Missing delivery proof or collateral custody root for cross-domain seizure.
+    MissingProofAnchor(String),
 }
 
 impl core::fmt::Display for LiquidationError {
@@ -162,6 +170,30 @@ impl core::fmt::Display for LiquidationError {
             }
             Self::PriceOverflow => write!(f, "TWAP price overflow"),
             Self::CollateralUnderflow => write!(f, "collateral underflow"),
+            Self::InvalidReserveProof { domain_id, epoch } => {
+                write!(
+                    f,
+                    "AMM reserve Merkle proof failed for domain {domain_id} at epoch {epoch}"
+                )
+            }
+            Self::BonusExceedsCap { got_bps, max_bps } => {
+                write!(
+                    f,
+                    "liquidation bonus {got_bps} bps exceeds cap {max_bps} bps"
+                )
+            }
+            Self::InvalidCloseAmount {
+                requested,
+                max_repay,
+            } => {
+                write!(
+                    f,
+                    "liquidation close amount {requested} must be within 1..={max_repay}"
+                )
+            }
+            Self::MissingProofAnchor(reason) => {
+                write!(f, "missing cross-domain liquidation proof anchor: {reason}")
+            }
         }
     }
 }
@@ -359,6 +391,362 @@ pub fn execute_liquidation(
     }
 
     Ok(outcomes)
+}
+
+/// Domain separation tag for AMM reserve Merkle leaves inside a certified domain
+/// state root.
+pub const LIQ_RESERVE_LEAF_TAG: &[u8] = b"BDLM_LIQ_RESERVE_LEAF_V1";
+
+/// Maximum debt fraction repayable in one liquidation call (50% = 5,000 bps).
+pub const LIQ_CLOSE_FACTOR_MAX_BPS: u64 = 5_000;
+
+/// Maximum liquidation incentive bonus over debt repaid (15% = 1,500 bps).
+pub const LIQ_BONUS_MAX_BPS: u64 = 1_500;
+
+/// Maximum collateral legs seized across external domains in one liquidation.
+const MAX_COLLATERAL_LEGS: usize = 16;
+
+/// State-root-anchored AMM reserve observation carrying its Merkle inclusion
+/// coordinates against a finalized domain state root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvenReserveObservation {
+    pub domain_id: u32,
+    pub snapshot: AmmReserveSnapshot,
+    pub leaf_index: usize,
+    pub leaf_count: usize,
+}
+
+/// Compute the deterministic Merkle leaf committing an AMM reserve observation
+/// inside `domain_id`'s state tree.
+///
+/// Convenience: shared by state-root provers and verifiers building oracle-free
+/// TWAP reserve proofs.
+#[must_use]
+pub fn reserve_observation_leaf(
+    domain_id: u32,
+    epoch: u64,
+    reserve_x: u128,
+    reserve_y: u128,
+) -> Hash32 {
+    crate::core::hash::hash_fields_bytes(&[
+        LIQ_RESERVE_LEAF_TAG,
+        &domain_id.to_le_bytes(),
+        &epoch.to_le_bytes(),
+        &reserve_x.to_le_bytes(),
+        &reserve_y.to_le_bytes(),
+    ])
+}
+
+/// Compute the Merkle root committing reserve observation leaves at one epoch.
+///
+/// Convenience: constructs certified domain state roots for oracle-free TWAP
+/// verification and tests.
+#[must_use]
+pub fn build_reserve_state_root(leaves: &[Hash32]) -> Hash32 {
+    crate::unification::unification_merkle_root(LIQ_RESERVE_LEAF_TAG, leaves)
+}
+
+/// Build a Merkle inclusion proof for `leaf_index` in an epoch reserve tree.
+///
+/// Convenience: builds inclusion proofs verified by [`ProvenReserveObservation::verify_against_state_root`].
+#[must_use]
+pub fn build_reserve_inclusion_proof(leaves: &[Hash32], leaf_index: usize) -> Option<Vec<Hash32>> {
+    crate::unification::build_merkle_proof(LIQ_RESERVE_LEAF_TAG, leaves, leaf_index)
+}
+
+impl ProvenReserveObservation {
+    /// Cryptographically verify that this AMM reserve snapshot is included in
+    /// `certified_domain_state_root` (from a finalized domain checkpoint).
+    ///
+    /// Convenience: enforces oracle-free state-root provenance for every TWAP
+    /// price observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiquidationError::InvalidReserveProof`] if the root is zero,
+    /// disagrees with `snapshot.state_root`, or fails Merkle verification.
+    pub fn verify_against_state_root(
+        &self,
+        certified_domain_state_root: &Hash32,
+    ) -> Result<(), LiquidationError> {
+        if *certified_domain_state_root == [0u8; 32]
+            || self.snapshot.state_root != *certified_domain_state_root
+        {
+            return Err(LiquidationError::InvalidReserveProof {
+                domain_id: self.domain_id,
+                epoch: self.snapshot.epoch,
+            });
+        }
+        let leaf = reserve_observation_leaf(
+            self.domain_id,
+            self.snapshot.epoch,
+            self.snapshot.reserve_x,
+            self.snapshot.reserve_y,
+        );
+        if !crate::unification::verify_merkle_proof(
+            LIQ_RESERVE_LEAF_TAG,
+            certified_domain_state_root,
+            self.leaf_index,
+            self.leaf_count,
+            &leaf,
+            &self.snapshot.proof,
+        ) {
+            return Err(LiquidationError::InvalidReserveProof {
+                domain_id: self.domain_id,
+                epoch: self.snapshot.epoch,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Proof-carrying health verdict derived exclusively from state-root-verified
+/// AMM reserves (no price oracle dependency).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofCarryingHealth {
+    pub position_id: u64,
+    pub debt_domain_id: u32,
+    pub twap_price_scaled: u128,
+    pub twap_epoch: u64,
+    pub health_bps: u64,
+    pub maintenance_threshold_bps: u64,
+    pub liquidatable: bool,
+    pub observations_commitment: Hash32,
+    pub health_proof_digest: Hash32,
+}
+
+/// One cross-domain collateral leg held in object-layer custody or a Budlum-proven
+/// remote account (debt on domain A, collateral spread across domains B, C, ...).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollateralLegSpec {
+    pub domain_id: u32,
+    pub asset_id: Hash32,
+    /// Non-zero custody or remote-account proof root anchoring this leg.
+    pub custody_or_remote_root: Hash32,
+    pub available_y: u128,
+}
+
+/// Deterministic collateral seizure outcome on one external domain leg.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossDomainSeizureLeg {
+    pub domain_id: u32,
+    pub asset_id: Hash32,
+    pub seized_y: u128,
+    pub remainder_y: u128,
+}
+
+/// Complete proof-carrying cross-domain liquidation result binding the proven
+/// health verdict, close-factor-bounded debt repayment, bonus cap, delivery
+/// proof anchor on the debt domain, and deterministic collateral seizures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvenLiquidationResult {
+    pub health: ProofCarryingHealth,
+    pub debt_repaid_x: u128,
+    pub bonus_bps: u64,
+    pub seized_legs: Vec<CrossDomainSeizureLeg>,
+    pub delivery_proof_root: Hash32,
+}
+
+/// Derive a [`ProofCarryingHealth`] verdict for `position` after verifying every
+/// [`ProvenReserveObservation`] against `certified_roots` keyed by `(domain_id, epoch)`.
+///
+/// Convenience: produces an oracle-free, state-root-proven health statement
+/// usable by cross-domain liquidation gates and light verifiers.
+///
+/// # Errors
+///
+/// Returns [`LiquidationError`] if `position.debt_x == 0`, any observation fails
+/// Merkle proof verification against `certified_roots`, or the TWAP sequence is
+/// malformed.
+pub fn prove_position_health(
+    position: &LiquidationPosition,
+    debt_domain_id: u32,
+    certified_roots: &std::collections::BTreeMap<(u32, u64), Hash32>,
+    observations: &[ProvenReserveObservation],
+) -> Result<ProofCarryingHealth, LiquidationError> {
+    if position.debt_x == 0 {
+        return Err(LiquidationError::NoDebt {
+            position_id: position.position_id,
+        });
+    }
+
+    let mut snapshots = Vec::with_capacity(observations.len());
+    let mut obs_digests = Vec::with_capacity(observations.len());
+    for obs in observations {
+        let Some(certified_root) = certified_roots.get(&(obs.domain_id, obs.snapshot.epoch)) else {
+            return Err(LiquidationError::InvalidReserveProof {
+                domain_id: obs.domain_id,
+                epoch: obs.snapshot.epoch,
+            });
+        };
+        obs.verify_against_state_root(certified_root)?;
+        obs_digests.push(obs.snapshot.digest());
+        snapshots.push(obs.snapshot.clone());
+    }
+
+    validate_observations(&snapshots)?;
+    let twap_price_scaled = compute_twap_price(&snapshots)?;
+    let twap_epoch = snapshots.last().map_or(0, |s| s.epoch);
+
+    let scale: u128 = 1_000_000_000_000_000_000;
+    let collateral_value_x = position.collateral_y.saturating_mul(scale) / twap_price_scaled.max(1);
+    let health_bps_u128 = collateral_value_x
+        .saturating_mul(u128::from(BPS_DEN))
+        .checked_div(position.debt_x)
+        .unwrap_or(u128::from(u64::MAX));
+    let health_bps = u64::try_from(health_bps_u128).unwrap_or(u64::MAX);
+    let liquidatable = health_bps <= position.maintenance_threshold_bps;
+
+    let observations_commitment =
+        crate::unification::unification_merkle_root(b"BDLM_LIQ_OBSERVATIONS_V1", &obs_digests);
+    let health_proof_digest = crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_LIQ_HEALTH_PROOF_V1",
+        &position.position_id.to_le_bytes(),
+        &debt_domain_id.to_le_bytes(),
+        &twap_price_scaled.to_le_bytes(),
+        &twap_epoch.to_le_bytes(),
+        &health_bps.to_le_bytes(),
+        &position.maintenance_threshold_bps.to_le_bytes(),
+        &[u8::from(liquidatable)],
+        &observations_commitment,
+    ]);
+
+    Ok(ProofCarryingHealth {
+        position_id: position.position_id,
+        debt_domain_id,
+        twap_price_scaled,
+        twap_epoch,
+        health_bps,
+        maintenance_threshold_bps: position.maintenance_threshold_bps,
+        liquidatable,
+        observations_commitment,
+        health_proof_digest,
+    })
+}
+
+/// Execute an oracle-free, proof-carrying, close-factor- and bonus-capped
+/// cross-domain liquidation (debt on `debt_domain_id`, collateral legs across
+/// arbitrary domains anchored by custody or remote-account proof roots).
+///
+/// Rejects fail-closed if:
+/// - Any AMM reserve observation fails Merkle verification against `certified_roots`.
+/// - The position is healthy (`!health.liquidatable`).
+/// - `bonus_bps > LIQ_BONUS_MAX_BPS` or `repay_debt_x` is zero / exceeds the
+///   50% close-factor ceiling (`LIQ_CLOSE_FACTOR_MAX_BPS`).
+/// - `delivery_proof_root` or any collateral leg `custody_or_remote_root` is all-zero.
+/// - Collateral legs are empty or exceed `MAX_COLLATERAL_LEGS`, or their sum
+///   disagrees with `position.collateral_y`.
+///
+/// Convenience: unified oracle-free cross-domain liquidation coordinator
+/// combining state-root reserve provenance with close-factor and bonus bounds.
+///
+/// # Errors
+///
+/// Returns [`LiquidationError`] on any failed proof, health, bound, or anchor check.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_proven_cross_domain_liquidation(
+    position: &LiquidationPosition,
+    debt_domain_id: u32,
+    certified_roots: &std::collections::BTreeMap<(u32, u64), Hash32>,
+    observations: &[ProvenReserveObservation],
+    collateral_legs: &[CollateralLegSpec],
+    repay_debt_x: u128,
+    bonus_bps: u64,
+    delivery_proof_root: Hash32,
+) -> Result<ProvenLiquidationResult, LiquidationError> {
+    if bonus_bps > LIQ_BONUS_MAX_BPS {
+        return Err(LiquidationError::BonusExceedsCap {
+            got_bps: bonus_bps,
+            max_bps: LIQ_BONUS_MAX_BPS,
+        });
+    }
+    if delivery_proof_root == [0u8; 32] {
+        return Err(LiquidationError::MissingProofAnchor(String::from(
+            "debt-domain delivery_proof_root must be non-zero",
+        )));
+    }
+    if collateral_legs.is_empty() || collateral_legs.len() > MAX_COLLATERAL_LEGS {
+        return Err(LiquidationError::MissingProofAnchor(format!(
+            "collateral_legs count must be within 1..={MAX_COLLATERAL_LEGS}"
+        )));
+    }
+
+    let mut total_leg_collateral = 0u128;
+    for leg in collateral_legs {
+        if leg.custody_or_remote_root == [0u8; 32] {
+            return Err(LiquidationError::MissingProofAnchor(format!(
+                "collateral leg on domain {} missing non-zero custody/remote root",
+                leg.domain_id
+            )));
+        }
+        total_leg_collateral = total_leg_collateral
+            .checked_add(leg.available_y)
+            .ok_or(LiquidationError::PriceOverflow)?;
+    }
+    if total_leg_collateral != position.collateral_y {
+        return Err(LiquidationError::MissingProofAnchor(format!(
+            "sum of collateral legs ({total_leg_collateral}) disagrees with position.collateral_y ({})",
+            position.collateral_y
+        )));
+    }
+
+    let health = prove_position_health(position, debt_domain_id, certified_roots, observations)?;
+    if !health.liquidatable {
+        return Err(LiquidationError::PositionHealthy {
+            position_id: position.position_id,
+            health_bps: health.health_bps,
+        });
+    }
+
+    let max_repay = (position
+        .debt_x
+        .saturating_mul(u128::from(LIQ_CLOSE_FACTOR_MAX_BPS))
+        / u128::from(BPS_DEN))
+    .max(1)
+    .min(position.debt_x);
+    if repay_debt_x == 0 || repay_debt_x > max_repay {
+        return Err(LiquidationError::InvalidCloseAmount {
+            requested: repay_debt_x,
+            max_repay,
+        });
+    }
+
+    let scale: u128 = 1_000_000_000_000_000_000;
+    let bonus_mult = u128::from(BPS_DEN.saturating_add(bonus_bps));
+    let mut target_seize_y = repay_debt_x
+        .saturating_mul(health.twap_price_scaled)
+        .saturating_mul(bonus_mult)
+        / (scale * u128::from(BPS_DEN));
+    target_seize_y = target_seize_y.min(position.collateral_y);
+
+    // Deterministic canonical ordering by `(domain_id, asset_id)` so seizure is
+    // caller-order-independent across multi-domain collateral legs.
+    let mut sorted_legs = collateral_legs.to_vec();
+    sorted_legs.sort_by_key(|l| (l.domain_id, l.asset_id));
+
+    let mut remaining_to_seize = target_seize_y;
+    let mut seized_legs = Vec::with_capacity(sorted_legs.len());
+    for leg in sorted_legs {
+        let take = remaining_to_seize.min(leg.available_y);
+        let remainder = leg.available_y.saturating_sub(take);
+        remaining_to_seize = remaining_to_seize.saturating_sub(take);
+        if take > 0 {
+            seized_legs.push(CrossDomainSeizureLeg {
+                domain_id: leg.domain_id,
+                asset_id: leg.asset_id,
+                seized_y: take,
+                remainder_y: remainder,
+            });
+        }
+    }
+
+    Ok(ProvenLiquidationResult {
+        health,
+        debt_repaid_x: repay_debt_x,
+        bonus_bps,
+        seized_legs,
+        delivery_proof_root,
+    })
 }
 
 #[cfg(test)]

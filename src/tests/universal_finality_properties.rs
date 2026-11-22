@@ -1065,3 +1065,162 @@ fn storage_fabric_verifies_external_domain_proofs_and_blocks_strength_inflation(
         )
         .expect("valid B.U.D. 3.0 custody proof accepted");
 }
+
+#[test]
+fn oracle_free_proof_carrying_liquidation_enforces_state_root_proofs_close_factor_and_multi_domain_legs(
+) {
+    use crate::settlement::liquidation_proof::{
+        build_reserve_inclusion_proof, build_reserve_state_root,
+        execute_proven_cross_domain_liquidation, prove_position_health, reserve_observation_leaf,
+        AmmReserveSnapshot, CollateralLegSpec, LiquidationPosition, ProvenReserveObservation,
+        LIQ_BONUS_MAX_BPS,
+    };
+    use std::collections::BTreeMap;
+
+    let amm_domain = 10u32;
+    let debt_domain = 1u32;
+    let mut certified_roots = BTreeMap::new();
+    let mut observations = Vec::new();
+
+    // Three monotonically ascending epochs with AMM reserve price Y/X = 2.0
+    for (epoch, rx, ry) in [
+        (10u64, 1_000u128, 2_000u128),
+        (11, 1_000, 2_000),
+        (12, 1_000, 2_000),
+    ] {
+        let leaf = reserve_observation_leaf(amm_domain, epoch, rx, ry);
+        let leaves = [leaf, [u8::try_from(epoch).unwrap_or(1); 32]];
+        let root = build_reserve_state_root(&leaves);
+        let proof = build_reserve_inclusion_proof(&leaves, 0).expect("reserve proof");
+        certified_roots.insert((amm_domain, epoch), root);
+        observations.push(ProvenReserveObservation {
+            domain_id: amm_domain,
+            snapshot: AmmReserveSnapshot {
+                state_root: root,
+                epoch,
+                reserve_x: rx,
+                reserve_y: ry,
+                proof,
+            },
+            leaf_index: 0,
+            leaf_count: leaves.len(),
+        });
+    }
+
+    // Debt=1_000 X (worth 2_000 Y at price 2.0), Collateral=2_500 Y -> health = 12_500 bps (< 15_000 threshold).
+    let unhealthy = LiquidationPosition {
+        position_id: 7,
+        debt_x: 1_000,
+        collateral_y: 2_500,
+        maintenance_threshold_bps: 15_000,
+    };
+    let health = prove_position_health(&unhealthy, debt_domain, &certified_roots, &observations)
+        .expect("proof-carrying health succeeds");
+    assert!(health.liquidatable);
+    assert_eq!(health.health_bps, 12_500);
+    assert_ne!(health.health_proof_digest, [0u8; 32]);
+
+    // Forged AMM reserve snapshot fails Merkle proof verification fail-closed.
+    let mut forged_obs = observations.clone();
+    if let Some(first) = forged_obs.first_mut() {
+        first.snapshot.reserve_y = 9_999;
+    }
+    assert!(
+        prove_position_health(&unhealthy, debt_domain, &certified_roots, &forged_obs).is_err(),
+        "forged AMM reserve must fail state-root Merkle proof"
+    );
+
+    // Collateral spread across domains B (20) and C (30).
+    let legs = vec![
+        CollateralLegSpec {
+            domain_id: 30,
+            asset_id: [0x30; 32],
+            custody_or_remote_root: [0xaa; 32],
+            available_y: 1_500,
+        },
+        CollateralLegSpec {
+            domain_id: 20,
+            asset_id: [0x20; 32],
+            custody_or_remote_root: [0xbb; 32],
+            available_y: 1_000,
+        },
+    ];
+
+    // Exceeding close factor (>50% of 1_000 = 500) or bonus cap (>1500 bps) fails closed.
+    assert!(execute_proven_cross_domain_liquidation(
+        &unhealthy,
+        debt_domain,
+        &certified_roots,
+        &observations,
+        &legs,
+        501,
+        500,
+        [0xdd; 32],
+    )
+    .is_err());
+    assert!(execute_proven_cross_domain_liquidation(
+        &unhealthy,
+        debt_domain,
+        &certified_roots,
+        &observations,
+        &legs,
+        500,
+        LIQ_BONUS_MAX_BPS + 1,
+        [0xdd; 32],
+    )
+    .is_err());
+    // Missing delivery proof root fails closed.
+    assert!(execute_proven_cross_domain_liquidation(
+        &unhealthy,
+        debt_domain,
+        &certified_roots,
+        &observations,
+        &legs,
+        500,
+        500,
+        [0u8; 32],
+    )
+    .is_err());
+
+    // Valid partial liquidation (500 X repaid @ price 2.0 + 5% bonus = 1_050 Y seized across domain 20 then 30).
+    let res = execute_proven_cross_domain_liquidation(
+        &unhealthy,
+        debt_domain,
+        &certified_roots,
+        &observations,
+        &legs,
+        500,
+        500,
+        [0xdd; 32],
+    )
+    .expect("valid cross-domain partial liquidation");
+    assert_eq!(res.debt_repaid_x, 500);
+    assert_eq!(res.seized_legs.len(), 2);
+    let total_seized: u128 = res.seized_legs.iter().map(|l| l.seized_y).sum();
+    assert_eq!(total_seized, 1_050);
+
+    // Healthy position (collateral 4_000 Y -> health 20_000 bps > 15_000 bps) must be refused.
+    let healthy = LiquidationPosition {
+        position_id: 8,
+        debt_x: 1_000,
+        collateral_y: 4_000,
+        maintenance_threshold_bps: 15_000,
+    };
+    let healthy_legs = vec![CollateralLegSpec {
+        domain_id: 20,
+        asset_id: [0x20; 32],
+        custody_or_remote_root: [0xbb; 32],
+        available_y: 4_000,
+    }];
+    assert!(execute_proven_cross_domain_liquidation(
+        &healthy,
+        debt_domain,
+        &certified_roots,
+        &observations,
+        &healthy_legs,
+        200,
+        500,
+        [0xdd; 32],
+    )
+    .is_err());
+}
