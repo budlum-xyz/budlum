@@ -17,6 +17,7 @@ pub mod error;
 pub mod handover;
 pub mod hash;
 pub mod keys;
+pub mod light_client;
 pub mod policy;
 pub mod presence;
 pub mod quota;
@@ -32,6 +33,11 @@ pub use handover::{
 pub use keys::{
     KeyVault, OperatorKey, SealedOperatorKey, VaultError, OPERATOR_KEY_LABEL, OPERATOR_KEY_SCHEME,
     OPERATOR_SEED_LEN,
+};
+pub use light_client::{
+    CheckpointSummary, CheckpointVerifyError, HandoffCertificate, HandoffError, HandoffMember,
+    HandoffSignature, MobileLightClient, PqSignatureEntry, QcBlob, TrustedCheckpoint,
+    ValidatorEntry, ValidatorSetSnapshot, VerifiedCheckpoint,
 };
 pub use policy::{NetworkPolicy, Policy, PowerPolicy};
 pub use presence::{

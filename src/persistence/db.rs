@@ -1113,11 +1113,13 @@ impl Storage {
         Vec<crate::consensus::handoff::HandoffMember>,
         Vec<crate::consensus::handoff::HandoffCertificate>,
     )> {
-        use crate::consensus::handoff::{follow_handoffs, HandoffCertificate, HandoffMember};
+        use crate::consensus::handoff::{
+            follow_handoffs, from_snapshot, HandoffCertificate, HandoffMember,
+        };
         let mut snapshots: std::collections::BTreeMap<u64, Vec<HandoffMember>> =
             std::collections::BTreeMap::new();
         for (epoch, snapshot) in self.load_validator_snapshots()? {
-            snapshots.insert(epoch, HandoffMember::from_snapshot(&snapshot));
+            snapshots.insert(epoch, from_snapshot(&snapshot));
         }
         let Some(trusted) = snapshots.get(&start_epoch).cloned() else {
             return Ok((start_epoch, Vec::new(), Vec::new()));
@@ -2692,7 +2694,7 @@ mod tests {
     #[test]
     fn a_stored_handoff_chain_survives_a_restart_and_verifies() {
         use crate::chain::finality::{ValidatorEntry, ValidatorSetSnapshot};
-        use crate::consensus::handoff::{HandoffCertificate, HandoffMember};
+        use crate::consensus::handoff::{from_snapshot, HandoffCertificate};
 
         // Two epochs of a one-validator chain: epoch 4 hands the set to epoch
         // 5, and the stake changes, so the two set digests differ and a
@@ -2715,8 +2717,8 @@ mod tests {
         entry.stake = 20;
         let epoch5 = snapshot(5, &entry);
 
-        let outgoing = HandoffMember::from_snapshot(&epoch4);
-        let incoming = HandoffMember::from_snapshot(&epoch5);
+        let outgoing = from_snapshot(&epoch4);
+        let incoming = from_snapshot(&epoch5);
         let mut cert = HandoffCertificate::unsigned(7, 4, &outgoing, &incoming, [3; 32]);
         let signature = key
             .sign(crate::crypto::ctx::HANDOFF_V1, &cert.signing_message())
@@ -2751,7 +2753,7 @@ mod tests {
     #[test]
     fn a_stored_handoff_chain_with_the_wrong_randomness_is_refused() {
         use crate::chain::finality::{ValidatorEntry, ValidatorSetSnapshot};
-        use crate::consensus::handoff::{HandoffCertificate, HandoffMember};
+        use crate::consensus::handoff::{from_snapshot, HandoffCertificate};
 
         let key = crate::crypto::primitives::PqKeyPair::generate();
         let entry = ValidatorEntry {
@@ -2768,8 +2770,8 @@ mod tests {
             total_stake: entry.stake,
         };
         let (e4, e5) = (snap(4), snap(5));
-        let outgoing = HandoffMember::from_snapshot(&e4);
-        let incoming = HandoffMember::from_snapshot(&e5);
+        let outgoing = from_snapshot(&e4);
+        let incoming = from_snapshot(&e5);
         let mut cert = HandoffCertificate::unsigned(7, 4, &outgoing, &incoming, [3; 32]);
         let signature = key
             .sign(crate::crypto::ctx::HANDOFF_V1, &cert.signing_message())

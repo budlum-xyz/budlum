@@ -172,54 +172,8 @@ pub struct VerifiedUniversalRoute {
     pub route_digest: crate::domain::types::Hash32,
 }
 
-/// The single trust anchor a light client is bootstrapped from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustedCheckpoint {
-    /// Block height of the anchor.
-    pub height: u64,
-    /// Canonical block hash at `height`.
-    pub block_hash: String,
-    /// Hash of the validator set that finalized `height`.
-    pub set_hash: String,
-}
-
-/// A checkpoint that has been cryptographically verified against the anchor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedCheckpoint {
-    /// Block height of the verified checkpoint.
-    pub height: u64,
-    /// Canonical block hash at `height`.
-    pub block_hash: String,
-    /// Hash of the validator set the certificate was verified against.
-    pub set_hash: String,
-    /// Epoch the finality certificate belonged to.
-    pub epoch: u64,
-    /// The external chain's state root at `height` (64-hex), as recorded in the
-    /// finalized header. A consensus step anchors this via
-    /// `AccountState::anchor_external_root` so the relayer gate can validate
-    /// against it. Carried here so the verified finality fact
-    /// survives past the verification call.
-    pub state_root: String,
-}
-
-impl VerifiedCheckpoint {
-    /// The external chain's state root at [`Self::height`], as a 32-byte digest
-    /// ready to anchor via `AccountState::anchor_external_root`.
-    ///
-    /// Returns `None` when the recorded root is not a canonical 32-byte digest:
-    /// such a value would be refused by the anchor (zero / malformed), so
-    /// surfacing `None` keeps the caller from anchoring garbage.
-    #[must_use]
-    pub fn external_root(&self) -> Option<crate::domain::types::Hash32> {
-        let bytes = hex::decode(&self.state_root).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut root = [0u8; 32];
-        root.copy_from_slice(&bytes);
-        Some(root)
-    }
-}
+/// Trust anchor and verified checkpoint shared with `budlum-mobile-core` (K-4, K-G.6).
+pub use budlum_types::checkpoint::{TrustedCheckpoint, VerifiedCheckpoint};
 
 /// Why a checkpoint failed light-client verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -764,7 +718,7 @@ impl LightClient {
     /// `epoch_randomness` is the epoch randomness the caller independently
     /// obtained for each epoch on the way; the certificate's own `randomness`
     /// field seats the handoff committee, so a certificate cannot be allowed to
-    /// name it (see [`crate::consensus::handoff::HandoffCertificate::verify_in`]).
+    /// name it (see [`crate::consensus::handoff::verify_in`]).
     ///
     /// # Errors
     ///
@@ -783,7 +737,7 @@ impl LightClient {
         )],
         epoch_randomness: &dyn Fn(u64) -> [u8; 32],
     ) -> Result<u64, LightClientError> {
-        use crate::consensus::handoff::{follow_handoffs, HandoffMember};
+        use crate::consensus::handoff::{follow_handoffs, from_snapshot};
         if outgoing.set_hash != self.trusted.set_hash {
             return Err(LightClientError::TrustBinding(
                 "the outgoing set is not the trusted set".into(),
@@ -819,9 +773,9 @@ impl LightClient {
                     ));
                 }
             }
-            member_steps.push((cert.clone(), HandoffMember::from_snapshot(snapshot)));
+            member_steps.push((cert.clone(), from_snapshot(snapshot)));
         }
-        let trusted_members = HandoffMember::from_snapshot(outgoing);
+        let trusted_members = from_snapshot(outgoing);
         let (epoch, _) = follow_handoffs(
             registry,
             chain_id,
@@ -3153,5 +3107,114 @@ mod tests {
         assert!(lc
             .verify_finality_certificate_domain(&checkpoint, &body, &header, &cert, &bad_proof)
             .is_err());
+    }
+
+    #[test]
+    fn node_light_client_matches_shared_mobile_golden_vectors() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/vectors/light_client/v1");
+        let meta_raw = std::fs::read_to_string(dir.join("metadata.json")).expect("metadata.json");
+        let meta: serde_json::Value = serde_json::from_str(&meta_raw).expect("parse metadata");
+        let qc4_wire = std::fs::read(dir.join("qc_epoch4_h200.bin")).expect("qc_epoch4_h200.bin");
+
+        let mut e4 = Vec::new();
+        let mut e5 = Vec::new();
+        let mut s4 = Vec::new();
+        for i in 0u8..4 {
+            let mut seed4 = [0x40u8; 32];
+            seed4[0] = i + 1;
+            let pk4 = crate::crypto::pq::ml_dsa_public_key(
+                crate::crypto::scheme::SchemeId::ML_DSA_65,
+                &seed4,
+            )
+            .expect("pk4");
+            let mut addr4 = [0u8; 32];
+            addr4[0] = 0x10 + i;
+            addr4[31] = 0x04;
+            s4.push(seed4);
+            e4.push(crate::chain::finality::ValidatorEntry {
+                address: crate::core::address::Address::from(addr4),
+                stake: if i < 3 { 1_000 } else { 7_000 },
+                bls_public_key: vec![0xB4 ^ i; 96],
+                pop_signature: vec![0xC4 ^ i; 48],
+                pq_public_key: pk4,
+            });
+
+            let mut seed5 = [0x50u8; 32];
+            seed5[0] = i + 1;
+            let pk5 = crate::crypto::pq::ml_dsa_public_key(
+                crate::crypto::scheme::SchemeId::ML_DSA_65,
+                &seed5,
+            )
+            .expect("pk5");
+            let mut addr5 = [0u8; 32];
+            addr5[0] = 0x20 + i;
+            addr5[31] = 0x05;
+            e5.push(crate::chain::finality::ValidatorEntry {
+                address: crate::core::address::Address::from(addr5),
+                stake: 1_500 * u64::from(i + 1),
+                bls_public_key: vec![0xB5 ^ i; 96],
+                pop_signature: vec![0xC5 ^ i; 48],
+                pq_public_key: pk5,
+            });
+        }
+        let snap4 = ValidatorSetSnapshot::new(4, e4);
+        let snap5 = ValidatorSetSnapshot::new(5, e5);
+        assert_eq!(meta["epoch4_set_hash"].as_str().unwrap(), snap4.set_hash);
+        assert_eq!(meta["epoch5_set_hash"].as_str().unwrap(), snap5.set_hash);
+
+        let node_qc4 = QcBlob::from_bytes(&qc4_wire, snap4.validators.len()).expect("node decode");
+        assert_eq!(
+            meta["qc4_merkle_root"].as_str().unwrap(),
+            node_qc4.merkle_root
+        );
+        let verified_signers = node_qc4
+            .verify_against_snapshot(&snap4, None, Some(4))
+            .expect("node verifies mobile QC wire");
+        assert_eq!(verified_signers.len(), 3);
+
+        let mut lc = LightClient::new(TrustedCheckpoint {
+            height: 100,
+            block_hash: "10".repeat(32),
+            set_hash: snap4.set_hash.clone(),
+        })
+        .expect("node light client");
+        let header200 = HeaderSummary {
+            height: 200,
+            block_hash: "20".repeat(32),
+            state_root: "30".repeat(32),
+        };
+        let verified200 = lc
+            .verify_pq_checkpoint(&header200, &node_qc4, &snap4)
+            .expect("node light client verifies shared QC");
+        lc.advance(&verified200).expect("advance");
+
+        let randomness = [0xA5u8; 32];
+        let out4 = crate::consensus::handoff::from_snapshot(&snap4);
+        let in5 = crate::consensus::handoff::from_snapshot(&snap5);
+        let mut handoff = crate::consensus::handoff::HandoffCertificate::unsigned(
+            45_261, 4, &out4, &in5, randomness,
+        );
+        let ho_msg = handoff.signing_message();
+        assert_eq!(
+            meta["handoff_signing_message_hex"].as_str().unwrap(),
+            hex::encode(&ho_msg)
+        );
+        for idx in 0usize..4 {
+            let sig = crate::crypto::pq::ml_dsa_sign(
+                crate::crypto::scheme::SchemeId::ML_DSA_65,
+                &s4[idx],
+                &ho_msg,
+                crate::crypto::ctx::HANDOFF_V1,
+                &[0u8; 32],
+            )
+            .expect("ho sig");
+            handoff.insert_signature(u32::try_from(idx).unwrap(), sig);
+        }
+        let reached = lc
+            .follow_handoffs(45_261, &snap4, &[(handoff, snap5.clone())], &|_| randomness)
+            .expect("node follows shared handoff");
+        assert_eq!(reached, 5);
+        assert_eq!(lc.trusted().set_hash, snap5.set_hash);
     }
 }
