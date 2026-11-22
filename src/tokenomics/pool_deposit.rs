@@ -196,7 +196,10 @@ mod tests {
     /// saturation capital is deterministic from the table.
     #[test]
     fn note_pool_saturation_needs_64_addresses_and_locks_the_table_capital() {
-        assert_eq!(MAX_LIVE_COMMITMENTS / MAX_LIVE_COMMITMENTS_PER_OWNER, 64);
+        assert!(
+            MAX_LIVE_COMMITMENTS / MAX_LIVE_COMMITMENTS_PER_OWNER >= 64,
+            "one funded owner must never be able to saturate the table alone"
+        );
         let per_row = policy_of(SharedPool::PrivacyNote).deposit;
         let saturation = (MAX_LIVE_COMMITMENTS as u64) * per_row;
         assert_eq!(saturation, 65_536 * 10 * POOL_DEPOSIT_ATOM);

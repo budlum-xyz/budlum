@@ -2405,7 +2405,7 @@ mod tests {
             ics_domain_id,
             crate::domain::ConsensusKind::Bft,
             7700,
-            "tendermint-bft",
+            "bft-quorum-commit",
             1,
         );
         domain.operator = Some(reg_op);
