@@ -1008,7 +1008,9 @@ pub struct SszCommitteeRotation {
     pub next_sync_committee_branch: Vec<[u8; 32]>,
     /// Fork's `finalized_root_gindex` (`105` Deneb / `169` Electra) used to enforce gindex pairing.
     pub finalized_root_gindex: u64,
-    /// Commitment to period `next_period + 1` (either `committee_root` or SSZ root).
+    /// Reserved on the wire; the rotation ignores it. A single finalized
+    /// state cannot prove the period-after-next committee, so this claim is
+    /// never trusted.
     pub subsequent_committee_root: [u8; 32],
 }
 
@@ -1325,6 +1327,13 @@ impl EthereumSyncAdapter {
                 rule: "no pinned committee to rotate from".to_string(),
             });
         };
+        if current.next_committee_root == [0u8; 32] {
+            return Err(AdapterError::ConsensusRule {
+                rule: "pinned committee carries no proven successor commitment; \
+                       re-pin with the next roster's SSZ root before rotating"
+                    .to_string(),
+            });
+        }
         let Some(expected_period) = current.period.checked_add(1) else {
             return Err(AdapterError::ConsensusRule {
                 rule: "sync committee period overflow at u64::MAX".to_string(),
@@ -1383,19 +1392,22 @@ impl EthereumSyncAdapter {
         if let Some(head) = padded_agg.get_mut(..48) {
             head.copy_from_slice(&rotation.next_aggregate_pubkey);
         }
+        // Only the SSZ hash_tree_root of the full 512-member roster opens the
+        // pin. An aggregate-only match cannot bind the member list: any 511
+        // chosen keys plus one derived key sum to a target aggregate, and the
+        // participation bitvector lets the derived key abstain, so a roster
+        // admitted on the aggregate alone hands partial-quorum finality to
+        // whoever built it. A pin that only names an aggregate cannot be
+        // rotated permissionlessly; it must be re-pinned by its operator
+        // with the roster commitment.
         let matches_ssz = bool::from(
             ssz_committee_root
                 .as_slice()
                 .ct_eq(current.next_committee_root.as_slice()),
         );
-        let matches_pin_hash = bool::from(
-            committee_root(&padded_agg)
-                .as_slice()
-                .ct_eq(current.next_committee_root.as_slice()),
-        );
-        if !matches_ssz && !matches_pin_hash {
+        if !matches_ssz {
             return Err(AdapterError::ConsensusRule {
-                rule: "incoming sync committee does not open pinned next_committee_root"
+                rule: "incoming sync committee roster's SSZ commitment does not open pinned next_committee_root"
                     .to_string(),
             });
         }
@@ -1408,10 +1420,16 @@ impl EthereumSyncAdapter {
             what: e.to_string(),
         })?;
 
+        // The successor commitment is NOT taken from the payload: a state of
+        // this period cannot contain the period-after-next roster, so any
+        // claimed subsequent root is unprovable here, and copying it would
+        // let one honest rotation smuggle in an attacker-chosen anchor for
+        // the next one. The pin closes instead; a later proof (or operator
+        // re-pin) must open it before another rotation.
         self.committee = Some(PinnedCommittee {
             period: expected_period,
             aggregate_pubkey: padded_agg,
-            next_committee_root: rotation.subsequent_committee_root,
+            next_committee_root: [0u8; 32],
         });
         self.member_pubkeys = Some(rotation.next_member_pubkeys.to_vec());
         Ok(())
@@ -2743,22 +2761,37 @@ mod slashable_policy_tests {
                 .is_err(),
             "period-0 update must no longer verify after rotating to period 1"
         );
+        // The rotation closes the pin: the payload's successor claim is
+        // unprovable and ignored, so a second permissionless rotation
+        // refuses until the next commitment is re-pinned with real proof.
+        assert_eq!(
+            adapter.committee.as_ref().unwrap().next_committee_root,
+            [0u8; 32]
+        );
 
         let branch_87: Vec<[u8; 32]> = (0u8..6).map(|i| [0xD1 + i; 32]).collect();
         let fin_state_1 =
             walk_branch(ssz_root_2, &branch_87, NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA).unwrap();
+        let rot_to_2 = SszCommitteeRotation {
+            next_period: 2,
+            next_member_pubkeys: pk2,
+            next_aggregate_pubkey: agg2,
+            finalized_state_root: fin_state_1,
+            next_sync_committee_gindex: NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA,
+            next_sync_committee_branch: branch_87,
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_ELECTRA,
+            subsequent_committee_root: [0xEE; 32],
+        };
+        assert!(
+            adapter.rotate_committee_with_ssz_branch(&rot_to_2).is_err(),
+            "a closed pin must refuse rotation until the successor is proven"
+        );
+        // Operator re-pin with the proven period-2 roster commitment opens
+        // the door the conservative close shut.
+        adapter.committee.as_mut().unwrap().next_committee_root = ssz_root_2;
         adapter
-            .rotate_committee_with_ssz_branch(&SszCommitteeRotation {
-                next_period: 2,
-                next_member_pubkeys: pk2,
-                next_aggregate_pubkey: agg2,
-                finalized_state_root: fin_state_1,
-                next_sync_committee_gindex: NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA,
-                next_sync_committee_branch: branch_87,
-                finalized_root_gindex: FINALIZED_ROOT_GINDEX_ELECTRA,
-                subsequent_committee_root: [0xEE; 32],
-            })
-            .expect("Electra SSZ rotation 1 -> 2 succeeds");
+            .rotate_committee_with_ssz_branch(&rot_to_2)
+            .expect("Electra SSZ rotation 1 -> 2 succeeds after re-pin");
 
         // 3. Electra v3 execution update in period 2 verifies against rotated `pk2` subset!
         let pin2 = adapter.committee.clone().unwrap();
@@ -2811,5 +2844,73 @@ mod slashable_policy_tests {
         assert_eq!(att2.attested_block_hash, Some(exec2.block_hash));
         assert_eq!(att2.attested_event_root, Some(exec2.receipts_root));
         assert_eq!(att2.attested_tx_root, Some(exec2.transactions_root));
+    }
+    #[test]
+    fn rotation_refuses_a_roster_the_pinned_commitment_never_named() {
+        use crate::cross_domain::evm::sync_committee::{
+            sync_committee_hash_tree_root, walk_branch, FINALIZED_ROOT_GINDEX_DENEB,
+            NEXT_SYNC_COMMITTEE_GINDEX_DENEB,
+        };
+        use bls12_381::{G1Affine, G1Projective, Scalar};
+
+        // A real 512-member roster whose aggregate is the G1 sum of all keys.
+        let g1 = G1Projective::generator();
+        let mut pks = [[0u8; 48]; 512];
+        let mut sum = G1Projective::identity();
+        for (idx, slot) in pks.iter_mut().enumerate() {
+            let sk = Scalar::from(u64::try_from(idx).expect("fits") + 7_001);
+            let pt = g1 * sk;
+            *slot = G1Affine::from(pt).to_compressed();
+            sum += pt;
+        }
+        let agg: [u8; 48] = G1Affine::from(sum).to_compressed();
+        let mut padded_agg = vec![0u8; 96];
+        padded_agg[..48].copy_from_slice(&agg);
+
+        // The pin names the next committee only by its aggregate hash - the
+        // legacy pin shape that cannot bind the member list.
+        let mut adapter = EthereumSyncAdapter::new(
+            "mainnet",
+            Some(PinnedCommittee {
+                period: 0,
+                aggregate_pubkey: padded_agg.clone(),
+                next_committee_root: committee_root(&padded_agg),
+            }),
+            None,
+        );
+
+        // The same key set in reverse order: identical aggregate sum, but a
+        // different SSZ hash_tree_root, so the pinned commitment never named
+        // THIS roster. Participation bits would select different members.
+        let mut shuffled = pks;
+        shuffled.reverse();
+        assert_ne!(
+            sync_committee_hash_tree_root(&shuffled, &agg),
+            sync_committee_hash_tree_root(&pks, &agg),
+            "the shuffle must change the SSZ commitment for the test to mean anything"
+        );
+        let branch: Vec<[u8; 32]> = (0u8..5).map(|i| [0xE1 + i; 32]).collect();
+        let fin_state = walk_branch(
+            sync_committee_hash_tree_root(&shuffled, &agg),
+            &branch,
+            NEXT_SYNC_COMMITTEE_GINDEX_DENEB,
+        )
+        .expect("branch walks");
+        let rotation = SszCommitteeRotation {
+            next_period: 1,
+            next_member_pubkeys: shuffled,
+            next_aggregate_pubkey: agg,
+            finalized_state_root: fin_state,
+            next_sync_committee_gindex: NEXT_SYNC_COMMITTEE_GINDEX_DENEB,
+            next_sync_committee_branch: branch,
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_DENEB,
+            subsequent_committee_root: [0x5E; 32],
+        };
+        assert!(
+            adapter.rotate_committee_with_ssz_branch(&rotation).is_err(),
+            "an aggregate-only pin must not admit a roster whose SSZ commitment it never named: \
+             a signer summing to the pinned aggregate while abstaining from one derived key \
+             would otherwise forge partial-quorum finality"
+        );
     }
 }
