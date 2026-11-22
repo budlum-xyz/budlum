@@ -4803,7 +4803,8 @@ mod rpc_tests {
     #[tokio::test]
     async fn finality_certificate_domain_and_route_rpc_verify_and_refuse() {
         use crate::domain::types::{
-            ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, RootScheme,
+            ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, PoWDomainParameters,
+            RootScheme, POW_HEADER_CHAIN_ADAPTER,
         };
         use crate::settlement::{
             DomainFinalityInclusionProof, FinalityBucket, GlobalFinalityCertificate,
@@ -4843,8 +4844,12 @@ mod rpc_tests {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
 
-        let make_domain =
-            |id: u32, kind: ConsensusKind, adapter: &str, last_h: u64| ConsensusDomain {
+        // Header-chain depth is read only by the PoW header-chain adapter, so
+        // the registry refuses a depth above 1 anywhere else; the PoW domains
+        // carry it together with the bounded verifier parameters it needs.
+        let make_domain = |id: u32, kind: ConsensusKind, adapter: &str, last_h: u64| {
+            let header_chain = adapter == POW_HEADER_CHAIN_ADAPTER;
+            ConsensusDomain {
                 id,
                 kind,
                 status: DomainStatus::Active,
@@ -4854,22 +4859,28 @@ mod rpc_tests {
                 config_hash: [0xA0; 32],
                 validator_set_hash: [0xB0; 32],
                 finality_adapter: adapter.to_owned(),
-                min_confirmations: 6,
+                min_confirmations: if header_chain { 6 } else { 1 },
                 bridge_enabled: true,
                 block_hash_scheme: RootScheme::Sha256,
                 state_root_scheme: RootScheme::Sha256,
                 tx_root_scheme: RootScheme::Sha256,
                 last_committed_height: last_h,
                 last_committed_hash: if last_h > 0 { [0x21; 32] } else { [0u8; 32] },
-                pow_parameters: None,
+                pow_parameters: header_chain.then_some(PoWDomainParameters {
+                    min_difficulty_bits: 1,
+                    max_difficulty_bits: 120,
+                    min_cumulative_work: 1,
+                    max_headers: 64,
+                }),
                 zk_program_allowlist: Vec::new(),
                 plugin_code_hash: None,
                 genesis_state_root: [0u8; 32],
-            };
+            }
+        };
 
         for (id, kind, adapter, last_h) in [
-            (1u32, ConsensusKind::PoW, "pow-header-v1", 12u64),
-            (2u32, ConsensusKind::PoW, "pow-header-v1", 14u64),
+            (1u32, ConsensusKind::PoW, POW_HEADER_CHAIN_ADAPTER, 12u64),
+            (2u32, ConsensusKind::PoW, POW_HEADER_CHAIN_ADAPTER, 14u64),
             (3u32, ConsensusKind::Bft, "tendermint-v1", 0u64),
             (4u32, ConsensusKind::AiInference, "ai-attest-v1", 16u64),
         ] {

@@ -934,7 +934,18 @@ fn storage_fabric_verifies_external_domain_proofs_and_blocks_strength_inflation(
     };
 
     let payload = b"budlum-decentralized-web3-object-v1".to_vec();
-    let record = UnifiedContentRecord::from_bytes(&payload, "application/octet-stream");
+    let mut record = UnifiedContentRecord::from_bytes(&payload, "application/octet-stream");
+    // The fabric refuses an object with no replica at all, so the object is
+    // registered with a declared Filecoin deal and the proven replicas below
+    // join it.
+    record.replicas = vec![StorageReplica {
+        network: StorageNetworkKind::Filecoin,
+        domain_id: StorageNetworkKind::Filecoin.default_domain_id(),
+        native_locator: String::from("bafk2bzacedfvut2myeleyq67fljcrw4kkmn5pb5dglvoz"),
+        verification: VerificationStrength::AttestedDeal,
+        available: true,
+        latency_ms: 60,
+    }];
     let digest = record.sha3_256_digest;
     let sha256 = record.sha256_digest;
 
