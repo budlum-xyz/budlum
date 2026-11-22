@@ -481,50 +481,6 @@ impl QuantumAccountRegistry {
         self.accounts.insert(*address, candidate);
         Ok(())
     }
-
-    /// Evaluate a transaction-bound fee sponsor authorization for a registered
-    /// account at the registry's current epoch.
-    ///
-    /// Convenience: bridges [`QuantumAccountRegistry`] to
-    /// [`crate::account_abstraction::fee_and_session::FeeSponsorAuthorization`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::account_abstraction::fee_and_session::AccountAbstractionError`]
-    /// if sponsorship verification fails.
-    pub fn evaluate_sponsored_fee(
-        &self,
-        grant: &crate::account_abstraction::fee_and_session::FeeSponsorAuthorization,
-        expected_chain_id: u64,
-        expected_tx_hash: &[u8; 32],
-        actual_fee_bud: u128,
-    ) -> Result<[u8; 32], crate::account_abstraction::fee_and_session::AccountAbstractionError>
-    {
-        grant.verify(
-            expected_chain_id,
-            expected_tx_hash,
-            actual_fee_bud,
-            self.epoch,
-        )
-    }
-
-    /// Evaluate a master-signed bounded session delegation for a registered account.
-    ///
-    /// Convenience: bridges [`QuantumAccountRegistry`] to
-    /// [`crate::account_abstraction::fee_and_session::SessionDelegation`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::account_abstraction::fee_and_session::AccountAbstractionError`]
-    /// if bounds, chain binding, or post-quantum master signature verification fails.
-    pub fn evaluate_session_delegation(
-        &self,
-        delegation: &crate::account_abstraction::fee_and_session::SessionDelegation,
-        expected_chain_id: u64,
-    ) -> Result<[u8; 32], crate::account_abstraction::fee_and_session::AccountAbstractionError>
-    {
-        delegation.verify(expected_chain_id)
-    }
 }
 
 #[cfg(test)]

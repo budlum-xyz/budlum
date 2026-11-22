@@ -564,14 +564,14 @@ fn output_composer_attested_verifies_uer_batch_synchronous_steps_and_rejects_for
     attestations.insert(
         String::from("evm_leg"),
         StepReceiptAttestation::UerBatch {
-            inclusion: Box::new(p0.clone()),
+            inclusion: p0.clone(),
             batch_root,
         },
     );
     attestations.insert(
         String::from("wasm_leg"),
         StepReceiptAttestation::UerBatch {
-            inclusion: Box::new(p1.clone()),
+            inclusion: p1.clone(),
             batch_root,
         },
     );
@@ -605,7 +605,7 @@ fn output_composer_attested_verifies_uer_batch_synchronous_steps_and_rejects_for
     partial.insert(
         String::from("evm_leg"),
         StepReceiptAttestation::UerBatch {
-            inclusion: Box::new(p0),
+            inclusion: p0,
             batch_root,
         },
     );

@@ -1010,50 +1010,6 @@ impl UnificationLedger {
         Ok((receipt, record_hash))
     }
 
-    /// Attach a proof-verified external storage replica (B.U.D. 3.0 custody,
-    /// content preimage, or external domain Merkle proof) to a registered object.
-    ///
-    /// Convenience: wires [`UnifiedStorageFabric::verify_and_attach_replica`]
-    /// through [`UnificationLedger`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StorageFabricError`] if the object is missing or proof
-    /// verification fails.
-    pub fn attach_verified_storage_replica(
-        &mut self,
-        digest: &Hash32,
-        replica: StorageReplica,
-        proof: &StorageReplicaProof,
-    ) -> Result<Hash32, StorageFabricError> {
-        self.storage
-            .verify_and_attach_replica(digest, replica, proof)
-    }
-
-    /// Resolve an Ethereum ENS name trustlessly against the anchored Ethereum
-    /// domain's `finalized_state_root` using Yellow Paper MPT account + storage proofs.
-    ///
-    /// Convenience: wires [`verify_ens_resolution`] to the ledger's finalized
-    /// domain state roots without trusting any external RPC provider.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UnificationExecutionError::InvalidArgument`] if `eth_domain_id`
-    /// is not anchored or if the ENS MPT proof fails verification.
-    pub fn resolve_verified_ens_name(
-        &self,
-        eth_domain_id: crate::domain::types::DomainId,
-        proof: &EnsResolutionProof,
-    ) -> Result<VerifiedEnsResolution, UnificationExecutionError> {
-        let Some(domain) = self.domains.get(&eth_domain_id) else {
-            return Err(UnificationExecutionError::InvalidArgument(format!(
-                "ethereum domain {eth_domain_id} is not anchored in unification ledger"
-            )));
-        };
-        verify_ens_resolution(&domain.finalized_state_root, proof)
-            .map_err(|err| UnificationExecutionError::InvalidArgument(err.to_string()))
-    }
-
     /// Read-only view of the underlying owner-authenticated storage fabric.
     ///
     /// WIRING: Exposes verified replica resolution over committed storage deals.

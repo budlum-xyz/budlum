@@ -1105,7 +1105,7 @@ impl AtomicityClass {
 pub enum StepReceiptAttestation {
     /// Receipt proven against a UER-1 settlement block batch root.
     UerBatch {
-        inclusion: Box<crate::execution::uer::UerInclusionProof>,
+        inclusion: crate::execution::uer::UerInclusionProof,
         batch_root: Hash32,
     },
     /// Receipt proven against an external domain's finalized Merkle root over
