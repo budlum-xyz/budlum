@@ -11,6 +11,15 @@ name: Dependency Review (PR security gate)
 on:
   pull_request:
     branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
+  # On demand, for issue 203: a blocked merge queue can be drained by hand
+  # only if the gate can be started on the head that is blocked. The run
+  # joins the same per-ref concurrency group as the pull_request runs, so a
+  # dispatch does not add a second queue lane; it replaces nothing either -
+  # it reviews the PR's dependency delta against the advisory database the
+  # same way. (The gate reads the PR's diff, so a dispatch on a branch with
+  # no pull request is a no-op that still exits 0; there is nothing to
+  # review without a delta.)
+  workflow_dispatch:
 
 # Salt-okur.
 concurrency:

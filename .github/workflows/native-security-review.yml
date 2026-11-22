@@ -35,6 +35,11 @@ on:
     # to stop double-running on every forward-merge.
     branches: [main]
   pull_request:
+  # On demand, for issue 203: a blocked merge queue can be drained by hand
+  # only if the review can be started on the head that is blocked. The run
+  # joins the same per-ref concurrency group as the push and pull_request
+  # runs, so it adds no second queue lane.
+  workflow_dispatch:
 
 permissions:
   contents: read
