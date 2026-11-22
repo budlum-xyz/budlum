@@ -137,8 +137,6 @@ pub struct UniversalLightPacket {
     pub hops: Vec<UniversalRouteHop>,
 }
 
-/// Verified receipt produced by [`LightClient::verify_multi_hop_light_route`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Verified single-domain finality outcome extracted from a trusted
 /// [`crate::settlement::GlobalBlockHeader::finality_certificate_root`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +151,8 @@ pub struct VerifiedDomainFinality {
     pub guarantee_label: String,
 }
 
+/// Verified receipt produced by [`LightClient::verify_multi_hop_light_route`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedUniversalRoute {
     /// Finalized settlement hub checkpoint height.
     pub hub_height: u64,
@@ -3121,9 +3121,12 @@ mod tests {
             epoch: 1,
             state_root: state.calculate_state_root(),
         };
-        let mut lc = LightClient::new(TEST_CHAIN_ID);
-        lc.anchor_trusted_checkpoint(checkpoint.clone())
-            .expect("anchor checkpoint");
+        let lc = LightClient::new(TrustedCheckpoint {
+            height: 10,
+            block_hash: "aa".repeat(32),
+            set_hash: "bb".repeat(32),
+        })
+        .expect("light client");
 
         let verified = lc
             .verify_finality_certificate_domain(&checkpoint, &body, &header, &cert, &proof)
