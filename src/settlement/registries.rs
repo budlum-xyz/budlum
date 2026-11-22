@@ -298,7 +298,23 @@ impl SettlementRegistries {
                 verdict,
             });
         }
-        compose(&entries).ok()
+        match compose(&entries) {
+            Ok(certificate) => Some(certificate),
+            // Unreachable while this derivation holds its own preconditions:
+            // the registry map cannot repeat a domain id, every row carries
+            // the same checkpoint height, and Established is only assigned
+            // after the exact checks compose re-applies. If a future compose
+            // rule breaks that pairing, the header must fall back to carrying
+            // no certificate (light clients then refuse) rather than a wrong
+            // one - and debug builds must fail loudly instead of drifting.
+            Err(err) => {
+                debug_assert!(
+                    false,
+                    "state-derived finality certificate failed to compose: {err:?}"
+                );
+                None
+            }
+        }
     }
 
     /// Canonical Keccak-256 digest of the checkpoint

@@ -1174,14 +1174,27 @@ impl DomainFinalityInclusionProof {
             return false;
         }
         let mut acc = keccak_cert_leaf(&self.entry.row_digest());
-        let mut cursor = self.leaf_index;
+        let Ok(mut cursor) = usize::try_from(self.leaf_index) else {
+            return false;
+        };
+        let mut width = leaf_count_usize;
         for sibling in &self.siblings {
+            // The claimed position pins the tree shape: only the final node
+            // of an odd-width level is hashed with itself, and nowhere else
+            // may a sibling repeat the running digest - otherwise the root of
+            // a three-leaf bucket also opens as a forged four-leaf proof that
+            // presents the duplicated tail as a second, distinct position.
+            let odd_tail = !width.is_multiple_of(2) && cursor == width - 1;
+            if odd_tail != (*sibling == acc) {
+                return false;
+            }
             acc = if cursor.is_multiple_of(2) {
                 keccak_cert_node(&acc, sibling)
             } else {
                 keccak_cert_node(sibling, &acc)
             };
             cursor /= 2;
+            width = width.div_ceil(2);
         }
         acc == *expected_bucket_root
     }
@@ -2367,6 +2380,44 @@ mod tests {
         assert_eq!(
             hub.label(),
             "deterministic-quorum|lattice|slashable|ft=3333bps"
+        );
+    }
+
+    #[test]
+    fn a_forged_leaf_count_cannot_reopen_a_bucket_root() {
+        let entries: Vec<_> = (0u32..3)
+            .map(|id| {
+                cert_entry(
+                    id,
+                    3_333,
+                    FinalityReversibility::DeterministicQuorum,
+                    FinalityVerdict::Established,
+                )
+            })
+            .collect();
+        let cert = compose(&entries).expect("three established domains compose");
+        let honest = cert.prove_domain(2).expect("honest tail proof");
+        assert!(honest.verify(&cert.established_root));
+
+        // The three-leaf tree duplicates its tail: root = node(node(l0, l1),
+        // node(l2, l2)). A forger re-declares the bucket as four leaves and
+        // presents the same tail row a second time at index 3, with the
+        // duplicated tail leaf itself as the level-0 sibling.
+        let tail_leaf = keccak_cert_leaf(&cert.established[2].row_digest());
+        let left_pair = keccak_cert_node(
+            &keccak_cert_leaf(&cert.established[0].row_digest()),
+            &keccak_cert_leaf(&cert.established[1].row_digest()),
+        );
+        let forged = DomainFinalityInclusionProof {
+            bucket: FinalityBucket::Established,
+            leaf_index: 3,
+            leaf_count: 4,
+            entry: cert.established[2].clone(),
+            siblings: vec![tail_leaf, left_pair],
+        };
+        assert!(
+            !forged.verify(&cert.established_root),
+            "a duplicated tail must not verify as a second position under an inflated leaf count"
         );
     }
 }
