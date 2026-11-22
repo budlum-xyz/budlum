@@ -70,15 +70,19 @@ struct Cli {
     trusted_bns_epoch: Option<u64>,
 
     /// Trusted Universal Finality Certificate digest (32-byte hex) from an
-    /// out-of-band source. When set, the certificate fetched via RPC must
-    /// match it exactly: trusting the `certificateDigest` returned in the RPC
-    /// reply itself would let a hostile node present a forged certificate.
+    /// out-of-band source. Required, together with
+    /// `--trusted-finality-checkpoint`, by `bud finality show` and
+    /// `bud finality route`: the certificate fetched via RPC must match it
+    /// exactly. A certificate checked only against itself proves nothing - a
+    /// hostile node can compose a self-consistent forgery from rows of its
+    /// choosing.
     #[arg(long, global = true)]
     trusted_finality_digest: Option<String>,
 
-    /// Trusted finality checkpoint height. When set, the certificate's
-    /// `checkpoint_height` must match it exactly, refusing stale or forked
-    /// certificates the RPC node might serve.
+    /// Trusted finality checkpoint height paired with
+    /// `--trusted-finality-digest`. The certificate is requested at this
+    /// height and its `checkpoint_height` must match it exactly, refusing
+    /// stale or forked certificates the RPC node might serve.
     #[arg(long, global = true)]
     trusted_finality_checkpoint: Option<u64>,
     /// Maximum fee in atoms that auto-fee resolution (`bud_estimateGas` /
@@ -3660,91 +3664,58 @@ fn verify_certificate_rpc_response(
     Ok(cert)
 }
 
-// Test-only helper: the only callers live in the `tests` module below.
-#[cfg(test)]
-fn verify_domain_finality_rpc_response(
-    resp: &serde_json::Value,
-    expected_domain: u32,
-) -> Result<budlum_core::settlement::DomainFinalityInclusionProof, String> {
-    let bucket_root_str = resp
-        .get("bucketRoot")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "RPC response missing `bucketRoot`".to_string())?;
-    let bucket_root = parse_hex_bytes32(bucket_root_str, "bucketRoot")?;
-    let proof: budlum_core::settlement::DomainFinalityInclusionProof = serde_json::from_value(
-        resp.get("proof")
-            .cloned()
-            .ok_or_else(|| "RPC response missing `proof`".to_string())?,
-    )
-    .map_err(|e| format!("failed to decode DomainFinalityInclusionProof: {e}"))?;
-    if proof.entry.domain_id != expected_domain {
-        return Err(format!(
-            "proof domain_id {} does not match requested domain {expected_domain}",
-            proof.entry.domain_id
-        ));
-    }
-    if !proof.verify(&bucket_root) {
-        return Err("domain finality Merkle inclusion proof failed local verification".to_string());
-    }
-    Ok(proof)
+/// Operator-supplied finality anchor (`--trusted-finality-digest` +
+/// `--trusted-finality-checkpoint`), obtained out-of-band from a source the
+/// operator already trusts: an own node, a light client, a pinned header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FinalityAnchor {
+    digest: [u8; 32],
+    checkpoint: u64,
 }
 
-// Test-only helper: the only callers live in the `tests` module below.
-#[cfg(test)]
-fn verify_route_finality_rpc_response(
-    resp: &serde_json::Value,
-    expected_source: u32,
-    expected_target: u32,
-) -> Result<
-    (
-        budlum_core::settlement::DomainFinalityInclusionProof,
-        budlum_core::settlement::DomainFinalityInclusionProof,
-    ),
-    String,
-> {
-    let src_root = parse_hex_bytes32(
-        resp.get("sourceBucketRoot")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "RPC response missing `sourceBucketRoot`".to_string())?,
-        "sourceBucketRoot",
-    )?;
-    let dst_root = parse_hex_bytes32(
-        resp.get("targetBucketRoot")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "RPC response missing `targetBucketRoot`".to_string())?,
-        "targetBucketRoot",
-    )?;
-    let src_proof: budlum_core::settlement::DomainFinalityInclusionProof = serde_json::from_value(
-        resp.get("sourceProof")
-            .cloned()
-            .ok_or_else(|| "RPC response missing `sourceProof`".to_string())?,
-    )
-    .map_err(|e| format!("failed to decode sourceProof: {e}"))?;
-    let dst_proof: budlum_core::settlement::DomainFinalityInclusionProof = serde_json::from_value(
-        resp.get("targetProof")
-            .cloned()
-            .ok_or_else(|| "RPC response missing `targetProof`".to_string())?,
-    )
-    .map_err(|e| format!("failed to decode targetProof: {e}"))?;
-    if src_proof.entry.domain_id != expected_source {
+/// Resolve the finality anchor before any RPC traffic. Both values are
+/// required: `GlobalFinalityCertificate::verify_integrity` only recomposes the
+/// certificate from its own rows, so without an independent anchor every
+/// "verified" field would be a statement the RPC node makes about itself.
+fn require_finality_anchor(
+    digest_hex: Option<&str>,
+    checkpoint: Option<u64>,
+) -> Result<FinalityAnchor, String> {
+    match (digest_hex, checkpoint) {
+        (Some(raw), Some(checkpoint)) => Ok(FinalityAnchor {
+            digest: parse_hex32_str(raw, "--trusted-finality-digest")?,
+            checkpoint,
+        }),
+        (Some(_), None) | (None, Some(_)) => Err(
+            "--trusted-finality-digest and --trusted-finality-checkpoint must be provided together"
+                .to_string(),
+        ),
+        (None, None) => Err(
+            "--trusted-finality-digest <hex32> and --trusted-finality-checkpoint <height> are \
+             required to verify finality: a certificate checked only against itself lets a \
+             hostile RPC node compose a self-consistent forgery and report any route as \
+             admitting cross-domain value"
+                .to_string(),
+        ),
+    }
+}
+
+/// Bind a fetched certificate to the operator's anchor: the checkpoint first
+/// (a stale or forked height gets the more specific error), then the digest.
+fn check_certificate_against_anchor(
+    cert: &budlum_core::settlement::GlobalFinalityCertificate,
+    anchor: &FinalityAnchor,
+) -> Result<(), String> {
+    if cert.checkpoint_height != anchor.checkpoint {
         return Err(format!(
-            "sourceProof domain_id {} != requested source {expected_source}",
-            src_proof.entry.domain_id
+            "--trusted-finality-checkpoint {} conflicts with certificate checkpoint_height {}",
+            anchor.checkpoint, cert.checkpoint_height
         ));
     }
-    if dst_proof.entry.domain_id != expected_target {
-        return Err(format!(
-            "targetProof domain_id {} != requested target {expected_target}",
-            dst_proof.entry.domain_id
-        ));
+    if cert.certificate_digest != anchor.digest {
+        return Err("--trusted-finality-digest does not match certificate digest".to_string());
     }
-    if !src_proof.verify(&src_root) {
-        return Err("source domain finality Merkle proof failed local verification".to_string());
-    }
-    if !dst_proof.verify(&dst_root) {
-        return Err("target domain finality Merkle proof failed local verification".to_string());
-    }
-    Ok((src_proof, dst_proof))
+    Ok(())
 }
 
 fn run_finality_show(
@@ -3754,16 +3725,18 @@ fn run_finality_show(
     trusted_digest: Option<&str>,
     trusted_checkpoint: Option<u64>,
 ) -> Result<(), String> {
+    // Anchor first: refuse before any RPC traffic when the operator has not
+    // supplied an independent commitment to compare the certificate with.
+    let anchor = require_finality_anchor(trusted_digest, trusted_checkpoint)?;
     // hxIP: the certificate is the single local source of truth; every field
     // below is derived from it, never copied from the RPC reply.
     let resp = rpc_call(
         rpc_url,
         "bud_getFinalityCertificate",
-        serde_json::json!([checkpoint]),
+        serde_json::json!([checkpoint.unwrap_or(anchor.checkpoint)]),
     )?;
     let cert = verify_certificate_rpc_response(&resp)?;
 
-    // Trusted digest checkpoint parity (hxIP).
     if let Some(cp) = checkpoint {
         if cp != cert.checkpoint_height {
             return Err(format!(
@@ -3772,20 +3745,7 @@ fn run_finality_show(
             ));
         }
     }
-    if let Some(digest_hex) = trusted_digest {
-        let claimed = parse_hex_bytes32(digest_hex, "trusted-finality-digest")?;
-        if claimed != cert.certificate_digest {
-            return Err("--trusted-finality-digest does not match certificate digest".to_string());
-        }
-    }
-    if let Some(cp) = trusted_checkpoint {
-        if cp != cert.checkpoint_height {
-            return Err(format!(
-                "--trusted-finality-checkpoint {} conflicts with certificate checkpoint_height {}",
-                cp, cert.checkpoint_height
-            ));
-        }
-    }
+    check_certificate_against_anchor(&cert, &anchor)?;
 
     let summary = if let Some(domain_id) = domain {
         // hxIP: inclusion proof verified against cert.bucket_root(proof.bucket),
@@ -3879,29 +3839,16 @@ fn run_finality_route(
     trusted_digest: Option<&str>,
     trusted_checkpoint: Option<u64>,
 ) -> Result<(), String> {
+    // Anchor first: refuse before any RPC traffic (see `require_finality_anchor`).
+    let anchor = require_finality_anchor(trusted_digest, trusted_checkpoint)?;
     // hxIW / hxIP: the certificate is the single local source of truth.
     let resp = rpc_call(
         rpc_url,
         "bud_getFinalityCertificate",
-        serde_json::json!([serde_json::Value::Null]),
+        serde_json::json!([anchor.checkpoint]),
     )?;
     let cert = verify_certificate_rpc_response(&resp)?;
-
-    // Trusted digest / checkpoint parity (hxIP).
-    if let Some(digest_hex) = trusted_digest {
-        let claimed = parse_hex_bytes32(digest_hex, "trusted-finality-digest")?;
-        if claimed != cert.certificate_digest {
-            return Err("--trusted-finality-digest does not match certificate digest".to_string());
-        }
-    }
-    if let Some(cp) = trusted_checkpoint {
-        if cp != cert.checkpoint_height {
-            return Err(format!(
-                "--trusted-finality-checkpoint {} conflicts with certificate checkpoint_height {}",
-                cp, cert.checkpoint_height
-            ));
-        }
-    }
+    check_certificate_against_anchor(&cert, &anchor)?;
 
     let src = cert.prove_domain(source).ok_or_else(|| {
         format!("source domain {source} is not present in the finality certificate")
@@ -5891,27 +5838,227 @@ mod rpc_auth_tests {
         forged_cert["certificateDigest"] = serde_json::json!(format!("0x{}", "ff".repeat(32)));
         assert!(verify_certificate_rpc_response(&forged_cert).is_err());
 
-        let dom_resp = serde_json::json!({
-            "bucketRoot": format!("0x{}", hex::encode(cert.established_root)),
-            "proof": p1,
+        // Inclusion proofs are judged against the locally verified
+        // certificate's own bucket roots - an RPC-chosen root is never an
+        // input, so a root the server forges can prove nothing.
+        assert!(p1.verify(&cert.bucket_root(p1.bucket)));
+        assert!(p2.verify(&cert.bucket_root(p2.bucket)));
+        assert!(!p1.verify(&[0u8; 32]));
+    }
+}
+
+/// The finality commands' trust input. `bud finality show|route` print
+/// `integrityVerified` / `proofsVerified`, the route's value admission and its
+/// safe outflow ceiling; these tests pin that none of that is reported unless
+/// the certificate matched an anchor the operator supplied, and that the
+/// refusal happens before the RPC node is contacted at all.
+#[cfg(test)]
+mod finality_anchor_tests {
+    use super::*;
+    use budlum_core::crypto::facts::QuantumClass;
+    use budlum_core::settlement::{
+        compose_global_finality_certificate, DomainFinalityEntry, FinalityGuarantee,
+        FinalityReversibility, FinalityVerdict, GlobalFinalityCertificate, FINALITY_BINDS_ALL,
+    };
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const CHECKPOINT: u64 = 200;
+
+    /// A row an RPC node is free to invent: any domain, any state root, the
+    /// strongest-looking guarantee `compose` accepts.
+    fn row(domain_id: u32, state_byte: u8) -> DomainFinalityEntry {
+        DomainFinalityEntry {
+            domain_id,
+            height: 100 + u64::from(domain_id),
+            checkpoint_height: CHECKPOINT,
+            state_root: [state_byte; 32],
+            adapter_id: "pow-header-v1".to_owned(),
+            adapter_version: 1,
+            finality_proof_hash: [0x11; 32],
+            guarantee_backing_hash: [0x22; 32],
+            bond_atoms: 1_000_000,
+            guarantee: FinalityGuarantee {
+                reversibility: FinalityReversibility::ProbabilisticWork { confirmations: 6 },
+                quantum_posture: QuantumClass::Hash,
+                attestation: FINALITY_BINDS_ALL,
+                slashable_backing: false,
+                fault_tolerance_bps: 4_999,
+            },
+            verdict: FinalityVerdict::Established,
+        }
+    }
+
+    fn honest() -> GlobalFinalityCertificate {
+        compose_global_finality_certificate(&[row(1, 0x01), row(2, 0x02)])
+            .expect("compose the honest certificate")
+    }
+
+    /// Self-consistent forgery: recomposed from invented rows, so it passes
+    /// `verify_integrity` - exactly what a hostile node can serve.
+    fn forged() -> GlobalFinalityCertificate {
+        compose_global_finality_certificate(&[row(1, 0xEE), row(2, 0xEF)])
+            .expect("compose the forged certificate")
+    }
+
+    fn digest_hex(cert: &GlobalFinalityCertificate) -> String {
+        format!("0x{}", hex::encode(cert.certificate_digest))
+    }
+
+    /// Read one HTTP request: headers, then exactly `Content-Length` body bytes.
+    fn read_request(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&raw).into_owned();
+            if let Some(split) = text.find("\r\n\r\n") {
+                let wanted = text[..split]
+                    .lines()
+                    .find_map(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        lower
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if raw.len() >= split + 4 + wanted {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&raw).into_owned()
+    }
+
+    /// Serve `cert` as the `bud_getFinalityCertificate` result to at most one
+    /// request. The receiver yields the request if one arrived; the listener
+    /// gives up after a bounded wait, so a refused call never hangs the test.
+    fn serve(cert: &GlobalFinalityCertificate) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock RPC");
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking mock RPC");
+        let addr = listener.local_addr().expect("mock RPC address");
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "certificateDigest": digest_hex(cert),
+                "certificate": cert,
+            },
+        })
+        .to_string();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).expect("blocking stream");
+                        let request = read_request(&mut stream);
+                        let reply = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            payload.len(),
+                            payload
+                        );
+                        let _ = stream.write_all(reply.as_bytes());
+                        let _ = tx.send(request);
+                        return;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
         });
-        assert!(verify_domain_finality_rpc_response(&dom_resp, 1).is_ok());
-        assert!(verify_domain_finality_rpc_response(&dom_resp, 2).is_err());
+        (format!("http://{addr}"), rx)
+    }
 
-        let mut forged_dom = dom_resp;
-        forged_dom["bucketRoot"] = serde_json::json!(format!("0x{}", "00".repeat(32)));
-        assert!(verify_domain_finality_rpc_response(&forged_dom, 1).is_err());
+    fn contacted(rx: &mpsc::Receiver<String>) -> bool {
+        rx.recv_timeout(Duration::from_millis(300)).is_ok()
+    }
 
-        let route_resp = serde_json::json!({
-            "sourceBucketRoot": format!("0x{}", hex::encode(cert.established_root)),
-            "targetBucketRoot": format!("0x{}", hex::encode(cert.established_root)),
-            "sourceProof": p1,
-            "targetProof": p2,
-        });
-        assert!(verify_route_finality_rpc_response(&route_resp, 1, 2).is_ok());
+    #[test]
+    fn show_refuses_a_self_consistent_forgery_when_no_anchor_is_given() {
+        let (url, rx) = serve(&forged());
+        let err = run_finality_show(&url, None, None, None, None)
+            .expect_err("an unanchored certificate must not be reported as verified");
+        assert!(
+            err.contains("--trusted-finality-digest"),
+            "unexpected error: {err}"
+        );
+        assert!(!contacted(&rx), "the refusal must precede any RPC traffic");
+    }
 
-        let mut forged_route = route_resp;
-        forged_route["targetBucketRoot"] = serde_json::json!(format!("0x{}", "aa".repeat(32)));
-        assert!(verify_route_finality_rpc_response(&forged_route, 1, 2).is_err());
+    #[test]
+    fn route_refuses_a_self_consistent_forgery_when_no_anchor_is_given() {
+        let (url, rx) = serve(&forged());
+        let err = run_finality_route(&url, 1, 2, None, None)
+            .expect_err("an unanchored route must not be reported as admitting value");
+        assert!(
+            err.contains("--trusted-finality-digest"),
+            "unexpected error: {err}"
+        );
+        assert!(!contacted(&rx), "the refusal must precede any RPC traffic");
+    }
+
+    #[test]
+    fn a_digest_without_its_checkpoint_is_not_an_anchor() {
+        let forged = forged();
+        let (url, rx) = serve(&forged);
+        let err = run_finality_show(&url, None, None, Some(&digest_hex(&forged)), None)
+            .expect_err("half an anchor must be refused");
+        assert!(
+            err.contains("must be provided together"),
+            "unexpected error: {err}"
+        );
+        assert!(!contacted(&rx), "the refusal must precede any RPC traffic");
+    }
+
+    #[test]
+    fn an_honest_anchor_rejects_the_forgery_on_both_commands() {
+        let anchor = digest_hex(&honest());
+        let (url, _rx) = serve(&forged());
+        let err = run_finality_show(&url, None, None, Some(&anchor), Some(CHECKPOINT))
+            .expect_err("forged certificate against an honest anchor");
+        assert!(
+            err.contains("does not match certificate digest"),
+            "unexpected error: {err}"
+        );
+        let (url, _rx) = serve(&forged());
+        let err = run_finality_route(&url, 1, 2, Some(&anchor), Some(CHECKPOINT))
+            .expect_err("forged route against an honest anchor");
+        assert!(
+            err.contains("does not match certificate digest"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn an_anchored_show_asks_the_node_for_the_anchored_checkpoint() {
+        let honest = honest();
+        let (url, rx) = serve(&honest);
+        run_finality_show(
+            &url,
+            None,
+            None,
+            Some(&digest_hex(&honest)),
+            Some(CHECKPOINT),
+        )
+        .expect("the honest certificate verifies against its own anchor");
+        let request = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("one RPC request");
+        assert!(
+            request.contains(&format!("\"params\":[{CHECKPOINT}]")),
+            "the certificate must be requested at the anchored height, got: {request}"
+        );
     }
 }
