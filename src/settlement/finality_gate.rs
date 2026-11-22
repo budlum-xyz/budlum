@@ -298,7 +298,8 @@ pub fn enforce_domain_not_refuted(
             FinalityVerdict::Pending {
                 reason:
                     reason @ (FinalityPendingReason::AttestationUnbound
-                    | FinalityPendingReason::RuleNotSatisfied),
+                    | FinalityPendingReason::RuleNotSatisfied
+                    | FinalityPendingReason::BondUnverified),
             } => {
                 let _ = gate.as_str();
                 return Err(ValueGateRefusal::DomainPending { domain_id, reason });

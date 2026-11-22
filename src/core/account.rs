@@ -6551,7 +6551,7 @@ impl AccountState {
                 );
                 let posture = match domain.kind {
                     ConsensusKind::PoW | ConsensusKind::Zk => DomainQuantumPosture::PurePostQuantum,
-                    _ if observed_pq => DomainQuantumPosture::Hybrid,
+                    _ if observed_pq => DomainQuantumPosture::HybridPostQuantum,
                     _ => DomainQuantumPosture::ClassicalOnly,
                 };
                 let tip = if domain.last_committed_height > 0

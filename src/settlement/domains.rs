@@ -1955,7 +1955,13 @@ fn execute_object_layer_tx(
         if trimmed.contains(':') {
             Some(trimmed.to_string())
         } else {
-            let ns = format!("{:?}", charter.vm_family).to_ascii_lowercase();
+            use crate::object_layer::family::HomeVmFamily;
+            let ns = match charter.vm_family {
+                HomeVmFamily::Evm => "eip155",
+                HomeVmFamily::CosmWasm => "cosmos",
+                HomeVmFamily::Svm => "solana",
+                HomeVmFamily::Move => "move",
+            };
             Some(format!("{ns}:{trimmed}"))
         }
     };
@@ -1971,6 +1977,11 @@ fn execute_object_layer_tx(
                     )));
                 }
             }
+            state
+                .settlement
+                .domains
+                .validate_caip2_binding(*domain, &caip2)
+                .map_err(SettlementTxError::Refused)?;
         }
     }
     if let crate::object_layer::ObjectLayerTx::Arrive(proof) = tx {

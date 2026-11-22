@@ -67,13 +67,10 @@ pub struct ConsensusDomainRegistry {
     #[serde(default)]
     observed: BTreeMap<DomainId, CryptoFacts>,
     /// Canonical CAIP-2 chain reference bound to each registered domain.
-    /// Appended with `#[serde(default)]` for backwards-compatible snapshots.
+    /// Kept as the single source of truth (committed into [`Self::root`]) so
+    /// forward and reverse lookups can never diverge across snapshots.
     #[serde(default)]
     caip2_by_domain: BTreeMap<DomainId, String>,
-    /// Reverse uniqueness index (`CAIP-2 -> DomainId`) enforcing that no two
-    /// registered domains may ever claim the same CAIP-2 chain identity.
-    #[serde(default)]
-    domain_by_caip2: BTreeMap<String, DomainId>,
     /// Global block height at which each registered domain last registered or
     /// advanced with a verified commitment. Used to retire and reclaim stale
     /// slots once inactive for [`DOMAIN_INACTIVITY_RETIREMENT_BLOCKS`].
@@ -81,18 +78,22 @@ pub struct ConsensusDomainRegistry {
     last_activity_block: BTreeMap<DomainId, u64>,
 }
 
-/// Validates and normalizes a CAIP-2 reference (`namespace:reference`).
+/// Validates and normalizes a CAIP-2 Final chain identifier (`namespace:reference`).
+///
+/// Enforces the official CAIP-2 Final grammar:
+/// - `namespace`: `[-a-z0-9]{3,8}`
+/// - `reference`: `[-_a-zA-Z0-9]{1,32}`
 fn normalize_caip2(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.len() > 128 {
-        return Err("CAIP-2 reference must be 1..=128 bytes".to_string());
-    }
     let Some((ns, reference)) = trimmed.split_once(':') else {
         return Err(format!("CAIP-2 reference '{trimmed}' must contain ':'"));
     };
-    if ns.is_empty() || reference.is_empty() || reference.contains(':') {
+    if !(3..=8).contains(&ns.len()) {
+        return Err(format!("CAIP-2 namespace '{ns}' must be 3..=8 characters"));
+    }
+    if !(1..=32).contains(&reference.len()) || reference.contains(':') {
         return Err(format!(
-            "CAIP-2 reference '{trimmed}' has malformed segments"
+            "CAIP-2 reference '{reference}' must be 1..=32 characters without ':'"
         ));
     }
     if !ns
@@ -100,7 +101,7 @@ fn normalize_caip2(raw: &str) -> Result<String, String> {
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         || !reference
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
         return Err(format!(
             "CAIP-2 reference '{trimmed}' contains disallowed characters"
@@ -116,7 +117,6 @@ impl ConsensusDomainRegistry {
             domains: BTreeMap::new(),
             observed: BTreeMap::new(),
             caip2_by_domain: BTreeMap::new(),
-            domain_by_caip2: BTreeMap::new(),
             last_activity_block: BTreeMap::new(),
         }
     }
@@ -128,18 +128,31 @@ impl ConsensusDomainRegistry {
     /// Returns an error without mutating state if `domain_id` is unknown, the
     /// CAIP-2 string is malformed, the CAIP-2 reference is already bound to a
     /// different domain, or `domain_id` is already bound to a different CAIP-2.
-    pub fn bind_caip2(&mut self, domain_id: DomainId, caip2: &str) -> Result<(), String> {
+    /// Validates whether `caip2` can be bound to `domain_id` without mutating
+    /// state (used by callers that must pre-check atomically before applying
+    /// sibling registry writes).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `domain_id` is unknown, `caip2` violates CAIP-2
+    /// Final syntax, `caip2` is claimed by another domain, or `domain_id` is
+    /// already bound to a different CAIP-2 reference.
+    pub fn validate_caip2_binding(
+        &self,
+        domain_id: DomainId,
+        caip2: &str,
+    ) -> Result<String, String> {
         if !self.domains.contains_key(&domain_id) {
             return Err(format!("Domain {domain_id} is not registered"));
         }
         let normalized = normalize_caip2(caip2)?;
-        if let Some(&existing_domain) = self.domain_by_caip2.get(&normalized) {
+        if let Some(existing_domain) = self.domain_id_by_caip2(&normalized) {
             if existing_domain != domain_id {
                 return Err(format!(
                     "CAIP-2 reference '{normalized}' is already registered to domain {existing_domain}"
                 ));
             }
-            return Ok(());
+            return Ok(normalized);
         }
         if let Some(existing_ref) = self.caip2_by_domain.get(&domain_id) {
             if existing_ref != &normalized {
@@ -147,10 +160,13 @@ impl ConsensusDomainRegistry {
                     "Domain {domain_id} is already bound to CAIP-2 '{existing_ref}'"
                 ));
             }
-            return Ok(());
         }
-        self.caip2_by_domain.insert(domain_id, normalized.clone());
-        self.domain_by_caip2.insert(normalized, domain_id);
+        Ok(normalized)
+    }
+
+    pub fn bind_caip2(&mut self, domain_id: DomainId, caip2: &str) -> Result<(), String> {
+        let normalized = self.validate_caip2_binding(domain_id, caip2)?;
+        self.caip2_by_domain.insert(domain_id, normalized);
         Ok(())
     }
 
@@ -169,22 +185,24 @@ impl ConsensusDomainRegistry {
         caip2: &str,
     ) -> Result<(), String> {
         let normalized = normalize_caip2(caip2)?;
-        if let Some(&existing_domain) = self.domain_by_caip2.get(&normalized) {
+        if let Some(existing_domain) = self.domain_id_by_caip2(&normalized) {
             return Err(format!(
                 "CAIP-2 reference '{normalized}' is already registered to domain {existing_domain}"
             ));
         }
         let id = domain.id;
         self.register(domain)?;
-        self.caip2_by_domain.insert(id, normalized.clone());
-        self.domain_by_caip2.insert(normalized, id);
+        self.caip2_by_domain.insert(id, normalized);
         Ok(())
     }
 
     /// Resolves a canonical CAIP-2 reference to its unique registered `DomainId`.
     #[must_use]
     pub fn domain_id_by_caip2(&self, caip2: &str) -> Option<DomainId> {
-        self.domain_by_caip2.get(caip2.trim()).copied()
+        let trimmed = caip2.trim();
+        self.caip2_by_domain
+            .iter()
+            .find_map(|(&id, existing)| (existing == trimmed).then_some(id))
     }
 
     /// Returns the canonical CAIP-2 reference bound to `domain_id`, if any.
@@ -230,9 +248,7 @@ impl ConsensusDomainRegistry {
             self.domains.remove(id);
             self.observed.remove(id);
             self.last_activity_block.remove(id);
-            if let Some(caip2) = self.caip2_by_domain.remove(id) {
-                self.domain_by_caip2.remove(&caip2);
-            }
+            self.caip2_by_domain.remove(id);
         }
         stale
     }
@@ -1168,7 +1184,7 @@ mod tests {
     #[test]
     fn single_operator_cannot_exhaust_domain_registry_and_inactive_domain_reclaims_slot() {
         let mut reg = ConsensusDomainRegistry::new();
-        let single_operator = crate::core::address::Address::from_bytes([0x5A; 32]);
+        let single_operator = crate::core::address::Address([0x5A; 32]);
 
         // Under-bonded registration is rejected (deposit required for every slot).
         let mut underfunded = default_domain(1, ConsensusKind::PoS, 1001, "pos", 0);
@@ -1214,5 +1230,30 @@ mod tests {
         reg.register(overflow)
             .expect("registration must succeed once inactive slots are reclaimed");
         assert!(reg.get(999).is_some());
+    }
+    #[test]
+    fn normalize_caip2_conforms_to_official_caip2_final_grammar() {
+        for valid in [
+            "eip155:1",
+            "cosmos:cosmoshub-3",
+            "starknet:SN_GOERLI",
+            "chainstd:8c3444cf8970a9e41a706fab93e7a6c4",
+        ] {
+            assert_eq!(normalize_caip2(valid).as_deref(), Ok(valid), "{valid}");
+        }
+        assert!(normalize_caip2("a:b").is_err(), "namespace < 3 must fail");
+        assert!(
+            normalize_caip2("namespace:1").is_err(),
+            "namespace > 8 must fail"
+        );
+        let over_ref = format!("eip155:{}", "1".repeat(33));
+        assert!(
+            normalize_caip2(&over_ref).is_err(),
+            "reference > 32 must fail"
+        );
+        assert!(
+            normalize_caip2("eip155:1.2").is_err(),
+            "dot is disallowed in CAIP-2 reference"
+        );
     }
 }
