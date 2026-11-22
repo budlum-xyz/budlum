@@ -3265,8 +3265,17 @@ impl BudlumApiServer for RpcServer {
             })
         };
         let hub = crate::settlement::FinalityGuarantee::settlement_hub();
+        // The guarantee is bound to the backing the domain's LAST ACCEPTED
+        // attestation actually carried, not to the registration spec alone.
+        // `profile.last_backing` is that backing (`None` until the domain has
+        // produced its first accepted attestation), so a domain that has never
+        // been attested reports zero fault tolerance instead of the
+        // registration's promise.
         let finality_guarantee =
-            crate::settlement::FinalityGuarantee::for_external_spec(&entry.spec);
+            crate::settlement::FinalityGuarantee::for_external_spec_with_backing(
+                &entry.spec,
+                profile.last_backing.as_ref(),
+            );
         let economic_security = crate::settlement::EconomicSecurityBound::derive(
             &finality_guarantee,
             profile.bond_atoms,

@@ -21,6 +21,7 @@
 //! in this tree yet, so today the composer's only callers are the tests below.
 //! The note is the door, not a claim that the door is hung.
 
+use crate::cross_domain::external::spec::SecurityBacking;
 use crate::cross_domain::external::AdapterSpec;
 use crate::crypto::facts::QuantumClass;
 use crate::domain::types::{ConsensusDomain, ConsensusKind};
@@ -38,6 +39,15 @@ const VALIDITY_PROOF_FAULT_TOLERANCE_BPS: u16 = 9_999;
 /// Minimum confirmation depth required before probabilistic `PoW` finality is
 /// eligible for cross-domain value routing without slashable stake.
 const MIN_VALUE_SAFE_POW_CONFIRMATIONS: u64 = 6;
+/// Minimum cumulative proof-of-work difficulty (in bits) an observed `Work`
+/// backing must carry before it may keep a deep-`PoW` value-outflow guarantee.
+///
+/// A `Work { difficulty_bits }` below this threshold is a regtest- or
+/// toy-chain-scale claim: two hashes cost well under a microsecond, so it
+/// carries no adversarial cost at all. It must not open the value path.
+/// (`SecurityBacking::Work` is produced by `bitcoin_spv.rs` from the
+/// cumulative chain work, so a real mainnet chain clears this threshold.)
+const MIN_TIER1_WORK_BITS: u32 = 64;
 
 /// Reversibility class of an accepted finality verdict, ordered from weakest
 /// (`ProbabilisticWork`) to strongest (`CryptographicValidity`).
@@ -272,8 +282,26 @@ impl FinalityGuarantee {
     }
 
     /// Derive the finality guarantee of a registered external intake [`AdapterSpec`].
+    ///
+    /// # Module-private on purpose
+    ///
+    /// This is the SPEC-ONLY derivation: it reads the registration promise and
+    /// nothing else. It is deliberately **not** `pub`, so no other module in
+    /// the tree can obtain an external domain's guarantee from the
+    /// registration alone. The single public entry point is
+    /// [`Self::for_external_spec_with_backing`], which additionally reads the
+    /// backing of the domain's LAST ACCEPTED attestation.
+    ///
+    /// The distinction is not cosmetic. A registration spec is a declaration
+    /// made before any evidence existed; the accepted attestation is the fact.
+    /// Deriving the guarantee from the declaration alone reports a
+    /// BFT-grade bound for a domain that has never produced a single
+    /// accepted attestation.
+    ///
+    /// WIRING: the spec-only half of `for_external_spec_with_backing`; it is
+    /// the ceiling that the observed backing may only ever lower.
     #[must_use]
-    pub fn for_external_spec(spec: &AdapterSpec) -> Self {
+    fn for_external_spec_declared(spec: &AdapterSpec) -> Self {
         match spec {
             AdapterSpec::EthereumSync { committee, .. } => Self {
                 reversibility: FinalityReversibility::DeterministicQuorum,
@@ -517,6 +545,139 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+        }
+    }
+
+    /// Derive the finality guarantee of a registered external intake
+    /// [`AdapterSpec`] **constrained by the backing its last accepted
+    /// attestation actually carried**.
+    ///
+    /// `observed` is the `SecurityBacking` of the domain's LAST ACCEPTED
+    /// attestation (`DomainProfile::last_backing`, updated by the registry on
+    /// every accepted attestation). `None` means the domain has not yet
+    /// produced any accepted attestation.
+    ///
+    /// # The observed backing may only ever REDUCE the promise
+    ///
+    /// The registration spec is a ceiling: it was written before any evidence
+    /// existed, so a later, stronger attestation must not inflate what the
+    /// registration promised. A weaker attestation must reduce it.
+    ///
+    /// | Observed backing | Effect on the promised bound |
+    /// |---|---|
+    /// | `None` (no accepted attestation) | `bps = 0`, `slashable_backing = false`, attestation cleared |
+    /// | `SecurityBacking::None` | `bps = 0`, `slashable_backing = false`, attestation cleared |
+    /// | `Authority { .. }` | `slashable_backing = false`; `bps = 0` when the spec promised slashable backing |
+    /// | `SignatureSet { slashable, .. }` | `slashable_backing &= slashable`; `bps = 0` when the quorum is degenerate (`required == 0`, `signers < required`, `total_weight == 0`) or when the spec promised slashable backing the attestation does not carry |
+    /// | `SignatureSet { slashable: true, .. }` | the promised bound is kept |
+    /// | `Work { difficulty_bits }` | `bps = 0` when `difficulty_bits == 0`; a sub-Tier-1 work claim (`< 64` bits) does not keep a deep-`PoW` value guarantee |
+    /// | `Zk { .. }` | the promised bound is kept (stronger evidence cannot inflate it) |
+    ///
+    /// # Why an unslashable signature set does not always zero the bound
+    ///
+    /// `fault_tolerance_bps == 0` also closes tx-inclusion
+    /// (`source_admits_tx_inclusion` is `tx_root && fault_tolerance_bps > 0`).
+    /// An Ethereum sync committee is unslashable BY DESIGN and still carries
+    /// a BFT-grade inclusion bound; zeroing its bound would refuse a
+    /// perfectly valid inclusion proof. So the bound is zeroed only when the
+    /// observation actually contradicts the promise (a downgrade) or when the
+    /// quorum is degenerate — never merely because the backing is
+    /// unslashable.
+    ///
+    /// WIRING: the canonical external-domain guarantee derivation; the
+    /// spec-only half ([`Self::for_external_spec_declared`]) is module-private
+    /// so this is the only reachable path.
+    #[must_use]
+    pub fn for_external_spec_with_backing(
+        spec: &AdapterSpec,
+        observed: Option<&SecurityBacking>,
+    ) -> Self {
+        let promised = Self::for_external_spec_declared(spec);
+        let Some(observed) = observed else {
+            // No accepted attestation: there is no evidence at all. A domain
+            // that has never been attested carries no fault tolerance.
+            return Self::no_observed_backing();
+        };
+        match observed {
+            SecurityBacking::None => Self::no_observed_backing(),
+            SecurityBacking::Authority { .. } => Self {
+                // A permissioned authority set is revocable by admission root,
+                // not stake-slashed, so it is never slashable backing.
+                slashable_backing: false,
+                fault_tolerance_bps: if promised.slashable_backing {
+                    0
+                } else {
+                    promised.fault_tolerance_bps
+                },
+                ..promised
+            },
+            SecurityBacking::SignatureSet {
+                signers,
+                required,
+                total_weight,
+                slashable,
+                ..
+            } => {
+                let degenerate = *required == 0 || *signers < *required || *total_weight == 0;
+                let downgrade = promised.slashable_backing && !*slashable;
+                Self {
+                    // A degenerate quorum proves nothing, so it cannot keep
+                    // the slashability claim either: the stake it names was
+                    // never really at risk behind a quorum that does not
+                    // exist.
+                    slashable_backing: !degenerate && promised.slashable_backing && *slashable,
+                    fault_tolerance_bps: if degenerate || downgrade {
+                        0
+                    } else {
+                        promised.fault_tolerance_bps
+                    },
+                    ..promised
+                }
+            }
+            SecurityBacking::Work { difficulty_bits } => {
+                // No work at all is no evidence. A sub-Tier-1 work claim is a
+                // toy/regtest chain: it may keep a probabilistic inclusion
+                // bound, but it must not keep a deep-`PoW` value guarantee.
+                let deep_pow = matches!(
+                    promised.reversibility,
+                    FinalityReversibility::ProbabilisticWork { .. }
+                );
+                Self {
+                    slashable_backing: false,
+                    // No work at all is no evidence, and a sub-Tier-1 work
+                    // claim cannot keep a deep-`PoW` value guarantee.
+                    fault_tolerance_bps: if *difficulty_bits == 0
+                        || (deep_pow && *difficulty_bits < MIN_TIER1_WORK_BITS)
+                    {
+                        0
+                    } else {
+                        promised.fault_tolerance_bps
+                    },
+                    ..promised
+                }
+            }
+            SecurityBacking::Zk { .. } => promised,
+        }
+    }
+
+    /// The guarantee of a domain whose last accepted attestation carries no
+    /// usable backing: no fault tolerance, no slashable backing, and no
+    /// attestation of any kind.
+    ///
+    /// Fail-closed: "no evidence" is not "a little evidence".
+    #[must_use]
+    fn no_observed_backing() -> Self {
+        Self {
+            reversibility: FinalityReversibility::DeterministicQuorum,
+            quantum_posture: QuantumClass::Hash,
+            attestation: CommitmentAttestation {
+                state_root: false,
+                tx_root: false,
+                event_root: false,
+                parent: false,
+            },
+            slashable_backing: false,
+            fault_tolerance_bps: 0,
         }
     }
 
@@ -1127,7 +1288,7 @@ mod tests {
         // 3. Bonded stake-weighted PQ Bullshark DAG-BFT (`AdapterSpec::DagCertificate`)
         //    and HotStuff 3-chain (`AdapterSpec::HotStuffQc`) genuinely attest all 4 roots
         //    under slashable quorum -> admit value transfer and enforce economic ceiling.
-        let g_dag = FinalityGuarantee::for_external_spec(&AdapterSpec::DagCertificate {
+        let g_dag = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::DagCertificate {
             network: "sui-mysticeti".into(),
             committee: Some(crate::cross_domain::external::PinnedDagCommittee {
                 epoch: 1,
@@ -1142,7 +1303,7 @@ mod tests {
         assert!(g_dag.admits_cross_domain_value());
         assert_eq!(g_dag.quantum_posture, QuantumClass::Lattice);
 
-        let g_hs = FinalityGuarantee::for_external_spec(&AdapterSpec::HotStuffQc {
+        let g_hs = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::HotStuffQc {
             network: "aptos-jolteon".into(),
             committee: Some(crate::cross_domain::external::PinnedHotStuffCommittee {
                 epoch: 1,
@@ -1228,7 +1389,7 @@ mod tests {
         //    block_hash-bound), EthereumSync (unslashable, classical), ZkVm
         //    (Hash-sound validity), DataAvailability (DAS-sampled, tx_root),
         //    and BitcoinSpv (Hash-sound PoW, tx_root).
-        let g_tm = FinalityGuarantee::for_external_spec(&AdapterSpec::TendermintCommit {
+        let g_tm = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::TendermintCommit {
             network: "noble".into(),
             chain_id: "noble-1".into(),
             validator_set_hash: Some([0xAB; 32]),
@@ -1237,21 +1398,22 @@ mod tests {
         assert!(g_tm.attestation.state_root);
         assert!(!g_tm.admits_cross_domain_value());
         assert_eq!(g_tm.quantum_posture, QuantumClass::Classical);
-        let g_tm_unpinned = FinalityGuarantee::for_external_spec(&AdapterSpec::TendermintCommit {
-            network: "noble".into(),
-            chain_id: "noble-1".into(),
-            validator_set_hash: None,
-        });
+        let g_tm_unpinned =
+            FinalityGuarantee::for_external_spec_declared(&AdapterSpec::TendermintCommit {
+                network: "noble".into(),
+                chain_id: "noble-1".into(),
+                validator_set_hash: None,
+            });
         assert_eq!(g_tm_unpinned.fault_tolerance_bps, 0);
 
-        let g_eth = FinalityGuarantee::for_external_spec(&AdapterSpec::EthereumSync {
+        let g_eth = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::EthereumSync {
             network: "eth".into(),
             committee: None,
         });
         assert!(!g_eth.admits_cross_domain_value());
         assert_eq!(g_eth.quantum_posture, QuantumClass::Classical);
 
-        let g_zk = FinalityGuarantee::for_external_spec(&AdapterSpec::ZkVm {
+        let g_zk = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::ZkVm {
             network: "zk".into(),
             program_hash: Some([9; 32]),
             chain_id: Some(77),
@@ -1262,7 +1424,7 @@ mod tests {
             FinalityReversibility::CryptographicValidity
         );
 
-        let g_da = FinalityGuarantee::for_external_spec(&AdapterSpec::DataAvailability {
+        let g_da = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::DataAvailability {
             network: "celestia".into(),
             committee: Some(PinnedDaCommittee {
                 namespace_id: [3; 32],
@@ -1283,7 +1445,7 @@ mod tests {
         );
         assert!(da_to_zk.source_admits_tx_inclusion);
 
-        let g_btc_ext = FinalityGuarantee::for_external_spec(&AdapterSpec::BitcoinSpv {
+        let g_btc_ext = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::BitcoinSpv {
             network: "mainnet".into(),
             anchor: Some(
                 crate::cross_domain::external::bitcoin_spv::PinnedBitcoinAnchor {
@@ -1296,10 +1458,11 @@ mod tests {
         assert_eq!(g_btc_ext.quantum_posture, QuantumClass::Hash);
         assert!(g_btc_ext.attestation.tx_root);
         assert!(!g_btc_ext.admits_cross_domain_value());
-        let g_btc_unpinned = FinalityGuarantee::for_external_spec(&AdapterSpec::BitcoinSpv {
-            network: "mainnet".into(),
-            anchor: None,
-        });
+        let g_btc_unpinned =
+            FinalityGuarantee::for_external_spec_declared(&AdapterSpec::BitcoinSpv {
+                network: "mainnet".into(),
+                anchor: None,
+            });
         assert_eq!(g_btc_unpinned.fault_tolerance_bps, 0);
         assert!(!da_to_zk.source_admits_value_transfer);
     }
@@ -1327,32 +1490,34 @@ mod tests {
 
     #[test]
     fn external_spec_refuses_empty_duplicate_zero_sample_and_short_pq_committees() {
-        let empty_da = FinalityGuarantee::for_external_spec(&AdapterSpec::DataAvailability {
-            network: "celestia-empty".into(),
-            committee: Some(PinnedDaCommittee {
-                namespace_id: [0x10; 32],
-                min_samples: 0,
-                min_square_size: 2,
-                members: Vec::new(),
-            }),
-        });
+        let empty_da =
+            FinalityGuarantee::for_external_spec_declared(&AdapterSpec::DataAvailability {
+                network: "celestia-empty".into(),
+                committee: Some(PinnedDaCommittee {
+                    namespace_id: [0x10; 32],
+                    min_samples: 0,
+                    min_square_size: 2,
+                    members: Vec::new(),
+                }),
+            });
         assert_eq!(empty_da.fault_tolerance_bps, 0);
         assert!(!empty_da.slashable_backing);
         assert!(!empty_da.attestation.state_root);
         assert!(!empty_da.attestation.tx_root);
 
         // Short 32-byte non-ML-DSA-65 pq_pubkey must never claim QuantumClass::Lattice.
-        let short_pq_dag = FinalityGuarantee::for_external_spec(&AdapterSpec::DagCertificate {
-            network: "dag-short-pq".into(),
-            committee: Some(crate::cross_domain::external::PinnedDagCommittee {
-                epoch: 1,
-                members: vec![crate::cross_domain::external::DagBftValidator {
-                    ed25519_pubkey: [0x41; 32],
-                    voting_weight: 100,
-                    pq_pubkey: vec![0x99; 32],
-                }],
-            }),
-        });
+        let short_pq_dag =
+            FinalityGuarantee::for_external_spec_declared(&AdapterSpec::DagCertificate {
+                network: "dag-short-pq".into(),
+                committee: Some(crate::cross_domain::external::PinnedDagCommittee {
+                    epoch: 1,
+                    members: vec![crate::cross_domain::external::DagBftValidator {
+                        ed25519_pubkey: [0x41; 32],
+                        voting_weight: 100,
+                        pq_pubkey: vec![0x99; 32],
+                    }],
+                }),
+            });
         assert_eq!(short_pq_dag.quantum_posture, QuantumClass::Classical);
 
         // Duplicate validator ed25519 pubkeys invalidate pinned BFT committee guarantees.
@@ -1361,7 +1526,7 @@ mod tests {
             voting_weight: 100,
             pq_pubkey: vec![0x77; 1_952],
         };
-        let dup_dag = FinalityGuarantee::for_external_spec(&AdapterSpec::DagCertificate {
+        let dup_dag = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::DagCertificate {
             network: "dag-dup".into(),
             committee: Some(crate::cross_domain::external::PinnedDagCommittee {
                 epoch: 1,
@@ -1383,7 +1548,7 @@ mod tests {
         let pq = PqKeyPair::generate();
         let pq_bytes = pq.public_key_bytes().to_vec();
 
-        let g_ffg = FinalityGuarantee::for_external_spec(&AdapterSpec::CasperFfg {
+        let g_ffg = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::CasperFfg {
             network: "eth-ffg".into(),
             committee: Some(
                 PinnedFfgCommittee::new(
@@ -1401,7 +1566,7 @@ mod tests {
         assert!(!g_ffg.slashable_backing);
         assert_eq!(g_ffg.fault_tolerance_bps, BFT_FAULT_TOLERANCE_BPS);
 
-        let g_my = FinalityGuarantee::for_external_spec(&AdapterSpec::MysticetiDag {
+        let g_my = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::MysticetiDag {
             network: "sui-my".into(),
             committee: Some(
                 PinnedMysticetiCommittee::new(
@@ -1418,7 +1583,7 @@ mod tests {
         assert!(g_my.attestation.event_root);
         assert!(!g_my.slashable_backing);
 
-        let g_bv = FinalityGuarantee::for_external_spec(&AdapterSpec::BitVmCovenant {
+        let g_bv = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::BitVmCovenant {
             network: "btc-bv".into(),
             anchor: Some(PinnedBitVmAnchor {
                 height: 10,
@@ -1662,5 +1827,297 @@ mod tests {
             })
             .collect();
         assert_eq!(compose(&entries), Err(FinalityComposeError::TooManyDomains));
+    }
+}
+
+/// A registered external domain's guarantee must reflect the backing the
+/// domain's ACCEPTED attestations actually carry, not only what its
+/// registration spec promised. The spec is a declaration made before any
+/// evidence existed; the accepted attestation is the fact.
+#[cfg(test)]
+mod external_backing_tests {
+    use super::*;
+    use crate::cross_domain::external::da_sampling::{DaCommitteeMember, PinnedDaCommittee};
+    use crate::cross_domain::external::spec::{ProofSystem, SecurityBacking};
+    use crate::crypto::facts::ObservedScheme;
+    use crate::crypto::scheme::SchemeId;
+
+    /// A governance-pinned, fully populated DA committee: the registration
+    /// state in which the spec alone promises a BFT-grade guarantee.
+    fn pinned_da_spec() -> AdapterSpec {
+        AdapterSpec::DataAvailability {
+            network: "da-net".into(),
+            committee: Some(PinnedDaCommittee {
+                namespace_id: [3; 32],
+                min_samples: 16,
+                min_square_size: 4,
+                members: vec![DaCommitteeMember {
+                    ed25519_pubkey: [4; 32],
+                    voting_weight: 100,
+                    pq_pubkey: vec![5; 1_952],
+                }],
+            }),
+        }
+    }
+
+    /// The spec-only derivation is what the tree does today: it reports a
+    /// BFT-grade fault-tolerance bound from the registration alone, with no
+    /// evidence of any accepted attestation behind it.
+    ///
+    /// This assertion is the RED half of the pair below: it pins the current
+    /// (over-optimistic) behaviour so the change is measurable.
+    #[test]
+    fn the_spec_only_derivation_claims_a_bft_grade_bound_with_no_accepted_attestation() {
+        let g = FinalityGuarantee::for_external_spec_declared(&pinned_da_spec());
+        assert_eq!(g.fault_tolerance_bps, BFT_FAULT_TOLERANCE_BPS);
+        assert!(g.slashable_backing);
+    }
+
+    /// A domain that has never produced an accepted attestation has NO
+    /// backing. Its guarantee must say so: zero fault tolerance, and no
+    /// cross-domain value admitted.
+    ///
+    /// RED today: the spec-only derivation has no way to see the attestation,
+    /// so the only way to express "no accepted attestation" does not exist yet.
+    #[test]
+    fn a_domain_with_no_accepted_attestation_has_no_fault_tolerance() {
+        let g = FinalityGuarantee::for_external_spec_with_backing(&pinned_da_spec(), None);
+        assert_eq!(g.fault_tolerance_bps, 0);
+        assert!(!g.slashable_backing);
+        assert!(!g.admits_cross_domain_value());
+    }
+
+    /// An accepted attestation whose backing is an unslashable authority set
+    /// cannot carry the BFT fault-tolerance bound the registration promised.
+    /// The guarantee must be reduced to zero, not carried over.
+    #[test]
+    fn an_unslashable_authority_backing_cancels_the_promised_fault_tolerance() {
+        let g = FinalityGuarantee::for_external_spec_with_backing(
+            &pinned_da_spec(),
+            Some(&SecurityBacking::Authority { count: 3 }),
+        );
+        assert_eq!(g.fault_tolerance_bps, 0);
+        assert!(!g.slashable_backing);
+        assert!(!g.admits_cross_domain_value());
+    }
+
+    /// A signature set the domain itself reported as unslashable (an
+    /// Ethereum sync committee is the live example) is not slashable economic
+    /// security, whatever the registration promised.
+    #[test]
+    fn an_unslashable_signature_set_cancels_the_promised_fault_tolerance() {
+        let g = FinalityGuarantee::for_external_spec_with_backing(
+            &pinned_da_spec(),
+            Some(&SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
+                signers: 64,
+                required: 32,
+                total_weight: 1_000,
+                slashable: false,
+            }),
+        );
+        assert_eq!(g.fault_tolerance_bps, 0);
+        assert!(!g.slashable_backing);
+        assert!(!g.admits_cross_domain_value());
+    }
+
+    /// A slashable signature set DOES carry the promised bound: the accepted
+    /// attestation confirms what the registration declared.
+    #[test]
+    fn a_slashable_signature_backing_keeps_the_promised_fault_tolerance() {
+        let g = FinalityGuarantee::for_external_spec_with_backing(
+            &pinned_da_spec(),
+            Some(&SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::ED25519),
+                signers: 64,
+                required: 32,
+                total_weight: 1_000,
+                slashable: true,
+            }),
+        );
+        assert_eq!(g.fault_tolerance_bps, BFT_FAULT_TOLERANCE_BPS);
+        assert!(g.slashable_backing);
+    }
+
+    /// The rule that makes the two halves one: the observed backing may only
+    /// ever REDUCE the promised bound. A backing stronger than the
+    /// registration promised must not inflate it.
+    #[test]
+    fn the_observed_backing_can_only_reduce_the_promised_bound() {
+        let spec = AdapterSpec::BitcoinSpv {
+            network: "btc".into(),
+            anchor: Some(
+                crate::cross_domain::external::bitcoin_spv::PinnedBitcoinAnchor {
+                    height: 840_000,
+                    block_hash: [0x11; 32],
+                    bits: 0x1703_4219,
+                },
+            ),
+        };
+        let promised = FinalityGuarantee::for_external_spec_declared(&spec);
+        assert_eq!(promised.fault_tolerance_bps, POW_FAULT_TOLERANCE_BPS);
+
+        // A ZK validity proof is stronger than the promised PoW bound.
+        let observed = FinalityGuarantee::for_external_spec_with_backing(
+            &spec,
+            Some(&SecurityBacking::Zk {
+                system: ProofSystem::Stark,
+                public_inputs_digest: [0x22; 32],
+            }),
+        );
+        assert_eq!(
+            observed.fault_tolerance_bps, promised.fault_tolerance_bps,
+            "an observed backing stronger than the registration must not inflate the bound"
+        );
+    }
+
+    /// A `PoW` domain whose accepted attestation reports a work claim below
+    /// the Tier-1 threshold is a regtest- or toy-scale chain: two hashes cost
+    /// well under a microsecond, so the claim carries no adversarial cost.
+    /// It must not keep the deep-`PoW` value guarantee the registration
+    /// promised.
+    ///
+    /// A work claim of ZERO is stronger still: it is not a weak chain, it is
+    /// no work at all, so the fault-tolerance bound itself is zero.
+    #[test]
+    fn a_sub_tier1_work_backing_cancels_the_promised_pow_fault_tolerance() {
+        let spec = AdapterSpec::BitcoinSpv {
+            network: "btc".into(),
+            anchor: Some(
+                crate::cross_domain::external::bitcoin_spv::PinnedBitcoinAnchor {
+                    height: 840_000,
+                    block_hash: [0x11; 32],
+                    bits: 0x1703_4219,
+                },
+            ),
+        };
+        let promised = FinalityGuarantee::for_external_spec_declared(&spec);
+        assert_eq!(promised.fault_tolerance_bps, POW_FAULT_TOLERANCE_BPS);
+
+        let toy = FinalityGuarantee::for_external_spec_with_backing(
+            &spec,
+            Some(&SecurityBacking::Work {
+                difficulty_bits: MIN_TIER1_WORK_BITS - 1,
+            }),
+        );
+        assert_eq!(
+            toy.fault_tolerance_bps, 0,
+            "a work claim below the Tier-1 threshold must not keep a deep-PoW bound"
+        );
+        assert!(!toy.admits_cross_domain_value());
+
+        let none = FinalityGuarantee::for_external_spec_with_backing(
+            &spec,
+            Some(&SecurityBacking::Work { difficulty_bits: 0 }),
+        );
+        assert_eq!(none.fault_tolerance_bps, 0);
+        assert!(!none.admits_cross_domain_value());
+    }
+
+    /// An Ethereum sync committee is unslashable BY DESIGN and still carries
+    /// a BFT-grade inclusion bound. Zeroing its fault tolerance would refuse a
+    /// perfectly valid inclusion proof (`source_admits_tx_inclusion` is
+    /// `tx_root && fault_tolerance_bps > 0`), so an unslashable signature set
+    /// with a real quorum must keep its bound.
+    ///
+    /// The two outcomes are pinned SEPARATELY: the inclusion proof survives,
+    /// and the value transfer is still refused.
+    #[test]
+    fn an_unslashable_quorum_keeps_inclusion_but_still_refuses_value_transfer() {
+        let spec = AdapterSpec::EthereumSync {
+            network: "eth".into(),
+            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
+                period: 1,
+                aggregate_pubkey: vec![0x33; 96],
+                next_committee_root: [0x44; 32],
+            }),
+        };
+        let promised = FinalityGuarantee::for_external_spec_declared(&spec);
+        assert!(
+            !promised.slashable_backing,
+            "an Ethereum sync committee is never slashable-backed"
+        );
+
+        let observed = FinalityGuarantee::for_external_spec_with_backing(
+            &spec,
+            Some(&SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
+                signers: 64,
+                required: 32,
+                total_weight: 1_000,
+                slashable: false,
+            }),
+        );
+        assert_eq!(
+            observed.fault_tolerance_bps, promised.fault_tolerance_bps,
+            "an unslashable quorum with a real threshold must keep its inclusion bound"
+        );
+        assert!(
+            !observed.admits_cross_domain_value(),
+            "an unslashable quorum must still refuse cross-domain value transfer"
+        );
+    }
+
+    /// A degenerate quorum is not a quorum: `required == 0`, fewer signers
+    /// than the threshold, or zero total weight all mean the attestation
+    /// proves nothing, whatever the registration promised.
+    #[test]
+    fn a_degenerate_quorum_cancels_the_promised_fault_tolerance() {
+        for (signers, required, weight) in [(64u64, 0u64, 1_000u128), (64, 32, 0)] {
+            let g = FinalityGuarantee::for_external_spec_with_backing(
+                &pinned_da_spec(),
+                Some(&SecurityBacking::SignatureSet {
+                    scheme: ObservedScheme::Scheme(SchemeId::ED25519),
+                    signers,
+                    required,
+                    total_weight: weight,
+                    slashable: true,
+                }),
+            );
+            assert_eq!(
+                g.fault_tolerance_bps, 0,
+                "a degenerate quorum (signers={signers}, required={required}, weight={weight}) \
+                 must not keep the promised bound"
+            );
+            assert!(!g.slashable_backing);
+            assert!(!g.admits_cross_domain_value());
+        }
+    }
+
+    /// The single-canonical-path rule, checked at the SOURCE level.
+    ///
+    /// The spec-only derivation is module-private, so no other module can call
+    /// it; this test locks that down against a future edit that re-widens it
+    /// or adds a second spec-only entry point. The production settlement
+    /// surface must reach the external guarantee ONLY through the
+    /// observed-backing path.
+    #[test]
+    fn a_settlement_write_path_refuses_a_spec_only_guarantee() {
+        let sources: [(&str, &str); 4] = [
+            (
+                "src/settlement/universal_finality.rs",
+                include_str!("universal_finality.rs"),
+            ),
+            ("src/rpc/server.rs", include_str!("../rpc/server.rs")),
+            ("src/settlement/domains.rs", include_str!("domains.rs")),
+            (
+                "src/unification/mod.rs",
+                include_str!("../unification/mod.rs"),
+            ),
+        ];
+        for (path, source) in sources {
+            let mut outside = Vec::new();
+            for (at, _) in source.match_indices("for_external_spec_declared") {
+                let is_call = source[at..].starts_with("for_external_spec_declared(");
+                if is_call && path != "src/settlement/universal_finality.rs" {
+                    outside.push(source[..at].lines().count() + 1);
+                }
+            }
+            assert!(
+                outside.is_empty(),
+                "{path} calls the spec-only derivation at line(s) {outside:?}; \
+                 the external guarantee must be derived from the observed backing only"
+            );
+        }
     }
 }
