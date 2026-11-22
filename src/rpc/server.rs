@@ -3242,40 +3242,18 @@ impl BudlumApiServer for RpcServer {
             &dst.entry.guarantee,
         );
         let composed_guarantee = src.entry.guarantee.meet(&hub).meet(&dst.entry.guarantee);
-        let src_econ = crate::settlement::EconomicSecurityBound::derive(
-            &src.entry.guarantee,
-            src.entry.bond_atoms,
-            src.entry.bond_atoms,
+        let gate_result: Result<
+            crate::settlement::finality_gate::ValueGateVerdict,
+            crate::settlement::finality_gate::ValueGateRefusal,
+        > = crate::settlement::finality_gate::check_certificate_value_gate(
+            &cert,
+            crate::settlement::finality_gate::ValueGate::UniversalPayment,
+            source_domain,
+            Some(target_domain),
         );
-        let dst_econ = crate::settlement::EconomicSecurityBound::derive(
-            &dst.entry.guarantee,
-            dst.entry.bond_atoms,
-            dst.entry.bond_atoms,
-        );
-        let src_established = matches!(
-            src.entry.verdict,
-            crate::settlement::FinalityVerdict::Established
-        );
-        let dst_established = matches!(
-            dst.entry.verdict,
-            crate::settlement::FinalityVerdict::Established
-        );
-        let admits_value = src_established && dst_established && bound.source_admits_value_transfer;
-        let refusal_reason = if !src_established {
-            Some("source domain is not established in the finality certificate")
-        } else if !dst_established {
-            Some("target domain is not established in the finality certificate")
-        } else if !bound.source_admits_value_transfer {
-            Some("source domain finality guarantee does not admit cross-domain value transfer")
-        } else {
-            None
-        };
-        let safe_ceiling = if admits_value {
-            src_econ
-                .safe_value_outflow_ceiling_atoms
-                .min(dst_econ.safe_value_outflow_ceiling_atoms)
-        } else {
-            0
+        let (admits_value, refusal_reason, safe_ceiling) = match gate_result {
+            Ok(verdict) => (true, None, verdict.safe_value_outflow_ceiling_atoms),
+            Err(refusal) => (false, Some(refusal.to_string()), 0),
         };
         Ok(serde_json::json!({
             "checkpointHeight": cert.checkpoint_height,

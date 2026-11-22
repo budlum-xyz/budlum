@@ -1924,6 +1924,15 @@ fn execute_object_layer_tx(
     ctx: &SettlementTxContext,
     tx: &crate::object_layer::ObjectLayerTx,
 ) -> Result<(), SettlementTxError> {
+    if let crate::object_layer::ObjectLayerTx::Arrive(proof) = tx {
+        crate::settlement::finality_gate::enforce_domain_not_refuted(
+            &state.settlement,
+            ctx.height,
+            crate::settlement::finality_gate::ValueGate::ObjectLayerArrive,
+            proof.domain,
+        )
+        .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+    }
     struct IntakeFinality<'a> {
         domains: &'a crate::domain::ConsensusDomainRegistry,
         commitments: &'a crate::domain::DomainCommitmentRegistry,
@@ -2257,6 +2266,13 @@ pub(crate) fn execute_relayer_intent_tx(
                     "relayer settlement fee exceeds the sender's bid".into(),
                 ));
             }
+            crate::settlement::finality_gate::enforce_domain_not_refuted(
+                &state.settlement,
+                state.current_block_height,
+                crate::settlement::finality_gate::ValueGate::RelayerIntentSettle,
+                intent.target_domain,
+            )
+            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
             crate::relayer::policy::verify_intent_result(
                 &state.external_roots,
                 intent,

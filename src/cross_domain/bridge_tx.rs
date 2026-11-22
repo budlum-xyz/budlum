@@ -395,6 +395,13 @@ pub fn mint_from_verified_event(
     if !domain.bridge_enabled {
         return Err(format!("Bridge mint disabled for domain {source_domain}"));
     }
+    crate::settlement::finality_gate::enforce_domain_not_refuted(
+        &state.settlement,
+        height,
+        crate::settlement::finality_gate::ValueGate::BridgeMint,
+        source_domain,
+    )
+    .map_err(|e| e.to_string())?;
     ensure_domain_class_intake(state, source_domain, source_height)?;
     // A finalized proof may arrive out of order and be staged in the
     // commitment registry; bridge verification may not consume it until the
@@ -614,6 +621,13 @@ pub fn unlock_from_verified_event(
             proven.domain
         ));
     }
+    crate::settlement::finality_gate::enforce_domain_not_refuted(
+        &state.settlement,
+        height,
+        crate::settlement::finality_gate::ValueGate::BridgeUnlock,
+        proven.domain,
+    )
+    .map_err(|e| e.to_string())?;
     ensure_domain_class_intake(state, proven.domain, proven.height)?;
     // A finalized commitment may arrive out of order and sit staged in the
     // commitment registry until its parent chain links up; bridge unlock may

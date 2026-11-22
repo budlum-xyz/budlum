@@ -1020,6 +1020,13 @@ pub fn execute_app_binding_tx(
                     "a retired AppBinding application cannot be claimed",
                 ));
             }
+            crate::settlement::finality_gate::enforce_domain_not_refuted(
+                &state.settlement,
+                block,
+                crate::settlement::finality_gate::ValueGate::AppBindingClaim,
+                app.domain_key,
+            )
+            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
             ensure_serving_origin(state, app.domain_key)?;
             if evidence.chain.domain_id() != app.domain_key {
                 return Err(refused(

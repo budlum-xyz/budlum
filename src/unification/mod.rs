@@ -606,20 +606,15 @@ impl UnificationLedger {
                 UnificationExecutionError::UnanchoredDomain(leg.source_domain),
             )?;
             if leg.source_domain != intent.target_domain {
-                let route = crate::settlement::universal_finality::compose_cross_domain_route(
+                let _route = crate::settlement::finality_gate::evaluate_route_guarantee(
                     &src.guarantee,
                     &self.hub_guarantee,
                     &target_anchor.guarantee,
-                );
-                if !src.guarantee.admits_cross_domain_value()
-                    || !route.source_admits_value_transfer
-                    || route.bottleneck_fault_tolerance_bps == 0
-                {
-                    return Err(UnificationExecutionError::RouteFinalityInsufficient {
-                        source_domain: leg.source_domain,
-                        target_domain: intent.target_domain,
-                    });
-                }
+                )
+                .ok_or(UnificationExecutionError::RouteFinalityInsufficient {
+                    source_domain: leg.source_domain,
+                    target_domain: intent.target_domain,
+                })?;
                 let econ = crate::settlement::universal_finality::EconomicSecurityBound::derive(
                     &src.guarantee,
                     src.slashable_bond_atoms,
