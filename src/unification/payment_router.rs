@@ -1423,8 +1423,13 @@ impl PaymentStatusReport {
     }
 }
 
-/// Domain separation context for PQ-hybrid offline spend vouchers.
-pub const OFFLINE_VOUCHER_CTX: &[u8] = b"BDLM_OFFLINE_VOUCHER_V1";
+/// Registered PQ-hybrid signing context for offline spend vouchers. The
+/// signing facade refuses any context outside the registry, so the voucher
+/// payload keeps its own domain tag below.
+pub const OFFLINE_VOUCHER_CTX: &[u8] = crate::crypto::ctx::OFFLINE_VOUCHER_V1;
+
+/// Domain separation tag of the offline voucher signing payload.
+const OFFLINE_VOUCHER_TAG: &[u8] = b"BDLM_OFFLINE_VOUCHER_V1";
 
 /// Maximum offline vouchers settled in a single batch call.
 const MAX_OFFLINE_VOUCHERS_PER_BATCH: usize = 256;
@@ -1469,7 +1474,7 @@ impl SignedOfflineVoucher {
     #[must_use]
     pub fn signing_payload(&self) -> Hash32 {
         hash_domain_fields(
-            OFFLINE_VOUCHER_CTX,
+            OFFLINE_VOUCHER_TAG,
             &[
                 &self.account_id,
                 &self.voucher_nonce.to_le_bytes(),

@@ -836,8 +836,13 @@ fn evaluate_bns_evidence(
     }
 }
 
-/// Domain separation context for signed identity-to-address ownership binding.
-pub const IDENTITY_ADDR_LINK_CTX: &[u8] = b"BDLM_IDENTITY_ADDR_LINK_V1";
+/// Registered PQ-hybrid signing context for identity-to-address ownership
+/// binding. The signing facade refuses any context outside the registry, so
+/// the binding digest keeps its own domain tag below.
+pub const IDENTITY_ADDR_LINK_CTX: &[u8] = crate::crypto::ctx::IDENTITY_ADDR_LINK_V1;
+
+/// Domain separation tag of the ownership binding digest.
+const IDENTITY_ADDR_LINK_TAG: &[u8] = b"BDLM_IDENTITY_ADDR_LINK_V1";
 
 /// Domain separation tag for external-domain identity / attestation Merkle proofs.
 pub const IDENTITY_EXT_ATTEST_TAG: &[u8] = b"BDLM_IDENTITY_EXT_ATTEST_V1";
@@ -861,7 +866,7 @@ impl LinkedAccountClaim {
     #[must_use]
     pub fn binding_digest(&self) -> [u8; 32] {
         crate::core::hash::hash_fields_bytes(&[
-            IDENTITY_ADDR_LINK_CTX,
+            IDENTITY_ADDR_LINK_TAG,
             self.subject_name.as_bytes(),
             &self.target_domain.to_le_bytes(),
             self.account_label.as_bytes(),
