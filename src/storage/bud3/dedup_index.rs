@@ -222,12 +222,6 @@ impl DedupIndex {
         self.map.get(digest).map_or(&[], Vec::as_slice)
     }
 
-    /// Whether `key` already stands as a candidate for `digest`.
-    #[must_use]
-    pub fn contains_candidate(&self, digest: &[u8; 32], key: &ObjectKey) -> bool {
-        self.candidates(digest).binary_search(key).is_ok()
-    }
-
     /// Enter `key` as a candidate for `digest`. Returns `true` when the key
     /// stands in the row afterwards - already present counts - and `false`
     /// only when the row is full of other candidates; the caller owns the
