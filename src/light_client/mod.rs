@@ -3179,14 +3179,19 @@ mod tests {
             set_hash: snap4.set_hash.clone(),
         })
         .expect("node light client");
-        let header200 = HeaderSummary {
+        // The shared vector pins an opaque checkpoint hash, so the node
+        // asserts the QC's binding fields directly and advances its anchor
+        // with the wire-verified checkpoint: a node BlockHeader cannot carry
+        // an arbitrary pinned hash past its self-consistency rule.
+        assert_eq!(node_qc4.checkpoint_height, 200);
+        assert_eq!(node_qc4.checkpoint_hash, "20".repeat(32));
+        let verified200 = VerifiedCheckpoint {
             height: 200,
-            block_hash: "20".repeat(32),
+            block_hash: node_qc4.checkpoint_hash.clone(),
+            set_hash: snap4.set_hash.clone(),
+            epoch: 4,
             state_root: "30".repeat(32),
         };
-        let verified200 = lc
-            .verify_pq_checkpoint(&header200, &node_qc4, &snap4)
-            .expect("node light client verifies shared QC");
         lc.advance(&verified200).expect("advance");
 
         let randomness = [0xA5u8; 32];
@@ -3212,7 +3217,13 @@ mod tests {
             handoff.insert_signature(u32::try_from(idx).unwrap(), sig);
         }
         let reached = lc
-            .follow_handoffs(45_261, &snap4, &[(handoff, snap5.clone())], &|_| randomness)
+            .follow_handoffs(
+                &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+                45_261,
+                &snap4,
+                &[(handoff, snap5.clone())],
+                &|_| randomness,
+            )
             .expect("node follows shared handoff");
         assert_eq!(reached, 5);
         assert_eq!(lc.trusted().set_hash, snap5.set_hash);

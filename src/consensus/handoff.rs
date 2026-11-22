@@ -265,7 +265,7 @@ mod tests {
         let low_stake_cert = signed(&keys, &outgoing, &incoming, &[0, 1, 2]);
         assert!(
             matches!(
-                low_stake_verify_in(&cert, &registry, &outgoing, [3; 32]),
+                verify_in(&low_stake_cert, &registry, &outgoing, [3; 32]),
                 Err(HandoffError::Quorum {
                     signed: 3,
                     committee: 4
