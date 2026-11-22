@@ -11,9 +11,9 @@
 //!   a shard root is comparable with the whole-state root.
 //! * A single commitment over all shard roots ([`shards_commitment`]) is
 //!   folded into the block header (`Block::shards_root`) and therefore into
-//!   the block hash the BLS finality certificate seals. Enforcement is not
-//!   wired: no validation rule recomputes the commitment yet, so today a
-//!   block with a wrong `shards_root` is not rejected for that reason.
+//!   the block hash the BLS finality certificate seals. Block production
+//!   sets `shards_root` and block validation (`Blockchain`) recomputes and
+//!   enforces it whenever sharding is active at the block height.
 //! * A transfer between two shards is a single state transition: the source
 //!   shard is debited and the destination shard credited in one
 //!   `apply_transaction` call, so the pair commits together or not at all
