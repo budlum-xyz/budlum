@@ -1,6 +1,10 @@
 //! `ProofCarryingLiquidation`: oracle-free AMM/TWAP state-root-proven
 //! cross-domain liquidation engine.
 //!
+//! WIRING: unwired - oracle-free AMM/TWAP cross-domain liquidation proof
+//! verifier awaits its dedicated settlement transaction door and RPC submission
+//! endpoint in a subsequent integration step.
+//!
 //! This module implements a liquidation mechanism that does not depend on
 //! any external price oracle. Instead, it uses a Time-Weighted Average Price
 //! (TWAP) computed from state-root-verified AMM reserves, proven via a

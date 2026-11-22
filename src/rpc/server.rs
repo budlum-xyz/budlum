@@ -5854,11 +5854,19 @@ impl BudlumApiServer for RpcServer {
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         #[derive(serde::Deserialize)]
+        struct VerifiedReplicaRpcAttachment {
+            digest: [u8; 32],
+            replica: crate::unification::StorageReplica,
+            proof: crate::unification::storage_fabric::StorageReplicaProof,
+        }
+        #[derive(serde::Deserialize)]
         struct ResolveStorageRpcRequest {
             uri: String,
             objects: Vec<crate::unification::UnifiedContentRecord>,
             #[serde(default)]
             bns_bindings: std::collections::BTreeMap<String, [u8; 32]>,
+            #[serde(default)]
+            verified_replicas: Vec<VerifiedReplicaRpcAttachment>,
             #[serde(default = "default_rpc_storage_strength")]
             min_strength: crate::unification::VerificationStrength,
             #[serde(default)]
@@ -5879,10 +5887,11 @@ impl BudlumApiServer for RpcServer {
         })?;
         // Keep one RPC call strictly bounded so a single request cannot seed
         // thousands of transient records.
-        if req.objects.len() > 64 || req.bns_bindings.len() > 64 {
+        if req.objects.len() > 64 || req.bns_bindings.len() > 64 || req.verified_replicas.len() > 64
+        {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                "request exceeds 64-entry object or BNS binding limit",
+                "request exceeds 64-entry object, BNS binding, or verified replica limit",
                 None::<()>,
             ));
         }
@@ -5890,6 +5899,15 @@ impl BudlumApiServer for RpcServer {
         for obj in req.objects {
             fabric
                 .register_object(obj)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        }
+        for attachment in req.verified_replicas {
+            fabric
+                .verify_and_attach_replica(
+                    &attachment.digest,
+                    attachment.replica,
+                    &attachment.proof,
+                )
                 .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
         }
         for (name, digest) in req.bns_bindings {

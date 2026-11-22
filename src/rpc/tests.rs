@@ -4258,6 +4258,51 @@ mod rpc_tests {
             }))
             .await
             .is_err());
+        // Verified replica attachment via RPC: forged preimage must fail closed; valid preimage upgrades primary replica.
+        let verified_replica = StorageReplica {
+            network: StorageNetworkKind::Ipfs,
+            domain_id: StorageNetworkKind::Ipfs.default_domain_id(),
+            native_locator: String::from(
+                "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            ),
+            verification: VerificationStrength::CryptographicHash,
+            available: true,
+            latency_ms: 5,
+        };
+        assert!(server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "verified_replicas": [{
+                    "digest": digest,
+                    "replica": &verified_replica,
+                    "proof": crate::unification::storage_fabric::StorageReplicaProof::ContentHashPreimage {
+                        payload: b"tampered bytes".to_vec(),
+                    },
+                }],
+            }))
+            .await
+            .is_err());
+        let verified_res = server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "verified_replicas": [{
+                    "digest": digest,
+                    "replica": &verified_replica,
+                    "proof": crate::unification::storage_fabric::StorageReplicaProof::ContentHashPreimage {
+                        payload: b"hello web3".to_vec(),
+                    },
+                }],
+            }))
+            .await
+            .expect("valid content hash preimage must attach replica via RPC");
+        assert_eq!(
+            verified_res["primary"]["native_locator"].as_str(),
+            Some("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        );
 
         // 5. bud_encodeCrossVmCall (refusal + answer)
         assert!(server

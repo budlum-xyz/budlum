@@ -577,13 +577,13 @@ impl UniversalPaymentRouter {
         )?;
         // Pre-validate cumulative debits per balance index AND cumulative quote
         // liquidity draws before mutating any state (atomic rollback guarantee).
-        let quote_caps: BTreeMap<Hash32, u128> = quotes
-            .iter()
-            .map(|q| (q.quote_id, q.max_target_liquidity))
-            .collect();
+        let quotes_by_id: BTreeMap<Hash32, &LiquidityQuote> =
+            quotes.iter().map(|q| (q.quote_id, q)).collect();
         let mut provisional_quotes: BTreeMap<Hash32, u128> = BTreeMap::new();
         let mut new_quote_entries = 0usize;
         let mut cumulative_debits: BTreeMap<usize, u128> = BTreeMap::new();
+        let mut source_total_value = 0u128;
+        let mut total_fees = 0u128;
         for leg in &receipt.legs {
             let (idx, _) = balances
                 .iter()
@@ -596,11 +596,12 @@ impl UniversalPaymentRouter {
             *entry = entry
                 .checked_add(leg.source_debited)
                 .ok_or(PaymentError::ArithmeticOverflow)?;
-            if let Some(qid) = leg.quote_id {
-                let cap = quote_caps
+            let leg_gross_value = if let Some(qid) = leg.quote_id {
+                let quote = quotes_by_id
                     .get(&qid)
                     .copied()
                     .ok_or(PaymentError::ArithmeticOverflow)?;
+                let cap = quote.max_target_liquidity;
                 let base = if let Some(&staged) = provisional_quotes.get(&qid) {
                     staged
                 } else if let Some(&existing) = self.consumed_quote_liquidity.get(&qid) {
@@ -618,8 +619,31 @@ impl UniversalPaymentRouter {
                     });
                 }
                 provisional_quotes.insert(qid, updated);
-            }
+                mul_div_floor(leg.source_debited, quote.rate_scaled, RATE_SCALE)
+                    .ok_or(PaymentError::ArithmeticOverflow)?
+            } else {
+                leg.source_debited
+            };
+            let leg_fee = leg_gross_value
+                .checked_sub(leg.target_delivered)
+                .ok_or_else(|| {
+                    PaymentError::InvalidIntent(String::from(
+                        "split-tender leg delivered more target value than debited source value",
+                    ))
+                })?;
+            source_total_value = source_total_value
+                .checked_add(leg_gross_value)
+                .ok_or(PaymentError::ArithmeticOverflow)?;
+            total_fees = total_fees
+                .checked_add(leg_fee)
+                .ok_or(PaymentError::ArithmeticOverflow)?;
         }
+        verify_split_tender_supply_conservation(
+            &receipt,
+            source_total_value,
+            intent.target_amount,
+            total_fees,
+        )?;
         if self
             .consumed_quote_liquidity
             .len()
@@ -2407,5 +2431,61 @@ mod tests {
                 .unwrap();
         assert_eq!(r_ab.receipt_hash, r_ba.receipt_hash);
         assert_eq!(r_ab.seized_legs, r_ba.seized_legs);
+    }
+
+    #[test]
+    fn settle_payment_enforces_non_tautological_split_tender_conservation() {
+        let bud_asset = [0x01; 32];
+        let usdc_asset = [0x02; 32];
+        let mut balances = vec![
+            DomainTokenBalance {
+                domain_id: 1,
+                asset_id: bud_asset,
+                symbol: String::from("BUD"),
+                available_amount: 600,
+            },
+            DomainTokenBalance {
+                domain_id: 3,
+                asset_id: usdc_asset,
+                symbol: String::from("USDC"),
+                available_amount: 1_000,
+            },
+        ];
+        let quotes = vec![LiquidityQuote {
+            quote_id: [0x91; 32],
+            source_domain: 3,
+            source_asset_id: usdc_asset,
+            target_domain: 1,
+            target_asset_id: bud_asset,
+            rate_scaled: RATE_SCALE,
+            fee_bps: 100, // 1%
+            max_target_liquidity: 1_000,
+            valid_until_unix_secs: 2_000,
+        }];
+        let intent = UniversalPaymentIntent {
+            payer_id: [0xA1; 32],
+            merchant_id: [0xB2; 32],
+            target_domain: 1,
+            target_asset_id: bud_asset,
+            target_amount: 1_000,
+            max_slippage_bps: 200,
+            rail: PaymentRail::OnChain,
+            invoice_hash: [0xC3; 32],
+            deadline_unix_secs: 2_000,
+            nonce: 77,
+        };
+        let mut router = UniversalPaymentRouter::new();
+        let receipt = router
+            .settle_payment(&intent, &mut balances, &quotes, 1_500)
+            .expect("valid split-tender payment must pass supply conservation");
+        assert_eq!(receipt.target_amount_delivered, 1_000);
+
+        // Tampered receipt where leg sum diverges from delivered amount fails closed.
+        let mut bad_receipt = receipt.clone();
+        bad_receipt.target_amount_delivered = 1_001;
+        assert!(verify_split_tender_supply_conservation(&bad_receipt, 1_005, 1_001, 4).is_err());
+
+        // Conservation violation where delivered + fees != source_total_value fails closed.
+        assert!(verify_split_tender_supply_conservation(&receipt, 1_005, 1_000, 3).is_err());
     }
 }
