@@ -195,7 +195,15 @@ mod tests {
     /// forces at least 1,024 addresses to saturate the note pool, and the
     /// saturation capital is deterministic from the table.
     #[test]
-    fn note_pool_saturation_needs_1024_addresses_and_locks_the_table_capital() {
+    /// The occupancy arithmetic the K values price: the per-owner quota
+    /// forces at least 1,024 addresses to saturate the note pool, and the
+    /// saturation capital is deterministic from the table.
+    #[test]
+    fn note_pool_saturation_needs_64_addresses_and_locks_the_table_capital() {
+        assert!(
+            MAX_LIVE_COMMITMENTS / MAX_LIVE_COMMITMENTS_PER_OWNER >= 64,
+            "one funded owner must never be able to saturate the table alone"
+        );
         assert_eq!(MAX_LIVE_COMMITMENTS / MAX_LIVE_COMMITMENTS_PER_OWNER, 1_024);
         let per_row = policy_of(SharedPool::PrivacyNote).deposit;
         let saturation = (MAX_LIVE_COMMITMENTS as u64) * per_row;
