@@ -58,9 +58,11 @@ pub use payment_router::{
     UniversalPaymentRouter, OFFLINE_VOUCHER_CTX,
 };
 pub use storage_fabric::{
-    ReplicaResolution, StorageFabricError, StorageNetworkKind, StoragePaymentRequest,
-    StorageReplica, UnifiedContentRecord, UnifiedStorageFabric, UniversalContentUri,
-    VerificationStrength, Web3SiteAsset,
+    build_storage_domain_commitment_root, build_storage_domain_inclusion_proof,
+    storage_domain_commitment_leaf, ReplicaResolution, StorageFabricError, StorageNetworkKind,
+    StoragePaymentRequest, StorageReplica, StorageReplicaProof, UnifiedContentRecord,
+    UnifiedStorageFabric, UniversalContentUri, VerificationStrength, Web3SiteAsset,
+    STORAGE_DOMAIN_COMMITMENT_TAG,
 };
 
 use crate::domain::types::Hash32;

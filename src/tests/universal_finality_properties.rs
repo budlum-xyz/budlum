@@ -924,3 +924,144 @@ fn canonical_payment_request_uri_roundtrips_and_refund_registry_blocks_double_re
     // Second refund against the same settled payment receipt must be rejected.
     assert!(registry.record_refund(&receipt, &refund).is_err());
 }
+
+#[test]
+fn storage_fabric_verifies_external_domain_proofs_and_blocks_strength_inflation() {
+    use crate::unification::storage_fabric::{
+        build_storage_domain_commitment_root, build_storage_domain_inclusion_proof,
+        storage_domain_commitment_leaf, StorageNetworkKind, StorageReplica, StorageReplicaProof,
+        UnifiedContentRecord, UnifiedStorageFabric, VerificationStrength,
+    };
+
+    let payload = b"budlum-decentralized-web3-object-v1".to_vec();
+    let record = UnifiedContentRecord::from_bytes(&payload, "application/octet-stream");
+    let digest = record.sha3_256_digest;
+    let sha256 = record.sha256_digest;
+
+    let mut fabric = UnifiedStorageFabric::new();
+    fabric.register_object(record).expect("register object");
+
+    // 1. Arweave external domain Merkle proof verifies cleanly.
+    let ar_locator = String::from("bNbA3TEQVL60xlgCcqdz4ZPHFZ711cZ3hmkpGttDt_U");
+    let ar_domain = StorageNetworkKind::Arweave.default_domain_id();
+    let ar_leaf = storage_domain_commitment_leaf(
+        StorageNetworkKind::Arweave,
+        ar_domain,
+        &digest,
+        &sha256,
+        &ar_locator,
+    );
+    let leaves = [ar_leaf, [0x77; 32]];
+    let ar_root = build_storage_domain_commitment_root(&leaves);
+    let ar_proof = build_storage_domain_inclusion_proof(&leaves, 0).expect("arweave proof");
+
+    let ar_replica = StorageReplica {
+        network: StorageNetworkKind::Arweave,
+        domain_id: ar_domain,
+        native_locator: ar_locator,
+        verification: VerificationStrength::MerkleRoot,
+        available: true,
+        latency_ms: 30,
+    };
+    fabric
+        .verify_and_attach_replica(
+            &digest,
+            ar_replica.clone(),
+            &StorageReplicaProof::ExternalDomainMerkle {
+                domain_id: ar_domain,
+                finalized_state_root: ar_root,
+                leaf_index: 0,
+                leaf_count: leaves.len(),
+                proof: ar_proof.clone(),
+            },
+        )
+        .expect("verified Arweave Merkle replica accepted");
+
+    // Tampered root must fail closed.
+    let mut bad_root = ar_root;
+    bad_root[0] ^= 0xff;
+    assert!(fabric
+        .verify_and_attach_replica(
+            &digest,
+            ar_replica,
+            &StorageReplicaProof::ExternalDomainMerkle {
+                domain_id: ar_domain,
+                finalized_state_root: bad_root,
+                leaf_index: 0,
+                leaf_count: leaves.len(),
+                proof: ar_proof,
+            },
+        )
+        .is_err());
+
+    // 2. Storj cannot claim on-chain ExternalDomainMerkle or inflate above AttestedDeal.
+    assert!(!StorageNetworkKind::Storj.supports_domain_state_proof());
+    assert!(!StorageNetworkKind::Ipfs.supports_domain_state_proof());
+    assert!(StorageNetworkKind::Filecoin.supports_domain_state_proof());
+    assert!(StorageNetworkKind::Walrus.supports_domain_state_proof());
+
+    let storj_inflated = StorageReplica {
+        network: StorageNetworkKind::Storj,
+        domain_id: StorageNetworkKind::Storj.default_domain_id(),
+        native_locator: String::from("bucket-01-object-abc"),
+        verification: VerificationStrength::MerkleRoot,
+        available: true,
+        latency_ms: 45,
+    };
+    assert!(fabric
+        .verify_and_attach_replica(
+            &digest,
+            storj_inflated,
+            &StorageReplicaProof::DeclaredDealOnly {
+                deal_commitment: [0x22; 32],
+            },
+        )
+        .is_err());
+
+    // 3. IPFS preimage verification accepts exact payload and rejects tampered bytes.
+    let ipfs_replica = StorageReplica {
+        network: StorageNetworkKind::Ipfs,
+        domain_id: StorageNetworkKind::Ipfs.default_domain_id(),
+        native_locator: String::from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"),
+        verification: VerificationStrength::CryptographicHash,
+        available: true,
+        latency_ms: 20,
+    };
+    assert!(fabric
+        .verify_and_attach_replica(
+            &digest,
+            ipfs_replica.clone(),
+            &StorageReplicaProof::ContentHashPreimage {
+                payload: b"wrong-bytes".to_vec(),
+            },
+        )
+        .is_err());
+    fabric
+        .verify_and_attach_replica(
+            &digest,
+            ipfs_replica,
+            &StorageReplicaProof::ContentHashPreimage { payload },
+        )
+        .expect("exact IPFS payload preimage accepted");
+
+    // 4. B.U.D. 3.0 custody proof yields ErasureVerified and rejects non-Bud3 networks.
+    let bud3_replica = StorageReplica {
+        network: StorageNetworkKind::Bud3,
+        domain_id: StorageNetworkKind::Bud3.default_domain_id(),
+        native_locator: String::from("chunk-manifest-0001"),
+        verification: VerificationStrength::ErasureVerified,
+        available: true,
+        latency_ms: 10,
+    };
+    fabric
+        .verify_and_attach_replica(
+            &digest,
+            bud3_replica,
+            &StorageReplicaProof::Bud3Custody {
+                data_shards: 4,
+                parity_shards: 2,
+                custody_merkle_root: [0x99; 32],
+            },
+        )
+        .expect("valid B.U.D. 3.0 custody proof accepted");
+}

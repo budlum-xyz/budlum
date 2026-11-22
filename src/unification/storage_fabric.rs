@@ -11,7 +11,10 @@
 
 use crate::domain::types::{DomainId, Hash32};
 use crate::unification::payment_router::{PaymentRail, UniversalPaymentIntent};
-use crate::unification::{hash_domain_fields, unification_merkle_root, validate_safe_label};
+use crate::unification::{
+    build_merkle_proof, hash_domain_fields, unification_merkle_root, validate_safe_label,
+    verify_merkle_proof,
+};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
@@ -798,6 +801,253 @@ impl UnifiedStorageFabric {
             invoice_hash: req.content_digest,
             rail: PaymentRail::OnChain,
         }
+    }
+}
+
+/// Domain separation tag binding an external storage network's finalized state
+/// or transaction commitment to a Budlum content object and native locator.
+pub const STORAGE_DOMAIN_COMMITMENT_TAG: &[u8] = b"BDLM_STORAGE_DOMAIN_LEAF_V1";
+
+/// Network-specific cryptographic proof backing a [`StorageReplica`] so external
+/// decentralized storage claims are verified against each network's own rule
+/// rather than accepted as unverified caller assertions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageReplicaProof {
+    /// Native B.U.D. 3.0 erasure-coded custody proof (`ErasureVerified`).
+    Bud3Custody {
+        data_shards: u16,
+        parity_shards: u16,
+        custody_merkle_root: Hash32,
+    },
+    /// Byte-exact content preimage recomputing both `SHA3-256` and `SHA-256`
+    /// (`CryptographicHash`, e.g., IPFS CID verification).
+    ContentHashPreimage { payload: Vec<u8> },
+    /// Merkle inclusion proof against a finalized external storage domain root
+    /// (`Arweave`, `Filecoin`, `Walrus`, `Swarm`, `Sia` -> `MerkleRoot`).
+    ExternalDomainMerkle {
+        domain_id: DomainId,
+        finalized_state_root: Hash32,
+        leaf_index: usize,
+        leaf_count: usize,
+        proof: Vec<Hash32>,
+    },
+    /// Unproven off-chain / deal declaration (`AttestedDeal` only, e.g., Storj).
+    DeclaredDealOnly { deal_commitment: Hash32 },
+}
+
+/// Compute the deterministic commitment leaf for a storage replica anchored on
+/// an external domain (`Arweave`, `Filecoin`, `Walrus`, `Swarm`, `Sia`).
+///
+/// Convenience: shared by external storage relayers and verifiers anchoring
+/// storage commitments into finalized domain state roots.
+#[must_use]
+pub fn storage_domain_commitment_leaf(
+    network: StorageNetworkKind,
+    domain_id: DomainId,
+    sha3_256_digest: &Hash32,
+    sha256_digest: &Hash32,
+    native_locator: &str,
+) -> Hash32 {
+    hash_domain_fields(
+        STORAGE_DOMAIN_COMMITMENT_TAG,
+        &[
+            network.scheme().as_bytes(),
+            &domain_id.to_le_bytes(),
+            sha3_256_digest,
+            sha256_digest,
+            native_locator.as_bytes(),
+        ],
+    )
+}
+
+/// Build the deterministic Merkle root over external storage domain leaves.
+///
+/// Convenience: external storage provers and test suites construct finalized
+/// storage state roots verified by [`UnifiedStorageFabric::verify_and_attach_replica`].
+#[must_use]
+pub fn build_storage_domain_commitment_root(leaves: &[Hash32]) -> Hash32 {
+    unification_merkle_root(STORAGE_DOMAIN_COMMITMENT_TAG, leaves)
+}
+
+/// Build a Merkle inclusion proof for `leaf_index` in an external storage
+/// domain commitment tree.
+///
+/// Convenience: external storage relayers generate inclusion proofs consumed
+/// by [`UnifiedStorageFabric::verify_and_attach_replica`].
+#[must_use]
+pub fn build_storage_domain_inclusion_proof(
+    leaves: &[Hash32],
+    leaf_index: usize,
+) -> Option<Vec<Hash32>> {
+    build_merkle_proof(STORAGE_DOMAIN_COMMITMENT_TAG, leaves, leaf_index)
+}
+
+impl StorageNetworkKind {
+    /// Whether this storage network maintains an on-chain finalized state or
+    /// transaction root readable via an external domain finality proof.
+    ///
+    /// IPFS provides content-addressing without an on-chain persistence ledger,
+    /// and Storj exposes no on-chain proof surface.
+    ///
+    /// Convenience: classifies storage networks by whether on-chain domain
+    /// Merkle inclusion proofs are structurally valid.
+    #[must_use]
+    pub const fn supports_domain_state_proof(self) -> bool {
+        matches!(
+            self,
+            Self::Arweave | Self::Filecoin | Self::Walrus | Self::Swarm | Self::Sia
+        )
+    }
+}
+
+impl UnifiedStorageFabric {
+    /// Cryptographically verify `proof` for `replica` against the registered
+    /// object identified by `digest`, enforce exact [`VerificationStrength`]
+    /// honesty (callers cannot inflate declared strength above what the proof
+    /// establishes), and attach the verified replica to the object.
+    ///
+    /// Convenience: upgrades external storage replica registration from caller
+    /// assertion to proof-verified external-domain anchoring.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageFabricError`] if `digest` is unknown, the replica URI
+    /// or metadata is invalid, the proof fails cryptographic verification, the
+    /// storage network does not support the claimed proof family, or the object
+    /// has reached [`MAX_REPLICAS_PER_OBJECT`].
+    pub fn verify_and_attach_replica(
+        &mut self,
+        digest: &Hash32,
+        replica: StorageReplica,
+        proof: &StorageReplicaProof,
+    ) -> Result<Hash32, StorageFabricError> {
+        let Some(record) = self.objects.get(digest) else {
+            return Err(StorageFabricError::NotFound(hex::encode(digest)));
+        };
+        if record.replicas.len() >= MAX_REPLICAS_PER_OBJECT {
+            return Err(StorageFabricError::ReplicaLimitExceeded);
+        }
+        let replica_uri = replica.uri();
+        let parsed = UniversalContentUri::parse(&replica_uri)?;
+        let expected_scheme = replica.network.scheme();
+        if parsed.scheme != expected_scheme {
+            return Err(StorageFabricError::InvalidUri(format!(
+                "replica scheme `{}` disagrees with network `{expected_scheme}`",
+                parsed.scheme
+            )));
+        }
+
+        let proven_strength = match proof {
+            StorageReplicaProof::Bud3Custody {
+                data_shards,
+                parity_shards,
+                custody_merkle_root,
+            } => {
+                if replica.network != StorageNetworkKind::Bud3 {
+                    return Err(StorageFabricError::InvalidMetadata(String::from(
+                        "Bud3Custody proof is only valid for B.U.D. 3.0 replicas",
+                    )));
+                }
+                if *data_shards == 0 || *parity_shards == 0 || *custody_merkle_root == [0u8; 32] {
+                    return Err(StorageFabricError::InvalidMetadata(String::from(
+                        "Bud3Custody requires positive data/parity shards and non-zero custody root",
+                    )));
+                }
+                VerificationStrength::ErasureVerified
+            }
+            StorageReplicaProof::ContentHashPreimage { payload } => {
+                if !record.verify_bytes(payload) {
+                    return Err(StorageFabricError::InvalidMetadata(String::from(
+                        "content preimage fails SHA3-256 / SHA-256 / byte_len verification",
+                    )));
+                }
+                VerificationStrength::CryptographicHash
+            }
+            StorageReplicaProof::ExternalDomainMerkle {
+                domain_id,
+                finalized_state_root,
+                leaf_index,
+                leaf_count,
+                proof: merkle_proof,
+            } => {
+                if !replica.network.supports_domain_state_proof() {
+                    return Err(StorageFabricError::InvalidMetadata(format!(
+                        "network `{}` has no on-chain domain state proof surface",
+                        replica.network.scheme()
+                    )));
+                }
+                if *domain_id != replica.domain_id {
+                    return Err(StorageFabricError::InvalidMetadata(format!(
+                        "proof domain ({domain_id}) disagrees with replica domain ({})",
+                        replica.domain_id
+                    )));
+                }
+                if *finalized_state_root == [0u8; 32] {
+                    return Err(StorageFabricError::InvalidMetadata(String::from(
+                        "external storage domain finalized_state_root must be non-zero",
+                    )));
+                }
+                let leaf = storage_domain_commitment_leaf(
+                    replica.network,
+                    *domain_id,
+                    &record.sha3_256_digest,
+                    &record.sha256_digest,
+                    &replica.native_locator,
+                );
+                if !verify_merkle_proof(
+                    STORAGE_DOMAIN_COMMITMENT_TAG,
+                    finalized_state_root,
+                    *leaf_index,
+                    *leaf_count,
+                    &leaf,
+                    merkle_proof,
+                ) {
+                    return Err(StorageFabricError::InvalidMetadata(format!(
+                        "external storage Merkle inclusion proof failed for `{replica_uri}`"
+                    )));
+                }
+                VerificationStrength::MerkleRoot
+            }
+            StorageReplicaProof::DeclaredDealOnly { deal_commitment } => {
+                if *deal_commitment == [0u8; 32] {
+                    return Err(StorageFabricError::InvalidMetadata(String::from(
+                        "declared deal commitment must be non-zero",
+                    )));
+                }
+                VerificationStrength::AttestedDeal
+            }
+        };
+
+        if replica.verification > proven_strength {
+            return Err(StorageFabricError::InvalidMetadata(format!(
+                "replica claims verification {:?}, but proof only establishes {:?}",
+                replica.verification, proven_strength
+            )));
+        }
+
+        let mut verified_replica = replica;
+        verified_replica.verification = proven_strength;
+        let canonical_locator = parsed.canonical_string();
+        if let Some(existing_digest) = self.locator_index.get(&canonical_locator) {
+            if existing_digest != digest {
+                return Err(StorageFabricError::InvalidMetadata(format!(
+                    "replica locator `{canonical_locator}` is already bound to a different content digest"
+                )));
+            }
+        }
+
+        let Some(record_mut) = self.objects.get_mut(digest) else {
+            return Err(StorageFabricError::NotFound(hex::encode(digest)));
+        };
+        if !record_mut.replicas.iter().any(|r| {
+            r.network == verified_replica.network
+                && r.native_locator == verified_replica.native_locator
+        }) {
+            record_mut.replicas.push(verified_replica);
+        }
+        let next_hash = record_mut.record_hash();
+        self.locator_index.insert(canonical_locator, *digest);
+        Ok(next_hash)
     }
 }
 
