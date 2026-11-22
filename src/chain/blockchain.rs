@@ -2789,9 +2789,18 @@ impl Blockchain {
     /// The aggregate root this node recomputes for the anchor at `height`
     /// from its own header archive, with the class the anchor was signed
     /// with (the current class when this node did not record it).
-    #[must_use]
     /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
-    pub fn local_anchor_root(&self, height: u64) -> Option<[u8; 32]> {
+    ///
+    /// # Errors
+    ///
+    /// [`crate::settlement::AnchorError`] when the window has leaves but the
+    /// aggregation refuses them - a zero digest, or a root that derives to
+    /// zero. That is an encoding failure, not an absence, and it must not
+    /// reach a recovery tick dressed as one.
+    pub fn local_anchor_root(
+        &self,
+        height: u64,
+    ) -> Result<Option<[u8; 32]>, crate::settlement::AnchorError> {
         let class = self
             .anchor_classes
             .get(&height)
@@ -2802,7 +2811,7 @@ impl Blockchain {
             .iter()
             .map(crate::settlement::anchor_leaf_digest)
             .collect();
-        crate::settlement::aggregate_finality_roots(&digests).ok()
+        aggregate_local_anchor_root(&digests)
     }
 
     /// What the state recovery tick needs about one stage and height: the
@@ -2825,7 +2834,16 @@ impl Blockchain {
                 .and_then(|at| self.chain.get(at))
                 .and_then(|block| hex::decode(&block.hash).ok())
                 .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()),
-            Stage::Ephyra => self.local_anchor_root(height),
+            Stage::Ephyra => match self.local_anchor_root(height) {
+                Ok(root) => root,
+                Err(err) => {
+                    tracing::error!(
+                        "this node cannot recompute the anchor root at {height}: {err}; \
+                         the stage reads as unproven here, not as absent"
+                    );
+                    None
+                }
+            },
             Stage::Polyp => self
                 .anchor_emission
                 .seals
@@ -11041,6 +11059,31 @@ impl Clone for Blockchain {
         }
     }
 }
+
+/// The aggregate root for a window of leaf digests, or `None` when the
+/// window holds no leaves at all.
+///
+/// Split out of [`Blockchain::local_anchor_root`] so the two outcomes an
+/// `Option` folds together stay apart: a window this node has no leaves for
+/// (`None`) and a window the aggregation refused ([`crate::settlement::AnchorError`],
+/// a zero leaf digest or a root that derived to zero). The second is an
+/// encoding failure. A recovery tick that reads it as "nothing here" forgets
+/// a commitment it actually holds.
+fn aggregate_local_anchor_root(
+    digests: &[[u8; 32]],
+) -> Result<Option<[u8; 32]>, crate::settlement::AnchorError> {
+    use crate::settlement::AnchorError;
+    match crate::settlement::aggregate_finality_roots(digests) {
+        Ok(root) => Ok(Some(root)),
+        Err(AnchorError::EmptyAggregation) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(test)]
+#[path = "local_anchor_root_tests.rs"]
+mod local_anchor_root_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
