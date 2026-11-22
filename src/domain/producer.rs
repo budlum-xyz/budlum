@@ -1060,22 +1060,27 @@ mod tests {
         assert_eq!(status, FinalityStatus::Finalized);
     }
 
+    /// Signer `i`'s composite key pair, re-derived from the fixed seeds
+    /// [`composite_quorum`] uses. Key material is deliberately not `Clone`
+    /// (wiped on drop), so a repeated signer is re-derived from its seeds
+    /// instead of copied.
+    fn composite_keypair_at(i: u8) -> crate::crypto::composite::CompositeKeypair {
+        crate::crypto::composite::CompositeKeypair::from_seeds(
+            crate::crypto::scheme::SuiteId::VALIDATOR,
+            &[i + 11; crate::crypto::pq::ML_DSA_SEED_LEN],
+            &[i + 29; 32],
+        )
+        .expect("seeds")
+    }
+
     fn composite_quorum(
         count: u8,
     ) -> (
         Vec<crate::crypto::composite::CompositeKeypair>,
         Vec<crate::domain::finality_adapter::PoAAuthorityKey>,
     ) {
-        let keypairs: Vec<crate::crypto::composite::CompositeKeypair> = (0..count)
-            .map(|i| {
-                crate::crypto::composite::CompositeKeypair::from_seeds(
-                    crate::crypto::scheme::SuiteId::VALIDATOR,
-                    &[i + 11; crate::crypto::pq::ML_DSA_SEED_LEN],
-                    &[i + 29; 32],
-                )
-                .expect("seeds")
-            })
-            .collect();
+        let keypairs: Vec<crate::crypto::composite::CompositeKeypair> =
+            (0..count).map(composite_keypair_at).collect();
         let authorities: Vec<crate::domain::finality_adapter::PoAAuthorityKey> = keypairs
             .iter()
             .map(|kp| {
@@ -1109,7 +1114,10 @@ mod tests {
             .expect("dag adapter");
         assert_eq!(dag_status, FinalityStatus::Finalized);
         assert!(build_dag_commitment(&dag_spec, 7, &authorities, &[]).is_err());
-        let dup_signers = [keypairs[0].clone(), keypairs[0].clone()];
+        // The same signer twice: signer 0 is re-derived from its seeds, so the
+        // two key pairs hold identical public keys and the builder's
+        // duplicate-signer rejection is exactly what this exercises.
+        let dup_signers = [composite_keypair_at(0), composite_keypair_at(0)];
         assert!(build_dag_commitment(&dag_spec, 7, &authorities, &dup_signers).is_err());
 
         // 2. PoH PQ commitment + fail-closed rejections
