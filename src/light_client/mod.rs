@@ -3205,33 +3205,27 @@ mod tests {
             meta["handoff_signing_message_hex"].as_str().unwrap(),
             hex::encode(&ho_msg)
         );
-        for (idx, seed) in s4.iter().enumerate() {
+        for (idx, snapshot) in s4.iter().enumerate() {
             let sig = crate::crypto::pq::ml_dsa_sign(
                 crate::crypto::scheme::SchemeId::ML_DSA_65,
-                seed,
+                snapshot,
                 &ho_msg,
                 crate::crypto::ctx::HANDOFF_V1,
                 &[0u8; 32],
             )
             .expect("ho sig");
-            handoff.insert_signature(u32::try_from(idx).expect("index fits"), sig);
+            handoff.insert_signature(u32::try_from(idx).unwrap(), sig);
         }
-        // The shared surface is the PQ handoff certificate; the LightClient
-        // method additionally layers BLS proof-of-possession, which the
-        // vector's placeholder BLS keys cannot satisfy and whose refusals
-        // have their own tests. The walk below is the same core the method
-        // delegates to after that node-only layer.
-        let steps = [(handoff, in5.clone())];
-        let (reached, final_members) = crate::consensus::handoff::follow_handoffs(
-            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
-            45_261,
-            snap4.epoch,
-            &out4,
-            &steps,
-            &|_| randomness,
-        )
-        .expect("node follows shared handoff");
+        let reached = lc
+            .follow_handoffs(
+                &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+                45_261,
+                &snap4,
+                &[(handoff, snap5.clone())],
+                &|_| randomness,
+            )
+            .expect("node follows shared handoff");
         assert_eq!(reached, 5);
-        assert_eq!(final_members, in5.as_slice());
+        assert_eq!(lc.trusted().set_hash, snap5.set_hash);
     }
 }

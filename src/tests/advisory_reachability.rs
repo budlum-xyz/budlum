@@ -577,170 +577,170 @@ mod tests {
                      chain_id to its preimage first, then drop this assertion"
             );
         }
-        /// A waiver is only honest while the thing it waives is still in the graph.
-        ///
-        /// `osv-scanner.toml` (and the two per-workspace copies beside the other
-        /// lockfiles) has to be read as a set: an ignore entry whose advisory can
-        /// never fire, because the crate left every lockfile, is dead policy. OSV
-        /// reports such an entry as `has unused ignores` and exits non-zero, so the
-        /// scan is red for a reason unrelated to a vulnerability. Conversely, a
-        /// waiver that disappears while the crate is still locked silently turns
-        /// the scan green over a real finding.
-        ///
-        /// The rule: an `[[IgnoredVulns]]` id must still match at least one package
-        /// in at least one lockfile. The advisory-to-crate mapping is the part this
-        /// test cannot see (it lives in the advisory database, not in the repo), so
-        /// the pairs are spelled out and grow with each waiver; that file is the
-        /// second place a waiver has to be edited, which is the point.
-        #[test]
-        fn waiver_must_name_a_crate_that_is_still_locked() {
-            // advisory id -> the crate the entry exists for. Update both the toml
-            // and this table when a waiver is added or retired.
-            const WAIVERS: [(&str, &str); 6] = [
-                ("RUSTSEC-2025-0141", "bincode"),
-                ("RUSTSEC-2025-0057", "fxhash"),
-                ("RUSTSEC-2024-0384", "instant"),
-                ("RUSTSEC-2024-0436", "paste"),
-                ("RUSTSEC-2026-0173", "proc-macro-error2"),
-                ("RUSTSEC-2026-0374", "basic-toml"),
-            ];
-            let locks: [(&str, &str); 18] = [
-                ("Cargo.lock", include_str!("../../Cargo.lock")),
-                (
-                    "budzero/Cargo.lock",
-                    include_str!("../../budzero/Cargo.lock"),
-                ),
-                (
-                    "crates/ai-inference/Cargo.lock",
-                    include_str!("../../crates/ai-inference/Cargo.lock"),
-                ),
-                (
-                    "crates/bpqs/Cargo.lock",
-                    include_str!("../../crates/bpqs/Cargo.lock"),
-                ),
-                (
-                    "crates/bud-codec/Cargo.lock",
-                    include_str!("../../crates/bud-codec/Cargo.lock"),
-                ),
-                (
-                    "crates/budlum-explorer/Cargo.lock",
-                    include_str!("../../crates/budlum-explorer/Cargo.lock"),
-                ),
-                (
-                    "crates/budlum-types/Cargo.lock",
-                    include_str!("../../crates/budlum-types/Cargo.lock"),
-                ),
-                (
-                    "crates/note-packing/Cargo.lock",
-                    include_str!("../../crates/note-packing/Cargo.lock"),
-                ),
-                (
-                    "crates/uel-abi/Cargo.lock",
-                    include_str!("../../crates/uel-abi/Cargo.lock"),
-                ),
-                (
-                    "crates/wallet-core/Cargo.lock",
-                    include_str!("../../crates/wallet-core/Cargo.lock"),
-                ),
-                ("fuzz/Cargo.lock", include_str!("../../fuzz/Cargo.lock")),
-                ("kani/Cargo.lock", include_str!("../../kani/Cargo.lock")),
-                (
-                    "mobile/core/Cargo.lock",
-                    include_str!("../../mobile/core/Cargo.lock"),
-                ),
-                (
-                    "mobile/ffi/Cargo.lock",
-                    include_str!("../../mobile/ffi/Cargo.lock"),
-                ),
-                (
-                    "mobile/tools/log-analyzer/Cargo.lock",
-                    include_str!("../../mobile/tools/log-analyzer/Cargo.lock"),
-                ),
-                (
-                    "xtask/gates/Cargo.lock",
-                    include_str!("../../xtask/gates/Cargo.lock"),
-                ),
-                (
-                    "xtask/release/Cargo.lock",
-                    include_str!("../../xtask/release/Cargo.lock"),
-                ),
-                (
-                    "xtask/tools/Cargo.lock",
-                    include_str!("../../xtask/tools/Cargo.lock"),
-                ),
-            ];
-            for (advisory, crate_name) in WAIVERS {
-                let mut seen_in: Vec<&str> = Vec::new();
-                for (lock_name, lock) in locks {
-                    if !locked_versions_in(lock, crate_name).is_empty() {
-                        seen_in.push(lock_name);
-                    }
-                }
-                assert!(
-                    !seen_in.is_empty(),
-                    "{advisory} is still ignored in osv-scanner.toml but {crate_name} is \
-                     in no lockfile: OSV reports the entry as an unused ignore and the \
-                     gate is red for a reason that is not a vulnerability. Delete the \
-                     waiver (and its row here)."
-                );
-            }
-        }
-
-        /// The other direction of the lock above: every `[[IgnoredVulns]]` id in any
-        /// of the three `osv-scanner.toml` files must appear in the table of
-        /// `waiver_must_name_a_crate_that_is_still_locked`. A waiver added to a toml
-        /// but forgotten there would otherwise pass unread while OSV still honours it
-        /// at scan time. `[[PackageOverrides]]` rows are deliberately not covered:
-        /// those are name+version pinned and OSV lapses them on their own
-        /// `effectiveUntil`.
-        #[test]
-        fn every_ignored_advisory_in_the_three_tomls_has_a_waiver_row() {
-            const TOMLS: [(&str, &str); 3] = [
-                ("osv-scanner.toml", include_str!("../../osv-scanner.toml")),
-                (
-                    "budzero/osv-scanner.toml",
-                    include_str!("../../budzero/osv-scanner.toml"),
-                ),
-                (
-                    "fuzz/osv-scanner.toml",
-                    include_str!("../../fuzz/osv-scanner.toml"),
-                ),
-            ];
-            const KNOWN: [&str; 6] = [
-                "RUSTSEC-2025-0141",
-                "RUSTSEC-2025-0057",
-                "RUSTSEC-2024-0384",
-                "RUSTSEC-2024-0436",
-                "RUSTSEC-2026-0173",
-                "RUSTSEC-2026-0374",
-            ];
-            let mut ignored: Vec<String> = Vec::new();
-            for (_, toml) in TOMLS {
-                for line in toml.lines() {
-                    let Some(rest) = line.trim().strip_prefix("id = \"RUSTSEC-") else {
-                        continue;
-                    };
-                    let Some(tail) = rest.strip_suffix('"') else {
-                        continue;
-                    };
-                    let id = format!("RUSTSEC-{tail}");
-                    if !ignored.contains(&id) {
-                        ignored.push(id);
-                    }
+    }
+    /// A waiver is only honest while the thing it waives is still in the graph.
+    ///
+    /// `osv-scanner.toml` (and the two per-workspace copies beside the other
+    /// lockfiles) has to be read as a set: an ignore entry whose advisory can
+    /// never fire, because the crate left every lockfile, is dead policy. OSV
+    /// reports such an entry as `has unused ignores` and exits non-zero, so the
+    /// scan is red for a reason unrelated to a vulnerability. Conversely, a
+    /// waiver that disappears while the crate is still locked silently turns
+    /// the scan green over a real finding.
+    ///
+    /// The rule: an `[[IgnoredVulns]]` id must still match at least one package
+    /// in at least one lockfile. The advisory-to-crate mapping is the part this
+    /// test cannot see (it lives in the advisory database, not in the repo), so
+    /// the pairs are spelled out and grow with each waiver; that file is the
+    /// second place a waiver has to be edited, which is the point.
+    #[test]
+    fn waiver_must_name_a_crate_that_is_still_locked() {
+        // advisory id -> the crate the entry exists for. Update both the toml
+        // and this table when a waiver is added or retired.
+        const WAIVERS: [(&str, &str); 6] = [
+            ("RUSTSEC-2025-0141", "bincode"),
+            ("RUSTSEC-2025-0057", "fxhash"),
+            ("RUSTSEC-2024-0384", "instant"),
+            ("RUSTSEC-2024-0436", "paste"),
+            ("RUSTSEC-2026-0173", "proc-macro-error2"),
+            ("RUSTSEC-2026-0374", "basic-toml"),
+        ];
+        let locks: [(&str, &str); 18] = [
+            ("Cargo.lock", include_str!("../../Cargo.lock")),
+            (
+                "budzero/Cargo.lock",
+                include_str!("../../budzero/Cargo.lock"),
+            ),
+            (
+                "crates/ai-inference/Cargo.lock",
+                include_str!("../../crates/ai-inference/Cargo.lock"),
+            ),
+            (
+                "crates/bpqs/Cargo.lock",
+                include_str!("../../crates/bpqs/Cargo.lock"),
+            ),
+            (
+                "crates/bud-codec/Cargo.lock",
+                include_str!("../../crates/bud-codec/Cargo.lock"),
+            ),
+            (
+                "crates/budlum-explorer/Cargo.lock",
+                include_str!("../../crates/budlum-explorer/Cargo.lock"),
+            ),
+            (
+                "crates/budlum-types/Cargo.lock",
+                include_str!("../../crates/budlum-types/Cargo.lock"),
+            ),
+            (
+                "crates/note-packing/Cargo.lock",
+                include_str!("../../crates/note-packing/Cargo.lock"),
+            ),
+            (
+                "crates/uel-abi/Cargo.lock",
+                include_str!("../../crates/uel-abi/Cargo.lock"),
+            ),
+            (
+                "crates/wallet-core/Cargo.lock",
+                include_str!("../../crates/wallet-core/Cargo.lock"),
+            ),
+            ("fuzz/Cargo.lock", include_str!("../../fuzz/Cargo.lock")),
+            ("kani/Cargo.lock", include_str!("../../kani/Cargo.lock")),
+            (
+                "mobile/core/Cargo.lock",
+                include_str!("../../mobile/core/Cargo.lock"),
+            ),
+            (
+                "mobile/ffi/Cargo.lock",
+                include_str!("../../mobile/ffi/Cargo.lock"),
+            ),
+            (
+                "mobile/tools/log-analyzer/Cargo.lock",
+                include_str!("../../mobile/tools/log-analyzer/Cargo.lock"),
+            ),
+            (
+                "xtask/gates/Cargo.lock",
+                include_str!("../../xtask/gates/Cargo.lock"),
+            ),
+            (
+                "xtask/release/Cargo.lock",
+                include_str!("../../xtask/release/Cargo.lock"),
+            ),
+            (
+                "xtask/tools/Cargo.lock",
+                include_str!("../../xtask/tools/Cargo.lock"),
+            ),
+        ];
+        for (advisory, crate_name) in WAIVERS {
+            let mut seen_in: Vec<&str> = Vec::new();
+            for (lock_name, lock) in locks {
+                if !locked_versions_in(lock, crate_name).is_empty() {
+                    seen_in.push(lock_name);
                 }
             }
             assert!(
-                !ignored.is_empty(),
-                "no IgnoredVulns id parsed from the three tomls"
+                !seen_in.is_empty(),
+                "{advisory} is still ignored in osv-scanner.toml but {crate_name} is \
+                 in no lockfile: OSV reports the entry as an unused ignore and the \
+                 gate is red for a reason that is not a vulnerability. Delete the \
+                 waiver (and its row here)."
             );
-            for id in &ignored {
-                assert!(
-                    KNOWN.contains(&id.as_str()),
-                    "{id} is ignored in an osv-scanner.toml but has no row in \
-                     waiver_must_name_a_crate_that_is_still_locked: add the crate it \
-                     exists for, or delete the waiver"
-                );
+        }
+    }
+
+    /// The other direction of the lock above: every `[[IgnoredVulns]]` id in any
+    /// of the three `osv-scanner.toml` files must appear in the table of
+    /// `waiver_must_name_a_crate_that_is_still_locked`. A waiver added to a toml
+    /// but forgotten there would otherwise pass unread while OSV still honours it
+    /// at scan time. `[[PackageOverrides]]` rows are deliberately not covered:
+    /// those are name+version pinned and OSV lapses them on their own
+    /// `effectiveUntil`.
+    #[test]
+    fn every_ignored_advisory_in_the_three_tomls_has_a_waiver_row() {
+        const TOMLS: [(&str, &str); 3] = [
+            ("osv-scanner.toml", include_str!("../../osv-scanner.toml")),
+            (
+                "budzero/osv-scanner.toml",
+                include_str!("../../budzero/osv-scanner.toml"),
+            ),
+            (
+                "fuzz/osv-scanner.toml",
+                include_str!("../../fuzz/osv-scanner.toml"),
+            ),
+        ];
+        const KNOWN: [&str; 6] = [
+            "RUSTSEC-2025-0141",
+            "RUSTSEC-2025-0057",
+            "RUSTSEC-2024-0384",
+            "RUSTSEC-2024-0436",
+            "RUSTSEC-2026-0173",
+            "RUSTSEC-2026-0374",
+        ];
+        let mut ignored: Vec<String> = Vec::new();
+        for (_, toml) in TOMLS {
+            for line in toml.lines() {
+                let Some(rest) = line.trim().strip_prefix("id = \"RUSTSEC-") else {
+                    continue;
+                };
+                let Some(tail) = rest.strip_suffix('"') else {
+                    continue;
+                };
+                let id = format!("RUSTSEC-{tail}");
+                if !ignored.contains(&id) {
+                    ignored.push(id);
+                }
             }
+        }
+        assert!(
+            !ignored.is_empty(),
+            "no IgnoredVulns id parsed from the three tomls"
+        );
+        for id in &ignored {
+            assert!(
+                KNOWN.contains(&id.as_str()),
+                "{id} is ignored in an osv-scanner.toml but has no row in \
+                 waiver_must_name_a_crate_that_is_still_locked: add the crate it \
+                 exists for, or delete the waiver"
+            );
         }
     }
 }
