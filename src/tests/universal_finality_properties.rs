@@ -1684,3 +1684,264 @@ fn evm_migration_deployment_roots_bind_to_finalized_beacon_and_header_anchors() 
     };
     assert!(begin_import_attested(forged_req, 7777, &attested_anchor).is_err());
 }
+
+#[test]
+fn account_abstraction_fee_sponsorship_session_caps_and_timelocked_recovery() {
+    use crate::account_abstraction::{
+        recovery_approval_digest, recovery_cancel_digest, session_spend_digest,
+        AccountAbstractionError, FeeSponsorAuthorization, FeeSponsorRegistry, FeeSponsorTerms,
+        GuardianRecoveryApproval, SessionDelegation, SessionDelegationParams,
+        SessionDelegationRegistry, SessionKeyPosture, SessionSpendRequest, SocialRecoveryPolicy,
+        TimelockedRecoveryRegistry, MAX_CLASSICAL_HARDWARE_SESSION_CAP,
+        RECOVERY_APPROVAL_DOMAIN_TAG, RECOVERY_CANCEL_DOMAIN_TAG, SESSION_SPEND_DOMAIN_TAG,
+    };
+    use crate::core::address::Address;
+    use crate::crypto::composite::CompositeKeypair;
+    use crate::crypto::ml_dsa::ML_DSA_SEED_LEN;
+    use crate::crypto::suites::SuiteId;
+
+    let sponsor_kp =
+        CompositeKeypair::from_seeds(SuiteId::VALIDATOR, &[0x31; ML_DSA_SEED_LEN], &[0x32; 32])
+            .expect("sponsor keypair");
+    let sender = Address::from([0x41; 32]);
+    let tx_hash = [0x51; 32];
+    let other_tx_hash = [0x52; 32];
+
+    // 1. Gasless fee sponsorship: bound to exact tx_hash & chain_id, single-use.
+    let grant = FeeSponsorAuthorization::sign(
+        &sponsor_kp,
+        FeeSponsorTerms {
+            chain_id: 7777,
+            tx_hash,
+            sender,
+            max_fee_bud: 5_000,
+            expiry_epoch: 100,
+            sponsor_nonce: 1,
+        },
+        &[0x11; 32],
+    )
+    .expect("fee sponsor sign");
+
+    let mut sponsor_reg = FeeSponsorRegistry::default();
+    // Transplanting sponsor signature onto a different tx_hash fails closed.
+    assert_eq!(
+        sponsor_reg.consume(&grant, 7777, &other_tx_hash, 1_000, 50),
+        Err(AccountAbstractionError::TxHashMismatch)
+    );
+    // Fee exceeding sponsored max fails closed.
+    assert_eq!(
+        sponsor_reg.consume(&grant, 7777, &tx_hash, 5_001, 50),
+        Err(AccountAbstractionError::FeeExceedsSponsoredCap {
+            actual: 5_001,
+            max: 5_000
+        })
+    );
+    let grant_id = sponsor_reg
+        .consume(&grant, 7777, &tx_hash, 1_200, 50)
+        .expect("valid sponsor grant consumed");
+    assert!(sponsor_reg.is_consumed(&grant_id));
+    assert_eq!(
+        sponsor_reg.consume(&grant, 7777, &tx_hash, 1_200, 50),
+        Err(AccountAbstractionError::SponsorAuthorizationAlreadyConsumed)
+    );
+
+    // 2. Bounded session delegation (PQ session + hardware-capped classical guard).
+    let master_kp =
+        CompositeKeypair::from_seeds(SuiteId::VALIDATOR, &[0x61; ML_DSA_SEED_LEN], &[0x63; 32])
+            .expect("master keypair");
+    let session_kp =
+        CompositeKeypair::from_seeds(SuiteId::VALIDATOR, &[0x62; ML_DSA_SEED_LEN], &[0x64; 32])
+            .expect("session keypair");
+    let master_pk_bytes = master_kp.public_key().expect("master pk").encode();
+    let session_pk_bytes = session_kp.public_key().expect("session pk").encode();
+    let merchant = Address::from([0x71; 32]);
+    let stranger = Address::from([0x72; 32]);
+
+    // Unbounded classical hardware session exceeding MAX_CLASSICAL_HARDWARE_SESSION_CAP fails closed.
+    assert!(matches!(
+        SessionDelegation::sign(
+            &master_kp,
+            SessionDelegationParams {
+                chain_id: 7777,
+                session_key: SessionKeyPosture::HardwareClassicalCapped {
+                    evm_address: [0xaa; 20],
+                },
+                total_spend_cap: MAX_CLASSICAL_HARDWARE_SESSION_CAP + 1,
+                per_tx_cap: 1_000,
+                allowed_recipients: vec![merchant],
+                not_before_epoch: 10,
+                expiry_epoch: 20,
+                delegation_nonce: 1,
+            },
+            &[0x12; 32],
+        ),
+        Err(AccountAbstractionError::ClassicalHardwareCapExceeded { .. })
+    ));
+
+    let delegation = SessionDelegation::sign(
+        &master_kp,
+        SessionDelegationParams {
+            chain_id: 7777,
+            session_key: SessionKeyPosture::PostQuantumComposite {
+                composite_pubkey: session_pk_bytes,
+            },
+            total_spend_cap: 1_000,
+            per_tx_cap: 600,
+            allowed_recipients: vec![merchant],
+            not_before_epoch: 10,
+            expiry_epoch: 20,
+            delegation_nonce: 2,
+        },
+        &[0x13; 32],
+    )
+    .expect("session delegation");
+
+    let mut session_reg = SessionDelegationRegistry::default();
+    let del_id = session_reg
+        .register(delegation, 7777)
+        .expect("register session");
+
+    let spend1 = SessionSpendRequest {
+        delegation_id: del_id,
+        chain_id: 7777,
+        recipient: merchant,
+        amount: 600,
+        spend_nonce: 1,
+        current_epoch: 15,
+    };
+    let sig1 = session_kp
+        .sign(
+            SESSION_SPEND_DOMAIN_TAG,
+            &session_spend_digest(&del_id, 7777, &merchant, 600, 1),
+            &[0x14; 32],
+        )
+        .expect("sign spend1")
+        .encode();
+    assert_eq!(session_reg.authorize_spend(&spend1, &sig1), Ok(400));
+    // Disallowed recipient rejected.
+    let bad_recip = SessionSpendRequest {
+        recipient: stranger,
+        spend_nonce: 2,
+        amount: 100,
+        ..spend1.clone()
+    };
+    assert_eq!(
+        session_reg.authorize_spend(&bad_recip, &sig1),
+        Err(AccountAbstractionError::RecipientNotAllowed)
+    );
+    // Exceeding remaining cap (400) rejected.
+    let over_cap = SessionSpendRequest {
+        amount: 401,
+        spend_nonce: 3,
+        ..spend1.clone()
+    };
+    assert_eq!(
+        session_reg.authorize_spend(&over_cap, &sig1),
+        Err(AccountAbstractionError::AmountExceedsRemainingCap {
+            amount: 401,
+            remaining: 400
+        })
+    );
+    // Expired epoch rejected.
+    let expired = SessionSpendRequest {
+        current_epoch: 21,
+        amount: 100,
+        spend_nonce: 4,
+        ..spend1
+    };
+    assert!(matches!(
+        session_reg.authorize_spend(&expired, &sig1),
+        Err(AccountAbstractionError::SessionNotActive { .. })
+    ));
+    session_reg.revoke(&del_id).expect("revoke session");
+
+    // 3. Timelocked, owner-cancellable social recovery (zero admin backdoor).
+    let g1 =
+        CompositeKeypair::from_seeds(SuiteId::VALIDATOR, &[0x81; ML_DSA_SEED_LEN], &[0x91; 32])
+            .expect("g1");
+    let g2 =
+        CompositeKeypair::from_seeds(SuiteId::VALIDATOR, &[0x82; ML_DSA_SEED_LEN], &[0x92; 32])
+            .expect("g2");
+    let new_owner =
+        CompositeKeypair::from_seeds(SuiteId::VALIDATOR, &[0x83; ML_DSA_SEED_LEN], &[0x93; 32])
+            .expect("new owner");
+    let g1_pk = g1.public_key().expect("g1 pk").encode();
+    let g2_pk = g2.public_key().expect("g2 pk").encode();
+    let new_owner_pk = new_owner.public_key().expect("new owner pk").encode();
+    let policy = SocialRecoveryPolicy {
+        chain_id: 7777,
+        current_owner_pubkey: master_pk_bytes,
+        guardians: vec![g1_pk.clone(), g2_pk.clone()],
+        threshold: 2,
+        delay_epochs: 5,
+    };
+    let rec_digest = recovery_approval_digest(7777, &policy.current_owner_pubkey, &new_owner_pk, 1);
+    let approvals = vec![
+        GuardianRecoveryApproval {
+            guardian_pubkey: g1_pk.clone(),
+            signature: g1
+                .sign(RECOVERY_APPROVAL_DOMAIN_TAG, &rec_digest, &[0x21; 32])
+                .expect("g1 sign")
+                .encode(),
+        },
+        GuardianRecoveryApproval {
+            guardian_pubkey: g2_pk.clone(),
+            signature: g2
+                .sign(RECOVERY_APPROVAL_DOMAIN_TAG, &rec_digest, &[0x22; 32])
+                .expect("g2 sign")
+                .encode(),
+        },
+    ];
+    let mut rec_reg = TimelockedRecoveryRegistry::default();
+    let rec_id = rec_reg
+        .initiate(policy.clone(), new_owner_pk.clone(), 1, &approvals, 100)
+        .expect("initiate recovery");
+    // Finalizing before timelock window expires fails closed.
+    assert!(matches!(
+        rec_reg.finalize(&rec_id, 104),
+        Err(AccountAbstractionError::RecoveryWindowStillOpen { .. })
+    ));
+    // Owner cancels inside the window; subsequent finalization fails permanently.
+    let cancel_sig = master_kp
+        .sign(
+            RECOVERY_CANCEL_DOMAIN_TAG,
+            &recovery_cancel_digest(&rec_id, 7777),
+            &[0x23; 32],
+        )
+        .expect("cancel sign")
+        .encode();
+    rec_reg
+        .cancel_by_owner(&rec_id, &cancel_sig)
+        .expect("owner cancels");
+    assert_eq!(
+        rec_reg.finalize(&rec_id, 200),
+        Err(AccountAbstractionError::RecoveryCancelled)
+    );
+
+    // Second recovery (nonce 2) uncancelled activates cleanly after window.
+    let rec2_digest =
+        recovery_approval_digest(7777, &policy.current_owner_pubkey, &new_owner_pk, 2);
+    let approvals2 = vec![
+        GuardianRecoveryApproval {
+            guardian_pubkey: g1_pk,
+            signature: g1
+                .sign(RECOVERY_APPROVAL_DOMAIN_TAG, &rec2_digest, &[0x24; 32])
+                .expect("g1 sign2")
+                .encode(),
+        },
+        GuardianRecoveryApproval {
+            guardian_pubkey: g2_pk,
+            signature: g2
+                .sign(RECOVERY_APPROVAL_DOMAIN_TAG, &rec2_digest, &[0x25; 32])
+                .expect("g2 sign2")
+                .encode(),
+        },
+    ];
+    let rec2_id = rec_reg
+        .initiate(policy, new_owner_pk.clone(), 2, &approvals2, 300)
+        .expect("initiate recovery 2");
+    let activated = rec_reg
+        .finalize(&rec2_id, 305)
+        .expect("finalize after timelock");
+    assert_eq!(activated, new_owner_pk);
+}
