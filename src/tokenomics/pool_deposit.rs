@@ -195,20 +195,12 @@ mod tests {
     /// forces at least 1,024 addresses to saturate the note pool, and the
     /// saturation capital is deterministic from the table.
     #[test]
-    fn note_pool_saturation_needs_64_addresses_and_locks_the_table_capital() {
-        // Compile-time canary: the per-owner quota must admit at least 64
-        // addresses before the table can saturate. A constant assertion is
-        // evaluated at build time, so a registry evolution that breaks the
-        // quota fails the build instead of reaching the chain.
-        const {
-            assert!(
-                MAX_LIVE_COMMITMENTS / MAX_LIVE_COMMITMENTS_PER_OWNER >= 64,
-                "one funded owner must never be able to saturate the table alone"
-            )
-        };
-        // The module contract prices K at 1_024 funded addresses per owner;
-        // pinning the exact ratio turns a silent quota widening into a build
-        // failure instead of an unpriced occupancy regression.
+    fn note_pool_saturation_needs_1024_addresses_and_locks_the_table_capital() {
+        // The module contract prices K at 1_024 funded addresses per owner.
+        // Exact equality pins the table: a silent quota widening becomes a red
+        // test instead of an unpriced occupancy regression, and a runtime
+        // `assert!` on constants is the form clippy::assertions_on_constants
+        // rejects, so equality is the only canonical shape here.
         assert_eq!(MAX_LIVE_COMMITMENTS / MAX_LIVE_COMMITMENTS_PER_OWNER, 1_024);
         let per_row = policy_of(SharedPool::PrivacyNote).deposit;
         let saturation = (MAX_LIVE_COMMITMENTS as u64) * per_row;
