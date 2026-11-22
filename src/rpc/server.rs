@@ -5776,13 +5776,20 @@ impl BudlumApiServer for RpcServer {
     async fn get_universal_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let catalog = self.chain.get_universal_domains().await;
         let domains = catalog.list();
-        let root = hex::encode(catalog.catalog_root());
+        let root_bytes = catalog.catalog_root();
+        let root = hex::encode(root_bytes);
+        let inclusion_proofs: Vec<crate::unification::UniversalDomainInclusionProof> = domains
+            .iter()
+            .filter_map(|d| catalog.prove_domain_inclusion(d.domain_id))
+            .filter(|proof| proof.verify(&root_bytes))
+            .collect();
         let template_count =
             crate::unification::UniversalDomainCatalog::with_canonical_ecosystems().len();
         Ok(serde_json::json!({
             "count": catalog.len(),
             "catalog_root": format!("0x{root}"),
             "domains": domains,
+            "inclusion_proofs": inclusion_proofs,
             "template_count": template_count,
             "source": "chain_state",
         }))

@@ -906,9 +906,9 @@ pub struct BridgeEconomicGuard {
     consumed_evidence: BTreeSet<Hash32>,
     #[serde(default)]
     slashed_offenders: BTreeSet<Hash32>,
-    #[serde(default)]
+    #[serde(default, with = "crate::core::map_keys")]
     consumed_evidence_epochs: BTreeMap<Hash32, u64>,
-    #[serde(default)]
+    #[serde(default, with = "crate::core::map_keys")]
     slashed_offender_epochs: BTreeMap<Hash32, u64>,
     #[serde(default)]
     replay_pruned_before_epoch: u64,

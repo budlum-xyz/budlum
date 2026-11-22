@@ -176,6 +176,9 @@ const READ_NAMES: &[&str] = &[
     "prove_name",
     "list_names_by_owner",
     "list_subdomains",
+    // Pure `&self` finality certificate query answered by `bud_getFinalityCertificate`
+    // and `bud_getDomainFinalityProof`; never mutates consensus state.
+    "universal_finality_certificate",
 ];
 
 /// Read-only queries reached through an explicit sub-registry. The method
@@ -184,6 +187,9 @@ const READ_NAMES: &[&str] = &[
 const READ_CHAINS: &[&str] = &[
     ".bud3_registry.query_json(",
     ".validator_directory.query_json(",
+    // Read-only snapshot of owned `ConsensusSentry` fields returned by
+    // `ChainCommand::GetConsensusSentry`; no generic `clone` exemption.
+    ".bridge_state.consensus_sentry.clone(",
 ];
 
 /// Calls on `self.state` inside a `Blockchain` method body that write it.
@@ -321,7 +327,7 @@ fn check_actor_state_access(actor: &str) -> Result<(), String> {
         }
         if let Some(method) = method {
             let chain = actor[at..].trim_start();
-            let nested_read = method == "query_json"
+            let nested_read = matches!(method.as_str(), "query_json" | "clone")
                 && READ_CHAINS.iter().any(|allowed| {
                     chain.strip_prefix(allowed).is_some_and(|arguments| {
                         // Walk this call's balanced parentheses. A following
@@ -606,6 +612,37 @@ mod tests {
             "self.blockchain.state.bud3_registry.query_json(&query).insert(key, value);",
         ] {
             assert!(check_actor_state_access(path).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn consensus_sentry_snapshot_clone_is_an_exact_read() {
+        for path in [
+            "let sentry = self.blockchain.state.bridge_state.consensus_sentry.clone();",
+            "let sentry = self\n.blockchain\n.state\n.bridge_state\n.consensus_sentry\n.clone();",
+        ] {
+            assert!(check_actor_state_access(&normalize(path)).is_ok(), "{path}");
+        }
+    }
+
+    #[test]
+    fn consensus_sentry_snapshot_does_not_allow_other_clone_or_write_paths() {
+        for path in [
+            "self.blockchain.state.clone();",
+            "self.blockchain.state.bridge_state.clone();",
+            "self.blockchain.state.accounts.clone();",
+            "self.blockchain.state.bridge_state.consensus_sentry.clone_from(&other);",
+            "self.blockchain.state.bridge_state.consensus_sentry.clone_mut();",
+            "self.blockchain.state.bridge_state.consensus_sentry.clone().insert(key, value);",
+            "self.blockchain.state.bridge_state.consensus_sentry = other;",
+            "let sentry = &mut self.blockchain.state.bridge_state.consensus_sentry;",
+            "self.blockchain.state.add_balance(&addr, 1);",
+            "self.blockchain.state.bridge_state.consensus_sentry.clone(",
+        ] {
+            assert!(
+                check_actor_state_access(&normalize(path)).is_err(),
+                "{path}"
+            );
         }
     }
 }

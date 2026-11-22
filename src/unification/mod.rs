@@ -37,7 +37,8 @@ pub use abi_bridge::{
 };
 
 pub use domain_catalog::{
-    CatalogError, DomainCapability, UniversalDomainCatalog, UniversalDomainRecord,
+    CatalogError, DomainCapability, UniversalDomainCatalog, UniversalDomainInclusionProof,
+    UniversalDomainRecord,
 };
 pub use output_composer::{
     CanonicalValue, CompositionError, LanguageTag, NormalizedEvent, NormalizedMachineOutput,

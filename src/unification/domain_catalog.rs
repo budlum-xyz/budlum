@@ -11,7 +11,10 @@
 use crate::domain::storage_params::StorageDomainParams;
 use crate::domain::types::{ConsensusKind, DomainId, Hash32};
 use crate::object_layer::family::HomeVmFamily;
-use crate::unification::{hash_domain_fields, unification_merkle_root, validate_safe_label};
+use crate::unification::{
+    build_merkle_proof, hash_domain_fields, unification_merkle_root, validate_safe_label,
+    verify_merkle_proof,
+};
 use budlum_uel_abi::EeId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -675,6 +678,64 @@ impl UniversalDomainCatalog {
             .collect();
         unification_merkle_root(b"BDLM_UNIVERSAL_CATALOG_V1", &leaves)
     }
+
+    /// Builds a single Merkle inclusion proof attesting that `domain_id` (with
+    /// its canonical CAIP-2 identity, consensus family, and derived
+    /// capabilities) is committed under [`Self::catalog_root`].
+    #[must_use]
+    pub fn prove_domain_inclusion(
+        &self,
+        domain_id: DomainId,
+    ) -> Option<UniversalDomainInclusionProof> {
+        let mut leaves = Vec::with_capacity(self.domains.len());
+        let mut target = None;
+        for (idx, (&id, record)) in self.domains.iter().enumerate() {
+            leaves.push(record.commitment_hash());
+            if id == domain_id {
+                target = Some((idx, record.clone()));
+            }
+        }
+        let (leaf_index, record) = target?;
+        let siblings = build_merkle_proof(b"BDLM_UNIVERSAL_CATALOG_V1", &leaves, leaf_index)?;
+        Some(UniversalDomainInclusionProof {
+            record,
+            leaf_index,
+            leaf_count: leaves.len(),
+            siblings,
+        })
+    }
+}
+
+/// Self-contained Merkle inclusion proof against [`UniversalDomainCatalog::catalog_root`].
+///
+/// Allows a light client to verify with a single proof that a domain is
+/// registered together with its CAIP-2 reference, consensus family, and
+/// state-derived capability set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UniversalDomainInclusionProof {
+    /// Registered domain record committed at `leaf_index`.
+    pub record: UniversalDomainRecord,
+    /// Zero-based position of `record` in the canonical sorted catalog.
+    pub leaf_index: usize,
+    /// Total number of registered domains in the committed catalog.
+    pub leaf_count: usize,
+    /// Merkle sibling hashes from leaf to root.
+    pub siblings: Vec<Hash32>,
+}
+
+impl UniversalDomainInclusionProof {
+    /// Verifies this inclusion proof against `catalog_root`.
+    #[must_use]
+    pub fn verify(&self, catalog_root: &Hash32) -> bool {
+        verify_merkle_proof(
+            b"BDLM_UNIVERSAL_CATALOG_V1",
+            catalog_root,
+            self.leaf_index,
+            self.leaf_count,
+            &self.record.commitment_hash(),
+            &self.siblings,
+        )
+    }
 }
 
 struct PresetSpec<'a> {
@@ -887,5 +948,29 @@ mod tests {
         assert!(!rec4
             .capabilities
             .contains(&DomainCapability::ObjectLayerCustody));
+    }
+    #[test]
+    fn single_merkle_proof_verifies_registered_domain_and_rejects_tampered_record() {
+        let catalog = UniversalDomainCatalog::with_canonical_ecosystems();
+        let root = catalog.catalog_root();
+        let target_id = catalog.list()[0].domain_id;
+
+        let proof = catalog
+            .prove_domain_inclusion(target_id)
+            .expect("registered domain must produce an inclusion proof");
+        assert!(proof.verify(&root));
+
+        // Tampering with consensus family or CAIP-2 reference invalidates proof.
+        let mut tampered_caip2 = proof.clone();
+        tampered_caip2.record.caip2_reference = "eip155:999999".to_string();
+        assert!(!tampered_caip2.verify(&root));
+
+        // Wrong root is rejected.
+        let mut bad_root = root;
+        bad_root[0] ^= 0xFF;
+        assert!(!proof.verify(&bad_root));
+
+        // Unregistered domain yields None.
+        assert!(catalog.prove_domain_inclusion(u32::MAX - 7).is_none());
     }
 }

@@ -450,7 +450,22 @@ pub fn register_domain(state: &mut AccountState, domain: ConsensusDomain) -> Res
             ));
         }
     }
-    state.settlement.domains.register(domain)
+    const _: () = assert!(
+        crate::domain::registry::MAX_ACTIVE_DOMAINS_PER_OPERATOR > 0
+            && crate::domain::registry::MAX_ACTIVE_DOMAINS_PER_OPERATOR
+                < crate::domain::registry::MAX_REGISTERED_DOMAINS
+    );
+    state.settlement.domains.reclaim_inactive_domains(
+        state.current_block_height,
+        crate::domain::registry::DOMAIN_INACTIVITY_RETIREMENT_BLOCKS,
+    );
+    let id = domain.id;
+    state.settlement.domains.register(domain)?;
+    state
+        .settlement
+        .domains
+        .note_activity(id, state.current_block_height);
+    Ok(())
 }
 
 fn validate_commitment_metadata<'a>(
@@ -1262,6 +1277,10 @@ fn apply_pending_commitments(
             domain.last_committed_height = next_height;
             domain.last_committed_hash = com.domain_block_hash;
         }
+        state
+            .settlement
+            .domains
+            .note_activity(domain_id, state.current_block_height);
         advanced = true;
     }
     Ok(if advanced {
@@ -1652,6 +1671,10 @@ pub fn submit_zk_proof(
                 domain.last_committed_height = key.target_height;
                 domain.last_committed_hash = final_state_root;
             }
+            state
+                .settlement
+                .domains
+                .note_activity(claimed_domain, state.current_block_height);
             Ok(ProofAcceptance::Accepted {
                 rewarded: false,
                 reward: 0,

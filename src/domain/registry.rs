@@ -48,6 +48,16 @@ pub const MAX_ZK_PROGRAMS_PER_DOMAIN: usize = 64;
 /// separate path.
 pub const MAX_REGISTERED_DOMAINS: usize = 4096;
 
+/// Maximum number of non-retired consensus domains a single operator account
+/// may keep registered concurrently. Prevents one funded account from
+/// exhausting the global [`MAX_REGISTERED_DOMAINS`] table.
+pub const MAX_ACTIVE_DOMAINS_PER_OPERATOR: usize = 32;
+
+/// Number of global blocks without any observed commitment progress after
+/// which an inactive domain is eligible to be retired and reclaimed so its
+/// registry slot returns to the shared pool.
+pub const DOMAIN_INACTIVITY_RETIREMENT_BLOCKS: u64 = 100_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConsensusDomainRegistry {
     domains: BTreeMap<DomainId, ConsensusDomain>,
@@ -64,6 +74,11 @@ pub struct ConsensusDomainRegistry {
     /// registered domains may ever claim the same CAIP-2 chain identity.
     #[serde(default)]
     domain_by_caip2: BTreeMap<String, DomainId>,
+    /// Global block height at which each registered domain last registered or
+    /// advanced with a verified commitment. Used to retire and reclaim stale
+    /// slots once inactive for [`DOMAIN_INACTIVITY_RETIREMENT_BLOCKS`].
+    #[serde(default)]
+    last_activity_block: BTreeMap<DomainId, u64>,
 }
 
 /// Validates and normalizes a CAIP-2 reference (`namespace:reference`).
@@ -102,6 +117,7 @@ impl ConsensusDomainRegistry {
             observed: BTreeMap::new(),
             caip2_by_domain: BTreeMap::new(),
             domain_by_caip2: BTreeMap::new(),
+            last_activity_block: BTreeMap::new(),
         }
     }
 
@@ -175,6 +191,50 @@ impl ConsensusDomainRegistry {
     #[must_use]
     pub fn caip2_for_domain(&self, domain_id: DomainId) -> Option<&str> {
         self.caip2_by_domain.get(&domain_id).map(String::as_str)
+    }
+
+    /// Records that `domain_id` registered or delivered a verified commitment
+    /// at global `block_height`, refreshing its liveness lease.
+    pub fn note_activity(&mut self, domain_id: DomainId, block_height: u64) {
+        if self.domains.contains_key(&domain_id) {
+            let entry = self.last_activity_block.entry(domain_id).or_insert(0);
+            if block_height > *entry {
+                *entry = block_height;
+            }
+        }
+    }
+
+    /// Retires and reclaims domains whose recorded activity has been stale for
+    /// at least `inactivity_window` global blocks, freeing their registry slots
+    /// and CAIP-2 bindings for new registrations.
+    pub fn reclaim_inactive_domains(
+        &mut self,
+        current_block_height: u64,
+        inactivity_window: u64,
+    ) -> Vec<DomainId> {
+        if inactivity_window == 0 {
+            return Vec::new();
+        }
+        let stale: Vec<DomainId> = self
+            .last_activity_block
+            .iter()
+            .filter_map(|(&id, &last_seen)| {
+                if current_block_height.saturating_sub(last_seen) >= inactivity_window {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in &stale {
+            self.domains.remove(id);
+            self.observed.remove(id);
+            self.last_activity_block.remove(id);
+            if let Some(caip2) = self.caip2_by_domain.remove(id) {
+                self.domain_by_caip2.remove(&caip2);
+            }
+        }
+        stale
     }
 
     /// Adds what an adapter checked for a commitment of `id`.
@@ -271,6 +331,21 @@ impl ConsensusDomainRegistry {
         }
         if domain.operator == Some(crate::core::address::Address::zero()) {
             return Err(format!("Domain {} has invalid zero operator", domain.id));
+        }
+        if require_active {
+            if let Some(op) = domain.operator {
+                let held = self
+                    .domains
+                    .values()
+                    .filter(|d| d.operator == Some(op) && d.status != DomainStatus::Retired)
+                    .count();
+                if held >= MAX_ACTIVE_DOMAINS_PER_OPERATOR {
+                    return Err(format!(
+                        "Domain {} rejected: operator already holds {held} active domains                          (quota {MAX_ACTIVE_DOMAINS_PER_OPERATOR}); retire an unused domain first",
+                        domain.id
+                    ));
+                }
+            }
         }
         // A new registration starts Active. Frozen and Retired are reached
         // only through `transition_status_checked`; registering straight into
@@ -1088,5 +1163,56 @@ mod tests {
             .expect("distinct CAIP-2 must succeed");
         assert_eq!(reg.domain_id_by_caip2("eip155:11155111"), Some(102));
         assert_ne!(reg.root(), root_after_first);
+    }
+
+    #[test]
+    fn single_operator_cannot_exhaust_domain_registry_and_inactive_domain_reclaims_slot() {
+        let mut reg = ConsensusDomainRegistry::new();
+        let single_operator = crate::core::address::Address::from_bytes([0x5A; 32]);
+
+        // Under-bonded registration is rejected (deposit required for every slot).
+        let mut underfunded = default_domain(1, ConsensusKind::PoS, 1001, "pos", 0);
+        underfunded.operator = Some(single_operator);
+        underfunded.operator_bond = MIN_DOMAIN_OPERATOR_BOND.saturating_sub(1);
+        assert!(reg.register(underfunded).is_err());
+
+        // A single operator can fill at most MAX_ACTIVE_DOMAINS_PER_OPERATOR slots.
+        for idx in 0..MAX_ACTIVE_DOMAINS_PER_OPERATOR {
+            let id = u32::try_from(idx + 10).expect("fits u32");
+            let mut dom = default_domain(id, ConsensusKind::PoS, u64::from(id), "pos", 0);
+            dom.operator = Some(single_operator);
+            reg.register(dom)
+                .expect("registrations within operator quota must succeed");
+            reg.note_activity(id, 100);
+        }
+
+        // The next registration by the same operator must be rejected without
+        // mutating the table.
+        let mut overflow = default_domain(999, ConsensusKind::PoS, 999, "pos", 0);
+        overflow.operator = Some(single_operator);
+        let err = reg
+            .register(overflow.clone())
+            .expect_err("single operator must not exceed fair-share quota");
+        assert!(err.contains("quota"), "{err}");
+        assert_eq!(reg.len(), MAX_ACTIVE_DOMAINS_PER_OPERATOR);
+
+        // Keep domain 10 active with fresh proof progress while the rest stay idle.
+        reg.note_activity(10, 100 + DOMAIN_INACTIVITY_RETIREMENT_BLOCKS - 1);
+
+        // Once the inactivity window passes, idle domains are reclaimed and
+        // their slots open up while the active domain stays registered.
+        let reclaimed = reg.reclaim_inactive_domains(
+            100 + DOMAIN_INACTIVITY_RETIREMENT_BLOCKS,
+            DOMAIN_INACTIVITY_RETIREMENT_BLOCKS,
+        );
+        assert_eq!(reclaimed.len(), MAX_ACTIVE_DOMAINS_PER_OPERATOR - 1);
+        assert!(reg.get(10).is_some(), "active domain must remain");
+        assert!(reg.get(11).is_none(), "stale domain must be reclaimed");
+        assert_eq!(reg.len(), 1);
+
+        // Freed slot accepts a new registration cleanly.
+        reg.register(overflow)
+            .expect("registration must succeed once inactive slots are reclaimed");
+        assert!(reg.get(999).is_some());
     }
 }

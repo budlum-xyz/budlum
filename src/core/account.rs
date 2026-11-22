@@ -6426,12 +6426,13 @@ impl AccountState {
         use crate::cross_domain::external::spec::{AssumptionClass, SecurityBacking};
 
         let mut emitted = 0usize;
-        let external_samples: Vec<(
+        type ExternalSentrySample = (
             String,
             String,
             DomainQuantumPosture,
             Option<(u64, [u8; 32])>,
-        )> = self
+        );
+        let external_samples: Vec<ExternalSentrySample> = self
             .settlement
             .external_intake
             .registry
@@ -6489,6 +6490,126 @@ impl AccountState {
                     })
                 {
                     emitted = emitted.saturating_add(alerts.len());
+                }
+            }
+        }
+
+        // Also synchronize every registered consensus domain under its
+        // canonical `domain:<u32>` key so `finality_gate::enforce_sentry_circuit_clear`
+        // and `bud_getDomainHealth` read the exact same live Sentry state.
+        type DomainSentrySample = (
+            String,
+            String,
+            DomainQuantumPosture,
+            Option<(u64, [u8; 32])>,
+            bool,
+        );
+        let domain_samples: Vec<DomainSentrySample> = self
+            .settlement
+            .domains
+            .domains()
+            .into_iter()
+            .map(|domain| {
+                use crate::cross_domain::external::sentry::ConsensusSentry;
+                use crate::cross_domain::external::{DomainKey, EXTERNAL_DOMAIN_FINALITY_ADAPTER};
+                use crate::crypto::facts::QuantumClass;
+                use crate::domain::types::{ConsensusKind, DomainStatus};
+
+                let key = ConsensusSentry::domain_key_for_id(domain.id);
+                let frozen = domain.status == DomainStatus::Frozen;
+                if domain.finality_adapter == EXTERNAL_DOMAIN_FINALITY_ADAPTER
+                    && domain.config_hash != [0u8; 32]
+                {
+                    if let Some(reg) = self
+                        .settlement
+                        .external_intake
+                        .registry
+                        .domain(&DomainKey(domain.config_hash))
+                    {
+                        let family = reg.record.descriptor.name.clone();
+                        let posture = match &reg.record.last_backing {
+                            Some(SecurityBacking::Work { .. }) => {
+                                DomainQuantumPosture::PurePostQuantum
+                            }
+                            Some(SecurityBacking::Zk { system, .. })
+                                if system.assumption_class() == AssumptionClass::Hash =>
+                            {
+                                DomainQuantumPosture::PurePostQuantum
+                            }
+                            _ => DomainQuantumPosture::ClassicalOnly,
+                        };
+                        let tip = reg
+                            .latest_attestation()
+                            .map(|att| (att.height, att.state_root));
+                        return (key, family, posture, tip, frozen);
+                    }
+                }
+                let family = domain.finality_adapter.clone();
+                let observed_pq = matches!(
+                    self.settlement.domains.observed(domain.id).quantum_class(),
+                    Some(QuantumClass::Lattice | QuantumClass::Hash)
+                );
+                let posture = match domain.kind {
+                    ConsensusKind::PoW | ConsensusKind::Zk => DomainQuantumPosture::PurePostQuantum,
+                    _ if observed_pq => DomainQuantumPosture::Hybrid,
+                    _ => DomainQuantumPosture::ClassicalOnly,
+                };
+                let tip = if domain.last_committed_height > 0
+                    && domain.last_committed_hash != [0u8; 32]
+                {
+                    Some((domain.last_committed_height, domain.last_committed_hash))
+                } else {
+                    None
+                };
+                (key, family, posture, tip, frozen)
+            })
+            .collect();
+
+        for (key, family, posture, tip, frozen) in domain_samples {
+            if self.bridge_state.consensus_sentry.domain(&key).is_none() {
+                let _ = self.bridge_state.consensus_sentry.register_domain(
+                    key.clone(),
+                    SentryDomainPolicy {
+                        consensus_family: if family.is_empty() {
+                            "consensus-domain".into()
+                        } else {
+                            family
+                        },
+                        quantum_posture: posture,
+                        max_finality_stall_secs: 3_600,
+                        min_trusting_window_secs: 600,
+                        max_reorg_blocks: 6,
+                        max_consecutive_proof_failures: 3,
+                        max_restake_share_ppm: DEFAULT_MAX_RESTAKE_SHARE_PPM,
+                        recovery_cooldown_secs: 3_600,
+                    },
+                );
+            }
+            if let Some((height, state_root)) = tip {
+                if let Ok(alerts) = self
+                    .bridge_state
+                    .consensus_sentry
+                    .observe(&SentryObservation {
+                        domain_id: key.clone(),
+                        height,
+                        state_root,
+                        observed_at_secs: block_unix_secs,
+                        remaining_trust_window_secs: None,
+                        restake_share_ppm: 0,
+                    })
+                {
+                    emitted = emitted.saturating_add(alerts.len());
+                }
+            }
+            if frozen {
+                for _ in 0..3 {
+                    if let Ok(Some(_)) = self
+                        .bridge_state
+                        .consensus_sentry
+                        .record_proof_failure(&key, block_unix_secs)
+                    {
+                        emitted = emitted.saturating_add(1);
+                    }
                 }
             }
         }

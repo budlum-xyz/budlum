@@ -290,9 +290,33 @@ pub fn enforce_domain_not_refuted(
         return Ok(());
     };
     if let Some(proof) = cert.prove_domain(domain_id) {
-        if let FinalityVerdict::Refuted { code } = proof.entry.verdict {
-            let _ = gate.as_str();
-            return Err(ValueGateRefusal::DomainRefuted { domain_id, code });
+        match proof.entry.verdict {
+            FinalityVerdict::Refuted { code } => {
+                let _ = gate.as_str();
+                return Err(ValueGateRefusal::DomainRefuted { domain_id, code });
+            }
+            FinalityVerdict::Pending {
+                reason:
+                    reason @ (FinalityPendingReason::AttestationUnbound
+                    | FinalityPendingReason::RuleNotSatisfied),
+            } => {
+                let _ = gate.as_str();
+                return Err(ValueGateRefusal::DomainPending { domain_id, reason });
+            }
+            FinalityVerdict::Pending {
+                reason: FinalityPendingReason::EvidenceMissing,
+            } => {
+                // If the domain already claims a non-zero committed height but
+                // lacks a bound commitment/state root, refuse fail-closed.
+                if proof.entry.height > 0 {
+                    let _ = gate.as_str();
+                    return Err(ValueGateRefusal::DomainPending {
+                        domain_id,
+                        reason: FinalityPendingReason::EvidenceMissing,
+                    });
+                }
+            }
+            FinalityVerdict::Established => {}
         }
     }
     Ok(())
@@ -533,5 +557,87 @@ mod tests {
                 }
             );
         }
+    }
+    #[test]
+    fn refresh_consensus_sentry_indexes_domain_id_key_and_blocks_stalled_domain() {
+        use crate::core::account::AccountState;
+        use crate::domain::plugin::default_domain;
+        use crate::domain::types::ConsensusKind;
+
+        let mut state = AccountState::new();
+        let mut dom = default_domain(42, ConsensusKind::PoS, 42, "pos", 0);
+        dom.last_committed_height = 5;
+        dom.last_committed_hash = [0x42; 32];
+        state
+            .settlement
+            .domains
+            .register(dom)
+            .expect("register domain 42");
+
+        state.refresh_consensus_sentry(1_000);
+        let key = crate::cross_domain::external::sentry::ConsensusSentry::domain_key_for_id(42);
+        assert!(
+            state.bridge_state.consensus_sentry.domain(&key).is_some(),
+            "refresh_consensus_sentry must populate canonical domain:<id> key"
+        );
+        assert!(enforce_sentry_circuit_clear(
+            &state.bridge_state.consensus_sentry,
+            ValueGate::BridgeMint,
+            42,
+        )
+        .is_ok());
+
+        // Advance well past max_finality_stall_secs (3600s) with no progress.
+        state.refresh_consensus_sentry(10_000);
+        let err = enforce_sentry_circuit_clear(
+            &state.bridge_state.consensus_sentry,
+            ValueGate::BridgeMint,
+            42,
+        )
+        .expect_err("stalled domain must trigger Sentry circuit breaker on domain:<id>");
+        assert!(matches!(
+            err,
+            ValueGateRefusal::SentryCircuitEscalated {
+                gate: ValueGate::BridgeMint,
+                domain_id: 42,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn enforce_domain_not_refuted_rejects_pending_retired_and_unbound_domains() {
+        use crate::domain::plugin::default_domain;
+        use crate::domain::types::{ConsensusKind, DomainStatus};
+        use crate::settlement::registries::SettlementRegistries;
+
+        let mut regs = SettlementRegistries::new();
+        let mut dom = default_domain(77, ConsensusKind::PoS, 77, "pos", 0);
+        dom.last_committed_height = 3;
+        dom.last_committed_hash = [0x77; 32];
+        regs.domains.register(dom).expect("register");
+
+        // Domain claims height 3 without a matching commitment -> Pending(EvidenceMissing) refused.
+        let err = enforce_domain_not_refuted(&regs, 10, ValueGate::BridgeMint, 77)
+            .expect_err("non-zero height without commitment must be refused fail-closed");
+        assert_eq!(
+            err,
+            ValueGateRefusal::DomainPending {
+                domain_id: 77,
+                reason: FinalityPendingReason::EvidenceMissing,
+            }
+        );
+
+        // Retired domain -> Pending(RuleNotSatisfied) refused.
+        regs.domains.get_mut(77).unwrap().status = DomainStatus::Retired;
+        let err_retired = enforce_domain_not_refuted(&regs, 10, ValueGate::BridgeUnlock, 77)
+            .expect_err("retired domain must be refused");
+        assert_eq!(
+            err_retired,
+            ValueGateRefusal::DomainPending {
+                domain_id: 77,
+                reason: FinalityPendingReason::RuleNotSatisfied,
+            }
+        );
     }
 }
