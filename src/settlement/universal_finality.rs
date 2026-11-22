@@ -581,7 +581,7 @@ impl FinalityGuarantee {
     /// a BFT-grade inclusion bound; zeroing its bound would refuse a
     /// perfectly valid inclusion proof. So the bound is zeroed only when the
     /// observation actually contradicts the promise (a downgrade) or when the
-    /// quorum is degenerate — never merely because the backing is
+    /// quorum is degenerate - never merely because the backing is
     /// unslashable.
     ///
     /// WIRING: the canonical external-domain guarantee derivation; the

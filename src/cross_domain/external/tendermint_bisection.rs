@@ -1,4 +1,4 @@
-//! WIRING: wired — multi-step ICS-07 bisection header-skip verifier, consumed
+//! WIRING: wired - multi-step ICS-07 bisection header-skip verifier, consumed
 //! in production by `IntakeState::rotate_tendermint_anchor_bisection`
 //! (non-adjacent Tendermint anchor rotation door) and by the CLI/IBC relayer
 //! bisection submission paths.

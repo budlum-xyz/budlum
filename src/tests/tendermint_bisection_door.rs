@@ -1,13 +1,9 @@
 //! Door tests for the production multi-step ICS-07 bisection anchor-rotation
 //! surface: `IntakeState::rotate_tendermint_anchor_bisection`.
 //!
-//! RED -> GREEN (GOREV-146; reconstruction of commit `502ffc84`, which the
-//! 2026-11-22 sandbox reset destroyed before it could be pushed): these seven
-//! tests were the red half first — the method did not exist — and
-//! `intake.rs::rotate_tendermint_anchor_bisection` is the green half. The
-//! bisection machinery itself (`tendermint_bisection::verify_bisection`,
-//! GOREV-07) predates this change; what lands here is its production wiring
-//! plus the fail-closed gates around it.
+//! Door coverage for `intake.rs::rotate_tendermint_anchor_bisection`: these
+//! seven tests verify the production wiring and fail-closed gates around the
+//! multi-step bisection verifier (`tendermint_bisection::verify_bisection`).
 //!
 //! Every test that can leave the pin behind asserts the pin is bit-identical
 //! afterwards: a refused rotation must not move the anchor a millimetre.
@@ -451,7 +447,7 @@ fn a_failing_middle_step_leaves_the_pin_untouched() {
     assert_eq!(
         pin_hash(&intake),
         before,
-        "a failed bisection leaves the pin bit-identical — no partial advance"
+        "a failed bisection leaves the pin bit-identical: no partial advance"
     );
 }
 

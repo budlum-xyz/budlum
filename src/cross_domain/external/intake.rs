@@ -842,7 +842,7 @@ impl IntakeState {
     ///
     /// Refuses unpinned networks and chain-id or validator-set pin mismatches
     /// with [`IntakeError::CommitteeNotPinned`]; refuses light params that do
-    /// not equal the trusted checkpoint's trusting period (fail-closed — no
+    /// not equal the trusted checkpoint's trusting period (fail-closed - no
     /// widening, no silent shrink); and refuses empty or oversized step lists
     /// or any failing step with the light client's own [`AdapterError`]. The
     /// pin advances only after the whole bisection verifies, so a failing path
