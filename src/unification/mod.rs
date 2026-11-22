@@ -41,9 +41,11 @@ pub use domain_catalog::{
     UniversalDomainRecord,
 };
 pub use output_composer::{
-    CanonicalValue, CompositionError, LanguageTag, NormalizedEvent, NormalizedMachineOutput,
-    NormalizedStateEffect, OutputBinding, OutputComposer, OutputCompositionPlan, OutputSelector,
-    UnifiedOutputBundle,
+    build_external_step_receipt_proof, build_external_step_receipt_root, AtomicityClass,
+    AttestedOutputBundle, CanonicalValue, CompositionError, LanguageTag, NormalizedEvent,
+    NormalizedMachineOutput, NormalizedStateEffect, OutputBinding, OutputComposer,
+    OutputCompositionPlan, OutputSelector, StepReceiptAttestation, UnifiedOutputBundle,
+    EXTERNAL_STEP_RECEIPT_TAG,
 };
 pub use payment_router::{
     universal_asset_id, verify_split_tender_supply_conservation, AssetEquivalenceClass,

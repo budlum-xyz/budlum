@@ -460,3 +460,283 @@ fn asset_equivalence_class_selects_cheapest_proven_member_and_enforces_supply_co
         "overflow must fail conservation"
     );
 }
+
+#[test]
+fn output_composer_attested_verifies_uer_batch_synchronous_steps_and_rejects_forged_outputs() {
+    use crate::core::hash::calculate_hash_bytes;
+    use crate::execution::uer::{
+        compute_uer_batch_root, prove_uer_inclusion, UerStatus, UniversalExecutionReceipt,
+        UER_VERSION_V1,
+    };
+    use crate::unification::output_composer::{
+        AtomicityClass, CanonicalValue, NormalizedMachineOutput, OutputBinding, OutputComposer,
+        OutputCompositionPlan, OutputSelector, StepReceiptAttestation,
+    };
+    use budlum_uel_abi::EeId;
+    use std::collections::BTreeMap;
+
+    let evm_return = b"evm-swap-result".to_vec();
+    let wasm_return = b"wasm-settle-ok".to_vec();
+
+    let mut evm_vals = BTreeMap::new();
+    evm_vals.insert(String::from("amount"), CanonicalValue::U128(500));
+    let evm_step = NormalizedMachineOutput::from_evm(
+        "evm_leg",
+        1,
+        true,
+        50_000,
+        evm_return.clone(),
+        &[],
+        evm_vals,
+    )
+    .expect("evm step");
+
+    let mut wasm_vals = BTreeMap::new();
+    wasm_vals.insert(String::from("in_amount"), CanonicalValue::U128(500));
+    let wasm_step = NormalizedMachineOutput::from_wasm(
+        "wasm_leg",
+        1,
+        true,
+        40_000,
+        wasm_return.clone(),
+        Vec::new(),
+        wasm_vals,
+    )
+    .expect("wasm step");
+
+    let r0 = UniversalExecutionReceipt {
+        version: UER_VERSION_V1,
+        chain_id: 1,
+        block_height: 42,
+        tx_index: 0,
+        tx_hash: [0x11; 32],
+        origin_ee: EeId::EVM.0,
+        status: UerStatus::Success,
+        gas_used_bgu: evm_step.gas_used_bgu,
+        burned_attos: 100,
+        security_pool_attos: 50,
+        proposer_tip_attos: 10,
+        output_digest: calculate_hash_bytes(&evm_return),
+        contract_address: None,
+        logs_commitment: [0x22; 32],
+        post_execution_root: [0x33; 32],
+        zk_trace_commitment: None,
+    };
+    let r1 = UniversalExecutionReceipt {
+        version: UER_VERSION_V1,
+        chain_id: 1,
+        block_height: 42,
+        tx_index: 1,
+        tx_hash: [0x44; 32],
+        origin_ee: EeId::WASM.0,
+        status: UerStatus::Success,
+        gas_used_bgu: wasm_step.gas_used_bgu,
+        burned_attos: 80,
+        security_pool_attos: 40,
+        proposer_tip_attos: 10,
+        output_digest: calculate_hash_bytes(&wasm_return),
+        contract_address: None,
+        logs_commitment: [0x55; 32],
+        post_execution_root: [0x66; 32],
+        zk_trace_commitment: None,
+    };
+
+    let receipts = [r0, r1];
+    let batch_root = compute_uer_batch_root(&receipts).expect("uer batch root");
+    let p0 = prove_uer_inclusion(&receipts, 0).expect("proof 0");
+    let p1 = prove_uer_inclusion(&receipts, 1).expect("proof 1");
+
+    let plan = OutputCompositionPlan {
+        plan_id: String::from("sync-evm-wasm-v1"),
+        steps: vec![evm_step.clone(), wasm_step.clone()],
+        bindings: vec![OutputBinding {
+            from_step: String::from("evm_leg"),
+            selector: OutputSelector::TypedField {
+                key: String::from("amount"),
+            },
+            to_step: String::from("wasm_leg"),
+            target_input: String::from("in_amount"),
+            expected_value: Some(CanonicalValue::U128(500)),
+        }],
+    };
+
+    let mut attestations = BTreeMap::new();
+    attestations.insert(
+        String::from("evm_leg"),
+        StepReceiptAttestation::UerBatch {
+            inclusion: p0.clone(),
+            batch_root,
+        },
+    );
+    attestations.insert(
+        String::from("wasm_leg"),
+        StepReceiptAttestation::UerBatch {
+            inclusion: p1.clone(),
+            batch_root,
+        },
+    );
+
+    let attested = OutputComposer::compose_attested(
+        &plan,
+        AtomicityClass::SingleBlockSynchronous,
+        &attestations,
+    )
+    .expect("synchronous UER-attested composition must succeed");
+    assert_eq!(attested.atomicity, AtomicityClass::SingleBlockSynchronous);
+    assert_ne!(attested.attestation_root, [0u8; 32]);
+
+    // Tampering with return_data without matching UER receipt fails closed.
+    let mut forged_plan = plan.clone();
+    if let Some(first) = forged_plan.steps.first_mut() {
+        first.return_data.push(0xff);
+    }
+    assert!(
+        OutputComposer::compose_attested(
+            &forged_plan,
+            AtomicityClass::SingleBlockSynchronous,
+            &attestations,
+        )
+        .is_err(),
+        "forged return_data disagreeing with UER output_digest must be rejected"
+    );
+
+    // Missing attestation fails closed.
+    let mut partial = BTreeMap::new();
+    partial.insert(
+        String::from("evm_leg"),
+        StepReceiptAttestation::UerBatch {
+            inclusion: p0,
+            batch_root,
+        },
+    );
+    assert!(OutputComposer::compose_attested(
+        &plan,
+        AtomicityClass::SingleBlockSynchronous,
+        &partial
+    )
+    .is_err());
+}
+
+#[test]
+fn output_composer_attested_enforces_external_two_phase_and_compensating_async_classes() {
+    use crate::unification::output_composer::{
+        build_external_step_receipt_proof, build_external_step_receipt_root, AtomicityClass,
+        CanonicalValue, NormalizedMachineOutput, OutputComposer, OutputCompositionPlan,
+        StepReceiptAttestation,
+    };
+    use std::collections::BTreeMap;
+
+    let mut vals_a = BTreeMap::new();
+    vals_a.insert(String::from("out"), CanonicalValue::U128(10));
+    let step_a = NormalizedMachineOutput::from_evm(
+        "eth_step",
+        10,
+        true,
+        30_000,
+        b"eth-ok".to_vec(),
+        &[],
+        vals_a,
+    )
+    .expect("step a");
+
+    let mut vals_b = BTreeMap::new();
+    vals_b.insert(String::from("out"), CanonicalValue::U128(10));
+    let step_b = NormalizedMachineOutput::from_wasm(
+        "cosmos_step",
+        20,
+        true,
+        30_000,
+        b"cosmos-ok".to_vec(),
+        Vec::new(),
+        vals_b,
+    )
+    .expect("step b");
+
+    let leaves_a = [step_a.artifact_hash(), [0x99; 32]];
+    let root_a = build_external_step_receipt_root(&leaves_a);
+    let proof_a = build_external_step_receipt_proof(&leaves_a, 0).expect("proof a");
+
+    let leaves_b = [[0x88; 32], step_b.artifact_hash()];
+    let root_b = build_external_step_receipt_root(&leaves_b);
+    let proof_b = build_external_step_receipt_proof(&leaves_b, 1).expect("proof b");
+
+    let plan = OutputCompositionPlan {
+        plan_id: String::from("cross-domain-2pc-v1"),
+        steps: vec![step_a, step_b],
+        bindings: Vec::new(),
+    };
+
+    let mut two_phase = BTreeMap::new();
+    two_phase.insert(
+        String::from("eth_step"),
+        StepReceiptAttestation::ExternalDomainMerkle {
+            domain_id: 10,
+            finality_root: root_a,
+            leaf_index: 0,
+            leaf_count: leaves_a.len(),
+            proof: proof_a.clone(),
+            compensation_commitment: None,
+        },
+    );
+    two_phase.insert(
+        String::from("cosmos_step"),
+        StepReceiptAttestation::ExternalDomainMerkle {
+            domain_id: 20,
+            finality_root: root_b,
+            leaf_index: 1,
+            leaf_count: leaves_b.len(),
+            proof: proof_b.clone(),
+            compensation_commitment: None,
+        },
+    );
+
+    // External Merkle proofs cannot claim SingleBlockSynchronous atomicity.
+    assert!(OutputComposer::compose_attested(
+        &plan,
+        AtomicityClass::SingleBlockSynchronous,
+        &two_phase
+    )
+    .is_err());
+
+    // FinalityBoundTwoPhase succeeds.
+    let res_2pc =
+        OutputComposer::compose_attested(&plan, AtomicityClass::FinalityBoundTwoPhase, &two_phase)
+            .expect("two-phase external attestation passes");
+    assert_eq!(res_2pc.atomicity, AtomicityClass::FinalityBoundTwoPhase);
+
+    // CompensatingAsync rejects missing compensation_commitment.
+    assert!(
+        OutputComposer::compose_attested(&plan, AtomicityClass::CompensatingAsync, &two_phase)
+            .is_err()
+    );
+
+    // With explicit non-zero compensation commitments, CompensatingAsync succeeds.
+    let mut comp = BTreeMap::new();
+    comp.insert(
+        String::from("eth_step"),
+        StepReceiptAttestation::ExternalDomainMerkle {
+            domain_id: 10,
+            finality_root: root_a,
+            leaf_index: 0,
+            leaf_count: leaves_a.len(),
+            proof: proof_a,
+            compensation_commitment: Some([0xaa; 32]),
+        },
+    );
+    comp.insert(
+        String::from("cosmos_step"),
+        StepReceiptAttestation::ExternalDomainMerkle {
+            domain_id: 20,
+            finality_root: root_b,
+            leaf_index: 1,
+            leaf_count: leaves_b.len(),
+            proof: proof_b,
+            compensation_commitment: Some([0xbb; 32]),
+        },
+    );
+    let res_async =
+        OutputComposer::compose_attested(&plan, AtomicityClass::CompensatingAsync, &comp)
+            .expect("compensating async passes");
+    assert_eq!(res_async.atomicity, AtomicityClass::CompensatingAsync);
+    assert_ne!(res_2pc.attestation_root, res_async.attestation_root);
+}
