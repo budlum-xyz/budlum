@@ -110,6 +110,7 @@ impl ConsensusDomainForkChoice for DomainForkChoice {
 
 /// Freeze state produced when conflicting finalized commitments are observed
 /// for the same domain.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum DomainForkFreezeStatus {
     Active,
@@ -123,6 +124,7 @@ enum DomainForkFreezeStatus {
 /// In-block evidence required to unfreeze a domain frozen by conflicting
 /// finalized commitments. Out-of-block claims (`verified_in_block == false`)
 /// or zero digests are unconditionally refused.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct InBlockForkResolutionProof {
     block_height: u64,
@@ -131,6 +133,7 @@ struct InBlockForkResolutionProof {
     verified_in_block: bool,
 }
 
+#[cfg(test)]
 impl DomainForkChoice {
     fn first_conflict_pair(candidates: &[ForkCandidate]) -> Option<(u64, Hash32, Hash32)> {
         let mut seen = std::collections::BTreeMap::<u64, Hash32>::new();
@@ -156,7 +159,6 @@ impl DomainForkChoice {
         None
     }
 
-    #[cfg(test)]
     fn evaluate_with_freeze(
         &self,
         candidates: &[ForkCandidate],
@@ -180,7 +182,6 @@ impl DomainForkChoice {
         }
     }
 
-    #[cfg(test)]
     fn unfreeze_with_in_block_proof(
         &self,
         current: &DomainForkFreezeStatus,
