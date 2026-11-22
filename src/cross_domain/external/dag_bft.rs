@@ -268,7 +268,9 @@ fn verify_member_sig(
     }
 }
 
-fn encode_dag_evidence(bundle: &DagWaveCommitEvidence) -> Result<Vec<u8>, String> {
+/// Canonical wire payload of a wave-commit bundle: the magic prefix the
+/// decoder requires, then the bincode body, under the payload ceiling.
+pub(crate) fn encode_dag_evidence(bundle: &DagWaveCommitEvidence) -> Result<Vec<u8>, String> {
     let body = bincode::serialize(bundle).map_err(|e| format!("DAG-BFT encode failed: {e}"))?;
     let total = PAYLOAD_MAGIC.len().saturating_add(body.len());
     if total > MAX_DAG_PAYLOAD_BYTES {

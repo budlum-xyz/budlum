@@ -2168,7 +2168,8 @@ mod tests {
                 network: dag_net.into(),
                 declared_height: 100,
                 declared_root: [0xA1; 32],
-                payload: bincode::serialize(&dag_evidence).expect("encode dag golden"),
+                payload: crate::cross_domain::external::dag_bft::encode_dag_evidence(&dag_evidence)
+                    .expect("encode dag golden"),
                 submitter: poster,
             },
             poster,
