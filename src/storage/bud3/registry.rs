@@ -634,10 +634,15 @@ impl Bud3Registry {
         }
         let public = record.content_id.kind == ContentIdKind::Public;
         if public {
-            if let Some(existing) = self.public_index.get(&record.content_id.digest) {
+            // Reader-verified selection over the candidate row: dedup binds
+            // to the exact commitment, not the declared digest alone, so a
+            // squatter who confirmed custody of DIFFERENT bytes under this
+            // digest can never absorb the true copy's registration.
+            for existing in self.public_index.candidates(&record.content_id.digest) {
                 if self.objects.get(existing).is_some_and(|entry| {
                     entry.custody_confirmed
                         && entry.record.content_id == record.content_id
+                        && entry.record.commitment == record.commitment
                         && !entry.shares.is_empty()
                         && entry
                             .shares
@@ -1005,7 +1010,9 @@ impl Bud3Registry {
         for old in superseded {
             if let Some(obj) = self.objects.remove(&old) {
                 if obj.record.content_id.kind == ContentIdKind::Public {
-                    self.public_index.insert(obj.record.content_id.digest, *key);
+                    let digest = obj.record.content_id.digest;
+                    self.public_index.remove_candidate(&digest, &old);
+                    self.public_index.admit(digest, *key);
                 }
                 self.forfeited_pool_total = self
                     .forfeited_pool_total
@@ -1157,6 +1164,43 @@ impl Bud3Registry {
     }
 
     /// Forget one live object: its public-index row, its references and its
+    /// Stand a custody-complete object as a candidate for its public
+    /// digest. First-writer-wins is gone: a full row evicts its weakest
+    /// candidate by the deterministic quality order - an unconfirmed
+    /// custody first, then a row with lost or unconfirmed shares, both in
+    /// canonical order - and when all three fully stand, the newcomer
+    /// waits; resolution already succeeds through any standing candidate.
+    fn admit_public_candidate(&mut self, digest: [u8; 32], key: ObjectKey) {
+        if self.public_index.admit(digest, key) {
+            return;
+        }
+        let quality = |candidate: &ObjectKey| -> u8 {
+            self.objects.get(candidate).map_or(0, |e| {
+                if !e.custody_confirmed {
+                    0
+                } else if e.shares.is_empty()
+                    || e.shares
+                        .iter()
+                        .any(|s| s.status != ShareStatus::Confirmed || s.lost)
+                {
+                    1
+                } else {
+                    2
+                }
+            })
+        };
+        let evict = self
+            .public_index
+            .candidates(&digest)
+            .iter()
+            .copied()
+            .filter(|candidate| quality(candidate) < 2)
+            .min_by_key(|candidate| (quality(candidate), *candidate));
+        if let Some(evict) = evict {
+            self.public_index.replace_candidate(&digest, &evict, key);
+        }
+    }
+
     /// shares. The replacement record, if any, is the caller's business.
     fn drop_object(&mut self, key: &ObjectKey, epoch: u64) {
         if let Some(obj) = self.objects.remove(key) {
@@ -1167,10 +1211,9 @@ impl Bud3Registry {
                     .forfeited_pool_total
                     .saturating_add(obj.endowment.remaining_balance);
             }
-            if obj.record.content_id.kind == ContentIdKind::Public
-                && self.public_index.get(&obj.record.content_id.digest) == Some(key)
-            {
-                self.public_index.remove(&obj.record.content_id.digest);
+            if obj.record.content_id.kind == ContentIdKind::Public {
+                self.public_index
+                    .remove_candidate(&obj.record.content_id.digest, key);
             }
             for nft in obj.references {
                 self.nfts.remove(&nft);
@@ -1696,9 +1739,12 @@ impl Bud3Registry {
         public_digest: &[u8; 32],
         epoch: u64,
     ) -> Option<ObjectKey> {
-        let key = *self.public_index.get(public_digest)?;
-        self.delete(&key, epoch);
-        Some(key)
+        let keys = self.public_index.candidates(public_digest).to_vec();
+        let first = *keys.first()?;
+        for key in &keys {
+            self.delete(key, epoch);
+        }
+        Some(first)
     }
 
     /// Resolve `key` to the live leaf [`ObjectKey`] and [`ObjectEntry`] that
@@ -1980,11 +2026,36 @@ impl Bud3Registry {
         self.validator_quotas.get(validator).copied().unwrap_or(0)
     }
 
-    /// Look up the live `ObjectKey` indexed under a public content digest.
+    /// Look up a live `ObjectKey` indexed under a public content digest:
+    /// the first candidate whose custody fully stands, else the first
+    /// candidate at all. A caller that must bind to exact bytes verifies
+    /// the commitment itself over [`Self::public_candidates`] - the index
+    /// never judges bytes it cannot see.
     /// Convenience: exposed for upload-session deduplication and RPC lookup.
     #[must_use]
     pub fn public_object(&self, public_digest: &[u8; 32]) -> Option<ObjectKey> {
-        self.public_index.get(public_digest).copied()
+        let row = self.public_index.candidates(public_digest);
+        row.iter()
+            .find(|key| {
+                self.objects.get(*key).is_some_and(|entry| {
+                    entry.custody_confirmed
+                        && !entry.shares.is_empty()
+                        && entry
+                            .shares
+                            .iter()
+                            .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+                })
+            })
+            .or_else(|| row.first())
+            .copied()
+    }
+
+    /// Every candidate standing for a public content digest, in canonical
+    /// order. Readers verify in order and take the one whose commitment
+    /// opens; a squatting candidate costs a lookup, never the content.
+    #[must_use]
+    pub fn public_candidates(&self, public_digest: &[u8; 32]) -> &[ObjectKey] {
+        self.public_index.candidates(public_digest)
     }
 
     /// Whether `key` has been deleted and recorded in the tombstone map.
@@ -2070,19 +2141,7 @@ impl Bud3Registry {
         // (section 6.14, item 6).
         if n > 0 && complete {
             if let Some(digest) = public_digest {
-                let occupied_live = self.public_index.get(&digest).is_some_and(|existing| {
-                    existing != key
-                        && self.objects.get(existing).is_some_and(|e| {
-                            e.custody_confirmed
-                                && !e.shares.is_empty()
-                                && e.shares
-                                    .iter()
-                                    .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
-                        })
-                });
-                if !occupied_live {
-                    self.public_index.insert(digest, *key);
-                }
+                self.admit_public_candidate(digest, *key);
             }
             self.release_replaced(key);
         }
@@ -3513,8 +3572,13 @@ impl Bud3Registry {
         }
         // The exact index is consensus state after snapshot restoration. The
         // node-local Bloom filter that accelerates it is deliberately excluded.
-        for (digest, key) in self.public_index.iter() {
-            fold(&[b"public_index", digest, key]);
+        for (digest, keys) in self.public_index.iter() {
+            // One fold frame per candidate: a single-candidate row folds the
+            // exact bytes the single-value index folded, so every pre-change
+            // root is byte-identical.
+            for key in keys {
+                fold(&[b"public_index", digest, key]);
+            }
         }
         for (nft, (key, holder)) in &self.nfts {
             fold(&[b"nft", nft, key, holder]);
@@ -3762,7 +3826,7 @@ mod tests {
         assert!(!orphan_nft.is_empty());
         assert_ne!(orphan_nft.state_root(), empty.state_root());
         let mut orphan_index = empty.clone();
-        orphan_index.public_index.insert(digest, key);
+        orphan_index.public_index.admit(digest, key);
         assert!(!orphan_index.is_empty());
         assert_ne!(orphan_index.state_root(), empty.state_root());
     }
@@ -3893,14 +3957,22 @@ mod tests {
         }
         assert_eq!(r.public_object(&up.record.content_id.digest), Some(key));
         let root = r.state_root();
-        // A second upload of the same confirmed public content stores nothing.
-        let mut again = up.record.clone();
-        again.commitment = [0xEE; 32];
+        // A second upload of the same confirmed public content stores
+        // nothing: same bytes carry the same commitment.
         assert_eq!(
-            r.register_object(addr(2), again, shares.clone(), 1, 10),
+            r.register_object(addr(2), up.record.clone(), shares.clone(), 1, 10),
             Ok(Registered::Deduplicated(key))
         );
         assert_eq!(r.state_root(), root, "a dedup writes nothing");
+        // A registrant claiming the same digest over DIFFERENT bytes is not
+        // absorbed into the standing copy: dedup binds to the commitment,
+        // not to the declared digest alone.
+        let mut imposter = up.record.clone();
+        imposter.commitment = [0xEE; 32];
+        assert_eq!(
+            r.register_object(addr(2), imposter, shares.clone(), 1, 10),
+            Ok(Registered::New([0xEE; 32]))
+        );
         // Sealed content with the same digest bypasses the public index.
         let mut sealed = up.record;
         sealed.content_id.kind = ContentIdKind::Sealed;
@@ -3908,6 +3980,101 @@ mod tests {
         assert_eq!(
             r.register_object(addr(3), sealed, shares, 1, 10),
             Ok(Registered::New([0xDD; 32]))
+        );
+    }
+
+    /// Design rule D-1: with a correct committed copy standing, resolution
+    /// of its digest is never permanently blocked - a squatter costs one
+    /// extra candidate, never the content.
+    #[test]
+    fn a_squatter_cannot_keep_the_true_copy_out_of_resolution() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"the real bytes");
+        let digest = up.record.content_id.digest;
+        let true_key = up.record.commitment;
+        // The squatter claims the digest first, over different bytes, and
+        // fully confirms custody of its own object.
+        let mut squat = up.record.clone();
+        squat.commitment = [0xAA; 32];
+        r.register_object(addr(9), squat, shares.clone(), 0, 10)
+            .unwrap();
+        for h in [10u8, 11, 12, 13] {
+            r.ack(&[0xAA; 32], &addr(h)).unwrap();
+        }
+        assert_eq!(r.public_candidates(&digest), &[[0xAA; 32]]);
+        // The true copy is NOT absorbed into the squatter's object...
+        assert_eq!(
+            r.register_object(addr(1), up.record.clone(), shares.clone(), 0, 10),
+            Ok(Registered::New(true_key))
+        );
+        for h in [10u8, 11, 12, 13] {
+            r.ack(&true_key, &addr(h)).unwrap();
+        }
+        // ...and it STANDS in the candidate row next to the squatter.
+        assert!(r.public_candidates(&digest).contains(&true_key));
+        // Reader-verified selection: a later copy of the same bytes binds to
+        // the true candidate by commitment, whatever the squatter holds.
+        assert_eq!(
+            r.register_object(addr(2), up.record.clone(), shares.clone(), 1, 10),
+            Ok(Registered::Deduplicated(true_key))
+        );
+        // The takedown of this digest clears every candidate.
+        r.dao_delete_public_content(&digest, 11);
+        assert!(r.public_candidates(&digest).is_empty());
+    }
+
+    /// Design rule: a full row evicts its weakest candidate for a
+    /// custody-complete newcomer, deterministically; when all three fully
+    /// stand, the newcomer waits and the row does not move.
+    #[test]
+    fn a_full_candidate_row_evicts_by_quality_and_never_by_arrival() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"contested digest");
+        let digest = up.record.content_id.digest;
+        for n in 1u8..=3 {
+            let mut rec = up.record.clone();
+            rec.commitment = [n; 32];
+            r.register_object(addr(n), rec, shares.clone(), 0, 10)
+                .unwrap();
+            for h in [10u8, 11, 12, 13] {
+                r.ack(&[n; 32], &addr(h)).unwrap();
+            }
+        }
+        assert_eq!(
+            r.public_candidates(&digest),
+            &[[1u8; 32], [2u8; 32], [3u8; 32]]
+        );
+        // One candidate degrades: a share is lost.
+        if let Some(entry) = r.objects.get_mut(&[2u8; 32]) {
+            if let Some(share) = entry.shares.first_mut() {
+                share.lost = true;
+            }
+        }
+        // A custody-complete newcomer takes the degraded slot...
+        let mut rec = up.record.clone();
+        rec.commitment = [4u8; 32];
+        r.register_object(addr(4), rec, shares.clone(), 0, 10)
+            .unwrap();
+        for h in [10u8, 11, 12, 13] {
+            r.ack(&[4u8; 32], &addr(h)).unwrap();
+        }
+        assert_eq!(
+            r.public_candidates(&digest),
+            &[[1u8; 32], [3u8; 32], [4u8; 32]],
+            "the lost-share candidate leaves; canonical order holds"
+        );
+        // ...and with all three fully standing, the next newcomer waits.
+        let mut rec = up.record.clone();
+        rec.commitment = [5u8; 32];
+        r.register_object(addr(5), rec, shares.clone(), 0, 10)
+            .unwrap();
+        for h in [10u8, 11, 12, 13] {
+            r.ack(&[5u8; 32], &addr(h)).unwrap();
+        }
+        assert_eq!(
+            r.public_candidates(&digest),
+            &[[1u8; 32], [3u8; 32], [4u8; 32]],
+            "a row of fully standing candidates does not move"
         );
     }
 

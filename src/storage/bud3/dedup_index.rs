@@ -136,12 +136,24 @@ impl BloomFilter {
     }
 }
 
-/// The public dedup index: content digest to the live object holding it, with
-/// the filter in front.
+/// How many objects may stand as candidates for one public digest. The
+/// bound keeps the reader's verification loop constant-size and the root
+/// fold bounded; the quality rule in the registry decides who stays when
+/// the row is full.
+pub const MAX_PUBLIC_CANDIDATES: usize = 3;
+
+/// The public dedup index: content digest to the candidate objects claiming
+/// it, with the filter in front.
+///
+/// A row holds up to [`MAX_PUBLIC_CANDIDATES`] object keys in canonical
+/// (byte) order. The index itself never judges which candidate truly holds
+/// the bytes - consensus cannot see bytes - so a reader verifies candidates
+/// in order and takes the one whose commitment opens. First-writer-wins is
+/// gone on purpose: a squatting row can no longer keep the true copy out.
 #[derive(Debug, Clone, Default)]
 pub struct DedupIndex {
     filter: BloomFilter,
-    map: BTreeMap<[u8; 32], ObjectKey>,
+    map: BTreeMap<[u8; 32], Vec<ObjectKey>>,
 }
 
 /// Equality is the exact index. The filter is a lookup accelerator with a
@@ -159,18 +171,32 @@ impl FromIterator<([u8; 32], ObjectKey)> for DedupIndex {
     fn from_iter<T: IntoIterator<Item = ([u8; 32], ObjectKey)>>(iter: T) -> Self {
         let mut index = Self::default();
         for (digest, key) in iter {
-            index.insert(digest, key);
+            index.admit(digest, key);
         }
         index
     }
 }
 
+/// Rows flatten to `(digest, key)` pairs: a snapshot stores a multi-candidate
+/// row as several pairs sharing a digest, and a pre-candidate snapshot - one
+/// pair per digest - loads unchanged. The wire shape never moved.
 impl IntoIterator for DedupIndex {
     type Item = ([u8; 32], ObjectKey);
-    type IntoIter = IntoIter<[u8; 32], ObjectKey>;
+    type IntoIter = std::iter::FlatMap<
+        IntoIter<[u8; 32], Vec<ObjectKey>>,
+        std::vec::IntoIter<([u8; 32], ObjectKey)>,
+        fn(([u8; 32], Vec<ObjectKey>)) -> std::vec::IntoIter<([u8; 32], ObjectKey)>,
+    >;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.map.into_iter()
+        fn explode(row: ([u8; 32], Vec<ObjectKey>)) -> std::vec::IntoIter<([u8; 32], ObjectKey)> {
+            let (digest, keys) = row;
+            keys.into_iter()
+                .map(|key| (digest, key))
+                .collect::<Vec<_>>()
+                .into_iter()
+        }
+        self.map.into_iter().flat_map(explode)
     }
 }
 
@@ -181,34 +207,92 @@ impl DedupIndex {
         self.map.is_empty()
     }
 
-    /// Iterate over all `(digest, object_key)` entries in deterministic order.
-    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, [u8; 32], ObjectKey> {
+    /// Iterate over all `(digest, candidates)` rows in deterministic order.
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, [u8; 32], Vec<ObjectKey>> {
         self.map.iter()
     }
 
-    /// The object holding `digest`, if the index holds one. A filter "no"
+    /// The candidates claiming `digest`, in canonical order. A filter "no"
     /// answers without the lookup; a "maybe" always consults the exact index.
     #[must_use]
-    pub fn get(&self, digest: &[u8; 32]) -> Option<&ObjectKey> {
+    pub fn candidates(&self, digest: &[u8; 32]) -> &[ObjectKey] {
         if !self.filter.maybe_contains(digest) {
-            return None;
+            return &[];
         }
-        self.map.get(digest)
+        self.map.get(digest).map_or(&[], Vec::as_slice)
     }
 
-    /// Map `digest` to `key`. Grows the filter from the full key set when the
-    /// count passes what it was sized for. Returns the previous mapping.
-    pub fn insert(&mut self, digest: [u8; 32], key: ObjectKey) -> Option<ObjectKey> {
+    /// Whether `key` already stands as a candidate for `digest`.
+    #[must_use]
+    pub fn contains_candidate(&self, digest: &[u8; 32], key: &ObjectKey) -> bool {
+        self.candidates(digest).binary_search(key).is_ok()
+    }
+
+    /// Enter `key` as a candidate for `digest`. Returns `true` when the key
+    /// stands in the row afterwards - already present counts - and `false`
+    /// only when the row is full of other candidates; the caller owns the
+    /// quality rule that decides an eviction.
+    pub fn admit(&mut self, digest: [u8; 32], key: ObjectKey) -> bool {
         if self.filter.keys() >= self.filter.expected() {
             self.rebuild(self.filter.expected().saturating_mul(2).max(1));
         }
-        self.filter.insert(&digest);
-        self.map.insert(digest, key)
+        let row = self.map.entry(digest).or_default();
+        match row.binary_search(&key) {
+            Ok(_) => true,
+            Err(pos) => {
+                if row.len() >= MAX_PUBLIC_CANDIDATES {
+                    if row.is_empty() {
+                        self.map.remove(&digest);
+                    }
+                    return false;
+                }
+                row.insert(pos, key);
+                self.filter.insert(&digest);
+                true
+            }
+        }
     }
 
-    /// Drop the mapping for `digest`. The filter keeps its bits: a stale
-    /// "maybe" only costs a lookup, and the filter never decides alone.
-    pub fn remove(&mut self, digest: &[u8; 32]) -> Option<ObjectKey> {
+    /// Swap one named candidate for another, keeping canonical order. Returns
+    /// `false` when `evict` does not stand in the row; nothing moves then.
+    pub fn replace_candidate(
+        &mut self,
+        digest: &[u8; 32],
+        evict: &ObjectKey,
+        key: ObjectKey,
+    ) -> bool {
+        let Some(row) = self.map.get_mut(digest) else {
+            return false;
+        };
+        let Ok(pos) = row.binary_search(evict) else {
+            return false;
+        };
+        row.remove(pos);
+        if let Err(pos) = row.binary_search(&key) {
+            row.insert(pos, key);
+        }
+        self.filter.insert(digest);
+        true
+    }
+
+    /// Withdraw one candidate; the row leaves with its last candidate. The
+    /// filter keeps its bits: a stale "maybe" only costs a lookup.
+    pub fn remove_candidate(&mut self, digest: &[u8; 32], key: &ObjectKey) -> bool {
+        let Some(row) = self.map.get_mut(digest) else {
+            return false;
+        };
+        let Ok(pos) = row.binary_search(key) else {
+            return false;
+        };
+        row.remove(pos);
+        if row.is_empty() {
+            self.map.remove(digest);
+        }
+        true
+    }
+
+    /// Drop the whole row for `digest`, returning its candidates.
+    pub fn remove(&mut self, digest: &[u8; 32]) -> Option<Vec<ObjectKey>> {
         self.map.remove(digest)
     }
 
@@ -250,24 +334,70 @@ mod tests {
     #[test]
     fn a_filter_no_skips_the_index_and_a_maybe_consults_it() {
         let mut index = DedupIndex::default();
-        index.insert(key(1), [1u8; 32]);
-        assert_eq!(index.get(&key(1)), Some(&[1u8; 32]));
+        assert!(index.admit(key(1), [1u8; 32]));
+        assert_eq!(index.candidates(&key(1)), &[[1u8; 32]]);
         // Never inserted: a "maybe" would consult the index and still find
         // nothing, so the answer is the same either way.
-        assert_eq!(index.get(&key(2)), None);
+        assert!(index.candidates(&key(2)).is_empty());
         // Removal drops the mapping even if the filter keeps its bits.
-        assert_eq!(index.remove(&key(1)), Some([1u8; 32]));
-        assert_eq!(index.get(&key(1)), None);
+        assert!(index.remove_candidate(&key(1), &[1u8; 32]));
+        assert!(index.candidates(&key(1)).is_empty());
+    }
+
+    #[test]
+    fn a_row_holds_three_canonical_candidates_and_refuses_a_fourth() {
+        let mut index = DedupIndex::default();
+        assert!(index.admit(key(1), [3u8; 32]));
+        assert!(index.admit(key(1), [1u8; 32]));
+        assert!(index.admit(key(1), [2u8; 32]));
+        assert_eq!(
+            index.candidates(&key(1)),
+            &[[1u8; 32], [2u8; 32], [3u8; 32]],
+            "candidates stand in canonical byte order whatever order they came"
+        );
+        assert!(index.admit(key(1), [2u8; 32]), "already present counts");
+        assert!(
+            !index.admit(key(1), [4u8; 32]),
+            "a full row refuses; the caller owns the eviction rule"
+        );
+        assert!(index.replace_candidate(&key(1), &[3u8; 32], [4u8; 32]));
+        assert_eq!(
+            index.candidates(&key(1)),
+            &[[1u8; 32], [2u8; 32], [4u8; 32]]
+        );
+        assert!(!index.replace_candidate(&key(1), &[9u8; 32], [5u8; 32]));
+    }
+
+    #[test]
+    fn rows_flatten_to_pairs_and_load_back_identically() {
+        let mut index = DedupIndex::default();
+        index.admit(key(1), [2u8; 32]);
+        index.admit(key(1), [1u8; 32]);
+        index.admit(key(7), [7u8; 32]);
+        let pairs: Vec<([u8; 32], ObjectKey)> = index.clone().into_iter().collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (key(1), [1u8; 32]),
+                (key(1), [2u8; 32]),
+                (key(7), [7u8; 32])
+            ]
+        );
+        let reloaded: DedupIndex = pairs.into_iter().collect();
+        assert_eq!(reloaded, index);
+        // A pre-candidate snapshot is one pair per digest and loads unchanged.
+        let legacy: DedupIndex = vec![(key(9), [9u8; 32])].into_iter().collect();
+        assert_eq!(legacy.candidates(&key(9)), &[[9u8; 32]]);
     }
 
     #[test]
     fn the_index_grows_past_the_expected_count() {
         let mut index = DedupIndex::default();
         for n in 0..(DEFAULT_EXPECTED + 500) {
-            index.insert(key(n), key(n));
+            index.admit(key(n), key(n));
         }
         for n in 0..(DEFAULT_EXPECTED + 500) {
-            assert_eq!(index.get(&key(n)), Some(&key(n)), "key {n}");
+            assert_eq!(index.candidates(&key(n)), &[key(n)], "key {n}");
         }
     }
 
@@ -275,13 +405,17 @@ mod tests {
     fn a_rebuilt_index_answers_the_same_as_the_original() {
         let mut index = DedupIndex::default();
         for n in 0..100u64 {
-            index.insert(key(n), key(n));
+            index.admit(key(n), key(n));
         }
         index.remove(&key(7));
         let rebuilt: DedupIndex = index.clone().into_iter().collect();
         assert_eq!(rebuilt, index);
         for n in 0..100u64 {
-            assert_eq!(rebuilt.get(&key(n)), index.get(&key(n)), "key {n}");
+            assert_eq!(
+                rebuilt.candidates(&key(n)),
+                index.candidates(&key(n)),
+                "key {n}"
+            );
         }
     }
 

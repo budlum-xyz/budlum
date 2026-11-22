@@ -541,7 +541,7 @@ impl UploadSessionManager {
         // squatter in `public_index` can never be absorbed.
         if !session.pre_sealed_object && content_id.kind == super::content_id::ContentIdKind::Public
         {
-            if let Some(key) = registry.public_object(&content_id.digest) {
+            for key in registry.public_candidates(&content_id.digest).to_vec() {
                 if let Some(existing) = registry.object(&key).filter(|entry| {
                     entry.record.content_id == content_id
                         && entry.record.commitment == commitment
