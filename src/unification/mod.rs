@@ -351,13 +351,16 @@ pub struct AnchoredDomainState {
 /// ([`crate::garden::is_garden_domain_id`]), so the ledger mints names with
 /// bit 30 set and bit 31 clear: `0x4000_0000..=0x7FFF_FFFF`.
 ///
-/// The range is reserved, not merely used. A consensus domain may not
-/// register an id inside it
-/// ([`crate::settlement::domains::validate_domain_registration`]), and the
-/// ledger refuses an internal anchor there
-/// ([`UnificationLedger::anchor_domain_finality`]). Two nodes cannot
-/// disagree about which domain an id names, because the id says which
-/// namespace it came from.
+/// The range is reserved, not merely used. A new consensus domain may not
+/// be admitted with an id inside it - the ingest gate refuses it
+/// ([`crate::settlement::domains::check_ingest_garden_domain_reservation`])
+/// - and the ledger refuses an internal anchor there
+/// ([`UnificationLedger::anchor_domain_finality`]). The ingest gate is
+/// where the refusal lives on purpose: a check inside committed-block
+/// replay would reject a chain whose history already holds a domain in
+/// this range, and an upgraded node would fork away from an un-upgraded
+/// one. Two nodes cannot disagree about which domain an id names, because
+/// the id says which namespace it came from.
 pub const EXTERNAL_DOMAIN_ID_PREFIX: crate::domain::types::DomainId = 0x4000_0000;
 
 /// The last `DomainId` the unification ledger hands to an external domain.

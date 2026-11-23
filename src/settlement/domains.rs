@@ -321,17 +321,6 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     if domain.id == 0 {
         return Err("Consensus domain id 0 is reserved".into());
     }
-    // The unification ledger mints its own names for external domains in a
-    // reserved id range. A consensus domain taking an id from that range
-    // would make one number mean two domains - and the ledger, which keys
-    // its anchored domains by id, would overwrite whichever it anchored
-    // second. The range is refused here so the two namespaces stay apart.
-    if crate::unification::is_external_domain_id(domain.id) {
-        return Err(format!(
-            "Domain {} lies in the reserved external domain id range",
-            domain.id
-        ));
-    }
     // Bitcoin uses numeric chain id 0; no other canonical or custom slot may
     // register with zero. Keep this consistent with the chain bootstrap gate.
     if domain.domain_chain_id == 0
@@ -399,7 +388,18 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     Ok(())
 }
 
-/// Ingest-only reservation check for bit-31 Garden domain identifiers.
+/// Ingest-only reservation check for the reserved domain id ranges.
+///
+/// Two ranges are reserved:
+///
+/// 1. **bit 31** - the Garden range, marked by
+///    [`crate::garden::is_garden_domain_id`].
+/// 2. **bit 30** - the range the unification ledger mints its external
+///    domain names from
+///    ([`crate::unification::is_external_domain_id`]). A consensus domain
+///    there would make one number mean two domains, and the ledger - which
+///    keys its anchored domains by id - would overwrite whichever it
+///    anchored second.
 ///
 /// Enforced on transaction admission, precheck, aggregation pool intake and
 /// block assembly rather than unconditionally inside committed-block replay, so
@@ -407,6 +407,15 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
 /// `RegisterDomain` never rejects history or splits upgraded from un-upgraded
 /// nodes. `Blockchain::register_garden_domain` separately refuses any id
 /// already present in `state.settlement.domains`.
+///
+/// The reservation is deliberately NOT enforced inside
+/// [`validate_domain_registration`], which runs during committed-block
+/// replay. A hard check there would reject a chain whose history already
+/// holds a domain in the reserved range, and an upgraded node would fork
+/// away from an un-upgraded one. A domain that slipped through stays
+/// unanchorable: the ledger refuses that range, so the domain has no
+/// anchored state and the ledger fail-closes every route that would need
+/// it.
 pub fn check_ingest_garden_domain_reservation(
     tx: &crate::core::transaction::Transaction,
 ) -> Result<(), String> {
@@ -417,6 +426,12 @@ pub fn check_ingest_garden_domain_reservation(
         if crate::garden::is_garden_domain_id(domain.id) {
             return Err(format!(
                 "Domain {} lies in the reserved Garden domain id range",
+                domain.id
+            ));
+        }
+        if crate::unification::is_external_domain_id(domain.id) {
+            return Err(format!(
+                "Domain {} lies in the reserved external domain id range",
                 domain.id
             ));
         }
@@ -479,6 +494,20 @@ pub fn refresh_unification_anchors(
     // their finalized state root is the last block they committed.
     for domain in state.settlement.domains.domains() {
         if domain.id == 0 {
+            continue;
+        }
+        // A domain in the range the ledger reserves for its external names
+        // cannot be anchored: the ledger keys its anchored domains by id,
+        // and one number may not mean two domains. The domain stays
+        // unanchored, and the ledger fail-closes every route that would
+        // need its guarantee - which is the safe answer, not the
+        // convenient one.
+        if crate::unification::is_external_domain_id(domain.id) {
+            tracing::warn!(
+                "UnificationLedger: domain {} lies in the reserved external id range \
+                 and cannot be anchored",
+                domain.id
+            );
             continue;
         }
         // A domain that has committed nothing yet has no finalized state
