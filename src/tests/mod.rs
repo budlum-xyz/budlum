@@ -26,6 +26,8 @@ pub mod ai_inference_runtime;
 #[cfg(test)]
 pub mod ai_verification_status_locks;
 #[cfg(test)]
+pub mod anchor_window_honesty;
+#[cfg(test)]
 pub mod block_clock;
 pub mod blockchair_fixture_locks;
 #[cfg(test)]
