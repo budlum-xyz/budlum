@@ -7,7 +7,7 @@
 //!
 //! Ported from `scripts/check-badges-are-current.sh`. Four claims: the test
 //! badge count equals the last measured `N passed` in the CI log (and the log
-//! is green), the CI badge pins `branch=main&event=push`, the rust badge
+//! is green), the CI badge pins `branch=consensus-of-consensuses&event=push`, the rust badge
 //! matches `rust-toolchain.toml`, and the license badge matches `Cargo.toml`
 //! and links to `LICENSE.md`.
 
@@ -57,14 +57,14 @@ fn check_ci_badge(readme: &str) -> Result<(), String> {
         .lines()
         .find(|l| l.contains("actions/workflows/ci.yml/badge.svg"))
         .ok_or_else(|| String::from("no CI badge found in README.md"))?;
-    if !line.contains("badge.svg?branch=main&event=push") {
+    if !line.contains("badge.svg?branch=consensus-of-consensuses&event=push") {
         return Err(String::from(
-            "the CI badge does not pin branch and event.\n  Without `?branch=main&event=push` GitHub reports the newest run on ANY\n  branch when main has none, and otherwise reports the pull_request run,\n  which builds a merge commit that is on no branch. Use:\n      https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push",
+            "the CI badge does not pin branch and event.\n  Without `?branch=consensus-of-consensuses&event=push` GitHub reports the newest run on ANY\n  branch when consensus-of-consensuses has none, and otherwise reports the pull_request run,\n  which builds a merge commit that is on no branch. Use:\n      https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=consensus-of-consensuses&event=push",
         ));
     }
-    if !line.contains("ci.yml?query=branch%3Amain+event%3Apush") {
+    if !line.contains("ci.yml?query=branch%3Aconsensus-of-consensuses+event%3Apush") {
         return Err(String::from(
-            "the CI badge image is filtered but its link is not.\n  Point the link at the same query the image reports:\n      https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush",
+            "the CI badge image is filtered but its link is not.\n  Point the link at the same query the image reports:\n      https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Aconsensus-of-consensuses+event%3Apush",
         ));
     }
     Ok(())
@@ -219,7 +219,7 @@ pub fn run(root: &Path, log: &Path) -> Result<String, String> {
         .ok_or_else(|| String::from("no tests-N%20lib badge found in README.md"))?;
     if badge != measured {
         return Err(format!(
-            "README test badge says {badge}, this run measured {measured}.\n  Update the badge in README.md in this pull request:\n      [![Tests](https://img.shields.io/badge/tests-{measured}%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)"
+            "README test badge says {badge}, this run measured {measured}.\n  Update the badge in README.md in this pull request:\n      [![Tests](https://img.shields.io/badge/tests-{measured}%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Aconsensus-of-consensuses+event%3Apush)"
         ));
     }
     check_ci_badge(&readme)?;
@@ -237,7 +237,7 @@ pub fn run(root: &Path, log: &Path) -> Result<String, String> {
         })?;
         if tr_badge != measured {
             return Err(format!(
-                "README.tr.md test badge says {tr_badge}, this run measured {measured} (README.md says {badge}).\n  Update the Turkish badge in the same pull request:\n      [![Tests](https://img.shields.io/badge/tests-{measured}%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)"
+                "README.tr.md test badge says {tr_badge}, this run measured {measured} (README.md says {badge}).\n  Update the Turkish badge in the same pull request:\n      [![Tests](https://img.shields.io/badge/tests-{measured}%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Aconsensus-of-consensuses+event%3Apush)"
             ));
         }
         check_ci_badge(&tr)?;
@@ -249,7 +249,7 @@ pub fn run(root: &Path, log: &Path) -> Result<String, String> {
     };
 
     Ok(format!(
-        "Badge gate OK: README advertises {badge} tests, run measured {measured};\n  CI badge pins branch=main&event=push, rust badge matches rust-toolchain.toml,\n  license badge matches Cargo.toml and links to LICENSE.md.{tr_note}"
+        "Badge gate OK: README advertises {badge} tests, run measured {measured};\n  CI badge pins branch=consensus-of-consensuses&event=push, rust badge matches rust-toolchain.toml,\n  license badge matches Cargo.toml and links to LICENSE.md.{tr_note}"
     ))
 }
 
