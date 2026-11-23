@@ -4616,6 +4616,117 @@ mod tests {
         guest.leave().await.unwrap();
     }
 
+    /// A record that is not the Garden's own record opens nothing.
+    ///
+    /// An invite is the whole credential: whoever holds the line can join.
+    /// That only holds up if every other line is refused, so this walks the
+    /// ways a line can be wrong and insists on a refusal for each. The
+    /// refusals live in different places on purpose - the parser turns away
+    /// a line from another protocol version before any network call, the
+    /// joiner checks genesis against the hash the line claims, the token is
+    /// checked by signature against the key genesis carries, and the
+    /// validator cap is enforced by the chain itself - and a test that only
+    /// covered one of them would leave the others free to rot.
+    #[tokio::test]
+    async fn garden_invite_rejected() {
+        let host_handle = host().await;
+        let invite = host_handle.invite().await.unwrap();
+
+        // A line from another protocol version is refused by the parser,
+        // before anything is dialled.
+        let link = invite.to_link();
+        let other_version = link.replace("budlum-garden:1?", "budlum-garden:2?");
+        assert_ne!(other_version, link, "the link did not carry the version");
+        assert!(
+            GardenInvite::parse(&other_version).is_err(),
+            "a line from another protocol version was accepted"
+        );
+
+        // A forged token. Genesis carries the public key derived from the
+        // real token, so a join signed by anything else does not verify.
+        let mut forged_token = invite.clone();
+        forged_token.token = random_bytes();
+        assert_ne!(forged_token.token, invite.token);
+        let refused = tokio::time::timeout(
+            Duration::from_secs(30),
+            spawn(
+                GardenEntry::Invite(forged_token),
+                config("forger", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            ),
+        )
+        .await
+        .expect("the forged token left the joiner hanging");
+        assert!(
+            refused.is_err(),
+            "a forged invite token was admitted to the Garden"
+        );
+
+        // A forged genesis hash. The joiner fetches genesis from a peer and
+        // refuses it unless it hashes to what the line claims.
+        let mut forged_genesis = invite.clone();
+        forged_genesis.genesis_hash = random_bytes();
+        let refused = tokio::time::timeout(
+            Duration::from_secs(30),
+            spawn(
+                GardenEntry::Invite(forged_genesis),
+                config("stranger", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            ),
+        )
+        .await
+        .expect("the forged genesis left the joiner hanging");
+        assert!(
+            refused.is_err(),
+            "an invite naming a genesis the Garden does not have was admitted"
+        );
+
+        host_handle.leave().await.unwrap();
+
+        // A Garden with room for one validator is full the moment it is
+        // created. The line is genuine here: it is the Garden, not the
+        // record, that has nothing left to give.
+        let full = spawn(
+            GardenEntry::Create {
+                title: "Full".into(),
+                limits: GardenLimits {
+                    max_validators: 1,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let full_invite = full.invite().await.unwrap();
+        let refused = tokio::time::timeout(
+            Duration::from_secs(30),
+            spawn(
+                GardenEntry::Invite(full_invite),
+                config("latecomer", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            ),
+        )
+        .await
+        .expect("the full Garden left the joiner hanging");
+        assert!(
+            refused.is_err(),
+            "a Garden at its validator cap admitted another validator"
+        );
+        assert_eq!(
+            full.status().await.unwrap()["active_validators"],
+            json!(1),
+            "the refused join still changed the validator set"
+        );
+
+        full.leave().await.unwrap();
+    }
+
     /// A Frozen Garden still hands out its invite.
     ///
     /// Freezing stops new blocks, not the Garden's identity. The record a
