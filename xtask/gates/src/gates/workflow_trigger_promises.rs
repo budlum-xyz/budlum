@@ -89,11 +89,27 @@ fn violations_for(name: &str, text: &str) -> Vec<String> {
     if block.is_empty() {
         return Vec::new();
     }
+    // Only comments at the trigger keys' own indentation are file-level
+    // promises: they are the lines interleaved with the keys, speaking for
+    // the whole `on:` block. A deeper comment belongs to the trigger above
+    // it: "the daily integration pull request" describes which pull
+    // requests arrive, not that this file runs on a schedule, and is read
+    // as explanation, the same way a job comment outside the block is.
+    let key_indent = block
+        .iter()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map(|l| indent_of(l))
+        .min();
     let mut out = Vec::new();
     for line in &block {
         let Some(comment) = line.trim_start().strip_prefix('#') else {
             continue;
         };
+        if let Some(ki) = key_indent {
+            if indent_of(line) > ki {
+                continue;
+            }
+        }
         let comment = comment.to_lowercase();
         for (phrase, trigger) in PROMISES {
             if comment.contains(phrase) && !declares(&block, trigger) {
@@ -203,6 +219,17 @@ pub fn self_test() -> Result<String, String> {
     if violations_for("nightly.yml", nightly).is_empty() {
         problems.push(String::from(
             "VACUOUS: a \"nightly\" promise without a schedule trigger was accepted",
+        ));
+    }
+
+    // The measured false positive: a cadence word nested under a declared
+    // trigger describes that trigger's traffic, not the file's schedule, and
+    // must not be read as a file-level promise.
+    let nested = "name: X\non:\n  pull_request:\n    # the daily integration pull request into `main`\n    branches: [main]\n  workflow_dispatch:\njobs:\n  a:\n    runs-on: ubuntu-latest\n";
+    if !violations_for("nested.yml", nested).is_empty() {
+        problems.push(String::from(
+            "BROKEN: a cadence word nested under a declared trigger was read as a \
+             file-level schedule promise",
         ));
     }
 
