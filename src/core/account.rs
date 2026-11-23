@@ -9319,12 +9319,12 @@ mod validator_v7_binding_tests {
     }
 }
 
-#[cfg(test)]
+/// The quantum-account state doors.
+///
+/// A quantum account enters chain state only through these, so the
+/// replay guard and the pact-evidence check sit on the production
+/// path instead of the test tree.
 impl AccountState {
-    pub fn credit_account(&mut self, address: &Address, amount: u64) {
-        self.add_balance(address, amount);
-    }
-
     /// Register a quantum account against the state's current registry root.
     ///
     /// This is the state-level door: the root the caller computed the change
@@ -9391,5 +9391,11 @@ impl AccountState {
     /// another epoch does not read as the current one.
     pub fn stamp_quantum_account_epoch(&mut self, epoch: u64) {
         self.quantum_accounts.set_epoch(epoch);
+    }
+}
+#[cfg(test)]
+impl AccountState {
+    pub fn credit_account(&mut self, address: &Address, amount: u64) {
+        self.add_balance(address, amount);
     }
 }

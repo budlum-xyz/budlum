@@ -796,6 +796,55 @@ mod tests {
         ));
     }
 
+    /// The doors that carry a pact-carrying account into chain state are
+    /// production items, not test-tree helpers: `cargo check --lib` builds
+    /// them, and a registration through the state door must move the state
+    /// root the chain commits to. This is the lock for that: registering via
+    /// `AccountState::register_quantum_account_with_pacts_at_root` changes
+    /// `AccountState::state_root_body()`, which is what a block commits.
+    #[test]
+    fn the_pact_door_is_a_production_path_that_moves_the_committed_state_root() {
+        use crate::storage::pact_binding::Pact;
+        use sha3::{Digest, Sha3_256};
+
+        let payload = b"pact payload";
+        let mut h = Sha3_256::new();
+        h.update(payload);
+        let commitment: [u8; 32] = h.finalize().into();
+        let mut pacts = PactRegistry::new();
+        pacts
+            .add_pact(
+                Pact::new(
+                    [1u8; 32], [0u8; 32], [0u8; 32], commitment, [0u8; 32], 10, 0,
+                )
+                .expect("valid pact"),
+            )
+            .expect("pact accepted");
+
+        let mut state = crate::core::account::AccountState::new();
+        let root_before = state.state_root_body();
+        let live_root = state.quantum_accounts.root();
+
+        let mut account = account_with(2, 3);
+        account.storage_root = [9u8; 32];
+        account.pact_root = pacts.root;
+        let address = account.address;
+
+        state
+            .register_quantum_account_with_pacts_at_root(live_root, account, &pacts)
+            .expect("the live root and the pact set both match");
+
+        assert!(
+            state.quantum_accounts.is_registered(&address),
+            "the account must be in the registry the state carries"
+        );
+        assert_ne!(
+            state.state_root_body(),
+            root_before,
+            "a pact-carrying registration must move the committed state root"
+        );
+    }
+
     #[test]
     fn registry_root_commits_the_pact_root() {
         use crate::storage::pact_binding::Pact;

@@ -146,6 +146,8 @@ mod gates {
     pub mod no_conflict_markers;
     pub mod no_constant_security_verdicts;
     pub mod no_float_in_consensus_paths;
+    pub mod ci_trigger_coverage;
+    pub mod delivery_presence;
     pub mod no_idle_code;
     pub mod no_internal_ids;
     pub mod no_legacy_storage;
@@ -601,6 +603,22 @@ const GATES: &[Gate] = &[
         run: gates::wallet_node_address_agree::run,
         run_args: None,
         self_test: gates::wallet_node_address_agree::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "ci-trigger-coverage",
+        replaces: None,
+        run: gates::ci_trigger_coverage::run,
+        run_args: None,
+        self_test: gates::ci_trigger_coverage::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "delivery-presence",
+        replaces: None,
+        run: gates::delivery_presence::run,
+        run_args: None,
+        self_test: gates::delivery_presence::self_test,
         run_log: None,
     },
     Gate {

@@ -23,6 +23,16 @@ use crate::security::quantum_canary::CanaryBook;
 use crate::settlement::global_block::GlobalHeaderWindow;
 use serde::{Deserialize, Serialize};
 
+/// The digest folded in place of a registry that cannot be encoded.
+///
+/// It differs from every real digest, so a node that cannot encode its state
+/// cannot agree with one that can - and, in the header, it differs from
+/// `None`, so "could not encode" does not read as "absent".
+#[must_use]
+fn unencodable_marker() -> [u8; 32] {
+    hash_fields_bytes(&[b"BDLM_SETTLEMENT_UNENCODABLE_V1"])
+}
+
 /// The settlement registries, one field per registry.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SettlementRegistries {
@@ -140,6 +150,24 @@ impl SettlementRegistries {
         self.external_intake.state_digest()
     }
 
+    /// The root a header carries for the external intake.
+    ///
+    /// Three states, not two: no intake (`None`), an intake with a digest, and
+    /// an intake whose digest could not be produced. The third state is not
+    /// "no intake" - a light client reading the header would then see an
+    /// absent component where the truth is a node that could not encode its
+    /// own state - so it folds [`unencodable_marker`], the same marker
+    /// [`Self::root`] folds, because two markers for one meaning would let a
+    /// node disagree with itself.
+    ///
+    /// The empty intake is decided by the caller ([`Self::has_external_intake`]):
+    /// this function only answers what to put in the field once the intake is
+    /// known to hold a record.
+    #[must_use]
+    pub fn intake_root_for_header(digest: Result<[u8; 32], String>) -> Option<[u8; 32]> {
+        Some(digest.unwrap_or_else(|_| unencodable_marker()))
+    }
+
     /// The fold of every registry's own root under one tag. A registry whose
     /// root cannot be computed folds a fixed marker instead of failing the
     /// block: the marker differs from every real digest, so a node that
@@ -148,7 +176,7 @@ impl SettlementRegistries {
     pub fn root(&self) -> [u8; 32] {
         let intake = self
             .external_intake_digest()
-            .unwrap_or_else(|_| hash_fields_bytes(&[b"BDLM_SETTLEMENT_UNENCODABLE_V1"]));
+            .unwrap_or_else(|_| unencodable_marker());
         let domains = self.domains.root();
         let progress = self.domains.progress_root();
         let commitments = self.commitments.root();

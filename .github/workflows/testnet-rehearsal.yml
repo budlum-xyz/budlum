@@ -49,27 +49,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          PROTOC_VER=29.3
-          case "$(uname -m)" in
-            aarch64|arm64)
-              PROTOC_ARCH=linux-aarch_64
-              PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-              ;;
-            *)
-              PROTOC_ARCH=linux-x86_64
-              PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-              ;;
-          esac
-          if ! command -v protoc >/dev/null 2>&1 || [ "$(protoc --version | awk '{print $2}')" != "${PROTOC_VER}" ]; then
-            curl -sSL --retry 3 --retry-delay 2 \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VER}/protoc-${PROTOC_VER}-${PROTOC_ARCH}.zip" \
-              -o /tmp/protoc.zip
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
