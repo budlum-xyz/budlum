@@ -3829,6 +3829,37 @@ mod tests {
         assert!(rebuilt.verify(&entry.golden, &entry.policy).is_ok());
     }
 
+    #[test]
+    fn anchor_contract_refuses_standalone_tendermint() {
+        let standalone = TendermintFinalityAdapter::new("fixture", "fixture-1");
+        assert!(
+            !standalone.has_pinned_trust_anchor(),
+            "network and chain labels are identity, not a trust anchor"
+        );
+    }
+
+    #[test]
+    fn anchor_contract_refuses_era_only_tendermint() {
+        let era_only = TendermintFinalityAdapter::new_pinned("fixture", "fixture-1", None)
+            .with_trusted_era(TendermintEraAnchor {
+                pinned_height: 10,
+                pinned_time_secs: 100,
+                params: TendermintLightParams::standard_for_unbonding(300)
+                    .expect("valid light-client parameters"),
+            });
+        assert!(
+            !era_only.has_pinned_trust_anchor(),
+            "an era bounds a validator-set pin but cannot replace one"
+        );
+    }
+
+    #[test]
+    fn anchor_contract_accepts_validator_set_pinned_tendermint() {
+        let pinned =
+            TendermintFinalityAdapter::new_pinned("fixture", "fixture-1", Some([1u8; 32]));
+        assert!(pinned.has_pinned_trust_anchor());
+    }
+
     /// A registration without a governance-pinned validator set is refused at
     /// the door: the chain id alone does not stop an attacker self-signing a
     /// commit with freshly generated keys.
@@ -3863,8 +3894,12 @@ mod tests {
     /// roots, and a corrupted signature does not reach consensus.
     #[test]
     fn the_bridge_finalizes_a_tendermint_commitment() {
-        let adapter = adapter();
         let commit = noble_commit();
+        let adapter = TendermintFinalityAdapter::new_pinned(
+            "noble",
+            "noble-1",
+            Some(validator_set_commitment(&commit.validators)),
+        );
         let evidence = evidence_for(&adapter, &commit);
         let attestation = adapter
             .verify(&evidence, &policy())

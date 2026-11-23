@@ -369,6 +369,10 @@ mod tests {
             self.descriptor.clone()
         }
 
+        fn has_pinned_trust_anchor(&self) -> bool {
+            true
+        }
+
         fn verify(
             &self,
             evidence: &RawConsensusEvidence,
@@ -421,6 +425,29 @@ mod tests {
 
         fn fault_probes(&self) -> Vec<crate::cross_domain::external::selftest::FaultProbe> {
             Vec::new()
+        }
+    }
+
+    /// Deliberately omits `has_pinned_trust_anchor`: the trait default must not
+    /// let a third-party adapter claim an anchor it never declared.
+    struct ImplicitAnchorAdapter(FixtureAdapter);
+
+    impl ExternalFinalityAdapter for ImplicitAnchorAdapter {
+        fn descriptor(&self) -> AdapterDescriptor {
+            self.0.descriptor()
+        }
+
+        fn verify(
+            &self,
+            evidence: &RawConsensusEvidence,
+            policy: &VerificationPolicy,
+        ) -> Result<FinalityAttestation, crate::cross_domain::external::spec::AdapterError>
+        {
+            self.0.verify(evidence, policy)
+        }
+
+        fn fault_probes(&self) -> Vec<crate::cross_domain::external::selftest::FaultProbe> {
+            self.0.fault_probes()
         }
     }
 
@@ -644,6 +671,10 @@ mod tests {
             self.descriptor.clone()
         }
 
+        fn has_pinned_trust_anchor(&self) -> bool {
+            true
+        }
+
         fn verify(
             &self,
             evidence: &RawConsensusEvidence,
@@ -844,6 +875,27 @@ mod tests {
                 FinalityStatus::Rejected(ref message) if message.contains("requires a pinned trust anchor")
             ),
             "unpinned built-in adapter must be rejected with MissingTrustAnchor: {tm_status:?}"
+        );
+    }
+
+    #[test]
+    fn anchor_contract_refuses_custom_adapter_without_declaration() {
+        let (adapter, domain, mut commitment) = fixture();
+        let proof = encode_external_evidence(&adapter.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let bridge = ExternalDomainFinalityBridge::new(
+            Box::new(ImplicitAnchorAdapter(adapter)),
+            VerificationPolicy::proven(100),
+        );
+        let status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .expect("verify");
+        assert!(
+            matches!(
+                status,
+                FinalityStatus::Rejected(ref message) if message.contains("no pinned trust anchor")
+            ),
+            "an adapter that omits the anchor declaration must fail closed: {status:?}"
         );
     }
 
