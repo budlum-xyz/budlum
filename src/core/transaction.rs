@@ -837,6 +837,47 @@ pub enum TransactionType {
     /// the chain executes Stage 2 (`verify_algebra`) against `AirRegistry`.
     /// Appended last because `bincode` encodes the variant index.
     VerifyStark(Box<crate::aggregation::programs::pcs_claim::VerifyStarkTx>),
+    /// Registers a quantum (ML-DSA-87) account into the chain's
+    /// account-abstraction registry. Carries the full account record, the
+    /// pact set its `pact_root` commits to (empty means no pacts and a zero
+    /// root), the registry root the sender computed the change against (a
+    /// moved registry refuses with `RootMismatch` instead of re-applying
+    /// silently), and a possession signature by the account's own
+    /// post-quantum key - without that signature anyone could occupy a
+    /// published key's derived address with a hostile guardian policy.
+    /// Appended last because `bincode` encodes the variant index.
+    QuantumAccountRegister(Box<QuantumAccountRegisterTx>),
+}
+
+/// One pact row carried inside [`TransactionType::QuantumAccountRegister`].
+///
+/// A transport mirror of the storage module's crate-private pact record: the
+/// executor rebuilds the registry through that module's own ordered,
+/// deduplicating door, so the structural invariants stay in one place and
+/// the transaction stays serializable without widening the pact type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuantumAccountPactEntry {
+    pub id: [u8; 32],
+    pub program_hash: [u8; 32],
+    pub seed: [u8; 32],
+    pub commitment: [u8; 32],
+    pub residual_commitment: [u8; 32],
+    pub byte_budget: u64,
+    pub mode_flag: u8,
+}
+
+/// Payload of [`TransactionType::QuantumAccountRegister`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuantumAccountRegisterTx {
+    /// The account record exactly as it will enter the registry.
+    pub account: crate::account_abstraction::QuantumAccount,
+    /// The pact set `account.pact_root` commits to; empty means "no pacts".
+    pub pacts: Vec<QuantumAccountPactEntry>,
+    /// The registry root the sender read before building this registration.
+    pub based_on_root: [u8; 32],
+    /// ML-DSA-87 signature by `account.pq_public_key` over the registration
+    /// digest; proves the registrant holds the key the address derives from.
+    pub possession_sig: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2725,6 +2766,10 @@ impl Transaction {
             // transaction size, not by a per-approval price. Priced like the
             // registry arms beside it.
             TransactionType::Identity(_) => schedule.contract_call_gas * 2,
+            // A registry write plus one ML-DSA-87 possession verification and
+            // a bounded pact-set hash walk; priced above the plain registry
+            // arms for the post-quantum verify.
+            TransactionType::QuantumAccountRegister(_) => schedule.contract_call_gas * 3,
             // Same family of registry mutations: the vault ops read
             // `NftRegistry` beside their own map, which is exactly what the
             // registry arms already price.
@@ -3262,6 +3307,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::BnsRemoveSubdomain => 77,
         TransactionType::BnsSetSubdomainContent => 79,
         TransactionType::VerifyStark(_) => 80,
+        TransactionType::QuantumAccountRegister(_) => 81,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -4247,6 +4293,10 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_u8(out, 80);
             encode_verify_stark_tx(verify_tx, out);
         }
+        TransactionType::QuantumAccountRegister(reg) => {
+            put_u8(out, 81);
+            encode_quantum_account_register_tx(reg, out);
+        }
         TransactionType::ExternalDomain(external_tx) => {
             put_u8(out, 53);
             encode_external_domain_tx(external_tx, out);
@@ -4813,6 +4863,40 @@ fn encode_verify_stark_tx(
     put_opt_ext_slice(out, tx.opened_values.random.as_ref());
 }
 
+/// Every field is part of the signed preimage: the account's keys, roots,
+/// thresholds and counters, each pact row, the registry root the change was
+/// computed against, and the possession signature itself. Leaving any of
+/// them out would let a relaying node rewrite a signed registration.
+fn encode_quantum_account_register_tx(tx: &QuantumAccountRegisterTx, out: &mut Vec<u8>) {
+    let acc = &tx.account;
+    put_fixed(out, &acc.address);
+    put_bytes(out, &acc.pq_public_key);
+    put_fixed(out, &acc.storage_root);
+    put_fixed(out, &acc.pact_root);
+    put_fixed(out, &acc.guardian_root);
+    put_u64(out, acc.guardians.len() as u64);
+    for guardian in &acc.guardians {
+        put_bytes(out, guardian);
+    }
+    put_u64(out, acc.multisig_threshold as u64);
+    put_u64(out, acc.recovery_threshold as u64);
+    put_u64(out, acc.timelock_blocks);
+    put_u64(out, acc.nonce);
+    put_u64(out, acc.balance);
+    put_u64(out, acc.storage_bytes);
+    put_u64(out, tx.pacts.len() as u64);
+    for pact in &tx.pacts {
+        put_fixed(out, &pact.id);
+        put_fixed(out, &pact.program_hash);
+        put_fixed(out, &pact.seed);
+        put_fixed(out, &pact.commitment);
+        put_fixed(out, &pact.residual_commitment);
+        put_u64(out, pact.byte_budget);
+        put_u8(out, pact.mode_flag);
+    }
+    put_fixed(out, &tx.based_on_root);
+    put_bytes(out, &tx.possession_sig);
+}
 fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Vec<u8>) {
     use crate::storage::bud3::tx::StorageTxV3;
     match tx {
