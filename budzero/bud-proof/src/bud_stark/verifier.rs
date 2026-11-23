@@ -459,6 +459,9 @@ where
         degree >> usize::from(config.is_zk()),
         usize::from(config.is_zk()),
     );
+    if log_num_quotient_chunks > MAX_LOG_QUOTIENT_CHUNKS {
+        return Err(VerificationError::InvalidProofShape);
+    }
     if degree_bits
         .saturating_add(log_num_quotient_chunks)
         .saturating_add(usize::from(config.is_zk()))
@@ -475,6 +478,11 @@ where
         has_aux_trace,
     })
 }
+
+/// Upper bound on `log_num_quotient_chunks` (`1 << 8 == 256` unrandomized chunks),
+/// matching the on-chain Stage 2 quotient-chunk ceiling so an untrusted Stage 1
+/// opening statement cannot request millions of quotient subdomains.
+pub const MAX_LOG_QUOTIENT_CHUNKS: usize = 8;
 
 type TranscriptOutcome<SC> = Result<
     (
@@ -501,6 +509,9 @@ where
     if degree_bits > MAX_VERIFIER_DEGREE_BITS || degree_bits < usize::from(config.is_zk()) {
         return Err(VerificationError::InvalidProofShape);
     }
+    if shape.log_num_quotient_chunks > MAX_LOG_QUOTIENT_CHUNKS {
+        return Err(VerificationError::InvalidProofShape);
+    }
     if degree_bits
         .saturating_add(shape.log_num_quotient_chunks)
         .saturating_add(usize::from(config.is_zk()))
@@ -520,21 +531,11 @@ where
         return Err(VerificationError::RandomizationError);
     }
 
-    let pcs = config.pcs();
-    let degree = 1usize << degree_bits;
-    let trace_domain = pcs.natural_domain_for_degree(degree);
+    // Validate every opening slice length and the quotient chunk count before
+    // constructing or splitting evaluation domains, so an untrusted opening
+    // header cannot trigger eager subdomain allocation beyond its carried payload.
     let num_quotient_chunks =
         1usize << (shape.log_num_quotient_chunks + usize::from(config.is_zk()));
-    let init_trace_domain = pcs.natural_domain_for_degree(degree >> usize::from(config.is_zk()));
-
-    let quotient_domain = trace_domain
-        .create_disjoint_domain(1usize << (degree_bits + shape.log_num_quotient_chunks));
-    let quotient_chunks_domains = quotient_domain.split_domains(num_quotient_chunks);
-    let randomized_quotient_chunks_domains = quotient_chunks_domains
-        .iter()
-        .map(|domain| pcs.natural_domain_for_degree(domain.size() << usize::from(config.is_zk())))
-        .collect::<Vec<_>>();
-
     let trace_next_ok = if shape.main_next {
         opened_values
             .trace_next
@@ -585,6 +586,19 @@ where
     if !valid_shape {
         return Err(VerificationError::InvalidProofShape);
     }
+
+    let pcs = config.pcs();
+    let degree = 1usize << degree_bits;
+    let trace_domain = pcs.natural_domain_for_degree(degree);
+    let init_trace_domain = pcs.natural_domain_for_degree(degree >> usize::from(config.is_zk()));
+
+    let quotient_domain = trace_domain
+        .create_disjoint_domain(1usize << (degree_bits + shape.log_num_quotient_chunks));
+    let quotient_chunks_domains = quotient_domain.split_domains(num_quotient_chunks);
+    let randomized_quotient_chunks_domains = quotient_chunks_domains
+        .iter()
+        .map(|domain| pcs.natural_domain_for_degree(domain.size() << usize::from(config.is_zk())))
+        .collect::<Vec<_>>();
 
     let mut challenger = config.initialise_challenger();
     challenger.observe(Val::<SC>::from_usize(degree_bits));
@@ -1026,5 +1040,90 @@ mod tests {
     fn degree_bits_ceiling_guards_goldilocks_two_adicity() {
         let ceiling = std::hint::black_box(MAX_VERIFIER_DEGREE_BITS);
         assert!(ceiling <= 26);
+    }
+
+    #[test]
+    fn pcs_openings_refuses_excess_quotient_chunk_exponent() {
+        use p3_field::PrimeCharacteristicRing;
+
+        let config = crate::plonky3_prover::build_config();
+        let dummy_commit = crate::plonky3_prover::chip_commitment_from_bytes([0u8; 32]);
+        let commitments = crate::bud_stark::Commitments {
+            trace: dummy_commit.clone(),
+            quotient_chunks: dummy_commit,
+            random: None,
+            aux_trace: None,
+        };
+        let ext_zero =
+            <crate::plonky3_prover::ChipStarkConfig as StarkGenericConfig>::Challenge::ZERO;
+        let opened_values = crate::bud_stark::OpenedValues {
+            trace_local: vec![ext_zero; 2],
+            trace_next: None,
+            quotient_chunks: vec![vec![ext_zero; 3]; 512],
+            random: None,
+            aux_trace_local: None,
+            aux_trace_next: None,
+            preprocessed_local: None,
+            preprocessed_next: None,
+        };
+        let shape = PcsOpeningShape {
+            air_width: 2,
+            preprocessed_width: 0,
+            log_num_quotient_chunks: 9,
+            main_next: false,
+            pre_next: false,
+            has_aux_trace: false,
+        };
+        let res = derive_transcript(&config, shape, &commitments, &opened_values, 2, &[], None);
+        assert!(
+            matches!(res, Err(VerificationError::InvalidProofShape)),
+            "log_num_quotient_chunks above the 256-chunk ceiling must be refused as InvalidProofShape"
+        );
+    }
+
+    #[test]
+    fn derive_transcript_refuses_unbacked_quotient_chunks_without_domain_allocation() {
+        use p3_field::PrimeCharacteristicRing;
+
+        let config = crate::plonky3_prover::build_config();
+        let dummy_commit = crate::plonky3_prover::chip_commitment_from_bytes([0u8; 32]);
+        let commitments = crate::bud_stark::Commitments {
+            trace: dummy_commit.clone(),
+            quotient_chunks: dummy_commit,
+            random: None,
+            aux_trace: None,
+        };
+        let ext_zero =
+            <crate::plonky3_prover::ChipStarkConfig as StarkGenericConfig>::Challenge::ZERO;
+        let opened_values = crate::bud_stark::OpenedValues {
+            trace_local: vec![ext_zero; 2],
+            trace_next: None,
+            quotient_chunks: Vec::new(),
+            random: None,
+            aux_trace_local: None,
+            aux_trace_next: None,
+            preprocessed_local: None,
+            preprocessed_next: None,
+        };
+        let started = std::time::Instant::now();
+        for inflated_log in [4usize, 8, 21, 22, 28, 30, usize::MAX] {
+            let shape = PcsOpeningShape {
+                air_width: 2,
+                preprocessed_width: 0,
+                log_num_quotient_chunks: inflated_log,
+                main_next: false,
+                pre_next: false,
+                has_aux_trace: false,
+            };
+            let res = derive_transcript(&config, shape, &commitments, &opened_values, 0, &[], None);
+            assert!(
+                matches!(res, Err(VerificationError::InvalidProofShape)),
+                "inflated log_num_quotient_chunks={inflated_log} with empty openings must fail closed"
+            );
+        }
+        assert!(
+            started.elapsed().as_millis() < 5,
+            "rejecting unbacked quotient chunk counts must be O(1) without domain-vector allocation"
+        );
     }
 }

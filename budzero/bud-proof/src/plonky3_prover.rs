@@ -2329,8 +2329,11 @@ impl ProverAdapter for Plonky3Adapter {
             height = matrix.height(),
             "Commencing STARK prove"
         );
-        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
-        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+        let Some((preprocessed_prover, _)) = setup_preprocessed(&config, &air, degree_bits) else {
+            return Err(ProverError::TraceGenerationError(
+                "BudAir preprocessed ROM rejected program (unsupported ZK syscall or oversized trace)".to_string(),
+            ));
+        };
 
         let public_values = to_public_values(public_inputs);
 
@@ -2344,7 +2347,7 @@ impl ProverAdapter for Plonky3Adapter {
                 program.to_vec(),
             )),
             &public_values,
-            preprocessed_ref,
+            Some(&preprocessed_prover),
         );
 
         let proof_bytes = postcard::to_allocvec(&p3_proof)
@@ -2501,14 +2504,16 @@ impl Plonky3Adapter {
                         instruction.opcode
                     )));
                 }
+                if instruction.opcode == bud_isa::Opcode::Syscall
+                    && (10..=13).contains(&instruction.imm)
+                {
+                    return Err(VerifyError::InvalidEnvelope(format!(
+                        "syscall {} (256-bit sender word) is unsupported in BudAir proofs",
+                        instruction.imm
+                    )));
+                }
             }
         }
-
-        let config = build_config();
-        let air = BudAir {
-            num_steps: expected_inputs.trace_len as usize,
-            program: program.to_vec(),
-        };
 
         let degree_bits = log2_strict_usize(
             (3 * expected_inputs.trace_len as usize + 1)
@@ -2521,11 +2526,10 @@ impl Plonky3Adapter {
                 envelope.degree_bits, degree_bits
             )));
         }
-        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
-        let preprocessed_vk_ref = preprocessed.as_ref().map(|(_, vk)| vk);
 
-        let public_values = to_public_values(expected_inputs);
-
+        // Decode and reject malformed or trailing-byte proofs BEFORE running
+        // setup_preprocessed: building a 2^17 preprocessed commitment for a
+        // garbage proof would let cheap rejected calls stall validators.
         let bounded_bytes = &envelope.proof_bytes[..envelope
             .proof_bytes
             .len()
@@ -2543,12 +2547,25 @@ impl Plonky3Adapter {
             )));
         }
 
+        let config = build_config();
+        let air = BudAir {
+            num_steps: expected_inputs.trace_len as usize,
+            program: program.to_vec(),
+        };
+        let Some((_, preprocessed_vk)) = setup_preprocessed(&config, &air, degree_bits) else {
+            return Err(VerifyError::InvalidEnvelope(
+                "BudAir preprocessed ROM rejected program".to_string(),
+            ));
+        };
+
+        let public_values = to_public_values(expected_inputs);
+
         stark_verify_with_preprocessed(
             &config,
             &air,
             &p3_proof,
             &public_values,
-            preprocessed_vk_ref,
+            Some(&preprocessed_vk),
         )
         .map_err(|_| VerifyError::InvalidProof)
     }
@@ -11073,5 +11090,165 @@ mod tests {
             "an oversized claimed trace must be refused before the preprocessed \
              trace is built, got {verify_err:?}"
         );
+    }
+
+    #[test]
+    fn verify_rejects_malformed_proof_before_large_preprocessed_setup() {
+        // A valid-sized trace_len (43_690 -> degree_bits = 17) paired with
+        // malformed proof_bytes must fail deserialization immediately without
+        // paying the multi-second 2^17 preprocessed STARK setup.
+        let halt = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let pi = ExecutionPublicInputs {
+            chain_id: 0,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            program_hash: crate::canonical_set::program_hash_of(&[halt]),
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 1_000_000,
+            gas_used: 1,
+            exit_code: 0,
+            trace_len: 43_690,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        let env = ProofEnvelope {
+            proof_format_version: PROOF_FORMAT_VERSION,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes: vec![0xFFu8; 8],
+            degree_bits: 17,
+        };
+        let start = std::time::Instant::now();
+        let verify_err = Plonky3Adapter::verify(&env, &pi, &[halt]).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(verify_err, VerifyError::DeserializationError(_)),
+            "expected DeserializationError, got {verify_err:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "malformed proof took {elapsed:?} -- setup_preprocessed ran before proof decoding"
+        );
+    }
+
+    #[test]
+    fn bud_air_and_adapter_reject_syscall_10_to_13_fail_closed() {
+        use p3_air::BaseAir;
+        let halt = bud_isa::Instruction {
+            opcode: bud_isa::Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        for imm in 10..=13 {
+            let sys = bud_isa::Instruction {
+                opcode: bud_isa::Opcode::Syscall,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm,
+            }
+            .encode();
+            let program = vec![sys, halt];
+            let air = crate::plonky3_air::BudAir {
+                num_steps: 2,
+                program: program.clone(),
+            };
+            assert!(
+                <crate::plonky3_air::BudAir as BaseAir<p3_goldilocks::Goldilocks>>::preprocessed_trace(
+                    &air
+                )
+                .is_none(),
+                "BudAir::preprocessed_trace must reject Syscall {imm} fail-closed"
+            );
+
+            let pi = ExecutionPublicInputs {
+                chain_id: 45261,
+                initial_state_root: [0u8; 32],
+                final_state_root: [0u8; 32],
+                program_hash: crate::canonical_set::program_hash_of(&program),
+                sender: 0xDEAD_BEEF,
+                nonce: 0,
+                block_height: 1,
+                gas_limit: 100_000,
+                gas_used: 2,
+                exit_code: 0,
+                trace_len: 2,
+                event_digest: [0u8; 32],
+                state_writes_digest: [0u8; 32],
+            };
+            let env = ProofEnvelope {
+                proof_format_version: PROOF_FORMAT_VERSION,
+                backend: "Plonky3-Keccak-Goldilocks".to_string(),
+                p3_version: "0.5.2".to_string(),
+                fri_params_id: "test_fri_params".to_string(),
+                public_inputs_hash: pi.hash(),
+                proof_bytes: vec![0xFFu8; 8],
+                degree_bits: 4,
+            };
+            let err = Plonky3Adapter::verify(&env, &pi, &program).unwrap_err();
+            assert!(
+                matches!(err, VerifyError::InvalidEnvelope(_)),
+                "Plonky3Adapter::verify must reject Syscall {imm} with InvalidEnvelope before proof decode, got {err:?}"
+            );
+
+            let mut vm = Vm::new(64);
+            vm.context.sender = 0xDEAD_BEEF;
+            let _ = vm.run_receipt(&program);
+            assert!(
+                Plonky3Adapter::prove(&vm.trace, &pi, &program).is_err(),
+                "Plonky3Adapter::prove must reject Syscall {imm} fail-closed"
+            );
+        }
+
+        // End-to-end STARK prove + verify for Syscall 6 across the Goldilocks prime boundary:
+        // block_height = P - 5, rs1 = 10 => rd = 5 (mod P).
+        let sys6_prog = vec![
+            inst(Opcode::Syscall, 2, 1, 0, 6),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm6 = Vm::new(64);
+        vm6.context.block_height = bud_vm::GOLDILOCKS_P - 5;
+        vm6.registers[1] = 10;
+        let receipt6 = vm6.run_receipt(&sys6_prog);
+        assert!(receipt6.success);
+        assert_eq!(vm6.registers[2], 5);
+        let pi6 = ExecutionPublicInputs {
+            chain_id: 45261,
+            program_hash: crate::canonical_set::program_hash_of(&sys6_prog),
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm6.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm6.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: vm6.context.sender,
+            nonce: vm6.context.nonce,
+            block_height: vm6.context.block_height,
+            gas_limit: vm6.gas_limit,
+            gas_used: vm6.gas_used,
+            exit_code: 0,
+            trace_len: vm6.trace.len() as u64,
+            event_digest: crate::event_digest_from_events(&receipt6.events),
+            state_writes_digest: [0u8; 32],
+        };
+        let env6 = Plonky3Adapter::prove(&vm6.trace, &pi6, &sys6_prog)
+            .expect("Syscall 6 wrapping across GOLDILOCKS_P must produce a valid STARK proof");
+        Plonky3Adapter::verify(&env6, &pi6, &sys6_prog)
+            .expect("Syscall 6 wrapping STARK proof must verify");
     }
 }
