@@ -438,6 +438,19 @@ expect_used = "deny"
 [profile.test]
 opt-level = 1
 
+# `test` inherits `dev`'s `debug-assertions = true`. raptorq 2.0.0's hot paths
+# (GF(256) table setup, RNG) carry debug assertions that turn the k=4096
+# `SourceBlockEncoder::new` into ~179 s instead of ~13 ms (measured A/B on the
+# same tree), which is why `bud3_fountain_acceptance` never finishes and why
+# `Budlum Core library test` sits in_progress for over an hour. The
+# `[profile.dev.package.raptorq] opt-level = 3` override below was already in
+# place and is *not* the culprit: cargo applies it to this profile too. Turn
+# the assertions off for this one crate and leave the decoder's own errors to
+# the tests that assert on them.
+[profile.test.package.raptorq]
+debug-assertions = false
+overflow-checks = false
+
 [profile.dev.package.keccak]
 opt-level = 3
 [profile.dev.package.digest]
