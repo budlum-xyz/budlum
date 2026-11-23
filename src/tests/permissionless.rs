@@ -1,5 +1,5 @@
 //! Acceptance-criteria tests for the permissionless participation model and the
-//! Isolation of the permissioned PoA domain (master-context Section 2).
+//! Isolation of the permissioned `PoA` domain (master-context Section 2).
 //!
 //! These tests are the executable form of the instruction set's acceptance
 //! Criteria:
@@ -7,8 +7,8 @@
 //!    Staking alone, with no whitelist (negative "can it join without a
 //!    Whitelist?" check).
 //!  * PoA-domain permissioned rules do not leak into PoW/PoS/BFT, and vice
-//!    Versa: a permissionless (stake-only) account cannot enter the PoA domain
-//!    Without KYC/approval, and a PoA member gains no permissionless role.
+//!    Versa: a permissionless (stake-only) account cannot enter the `PoA` domain
+//!    Without KYC/approval, and a `PoA` member gains no permissionless role.
 
 use crate::core::address::Address;
 
@@ -89,7 +89,7 @@ fn slashing_removes_active_status() {
 // --- PoA isolation ----------------------------------------------------------
 
 /// A permissionless (stake-only) account must NOT gain PoA-domain authority.
-/// PoA entry requires KYC + admin approval; staking buys nothing there.
+/// `PoA` entry requires KYC + admin approval; staking buys nothing there.
 #[test]
 fn permissionless_account_cannot_enter_poa_without_approval() {
     // The account is a fully-fledged permissionless validator...
@@ -126,7 +126,7 @@ fn poa_requires_admin_approval_not_stake() {
 }
 
 /// A PoA-approved member gains NO permissionless role automatically. The two
-/// Registries do not share membership, so PoA rules do not leak outward.
+/// Registries do not share membership, so `PoA` rules do not leak outward.
 #[test]
 fn poa_membership_does_not_grant_permissionless_roles() {
     let mut poa = PoaMembershipRegistry::new();
@@ -805,8 +805,8 @@ fn a_role_bond_round_trip_conserves_supply() {
     assert_eq!(state.get_balance(&relayer), 10_000);
 }
 
-/// Regression guard: introducing the registry must not disturb PoA isolation.
-/// A staked (thus registry-registered) validator still has zero PoA authority.
+/// Regression guard: introducing the registry must not disturb `PoA` isolation.
+/// A staked (thus registry-registered) validator still has zero `PoA` authority.
 #[test]
 fn stake_registration_does_not_grant_poa_authority() {
     let staker = addr(0x41);
@@ -948,7 +948,7 @@ fn malformed_consensus_key_registration_is_atomic() {
 }
 
 /// Acceptance: empty-ish chain → fund → stake tx → registry Active
-/// → produce_block as that validator succeeds.
+/// → `produce_block` as that validator succeeds.
 #[test]
 fn validator_onboarding_e2e_stake_register_produce() {
     let consensus = Arc::new(PoWEngine::new(0));
@@ -1011,7 +1011,7 @@ fn validator_onboarding_e2e_stake_register_produce() {
     assert!(block2.index > block.index);
 }
 
-/// Mainnet economic floor (min_stake=1_000_000) still gates activity.
+/// Mainnet economic floor (`min_stake=1_000_000`) still gates activity.
 #[test]
 fn mainnet_min_stake_floor_for_onboarding() {
     let genesis = GenesisConfig::for_network(Network::Mainnet);

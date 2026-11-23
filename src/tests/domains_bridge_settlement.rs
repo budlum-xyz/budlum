@@ -500,12 +500,30 @@ fn bridge_e2e_lock_mint_burn_unlock() {
         );
         d.operator = Some(op);
         d.bridge_enabled = true;
+        // A domain that claims a committed height carries the commitment at
+        // that height: the finality certificate binds the tip, and a claimed
+        // tip without one is Pending (EvidenceMissing), which the bridge
+        // value gates refuse.
+        let tip_hash = [0xE0 | u8::try_from(id).unwrap_or(0x0F); 32];
         d.last_committed_height = 50;
+        d.last_committed_hash = tip_hash;
         bc.state
             .settlement
             .domains
             .register(d)
             .expect("register domain");
+        bc.state
+            .settlement
+            .commitments
+            .insert(make_commitment(
+                id,
+                50,
+                1,
+                tip_hash,
+                [0xE5; 32],
+                ConsensusKind::PoW,
+            ))
+            .expect("insert committed tip");
     }
 
     let asset = AssetId::for_domain(1, &[0x77; 32]);

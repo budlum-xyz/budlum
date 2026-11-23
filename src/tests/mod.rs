@@ -66,6 +66,8 @@ pub mod domain_edge_cases;
 #[cfg(test)]
 pub mod encryption_dao;
 #[cfg(test)]
+pub mod ethereum_real_finality;
+#[cfg(test)]
 pub mod evm_finality_contract;
 #[cfg(test)]
 pub mod finality_adversarial;
@@ -163,6 +165,8 @@ pub mod state_recovery;
 pub mod storage_tx_door;
 #[cfg(test)]
 pub mod target_700;
+#[cfg(test)]
+pub mod tendermint_bisection_door;
 #[cfg(test)]
 pub mod testnet_closed_features;
 #[cfg(test)]
@@ -270,3 +274,23 @@ pub mod wallet_safety;
 // Bitcoin SPV: the Nakamoto branch end to end (registration -> admission -> bridge).
 #[cfg(test)]
 pub mod bitcoin_spv;
+
+// End-to-end success and refusal coverage for the bud_ai* JSON-RPC family.
+#[cfg(test)]
+pub mod rpc_ai_coverage;
+
+// The Solana compatibility door: every row answered and refused on the real wire.
+#[cfg(test)]
+pub mod rpc_door_solana;
+
+// Success and refusal RPC coverage for BNS, bridge, encoding/relayer, and role registry.
+#[cfg(test)]
+pub mod rpc_bridge_bns_registry_coverage;
+
+// Success and refusal RPC coverage for admin, sentry, settlement, wallet, gateway, and identity.
+#[cfg(test)]
+pub mod rpc_admin_wallet_identity_coverage;
+
+// Property, invariant, and refutation coverage for Universal Finality certificates and bounds.
+#[cfg(test)]
+pub mod universal_finality_properties;

@@ -97,7 +97,7 @@ async fn test_state_bit_identical_after_reload() {
 /// Sub-registry recovery across a restart.
 ///
 /// This test carried `#[ignore]` with the note "V3 sub-registry persistence is
-/// not implemented: Blockchain::new reloads blocks but rebuilds BNS/NFT
+/// not implemented: `Blockchain::new` reloads blocks but rebuilds BNS/NFT
 /// registries empty". The note is wrong, and the ignore was hiding a broken
 /// test rather than a missing feature.
 ///

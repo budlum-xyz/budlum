@@ -18,7 +18,7 @@ use crate::tokenomics::{
     bud, genesis_allocations, TokenomicsAddresses, TokenomicsParams, BUD_TOTAL_SUPPLY,
 };
 
-/// Build an AccountState seeded with the full $BUD genesis distribution.
+/// Build an `AccountState` seeded with the full $BUD genesis distribution.
 fn genesis_state() -> (AccountState, TokenomicsAddresses) {
     let params = TokenomicsParams::default();
     let addrs = TokenomicsAddresses::reserved();
@@ -245,7 +245,7 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     );
 }
 
-/// A contract call that names an address no AppBinding application owns pays the
+/// A contract call that names an address no `AppBinding` application owns pays the
 /// whole post-burn fee to the producer: the sender cannot route a share of
 /// its own fee back to itself by naming an arbitrary recipient.
 #[test]
@@ -295,8 +295,8 @@ fn zero_fee_burns_nothing() {
 use crate::chain::genesis::GenesisConfig;
 use crate::tokenomics::VestingSchedule;
 
-/// Genesis distribution flows through the REAL GenesisConfig::build_state
-/// (not a hand-filled AccountState).
+/// Genesis distribution flows through the REAL `GenesisConfig::build_state`
+/// (not a hand-filled `AccountState`).
 #[test]
 fn genesis_build_state_seeds_bud_distribution_via_real_flow() {
     let addrs = TokenomicsAddresses::reserved();
@@ -600,7 +600,7 @@ fn team_vesting_holds_on_every_value_path_not_only_transfer() {
     );
 }
 
-/// F4 (Constitution): NftBoost 4% B.U.D. share accumulates in
+/// F4 (Constitution): `NftBoost` 4% B.U.D. share accumulates in
 /// `pending_bud_boost_share` for later distribution to storage operators.
 /// REGRESSION LOCK - verifies the executor-side wiring.
 #[test]
@@ -681,7 +681,7 @@ fn mainnet_state_with_distribution() -> AccountState {
 /// `tokenomics.epoch_at_timestamp(last_epoch_time)`. That function divides an
 /// absolute Unix timestamp by the epoch length, so it returns epochs elapsed
 /// since 1970 - around 5.5 billion. The schedule counts from genesis
-/// (`team_vesting(0)` sets `start_epoch = 0`) with a cliff of 52_560 epochs.
+/// (`team_vesting(0)` sets `start_epoch = 0`) with a cliff of `52_560` epochs.
 ///
 /// Measured with a canary before the fix, on `mainnet_genesis()`:
 ///
@@ -804,7 +804,7 @@ fn the_annual_burn_still_fires_after_a_year_of_epochs() {
 
 /// Every admission/fee gate must look at the spendable balance, not the raw
 /// balance. At genesis epoch 0 the whole team
-/// allocation is vesting-locked, so a fee-only transaction (liquid_cost ==
+/// allocation is vesting-locked, so a fee-only transaction (`liquid_cost` ==
 /// fee) from the team account must be refused even though the raw balance is
 /// 20M BUD.
 #[test]

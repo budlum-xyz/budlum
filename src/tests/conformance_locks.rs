@@ -1,7 +1,7 @@
 //! Cross-workspace locks for the execution limits table and block gas budget.
 //!
 //! The external conformance runner is a separate Cargo workspace. These tests
-//! keep its block limit, the native coordinator and BudZero's soft limit in
+//! keep its block limit, the native coordinator and `BudZero`'s soft limit in
 //! agreement without introducing a dependency cycle between those workspaces.
 
 use crate::execution::coordinator::gas::{
