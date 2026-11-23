@@ -538,9 +538,9 @@ pub enum AdapterError {
     Unavailable { reason: String },
 }
 
-/// The interface itself. Four required methods and one optional, and the
-/// optional one is the reason a third-party adapter can be admitted without
-/// anybody reading its source.
+/// The interface itself. Three methods are required. Optional methods default
+/// to claims that are safe when an implementation says nothing: no golden
+/// sample, no parent binding, and no pinned trust anchor.
 pub trait ExternalFinalityAdapter: Send + Sync {
     /// Who this adapter says it is. Read at registration and compared on every
     /// call, so an adapter cannot be swapped under a domain that already
