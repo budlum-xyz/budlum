@@ -1911,8 +1911,9 @@ pub struct TendermintFinalityAdapter {
 }
 
 impl TendermintFinalityAdapter {
-    /// Pins the adapter to one network label and one chain id (for standalone
-    /// self-test and fixture verification).
+    /// Binds standalone fixture verification to one network label and chain id.
+    /// This is identity, not a validator-set trust anchor, so the domain bridge
+    /// remains closed until [`Self::new_pinned`] supplies one.
     #[must_use]
     pub fn new(network: &str, chain_id: &str) -> Self {
         let name = format!("tendermint-commit-{network}");
@@ -1950,8 +1951,9 @@ impl TendermintFinalityAdapter {
         adapter
     }
 
-    /// Attach a pinned-era height and ICS-07 trusting-period anchor so
-    /// retired committees past `trusting_period` or `max_height_drift` fail closed.
+    /// Attach a pinned-era height and ICS-07 trusting-period bound so retired
+    /// committees past `trusting_period` or `max_height_drift` fail closed. The
+    /// era bounds an existing validator-set pin; it is not a trust anchor by itself.
     ///
     /// Convenience: kept for the CLI and era-bounded `CometBFT` domain builders.
     #[must_use]
