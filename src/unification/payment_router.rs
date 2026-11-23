@@ -625,6 +625,8 @@ impl UniversalPaymentRouter {
                     Some(quote),
                     receipt.target_domain,
                     receipt.target_asset_id,
+                    intent.max_slippage_bps,
+                    now_unix_secs,
                 )?
             } else {
                 verify_leg_against_target(
@@ -632,6 +634,8 @@ impl UniversalPaymentRouter {
                     None,
                     receipt.target_domain,
                     receipt.target_asset_id,
+                    intent.max_slippage_bps,
+                    now_unix_secs,
                 )?
             };
             let leg_fee = leg_gross_value
@@ -822,6 +826,8 @@ fn verify_leg_against_target(
     quote: Option<&LiquidityQuote>,
     expected_target_domain: DomainId,
     expected_target_asset_id: Hash32,
+    _max_fee_bps: u16,
+    _now_unix_secs: u64,
 ) -> Result<u128, PaymentError> {
     let Some(quote) = quote else {
         let source_is_target = leg.source_domain == expected_target_domain
@@ -2676,7 +2682,7 @@ mod tests {
         // 400 delivered at a 1% fee costs 405 of source; the gross value is 405
         // and the fee 5.
         assert_eq!(
-            verify_leg_against_target(&leg(405), Some(&quote), 1, [0x01; 32]),
+            verify_leg_against_target(&leg(405), Some(&quote), 1, [0x01; 32], 100, 1_500),
             Ok(405)
         );
 
@@ -2697,21 +2703,34 @@ mod tests {
             Ok(()),
             "conservation alone accepts the feeless leg"
         );
-        assert!(verify_leg_against_target(&feeless, Some(&quote), 1, [0x01; 32]).is_err());
+        assert!(
+            verify_leg_against_target(&feeless, Some(&quote), 1, [0x01; 32], 100, 1_500).is_err()
+        );
 
         // A fee, source identity, or target identity that differs from the
         // quote is refused as well.
         let mut wrong_fee = leg(405);
         wrong_fee.fee_bps = 0;
-        assert!(verify_leg_against_target(&wrong_fee, Some(&quote), 1, [0x01; 32]).is_err());
+        assert!(
+            verify_leg_against_target(&wrong_fee, Some(&quote), 1, [0x01; 32], 100, 1_500).is_err()
+        );
         let mut wrong_asset = leg(405);
         wrong_asset.source_asset_id = [0x03; 32];
-        assert!(verify_leg_against_target(&wrong_asset, Some(&quote), 1, [0x01; 32]).is_err());
+        assert!(
+            verify_leg_against_target(&wrong_asset, Some(&quote), 1, [0x01; 32], 100, 1_500)
+                .is_err()
+        );
         let mut wrong_target_quote = quote.clone();
         wrong_target_quote.target_asset_id = [0x09; 32];
-        assert!(
-            verify_leg_against_target(&leg(405), Some(&wrong_target_quote), 1, [0x01; 32]).is_err()
-        );
+        assert!(verify_leg_against_target(
+            &leg(405),
+            Some(&wrong_target_quote),
+            1,
+            [0x01; 32],
+            100,
+            1_500,
+        )
+        .is_err());
 
         let amount_mismatch = SplitTenderLeg {
             direct_same_domain: true,
@@ -2719,12 +2738,17 @@ mod tests {
             fee_bps: 0,
             ..leg(405)
         };
-        assert!(verify_leg_against_target(&amount_mismatch, None, 1, [0x01; 32]).is_err());
+        assert!(
+            verify_leg_against_target(&amount_mismatch, None, 1, [0x01; 32], 100, 1_500).is_err()
+        );
         let wrong_target_direct = SplitTenderLeg {
             source_debited: 400,
             ..amount_mismatch
         };
-        assert!(verify_leg_against_target(&wrong_target_direct, None, 1, [0x01; 32]).is_err());
+        assert!(
+            verify_leg_against_target(&wrong_target_direct, None, 1, [0x01; 32], 100, 1_500)
+                .is_err()
+        );
         let honest_direct = SplitTenderLeg {
             source_domain: 1,
             source_asset_id: [0x01; 32],
@@ -2732,7 +2756,7 @@ mod tests {
             ..wrong_target_direct
         };
         assert_eq!(
-            verify_leg_against_target(&honest_direct, None, 1, [0x01; 32]),
+            verify_leg_against_target(&honest_direct, None, 1, [0x01; 32], 100, 1_500),
             Ok(400)
         );
     }
