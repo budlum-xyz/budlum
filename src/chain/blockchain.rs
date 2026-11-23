@@ -5439,9 +5439,19 @@ impl Blockchain {
             warn!("Block frame dropped: it does not fit a block next to its transactions");
             return None;
         }
-        Self::frame_transactions(state, frame_transactions)
-            .ok()
-            .map(|taken| (taken, bytes))
+        // The framer's refusal carries the tag of the transaction it refused.
+        // `.ok()` dropped it, so a refused set read exactly like the empty set
+        // two branches above.
+        match Self::frame_transactions(state, frame_transactions) {
+            Ok(taken) => Some((taken, bytes)),
+            Err(tag) => {
+                warn!(
+                    tag = %hex::encode(tag),
+                    "Block frame dropped: the framer refused the transaction set"
+                );
+                None
+            }
+        }
     }
 
     fn collect_block_transactions(
