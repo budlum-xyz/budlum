@@ -22,8 +22,13 @@ use crate::storage::view_grant::ViewGrantRegistry;
 pub struct DeleteOutcome {
     /// Live grants the delete revoked.
     pub grants_revoked: usize,
-    /// Whether a key-rotation event was emitted. Always true: delete implies
-    /// key rotation, and the flow obeys the rule rather than re-stating it.
+    /// Whether a key-rotation event was emitted.
+    ///
+    /// A delete implies key rotation, but only when the delete really did
+    /// retire the key id: if an owner-issued grant is still live afterwards -
+    /// the per-grant revoke was refused because the delete carried an epoch
+    /// older than the grant's own opening - then the old key id still opens the
+    /// content and claiming a rotation would be a lie the gateway acts on.
     pub key_rotated: bool,
 }
 
@@ -53,7 +58,18 @@ pub fn process_social_delete(
             revoked += 1;
         }
     }
-    let key_rotated = crate::storage::three_visibility::delete_implies_key_rotate();
+    // Rotation is a claim that the old key id no longer opens anything, so it
+    // waits for the surviving rows: a grant of this owner's that the revoke
+    // refused (an epoch older than its opening, `RevokeBeforeOpen`) is still
+    // live and still opens the content. Rows issued by someone else are not the
+    // owner's to count - they are inert, the owner has no word over them, and
+    // they do not keep this content's key id in service.
+    let owner_grant_survived = grants
+        .live_for_content(&content_id)
+        .iter()
+        .any(|g| g.issuer == owner);
+    let key_rotated =
+        !owner_grant_survived && crate::storage::three_visibility::delete_implies_key_rotate();
     if key_rotated {
         emit_hook(
             hook,
@@ -167,5 +183,28 @@ mod social_delete_tests {
         );
         assert!(out.key_rotated);
         assert_eq!(hook.events.len(), 1, "only the KeyRotated event");
+    }
+
+    #[test]
+    fn stale_epoch_before_grant_open_does_not_claim_key_rotated_while_owner_grant_survives() {
+        let mut reg = ViewGrantRegistry::new();
+        let owner = addr(1);
+        let content = cid(9);
+        reg.issue(
+            content,
+            owner,
+            Some(addr(2)),
+            [7u8; 32],
+            ViewPolicy::NamedGrantee,
+            20,
+        )
+        .unwrap();
+        let mut hook = RecordingThreeHook::default();
+        let out = process_social_delete(&mut reg, content, owner, 5, &mut hook);
+        assert_eq!(out.grants_revoked, 0);
+        assert!(
+            !out.key_rotated && hook.events.is_empty(),
+            "key rotation must not fire while an owner-issued live grant survived RevokeBeforeOpen"
+        );
     }
 }

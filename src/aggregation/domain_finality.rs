@@ -93,10 +93,9 @@ const fn split_u128_limbs(value: u128) -> [u64; TIMESTAMP_LIMBS] {
 #[must_use]
 fn digest_limbs(digest: &Hash32) -> [u64; DIGEST_LIMBS] {
     let mut out = [0u64; DIGEST_LIMBS];
-    for (dst, chunk) in out.iter_mut().zip(digest.chunks_exact(4)) {
-        if let [b0, b1, b2, b3] = *chunk {
-            *dst = u64::from(u32::from_le_bytes([b0, b1, b2, b3]));
-        }
+    for (dst, chunk) in out.iter_mut().zip(digest.as_chunks::<4>().0) {
+        let [b0, b1, b2, b3] = *chunk;
+        *dst = u64::from(u32::from_le_bytes([b0, b1, b2, b3]));
     }
     out
 }
@@ -116,7 +115,7 @@ fn poseidon_sponge_256(tag: &[u8], limbs: &[u64]) -> Hash32 {
         acc_b = poseidon4_hash(acc_b, limb);
     }
     let mut out = [0u8; 32];
-    for (idx, chunk) in (0u64..).zip(out.chunks_exact_mut(4)) {
+    for (idx, chunk) in (0u64..).zip(out.as_chunks_mut::<4>().0) {
         let domain_idx = squeeze_base.wrapping_add(idx) % GOLDILOCKS_MODULUS;
         let inner = poseidon4_hash(acc_a, domain_idx);
         let word = poseidon4_hash(inner, acc_b);
@@ -533,18 +532,29 @@ impl ClaimedDomainFinalityAdapter {
         self.finalized_tips.insert(domain_id, (height, state_root));
     }
 
-    /// Verifies `frame` against `backend` for this adapter's `claim_domain` and
-    /// admits every [`Claim::Prog`] inside the verified `MasterProof`.
+    /// Verifies `frame` against `backend` (and validator bonds in `accounts`
+    /// when `backend.requires_bonded_aggregators()` is true) for this adapter's
+    /// `claim_domain`, then admits every [`Claim::Prog`] inside the verified
+    /// `MasterProof`.
     ///
     /// # Errors
     ///
-    /// Returns [`AggError`] if `backend.verify(frame, self.claim_domain)` rejects
-    /// the frame; no claims are admitted on failure.
+    /// Returns [`AggError`] if any segment aggregator is unbonded/unauthorized
+    /// or if `backend.verify(frame, self.claim_domain)` rejects the frame; no
+    /// claims are admitted on failure.
     pub fn admit_verified_frame<B: AggBackend>(
         &mut self,
+        accounts: &crate::core::account::AccountState,
         backend: &B,
         frame: &ClaimFrame,
     ) -> Result<usize, AggError> {
+        if backend.requires_bonded_aggregators() {
+            super::fraud::verify_bonded_segment_aggregators(
+                accounts,
+                u64::from(self.claim_domain),
+                frame,
+            )?;
+        }
         backend.verify(frame, self.claim_domain)?;
         let mut added = 0usize;
         for claim in &frame.claims {

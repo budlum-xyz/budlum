@@ -63,13 +63,13 @@ pub struct AggMergeProof {
 }
 
 fn write_digest_limbs(vm: &mut Vm, base_cell: u64, digest: &Hash32) {
-    for (i, chunk) in digest.chunks_exact(4).enumerate() {
-        if let [b0, b1, b2, b3] = *chunk {
-            let limb = u32::from_le_bytes([b0, b1, b2, b3]);
-            let byte_off = ((base_cell as usize) + i) * 8;
-            if let Some(slot) = vm.memory.get_mut(byte_off..byte_off + 8) {
-                slot.copy_from_slice(&u64::from(limb).to_le_bytes());
-            }
+    for (i, chunk) in digest.as_chunks::<4>().0.iter().enumerate() {
+        let [b0, b1, b2, b3] = *chunk;
+
+        let limb = u32::from_le_bytes([b0, b1, b2, b3]);
+        let byte_off = ((base_cell as usize) + i) * 8;
+        if let Some(slot) = vm.memory.get_mut(byte_off..byte_off + 8) {
+            slot.copy_from_slice(&u64::from(limb).to_le_bytes());
         }
     }
 }
@@ -274,7 +274,12 @@ pub fn verify_agg_merge(
         .last()
         .ok_or_else(|| AggMergeError::VerifyFailed("empty sponge output".into()))?;
     let mut squeezed = [0u8; 32];
-    for (chunk, word) in squeezed.chunks_exact_mut(8).zip(final_state.iter().take(4)) {
+    for (chunk, word) in squeezed
+        .as_chunks_mut::<8>()
+        .0
+        .iter_mut()
+        .zip(final_state.iter().take(4))
+    {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
     if squeezed != *expected_merge_pi {

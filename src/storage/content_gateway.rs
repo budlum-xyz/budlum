@@ -208,6 +208,7 @@ pub struct BudGateway {
 }
 
 impl BudGateway {
+    #[must_use]
     pub fn new(chain: ChainHandle, network: Option<NodeClient>, storage: Option<Storage>) -> Self {
         Self {
             chain,
@@ -406,6 +407,7 @@ impl BudGateway {
 /// values. Checking only one lets the owner pick the unprotected one. The
 /// content reference contributes both of its names: the content digest and
 /// the object commitment.
+#[must_use]
 pub fn pollen_guard_ids(resolved: &crate::bns::types::BnsResolved) -> Vec<ContentId> {
     let mut ids = Vec::with_capacity(3);
     let mut push = |id: ContentId| {

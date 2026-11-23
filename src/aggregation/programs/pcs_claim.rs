@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 
 use bincode::Options;
 use bud_proof::adapter::{ExecutionPublicInputs, ProofEnvelope};
-use bud_proof::bud_stark::{PcsOpeningShape, MAX_VERIFIER_DEGREE_BITS};
+use bud_proof::bud_stark::{PcsOpeningShape, MAX_LOG_QUOTIENT_CHUNKS, MAX_VERIFIER_DEGREE_BITS};
 use bud_proof::plonky3_prover::{
     chip_commitment_from_bytes, chip_commitment_to_bytes, chip_ext_from_limbs, chip_ext_to_limbs,
     extract_bud_envelope_pcs, verify_chip_pcs_openings_u64, ChipCommitments, ChipOpenedValues,
@@ -44,6 +44,46 @@ const PCS_OBJECT_VERSION: u8 = 1;
 const MAX_DECOMPRESSED_PCS_BYTES: usize = 4 * 1024 * 1024;
 /// Upper bound on public values carried by one `PcsOpeningObject` or `VerifyStarkTx`.
 pub const MAX_PCS_PUBLIC_VALUES: usize = 1024;
+/// Upper bound on the quotient-chunk fan-out a `PcsOpeningObject` may declare.
+///
+/// Derived from the Stage 2 ceiling in `bud_proof::bud_stark`
+/// (`MAX_LOG_QUOTIENT_CHUNKS == 8`, i.e. 256 chunks) so a declaration the
+/// algebra verifier is guaranteed to refuse is refused at admission instead of
+/// being parked in the object pool.
+pub const MAX_QUOTIENT_CHUNKS: usize = 1 << MAX_LOG_QUOTIENT_CHUNKS;
+/// Upper bound on the opened values carried by a single quotient-chunk row.
+const MAX_OPENED_VECTOR_LEN: usize = 4_096;
+
+/// Number of quotient chunks a `log_num_quotient_chunks` declaration commits
+/// to, or `None` when the declaration is above [`MAX_QUOTIENT_CHUNKS`].
+fn declared_quotient_chunks(log_num_quotient_chunks: u8) -> Option<usize> {
+    if usize::from(log_num_quotient_chunks) > MAX_LOG_QUOTIENT_CHUNKS {
+        return None;
+    }
+    Some(1usize << usize::from(log_num_quotient_chunks))
+}
+
+/// Checks that the quotient-chunk count declared by an object is exactly the
+/// number of chunk openings it carries, and that each row stays inside
+/// [`MAX_OPENED_VECTOR_LEN`].
+///
+/// The declaration is one byte on the wire while the carried openings cost real
+/// bytes, so without this check a peer can commit an object to a shape its
+/// payload can never satisfy: admitted into the pool, relayed to peers, and
+/// rejected by Stage 1 every time.
+fn quotient_chunk_declaration_matches_carry(
+    log_num_quotient_chunks: u8,
+    opened: &WireOpenedValues,
+) -> bool {
+    let Some(declared) = declared_quotient_chunks(log_num_quotient_chunks) else {
+        return false;
+    };
+    opened.quotient_chunks.len() == declared
+        && opened
+            .quotient_chunks
+            .iter()
+            .all(|chunk| chunk.len() <= MAX_OPENED_VECTOR_LEN)
+}
 
 /// Canonical 32-byte polynomial commitments carried in [`PcsOpeningObject`]
 /// and [`VerifyStarkTx`].
@@ -51,7 +91,7 @@ pub const MAX_PCS_PUBLIC_VALUES: usize = 1024;
 pub struct WireCommitments {
     /// Commitment to the main execution trace matrix.
     pub trace: Hash32,
-    /// Optional commitment to the auxiliary (LogUp) trace matrix.
+    /// Optional commitment to the auxiliary (`LogUp`) trace matrix.
     pub aux_trace: Option<Hash32>,
     /// Commitment to the quotient chunk polynomials.
     pub quotient_chunks: Hash32,
@@ -266,6 +306,7 @@ impl PcsOpeningObject {
             u8::try_from(shape.log_num_quotient_chunks).map_err(|_| ObjectError::Invalid)?;
         if public_values.len() > MAX_PCS_PUBLIC_VALUES
             || public_values.iter().any(|&v| v >= GOLDILOCKS_MODULUS)
+            || usize::from(log_num_quotient_chunks) > MAX_LOG_QUOTIENT_CHUNKS
         {
             return Err(ObjectError::Invalid);
         }
@@ -312,6 +353,9 @@ impl PcsOpeningObject {
     ///
     /// Returns [`ObjectError::Invalid`] if any width fails platform conversion.
     pub fn shape(&self) -> Result<PcsOpeningShape, ObjectError> {
+        if usize::from(self.log_num_quotient_chunks) > MAX_LOG_QUOTIENT_CHUNKS {
+            return Err(ObjectError::Invalid);
+        }
         Ok(PcsOpeningShape {
             air_width: usize::try_from(self.air_width).map_err(|_| ObjectError::Invalid)?,
             preprocessed_width: usize::try_from(self.preprocessed_width)
@@ -391,14 +435,19 @@ impl PcsOpeningObject {
         if usize::try_from(decoder.total_in()).ok() != Some(payload.len()) {
             return Err(ObjectError::Invalid);
         }
+        let raw_limit = u64::try_from(raw.len()).map_err(|_| ObjectError::Invalid)?;
         let obj: Self = bincode::DefaultOptions::new()
-            .with_limit(MAX_DECOMPRESSED_PCS_BYTES as u64)
+            .with_limit(raw_limit)
             .reject_trailing_bytes()
             .deserialize(&raw)
             .map_err(|_| ObjectError::Invalid)?;
         if usize::from(obj.degree_bits) > MAX_VERIFIER_DEGREE_BITS
             || obj.public_values.len() > MAX_PCS_PUBLIC_VALUES
             || (obj.preprocessed_width > 0) != obj.preprocessed_commit.is_some()
+            || !quotient_chunk_declaration_matches_carry(
+                obj.log_num_quotient_chunks,
+                &obj.opened_values,
+            )
         {
             return Err(ObjectError::Invalid);
         }
@@ -481,15 +530,12 @@ fn update_opt_ext_vec(
     hasher: &mut Keccak256,
     opt: Option<&Vec<[u64; 3]>>,
 ) -> Result<(), ObjectError> {
-    match opt {
-        Some(v) => {
-            hasher.update([1u8]);
-            update_ext_vec(hasher, v)
-        }
-        None => {
-            hasher.update([0u8]);
-            Ok(())
-        }
+    if let Some(v) = opt {
+        hasher.update([1u8]);
+        update_ext_vec(hasher, v)
+    } else {
+        hasher.update([0u8]);
+        Ok(())
     }
 }
 
@@ -554,6 +600,10 @@ pub fn eval_value_of(
 pub fn verify_pcs_opening(obj: &PcsOpeningObject) -> Result<Claim, ObjectError> {
     if obj.public_values.len() > MAX_PCS_PUBLIC_VALUES
         || obj.public_values.iter().any(|&v| v >= GOLDILOCKS_MODULUS)
+        || !quotient_chunk_declaration_matches_carry(
+            obj.log_num_quotient_chunks,
+            &obj.opened_values,
+        )
     {
         return Err(ObjectError::Invalid);
     }

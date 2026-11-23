@@ -125,7 +125,7 @@ fn seal_payload(
 /// Seal plaintext under `key` with a fresh CSPRNG nonce.
 ///
 /// XChaCha20-Poly1305 lets a (key, nonce) pair be used once: a repeat is a
-/// keystream repeat, and XORing the two ciphertexts leaves the XOR of the
+/// keystream repeat, and `XORing` the two ciphertexts leaves the XOR of the
 /// plaintexts behind. So the production path takes its nonce from a CSPRNG;
 /// the deterministic nonce below exists for lab and test fixtures only.
 ///

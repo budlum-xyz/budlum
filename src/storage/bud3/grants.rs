@@ -1,5 +1,5 @@
 //! Unlinkable B.U.D. 3.0 view grants (`IssueViewGrant`, `RevokeViewGrant`).
-//! exposed for `Bud3Registry`, `Bud3RpcService`, and DataMarket grant issuance.
+//! exposed for `Bud3Registry`, `Bud3RpcService`, and `DataMarket` grant issuance.
 //!
 //! Per Section 6.22.1 &  item 6:
 //! * An on-chain [`GrantRow`] NEVER carries `content_id`, `issuer`, or `grantee`.
@@ -103,19 +103,25 @@ pub enum GrantBud3Error {
     InvalidRevokeSignature,
 }
 
+/// Exact wire length of a B.U.D. 3.0 HPKE X-Wing (`0x647a`) grant key package:
+/// 6-byte suite header + `HPKE_ENCAPPED_KEY_LEN` (1,120) + `KEYPKG_PLAINTEXT_LEN` (64)
+/// + 16-byte ChaCha20-Poly1305 tag = 1,206 bytes.
+const EXACT_SEALED_KEY_PACKAGE_BYTES: usize =
+    6 + crate::crypto::hpke::HPKE_ENCAPPED_KEY_LEN + super::keys::KEYPKG_PLAINTEXT_LEN + 16;
+
 impl GrantRow {
     /// Validate all structural and cryptographic invariants of a newly submitted
     /// `GrantRow` at `current_epoch` before state mutation.
     ///
     /// # Errors
     ///
-    /// Returns [`GrantBud3Error`] if expiry, ML-DSA-65 key, or HPKE `0x647a`
-    /// envelope checks fail.
+    /// Returns [`GrantBud3Error`] if expiry, ML-DSA-65 key, or exact-size HPKE `0x647a`
+    /// key-package envelope checks fail.
     pub fn validate_for_issue(&self, current_epoch: u64) -> Result<(), GrantBud3Error> {
         if self.expires_at_epoch <= current_epoch {
             return Err(GrantBud3Error::ExpiredGrant);
         }
-        if self.sealed_key_package.is_empty()
+        if self.sealed_key_package.len() != EXACT_SEALED_KEY_PACKAGE_BYTES
             || self.sealed_key_package.len() > MAX_SEALED_KEY_PACKAGE_BYTES
         {
             return Err(GrantBud3Error::InvalidKeyPackage);
@@ -217,6 +223,20 @@ mod tests {
         assert_eq!(
             row.verify_revocation(&wrong_sig),
             Err(GrantBud3Error::InvalidRevokeSignature)
+        );
+
+        // Padded or truncated HPKE envelopes that fail exact 64-byte plaintext length are refused.
+        let mut padded_row = row.clone();
+        padded_row.sealed_key_package.push(0x00);
+        assert_eq!(
+            padded_row.validate_for_issue(10),
+            Err(GrantBud3Error::InvalidKeyPackage)
+        );
+        let mut short_row = row;
+        short_row.sealed_key_package.pop();
+        assert_eq!(
+            short_row.validate_for_issue(10),
+            Err(GrantBud3Error::InvalidKeyPackage)
         );
     }
 }

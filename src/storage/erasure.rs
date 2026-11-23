@@ -1579,7 +1579,7 @@ mod tests {
         ));
     }
 
-    /// A content_size that does not fit the data region is refused.
+    /// A `content_size` that does not fit the data region is refused.
     #[test]
     fn a_content_size_outside_the_data_region_is_refused() {
         let data: Vec<u8> = (0..=199u8).cycle().take(800).collect();

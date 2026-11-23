@@ -379,6 +379,13 @@ impl AggBackend for ChainBackend {
         #[cfg(not(any(test, feature = "agg-native-backend")))]
         return self.stark().verify(frame, domain);
     }
+
+    fn requires_bonded_aggregators(&self) -> bool {
+        #[cfg(any(test, feature = "agg-native-backend"))]
+        return self.native().requires_bonded_aggregators();
+        #[cfg(not(any(test, feature = "agg-native-backend")))]
+        return self.stark().requires_bonded_aggregators();
+    }
 }
 
 /// The commitment to the consensus parameters of the layer on one chain:
@@ -449,10 +456,21 @@ pub fn validate_params(params: &AggParams, chain_id: u64) -> Result<(), String> 
             params.max_proof_bytes
         ));
     }
-    // The only backend is the native one, whose proof is the objects
-    // themselves. The main network waits for the STARK backend.
-    if Network::from_chain_id(chain_id) == Some(Network::Mainnet) {
-        return Err("aggregation: the main network does not turn the layer on yet".into());
+    // `StarkBackend` (`AggFoldAir`) binds the postfix tree fold and segment
+    // ML-DSA-87 attestations, while leaf-witness proving runs outside the fold
+    // AIR until recursive leaf verification lands. Mainnet and public Testnet
+    // therefore reject `AggMode::On` (`Shadow` and `Off` remain permitted).
+    match Network::from_chain_id(chain_id) {
+        Some(Network::Mainnet) => {
+            return Err("aggregation: the main network does not turn the layer on yet".into());
+        }
+        Some(Network::Testnet) => {
+            return Err(
+                "aggregation: the public testnet rejects mode `on` until recursive leaf-witness proving lands (use `off` or `shadow`)"
+                    .into(),
+            );
+        }
+        _ => {}
     }
     if claim_domain(chain_id).is_none() {
         return Err(format!(
@@ -557,6 +575,26 @@ pub fn check_block_with_backend_and_airs<B: AggBackend>(
                         .into(),
                 );
             }
+        }
+    }
+    if params.mode == AggMode::On
+        && matches!(
+            Network::from_chain_id(block.chain_id),
+            Some(Network::Mainnet | Network::Testnet)
+        )
+    {
+        return Err(
+            "aggregation: mode `on` is closed on Mainnet and Testnet until recursive leaf-witness proving lands"
+                .into(),
+        );
+    }
+    if params.mode == AggMode::On && backend.requires_bonded_aggregators() {
+        if let Some(frame) = block.claim_frame.as_ref() {
+            let state = accounts.ok_or_else(|| {
+                "aggregation: attestation-backed frames require validator bond state".to_string()
+            })?;
+            super::fraud::verify_bonded_segment_aggregators(state, block.chain_id, frame)
+                .map_err(|e| format!("aggregation: {e}"))?;
         }
     }
     let views = views_with_accounts(domain, block, accounts);

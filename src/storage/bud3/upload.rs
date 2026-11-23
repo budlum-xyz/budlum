@@ -277,8 +277,12 @@ impl UploadSessionManager {
         }
     }
 
-    /// Purge sessions older than `UPLOAD_SESSION_TTL_SECS` (6 hours).
+    /// Purge sessions older than `UPLOAD_SESSION_TTL_SECS` (6 hours) and prune
+    /// historical daily quota buckets so node RAM stays strictly bounded.
     pub fn purge_expired(&mut self, now_sec: u64) {
+        let cur_day = now_sec / 86_400;
+        self.daily_account_bytes
+            .retain(|(bucket, _), _| *bucket >= cur_day);
         let expired: Vec<u64> = self
             .sessions
             .iter()
@@ -286,7 +290,18 @@ impl UploadSessionManager {
             .map(|(id, _)| *id)
             .collect();
         for id in expired {
-            self.sessions.remove(&id);
+            if let Some(stale) = self.sessions.remove(&id) {
+                let open_day = stale.opened_at_sec / 86_400;
+                // Release unreceived bytes from the account's current-day quota while
+                // keeping received bytes charged so abandoned streams still cost quota.
+                let unreceived = stale.declared_len.saturating_sub(stale.received_len);
+                if unreceived > 0 {
+                    if let Some(used) = self.daily_account_bytes.get_mut(&(open_day, stale.account))
+                    {
+                        *used = used.saturating_sub(unreceived);
+                    }
+                }
+            }
         }
     }
 
@@ -476,39 +491,6 @@ impl UploadSessionManager {
             .remove(&session_id)
             .ok_or(UploadError::UnknownOrExpiredSession)?;
 
-        // Y2/Y3 already hashed the public input as chunks arrived. A matching
-        // object needs no A0 compression, BOF-1 copy, fountain coding, or QR
-        // frames. Use the registered record rather than constructing a second
-        // representation and then claiming to have deduplicated it.
-        if !session.pre_sealed_object {
-            let content_id = session.hasher.clone().finish();
-            if let Some(key) = registry.public_object(&content_id.digest) {
-                if let Some(existing) = registry.object(&key).filter(|entry| {
-                    entry.record.content_id == content_id
-                        && entry.custody_confirmed
-                        && !entry.shares.is_empty()
-                        && entry
-                            .shares
-                            .iter()
-                            .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
-                }) {
-                    let record = existing.record.clone();
-                    zeroize_and_release(&mut session.buffer);
-                    return Ok(FinishedUploadSession {
-                        deduplicated_existing: Some(key),
-                        unsigned_tx: StorageTxV3::RegisterObject {
-                            record: record.clone(),
-                            shares: Vec::new(),
-                            lifetime_epochs: session.lifetime_epochs,
-                        },
-                        record,
-                        segments: Vec::new(),
-                        peak_working_bytes: 0,
-                    });
-                }
-            }
-        }
-
         let (object, content_id) = if session.pre_sealed_object {
             let mut m = super::meter::Meter::for_object(session.buffer.len() as u64);
             let parsed = Object::decode(&session.buffer, &mut m).inspect_err(|_| {
@@ -547,27 +529,48 @@ impl UploadSessionManager {
         // an additional whole-input buffer live during the most expensive step.
         zeroize_and_release(&mut session.buffer);
 
-        let deduplicated_existing = if content_id.kind == super::content_id::ContentIdKind::Public {
-            registry.public_object(&content_id.digest).filter(|key| {
-                registry.object(key).is_some_and(|entry| {
+        let payload_len = object.payload.len() as u64;
+        let codec = object.header.codec;
+        let encoded_bytes = object.encode();
+        drop(object);
+        let commitment = commit_object(&encoded_bytes, profile).ok_or(UploadError::TooLarge)?;
+
+        // Y2/Y3 deduplication requires that the existing confirmed public entry
+        // binds to the exact BOF-1 object commitment, length, codec, and profile
+        // derived from the uploaded plaintext so an unverified content-id
+        // squatter in `public_index` can never be absorbed.
+        if !session.pre_sealed_object && content_id.kind == super::content_id::ContentIdKind::Public
+        {
+            for key in registry.public_candidates(&content_id.digest).to_vec() {
+                if let Some(existing) = registry.object(&key).filter(|entry| {
                     entry.record.content_id == content_id
+                        && entry.record.commitment == commitment
+                        && entry.record.object_len == encoded_bytes.len() as u64
+                        && entry.record.codec == codec
+                        && entry.record.profile == *profile
                         && entry.custody_confirmed
                         && !entry.shares.is_empty()
                         && entry
                             .shares
                             .iter()
                             .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
-                })
-            })
-        } else {
-            None
-        };
-
-        let payload_len = object.payload.len() as u64;
-        let codec = object.header.codec;
-        let encoded_bytes = object.encode();
-        drop(object);
-        let commitment = commit_object(&encoded_bytes, profile).ok_or(UploadError::TooLarge)?;
+                }) {
+                    let record = existing.record.clone();
+                    return Ok(FinishedUploadSession {
+                        deduplicated_existing: Some(key),
+                        unsigned_tx: StorageTxV3::RegisterObject {
+                            record: record.clone(),
+                            shares: Vec::new(),
+                            lifetime_epochs: session.lifetime_epochs,
+                        },
+                        record,
+                        segments: Vec::new(),
+                        peak_working_bytes: 0,
+                    });
+                }
+            }
+        }
+        let deduplicated_existing = None;
         let seg = Segmentation::new(encoded_bytes.len() as u64, profile)
             .ok_or(UploadError::Fountain(FountainError::InvalidProfile))?;
         let symbols_per_segment =
@@ -591,6 +594,9 @@ impl UploadSessionManager {
             let k = enc.k();
             if symbols_per_segment < k.saturating_add(2) {
                 return Err(UploadError::Placement(PlacementError::RowTooSmall));
+            }
+            if symbols_per_segment > super::pipeline::MAX_SYMBOLS_PER_SEGMENT {
+                return Err(UploadError::TooLarge);
             }
             let mut syms = enc.source_symbols();
             syms.extend(enc.repair_symbols(0, symbols_per_segment - k)?);
@@ -964,6 +970,19 @@ mod tests {
             .finish_session(empty, &SMALL, &row, &full_candidates(4), &reg, 503)
             .expect("a declared zero-length upload is a deliberate empty object");
         assert_eq!(finished.record.content_id, ContentId::public(b""));
+
+        // Expired partial sessions release unreceived quota and historical days are pruned.
+        let partial = mgr
+            .open_session(([8; 32], [5; 16]), 1024, 0, 20, false, 1_000)
+            .unwrap();
+        mgr.append_chunk(partial, &[0xAB; 256], 1_001).unwrap();
+        mgr.purge_expired(1_000 + UPLOAD_SESSION_TTL_SECS + 1);
+        assert_eq!(
+            mgr.daily_account_bytes.get(&(0, [8; 32])).copied(),
+            Some(256)
+        );
+        mgr.purge_expired(2 * 86_400);
+        assert!(mgr.daily_account_bytes.is_empty());
     }
 
     #[test]
@@ -1134,5 +1153,66 @@ mod tests {
             .unwrap();
         assert!(finished.deduplicated_existing.is_none());
         assert!(!finished.segments.is_empty());
+
+        // A confirmed squatter entry in `public_index` whose `commitment` does
+        // not match the canonical BOF-1 commitment of `content` must never be
+        // absorbed as a deduplicated copy during `finish_session`.
+        let mut squatter_reg = Bud3Registry::default();
+        let mut forged_record = prepare_public_upload(content, &SMALL, &Bud3Limits::default(), 10)
+            .unwrap()
+            .record;
+        let forged_key = [0xFE; 32];
+        forged_record.commitment = forged_key;
+        let squatter_shares = vec![
+            (
+                0,
+                Share {
+                    validator: [10; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 5,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: [11; 32],
+                    class: Class::Full,
+                    first_esi: 5,
+                    symbols: 5,
+                },
+            ),
+        ];
+        assert_eq!(
+            squatter_reg.register_object([9; 32], forged_record, squatter_shares, 1, 20),
+            Ok(Registered::New(forged_key))
+        );
+        squatter_reg.ack(&forged_key, &[10; 32]).unwrap();
+        squatter_reg.ack(&forged_key, &[11; 32]).unwrap();
+        assert_eq!(
+            squatter_reg.public_object(&ContentId::public(content).digest),
+            Some(forged_key)
+        );
+
+        let sid_honest = mgr
+            .open_session(([3; 32], [4; 16]), content.len() as u64, 0, 20, false, 503)
+            .unwrap();
+        mgr.append_chunk(sid_honest, content, 504).unwrap();
+        let honest_finished = mgr
+            .finish_session(
+                sid_honest,
+                &SMALL,
+                &row,
+                &full_candidates(4),
+                &squatter_reg,
+                505,
+            )
+            .unwrap();
+        assert_eq!(
+            honest_finished.deduplicated_existing, None,
+            "upload session must not deduplicate against a squatter record with a mismatched commitment"
+        );
+        assert_eq!(honest_finished.record.commitment, key);
+        assert!(!honest_finished.segments.is_empty());
     }
 }

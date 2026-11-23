@@ -159,13 +159,13 @@ impl SymbolPeerLimiter {
         }
         if !self.window_sec.contains_key(peer) && self.window_sec.len() >= MAX_TRACKED_SYMBOL_PEERS
         {
-            self.window_sec.retain(|_, (sec, _)| *sec == now_sec);
+            self.window_sec.retain(|_, (sec, _)| *sec >= now_sec);
             if self.window_sec.len() >= MAX_TRACKED_SYMBOL_PEERS {
                 return Err(SymbolProtocolError::RateLimited);
             }
         }
         let entry = self.window_sec.entry(*peer).or_insert((now_sec, 0));
-        if entry.0 != now_sec {
+        if now_sec > entry.0 {
             *entry = (now_sec, 0);
         }
         if entry.1 >= MAX_SYMBOL_REQUESTS_PER_SEC {

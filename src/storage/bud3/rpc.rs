@@ -74,6 +74,35 @@ fn parse_hex_bytes(val: Option<&Value>, field: &str) -> Result<Vec<u8>, String> 
     hex::decode(trimmed).map_err(|e| format!("invalid hex `{field}`: {e}"))
 }
 
+/// The per-client bucket [`UploadSessionManager`] caps concurrent sessions on.
+///
+/// The upload door used to pass `[0u8; 16]` for every caller, so the cap the
+/// manager keeps per client was really one global cap: `MAX_CONCURRENT_SESSIONS_PER_IP`
+/// uploads, from anybody, and the next honest uploader was refused. A caller
+/// that states its address now gets its own bucket; a caller that does not is
+/// bucketed by its own account, which keeps one account from spending another
+/// account's allowance and cannot be shared by a crowd.
+fn upload_client_bucket(params: &Value, account: &Address) -> Result<[u8; 16], String> {
+    if let Some(raw) = params.get("client_ip").and_then(Value::as_str) {
+        let text = raw.trim();
+        let parsed = text
+            .parse::<std::net::IpAddr>()
+            .or_else(|_| text.parse::<std::net::SocketAddr>().map(|addr| addr.ip()))
+            .map_err(|_| String::from("invalid `client_ip`"))?;
+        // An IPv4 caller is bucketed by its IPv4-mapped IPv6 form, so both
+        // families land in one 16-byte key without a partial copy.
+        return Ok(match parsed {
+            std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+            std::net::IpAddr::V6(v6) => v6.octets(),
+        });
+    }
+    let mut bucket = [0u8; 16];
+    if let Some(head) = account.first_chunk::<16>() {
+        bucket.copy_from_slice(head);
+    }
+    Ok(bucket)
+}
+
 /// Stateful node-local B.U.D. 3.0 RPC endpoint holding upload & reveal sessions.
 pub struct Bud3RpcService {
     uploads: UploadSessionManager,
@@ -131,13 +160,14 @@ impl Bud3RpcService {
                     .get("pre_sealed")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                let ip_bucket = upload_client_bucket(params, &account)?;
                 let sid =
                     if let Some(days_u64) = params.get("lifetime_days").and_then(Value::as_u64) {
                         let days = u32::try_from(days_u64)
                             .map_err(|_| String::from("invalid `lifetime_days`"))?;
                         self.uploads
                             .open_session_for_days(
-                                (account, [0u8; 16]),
+                                (account, ip_bucket),
                                 declared_len,
                                 raw_flags,
                                 days,
@@ -148,7 +178,7 @@ impl Bud3RpcService {
                     } else {
                         self.uploads
                             .open_session(
-                                (account, [0u8; 16]),
+                                (account, ip_bucket),
                                 declared_len,
                                 raw_flags,
                                 lifetime_epochs,
@@ -456,15 +486,21 @@ impl Bud3RpcService {
                 }))
             }
             "bud_storageAuditRepairSymbol" => {
+                // Every parameter is parsed before the custody stream opens. The
+                // stream slot is a bounded per-peer resource the limiter reclaims
+                // only through `close_custody_stream`, and a malformed call used
+                // to return between the open and the close, so a peer could spend
+                // its whole allowance on calls that never reached the verifier
+                // and then be refused when it sent a real symbol.
                 let peer: Address = parse_hex32(params.get("peer"), "peer")?;
-                self.limiter
-                    .open_custody_stream(&peer)
-                    .map_err(|e| format!("{e:?}"))?;
                 let segment = params.get("segment").and_then(Value::as_u64).unwrap_or(0);
                 let esi = u32::try_from(params.get("esi").and_then(Value::as_u64).unwrap_or(0))
                     .map_err(|_| String::from("invalid `esi`"))?;
                 let segment_bytes = parse_hex_bytes(params.get("segment_hex"), "segment_hex")?;
                 let symbol_bytes = parse_hex_bytes(params.get("symbol_hex"), "symbol_hex")?;
+                self.limiter
+                    .open_custody_stream(&peer)
+                    .map_err(|e| format!("{e:?}"))?;
                 let claimed = Symbol {
                     segment,
                     esi,
@@ -937,5 +973,76 @@ mod upload_delivery_tests {
             .unwrap();
         assert_eq!(bundle_reply["object"], hex::encode(new_key));
         assert_eq!(bundle_reply["symbol_count"], 16);
+    }
+
+    #[test]
+    fn upload_open_isolates_distinct_accounts_and_audit_repair_closes_stream_on_bad_params() {
+        let mut rpc = Bud3RpcService::default();
+        let registry = Bud3Registry::default();
+        let net = MemorySymbolNetwork::default();
+        let (row, candidates) = placement();
+
+        for acct_byte in [1u8, 2u8, 3u8] {
+            let reply = rpc
+                .handle(
+                    "bud_storageUploadOpen",
+                    &json!({ "account": hex::encode([acct_byte; 32]), "declared_len": 128 }),
+                    &registry,
+                    &net,
+                    (&row, &candidates, 100),
+                )
+                .expect("distinct accounts must not share a single [0u8; 16] IP cap");
+            assert!(reply["session_id"].as_u64().is_some());
+        }
+
+        let peer = hex::encode([0x77u8; 32]);
+        for _ in 0..8 {
+            let err = rpc
+                .handle(
+                    "bud_storageAuditRepairSymbol",
+                    &json!({
+                        "peer": peer,
+                        "segment": 0,
+                        "esi": 0,
+                        "segment_hex": "not-valid-hex",
+                        "symbol_hex": "00"
+                    }),
+                    &registry,
+                    &net,
+                    (&row, &candidates, 101),
+                )
+                .unwrap_err();
+            assert!(err.contains("invalid hex"), "unexpected error: {err}");
+        }
+        // A well-formed call right after: one real P0 segment and a fresh
+        // symbol the encoder itself produced, so the door answers instead of
+        // refusing a peer that spent its allowance on malformed calls.
+        use super::super::fountain::SegmentEncoder;
+        let segment_bytes = vec![0x42u8; 5_822];
+        let encoder =
+            SegmentEncoder::new(0, &segment_bytes, &Profile::P0).expect("a P0 segment encodes");
+        let fresh = encoder
+            .repair_symbols(0, 1)
+            .expect("one fresh repair symbol")
+            .remove(0);
+        let valid_reply = rpc
+            .handle(
+                "bud_storageAuditRepairSymbol",
+                &json!({
+                    "peer": peer,
+                    "segment": 0,
+                    "esi": fresh.esi,
+                    "segment_hex": hex::encode(&segment_bytes),
+                    "symbol_hex": hex::encode(&fresh.data)
+                }),
+                &registry,
+                &net,
+                (&row, &candidates, 102),
+            )
+            .expect("malformed calls must not leak custody stream slots");
+        assert_eq!(
+            valid_reply["valid"], true,
+            "the honest repair symbol must be accepted: {valid_reply}"
+        );
     }
 }
