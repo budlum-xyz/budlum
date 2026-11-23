@@ -13,7 +13,7 @@ on:
   # so the filter alone does not keep it out. This keeps one push from queueing
   # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
-    branches: [main, consensus-of-consensuses]
+    branches: [main, consensus-of-consensuses, agg-phase-2, agg/phase-2-sig-claims, agg/phase-3-recursion-stark, agg/phase-4-program-claims, audit-2026-11-16, audit-testnet-2026-11, budlum, budlum-4-you, budlum-osv-coverage-agent, budlum-unification, budlum-universal, diag-rehearsal-a, diag-rehearsal-b, ortak-teslim]
 
 concurrency:
   group: semver-${{ github.ref }}
