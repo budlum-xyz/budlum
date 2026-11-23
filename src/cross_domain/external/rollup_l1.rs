@@ -635,19 +635,21 @@ pub(crate) const fn quantum_tag(q: QuantumClass) -> u8 {
 
 fn decode_u64_storage_word(word: Option<[u8; 32]>) -> Option<u64> {
     let bytes = word?;
-    if bytes[..24].iter().any(|b| *b != 0) {
+    let (head, tail) = bytes.split_first_chunk::<24>()?;
+    if head.iter().any(|b| *b != 0) {
         return None;
     }
-    let tail: [u8; 8] = bytes[24..].try_into().ok()?;
+    let tail: [u8; 8] = tail.try_into().ok()?;
     Some(u64::from_be_bytes(tail))
 }
 
 fn decode_u32_bitmap_word(word: Option<[u8; 32]>, total_provers: u8) -> Option<u32> {
     let bytes = word?;
-    if bytes[..28].iter().any(|b| *b != 0) {
+    let (head, tail) = bytes.split_first_chunk::<28>()?;
+    if head.iter().any(|b| *b != 0) {
         return None;
     }
-    let tail: [u8; 4] = bytes[28..].try_into().ok()?;
+    let tail: [u8; 4] = tail.try_into().ok()?;
     let raw = u32::from_be_bytes(tail);
     if total_provers < 32 {
         let allowed_mask = (1u32 << u32::from(total_provers)) - 1;
