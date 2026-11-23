@@ -117,101 +117,6 @@ pub fn bns_reverse_resolve(address_hex: &str) -> String {
     request("bud_bnsReverseResolve", &format!("[\"{address}\"]"), 1)
 }
 
-/// Locate a top-level JSON object key outside nested objects, arrays, and
-/// string literals, returning the trimmed slice starting at its value.
-fn top_level_value<'a>(answer: &'a str, key: &str) -> Option<&'a str> {
-    let bytes = answer.as_bytes();
-    let mut i = 0usize;
-    let mut depth = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => {
-                let str_start = i + 1;
-                i += 1;
-                let mut has_escape = false;
-                while i < bytes.len() {
-                    if bytes[i] == b'\\' {
-                        has_escape = true;
-                        i = (i + 2).min(bytes.len());
-                        continue;
-                    }
-                    if bytes[i] == b'"' {
-                        break;
-                    }
-                    i += 1;
-                }
-                if i >= bytes.len() {
-                    return None;
-                }
-                let str_end = i;
-                i += 1;
-                if depth == 1 && !has_escape && &answer[str_start..str_end] == key {
-                    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                        i += 1;
-                    }
-                    if i < bytes.len() && bytes[i] == b':' {
-                        i += 1;
-                        return answer.get(i..).map(str::trim_start);
-                    }
-                }
-            }
-            b'{' | b'[' => {
-                depth += 1;
-                i += 1;
-            }
-            b'}' | b']' => {
-                depth = depth.saturating_sub(1);
-                i += 1;
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-    None
-}
-
-/// Read a string or scalar token from the start of a JSON value slice.
-fn read_scalar_or_string(rest: &str) -> Option<&str> {
-    if let Some(quoted) = rest.strip_prefix('"') {
-        let bytes = quoted.as_bytes();
-        let mut i = 0usize;
-        while i < bytes.len() {
-            if bytes[i] == b'\\' {
-                i = (i + 2).min(bytes.len());
-                continue;
-            }
-            if bytes[i] == b'"' {
-                return quoted.get(..i);
-            }
-            i += 1;
-        }
-        return None;
-    }
-    let end = rest
-        .find(|c: char| c == ',' || c == '}' || c == ']' || c.is_whitespace())
-        .unwrap_or(rest.len());
-    if end == 0 {
-        None
-    } else {
-        rest.get(..end)
-    }
-}
-
-fn has_non_null_error(answer: &str) -> bool {
-    let Some(val) = top_level_value(answer, "error") else {
-        return false;
-    };
-    let Some(tok) = val
-        .strip_prefix("null")
-        .filter(|tail| tail.is_empty() || tail.starts_with([',', '}', ' ', '\t', '\r', '\n']))
-    else {
-        return true;
-    };
-    let _ = tok;
-    false
-}
-
 /// The `result` of an answer as text, or the node's error.
 ///
 /// # Errors
@@ -219,13 +124,24 @@ fn has_non_null_error(answer: &str) -> bool {
 /// The answer carries an `error`, or no `result`.
 /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
 pub fn string_result(answer: &str) -> Result<String, String> {
-    if has_non_null_error(answer) {
-        return Err(format!("the node refused: {answer}"));
+    let parsed: serde_json::Value =
+        serde_json::from_str(answer).map_err(|e| format!("invalid JSON-RPC response: {e}"))?;
+    let obj = parsed
+        .as_object()
+        .ok_or_else(|| format!("JSON-RPC response is not an object: {answer}"))?;
+    if let Some(err_val) = obj.get("error") {
+        if !err_val.is_null() {
+            return Err(format!("the node refused: {answer}"));
+        }
     }
-    top_level_value(answer, "result")
-        .and_then(read_scalar_or_string)
-        .map(str::to_string)
-        .ok_or_else(|| format!("the answer has no result: {answer}"))
+    match obj.get("result") {
+        Some(serde_json::Value::Null) => Ok("null".to_string()),
+        Some(serde_json::Value::String(s)) => Ok(s.clone()),
+        Some(serde_json::Value::Number(n)) => Ok(n.to_string()),
+        Some(serde_json::Value::Bool(b)) => Ok(b.to_string()),
+        Some(v) => Ok(v.to_string()),
+        None => Err(format!("the answer has no result: {answer}")),
+    }
 }
 
 /// The `result` of an answer as a number (`0x` quantity or decimal).
@@ -311,6 +227,10 @@ mod tests {
             Ok("0xabc".to_string())
         );
         assert!(string_result("{\"error\":{\"code\":-32602},\"id\":1}").is_err());
+        assert!(
+            string_result("{\"\\u0065rror\":{\"code\":-1},\"result\":\"0x5\"}").is_err(),
+            "escaped error key must not be bypassed"
+        );
         assert!(quantity_result("{\"result\":\"x\"}").is_err());
     }
 
