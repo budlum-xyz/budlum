@@ -9295,7 +9295,20 @@ impl BudlumApiServer for RpcServer {
             Some(height) => height,
             None => self.chain.get_height().await,
         };
-        let Some(snapshot) = self.chain.get_state_snapshot_data(height).await else {
+        // No such height is `null`; a state this node cannot rebuild is an
+        // error the caller can see. Both used to answer `null`.
+        let Some(snapshot) = self
+            .chain
+            .get_state_snapshot_data(height)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("cannot rebuild the state at height {height}: {e}"),
+                    None::<()>,
+                )
+            })?
+        else {
             return Ok(serde_json::Value::Null);
         };
         let verified = snapshot.verify();

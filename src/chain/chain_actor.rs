@@ -231,7 +231,7 @@ pub enum ChainCommand {
     FundDevelopmentAccount(Address, oneshot::Sender<Result<(), String>>),
     GetStateSnapshotData(
         u64,
-        oneshot::Sender<Option<crate::chain::snapshot::StateSnapshot>>,
+        oneshot::Sender<Result<Option<crate::chain::snapshot::StateSnapshot>, String>>,
     ),
     ApplySnapshot(
         crate::chain::snapshot::StateSnapshot,
@@ -1798,16 +1798,23 @@ impl ChainHandle {
             .map_err(|e| format!("faucet response channel closed: {e}"))?
     }
 
+    /// The snapshot at `height`, or the reason this node cannot rebuild it.
+    ///
+    /// `Ok(None)` means there is no such height here; an `Err` means the height
+    /// exists and the state behind it did not rebuild. Collapsing the two into
+    /// one `None` made an unrebuildable state answer exactly like a missing
+    /// block.
     pub async fn get_state_snapshot_data(
         &self,
         height: u64,
-    ) -> Option<crate::chain::snapshot::StateSnapshot> {
+    ) -> Result<Option<crate::chain::snapshot::StateSnapshot>, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
             .send(ChainCommand::GetStateSnapshotData(height, tx))
             .await;
-        rx.await.unwrap_or(None)
+        rx.await
+            .map_err(|e| format!("chain actor dropped the snapshot request: {e}"))?
     }
 
     pub async fn apply_snapshot(

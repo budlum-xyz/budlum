@@ -8087,17 +8087,27 @@ impl Blockchain {
             info!("Block #{}: {}", block.index, &block.hash[..16]);
         }
     }
-    pub fn get_state_snapshot(&self, height: u64) -> Option<crate::chain::snapshot::StateSnapshot> {
+    /// Rebuild this node's state at `height` and serve it as a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// The rebuild's own error. A height past the chain tip is `Ok(None)`, not
+    /// an error: "this node has no such height" and "this node cannot rebuild
+    /// the state it has" are different answers, and `.ok()?` used to fold the
+    /// second into the first.
+    pub fn get_state_snapshot(
+        &self,
+        height: u64,
+    ) -> Result<Option<crate::chain::snapshot::StateSnapshot>, String> {
         if height >= self.chain.len() as u64 {
-            return None;
+            return Ok(None);
         }
         let block = &self.chain[height as usize];
         let mut state = Self::rebuild_state(
             &self.chain[..=height as usize],
             &self.genesis_config,
             self.consensus.domain_kind(),
-        )
-        .ok()?;
+        )?;
         // Same rule as the reorg path: a rebuild must replay identity writes
         // under the same gate the chain applied them under, or the served
         // snapshot disagrees with the canonical state root at that height.
@@ -8147,7 +8157,7 @@ impl Blockchain {
         );
         // Embed V2 data for capable receivers
         snapshot.snapshot_hash = format!("__v2__{}", hex::encode(&v2_bytes));
-        Some(snapshot)
+        Ok(Some(snapshot))
     }
 
     fn mainnet_requires_signed_remote_snapshot(&self) -> bool {
@@ -12920,6 +12930,22 @@ mod tests {
     }
 
     #[test]
+    fn a_height_past_the_tip_is_an_absence_and_not_a_rebuild_failure() {
+        // `get_state_snapshot` used to answer both questions with `None`:
+        // "there is no block at this height" and "the state at this height did
+        // not rebuild". The first is a fact about the chain, the second is a
+        // fault in this node, and a caller cannot act on a fault it cannot see.
+        let chain_id = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, chain_id, None);
+        assert!(
+            matches!(chain.get_state_snapshot(u64::MAX), Ok(None)),
+            "a height past the tip is an absence, not a failure"
+        );
+    }
+
+    #[test]
     fn global_header_timestamp_follows_chain_tip() {
         let chain_id = crate::core::chain_config::Network::Mainnet
             .chain_id()
@@ -12942,7 +12968,7 @@ mod tests {
         let late_account = Address::from([8u8; 32]);
         bc.state.add_balance(&late_account, 123);
 
-        let snapshot = bc.get_state_snapshot(0).unwrap();
+        let snapshot = bc.get_state_snapshot(0).expect("rebuild state").expect("snapshot at 0");
 
         assert_eq!(snapshot.height, 0);
         assert_eq!(snapshot.balances.get(&late_account), None);
@@ -13043,7 +13069,7 @@ mod tests {
                 .value(),
             None,
         );
-        let snapshot = bc.get_state_snapshot(0).unwrap();
+        let snapshot = bc.get_state_snapshot(0).expect("rebuild state").expect("snapshot at 0");
         let err = bc
             .apply_state_snapshot(snapshot)
             .expect_err("mainnet remote snapshot must require signed V2 manifest");
@@ -13056,7 +13082,7 @@ mod tests {
         let restored_account = Address::from([7u8; 32]);
         let genesis = GenesisConfig::new(45262).with_allocation(restored_account, 250);
         let mut bc = Blockchain::new_with_genesis(consensus, None, 45262, None, Some(genesis));
-        let snapshot = bc.get_state_snapshot(0).unwrap();
+        let snapshot = bc.get_state_snapshot(0).expect("rebuild state").expect("snapshot at 0");
         bc.state.add_balance(&Address::from([9u8; 32]), 500);
 
         bc.apply_state_snapshot(snapshot).unwrap();
@@ -13281,7 +13307,7 @@ mod tests {
                 finality_certificates: vec![],
             },
         );
-        let mut carrier = bc.get_state_snapshot(0).unwrap();
+        let mut carrier = bc.get_state_snapshot(0).expect("rebuild state").expect("snapshot at 0");
         carrier.snapshot_hash = format!("__v2__{}", hex::encode(wrong_genesis_v2.to_bytes()));
         let err = bc
             .apply_state_snapshot(carrier)
