@@ -820,14 +820,16 @@ fn verify_receipt_settles_intent(
 /// # Errors
 ///
 /// Returns [`PaymentError::InvalidIntent`] when the leg disagrees with its
-/// quote, or [`PaymentError::ArithmeticOverflow`] when the arithmetic does.
+/// quote, the quote is expired, or its fee exceeds the intent's slippage
+/// ceiling; returns [`PaymentError::ArithmeticOverflow`] when the arithmetic
+/// does.
 fn verify_leg_against_target(
     leg: &SplitTenderLeg,
     quote: Option<&LiquidityQuote>,
     expected_target_domain: DomainId,
     expected_target_asset_id: Hash32,
-    _max_fee_bps: u16,
-    _now_unix_secs: u64,
+    max_fee_bps: u16,
+    now_unix_secs: u64,
 ) -> Result<u128, PaymentError> {
     let Some(quote) = quote else {
         let source_is_target = leg.source_domain == expected_target_domain
@@ -843,6 +845,11 @@ fn verify_leg_against_target(
         }
         return Ok(leg.source_debited);
     };
+    if quote.fee_bps > max_fee_bps || quote.valid_until_unix_secs < now_unix_secs {
+        return Err(PaymentError::InvalidIntent(String::from(
+            "the split-tender quote is expired or exceeds the intent's slippage ceiling",
+        )));
+    }
     let source_matches_quote =
         leg.source_domain == quote.source_domain && leg.source_asset_id == quote.source_asset_id;
     let quote_targets_receipt = quote.target_domain == expected_target_domain
