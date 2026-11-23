@@ -287,16 +287,24 @@ impl PoSEngine {
     }
     /// The last checkpoint this node has established, and its hash.
     ///
-    /// Returns `None` when no checkpoint exists yet, which is a genuinely
+    /// `Ok(None)` when no checkpoint exists yet, which is a genuinely
     /// different state from "checkpoint at height 0" and has to stay
     /// distinguishable: a node with no checkpoint has nothing to anchor
     /// against and must not silently behave as though it were anchored at
     /// genesis.
-    pub fn last_checkpoint(&self) -> Option<(u64, String)> {
+    ///
+    /// # Errors
+    ///
+    /// [`ConsensusError`] when the checkpoint lock is poisoned. `.ok()` here
+    /// folded that into `Ok(None)`, so an unreadable checkpoint set answered
+    /// exactly like an empty one - and the caller below treats an empty one as
+    /// "nothing to violate". `get_checkpoints` next door has always reported
+    /// the poisoning; this now matches it.
+    pub fn last_checkpoint(&self) -> Result<Option<(u64, String)>, ConsensusError> {
         self.checkpoints
             .read()
-            .ok()
-            .and_then(|guard| guard.last().map(|c| (c.block_index, c.block_hash.clone())))
+            .map(|guard| guard.last().map(|c| (c.block_index, c.block_hash.clone())))
+            .map_err(|_| ConsensusError("Failed to acquire read lock on checkpoints".into()))
     }
 
     /// Whether `chain` contains this node's last checkpoint at the height and
@@ -308,7 +316,18 @@ impl PoSEngine {
     /// matter of mechanism design*, whatever its length. A candidate that
     /// does not contain the checkpoint is such a fork.
     pub fn chain_honours_checkpoint(&self, chain: &[Block]) -> bool {
-        let Some((height, hash)) = self.last_checkpoint() else {
+        let checkpoint = match self.last_checkpoint() {
+            Ok(found) => found,
+            Err(err) => {
+                // The lock is poisoned: this node cannot say what its revert
+                // limit is, and a fork it cannot bound is not honoured.
+                // Answering "nothing to violate" here would retire the limit
+                // exactly when the node is least trustworthy.
+                tracing::error!("{err}; fork choice honours no checkpoint");
+                return false;
+            }
+        };
+        let Some((height, hash)) = checkpoint else {
             // Nothing established yet: nothing to violate.
             return true;
         };
@@ -1646,6 +1665,34 @@ impl ConsensusEngine for PoSEngine {
 }
 #[cfg(test)]
 mod tests {
+
+    /// A poisoned checkpoint lock must not read as "no checkpoint yet".
+    ///
+    /// `last_checkpoint` used to fold the poisoning into `None` with `.ok()`,
+    /// and `chain_honours_checkpoint` reads `None` as "nothing to violate". So
+    /// the one moment this node cannot say what its revert limit is, was the
+    /// moment every fork was honoured.
+    #[test]
+    fn a_poisoned_checkpoint_lock_does_not_retire_the_revert_limit() {
+        let engine = std::sync::Arc::new(PoSEngine::new(PoSConfig::default(), None));
+        let poisoner = std::sync::Arc::clone(&engine);
+        let poisoned = std::thread::spawn(move || match poisoner.checkpoints.write() {
+            // Holding the guard while unwinding is what poisons the lock.
+            Ok(_held) => panic!("poison the checkpoint lock on purpose"),
+            Err(_) => panic!("a fresh lock cannot already be poisoned"),
+        })
+        .join();
+        assert!(poisoned.is_err(), "the helper thread must have panicked");
+
+        assert!(
+            engine.last_checkpoint().is_err(),
+            "a poisoned lock is an error, not an empty checkpoint set"
+        );
+        assert!(
+            !engine.chain_honours_checkpoint(&[]),
+            "an unbounded fork must not be honoured because the lock is poisoned"
+        );
+    }
 
     /// C-12 regression: the `PoS` engine validates `block.epoch == block.index /
     /// Config.epoch_length`, while the chain layer derives epoch boundaries
