@@ -140,9 +140,9 @@ fn requiring_real_engines_refuses_a_model_block_without_writing() {
 
     let mut strict = ExecutionCoordinator::new();
     strict.set_require_real_engines(true);
-    assert_eq!(strict.first_refused_environment(&[tx.clone()]), Some(EeId::EVM));
+    assert_eq!(strict.first_refused_environment(std::slice::from_ref(&tx)), Some(EeId::EVM));
 
-    let refused = strict.execute_block(&mut state, ctx(), proposer, &[tx.clone()]);
+    let refused = strict.execute_block(&mut state, ctx(), proposer, std::slice::from_ref(&tx));
     assert_eq!(
         refused,
         Err(CoordinatorError::ModelEngineRefused { ee: EeId::EVM }),
@@ -161,7 +161,7 @@ fn the_gate_is_opt_in_and_the_default_still_executes() {
     let tx = signed_evm_deploy(sender).expect("signed deploy");
 
     let mut devnet = ExecutionCoordinator::new();
-    assert_eq!(devnet.first_refused_environment(&[tx.clone()]), None);
+    assert_eq!(devnet.first_refused_environment(std::slice::from_ref(&tx)), None);
     let receipts = devnet
         .execute_block(&mut state, ctx(), proposer, &[tx])
         .expect("the stand-in still executes when the chain allows it");
