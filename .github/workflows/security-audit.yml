@@ -462,6 +462,11 @@ jobs:
 
   scorecard:
     name: OpenSSF Scorecard
+    # The action refuses any non-default branch outside a pull request
+    # ("Only the default branch main is supported"), so a manual run on
+    # `testnet` failed here without measuring anything. It still runs on
+    # pull requests, on the schedule and on a manual run of `main`.
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
