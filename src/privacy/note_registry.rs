@@ -96,6 +96,18 @@ impl L1NoteRegistry {
         self.live_commitments.len()
     }
 
+    /// Live commitments recorded for one depositor. The per-owner quota and
+    /// the newcomer reserve are both stated in terms of this count, so the
+    /// two must be measured the same way (a test that re-derives the count
+    /// by hand can drift from the gate).
+    #[must_use]
+    pub fn owner_live_count(&self, owner: &Address) -> usize {
+        self.note_owners
+            .values()
+            .filter(|recorded| *recorded == owner)
+            .count()
+    }
+
     #[must_use]
     pub fn spent_count(&self) -> usize {
         self.spent_nullifiers.len()
@@ -174,26 +186,28 @@ impl L1NoteRegistry {
                 "PrivacyNoteInsert: commitment is not a packed Goldilocks field element".into(),
             );
         }
-        let owner_live = self
-            .note_owners
-            .values()
-            .filter(|recorded| **recorded == owner)
-            .count();
+        let owner_live = self.owner_live_count(&owner);
         if owner_live >= MAX_LIVE_COMMITMENTS_PER_OWNER {
             return Err(format!(
                 "owner live commitment limit reached ({owner_live}/{MAX_LIVE_COMMITMENTS_PER_OWNER})"
             ));
         }
-        if owner_live > 0
-            && self.live_commitments.len()
-                >= MAX_LIVE_COMMITMENTS.saturating_sub(NEWCOMER_RESERVED_COMMITMENTS)
-        {
+        // The reserve line holds repeat accounts back; a first-time owner
+        // (`owner_live == 0`) walks through it into the reserved slots. The
+        // inner `insert_note` still refuses at the global ceiling, which is
+        // what keeps the reserve bounded to exactly
+        // `NEWCOMER_RESERVED_COMMITMENTS` rows.
+        let reserve_line = MAX_LIVE_COMMITMENTS.saturating_sub(NEWCOMER_RESERVED_COMMITMENTS);
+        if owner_live > 0 && self.live_commitments.len() >= reserve_line {
             return Err(format!(
-                "non-newcomer live commitment pool reached ({}/{}) - newcomer reserve active",
-                self.live_commitments.len(),
-                MAX_LIVE_COMMITMENTS.saturating_sub(NEWCOMER_RESERVED_COMMITMENTS)
+                "non-newcomer live commitment pool reached ({}/{reserve_line}) - newcomer reserve active",
+                self.live_commitments.len()
             ));
         }
+        // A first-time owner past the reserve line must not be admitted
+        // half-way: admit first, then record, so a refused insert leaves no
+        // depositor ledger entry behind (the ledger is quota bookkeeping and
+        // a ghost row would burn a slot of the owner's quota).
         self.insert_note(commitment)?;
         self.note_owners.insert(hex::encode(commitment), owner);
         Ok(())
@@ -265,11 +279,7 @@ impl L1NoteRegistry {
                 recorded_spent_keys.insert(key);
             }
         }
-        let owner_live = self
-            .note_owners
-            .values()
-            .filter(|recorded| **recorded == *spender)
-            .count();
+        let owner_live = self.owner_live_count(spender);
         let projected_owner_live = owner_live
             .saturating_sub(recorded_spent_keys.len())
             .saturating_add(output_commitments.len());
@@ -905,6 +915,71 @@ mod h3_tests {
         let c = budlum_note_packing::hash_from_field(77);
         r.spent_commitments.insert(c);
         assert!(!r.is_empty());
+    }
+
+    /// The new-account reserve must be reachable: a fresh owner deposits into
+    /// the last 4 096 slots after repeat accounts have filled everything above
+    /// the reserve line, and stops at the global ceiling. Measured at the
+    /// gate: the reserve branch keys on `owner_live == 0`, the inner insert
+    /// still refuses at `MAX_LIVE_COMMITMENTS`, so the reserve is exactly
+    /// `NEWCOMER_RESERVED_COMMITMENTS` rows wide - no wider.
+    ///
+    /// The precondition is seeded through the fields the gate reads (this
+    /// module owns them): driving 61 440 real inserts through the per-owner
+    /// path would measure the same branch with O(n^2) bookkeeping instead of
+    /// O(1) per call, and the branch under test is the reserve line, not the
+    /// fill.
+    #[test]
+    fn newcomer_reserve_admits_a_first_time_owner_after_repeat_accounts_fill_the_pool() {
+        let mut r = L1NoteRegistry::new();
+        let reserve_line = MAX_LIVE_COMMITMENTS - NEWCOMER_RESERVED_COMMITMENTS;
+        let reserve = NEWCOMER_RESERVED_COMMITMENTS;
+        let repeat = Address::from([0x01; 32]);
+        // Seed 1 note for repeat owner, and the remaining reserve_line - 1
+        // notes for various distinct accounts (none exceeding the 64 cap).
+        let c0 = budlum_note_packing::hash_from_field(1);
+        r.live_commitments.insert(c0);
+        r.note_owners.insert(hex::encode(c0), repeat);
+        for i in 1..reserve_line as u64 {
+            let c = budlum_note_packing::hash_from_field(i + 1);
+            r.live_commitments.insert(c);
+            let mut owner_bytes = [0u8; 32];
+            owner_bytes[0..8].copy_from_slice(&(i / 64 + 2).to_le_bytes());
+            r.note_owners
+                .insert(hex::encode(c), Address::from(owner_bytes));
+        }
+        assert_eq!(r.live_count(), reserve_line);
+        assert_eq!(r.owner_live_count(&repeat), 1);
+        // The line holds: a repeat account (owner_live = 1 < 64) is refused
+        // specifically by the reserve branch, not by the per-owner cap.
+        let err = r
+            .insert_note_for_owner(budlum_note_packing::hash_from_field(0x8000_0000), repeat)
+            .unwrap_err();
+        assert!(
+            err.contains("newcomer reserve active"),
+            "unexpected error: {err}"
+        );
+        // A first-time owner crosses the line into the reserve.
+        let newcomer = Address::from([0xEE; 32]);
+        r.insert_note_for_owner(budlum_note_packing::hash_from_field(0x8000_0001), newcomer)
+            .expect("the newcomer reserve must admit a first-time owner");
+        assert_eq!(r.owner_live_count(&newcomer), 1);
+        assert_eq!(r.live_count(), reserve_line + 1);
+        // Fill the reserve to the brim; the global ceiling still holds for a
+        // second newcomer, so the reserve cannot be used to pass the cap.
+        for i in 0..(reserve as u64 - 1) {
+            let c = budlum_note_packing::hash_from_field(0x8000_0002 + i);
+            r.live_commitments.insert(c);
+        }
+        assert_eq!(r.live_count(), MAX_LIVE_COMMITMENTS);
+        let late = Address::from([0xDD; 32]);
+        let err = r
+            .insert_note_for_owner(budlum_note_packing::hash_from_field(0x9000_0000), late)
+            .unwrap_err();
+        assert!(
+            err.contains("live commitment set full"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
