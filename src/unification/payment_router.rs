@@ -778,11 +778,12 @@ fn required_source_for_target(
 ///
 /// The debit is re-derived from the quote's own rate and fee instead of being
 /// read from the leg, so a leg that charges another fee than its quote, draws
-/// on another source asset, or debits any other amount is refused before a
-/// balance moves. Conservation over the receipt cannot see this on its own:
-/// it takes each leg's fee as debit minus delivery, so a leg planned with no
-/// fee balances just as well as one planned with the quoted fee. A direct leg
-/// moves the same asset one to one and charges nothing.
+/// on another source asset, targets another receipt asset, or debits any other
+/// amount is refused before a balance moves. Conservation over the receipt
+/// cannot see this on its own: it takes each leg's fee as debit minus delivery,
+/// so a leg planned with no fee balances just as well as one planned with the
+/// quoted fee. A direct leg moves the receipt's target asset one to one and
+/// charges nothing.
 ///
 /// # Errors
 ///
@@ -794,23 +795,31 @@ fn verify_leg_against_target(
     expected_target_domain: DomainId,
     expected_target_asset_id: Hash32,
 ) -> Result<u128, PaymentError> {
-    let _ = (expected_target_domain, expected_target_asset_id);
     let Some(quote) = quote else {
-        if !leg.direct_same_domain || leg.fee_bps != 0 || leg.source_debited != leg.target_delivered
+        let source_is_target = leg.source_domain == expected_target_domain
+            && leg.source_asset_id == expected_target_asset_id;
+        if !leg.direct_same_domain
+            || !source_is_target
+            || leg.fee_bps != 0
+            || leg.source_debited != leg.target_delivered
         {
             return Err(PaymentError::InvalidIntent(String::from(
-                "a split-tender leg without a quote must move the same amount and charge no fee",
+                "a direct split-tender leg must move the target asset one to one with no fee",
             )));
         }
         return Ok(leg.source_debited);
     };
+    let source_matches_quote =
+        leg.source_domain == quote.source_domain && leg.source_asset_id == quote.source_asset_id;
+    let quote_targets_receipt = quote.target_domain == expected_target_domain
+        && quote.target_asset_id == expected_target_asset_id;
     if leg.direct_same_domain
         || leg.fee_bps != quote.fee_bps
-        || leg.source_domain != quote.source_domain
-        || leg.source_asset_id != quote.source_asset_id
+        || !source_matches_quote
+        || !quote_targets_receipt
     {
         return Err(PaymentError::InvalidIntent(String::from(
-            "split-tender leg does not match the source asset and fee of its quote",
+            "split-tender leg and quote do not match the source, target, and fee",
         )));
     }
     let charged =
