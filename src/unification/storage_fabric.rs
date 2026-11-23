@@ -1039,10 +1039,17 @@ impl UnifiedStorageFabric {
         let Some(record_mut) = self.objects.get_mut(digest) else {
             return Err(StorageFabricError::NotFound(hex::encode(digest)));
         };
-        if !record_mut.replicas.iter().any(|r| {
+        if let Some(existing) = record_mut.replicas.iter_mut().find(|r| {
             r.network == verified_replica.network
                 && r.native_locator == verified_replica.native_locator
         }) {
+            if verified_replica.verification > existing.verification {
+                existing.verification = verified_replica.verification;
+            }
+            existing.domain_id = verified_replica.domain_id;
+            existing.available = verified_replica.available;
+            existing.latency_ms = verified_replica.latency_ms;
+        } else {
             record_mut.replicas.push(verified_replica);
         }
         let next_hash = record_mut.record_hash();
@@ -1324,5 +1331,57 @@ mod tests {
             Err(StorageFabricError::FabricFull)
         ));
         assert!(fabric.bind_bns_name("site0000.bud", digest).is_ok());
+    }
+
+    #[test]
+    fn verify_and_attach_replica_upgrades_existing_attested_deal_strength() {
+        let mut fabric = UnifiedStorageFabric::new();
+        let mut rec = UnifiedContentRecord::from_bytes(b"upgradeable-bud3-payload", "text/plain");
+        let digest = rec.sha3_256_digest;
+        let locator = hex::encode(digest);
+        rec.replicas.push(StorageReplica {
+            network: StorageNetworkKind::Bud3,
+            domain_id: StorageNetworkKind::Bud3.default_domain_id(),
+            native_locator: locator.clone(),
+            verification: VerificationStrength::AttestedDeal,
+            available: true,
+            latency_ms: 9,
+        });
+        let initial_hash = fabric.register_object(rec).expect("register attested deal");
+        let initial_root = fabric.state_root();
+        let uri = format!("bud://{locator}");
+        assert!(fabric
+            .resolve(&uri, VerificationStrength::ErasureVerified)
+            .is_err());
+
+        let upgraded_hash = fabric
+            .verify_and_attach_replica(
+                &digest,
+                StorageReplica {
+                    network: StorageNetworkKind::Bud3,
+                    domain_id: StorageNetworkKind::Bud3.default_domain_id(),
+                    native_locator: locator,
+                    verification: VerificationStrength::ErasureVerified,
+                    available: true,
+                    latency_ms: 3,
+                },
+                &StorageReplicaProof::Bud3Custody {
+                    data_shards: 4,
+                    parity_shards: 2,
+                    custody_merkle_root: [0xAB; 32],
+                },
+            )
+            .expect("upgrade attested replica with Bud3Custody proof");
+        assert_ne!(upgraded_hash, initial_hash);
+        assert_ne!(fabric.state_root(), initial_root);
+
+        let resolved = fabric
+            .resolve(&uri, VerificationStrength::ErasureVerified)
+            .expect("resolves at ErasureVerified after proof upgrade");
+        assert_eq!(
+            resolved.primary.verification,
+            VerificationStrength::ErasureVerified
+        );
+        assert_eq!(resolved.primary.latency_ms, 3);
     }
 }
