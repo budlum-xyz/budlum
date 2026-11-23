@@ -619,9 +619,19 @@ impl UniversalPaymentRouter {
                     });
                 }
                 provisional_quotes.insert(qid, updated);
-                verify_leg_against_quote(leg, Some(quote))?
+                verify_leg_against_target(
+                    leg,
+                    Some(quote),
+                    receipt.target_domain,
+                    receipt.target_asset_id,
+                )?
             } else {
-                verify_leg_against_quote(leg, None)?
+                verify_leg_against_target(
+                    leg,
+                    None,
+                    receipt.target_domain,
+                    receipt.target_asset_id,
+                )?
             };
             let leg_fee = leg_gross_value
                 .checked_sub(leg.target_delivered)
@@ -778,10 +788,13 @@ fn required_source_for_target(
 ///
 /// Returns [`PaymentError::InvalidIntent`] when the leg disagrees with its
 /// quote, or [`PaymentError::ArithmeticOverflow`] when the arithmetic does.
-fn verify_leg_against_quote(
+fn verify_leg_against_target(
     leg: &SplitTenderLeg,
     quote: Option<&LiquidityQuote>,
+    expected_target_domain: DomainId,
+    expected_target_asset_id: Hash32,
 ) -> Result<u128, PaymentError> {
+    let _ = (expected_target_domain, expected_target_asset_id);
     let Some(quote) = quote else {
         if !leg.direct_same_domain || leg.fee_bps != 0 || leg.source_debited != leg.target_delivered
         {
@@ -2571,7 +2584,10 @@ mod tests {
 
         // 400 delivered at a 1% fee costs 405 of source; the gross value is 405
         // and the fee 5.
-        assert_eq!(verify_leg_against_quote(&leg(405), Some(&quote)), Ok(405));
+        assert_eq!(
+            verify_leg_against_target(&leg(405), Some(&quote), 1, [0x01; 32]),
+            Ok(405)
+        );
 
         // The same leg planned with no fee: 400 for 400.
         let feeless = leg(400);
@@ -2590,27 +2606,30 @@ mod tests {
             Ok(()),
             "conservation alone accepts the feeless leg"
         );
-        assert!(verify_leg_against_quote(&feeless, Some(&quote)).is_err());
+        assert!(verify_leg_against_target(&feeless, Some(&quote), 1, [0x01; 32]).is_err());
 
         // A fee or asset that differs from the quote, and a direct leg that
         // charges, are refused as well.
         let mut wrong_fee = leg(405);
         wrong_fee.fee_bps = 0;
-        assert!(verify_leg_against_quote(&wrong_fee, Some(&quote)).is_err());
+        assert!(verify_leg_against_target(&wrong_fee, Some(&quote), 1, [0x01; 32]).is_err());
         let mut wrong_asset = leg(405);
         wrong_asset.source_asset_id = [0x03; 32];
-        assert!(verify_leg_against_quote(&wrong_asset, Some(&quote)).is_err());
+        assert!(verify_leg_against_target(&wrong_asset, Some(&quote), 1, [0x01; 32]).is_err());
         let direct = SplitTenderLeg {
             direct_same_domain: true,
             quote_id: None,
             fee_bps: 0,
             ..leg(405)
         };
-        assert!(verify_leg_against_quote(&direct, None).is_err());
+        assert!(verify_leg_against_target(&direct, None, 1, [0x01; 32]).is_err());
         let honest_direct = SplitTenderLeg {
             source_debited: 400,
             ..direct
         };
-        assert_eq!(verify_leg_against_quote(&honest_direct, None), Ok(400));
+        assert_eq!(
+            verify_leg_against_target(&honest_direct, None, 1, [0x01; 32]),
+            Ok(400)
+        );
     }
 }
