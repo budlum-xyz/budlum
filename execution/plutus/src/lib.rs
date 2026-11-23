@@ -158,9 +158,13 @@ fn owner_key(hash32: &[u8; 32]) -> Vec<u8> {
     k
 }
 
+/// Maximum CEK AST nesting depth per call (prevents native call-stack exhaustion).
+const MAX_UPLC_DEPTH: usize = 64;
+
 fn derive_script_hash(caller: &[u8], tx_hash: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"BDLM_PLUTUS_SCRIPT_V1");
+    h.update((caller.len() as u64).to_le_bytes());
     h.update(caller);
     h.update(tx_hash);
     h.finalize().into()
@@ -191,7 +195,11 @@ fn eval_uplc(
     term: &UplcTerm,
     ev: &mut EvalCtx<'_>,
     host: &mut dyn HostApi,
+    depth: usize,
 ) -> Result<UplcVal, Vec<u8>> {
+    if depth > MAX_UPLC_DEPTH {
+        return Err(b"UPLC recursion depth exceeded".to_vec());
+    }
     ev.steps += 1;
     if ev.steps > MAX_UPLC_STEPS {
         return Err(b"UPLC step budget exhausted".to_vec());
@@ -203,6 +211,7 @@ fn eval_uplc(
         return Err(b"OUT_OF_GAS".to_vec());
     }
     ev.gas_used = next;
+    let next_depth = depth + 1;
 
     match term {
         UplcTerm::ConstInt(n) => Ok(UplcVal::Int(*n)),
@@ -213,22 +222,31 @@ fn eval_uplc(
         UplcTerm::CtxHeight => Ok(UplcVal::Int(i64::try_from(ev.height).unwrap_or(i64::MAX))),
         UplcTerm::Signatory => Ok(UplcVal::Bytes(ev.signatory.to_vec())),
         UplcTerm::Owner => Ok(UplcVal::Bytes(ev.owner.to_vec())),
-        UplcTerm::Add(a, b) => match (eval_uplc(a, ev, host)?, eval_uplc(b, ev, host)?) {
+        UplcTerm::Add(a, b) => match (
+            eval_uplc(a, ev, host, next_depth)?,
+            eval_uplc(b, ev, host, next_depth)?,
+        ) {
             (UplcVal::Int(x), UplcVal::Int(y)) => x
                 .checked_add(y)
                 .map(UplcVal::Int)
                 .ok_or_else(|| b"UPLC int overflow".to_vec()),
             _ => Err(b"UPLC Add type error".to_vec()),
         },
-        UplcTerm::EqualsInt(a, b) => match (eval_uplc(a, ev, host)?, eval_uplc(b, ev, host)?) {
+        UplcTerm::EqualsInt(a, b) => match (
+            eval_uplc(a, ev, host, next_depth)?,
+            eval_uplc(b, ev, host, next_depth)?,
+        ) {
             (UplcVal::Int(x), UplcVal::Int(y)) => Ok(UplcVal::Bool(x == y)),
             _ => Err(b"UPLC EqualsInt type error".to_vec()),
         },
-        UplcTerm::EqualsBytes(a, b) => match (eval_uplc(a, ev, host)?, eval_uplc(b, ev, host)?) {
+        UplcTerm::EqualsBytes(a, b) => match (
+            eval_uplc(a, ev, host, next_depth)?,
+            eval_uplc(b, ev, host, next_depth)?,
+        ) {
             (UplcVal::Bytes(x), UplcVal::Bytes(y)) => Ok(UplcVal::Bool(x == y)),
             _ => Err(b"UPLC EqualsBytes type error".to_vec()),
         },
-        UplcTerm::Sha256(inner) => match eval_uplc(inner, ev, host)? {
+        UplcTerm::Sha256(inner) => match eval_uplc(inner, ev, host, next_depth)? {
             UplcVal::Bytes(b) => {
                 let d: [u8; 32] = Sha256::digest(&b).into();
                 Ok(UplcVal::Bytes(d.to_vec()))
@@ -239,13 +257,13 @@ fn eval_uplc(
             cond,
             then_branch,
             else_branch,
-        } => match eval_uplc(cond, ev, host)? {
-            UplcVal::Bool(true) => eval_uplc(then_branch, ev, host),
-            UplcVal::Bool(false) => eval_uplc(else_branch, ev, host),
+        } => match eval_uplc(cond, ev, host, next_depth)? {
+            UplcVal::Bool(true) => eval_uplc(then_branch, ev, host, next_depth),
+            UplcVal::Bool(false) => eval_uplc(else_branch, ev, host, next_depth),
             _ => Err(b"UPLC IfThenElse expects Bool".to_vec()),
         },
         UplcTerm::TraceUnit(inner) => {
-            let _ = eval_uplc(inner, ev, host)?;
+            let _ = eval_uplc(inner, ev, host, next_depth)?;
             Ok(UplcVal::Unit)
         }
         UplcTerm::Error => Err(b"UPLC Error term reached".to_vec()),
@@ -324,7 +342,7 @@ impl ExecutionEnvironment for PlutusWorker {
                 gas_used: 0,
             });
         }
-        let gas_used = 1_000u64;
+        let mut gas_used = 1_000u64;
         if gas_used > call.gas_limit || host.charge(gas_used).is_err() {
             return Ok(EeOutcome {
                 status: OutcomeStatus::OutOfGas,
@@ -341,7 +359,51 @@ impl ExecutionEnvironment for PlutusWorker {
                     gas_used,
                 });
             };
+            // Published code is permanent state every validator keeps:
+            // the deploy pays the shared per-byte publication rate.
+            let publish_gas = u64::try_from(call.input.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(25);
+            gas_used = gas_used.saturating_add(publish_gas);
+            if gas_used > call.gas_limit || host.charge(publish_gas).is_err() {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                });
+            }
             let script_hash = derive_script_hash(&call.caller.id, &call.tx_hash);
+            match host.read(&ns, &script_key(&script_hash)) {
+                Ok(Some(_)) => {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"Plutus script already deployed".to_vec(),
+                        gas_used,
+                    });
+                }
+                Ok(None) => {}
+                Err(budlum_uel_abi::HostError::OutOfGas) => {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::OutOfGas,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    });
+                }
+                Err(_) => {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"Plutus script read failed".to_vec(),
+                        gas_used,
+                    });
+                }
+            }
+            let Ok(cp) = host.checkpoint_begin() else {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"Plutus checkpoint begin failed".to_vec(),
+                    gas_used,
+                });
+            };
             if host
                 .write(&ns, &script_key(&script_hash), Some(&call.input))
                 .is_err()
@@ -355,7 +417,9 @@ impl ExecutionEnvironment for PlutusWorker {
                 || host
                     .write(&ns, &owner_key(&script_hash), Some(&call.caller.id))
                     .is_err()
+                || host.checkpoint_commit(cp).is_err()
             {
+                let _ = host.checkpoint_rollback(cp);
                 return Ok(EeOutcome {
                     status: OutcomeStatus::Revert,
                     output: b"Plutus state write failed".to_vec(),
@@ -397,18 +461,52 @@ impl ExecutionEnvironment for PlutusWorker {
                 gas_used,
             });
         };
-        let cur_datum = host
-            .read(&ns, &datum_key(&script_hash))
-            .ok()
-            .flatten()
-            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
-            .map_or(prog.initial_datum_int, i64::from_le_bytes);
+        let cur_datum = match host.read(&ns, &datum_key(&script_hash)) {
+            Ok(Some(raw)) => {
+                let Ok(arr) = <[u8; 8]>::try_from(raw.as_slice()) else {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"corrupt Plutus datum".to_vec(),
+                        gas_used,
+                    });
+                };
+                i64::from_le_bytes(arr)
+            }
+            Ok(None) => prog.initial_datum_int,
+            Err(budlum_uel_abi::HostError::OutOfGas) => {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                });
+            }
+            Err(_) => {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"Plutus datum read failed".to_vec(),
+                    gas_used,
+                });
+            }
+        };
 
-        let owner = host
-            .read(&ns, &owner_key(&script_hash))
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let owner = match host.read(&ns, &owner_key(&script_hash)) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => Vec::new(),
+            Err(budlum_uel_abi::HostError::OutOfGas) => {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                });
+            }
+            Err(_) => {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"Plutus owner read failed".to_vec(),
+                    gas_used,
+                });
+            }
+        };
         let mut ev = EvalCtx {
             datum_int: cur_datum,
             redeemer_int: spend.redeemer_int,
@@ -420,7 +518,7 @@ impl ExecutionEnvironment for PlutusWorker {
             gas_used,
             gas_limit: call.gas_limit,
         };
-        let val = match eval_uplc(&prog.validator, &mut ev, host) {
+        let val = match eval_uplc(&prog.validator, &mut ev, host, 0) {
             Ok(v) => v,
             Err(e) if e == b"OUT_OF_GAS" => {
                 return Ok(EeOutcome {
@@ -437,13 +535,23 @@ impl ExecutionEnvironment for PlutusWorker {
                 });
             }
         };
-        if matches!(val, UplcVal::Bool(false)) {
+        if matches!(
+            val,
+            UplcVal::Bool(false) | UplcVal::Int(0) | UplcVal::Bytes(_)
+        ) {
             return Ok(EeOutcome {
                 status: OutcomeStatus::Revert,
                 output: b"UPLC validator returned false".to_vec(),
                 gas_used: ev.gas_used,
             });
         }
+        let Ok(cp) = host.checkpoint_begin() else {
+            return Ok(EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: b"Plutus checkpoint begin failed".to_vec(),
+                gas_used: ev.gas_used,
+            });
+        };
         if let Some(next_datum) = spend.new_datum_int {
             if host
                 .write(
@@ -453,6 +561,7 @@ impl ExecutionEnvironment for PlutusWorker {
                 )
                 .is_err()
             {
+                let _ = host.checkpoint_rollback(cp);
                 return Ok(EeOutcome {
                     status: OutcomeStatus::Revert,
                     output: b"Plutus datum update failed".to_vec(),
@@ -460,14 +569,25 @@ impl ExecutionEnvironment for PlutusWorker {
                 });
             }
         }
-        let _ = host.emit_log(EeLog {
-            emitter: EeIdentity {
-                ee: EeId::PLUTUS,
-                id: script_hash.to_vec(),
-            },
-            topics: vec![script_hash.to_vec()],
-            data: spend.redeemer_int.to_le_bytes().to_vec(),
-        });
+        if host
+            .emit_log(EeLog {
+                emitter: EeIdentity {
+                    ee: EeId::PLUTUS,
+                    id: script_hash.to_vec(),
+                },
+                topics: vec![script_hash.to_vec()],
+                data: spend.redeemer_int.to_le_bytes().to_vec(),
+            })
+            .is_err()
+            || host.checkpoint_commit(cp).is_err()
+        {
+            let _ = host.checkpoint_rollback(cp);
+            return Ok(EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: b"Plutus commit failed".to_vec(),
+                gas_used: ev.gas_used,
+            });
+        }
         Ok(EeOutcome {
             status: OutcomeStatus::Success,
             output: cur_datum.to_le_bytes().to_vec(),
@@ -825,5 +945,272 @@ mod tests {
         let out = set_datum(&mut worker, &mut host, &bob, &named, 13);
         assert_eq!(out.status, OutcomeStatus::Success);
         assert_eq!(datum(&worker, &host, &named), 13);
+    }
+
+    #[test]
+    fn validator_rejects_zero_int_and_bytes_returns() {
+        let mut worker = PlutusWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(2_000_000);
+        let Ok(alice) = EeIdentity::new(EeId::PLUTUS, vec![0x33; 32]) else {
+            panic!("caller");
+        };
+        for (idx, term) in [UplcTerm::ConstInt(0), UplcTerm::ConstBytes(vec![1, 2, 3])]
+            .into_iter()
+            .enumerate()
+        {
+            let Ok(blob) = encode_plutus_blob(&PlutusValidatorProgram {
+                uplc_version: String::from("1.1.0"),
+                initial_datum_int: 7,
+                validator: term,
+            }) else {
+                panic!("blob");
+            };
+            let Ok(dep) = worker.execute(
+                &ctx(),
+                &EeCall {
+                    kind: EeCallKind::Deploy,
+                    caller: alice.clone(),
+                    target: alice.clone(),
+                    value: budlum_uel_abi::BudAmount(0),
+                    input: blob,
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0xC0 + idx as u8; 32],
+                },
+                &mut host,
+            ) else {
+                panic!("deploy");
+            };
+            assert_eq!(dep.status, OutcomeStatus::Success);
+            let Ok(target) = EeIdentity::new(EeId::PLUTUS, dep.output) else {
+                panic!("target");
+            };
+            let Ok(spend_in) = serde_json::to_vec(&PlutusSpendInput {
+                new_datum_int: Some(99),
+                redeemer_int: 0,
+                redeemer_bytes: Vec::new(),
+            }) else {
+                panic!("json");
+            };
+            let Ok(res) = worker.execute(
+                &ctx(),
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: alice.clone(),
+                    target,
+                    value: budlum_uel_abi::BudAmount(0),
+                    input: spend_in,
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0xD0 + idx as u8; 32],
+                },
+                &mut host,
+            ) else {
+                panic!("call");
+            };
+            assert_eq!(res.status, OutcomeStatus::Revert);
+        }
+    }
+
+    #[test]
+    fn spend_fails_closed_when_datum_host_read_errors() {
+        use budlum_uel_abi::{
+            BudAmount, HostError, HostRead, OutOfGas, UniversalCall, UniversalResult,
+        };
+
+        struct FailingDatumHost {
+            inner: MemoryHost,
+        }
+        impl HostRead for FailingDatumHost {
+            fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+                if key.starts_with(b"datum:") {
+                    return Err(HostError::Invalid("injected datum read error".into()));
+                }
+                self.inner.read(ns, key)
+            }
+            fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+                self.inner.bud_balance(who)
+            }
+        }
+        impl HostApi for FailingDatumHost {
+            fn write(
+                &mut self,
+                ns: &Namespace,
+                key: &[u8],
+                value: Option<&[u8]>,
+            ) -> Result<(), HostError> {
+                self.inner.write(ns, key, value)
+            }
+            fn universal_call(
+                &mut self,
+                call: UniversalCall,
+            ) -> Result<UniversalResult, HostError> {
+                self.inner.universal_call(call)
+            }
+            fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+                self.inner.emit_log(log)
+            }
+            fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+                self.inner.charge(bgu)
+            }
+            fn bud_transfer(
+                &mut self,
+                from: &EeIdentity,
+                to: &EeIdentity,
+                attos: u128,
+            ) -> Result<(), HostError> {
+                self.inner.bud_transfer(from, to, attos)
+            }
+            fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+                self.inner.checkpoint_begin()
+            }
+            fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_commit(id)
+            }
+            fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_rollback(id)
+            }
+        }
+
+        let mut worker = PlutusWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(2_000_000);
+        let Ok(alice) = EeIdentity::new(EeId::PLUTUS, vec![0x71; 32]) else {
+            panic!("alice");
+        };
+        let Ok(blob) = encode_plutus_blob(&PlutusValidatorProgram {
+            uplc_version: String::from("1.1.0"),
+            initial_datum_int: 10,
+            validator: UplcTerm::ConstInt(1),
+        }) else {
+            panic!("blob");
+        };
+        let Ok(dep) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice.clone(),
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xE1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        let Ok(target) = EeIdentity::new(EeId::PLUTUS, dep.output) else {
+            panic!("target");
+        };
+        let Ok(spend1_in) = serde_json::to_vec(&PlutusSpendInput {
+            new_datum_int: Some(50),
+            redeemer_int: 1,
+            redeemer_bytes: Vec::new(),
+        }) else {
+            panic!("json");
+        };
+        let Ok(spend1) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: alice.clone(),
+                target: target.clone(),
+                value: BudAmount(0),
+                input: spend1_in,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xE2; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("spend1");
+        };
+        assert_eq!(spend1.status, OutcomeStatus::Success);
+
+        let mut faulty = FailingDatumHost { inner: host };
+        let Ok(spend2_in) = serde_json::to_vec(&PlutusSpendInput {
+            new_datum_int: None,
+            redeemer_int: 2,
+            redeemer_bytes: Vec::new(),
+        }) else {
+            panic!("json");
+        };
+        let Ok(spend2) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: alice,
+                target,
+                value: BudAmount(0),
+                input: spend2_in,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xE3; 32],
+            },
+            &mut faulty,
+        ) else {
+            panic!("spend2");
+        };
+        assert_eq!(
+            spend2.status,
+            OutcomeStatus::Revert,
+            "datum host.read error must fail closed instead of rolling back to initial_datum_int"
+        );
+    }
+
+    #[test]
+    fn plutus_deploy_charges_per_byte_of_published_blob() {
+        let mut worker = PlutusWorker::with_activation_height(Some(0));
+        let prog = PlutusValidatorProgram {
+            uplc_version: String::from("1.1.0"),
+            initial_datum_int: 1,
+            validator: UplcTerm::ConstBytes(vec![0xAB; 600]),
+        };
+        let Ok(blob) = encode_plutus_blob(&prog) else {
+            panic!("blob");
+        };
+        let expected_gas = 1_000 + (blob.len() as u64) * 25;
+        let Ok(alice) = EeIdentity::new(EeId::PLUTUS, vec![0x99; 32]) else {
+            panic!("alice");
+        };
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(low) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice.clone(),
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob.clone(),
+                gas_limit: expected_gas - 1,
+                depth: 0,
+                tx_hash: [0xD1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low");
+        };
+        assert_eq!(low.status, OutcomeStatus::OutOfGas);
+
+        let Ok(ok) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice,
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob,
+                gas_limit: expected_gas,
+                depth: 0,
+                tx_hash: [0xD2; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("ok");
+        };
+        assert_eq!(ok.status, OutcomeStatus::Success);
+        assert_eq!(ok.gas_used, expected_gas);
     }
 }

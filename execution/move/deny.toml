@@ -1,6 +1,6 @@
 # Supply-chain policy for the standalone `budlum-ee-move` worker.
 #
-# Per Section 8.14 item 4 and IP-32 item 7 of THE BUDLUM DIREKTIF, any
+# Move VM worker dependency policy: any
 # `unknown-git` source exception for `aptos-core` is confined strictly to this
 # file and pinned to an exact 40-hex commit SHA.
 

@@ -255,8 +255,13 @@ fn run_rv32em(
                 }
             }
             PolkaVmInsn::SealInputU32 { rd, word_index } => {
-                let off = (word_index as usize).saturating_mul(4);
-                let Some(slice) = args_tail.get(off..off + 4) else {
+                let Some(off) = (word_index as usize).checked_mul(4) else {
+                    return Err(b"SEAL_INPUT_OOB");
+                };
+                let Some(end) = off.checked_add(4) else {
+                    return Err(b"SEAL_INPUT_OOB");
+                };
+                let Some(slice) = args_tail.get(off..end) else {
                     return Err(b"SEAL_INPUT_OOB");
                 };
                 let Ok(arr) = <[u8; 4]>::try_from(slice) else {
@@ -275,13 +280,17 @@ fn run_rv32em(
             }
             PolkaVmInsn::SealGetStorageU32 { rd, slot } => {
                 let sk = stor_key(scope.contract, &slot);
-                let val = host
-                    .read(scope.ns, &sk)
-                    .ok()
-                    .flatten()
-                    .and_then(|b| <[u8; 4]>::try_from(b.as_slice()).ok())
-                    .map(u32::from_le_bytes)
-                    .unwrap_or(0);
+                let val = match host.read(scope.ns, &sk) {
+                    Ok(Some(bytes)) => {
+                        let Ok(arr) = <[u8; 4]>::try_from(bytes.as_slice()) else {
+                            return Err(b"SEAL_STORAGE_CORRUPT");
+                        };
+                        u32::from_le_bytes(arr)
+                    }
+                    Ok(None) => 0,
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS"),
+                    Err(_) => return Err(b"SEAL_STORAGE_READ_ERR"),
+                };
                 if let Some(r) = regs.get_mut(rd as usize) {
                     *r = val;
                 }
@@ -400,17 +409,41 @@ impl ExecutionEnvironment for PolkaVmWorker {
             let Ok(prog) = decode_polkavm_blob(&call.input) else {
                 return Ok(ee_reverted(b"bad PolkaVM blob".to_vec(), gas_used));
             };
+            // Published code is permanent state every validator keeps:
+            // the deploy pays the shared per-byte publication rate.
+            let publish_gas = u64::try_from(call.input.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(25);
+            gas_used = gas_used.saturating_add(publish_gas);
+            if gas_used > call.gas_limit || host.charge(publish_gas).is_err() {
+                return Ok(ee_out_of_gas(call.gas_limit));
+            }
             let addr = derive_contract_addr(&caller32, &call.tx_hash);
+            match host.read(&ns, &code_key(&addr)) {
+                Ok(Some(_)) => {
+                    return Ok(ee_reverted(
+                        b"PolkaVM contract already deployed".to_vec(),
+                        gas_used,
+                    ));
+                }
+                Ok(None) => {}
+                Err(budlum_uel_abi::HostError::OutOfGas) => {
+                    return Ok(ee_out_of_gas(call.gas_limit));
+                }
+                Err(_) => {
+                    return Ok(ee_reverted(b"PolkaVM code read err".to_vec(), gas_used));
+                }
+            }
+            let Ok(cp) = host.checkpoint_begin() else {
+                return Ok(ee_reverted(b"checkpoint begin err".to_vec(), gas_used));
+            };
             if host
                 .write(&ns, &code_key(&addr), Some(&call.input))
                 .is_err()
+                || host.write(&ns, &owner_key(&addr), Some(&caller32)).is_err()
             {
+                let _ = host.checkpoint_rollback(cp);
                 return Ok(ee_reverted(b"code write err".to_vec(), gas_used));
-            }
-            // The deployer is the owner. The constructor runs as the deployer, so a
-            // `RequireOwner` in it passes.
-            if host.write(&ns, &owner_key(&addr), Some(&caller32)).is_err() {
-                return Ok(ee_reverted(b"owner write err".to_vec(), gas_used));
             }
             let scope = PvmScope {
                 ns: &ns,
@@ -419,9 +452,21 @@ impl ExecutionEnvironment for PolkaVmWorker {
                 gas_limit: call.gas_limit,
             };
             match run_rv32em(&scope, &prog.constructor, &[], &mut gas_used, host) {
-                Ok(_) => Ok(ee_success(addr.to_vec(), gas_used)),
-                Err(b"OUT_OF_GAS") => Ok(ee_out_of_gas(call.gas_limit)),
-                Err(r) => Ok(ee_reverted(r.to_vec(), gas_used)),
+                Ok(_) => {
+                    if host.checkpoint_commit(cp).is_err() {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(ee_reverted(b"checkpoint commit err".to_vec(), gas_used));
+                    }
+                    Ok(ee_success(addr.to_vec(), gas_used))
+                }
+                Err(b"OUT_OF_GAS") => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(ee_out_of_gas(call.gas_limit))
+                }
+                Err(r) => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(ee_reverted(r.to_vec(), gas_used))
+                }
             }
         } else {
             let Ok(target32) = <[u8; 32]>::try_from(call.target.id.as_slice()) else {
@@ -442,6 +487,9 @@ impl ExecutionEnvironment for PolkaVmWorker {
             let Some(disp) = prog.dispatches.iter().find(|d| d.selector == sel_slice) else {
                 return Ok(ee_reverted(b"unknown ink! selector".to_vec(), gas_used));
             };
+            let Ok(cp) = host.checkpoint_begin() else {
+                return Ok(ee_reverted(b"checkpoint begin err".to_vec(), gas_used));
+            };
             let scope = PvmScope {
                 ns: &ns,
                 contract: &target32,
@@ -449,9 +497,21 @@ impl ExecutionEnvironment for PolkaVmWorker {
                 gas_limit: call.gas_limit,
             };
             match run_rv32em(&scope, &disp.insns, args_tail, &mut gas_used, host) {
-                Ok(out) => Ok(ee_success(out, gas_used)),
-                Err(b"OUT_OF_GAS") => Ok(ee_out_of_gas(call.gas_limit)),
-                Err(r) => Ok(ee_reverted(r.to_vec(), gas_used)),
+                Ok(out) => {
+                    if host.checkpoint_commit(cp).is_err() {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(ee_reverted(b"checkpoint commit err".to_vec(), gas_used));
+                    }
+                    Ok(ee_success(out, gas_used))
+                }
+                Err(b"OUT_OF_GAS") => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(ee_out_of_gas(call.gas_limit))
+                }
+                Err(r) => {
+                    let _ = host.checkpoint_rollback(cp);
+                    Ok(ee_reverted(r.to_vec(), gas_used))
+                }
             }
         }
     }
@@ -589,7 +649,7 @@ mod tests {
         assert_eq!(out.output, b"POLKAVM_CLOSED_ON_TESTNET");
     }
 
-    /// Directive IP-53 conformance gate (1/5): `uel_conformance_polkavm`.
+    /// PolkaVM conformance gate: `uel_conformance_polkavm`.
     #[test]
     fn uel_conformance_polkavm() {
         let mut worker = PolkaVmWorker::with_activation_height(Some(0));
@@ -850,5 +910,195 @@ mod tests {
         let out = message(&mut worker, &mut host, &bob, &contract, for_bob, 13);
         assert_eq!(out.status, OutcomeStatus::Success);
         assert_eq!(stored(&worker, &host, &contract, slot), 13);
+    }
+
+    #[test]
+    fn seal_get_storage_and_deploy_fail_closed_on_host_read_error() {
+        use budlum_uel_abi::{HostError, HostRead, OutOfGas, UniversalCall, UniversalResult};
+
+        struct FaultyReadHost {
+            inner: MemoryHost,
+            fail_prefix: &'static [u8],
+        }
+        impl HostRead for FaultyReadHost {
+            fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+                if key.starts_with(self.fail_prefix) {
+                    return Err(HostError::Invalid("injected pvm read error".into()));
+                }
+                self.inner.read(ns, key)
+            }
+            fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+                self.inner.bud_balance(who)
+            }
+        }
+        impl HostApi for FaultyReadHost {
+            fn write(
+                &mut self,
+                ns: &Namespace,
+                key: &[u8],
+                value: Option<&[u8]>,
+            ) -> Result<(), HostError> {
+                self.inner.write(ns, key, value)
+            }
+            fn universal_call(
+                &mut self,
+                call: UniversalCall,
+            ) -> Result<UniversalResult, HostError> {
+                self.inner.universal_call(call)
+            }
+            fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+                self.inner.emit_log(log)
+            }
+            fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+                self.inner.charge(bgu)
+            }
+            fn bud_transfer(
+                &mut self,
+                from: &EeIdentity,
+                to: &EeIdentity,
+                attos: u128,
+            ) -> Result<(), HostError> {
+                self.inner.bud_transfer(from, to, attos)
+            }
+            fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+                self.inner.checkpoint_begin()
+            }
+            fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_commit(id)
+            }
+            fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_rollback(id)
+            }
+        }
+
+        let mut worker = PolkaVmWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(alice) = EeIdentity::new(EeId::POLKAVM, vec![0x51; 32]) else {
+            panic!("alice");
+        };
+        let slot = [0x01; 32];
+        let sel = [0xAA, 0xBB, 0xCC, 0xDD];
+        let prog = PolkaVmProgram {
+            constructor: vec![
+                PolkaVmInsn::LoadImm { rd: 1, imm: 77 },
+                PolkaVmInsn::SealSetStorageU32 { slot, rs: 1 },
+            ],
+            dispatches: vec![PolkaVmDispatch {
+                selector: sel,
+                insns: vec![
+                    PolkaVmInsn::SealGetStorageU32 { rd: 1, slot },
+                    PolkaVmInsn::SealReturnU32 { rs: 1 },
+                ],
+            }],
+        };
+        let contract = deploy_as(&mut worker, &mut host, &alice, &prog);
+        let Ok(blob) = encode_polkavm_blob(&prog) else {
+            panic!("blob");
+        };
+
+        let mut faulty_stor = FaultyReadHost {
+            inner: host,
+            fail_prefix: b"stor:",
+        };
+        let Ok(get_res) = worker.execute(
+            &ctx_open(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: alice.clone(),
+                target: contract,
+                value: BudAmount(0),
+                input: sel.to_vec(),
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xE2; 32],
+            },
+            &mut faulty_stor,
+        ) else {
+            panic!("get");
+        };
+        assert_eq!(
+            get_res.status,
+            OutcomeStatus::Revert,
+            "SealGetStorageU32 must fail closed on host.read error instead of loading 0"
+        );
+
+        let mut faulty_code = FaultyReadHost {
+            inner: faulty_stor.inner,
+            fail_prefix: b"code:",
+        };
+        let Ok(dep_res) = worker.execute(
+            &ctx_open(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice,
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xE1; 32],
+            },
+            &mut faulty_code,
+        ) else {
+            panic!("dep");
+        };
+        assert_eq!(
+            dep_res.status,
+            OutcomeStatus::Revert,
+            "PolkaVM Deploy must fail closed on code: host.read error"
+        );
+    }
+
+    #[test]
+    fn polkavm_deploy_charges_per_byte_of_published_blob() {
+        let mut worker = PolkaVmWorker::with_activation_height(Some(0));
+        let prog = PolkaVmProgram {
+            constructor: vec![PolkaVmInsn::LoadImm { rd: 0, imm: 1 }; 40],
+            dispatches: Vec::new(),
+        };
+        let Ok(blob) = encode_polkavm_blob(&prog) else {
+            panic!("blob");
+        };
+        let expected_base = 1_000 + (blob.len() as u64) * 25;
+        let Ok(alice) = EeIdentity::new(EeId::POLKAVM, vec![0x77; 32]) else {
+            panic!("alice");
+        };
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(low) = worker.execute(
+            &ctx_open(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice.clone(),
+                value: BudAmount(0),
+                input: blob.clone(),
+                gas_limit: expected_base - 1,
+                depth: 0,
+                tx_hash: [0xC1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low");
+        };
+        assert_eq!(low.status, OutcomeStatus::OutOfGas);
+
+        let Ok(ok) = worker.execute(
+            &ctx_open(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice,
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: expected_base + 50_000,
+                depth: 0,
+                tx_hash: [0xC2; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("ok");
+        };
+        assert_eq!(ok.status, OutcomeStatus::Success);
+        assert!(ok.gas_used >= expected_base);
     }
 }

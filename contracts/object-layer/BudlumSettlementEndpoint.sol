@@ -4,6 +4,7 @@
 pragma solidity 0.8.26;
 
 import {BudlumHash} from "../lib/BudlumHash.sol";
+import {FinalityMode} from "../external-domain/BudlumFinalityVerifier.sol";
 import {IBudlumObjectLayerFinality} from "./BudlumFinalityVerifier.sol";
 
 /// @title Budlum settlement endpoint (EVM family).
@@ -20,6 +21,7 @@ contract BudlumSettlementEndpoint {
     uint256 private constant SHIFT_BYTE_1 = 8;
     uint256 private constant SHIFT_BYTE_2 = 16;
     uint256 private constant SHIFT_BYTE_3 = 24;
+    uint256 private constant MAX_SILENCE_WINDOW = 365 days;
 
     IBudlumObjectLayerFinality public immutable verifier;
     /// Seconds without a newly accepted checkpoint before the exit opens.
@@ -30,6 +32,7 @@ contract BudlumSettlementEndpoint {
     /// its object-layer state against this exact checkpoint, not a caller's
     /// unbound choice of header at the same height.
     bytes32 public lastAcceptedHeaderHash;
+    FinalityMode public lastAcceptedFinalityMode;
     uint256 public lastAcceptedAt;
     mapping(address => uint64) public homeNonce;
 
@@ -48,9 +51,16 @@ contract BudlumSettlementEndpoint {
     error NotNewer();
     error NotOpen(string step);
     error InvalidAssetClass();
+    error InvalidEndpointConfig();
+    error HybridFinalityRequired(FinalityMode got);
 
     constructor(IBudlumObjectLayerFinality verifier_, uint256 silenceWindow_) {
-        require(silenceWindow_ > 0, "silence window");
+        if (
+            address(verifier_) == address(0) || address(verifier_).code.length == 0 || silenceWindow_ == 0
+                || silenceWindow_ > MAX_SILENCE_WINDOW
+        ) {
+            revert InvalidEndpointConfig();
+        }
         verifier = verifier_;
         silenceWindow = silenceWindow_;
         lastAcceptedAt = block.timestamp;
@@ -60,11 +70,7 @@ contract BudlumSettlementEndpoint {
     /// ERC-721 would take custody without any possible exit. A caller can also
     /// invoke this hook directly and forge an Arrive event without transferring
     /// a token. Refuse both cases rather than returning the ERC-721 selector.
-    function onERC721Received(address, address, uint256, bytes calldata)
-        external
-        pure
-        returns (bytes4)
-    {
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
         revert NotOpen("object-layer arrival and exit proofs");
     }
 
@@ -85,15 +91,17 @@ contract BudlumSettlementEndpoint {
     /// departure/escape opening; it does not activate custody or exit.
     function acceptHeader(uint64 height) external {
         if (height <= lastAcceptedHeight) revert NotNewer();
-        bytes32 headerHash = _readFinalHeader(height);
+        (bytes32 headerHash, FinalityMode mode) = _readFinalHeader(height);
+        if (mode != FinalityMode.Hybrid) revert HybridFinalityRequired(mode);
         lastAcceptedHeight = height;
         lastAcceptedHeaderHash = headerHash;
+        lastAcceptedFinalityMode = mode;
         lastAcceptedAt = block.timestamp;
         emit HeaderAccepted(height, headerHash);
     }
 
     function silent() external view returns (bool) {
-        return block.timestamp > lastAcceptedAt + silenceWindow;
+        return block.timestamp > lastAcceptedAt && block.timestamp - lastAcceptedAt > silenceWindow;
     }
 
     /// EVM class identity is the Rust `AssetClassId::derive` value, not a
@@ -119,11 +127,7 @@ contract BudlumSettlementEndpoint {
     /// The Rust `AssetId::derive` value. Fungible units have no native id;
     /// ERC-721 token ids are exactly one 32-byte big-endian ABI word. The
     /// class and token id remain stable over repeated arrivals and round trips.
-    function assetId(uint32 homeDomain, uint8 kind, address token, uint256 tokenId)
-        external
-        pure
-        returns (bytes32)
-    {
+    function assetId(uint32 homeDomain, uint8 kind, address token, uint256 tokenId) external pure returns (bytes32) {
         if (kind == FUNGIBLE && tokenId != 0) revert InvalidAssetClass();
         bytes memory nativeId = kind == FUNGIBLE ? new bytes(0) : bytes.concat(bytes32(tokenId));
         bytes[] memory fields = new bytes[](HASH_QUAD_FIELDS);
@@ -146,10 +150,11 @@ contract BudlumSettlementEndpoint {
         revert NotOpen("escape proof");
     }
 
-    function _readFinalHeader(uint64 height) internal view returns (bytes32) {
+    function _readFinalHeader(uint64 height) internal view returns (bytes32 headerHash, FinalityMode mode) {
         if (!verifier.heightFinal(height)) revert NotFinal();
-        bytes32 headerHash = verifier.headerAt(height);
+        headerHash = verifier.headerAt(height);
         if (headerHash == bytes32(0)) revert NotFinal();
-        return headerHash;
+        mode = verifier.finalityModeAt(height);
+        if (mode == FinalityMode.None) revert NotFinal();
     }
 }
