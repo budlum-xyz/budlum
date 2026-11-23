@@ -311,3 +311,44 @@ fn a_registration_built_against_a_moved_registry_is_refused_and_the_deposit_retu
         "only the first row's deposit stays locked; the refused one returned"
     );
 }
+
+#[test]
+fn an_epoch_advance_moves_the_registry_root_and_refuses_pre_epoch_registrations() {
+    let sender = addr(1);
+    let mut state = funded_state(&sender);
+    let (wallet, account) = quantum_account(9);
+    let root_before = state.quantum_accounts.root();
+    Executor::apply_transaction_checked(
+        &mut state,
+        &register_tx(
+            sender,
+            signed_payload(&wallet, account, vec![], root_before),
+            0,
+        ),
+    )
+    .expect("registration enters");
+    let root_registered = state.quantum_accounts.root();
+
+    // The epoch is folded into the registry root: a state restored or read
+    // under another epoch must not present the same commitment, and a
+    // registration built before the boundary must refuse after it.
+    state.advance_epoch(1_000_000, crate::core::transaction::DEFAULT_CHAIN_ID);
+    assert_ne!(
+        state.quantum_accounts.root(),
+        root_registered,
+        "the epoch advance must stamp the quantum registry"
+    );
+
+    let (second_wallet, second_account) = quantum_account(10);
+    state.add_balance(&sender, 1_000 + qacc_deposit());
+    let err = Executor::apply_transaction_checked(
+        &mut state,
+        &register_tx(
+            sender,
+            signed_payload(&second_wallet, second_account, vec![], root_registered),
+            1,
+        ),
+    )
+    .expect_err("a pre-epoch root is a stale read once the boundary stamps");
+    assert_eq!(err.code(), "quantum_account_register_failed");
+}

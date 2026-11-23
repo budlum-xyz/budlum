@@ -4175,6 +4175,10 @@ impl AccountState {
         self.epoch_index = self.epoch_index.saturating_add(1);
         self.last_epoch_time = current_timestamp as u64;
         tracing::info!("Epoch advanced to {}", self.epoch_index);
+        // The quantum registry folds the epoch into its root: a state read
+        // under another epoch must not present the same commitment, and a
+        // root-CAS registration built before the boundary refuses after it.
+        self.stamp_quantum_account_epoch(self.epoch_index);
 
         self.process_unbonding();
 
